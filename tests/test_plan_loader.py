@@ -3,7 +3,7 @@
 import json
 import pytest
 
-from odin.plan_loader import load_plan
+from src.odin.plan_loader import load_plan
 
 
 class TestLoadPlan:

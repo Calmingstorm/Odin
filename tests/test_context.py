@@ -2,8 +2,8 @@
 
 import pytest
 
-from odin.context import ExecutionContext
-from odin.types import StepResult, StepStatus
+from src.odin.context import ExecutionContext
+from src.odin.types import StepResult, StepStatus
 
 
 # ---------------------------------------------------------------------------

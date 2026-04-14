@@ -15,7 +15,7 @@ import copy
 import re
 from typing import Any
 
-from odin.types import StepResult
+from src.odin.types import StepResult
 
 # ---------------------------------------------------------------------------
 # Regex patterns

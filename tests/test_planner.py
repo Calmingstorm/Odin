@@ -2,8 +2,8 @@
 
 import pytest
 
-from odin.planner import Planner, PlanValidationError
-from odin.types import PlanSpec, StepSpec, StepStatus
+from src.odin.planner import Planner, PlanValidationError
+from src.odin.types import PlanSpec, StepSpec, StepStatus
 
 
 class TestExecution:

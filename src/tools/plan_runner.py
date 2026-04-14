@@ -14,11 +14,11 @@ import logging
 import time
 from typing import Any
 
-from odin.plan_loader import load_plan
-from odin.planner import Planner, PlanValidationError
-from odin.registry import ToolRegistry
-from odin.reporter import Reporter
-from odin.types import PlanResult
+from src.odin.plan_loader import load_plan
+from src.odin.planner import Planner, PlanValidationError
+from src.odin.registry import ToolRegistry
+from src.odin.reporter import Reporter
+from src.odin.types import PlanResult
 
 log = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ class PlanRunner:
         log.info("Executing plan '%s' (%d steps)", plan.name, len(plan.steps))
         start = time.time()
         try:
-            result = await self._planner.execute(plan)
+            result = self._planner.execute(plan)
         except PlanValidationError as exc:
             return f"Plan validation error: {exc}"
         except Exception as exc:

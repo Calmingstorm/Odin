@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from odin.types import PlanResult, StepStatus
+from src.odin.types import PlanResult, StepStatus
 
 
 _STATUS_ICONS = {

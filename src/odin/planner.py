@@ -5,10 +5,10 @@ from __future__ import annotations
 from graphlib import TopologicalSorter
 from typing import Any
 
-from odin.context import ExecutionContext
-from odin.executor import StepExecutor
-from odin.registry import ToolRegistry
-from odin.types import PlanResult, PlanSpec, StepStatus
+from src.odin.context import ExecutionContext
+from src.odin.executor import StepExecutor
+from src.odin.registry import ToolRegistry
+from src.odin.types import PlanResult, PlanSpec, StepStatus
 
 
 class PlanValidationError(Exception):
@@ -104,7 +104,7 @@ class Planner:
 
 
 def _make_skip(spec: StepSpec) -> "StepResult":
-    from odin.types import StepResult
+    from src.odin.types import StepResult
     return StepResult(
         status=StepStatus.SKIPPED,
         error=f"skipped due to upstream failure",

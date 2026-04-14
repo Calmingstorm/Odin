@@ -3,9 +3,18 @@
 from src.odin.types import PlanResult, StepResult, StepStatus
 
 
-def test_step_result_duration():
-    r = StepResult(step_id="x", status=StepStatus.SUCCESS, started_at=1.0, finished_at=3.5)
+def test_step_result_defaults():
+    r = StepResult(status=StepStatus.SUCCESS)
+    assert r.duration == 0.0
+    assert r.attempts == 1
+    assert r.output is None
+    assert r.error is None
+
+
+def test_step_result_with_duration():
+    r = StepResult(status=StepStatus.SUCCESS, duration=2.5, attempts=3)
     assert r.duration == 2.5
+    assert r.attempts == 3
 
 
 def test_step_spec_frozen():
@@ -19,24 +28,25 @@ def test_step_spec_frozen():
 
 
 def test_plan_result_success_all_pass():
-    pr = PlanResult(plan_name="t")
-    pr.step_results["a"] = StepResult(step_id="a", status=StepStatus.SUCCESS)
-    pr.step_results["b"] = StepResult(step_id="b", status=StepStatus.SUCCESS)
+    pr = PlanResult(name="t", success=True)
+    pr.steps["a"] = StepResult(status=StepStatus.SUCCESS)
+    pr.steps["b"] = StepResult(status=StepStatus.SUCCESS)
     assert pr.success is True
 
 
-def test_plan_result_success_with_failure():
-    pr = PlanResult(plan_name="t")
-    pr.step_results["a"] = StepResult(step_id="a", status=StepStatus.SUCCESS)
-    pr.step_results["b"] = StepResult(step_id="b", status=StepStatus.FAILED)
+def test_plan_result_explicit_failure():
+    pr = PlanResult(name="t", success=False)
+    pr.steps["a"] = StepResult(status=StepStatus.SUCCESS)
+    pr.steps["b"] = StepResult(status=StepStatus.FAILED, error="boom")
     assert pr.success is False
 
 
-def test_plan_result_empty_is_not_success():
-    pr = PlanResult(plan_name="t")
-    assert pr.success is False
+def test_plan_result_empty():
+    pr = PlanResult(name="t", success=True)
+    assert len(pr.steps) == 0
 
 
-def test_plan_result_duration():
-    pr = PlanResult(plan_name="t", started_at=10.0, finished_at=15.0)
-    assert pr.duration == 5.0
+def test_plan_result_steps_dict():
+    pr = PlanResult(name="t", success=True)
+    pr.steps["a"] = StepResult(status=StepStatus.SUCCESS, duration=5.0)
+    assert pr.steps["a"].duration == 5.0

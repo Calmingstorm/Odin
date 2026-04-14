@@ -8,10 +8,10 @@ import json
 import logging
 import sys
 
-from odin.plan_loader import load_plan
-from odin.planner import PlanValidationError, Planner
-from odin.registry import ToolRegistry
-from odin.reporter import Reporter
+from src.odin.plan_loader import load_plan
+from src.odin.planner import PlanValidationError, Planner
+from src.odin.registry import ToolRegistry
+from src.odin.reporter import Reporter
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,7 +71,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
         planner = Planner(ToolRegistry.with_defaults())
 
         try:
-            result = await planner.execute(plan)
+            result = planner.execute(plan)
         except PlanValidationError as exc:
             for e in exc.errors:
                 print(f"ERROR: {e}", file=sys.stderr)

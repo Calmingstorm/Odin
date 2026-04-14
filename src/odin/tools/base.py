@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from odin.context import ExecutionContext
+    from src.odin.context import ExecutionContext
 
 
 class BaseTool(ABC):

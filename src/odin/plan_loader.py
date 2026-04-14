@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from odin.types import PlanSpec, StepSpec
+from src.odin.types import PlanSpec, StepSpec
 
 
 def load_plan(source: str | dict[str, Any]) -> PlanSpec:

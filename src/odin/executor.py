@@ -7,9 +7,9 @@ import inspect
 import time
 from typing import Any
 
-from odin.context import ExecutionContext
-from odin.registry import ToolRegistry
-from odin.types import StepResult, StepSpec, StepStatus
+from src.odin.context import ExecutionContext
+from src.odin.registry import ToolRegistry
+from src.odin.types import StepResult, StepSpec, StepStatus
 
 
 class StepExecutor:
@@ -75,10 +75,11 @@ class StepExecutor:
         result = tool.execute(params, ctx)
         if inspect.isawaitable(result):
             try:
-                loop = asyncio.get_running_loop()
+                asyncio.get_running_loop()
             except RuntimeError:
                 return asyncio.run(result)
-            raise RuntimeError(
-                f"tool execute() returned awaitable inside running event loop: {loop}"
-            )
+            # Running inside an event loop — use a new thread to avoid blocking
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, result).result()
         return result

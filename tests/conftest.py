@@ -151,7 +151,8 @@ def ts_registry() -> ToolRegistry:
     reg.register("fail", FailingTool)
     reg.register("echo", EchoTool)
     reg.register("slow", SlowTool)
-    reg.register("shell", __import__("src.odin.tools.shell", fromlist=["ShellTool"]).ShellTool)
+    from src.odin.tools.shell import ShellTool as _ShellTool
+    reg.register("shell", _ShellTool)
     return reg
 
 

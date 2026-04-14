@@ -37,7 +37,7 @@ async def test_run_plan_json_format(runner):
     result = await runner.run({"plan": plan, "format": "json"})
     parsed = json.loads(result)
     assert parsed["success"] is True
-    assert parsed["plan"] == "json-out"
+    assert parsed["name"] == "json-out"
 
 
 @pytest.mark.asyncio

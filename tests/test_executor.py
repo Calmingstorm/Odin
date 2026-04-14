@@ -2,9 +2,9 @@
 
 import pytest
 
-from odin.context import ExecutionContext
-from odin.executor import StepExecutor
-from odin.types import StepResult, StepSpec, StepStatus
+from src.odin.context import ExecutionContext
+from src.odin.executor import StepExecutor
+from src.odin.types import StepResult, StepSpec, StepStatus
 
 
 class TestStepExecutor:
