@@ -6,11 +6,13 @@ from src.discord.response_guards import (
     detect_code_hedging,
     detect_fabrication,
     detect_hedging,
+    detect_premature_failure,
     detect_promise_without_action,
     detect_tool_unavailable,
     scrub_response_secrets,
     truncate_tool_output,
 )
+from src.llm.secret_scrubber import scrub_output_secrets
 
 # ---------------------------------------------------------------------------
 # Secret scrubbing
@@ -255,3 +257,76 @@ class TestCombineBotMessages:
         part2 = "```bash\npwd\n```"
         result = combine_bot_messages([part1, part2])
         assert result.count("```bash") < 3  # at least one fence pair collapsed
+
+
+# ---------------------------------------------------------------------------
+# Premature failure detection
+# ---------------------------------------------------------------------------
+
+class TestDetectPrematureFailure:
+    def test_returns_false_when_no_tools_used(self):
+        text = "I couldn't get the data from the server."
+        assert detect_premature_failure(text, tools_used=[]) is False
+
+    def test_returns_true_for_failure_after_tool_use(self):
+        text = "I couldn't get the data from the server, it appears to be down."
+        assert detect_premature_failure(text, tools_used=["run_command"]) is True
+
+    def test_returns_true_for_timeout(self):
+        text = "The connection timed out when trying to reach the service."
+        assert detect_premature_failure(text, tools_used=["run_command"]) is True
+
+    def test_returns_true_for_workaround_suggestion(self):
+        text = "The service is down. Here is a workaround you can try instead."
+        assert detect_premature_failure(text, tools_used=["run_command"]) is True
+
+    def test_returns_false_for_short_text(self):
+        assert detect_premature_failure("Error: fail", tools_used=["run_command"]) is False
+
+    def test_returns_false_for_success_message(self):
+        text = "The deployment completed successfully and all services are running."
+        assert detect_premature_failure(text, tools_used=["run_command"]) is False
+
+    def test_returns_false_for_empty_text(self):
+        assert detect_premature_failure("", tools_used=["run_command"]) is False
+
+
+# ---------------------------------------------------------------------------
+# Direct secret scrubber tests
+# ---------------------------------------------------------------------------
+
+class TestScrubOutputSecrets:
+    def test_scrub_password_assignment(self):
+        text = "password=hunter2 in the config"
+        result = scrub_output_secrets(text)
+        assert "hunter2" not in result
+        assert "[REDACTED]" in result
+
+    def test_scrub_github_token(self):
+        text = "Token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+        result = scrub_output_secrets(text)
+        assert "ghp_" not in result
+
+    def test_scrub_aws_key(self):
+        text = "AWS key: AKIAIOSFODNN7EXAMPLE"
+        result = scrub_output_secrets(text)
+        assert "AKIA" not in result
+
+    def test_scrub_stripe_key(self):
+        text = "Stripe key: sk_live_abcdefghijklmnopqrstuvwxyz"
+        result = scrub_output_secrets(text)
+        assert "sk_live_" not in result
+
+    def test_scrub_private_key(self):
+        text = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow..."
+        result = scrub_output_secrets(text)
+        assert "PRIVATE KEY" not in result
+
+    def test_scrub_database_uri(self):
+        text = "postgres://user:password@host:5432/db"
+        result = scrub_output_secrets(text)
+        assert "password@" not in result
+
+    def test_no_false_positive(self):
+        text = "Everything looks normal, disk usage at 42%."
+        assert scrub_output_secrets(text) == text

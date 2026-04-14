@@ -26,3 +26,11 @@ class ReminderRecord:
             "fire_at": self.fire_at.isoformat(),
             "created_at": self.created_at.isoformat(),
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ReminderRecord:
+        d = dict(data)
+        for key in ("fire_at", "created_at"):
+            if isinstance(d.get(key), str):
+                d[key] = datetime.fromisoformat(d[key])
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})

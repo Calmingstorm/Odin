@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
 
 import discord
 
@@ -15,9 +14,6 @@ from src.constants import (
     COLOR_SUCCESS,
     COLOR_WARNING,
 )
-
-if TYPE_CHECKING:
-    pass
 
 
 def odin_embed(

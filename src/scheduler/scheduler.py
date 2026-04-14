@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -85,7 +85,7 @@ class Scheduler:
             "description": description,
             "action": action,
             "channel_id": channel_id,
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "last_run": None,
         }
 
@@ -98,7 +98,7 @@ class Scheduler:
                 raise ValueError(f"Invalid cron expression: {cron}")
             schedule["cron"] = cron
             schedule["one_time"] = False
-            cr = croniter(cron, datetime.now())
+            cr = croniter(cron, datetime.now(timezone.utc))
             schedule["next_run"] = cr.get_next(datetime).isoformat()
         else:
             if run_at:
@@ -181,7 +181,7 @@ class Scheduler:
 
         async with self._lock:
             fired = 0
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             for schedule in self._schedules:
                 trigger = schedule.get("trigger")
                 if not trigger:
@@ -243,7 +243,7 @@ class Scheduler:
 
     async def _tick(self) -> None:
         async with self._lock:
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             fired = False
             to_remove: list[str] = []
 
@@ -272,7 +272,7 @@ class Scheduler:
                 if schedule.get("one_time"):
                     to_remove.append(schedule["id"])
                 elif schedule.get("cron"):
-                    cr = croniter(schedule["cron"], now)
+                    cr = croniter(schedule["cron"], now.replace(tzinfo=None))
                     schedule["next_run"] = cr.get_next(datetime).isoformat()
 
             for sid in to_remove:

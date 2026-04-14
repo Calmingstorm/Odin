@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiofiles
@@ -38,7 +38,7 @@ class AuditLogger:
         error: str | None = None,
     ) -> None:
         entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "user_id": user_id,
             "user_name": user_name,
             "channel_id": channel_id,
@@ -74,7 +74,7 @@ class AuditLogger:
     ) -> None:
         """Log a web UI API action (state-changing requests)."""
         entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": "web_action",
             "method": method,
             "path": path,

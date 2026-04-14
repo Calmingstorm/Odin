@@ -5,7 +5,9 @@ import re
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
 
 class DiscordConfig(BaseModel):
@@ -51,6 +53,16 @@ class LoggingConfig(BaseModel):
     level: str = "INFO"
     directory: str = "./data/logs"
 
+    @field_validator("level")
+    @classmethod
+    def _validate_level(cls, v: str) -> str:
+        upper = v.upper()
+        if upper not in _VALID_LOG_LEVELS:
+            raise ValueError(
+                f"Invalid log level '{v}'. Must be one of: {', '.join(sorted(_VALID_LOG_LEVELS))}"
+            )
+        return upper
+
 
 class UsageConfig(BaseModel):
     directory: str = "./data/usage"
@@ -81,7 +93,7 @@ class SearchConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     enabled: bool = True
     # Accepts "chromadb_path" from old configs for backward compat
-    search_db_path: str = Field(default="./data/chromadb", validation_alias="chromadb_path")
+    search_db_path: str = Field(default="./data/search", validation_alias="chromadb_path")
 
 
 class VoiceConfig(BaseModel):

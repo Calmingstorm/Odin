@@ -1,6 +1,9 @@
 """Tests for src.config."""
 
+import pytest
+
 from src.config import OdinConfig
+from src.config.schema import LoggingConfig, SearchConfig
 
 
 class TestOdinConfig:
@@ -41,3 +44,28 @@ class TestOdinConfig:
             assert False, "Should be frozen"
         except AttributeError:
             pass
+
+
+class TestLoggingConfig:
+    def test_valid_levels(self):
+        for level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            cfg = LoggingConfig(level=level)
+            assert cfg.level == level
+
+    def test_case_insensitive(self):
+        cfg = LoggingConfig(level="debug")
+        assert cfg.level == "DEBUG"
+
+    def test_invalid_level_rejected(self):
+        with pytest.raises(ValueError, match="Invalid log level"):
+            LoggingConfig(level="TRACE")
+
+
+class TestSearchConfig:
+    def test_default_path(self):
+        cfg = SearchConfig()
+        assert cfg.search_db_path == "./data/search"
+
+    def test_backward_compat_alias(self):
+        cfg = SearchConfig(chromadb_path="./data/old_chromadb")
+        assert cfg.search_db_path == "./data/old_chromadb"

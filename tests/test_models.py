@@ -84,3 +84,18 @@ class TestReminderRecord:
         d = r.to_dict()
         assert d["message"] == "test"
         assert "fire_at" in d
+
+    def test_from_dict(self):
+        now = datetime.now(UTC)
+        r = ReminderRecord(user_id=1, channel_id=2, message="test", fire_at=now)
+        restored = ReminderRecord.from_dict(r.to_dict())
+        assert restored.user_id == 1
+        assert restored.message == "test"
+
+    def test_roundtrip(self):
+        now = datetime.now(UTC)
+        original = ReminderRecord(user_id=1, channel_id=2, message="hello", fire_at=now)
+        restored = ReminderRecord.from_dict(original.to_dict())
+        assert restored.user_id == original.user_id
+        assert restored.message == original.message
+        assert restored.channel_id == original.channel_id
