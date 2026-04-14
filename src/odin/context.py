@@ -59,6 +59,32 @@ class ExecutionContext:
     def inputs(self) -> dict[str, Any]:
         return dict(self._inputs)
 
+    # -- condition evaluation ------------------------------------------------
+
+    def evaluate_condition(self, expr: str) -> bool:
+        """Resolve interpolation in *expr* and evaluate as a condition.
+
+        After interpolation the result is checked for truthiness:
+        - Non-string objects use Python truthiness directly.
+        - Strings support ``==`` / ``!=`` comparison operators (whitespace-trimmed).
+        - Plain strings are truthy unless empty or one of the canonical false
+          literals: ``"false"``, ``"0"``, ``"no"``, ``"null"``, ``"none"`` (case-insensitive).
+        """
+        resolved = self._resolve_value(expr)
+
+        # Full-value ref returned a non-string object → Python truthiness
+        if not isinstance(resolved, str):
+            return bool(resolved)
+
+        # Check for comparison operators in the *resolved* string
+        for op, fn in (("!=", lambda a, b: a != b), ("==", lambda a, b: a == b)):
+            if op in resolved:
+                left, _, right = resolved.partition(op)
+                return fn(left.strip(), right.strip())
+
+        # Plain string truthiness
+        return resolved.strip().lower() not in ("", "false", "0", "no", "null", "none")
+
     # -- param resolution ----------------------------------------------------
 
     def resolve_params(self, params: dict[str, Any]) -> dict[str, Any]:

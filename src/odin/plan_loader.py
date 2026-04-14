@@ -57,6 +57,7 @@ def _from_dict(data: dict[str, Any]) -> PlanSpec:
                 timeout=float(s.get("timeout", 30)),
                 retries=int(s.get("retries", 0)),
                 continue_on_failure=bool(s.get("continue_on_failure", False)),
+                when=s.get("when"),
             )
         )
 

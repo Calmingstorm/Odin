@@ -23,6 +23,7 @@ class StepSpec:
     timeout: float = 30.0
     retries: int = 0
     continue_on_failure: bool = False
+    when: str | None = None
 
 
 @dataclass

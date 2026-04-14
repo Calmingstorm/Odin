@@ -155,3 +155,156 @@ class TestPlanInputs:
         r = p.execute(plan)
         assert r.success
         assert r.steps["a"].output == data
+
+
+# ---------------------------------------------------------------------------
+# Conditional step execution — ``when`` clause
+# ---------------------------------------------------------------------------
+
+class TestConditionalExecution:
+    def test_when_true_runs_step(self, ts_registry):
+        plan = PlanSpec(
+            name="cond",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "ok"}, when="${inputs.run}"),
+            ),
+            inputs={"run": True},
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.success
+        assert r.steps["a"].status == StepStatus.SUCCESS
+
+    def test_when_false_skips_step(self, ts_registry):
+        plan = PlanSpec(
+            name="cond",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "ok"}, when="${inputs.run}"),
+            ),
+            inputs={"run": False},
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.success  # skip is not a failure
+        assert r.steps["a"].status == StepStatus.SKIPPED
+        assert r.steps["a"].error == "condition not met"
+
+    def test_when_none_always_runs(self, ts_registry):
+        """Steps without a when clause always execute (backwards compatible)."""
+        plan = PlanSpec(
+            name="no_when",
+            steps=(StepSpec(id="a", tool="echo", params={"message": "hi"}),),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.success
+        assert r.steps["a"].status == StepStatus.SUCCESS
+
+    def test_when_string_equality(self, ts_registry):
+        plan = PlanSpec(
+            name="eq",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "deploy"},
+                         when="${inputs.env} == prod"),
+            ),
+            inputs={"env": "prod"},
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["a"].status == StepStatus.SUCCESS
+
+    def test_when_string_equality_false(self, ts_registry):
+        plan = PlanSpec(
+            name="eq",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "deploy"},
+                         when="${inputs.env} == prod"),
+            ),
+            inputs={"env": "staging"},
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["a"].status == StepStatus.SKIPPED
+
+    def test_when_inequality(self, ts_registry):
+        plan = PlanSpec(
+            name="neq",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "not prod"},
+                         when="${inputs.env} != prod"),
+            ),
+            inputs={"env": "staging"},
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["a"].status == StepStatus.SUCCESS
+
+    def test_when_references_step_output(self, ts_registry):
+        plan = PlanSpec(
+            name="step_ref",
+            steps=(
+                StepSpec(id="check", tool="echo", params={"message": "go"}),
+                StepSpec(id="act", tool="echo", params={"message": "acted"},
+                         depends_on=("check",), when="${check.output} == go"),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["act"].status == StepStatus.SUCCESS
+
+    def test_when_skip_does_not_cascade(self, ts_registry):
+        """A when-skipped step should NOT cascade-skip its dependents."""
+        plan = PlanSpec(
+            name="no_cascade",
+            steps=(
+                StepSpec(id="optional", tool="echo", params={"message": "x"},
+                         when="${inputs.run_optional}"),
+                StepSpec(id="always", tool="echo", params={"message": "yes"},
+                         depends_on=("optional",)),
+            ),
+            inputs={"run_optional": False},
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["optional"].status == StepStatus.SKIPPED
+        assert r.steps["always"].status == StepStatus.SUCCESS
+
+    def test_when_missing_ref_skips(self, ts_registry):
+        """Bad interpolation in when expression skips the step (doesn't crash)."""
+        plan = PlanSpec(
+            name="bad_when",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "ok"},
+                         when="${inputs.nonexistent}"),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["a"].status == StepStatus.SKIPPED
+
+    def test_when_loaded_from_dict(self):
+        from src.odin.plan_loader import load_plan
+        plan = load_plan({
+            "name": "t",
+            "steps": [{"id": "a", "tool": "echo", "when": "${inputs.go}"}],
+            "inputs": {"go": True},
+        })
+        assert plan.steps[0].when == "${inputs.go}"
+
+    def test_when_with_runtime_input_override(self, ts_registry):
+        """Runtime inputs can toggle conditional steps."""
+        plan = PlanSpec(
+            name="toggle",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "ran"},
+                         when="${inputs.enabled}"),
+            ),
+            inputs={"enabled": False},
+        )
+        p = Planner(ts_registry)
+        # Default: disabled
+        r = p.execute(plan)
+        assert r.steps["a"].status == StepStatus.SKIPPED
+        # Override: enabled
+        r = p.execute(plan, inputs={"enabled": True})
+        assert r.steps["a"].status == StepStatus.SUCCESS

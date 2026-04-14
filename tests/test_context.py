@@ -151,3 +151,81 @@ class TestPlanInputInterpolation:
         # Bad ref raises KeyError (step executor catches this per-step)
         with pytest.raises(KeyError):
             ctx.resolve_params({"x": "${inputs.missing}"})
+
+
+# ---------------------------------------------------------------------------
+# Condition evaluation
+# ---------------------------------------------------------------------------
+
+class TestConditionEvaluation:
+    def test_truthy_bool_true(self):
+        ctx = ExecutionContext(inputs={"flag": True})
+        assert ctx.evaluate_condition("${inputs.flag}") is True
+
+    def test_truthy_bool_false(self):
+        ctx = ExecutionContext(inputs={"flag": False})
+        assert ctx.evaluate_condition("${inputs.flag}") is False
+
+    def test_truthy_nonempty_string(self):
+        ctx = ExecutionContext(inputs={"val": "yes"})
+        assert ctx.evaluate_condition("${inputs.val}") is True
+
+    def test_truthy_empty_string(self):
+        ctx = ExecutionContext(inputs={"val": ""})
+        assert ctx.evaluate_condition("${inputs.val}") is False
+
+    def test_truthy_none(self):
+        ctx = ExecutionContext(inputs={"val": None})
+        assert ctx.evaluate_condition("${inputs.val}") is False
+
+    def test_truthy_zero(self):
+        ctx = ExecutionContext(inputs={"val": 0})
+        assert ctx.evaluate_condition("${inputs.val}") is False
+
+    def test_truthy_nonzero_int(self):
+        ctx = ExecutionContext(inputs={"val": 42})
+        assert ctx.evaluate_condition("${inputs.val}") is True
+
+    def test_truthy_nonempty_list(self):
+        ctx = ExecutionContext(inputs={"val": [1, 2]})
+        assert ctx.evaluate_condition("${inputs.val}") is True
+
+    def test_truthy_empty_list(self):
+        ctx = ExecutionContext(inputs={"val": []})
+        assert ctx.evaluate_condition("${inputs.val}") is False
+
+    def test_false_string_literals(self):
+        for val in ("false", "False", "FALSE", "0", "no", "null", "none", "None"):
+            ctx = ExecutionContext(inputs={"val": val})
+            assert ctx.evaluate_condition("${inputs.val}") is False, f"'{val}' should be falsy"
+
+    def test_equality_match(self):
+        ctx = ExecutionContext(inputs={"env": "prod"})
+        assert ctx.evaluate_condition("${inputs.env} == prod") is True
+
+    def test_equality_mismatch(self):
+        ctx = ExecutionContext(inputs={"env": "staging"})
+        assert ctx.evaluate_condition("${inputs.env} == prod") is False
+
+    def test_inequality_match(self):
+        ctx = ExecutionContext(inputs={"env": "staging"})
+        assert ctx.evaluate_condition("${inputs.env} != prod") is True
+
+    def test_inequality_mismatch(self):
+        ctx = ExecutionContext(inputs={"env": "prod"})
+        assert ctx.evaluate_condition("${inputs.env} != prod") is False
+
+    def test_step_result_in_condition(self):
+        ctx = ExecutionContext()
+        ctx.record("a", StepResult(status=StepStatus.SUCCESS, output="ready"))
+        assert ctx.evaluate_condition("${a.output} == ready") is True
+
+    def test_step_status_in_condition(self):
+        ctx = ExecutionContext()
+        ctx.record("a", StepResult(status=StepStatus.FAILED, error="boom"))
+        assert ctx.evaluate_condition("${a.status} == StepStatus.FAILED") is True
+
+    def test_missing_ref_raises(self):
+        ctx = ExecutionContext()
+        with pytest.raises(KeyError):
+            ctx.evaluate_condition("${inputs.missing}")

@@ -8,7 +8,7 @@ from typing import Any
 from src.odin.context import ExecutionContext
 from src.odin.executor import StepExecutor
 from src.odin.registry import ToolRegistry
-from src.odin.types import PlanResult, PlanSpec, StepStatus
+from src.odin.types import PlanResult, PlanSpec, StepResult, StepStatus
 
 
 class PlanValidationError(Exception):
@@ -86,6 +86,22 @@ class Planner:
                     result.steps[step_id] = sr
                     sorter.done(step_id)
                     continue
+
+                # Evaluate conditional — skip if `when` resolves to false
+                if spec.when is not None:
+                    try:
+                        condition_met = ctx.evaluate_condition(spec.when)
+                    except KeyError:
+                        condition_met = False
+                    if not condition_met:
+                        sr = StepResult(
+                            status=StepStatus.SKIPPED,
+                            error="condition not met",
+                        )
+                        ctx.record(step_id, sr)
+                        result.steps[step_id] = sr
+                        sorter.done(step_id)
+                        continue
 
                 sr = self._executor.execute_step(spec, ctx)
                 ctx.record(step_id, sr)
