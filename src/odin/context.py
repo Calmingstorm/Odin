@@ -8,15 +8,33 @@ from typing import Any
 
 from src.odin.types import StepResult
 
-# Pattern matching ${step_id.output} or ${step_id.output.key}
-_REF_PATTERN = re.compile(r"\$\{([^}]+)\}")
+# ${step_id.output} or ${step_id.output.key}
+_DOLLAR_REF = re.compile(r"\$\{([^}]+)\}")
+# {steps.step_id.output} or {steps.step_id.output.key}
+_STEPS_REF = re.compile(r"(?<!\$)\{steps\.([^}]+)\}")
+# Combined: matches either syntax
+_ANY_REF = re.compile(r"\$\{([^}]+)\}|(?<!\$)\{steps\.([^}]+)\}")
+
+# Fields on StepResult that can be accessed via the second path segment.
+_RESULT_FIELDS = frozenset({"output", "status", "error", "duration", "attempts"})
 
 
 class ExecutionContext:
     """Shared state across all steps in a plan execution.
 
-    Stores step results and resolves ``${step_id.output}`` references
-    inside parameter dicts before each step runs.
+    Stores step results and resolves placeholder references inside
+    parameter dicts before each step runs.
+
+    Supported syntaxes (equivalent)::
+
+        ${step_id.output}            — original short form
+        ${step_id.output.key}        — nested key access
+        {steps.step_id.output}       — explicit ``steps.`` prefix form
+        {steps.step_id.output.key}   — nested key with prefix form
+
+    Accessible fields: ``output``, ``status``, ``error``, ``duration``,
+    ``attempts``.  When the field segment is omitted the default is
+    ``output`` for backwards compatibility.
     """
 
     def __init__(self) -> None:
@@ -29,7 +47,7 @@ class ExecutionContext:
         return self._results.get(step_id)
 
     def resolve_params(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Deep-copy *params* and substitute ``${ref}`` references."""
+        """Deep-copy *params* and substitute placeholder references."""
         return self._resolve(copy.deepcopy(params))
 
     # ------------------------------------------------------------------
@@ -44,32 +62,55 @@ class ExecutionContext:
         return obj
 
     def _resolve_string(self, value: str) -> Any:
-        # Full-value reference: "${step.output}" → return raw object
-        m = _REF_PATTERN.fullmatch(value)
-        if m:
-            return self._lookup(m.group(1))
+        # Full-value reference (either syntax) → return raw object
+        m_dollar = _DOLLAR_REF.fullmatch(value)
+        if m_dollar:
+            return self._lookup(m_dollar.group(1))
+        m_steps = _STEPS_REF.fullmatch(value)
+        if m_steps:
+            return self._lookup(m_steps.group(1))
 
         # Embedded references: "prefix_${step.output}_suffix"
         def _replace(m: re.Match) -> str:
-            return str(self._lookup(m.group(1)))
+            path = m.group(1) or m.group(2)
+            return str(self._lookup(path))
 
-        return _REF_PATTERN.sub(_replace, value)
+        result = _ANY_REF.sub(_replace, value)
+        return result
 
     def _lookup(self, path: str) -> Any:
         parts = path.split(".")
         if len(parts) < 2:
-            raise KeyError(f"Invalid reference: ${{{path}}}")
+            raise KeyError(f"Invalid reference '${{{path}}}': need at least step_id.field")
+
         step_id = parts[0]
         result = self._results.get(step_id)
         if result is None:
-            raise KeyError(f"Step '{step_id}' not found in context")
-        # parts[1] should be "output"
-        obj: Any = result.output
-        for part in parts[2:]:
-            if isinstance(obj, dict):
-                obj = obj[part]
-            elif isinstance(obj, list):
-                obj = obj[int(part)]
-            else:
-                obj = getattr(obj, part)
+            raise KeyError(f"Reference error: step '{step_id}' not found in context")
+
+        # Determine which field to access on StepResult
+        field = parts[1]
+        if field in _RESULT_FIELDS:
+            obj: Any = getattr(result, field)
+            rest = parts[2:]
+        else:
+            # Backwards compat: treat as implicit "output" and start
+            # drilling from parts[1] into the output object.
+            obj = result.output
+            rest = parts[1:]
+
+        for i, part in enumerate(rest):
+            traversed = ".".join(parts[: 2 + i])
+            try:
+                if isinstance(obj, dict):
+                    obj = obj[part]
+                elif isinstance(obj, list):
+                    obj = obj[int(part)]
+                else:
+                    obj = getattr(obj, part)
+            except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
+                raise KeyError(
+                    f"Reference error: cannot resolve '{part}' "
+                    f"in '${{{path}}}' (after '{traversed}'): {exc}"
+                ) from exc
         return obj

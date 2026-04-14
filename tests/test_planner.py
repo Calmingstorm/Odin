@@ -223,3 +223,141 @@ async def test_bad_nested_ref_on_failed_output(ts_registry):
     assert result.step_results["a"].status == StepStatus.FAILED
     assert result.step_results["b"].status == StepStatus.FAILED
     assert "setup failed" in result.step_results["b"].error.lower()
+
+
+# ── Parameter interpolation integration tests ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_interpolation_output_into_next_step(ts_registry):
+    """Step B receives step A's output via ${A.output.value}."""
+    plan = PlanSpec(
+        name="interp-basic",
+        steps=(
+            StepSpec(id="producer", tool="echo", params={"payload": "hello-world"}),
+            StepSpec(
+                id="consumer",
+                tool="echo",
+                params={"received": "${producer.output.payload}"},
+                depends_on=("producer",),
+            ),
+        ),
+    )
+    planner = Planner(ts_registry)
+    result = await planner.execute(plan)
+
+    assert result.success
+    assert result.step_results["consumer"].output["received"] == "hello-world"
+
+
+@pytest.mark.asyncio
+async def test_interpolation_steps_prefix_syntax(ts_registry):
+    """{steps.X.output.field} works end-to-end through the planner."""
+    plan = PlanSpec(
+        name="interp-steps-prefix",
+        steps=(
+            StepSpec(id="src", tool="echo", params={"data": 42}),
+            StepSpec(
+                id="dst",
+                tool="echo",
+                params={"val": "{steps.src.output.data}"},
+                depends_on=("src",),
+            ),
+        ),
+    )
+    planner = Planner(ts_registry)
+    result = await planner.execute(plan)
+
+    assert result.success
+    assert result.step_results["dst"].output["val"] == 42
+
+
+@pytest.mark.asyncio
+async def test_interpolation_embedded_in_string(ts_registry):
+    """Placeholder embedded in a larger string resolves correctly."""
+    plan = PlanSpec(
+        name="interp-embedded",
+        steps=(
+            StepSpec(id="fetch", tool="echo", params={"url": "example.com"}),
+            StepSpec(
+                id="use",
+                tool="echo",
+                params={"msg": "Fetched from ${fetch.output.url}!"},
+                depends_on=("fetch",),
+            ),
+        ),
+    )
+    planner = Planner(ts_registry)
+    result = await planner.execute(plan)
+
+    assert result.success
+    assert result.step_results["use"].output["msg"] == "Fetched from example.com!"
+
+
+@pytest.mark.asyncio
+async def test_interpolation_chain_three_steps(ts_registry):
+    """A → B → C chain where each step references its predecessor."""
+    plan = PlanSpec(
+        name="interp-chain",
+        steps=(
+            StepSpec(id="a", tool="echo", params={"v": "start"}),
+            StepSpec(
+                id="b",
+                tool="echo",
+                params={"v": "mid-${a.output.v}"},
+                depends_on=("a",),
+            ),
+            StepSpec(
+                id="c",
+                tool="echo",
+                params={"v": "{steps.b.output.v}"},
+                depends_on=("b",),
+            ),
+        ),
+    )
+    planner = Planner(ts_registry)
+    result = await planner.execute(plan)
+
+    assert result.success
+    assert result.step_results["b"].output["v"] == "mid-start"
+    assert result.step_results["c"].output["v"] == "mid-start"
+
+
+@pytest.mark.asyncio
+async def test_literal_params_unchanged(ts_registry):
+    """Non-placeholder params pass through unmodified."""
+    plan = PlanSpec(
+        name="literal-params",
+        steps=(
+            StepSpec(id="x", tool="echo", params={"a": 1, "b": "hello", "c": [1, 2]}),
+        ),
+    )
+    planner = Planner(ts_registry)
+    result = await planner.execute(plan)
+
+    assert result.success
+    assert result.step_results["x"].output == {"a": 1, "b": "hello", "c": [1, 2]}
+
+
+@pytest.mark.asyncio
+async def test_bad_ref_steps_prefix_fails_locally(ts_registry):
+    """{steps.missing.output} fails the step, not the plan."""
+    plan = PlanSpec(
+        name="bad-steps-ref",
+        steps=(
+            StepSpec(id="ok", tool="echo", params={"v": 1}),
+            StepSpec(
+                id="bad",
+                tool="echo",
+                params={"x": "{steps.missing.output}"},
+                depends_on=("ok",),
+            ),
+        ),
+    )
+    planner = Planner(ts_registry)
+    result = await planner.execute(plan)
+
+    assert not result.success
+    assert result.step_results["ok"].status == StepStatus.SUCCESS
+    assert result.step_results["bad"].status == StepStatus.FAILED
+    assert "setup failed" in result.step_results["bad"].error.lower()
