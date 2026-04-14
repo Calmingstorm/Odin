@@ -16,12 +16,14 @@ class ShellTool(BaseTool):
         command = params["command"]
         cwd = params.get("cwd")
         check = params.get("check", False)
+        env = params.get("env")
 
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=env,
         )
         stdout, stderr = await proc.communicate()
         result = {

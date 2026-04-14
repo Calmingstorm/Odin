@@ -69,7 +69,7 @@ class PlanResult:
 
     @property
     def success(self) -> bool:
-        return all(
+        return bool(self.step_results) and all(
             r.status == StepStatus.SUCCESS for r in self.step_results.values()
         )
 

@@ -26,10 +26,12 @@ class WriteFileTool(BaseTool):
         path = Path(params["path"])
         content = params["content"]
         mkdir = params.get("mkdir", False)
+        mode = params.get("mode", "w")
         if mkdir:
             path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-        return {"written": str(path), "bytes": len(content)}
+        with open(path, mode) as f:
+            f.write(content)
+        return {"written": str(path), "bytes_written": len(content)}
 
 
 class ListDirTool(BaseTool):
