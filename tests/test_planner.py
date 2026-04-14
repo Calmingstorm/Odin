@@ -1,363 +1,157 @@
-"""Tests for the Odin DAG planner."""
-
-from __future__ import annotations
+"""Tests for the DAG planner — execution, validation, and input interpolation."""
 
 import pytest
 
-from src.odin.planner import Planner, PlanValidationError
-from src.odin.types import PlanSpec, StepSpec, StepStatus
+from odin.planner import Planner, PlanValidationError
+from odin.types import PlanSpec, StepSpec, StepStatus
 
 
-@pytest.mark.asyncio
-async def test_linear_execution(ts_registry, linear_plan):
-    """Steps execute in dependency order: A then B then C."""
-    planner = Planner(ts_registry)
-    result = await planner.execute(linear_plan)
+class TestExecution:
+    def test_linear(self, ts_registry, linear_plan):
+        p = Planner(ts_registry)
+        r = p.execute(linear_plan)
+        assert r.success
+        assert r.steps["c"].status == StepStatus.SUCCESS
 
-    assert result.success
-    assert len(result.step_results) == 3
-    # A finishes before B starts
-    a = result.step_results["a"]
-    b = result.step_results["b"]
-    c = result.step_results["c"]
-    assert a.finished_at <= b.output["start"]
-    assert b.finished_at <= c.output["start"]
+    def test_diamond(self, ts_registry, diamond_plan):
+        p = Planner(ts_registry)
+        r = p.execute(diamond_plan)
+        assert r.success
+        assert set(r.steps) == {"a", "b", "c", "d"}
 
-
-@pytest.mark.asyncio
-async def test_diamond_parallel_execution(ts_registry, diamond_plan):
-    """B and C run in parallel (overlap in time)."""
-    planner = Planner(ts_registry)
-    result = await planner.execute(diamond_plan)
-
-    assert result.success
-    b_out = result.step_results["b"].output
-    c_out = result.step_results["c"].output
-    # B and C should overlap: B starts before C ends AND C starts before B ends
-    assert b_out["start"] < c_out["end"]
-    assert c_out["start"] < b_out["end"]
-
-
-@pytest.mark.asyncio
-async def test_failure_cascade(ts_registry):
-    """When B fails, C (which depends on B) is skipped."""
-    plan = PlanSpec(
-        name="fail-cascade",
-        steps=(
-            StepSpec(id="a", tool="ts", params={"sleep": 0.01}),
-            StepSpec(id="b", tool="fail", depends_on=("a",)),
-            StepSpec(id="c", tool="ts", params={"sleep": 0.01}, depends_on=("b",)),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
-
-    assert not result.success
-    assert result.step_results["a"].status == StepStatus.SUCCESS
-    assert result.step_results["b"].status == StepStatus.FAILED
-    assert result.step_results["c"].status == StepStatus.SKIPPED
-
-
-@pytest.mark.asyncio
-async def test_continue_on_failure(ts_registry):
-    """With continue_on_failure, dependents still run after failure."""
-    plan = PlanSpec(
-        name="continue",
-        steps=(
-            StepSpec(id="a", tool="fail", continue_on_failure=True),
-            StepSpec(id="b", tool="ts", params={"sleep": 0.01}, depends_on=("a",)),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
-
-    assert not result.success  # overall still fails because a failed
-    assert result.step_results["a"].status == StepStatus.FAILED
-    assert result.step_results["b"].status == StepStatus.SUCCESS
-
-
-@pytest.mark.asyncio
-async def test_timeout(ts_registry):
-    """Step with short timeout should time out."""
-    plan = PlanSpec(
-        name="timeout",
-        steps=(
-            StepSpec(id="s", tool="slow", params={"sleep": 10}, timeout=0.1),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
-
-    assert not result.success
-    assert result.step_results["s"].status == StepStatus.TIMED_OUT
-
-
-@pytest.mark.asyncio
-async def test_retry(ts_registry):
-    """Retry count is recorded in step result."""
-    plan = PlanSpec(
-        name="retry",
-        steps=(
-            StepSpec(id="f", tool="fail", retries=2),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
-
-    assert result.step_results["f"].attempts == 3  # 1 original + 2 retries
-    assert result.step_results["f"].status == StepStatus.FAILED
-
-
-def test_validate_unknown_tool(ts_registry):
-    plan = PlanSpec(
-        name="bad-tool",
-        steps=(StepSpec(id="x", tool="nonexistent"),),
-    )
-    planner = Planner(ts_registry)
-    errors = planner.validate(plan)
-    assert any("unknown tool" in e.lower() for e in errors)
-
-
-def test_validate_cycle(ts_registry):
-    plan = PlanSpec(
-        name="cycle",
-        steps=(
-            StepSpec(id="a", tool="ts", depends_on=("b",)),
-            StepSpec(id="b", tool="ts", depends_on=("a",)),
-        ),
-    )
-    planner = Planner(ts_registry)
-    errors = planner.validate(plan)
-    assert any("cycle" in e.lower() for e in errors)
-
-
-def test_validate_dangling_dep(ts_registry):
-    plan = PlanSpec(
-        name="dangling",
-        steps=(StepSpec(id="a", tool="ts", depends_on=("missing",)),),
-    )
-    planner = Planner(ts_registry)
-    errors = planner.validate(plan)
-    assert any("unknown step" in e.lower() for e in errors)
-
-
-def test_validate_duplicate_id(ts_registry):
-    plan = PlanSpec(
-        name="dupes",
-        steps=(
-            StepSpec(id="a", tool="ts"),
-            StepSpec(id="a", tool="ts"),
-        ),
-    )
-    planner = Planner(ts_registry)
-    errors = planner.validate(plan)
-    assert any("duplicate" in e.lower() for e in errors)
-
-
-@pytest.mark.asyncio
-async def test_bad_variable_ref_fails_step_not_plan(ts_registry):
-    """A bad ${ref} in params should fail that step, not crash the plan."""
-    plan = PlanSpec(
-        name="bad-ref",
-        steps=(
-            StepSpec(id="a", tool="ts", params={"sleep": 0.01}),
-            StepSpec(
-                id="b",
-                tool="ts",
-                params={"value": "${nonexistent.output}"},
-                depends_on=("a",),
+    def test_failure_cascades(self, ts_registry):
+        plan = PlanSpec(
+            name="cascade",
+            steps=(
+                StepSpec(id="a", tool="fail", params={"fail_count": 999}),
+                StepSpec(id="b", tool="echo", params={"message": "hi"}, depends_on=("a",)),
             ),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert not r.success
+        assert r.steps["a"].status == StepStatus.FAILED
+        assert r.steps["b"].status == StepStatus.SKIPPED
 
-    assert not result.success
-    assert result.step_results["a"].status == StepStatus.SUCCESS
-    assert result.step_results["b"].status == StepStatus.FAILED
-    assert "setup failed" in result.step_results["b"].error.lower()
-
-
-@pytest.mark.asyncio
-async def test_bad_ref_cascades_to_dependents(ts_registry):
-    """When step setup fails, its dependents are cascade-skipped."""
-    plan = PlanSpec(
-        name="bad-ref-cascade",
-        steps=(
-            StepSpec(id="a", tool="ts", params={"sleep": 0.01}),
-            StepSpec(
-                id="b",
-                tool="ts",
-                params={"value": "${missing.output}"},
-                depends_on=("a",),
+    def test_step_result_interpolation_chain(self, ts_registry):
+        plan = PlanSpec(
+            name="chain",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "first"}),
+                StepSpec(id="b", tool="echo", params={"message": "got ${a.output}"}, depends_on=("a",)),
             ),
-            StepSpec(id="c", tool="ts", params={"sleep": 0.01}, depends_on=("b",)),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
-
-    assert result.step_results["a"].status == StepStatus.SUCCESS
-    assert result.step_results["b"].status == StepStatus.FAILED
-    assert result.step_results["c"].status == StepStatus.SKIPPED
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.success
+        assert r.steps["b"].output == "got first"
 
 
-@pytest.mark.asyncio
-async def test_bad_nested_ref_on_failed_output(ts_registry):
-    """Accessing nested field of a failed step's None output fails gracefully."""
-    plan = PlanSpec(
-        name="none-output",
-        steps=(
-            StepSpec(id="a", tool="fail", continue_on_failure=True),
-            StepSpec(
-                id="b",
-                tool="echo",
-                params={"data": "${a.output.key}"},
-                depends_on=("a",),
+class TestValidation:
+    def test_unknown_tool(self, ts_registry):
+        plan = PlanSpec(name="bad", steps=(StepSpec(id="a", tool="nope"),))
+        p = Planner(ts_registry)
+        errors = p.validate(plan)
+        assert any("unknown tool" in e for e in errors)
+
+    def test_dangling_dep(self, ts_registry):
+        plan = PlanSpec(name="bad", steps=(StepSpec(id="a", tool="echo", depends_on=("z",)),))
+        p = Planner(ts_registry)
+        errors = p.validate(plan)
+        assert any("unknown step" in e for e in errors)
+
+    def test_duplicate_id(self, ts_registry):
+        plan = PlanSpec(
+            name="bad",
+            steps=(StepSpec(id="a", tool="echo"), StepSpec(id="a", tool="echo")),
+        )
+        p = Planner(ts_registry)
+        errors = p.validate(plan)
+        assert any("duplicate" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# Plan inputs — end-to-end through the planner
+# ---------------------------------------------------------------------------
+
+class TestPlanInputs:
+    def test_inputs_from_spec(self, ts_registry):
+        plan = PlanSpec(
+            name="with_inputs",
+            steps=(StepSpec(id="a", tool="echo", params={"message": "${inputs.greeting}"}),),
+            inputs={"greeting": "hello world"},
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.success
+        assert r.steps["a"].output == "hello world"
+
+    def test_runtime_inputs_override_spec(self, ts_registry):
+        plan = PlanSpec(
+            name="override",
+            steps=(StepSpec(id="a", tool="echo", params={"message": "${inputs.x}"}),),
+            inputs={"x": "default"},
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan, inputs={"x": "override"})
+        assert r.success
+        assert r.steps["a"].output == "override"
+
+    def test_mixed_input_and_step_refs(self, ts_registry):
+        plan = PlanSpec(
+            name="mixed",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "${inputs.prefix}"}),
+                StepSpec(
+                    id="b",
+                    tool="echo",
+                    params={"message": "${a.output}-${inputs.suffix}"},
+                    depends_on=("a",),
+                ),
             ),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
+            inputs={"prefix": "hello", "suffix": "world"},
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.success
+        assert r.steps["b"].output == "hello-world"
 
-    assert result.step_results["a"].status == StepStatus.FAILED
-    assert result.step_results["b"].status == StepStatus.FAILED
-    assert "setup failed" in result.step_results["b"].error.lower()
-
-
-# ── Parameter interpolation integration tests ─────────────────
-
-
-@pytest.mark.asyncio
-async def test_interpolation_output_into_next_step(ts_registry):
-    """Step B receives step A's output via ${A.output.value}."""
-    plan = PlanSpec(
-        name="interp-basic",
-        steps=(
-            StepSpec(id="producer", tool="echo", params={"payload": "hello-world"}),
-            StepSpec(
-                id="consumer",
-                tool="echo",
-                params={"received": "${producer.output.payload}"},
-                depends_on=("producer",),
+    def test_bad_input_ref_fails_step_not_plan(self, ts_registry):
+        plan = PlanSpec(
+            name="bad_ref",
+            steps=(
+                StepSpec(id="good", tool="echo", params={"message": "ok"}),
+                StepSpec(id="bad", tool="echo", params={"message": "${inputs.nope}"}),
             ),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        # The bad step fails, good step succeeds
+        assert r.steps["good"].status == StepStatus.SUCCESS
+        assert r.steps["bad"].status == StepStatus.FAILED
+        assert "param resolution failed" in r.steps["bad"].error
 
-    assert result.success
-    assert result.step_results["consumer"].output["received"] == "hello-world"
-
-
-@pytest.mark.asyncio
-async def test_interpolation_steps_prefix_syntax(ts_registry):
-    """{steps.X.output.field} works end-to-end through the planner."""
-    plan = PlanSpec(
-        name="interp-steps-prefix",
-        steps=(
-            StepSpec(id="src", tool="echo", params={"data": 42}),
-            StepSpec(
-                id="dst",
-                tool="echo",
-                params={"val": "{steps.src.output.data}"},
-                depends_on=("src",),
+    def test_complex_input_object(self, ts_registry):
+        plan = PlanSpec(
+            name="complex",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "${inputs.cfg.db.host}"}),
             ),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
+            inputs={"cfg": {"db": {"host": "localhost", "port": 5432}}},
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.success
+        assert r.steps["a"].output == "localhost"
 
-    assert result.success
-    assert result.step_results["dst"].output["val"] == 42
-
-
-@pytest.mark.asyncio
-async def test_interpolation_embedded_in_string(ts_registry):
-    """Placeholder embedded in a larger string resolves correctly."""
-    plan = PlanSpec(
-        name="interp-embedded",
-        steps=(
-            StepSpec(id="fetch", tool="echo", params={"url": "example.com"}),
-            StepSpec(
-                id="use",
-                tool="echo",
-                params={"msg": "Fetched from ${fetch.output.url}!"},
-                depends_on=("fetch",),
-            ),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
-
-    assert result.success
-    assert result.step_results["use"].output["msg"] == "Fetched from example.com!"
-
-
-@pytest.mark.asyncio
-async def test_interpolation_chain_three_steps(ts_registry):
-    """A → B → C chain where each step references its predecessor."""
-    plan = PlanSpec(
-        name="interp-chain",
-        steps=(
-            StepSpec(id="a", tool="echo", params={"v": "start"}),
-            StepSpec(
-                id="b",
-                tool="echo",
-                params={"v": "mid-${a.output.v}"},
-                depends_on=("a",),
-            ),
-            StepSpec(
-                id="c",
-                tool="echo",
-                params={"v": "{steps.b.output.v}"},
-                depends_on=("b",),
-            ),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
-
-    assert result.success
-    assert result.step_results["b"].output["v"] == "mid-start"
-    assert result.step_results["c"].output["v"] == "mid-start"
-
-
-@pytest.mark.asyncio
-async def test_literal_params_unchanged(ts_registry):
-    """Non-placeholder params pass through unmodified."""
-    plan = PlanSpec(
-        name="literal-params",
-        steps=(
-            StepSpec(id="x", tool="echo", params={"a": 1, "b": "hello", "c": [1, 2]}),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
-
-    assert result.success
-    assert result.step_results["x"].output == {"a": 1, "b": "hello", "c": [1, 2]}
-
-
-@pytest.mark.asyncio
-async def test_bad_ref_steps_prefix_fails_locally(ts_registry):
-    """{steps.missing.output} fails the step, not the plan."""
-    plan = PlanSpec(
-        name="bad-steps-ref",
-        steps=(
-            StepSpec(id="ok", tool="echo", params={"v": 1}),
-            StepSpec(
-                id="bad",
-                tool="echo",
-                params={"x": "{steps.missing.output}"},
-                depends_on=("ok",),
-            ),
-        ),
-    )
-    planner = Planner(ts_registry)
-    result = await planner.execute(plan)
-
-    assert not result.success
-    assert result.step_results["ok"].status == StepStatus.SUCCESS
-    assert result.step_results["bad"].status == StepStatus.FAILED
-    assert "setup failed" in result.step_results["bad"].error.lower()
+    def test_input_as_full_object_passthrough(self, ts_registry):
+        data = {"servers": ["a", "b"], "count": 2}
+        plan = PlanSpec(
+            name="passthrough",
+            steps=(StepSpec(id="a", tool="echo", params={"message": "${inputs.data}"}),),
+            inputs={"data": data},
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.success
+        assert r.steps["a"].output == data

@@ -14,11 +14,11 @@ import logging
 import time
 from typing import Any
 
-from src.odin.plan_loader import load_plan
-from src.odin.planner import Planner, PlanValidationError
-from src.odin.registry import ToolRegistry
-from src.odin.reporter import Reporter
-from src.odin.types import PlanResult
+from odin.plan_loader import load_plan
+from odin.planner import Planner, PlanValidationError
+from odin.registry import ToolRegistry
+from odin.reporter import Reporter
+from odin.types import PlanResult
 
 log = logging.getLogger(__name__)
 

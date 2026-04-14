@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.odin.tools.base import BaseTool
-from src.odin.context import ExecutionContext
+from odin.tools.base import BaseTool
+from odin.context import ExecutionContext
 
 
 class HttpRequestTool(BaseTool):

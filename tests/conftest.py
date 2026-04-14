@@ -124,10 +124,10 @@ class FailingTool(BaseTool):
 
 
 class EchoTool(BaseTool):
-    """Returns its params as output."""
+    """Echoes the message param or the full params payload."""
 
     async def execute(self, params: dict[str, Any], ctx: ExecutionContext) -> Any:
-        return dict(params)
+        return params.get("message", dict(params))
 
 
 class SlowTool(BaseTool):

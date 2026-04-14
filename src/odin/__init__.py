@@ -1,11 +1,11 @@
 """Odin DAG planner — dependency-aware parallel task execution."""
 
-from src.odin.types import PlanSpec, StepSpec, PlanResult, StepResult, StepStatus
-from src.odin.planner import Planner, PlanValidationError
-from src.odin.registry import ToolRegistry
-from src.odin.context import ExecutionContext
-from src.odin.plan_loader import load_plan
-from src.odin.reporter import Reporter
+from odin.types import PlanSpec, StepSpec, PlanResult, StepResult, StepStatus
+from odin.planner import Planner, PlanValidationError
+from odin.registry import ToolRegistry
+from odin.context import ExecutionContext
+from odin.plan_loader import load_plan
+from odin.reporter import Reporter
 
 __all__ = [
     "PlanSpec",

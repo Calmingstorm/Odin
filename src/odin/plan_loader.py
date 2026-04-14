@@ -1,4 +1,4 @@
-"""Load plans from YAML, JSON strings, or Python dicts."""
+"""Load PlanSpec from dict, JSON string, or YAML file."""
 
 from __future__ import annotations
 
@@ -6,62 +6,57 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.odin.types import PlanSpec, StepSpec
+from odin.types import PlanSpec, StepSpec
 
 
-def load_plan(source: str | Path | dict[str, Any]) -> PlanSpec:
-    """Load a plan from a file path, JSON string, or dict.
-
-    Raises ``ValueError`` on invalid input.
-    """
+def load_plan(source: str | dict[str, Any]) -> PlanSpec:
     if isinstance(source, dict):
-        return _dict_to_plan(source)
-
-    if isinstance(source, Path) or (
-        isinstance(source, str) and not source.lstrip().startswith("{")
-    ):
-        path = Path(source)
-        if path.exists():
-            import yaml  # optional dep
-
-            data = yaml.safe_load(path.read_text())
-            return _dict_to_plan(data)
+        return _from_dict(source)
 
     # Try JSON string
     if isinstance(source, str):
-        try:
-            data = json.loads(source)
-            return _dict_to_plan(data)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Cannot parse plan: {exc}") from exc
+        source = source.strip()
+        if source.startswith("{"):
+            return _from_dict(json.loads(source))
 
-    raise ValueError(f"Unsupported plan source type: {type(source)}")
-
-
-def _dict_to_plan(data: dict[str, Any]) -> PlanSpec:
-    if "name" not in data:
-        raise ValueError("Plan must have a 'name' field")
-    if "steps" not in data or not data["steps"]:
-        raise ValueError("Plan must have a non-empty 'steps' field")
-
-    steps: list[StepSpec] = []
-    for raw in data["steps"]:
-        if "id" not in raw or "tool" not in raw:
-            raise ValueError(f"Step must have 'id' and 'tool': {raw}")
-        deps = raw.get("depends_on", ())
-        if isinstance(deps, str):
-            deps = (deps,)
+        # File path
+        path = Path(source)
+        if path.suffix in (".yml", ".yaml"):
+            try:
+                import yaml
+            except ImportError as exc:
+                raise ImportError("PyYAML required for YAML plans") from exc
+            data = yaml.safe_load(path.read_text())
+            return _from_dict(data)
+        elif path.suffix == ".json":
+            data = json.loads(path.read_text())
+            return _from_dict(data)
         else:
-            deps = tuple(deps)
+            raise ValueError(f"unsupported plan file format: {path.suffix}")
+
+    raise TypeError(f"expected dict or str, got {type(source).__name__}")
+
+
+def _from_dict(data: dict[str, Any]) -> PlanSpec:
+    if "name" not in data:
+        raise ValueError("plan must have a 'name'")
+    if "steps" not in data or not data["steps"]:
+        raise ValueError("plan must have at least one step")
+
+    steps = []
+    for s in data["steps"]:
+        deps = s.get("depends_on", [])
+        if isinstance(deps, str):
+            deps = [deps]
         steps.append(
             StepSpec(
-                id=raw["id"],
-                tool=raw["tool"],
-                params=raw.get("params", {}),
-                depends_on=deps,
-                timeout=float(raw.get("timeout", 30)),
-                retries=int(raw.get("retries", 0)),
-                continue_on_failure=bool(raw.get("continue_on_failure", False)),
+                id=s["id"],
+                tool=s["tool"],
+                params=s.get("params", {}),
+                depends_on=tuple(deps),
+                timeout=float(s.get("timeout", 30)),
+                retries=int(s.get("retries", 0)),
+                continue_on_failure=bool(s.get("continue_on_failure", False)),
             )
         )
 
@@ -69,4 +64,5 @@ def _dict_to_plan(data: dict[str, Any]) -> PlanSpec:
         name=data["name"],
         steps=tuple(steps),
         description=data.get("description", ""),
+        inputs=data.get("inputs", {}),
     )

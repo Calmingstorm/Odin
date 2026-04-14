@@ -5,16 +5,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.odin.types import PlanResult, StepStatus
+from odin.types import PlanResult, StepStatus
 
 
 _STATUS_ICONS = {
     StepStatus.SUCCESS: "[OK]",
     StepStatus.FAILED: "[FAIL]",
-    StepStatus.TIMED_OUT: "[TIMEOUT]",
+    StepStatus.TIMEOUT: "[TIMEOUT]",
     StepStatus.SKIPPED: "[SKIP]",
-    StepStatus.PENDING: "[PEND]",
-    StepStatus.RUNNING: "[RUN]",
 }
 
 
@@ -24,7 +22,7 @@ class Reporter:
     @staticmethod
     def to_dict(result: PlanResult) -> dict[str, Any]:
         steps = {}
-        for sid, sr in result.step_results.items():
+        for sid, sr in result.steps.items():
             steps[sid] = {
                 "status": sr.status.value,
                 "output": sr.output,
@@ -33,9 +31,8 @@ class Reporter:
                 "attempts": sr.attempts,
             }
         return {
-            "plan": result.plan_name,
+            "name": result.name,
             "success": result.success,
-            "duration": round(result.duration, 4),
             "steps": steps,
         }
 
@@ -46,12 +43,11 @@ class Reporter:
     @staticmethod
     def to_summary(result: PlanResult) -> str:
         lines = [
-            f"Plan: {result.plan_name}",
+            f"Plan: {result.name}",
             f"Status: {'SUCCESS' if result.success else 'FAILED'}",
-            f"Duration: {result.duration:.3f}s",
             "",
         ]
-        for sid, sr in result.step_results.items():
+        for sid, sr in result.steps.items():
             icon = _STATUS_ICONS.get(sr.status, "[?]")
             line = f"  {icon} {sid} ({sr.duration:.3f}s)"
             if sr.error:

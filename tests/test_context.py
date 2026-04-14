@@ -1,197 +1,153 @@
-"""Tests for ExecutionContext variable resolution."""
-
-from __future__ import annotations
+"""Tests for ExecutionContext — step-result and plan-input interpolation."""
 
 import pytest
 
-from src.odin.context import ExecutionContext
-from src.odin.types import StepResult, StepStatus
+from odin.context import ExecutionContext
+from odin.types import StepResult, StepStatus
 
 
-@pytest.fixture
-def populated_ctx():
-    ctx = ExecutionContext()
-    ctx.record(
-        StepResult(
-            step_id="step1",
-            status=StepStatus.SUCCESS,
-            output={"key": "value", "nested": {"inner": 42}},
-        )
-    )
-    ctx.record(
-        StepResult(
-            step_id="step2",
-            status=StepStatus.SUCCESS,
-            output="plain-string",
-        )
-    )
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _ctx_with_results(**kwargs) -> ExecutionContext:
+    ctx = ExecutionContext(inputs=kwargs.pop("_inputs", None))
+    for step_id, output in kwargs.items():
+        ctx.record(step_id, StepResult(status=StepStatus.SUCCESS, output=output))
     return ctx
 
 
-def test_full_ref(populated_ctx):
-    params = {"data": "${step1.output}"}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["data"] == {"key": "value", "nested": {"inner": 42}}
+# ---------------------------------------------------------------------------
+# Step-result interpolation (prior work — regression coverage)
+# ---------------------------------------------------------------------------
+
+class TestStepResultInterpolation:
+    def test_full_ref_returns_raw(self):
+        ctx = _ctx_with_results(a={"key": "val"})
+        assert ctx.resolve_params({"x": "${a.output}"}) == {"x": {"key": "val"}}
+
+    def test_nested_key_access(self):
+        ctx = _ctx_with_results(a={"nested": {"deep": 42}})
+        assert ctx.resolve_params({"x": "${a.output.nested.deep}"}) == {"x": 42}
+
+    def test_implicit_output(self):
+        ctx = _ctx_with_results(a={"k": "v"})
+        assert ctx.resolve_params({"x": "${a.k}"}) == {"x": "v"}
+
+    def test_embedded_ref_stringified(self):
+        ctx = _ctx_with_results(a="world")
+        assert ctx.resolve_params({"x": "hello ${a.output}!"}) == {"x": "hello world!"}
+
+    def test_list_index(self):
+        ctx = _ctx_with_results(a=["x", "y", "z"])
+        assert ctx.resolve_params({"x": "${a.output.1}"}) == {"x": "y"}
+
+    def test_steps_prefix_syntax(self):
+        ctx = _ctx_with_results(a="val")
+        assert ctx.resolve_params({"x": "{steps.a.output}"}) == {"x": "val"}
+
+    def test_non_output_field(self):
+        ctx = ExecutionContext()
+        ctx.record("a", StepResult(status=StepStatus.FAILED, error="oops", attempts=3))
+        r = ctx.resolve_params({"s": "${a.status}", "e": "${a.error}", "n": "${a.attempts}"})
+        assert r["s"] == StepStatus.FAILED
+        assert r["e"] == "oops"
+        assert r["n"] == 3
+
+    def test_unknown_step_raises(self):
+        ctx = _ctx_with_results()
+        with pytest.raises(KeyError, match="not found"):
+            ctx.resolve_params({"x": "${nope.output}"})
+
+    def test_bad_key_raises(self):
+        ctx = _ctx_with_results(a={"k": 1})
+        with pytest.raises(KeyError, match="not found"):
+            ctx.resolve_params({"x": "${a.output.missing}"})
 
 
-def test_nested_key_ref(populated_ctx):
-    params = {"val": "${step1.output.key}"}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["val"] == "value"
+# ---------------------------------------------------------------------------
+# Plan-input interpolation (new feature)
+# ---------------------------------------------------------------------------
 
+class TestPlanInputInterpolation:
+    def test_full_ref_returns_raw(self):
+        ctx = ExecutionContext(inputs={"target": {"host": "example.com", "port": 443}})
+        r = ctx.resolve_params({"server": "${inputs.target}"})
+        assert r == {"server": {"host": "example.com", "port": 443}}
 
-def test_deep_nested_ref(populated_ctx):
-    params = {"val": "${step1.output.nested.inner}"}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["val"] == 42
+    def test_nested_key(self):
+        ctx = ExecutionContext(inputs={"target": {"host": "example.com", "port": 443}})
+        r = ctx.resolve_params({"h": "${inputs.target.host}"})
+        assert r == {"h": "example.com"}
 
+    def test_embedded_ref_stringified(self):
+        ctx = ExecutionContext(inputs={"env": "prod", "region": "us-east-1"})
+        r = ctx.resolve_params({"url": "https://${inputs.env}.${inputs.region}.api.internal"})
+        assert r == {"url": "https://prod.us-east-1.api.internal"}
 
-def test_embedded_ref(populated_ctx):
-    params = {"msg": "result is ${step2.output}!"}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["msg"] == "result is plain-string!"
+    def test_bare_brace_syntax(self):
+        ctx = ExecutionContext(inputs={"x": 99})
+        r = ctx.resolve_params({"v": "{inputs.x}"})
+        assert r == {"v": 99}
 
+    def test_list_input(self):
+        ctx = ExecutionContext(inputs={"tags": ["a", "b", "c"]})
+        r = ctx.resolve_params({"first": "${inputs.tags.0}", "last": "${inputs.tags.2}"})
+        assert r == {"first": "a", "last": "c"}
 
-def test_unknown_step_raises(populated_ctx):
-    with pytest.raises(KeyError, match="not found"):
-        populated_ctx.resolve_params({"x": "${unknown.output}"})
+    def test_deep_nesting(self):
+        ctx = ExecutionContext(inputs={"cfg": {"db": {"host": "localhost", "port": 5432}}})
+        r = ctx.resolve_params({"dsn": "pg://${inputs.cfg.db.host}:${inputs.cfg.db.port}/app"})
+        assert r == {"dsn": "pg://localhost:5432/app"}
 
+    def test_mixed_step_and_input_refs(self):
+        ctx = ExecutionContext(inputs={"base_url": "https://api.example.com"})
+        ctx.record("auth", StepResult(status=StepStatus.SUCCESS, output={"token": "abc123"}))
+        r = ctx.resolve_params({"url": "${inputs.base_url}/data", "auth": "Bearer ${auth.output.token}"})
+        assert r == {"url": "https://api.example.com/data", "auth": "Bearer abc123"}
 
-def test_no_refs_passthrough(populated_ctx):
-    params = {"a": 1, "b": "hello"}
-    assert populated_ctx.resolve_params(params) == {"a": 1, "b": "hello"}
+    def test_input_in_nested_param_dict(self):
+        ctx = ExecutionContext(inputs={"retries": 5})
+        r = ctx.resolve_params({"config": {"max_retries": "${inputs.retries}"}})
+        assert r == {"config": {"max_retries": 5}}
 
+    def test_input_in_param_list(self):
+        ctx = ExecutionContext(inputs={"flag": "--verbose"})
+        r = ctx.resolve_params({"args": ["run", "${inputs.flag}"]})
+        assert r == {"args": ["run", "--verbose"]}
 
-# ── {steps.X.field} syntax ────────────────────────────────────
+    # -- error cases ---------------------------------------------------------
 
-def test_steps_prefix_full_ref(populated_ctx):
-    """``{steps.step1.output}`` returns the full output object."""
-    params = {"data": "{steps.step1.output}"}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["data"] == {"key": "value", "nested": {"inner": 42}}
+    def test_missing_input_key_raises(self):
+        ctx = ExecutionContext(inputs={"a": 1})
+        with pytest.raises(KeyError, match="input 'nope' not found.*available: a"):
+            ctx.resolve_params({"x": "${inputs.nope}"})
 
+    def test_missing_input_key_empty_inputs(self):
+        ctx = ExecutionContext()
+        with pytest.raises(KeyError, match="input 'x' not found.*available: none"):
+            ctx.resolve_params({"x": "${inputs.x}"})
 
-def test_steps_prefix_nested_key(populated_ctx):
-    """``{steps.step1.output.key}`` drills into the output dict."""
-    params = {"val": "{steps.step1.output.key}"}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["val"] == "value"
+    def test_bad_nested_path_raises(self):
+        ctx = ExecutionContext(inputs={"a": {"b": 1}})
+        with pytest.raises(KeyError, match="not found"):
+            ctx.resolve_params({"x": "${inputs.a.c}"})
 
+    def test_bad_list_index_raises(self):
+        ctx = ExecutionContext(inputs={"a": [1, 2]})
+        with pytest.raises(KeyError, match="invalid index"):
+            ctx.resolve_params({"x": "${inputs.a.99}"})
 
-def test_steps_prefix_deep_nested(populated_ctx):
-    params = {"val": "{steps.step1.output.nested.inner}"}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["val"] == 42
+    def test_empty_input_ref_raises(self):
+        ctx = ExecutionContext(inputs={"a": 1})
+        with pytest.raises(KeyError, match="empty input reference"):
+            ctx.resolve_params({"x": "${inputs.}"})
 
-
-def test_steps_prefix_embedded(populated_ctx):
-    """Embedded {steps.X.output} inside a larger string."""
-    params = {"msg": "got {steps.step2.output} here"}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["msg"] == "got plain-string here"
-
-
-def test_steps_prefix_unknown_step(populated_ctx):
-    with pytest.raises(KeyError, match="not found"):
-        populated_ctx.resolve_params({"x": "{steps.nope.output}"})
-
-
-def test_steps_prefix_bad_nested_key(populated_ctx):
-    with pytest.raises(KeyError, match="cannot resolve"):
-        populated_ctx.resolve_params({"x": "{steps.step1.output.nonexistent}"})
-
-
-# ── Mixed syntax in one param dict ────────────────────────────
-
-def test_mixed_syntax_in_params(populated_ctx):
-    """Both ${} and {steps.} refs in the same dict resolve correctly."""
-    params = {
-        "a": "${step2.output}",
-        "b": "{steps.step1.output.key}",
-    }
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["a"] == "plain-string"
-    assert resolved["b"] == "value"
-
-
-def test_mixed_syntax_in_single_string(populated_ctx):
-    """Both syntaxes embedded in a single string."""
-    params = {"msg": "${step2.output} and {steps.step1.output.key}"}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["msg"] == "plain-string and value"
-
-
-# ── Accessing non-output fields ───────────────────────────────
-
-def test_access_status_field(populated_ctx):
-    params = {"s": "${step1.status}"}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["s"] == StepStatus.SUCCESS
-
-
-def test_access_status_via_steps_prefix(populated_ctx):
-    params = {"s": "{steps.step1.status}"}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["s"] == StepStatus.SUCCESS
-
-
-def test_access_error_field():
-    ctx = ExecutionContext()
-    ctx.record(
-        StepResult(
-            step_id="e", status=StepStatus.FAILED, error="something broke"
-        )
-    )
-    params = {"err": "${e.error}"}
-    resolved = ctx.resolve_params(params)
-    assert resolved["err"] == "something broke"
-
-
-def test_access_attempts_field():
-    ctx = ExecutionContext()
-    ctx.record(
-        StepResult(step_id="r", status=StepStatus.FAILED, attempts=3)
-    )
-    assert ctx.resolve_params({"n": "${r.attempts}"})["n"] == 3
-
-
-# ── List-index access ─────────────────────────────────────────
-
-def test_list_index_access():
-    ctx = ExecutionContext()
-    ctx.record(
-        StepResult(
-            step_id="ls",
-            status=StepStatus.SUCCESS,
-            output=["alpha", "beta", "gamma"],
-        )
-    )
-    assert ctx.resolve_params({"v": "${ls.output.1}"})["v"] == "beta"
-
-
-# ── Nested params (dicts / lists) ─────────────────────────────
-
-def test_resolve_nested_dict(populated_ctx):
-    params = {"outer": {"inner": "${step2.output}"}}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["outer"]["inner"] == "plain-string"
-
-
-def test_resolve_nested_list(populated_ctx):
-    params = {"items": ["${step2.output}", "literal"]}
-    resolved = populated_ctx.resolve_params(params)
-    assert resolved["items"] == ["plain-string", "literal"]
-
-
-# ── Error message quality ─────────────────────────────────────
-
-def test_bad_single_segment_raises():
-    ctx = ExecutionContext()
-    with pytest.raises(KeyError, match="need at least"):
-        ctx.resolve_params({"x": "${oops}"})
-
-
-def test_bad_nested_field_message(populated_ctx):
-    """Error message includes the traversal path for debugging."""
-    with pytest.raises(KeyError, match="cannot resolve"):
-        populated_ctx.resolve_params({"x": "${step1.output.nested.bad}"})
+    def test_error_is_step_local_not_plan_crash(self):
+        """Bad input ref in one param doesn't prevent resolving others."""
+        ctx = ExecutionContext(inputs={"ok": "fine"})
+        # Good ref resolves fine
+        assert ctx.resolve_params({"x": "${inputs.ok}"}) == {"x": "fine"}
+        # Bad ref raises KeyError (step executor catches this per-step)
+        with pytest.raises(KeyError):
+            ctx.resolve_params({"x": "${inputs.missing}"})

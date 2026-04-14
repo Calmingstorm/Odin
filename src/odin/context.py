@@ -1,4 +1,13 @@
-"""Execution context for cross-step variable resolution."""
+"""Execution context for variable resolution in plan steps.
+
+Supports two namespaces for interpolation:
+  - Step results:  ${step_id.field.path}  or  {steps.step_id.field.path}
+  - Plan inputs:   ${inputs.key.path}     or  {inputs.key.path}
+
+Full-value references (the entire param value is a single placeholder) return
+the raw object.  Embedded references (placeholder inside a larger string) are
+stringified before substitution.
+"""
 
 from __future__ import annotations
 
@@ -6,111 +15,155 @@ import copy
 import re
 from typing import Any
 
-from src.odin.types import StepResult
+from odin.types import StepResult
 
-# ${step_id.output} or ${step_id.output.key}
+# ---------------------------------------------------------------------------
+# Regex patterns
+# ---------------------------------------------------------------------------
+# ${...} — dollar-brace syntax
 _DOLLAR_REF = re.compile(r"\$\{([^}]+)\}")
-# {steps.step_id.output} or {steps.step_id.output.key}
+# {steps.…} but NOT ${steps.…}  — bare-brace step syntax
 _STEPS_REF = re.compile(r"(?<!\$)\{steps\.([^}]+)\}")
-# Combined: matches either syntax
-_ANY_REF = re.compile(r"\$\{([^}]+)\}|(?<!\$)\{steps\.([^}]+)\}")
+# {inputs.…} but NOT ${inputs.…} — bare-brace input syntax
+_INPUTS_REF = re.compile(r"(?<!\$)\{inputs\.([^}]+)\}")
+# Combined: any reference
+_ANY_REF = re.compile(
+    r"\$\{([^}]+)\}"
+    r"|(?<!\$)\{steps\.([^}]+)\}"
+    r"|(?<!\$)\{inputs\.([^}]+)\}"
+)
 
-# Fields on StepResult that can be accessed via the second path segment.
-_RESULT_FIELDS = frozenset({"output", "status", "error", "duration", "attempts"})
+_STEP_RESULT_FIELDS = frozenset({"output", "status", "error", "duration", "attempts"})
 
 
 class ExecutionContext:
-    """Shared state across all steps in a plan execution.
+    """Stores step results and plan inputs; resolves interpolation placeholders."""
 
-    Stores step results and resolves placeholder references inside
-    parameter dicts before each step runs.
-
-    Supported syntaxes (equivalent)::
-
-        ${step_id.output}            — original short form
-        ${step_id.output.key}        — nested key access
-        {steps.step_id.output}       — explicit ``steps.`` prefix form
-        {steps.step_id.output.key}   — nested key with prefix form
-
-    Accessible fields: ``output``, ``status``, ``error``, ``duration``,
-    ``attempts``.  When the field segment is omitted the default is
-    ``output`` for backwards compatibility.
-    """
-
-    def __init__(self) -> None:
+    def __init__(self, inputs: dict[str, Any] | None = None) -> None:
         self._results: dict[str, StepResult] = {}
+        self._inputs: dict[str, Any] = dict(inputs) if inputs else {}
 
-    def record(self, result: StepResult) -> None:
-        self._results[result.step_id] = result
+    # -- result bookkeeping --------------------------------------------------
+
+    def record(self, step_id: str, result: StepResult) -> None:
+        self._results[step_id] = result
 
     def get(self, step_id: str) -> StepResult | None:
         return self._results.get(step_id)
 
+    @property
+    def results(self) -> dict[str, StepResult]:
+        return dict(self._results)
+
+    @property
+    def inputs(self) -> dict[str, Any]:
+        return dict(self._inputs)
+
+    # -- param resolution ----------------------------------------------------
+
     def resolve_params(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Deep-copy *params* and substitute placeholder references."""
-        return self._resolve(copy.deepcopy(params))
+        """Deep-copy *params* and resolve all placeholder references."""
+        resolved = copy.deepcopy(params)
+        return self._resolve_value(resolved)
 
-    # ------------------------------------------------------------------
+    # -- internals -----------------------------------------------------------
 
-    def _resolve(self, obj: Any) -> Any:
-        if isinstance(obj, str):
-            return self._resolve_string(obj)
-        if isinstance(obj, dict):
-            return {k: self._resolve(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [self._resolve(v) for v in obj]
-        return obj
+    def _resolve_value(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self._resolve_string(value)
+        if isinstance(value, dict):
+            return {k: self._resolve_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._resolve_value(v) for v in value]
+        return value
 
     def _resolve_string(self, value: str) -> Any:
-        # Full-value reference (either syntax) → return raw object
-        m_dollar = _DOLLAR_REF.fullmatch(value)
-        if m_dollar:
-            return self._lookup(m_dollar.group(1))
-        m_steps = _STEPS_REF.fullmatch(value)
-        if m_steps:
-            return self._lookup(m_steps.group(1))
+        # Full-value reference — return raw object
+        m = _DOLLAR_REF.fullmatch(value)
+        if m:
+            return self._lookup(m.group(1))
 
-        # Embedded references: "prefix_${step.output}_suffix"
-        def _replace(m: re.Match) -> str:
-            path = m.group(1) or m.group(2)
-            return str(self._lookup(path))
+        m = _STEPS_REF.fullmatch(value)
+        if m:
+            return self._lookup_step(m.group(1))
 
-        result = _ANY_REF.sub(_replace, value)
-        return result
+        m = _INPUTS_REF.fullmatch(value)
+        if m:
+            return self._lookup_input(m.group(1))
 
-    def _lookup(self, path: str) -> Any:
-        parts = path.split(".")
-        if len(parts) < 2:
-            raise KeyError(f"Invalid reference '${{{path}}}': need at least step_id.field")
+        # Embedded references — substitute as strings
+        if _ANY_REF.search(value):
+            def _replacer(match: re.Match) -> str:
+                dollar, steps, inputs = match.group(1), match.group(2), match.group(3)
+                if dollar is not None:
+                    return str(self._lookup(dollar))
+                if steps is not None:
+                    return str(self._lookup_step(steps))
+                return str(self._lookup_input(inputs))
+            return _ANY_REF.sub(_replacer, value)
 
+        return value
+
+    def _lookup(self, path_str: str) -> Any:
+        """Route a ${...} reference to step-result or input lookup."""
+        parts = path_str.split(".")
+        if parts[0] == "inputs":
+            return self._lookup_input(".".join(parts[1:]))
+        return self._lookup_step(path_str)
+
+    def _lookup_step(self, path_str: str) -> Any:
+        """Resolve a step-result reference like  step_id.output.key  ."""
+        parts = path_str.split(".")
         step_id = parts[0]
         result = self._results.get(step_id)
         if result is None:
-            raise KeyError(f"Reference error: step '{step_id}' not found in context")
+            raise KeyError(f"step '{step_id}' not found in context")
 
-        # Determine which field to access on StepResult
-        field = parts[1]
-        if field in _RESULT_FIELDS:
-            obj: Any = getattr(result, field)
-            rest = parts[2:]
+        if len(parts) > 1 and parts[1] in _STEP_RESULT_FIELDS:
+            obj = getattr(result, parts[1])
+            remaining = parts[2:]
         else:
-            # Backwards compat: treat as implicit "output" and start
-            # drilling from parts[1] into the output object.
             obj = result.output
-            rest = parts[1:]
+            remaining = parts[1:]
 
-        for i, part in enumerate(rest):
-            traversed = ".".join(parts[: 2 + i])
-            try:
-                if isinstance(obj, dict):
-                    obj = obj[part]
-                elif isinstance(obj, list):
+        return self._drill(obj, remaining, path_str)
+
+    def _lookup_input(self, path_str: str) -> Any:
+        """Resolve a plan-input reference like  key.nested  ."""
+        if not path_str:
+            raise KeyError("empty input reference")
+        parts = path_str.split(".")
+        key = parts[0]
+        if key not in self._inputs:
+            raise KeyError(
+                f"input '{key}' not found in plan inputs "
+                f"(available: {', '.join(sorted(self._inputs)) or 'none'})"
+            )
+        obj = self._inputs[key]
+        return self._drill(obj, parts[1:], f"inputs.{path_str}")
+
+    @staticmethod
+    def _drill(obj: Any, parts: list[str], full_path: str) -> Any:
+        """Traverse *obj* by the remaining *parts* (dict keys / list indices)."""
+        for i, part in enumerate(parts):
+            traversed = ".".join(parts[: i + 1])
+            if isinstance(obj, dict):
+                if part not in obj:
+                    raise KeyError(
+                        f"key '{part}' not found at '{traversed}' in ref '${{{full_path}}}'"
+                    )
+                obj = obj[part]
+            elif isinstance(obj, (list, tuple)):
+                try:
                     obj = obj[int(part)]
-                else:
-                    obj = getattr(obj, part)
-            except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
+                except (ValueError, IndexError) as exc:
+                    raise KeyError(
+                        f"invalid index '{part}' at '{traversed}' in ref '${{{full_path}}}'"
+                    ) from exc
+            elif hasattr(obj, part):
+                obj = getattr(obj, part)
+            else:
                 raise KeyError(
-                    f"Reference error: cannot resolve '{part}' "
-                    f"in '${{{path}}}' (after '{traversed}'): {exc}"
-                ) from exc
+                    f"cannot traverse '{part}' at '{traversed}' in ref '${{{full_path}}}'"
+                )
         return obj
