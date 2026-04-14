@@ -1,0 +1,431 @@
+from __future__ import annotations
+
+import re
+
+from ..llm.secret_scrubber import scrub_output_secrets
+
+# ---------------------------------------------------------------------------
+# Secret scrubbing
+# ---------------------------------------------------------------------------
+
+# Additional patterns for scrubbing LLM responses before Discord delivery.
+# These extend OUTPUT_SECRET_PATTERNS (applied via scrub_output_secrets) with
+# patterns more likely to appear in natural-language LLM output.
+_RESPONSE_EXTRA_PATTERNS = [
+    re.compile(r"xox[boaprs]-[a-zA-Z0-9-]+"),  # Slack tokens
+    # Natural language: "the password is ...", "my password is hunter2"
+    re.compile(r"(?i)(?:my\s+)?(?:password|passwd|pwd)\s+(?:\S+\s+){0,4}(?:is|was)\s+\S{6,}"),
+]
+
+
+def scrub_response_secrets(text: str) -> str:
+    """Scrub potential secrets from LLM responses before sending to Discord.
+
+    Applies the tool-output patterns (passwords, API keys, private keys,
+    database URLs) plus additional patterns for secrets that LLMs might
+    express in natural language.
+    """
+    text = scrub_output_secrets(text)
+    for pattern in _RESPONSE_EXTRA_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Fabrication detection
+# ---------------------------------------------------------------------------
+
+# Patterns that suggest fabricated tool output when no tools were actually called.
+# Each is (compiled_regex, description) for testability.
+_FABRICATION_PATTERNS: list[re.Pattern[str]] = [
+    # Claims of running/executing/investigating commands
+    re.compile(
+        r"(?i)\b(?:I\s+(?:ran|executed|checked|performed|ran\s+a|"
+        r"looked\s+at|reviewed|inspected|examined|verified|confirmed|"
+        r"tested|scanned|monitored|queried)|"
+        r"running|executing|here(?:'s| is) the (?:output|result)|"
+        r"the (?:command|output|result) (?:returned|shows?|is)|"
+        r"I (?:can see|found) (?:that )?(?:the |your )?)"
+    ),
+    # Fake command output patterns (``` followed by lines that look like terminal output)
+    re.compile(
+        r"```(?:bash|shell|console|text|output)?\s*\n"
+        r"(?:[\$#>].*\n|(?:total |drwx|Filesystem|CONTAINER|NAME |PID |USER ))",
+    ),
+    # Claims of completed actions without tool calls (generated, posted, created, saved, etc.)
+    re.compile(
+        r"(?i)\b(?:generated|posted|created|saved|uploaded|deployed|installed|"
+        r"started|stopped|deleted|removed|wrote|written|sent|fetched|downloaded)"
+        r"(?:\s+(?:and\s+)?(?:posted|uploaded|saved|sent|attached|delivered))?"
+        r"\b.{0,40}\b(?:image|file|script|server|container|process|document|skill)"
+    ),
+    # Claims referencing data sources without having checked them
+    re.compile(
+        r"(?i)\b(?:according to (?:the )?(?:logs?|output|results?|data|metrics|dashboard)|"
+        r"based on (?:the )?(?:output|logs?|results?|metrics))\b"
+    ),
+]
+
+
+def detect_fabrication(text: str, tools_used: list[str]) -> bool:
+    """Detect if a text-only response fabricates tool results.
+
+    Returns True if the response contains patterns suggesting the LLM claimed
+    to run commands or check systems without actually calling any tools.
+
+    Only meaningful when tools_used is empty — if tools were called, the
+    response is based on real results.
+    """
+    if tools_used:
+        return False
+    if not text or len(text) < 20:
+        return False
+    return any(p.search(text) for p in _FABRICATION_PATTERNS)
+
+
+# Developer message injected when fabrication is detected, prompting a retry.
+_FABRICATION_RETRY_MSG = {
+    "role": "developer",
+    "content": "That was a fabrication. Call the appropriate tool to get real results.",
+}
+
+
+# ---------------------------------------------------------------------------
+# Promise detection
+# ---------------------------------------------------------------------------
+
+_PROMISE_PATTERNS: list[re.Pattern[str]] = [
+    # "I'll <verb>" — any verb after I'll/I will (not just a fixed list)
+    re.compile(
+        r"(?i)\bI'(?:ll|m going to)\s+\w+"
+    ),
+    # "I'm <gerund>" — any -ing verb after I'm
+    re.compile(
+        r"(?i)\bI'm\s+\w+ing\b"
+    ),
+    # "I will <verb>"
+    re.compile(
+        r"(?i)\bI will\s+\w+"
+    ),
+    # "I can <verb> it/that/this immediately/now/right now"
+    re.compile(
+        r"(?i)\bI can\s+\w+\s+(?:it|that|this|right now|now|immediately)\b"
+    ),
+    # Action openers without subject — gerund-initial promises
+    re.compile(
+        r"(?i)^(?:On it|Working on|Spawning|Spinning up|Starting|Kicking off|"
+        r"Setting up|Pulling|Generating|Building|Deploying|Running|"
+        r"Creating|Launching|Firing up|Booting|Preparing|Fetching)\b",
+        re.MULTILINE,
+    ),
+    # "Plan:" or "Plan in" followed by description
+    re.compile(
+        r"(?i)^Plan(?::|(?:\s+in\s+))\s*.{10,}",
+        re.MULTILINE,
+    ),
+]
+
+# Phrases that indicate genuine chat, not a promise to act.
+# If any of these appear, the promise detector should NOT fire.
+_PROMISE_CHAT_EXEMPTIONS: list[re.Pattern[str]] = [
+    # Opinions/thoughts — "I'm thinking", "I'm not sure", "I'm guessing"
+    re.compile(r"(?i)\bI'm\s+(?:thinking|not sure|unsure|guessing|wondering|curious)"),
+    # Statements about state — "I'm aware", "I'm online", "I'm Odin"
+    re.compile(r"(?i)\bI'm\s+(?:aware|online|here|ready|Odin|a |the |not )"),
+    # Refusals — "I can't", "I won't"
+    re.compile(r"(?i)\bI\s+(?:can't|won't|cannot|will not)\b"),
+    # Past tense reports — "I'll note that", "I'm reporting"
+    re.compile(r"(?i)\bI'll\s+(?:note|say|add|mention|point out)\b"),
+]
+
+
+def detect_promise_without_action(text: str, tools_used: list[str]) -> bool:
+    """Detect if a response promises action but includes no tool calls.
+
+    Catches patterns like "I'll do X now" or "I'm executing that" when
+    no tools were actually called — the LLM described doing work without
+    doing it.
+    """
+    if tools_used:
+        return False
+    if not text or len(text) < 15:
+        return False
+    # Check exemptions first — genuine chat shouldn't trigger
+    if any(p.search(text) for p in _PROMISE_CHAT_EXEMPTIONS):
+        return False
+    return any(p.search(text) for p in _PROMISE_PATTERNS)
+
+
+_PROMISE_RETRY_MSG = {
+    "role": "developer",
+    "content": "Execute the action with tool calls now.",
+}
+
+
+# ---------------------------------------------------------------------------
+# Continuation message — injected when the classifier determines the
+# response is incomplete and the model should keep working.
+# ---------------------------------------------------------------------------
+
+_CONTINUATION_MSG = {
+    "role": "developer",
+    "content": (
+        "Continue executing the remaining steps with tool calls."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Tool-unavailability fabrication — catches Codex claiming tools are disabled
+# without actually trying them. Only fires when no tools were called.
+# ---------------------------------------------------------------------------
+
+_TOOL_UNAVAIL_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        r"(?i)\b(?:not (?:enabled|available|configured)|"
+        r"is(?:n't| not) (?:enabled|available|configured|supported)|"
+        r"is disabled|cannot be used)\b"
+    ),
+    re.compile(
+        r"(?i)\bcan(?:'t|not)\b.{0,30}\b(?:generate|create|produce|render)\b.{0,20}"
+        r"\b(?:image|photo|picture|screenshot)"
+    ),
+    re.compile(
+        r"(?i)\b(?:image|photo) generation.{0,20}\b(?:not|isn't|unavailable|disabled)\b"
+    ),
+    # Claims of lacking access or capability
+    re.compile(
+        r"(?i)\b(?:(?:don't|do not) have (?:access|the ability) to|"
+        r"no (?:tool|way) (?:to |for )(?:do )?(?:that|this)|"
+        r"that(?:'s| is) not something I can)\b"
+    ),
+]
+
+
+def detect_tool_unavailable(text: str, tools_used: list[str]) -> bool:
+    """Detect if a response falsely claims a tool is unavailable.
+
+    Returns True if the response claims a tool is not enabled/available/etc.
+    without actually trying to call it.  Only meaningful when tools_used is
+    empty — if tools were called and returned a real error, that's legitimate.
+    """
+    if tools_used:
+        return False
+    if not text or len(text) < 15:
+        return False
+    return any(p.search(text) for p in _TOOL_UNAVAIL_PATTERNS)
+
+
+_TOOL_UNAVAIL_RETRY_MSG = {
+    "role": "developer",
+    "content": "The tool is available. Try calling it.",
+}
+
+
+# ---------------------------------------------------------------------------
+# Hedging detection — catches "shall I", "if you want", etc.
+# Used for bot-to-bot interactions where hedging is never appropriate.
+# ---------------------------------------------------------------------------
+
+_HEDGING_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        r"(?i)\b(?:if you(?:'d| would)? (?:like|want|prefer)|"
+        r"shall I|should I|would you like(?: me to)?|"
+        r"ready (?:when|on) you|let me know (?:if|when)|"
+        r"I can (?:do|help|run|execute|set up) (?:that|this|it) (?:for you|if)|"
+        r"just (?:say|tell) (?:the word|me when|me if)|"
+        r"want me to)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:here(?:'s| is) (?:a |the )?plan|"
+        r"I(?:'d| would) (?:suggest|recommend)|"
+        r"before (?:I |we )(?:proceed|go ahead|start)|"
+        r"I'll wait for (?:your|the) (?:go[- ]ahead|confirmation|approval)|"
+        r"awaiting (?:your|the) (?:confirmation|input|response|approval|go[- ]ahead)|"
+        r"once you (?:confirm|approve|give the go[- ]ahead)|"
+        r"(?:your call|up to you|your decision))\b"
+    ),
+    re.compile(
+        r"(?i)^Plan:|"
+        r"I can(?:'t| not) directly|"
+        r"I (?:need|have) to .{0,30} (?:first|before)|"
+        r"I'm (?:going to|about to|proceeding to)"
+    ),
+    # Offering numbered options instead of executing
+    re.compile(
+        r"(?i)(?:pick (?:one|an option)|choose (?:one|from)|"
+        r"(?:option|choice) \d|"
+        r"tell me (?:what you (?:want|need|prefer)|which)|"
+        r"which (?:would you|do you|one))\b"
+    ),
+]
+
+
+def detect_hedging(text: str, tools_used: list[str]) -> bool:
+    """Detect if a response hedges instead of executing.
+
+    Returns True if the response contains hedging language and no tools
+    were called — meaning the LLM asked for permission instead of acting.
+    """
+    if tools_used:
+        return False
+    if not text or len(text) < 15:
+        return False
+    return any(p.search(text) for p in _HEDGING_PATTERNS)
+
+
+# Developer message injected when hedging is detected on a bot message.
+_HEDGING_RETRY_MSG = {
+    "role": "developer",
+    "content": "This is another bot. Do not say 'shall I' or 'if you want'. Execute immediately with tool calls.",
+}
+
+
+# ---------------------------------------------------------------------------
+# Code-block hedging — catches Codex showing a bash/shell command instead
+# of executing it via run_command.  Only fires when no tools were called.
+# ---------------------------------------------------------------------------
+
+_CODE_BLOCK_HEDGING_PATTERN: re.Pattern[str] = re.compile(
+    r"```(?:bash|sh|shell|zsh)\s*\n",
+)
+
+
+def detect_code_hedging(text: str, tools_used: list[str]) -> bool:
+    """Detect if a response shows a bash code block instead of executing it.
+
+    Returns True if the response contains a bash/sh code block but no tools
+    were called — meaning the LLM showed what it should have run.
+    """
+    if tools_used:
+        return False
+    if not text or len(text) < 15:
+        return False
+    return bool(_CODE_BLOCK_HEDGING_PATTERN.search(text))
+
+
+_CODE_HEDGING_RETRY_MSG = {
+    "role": "developer",
+    "content": (
+        "Execute the command using run_command instead of showing it. "
+        "You are an executor, not a manual."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Premature failure detection — catches when Codex gives up too early
+# instead of exhausting fallback chains.
+# ---------------------------------------------------------------------------
+
+_FAILURE_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        r"(?i)(?:couldn'?t (?:get|resolve|find|fetch|retrieve|determine|complete|"
+        r"access|connect)|"
+        r"(?:failed|unable) to (?:get|resolve|find|fetch|retrieve|connect|access)|"
+        r"(?:no|zero) (?:results?|matches?|data) (?:found|returned|available)|"
+        r"(?:is|was|currently) (?:blocked|unavailable|down|broken|failing)|"
+        r"(?:error|Error):)"
+    ),
+    re.compile(
+        r"(?i)(?:workaround|fallback|alternative|try (?:this|these|instead)|"
+        r"use this .{0,20} instead|if you want .{0,30} workaround)"
+    ),
+    # Connection/execution failure patterns
+    re.compile(
+        r"(?i)(?:timed?\s*out|connection (?:refused|failed|reset|closed)|"
+        r"(?:doesn't|does not|isn't|is not) (?:seem to be )?(?:work(?:ing)?|respond(?:ing)?))"
+    ),
+]
+
+
+def detect_premature_failure(text: str, tools_used: list[str]) -> bool:
+    """Detect if a response reports failure without exhausting alternatives.
+
+    Returns True if the response describes a failure/error AND tools were
+    called (partial execution) — meaning the LLM tried something, hit an
+    error, and gave up instead of trying a different approach.
+
+    Only fires when tools WERE used (partial attempt). Pure fabrication
+    (no tools) is handled by detect_fabrication instead.
+    """
+    if not tools_used:
+        return False  # No tools called — fabrication detector handles this
+    if not text or len(text) < 30:
+        return False
+    return any(p.search(text) for p in _FAILURE_PATTERNS)
+
+
+_FAILURE_RETRY_MSG = {
+    "role": "developer",
+    "content": "Try alternative approaches before reporting failure.",
+}
+
+
+# ---------------------------------------------------------------------------
+# Tool output truncation
+# ---------------------------------------------------------------------------
+
+# Imported by client.py for use in tool result processing.
+# Defined here alongside the other guard utilities.
+TOOL_OUTPUT_MAX_CHARS = 12000  # ~3000 tokens; cap tool results to prevent context bloat
+
+
+def truncate_tool_output(text: str, max_chars: int = TOOL_OUTPUT_MAX_CHARS) -> str:
+    """Truncate large tool output, preserving the start and end for context.
+
+    Tool results stay in the messages list and are re-sent as input tokens
+    on every subsequent iteration of the tool loop.  Capping output prevents
+    a single large result (Prometheus JSON, file contents, long command output)
+    from ballooning costs across iterations.
+    """
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    omitted = len(text) - max_chars
+    return (
+        text[:half]
+        + f"\n\n[... {omitted} characters omitted ...]\n\n"
+        + text[-half:]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Message combination
+# ---------------------------------------------------------------------------
+
+# Pre-compiled regex for merging adjacent code blocks in combine_bot_messages
+_ADJACENT_FENCE_RE = re.compile(r"\n```[ \t]*\n\n```(\w*)[ \t]*\n")
+
+
+def combine_bot_messages(parts: list[str]) -> str:
+    """Combine buffered bot messages, intelligently merging code blocks.
+
+    Handles:
+    - Split code blocks (open in one message, close in later one) — joined
+      with a single newline so no extra blank lines appear inside the block.
+    - Adjacent code blocks (close fence then immediately open fence) — merged
+      into one continuous block by removing the redundant fence pair.
+    - Regular text between code blocks — joined with double newline as usual.
+    """
+    if len(parts) <= 1:
+        return parts[0] if parts else ""
+
+    # Join parts, using \n (not \n\n) when the previous part has an unclosed
+    # code block — meaning the next part is a continuation of the same block.
+    # Track fence count incrementally to avoid O(n²) rescanning.
+    result = parts[0]
+    fence_count = result.count("```")
+    for i in range(1, len(parts)):
+        if fence_count % 2 == 1:
+            # Inside an unclosed code block — continuation, single newline
+            result += "\n" + parts[i]
+        else:
+            result += "\n\n" + parts[i]
+        fence_count += parts[i].count("```")
+
+    # Merge adjacent code blocks: \n```<ws>\n\n```<lang>\n → \n
+    # This collapses e.g. "\n```\n\n```bash\n" into a single block.
+    result = _ADJACENT_FENCE_RE.sub("\n", result)
+
+    return result

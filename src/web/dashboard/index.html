@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Odin Dashboard</title>
+    <link rel="stylesheet" href="/static/css/odin.css">
+</head>
+<body>
+    <header class="odin-header">
+        <h1>Odin</h1>
+        <nav class="odin-nav">
+            <a href="/dashboard">Dashboard</a>
+            <a href="/auth/login" id="login-btn">Login with Discord</a>
+        </nav>
+    </header>
+
+    <main class="odin-main" id="app">
+        <section class="odin-hero">
+            <h2>All-seeing moderation for Discord</h2>
+            <p>Manage your server from the web. Log in to get started.</p>
+        </section>
+        <section class="odin-guilds" id="guilds" style="display:none;">
+            <!-- Populated by odin-api.js -->
+        </section>
+    </main>
+
+    <footer class="odin-footer">
+        <p>Odin Bot &mdash; Open Source Discord Moderation</p>
+    </footer>
+
+    <script src="/static/js/odin-api.js"></script>
+    <script src="/static/js/odin-ws.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

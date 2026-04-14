@@ -1,0 +1,59 @@
+services:
+  odin-bot:
+    build: .
+    container_name: odin-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=${TZ:-UTC}
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - ./data:/app/data
+      - ./data/context:/app/data/context:ro
+      - ./ssh:/app/.ssh:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:3939:3000"
+    networks:
+      - default
+
+  odin-browser:
+    image: ghcr.io/browserless/chromium
+    container_name: odin-browser
+    restart: unless-stopped
+    profiles:
+      - browser
+    environment:
+      - CONCURRENT=2
+      - TIMEOUT=30000
+      - QUEUED=5
+      - HEALTH=true
+      - TOKEN=${BROWSER_TOKEN:-odin-internal}
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    networks:
+      - default
+
+  odin-voice:
+    build: ./voice-service
+    container_name: odin-voice
+    restart: unless-stopped
+    profiles:
+      - voice
+    volumes:
+      - ./voice-service/config.yml:/app/config.yml:ro
+      - ./voice-service/voices:/app/voices
+      - ./voice-service/models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - default

@@ -1,0 +1,92 @@
+# Customize timezone to match your deployment environment
+timezone: UTC
+
+discord:
+  token: ${DISCORD_TOKEN}
+  allowed_users: []
+  channels: []
+  respond_to_bots: true
+  require_mention: true
+  # Add bot IDs to ignore here (e.g., - "123456789012345678")
+  ignore_bot_ids: []
+
+openai_codex:
+  enabled: true
+  # Customize model name as needed (e.g., gpt-4o, gpt-4-turbo)
+  model: gpt-4o
+  max_tokens: 4096
+  credentials_path: ./data/codex_auth.json
+
+context:
+  directory: ./data/context
+  max_system_prompt_tokens: 32000
+
+sessions:
+  max_history: 50
+  max_age_hours: 24
+  persist_directory: ./data/sessions
+
+tools:
+  enabled: true
+  # Customize SSH key path for your deployment
+  ssh_key_path: /app/.ssh/id_ed25519
+  # Customize SSH known hosts path for your deployment
+  ssh_known_hosts_path: /app/.ssh/known_hosts
+  # Add hosts here, e.g.:
+  #   my-host:
+  #     address: 1.2.3.4
+  #     ssh_user: root
+  hosts: {}
+  command_timeout_seconds: 300
+  skill_allowed_urls:
+    - "http://localhost:8188"
+  # Hostname or IP where Claude Code is accessible; leave empty if not used
+  claude_code_host: ""
+  # SSH user for Claude Code host; leave empty if not used
+  claude_code_user: ""
+  # Working directory for Claude Code on the remote host
+  claude_code_dir: /opt/project
+
+webhook:
+  enabled: false
+  secret: ''
+  channel_id: ''
+  gitea_channel_id: ''
+  grafana_channel_id: ''
+
+learning:
+  enabled: true
+  max_entries: 30
+  consolidation_target: 20
+
+search:
+  enabled: true
+  search_db_path: ./data/search
+
+logging:
+  level: INFO
+  directory: ./data/logs
+
+usage:
+  directory: ./data/usage
+
+voice:
+  enabled: false
+
+browser:
+  enabled: true
+  # Customize CDP WebSocket URL to match your browser service
+  cdp_url: ws://odin-browser:3000?token=odin-internal
+
+permissions:
+  default_tier: admin
+  tiers: {}
+
+comfyui:
+  enabled: true
+  url: http://localhost:8188
+
+web:
+  enabled: true
+  port: 3001
+  api_token: ''
