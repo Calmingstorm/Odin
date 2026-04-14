@@ -41,12 +41,13 @@ def _truncate_lines(text: str, max_lines: int = _RUN_COMMAND_MAX_LINES) -> str:
 
 class ToolExecutor:
     def __init__(
-        self, config: ToolsConfig, memory_path: str | None = None,
+        self, config: ToolsConfig | None = None, memory_path: str | None = None,
         browser_manager: object | None = None,
     ) -> None:
-        self.config = config
+        self.config = config or ToolsConfig()
         self._memory_path = Path(memory_path) if memory_path else None
         self._browser_manager = browser_manager
+        self._metrics: dict[str, dict[str, int]] = {}
 
     def _resolve_host(self, alias: str) -> tuple[str, str, str] | None:
         """Resolve host alias to (address, ssh_user, os). Returns None if not allowed."""
@@ -62,11 +63,21 @@ class ToolExecutor:
 
         try:
             if tool_name in ("memory_manage", "manage_list"):
-                return await handler(tool_input, user_id=user_id)
-            return await handler(tool_input)
+                result = await handler(tool_input, user_id=user_id)
+            else:
+                result = await handler(tool_input)
+            self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0})
+            self._metrics[tool_name]["calls"] += 1
+            return result
         except Exception as e:
+            self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0})
+            self._metrics[tool_name]["errors"] += 1
             log.error("Tool %s failed: %s", tool_name, e)
             return f"Error executing {tool_name}: {e}"
+
+    def get_metrics(self) -> dict[str, dict[str, int]]:
+        """Return per-tool call and error counts."""
+        return dict(self._metrics)
 
     def _host_os(self, alias: str) -> str:
         host = self.config.hosts.get(alias)
