@@ -859,3 +859,10 @@ class ToolExecutor:
                 suffix = f"  _({', '.join(parts)})_"
             lines.append(f"{i}. {done_mark}{strike}{suffix}")
         return "\n".join(lines)
+
+    async def _handle_execute_plan(self, inp: dict) -> str:
+        """Execute a DAG plan using the Odin planner."""
+        from src.tools.plan_runner import PlanRunner
+
+        runner = PlanRunner()
+        return await runner.run(inp)

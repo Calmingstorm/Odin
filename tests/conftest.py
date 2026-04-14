@@ -92,3 +92,97 @@ def odin_config():
         log_level="DEBUG",
         web_secret="test-secret",
     )
+
+# ── Planner / DAG execution test support ──────────────────────
+
+import asyncio
+import time
+from typing import Any
+
+from src.odin.context import ExecutionContext
+from src.odin.registry import ToolRegistry
+from src.odin.tools.base import BaseTool
+from src.odin.types import PlanSpec, StepSpec
+
+
+class TimestampTool(BaseTool):
+    """Sleeps for a configured duration and returns start/end timestamps."""
+
+    async def execute(self, params: dict[str, Any], ctx: ExecutionContext) -> Any:
+        duration = params.get("sleep", 0.01)
+        start = time.time()
+        await asyncio.sleep(duration)
+        end = time.time()
+        return {"start": start, "end": end, "value": params.get("value", "ok")}
+
+
+class FailingTool(BaseTool):
+    """Always raises an exception."""
+
+    async def execute(self, params: dict[str, Any], ctx: ExecutionContext) -> Any:
+        raise RuntimeError(params.get("message", "deliberate failure"))
+
+
+class EchoTool(BaseTool):
+    """Returns its params as output."""
+
+    async def execute(self, params: dict[str, Any], ctx: ExecutionContext) -> Any:
+        return dict(params)
+
+
+class SlowTool(BaseTool):
+    """Sleeps longer than typical timeouts for timeout testing."""
+
+    async def execute(self, params: dict[str, Any], ctx: ExecutionContext) -> Any:
+        await asyncio.sleep(params.get("sleep", 60))
+        return "done"
+
+
+@pytest.fixture
+def registry() -> ToolRegistry:
+    return ToolRegistry.with_defaults()
+
+
+@pytest.fixture
+def ts_registry() -> ToolRegistry:
+    """Registry with timestamp, failing, echo, and slow tools."""
+    reg = ToolRegistry()
+    reg.register("ts", TimestampTool)
+    reg.register("fail", FailingTool)
+    reg.register("echo", EchoTool)
+    reg.register("slow", SlowTool)
+    reg.register("shell", __import__("src.odin.tools.shell", fromlist=["ShellTool"]).ShellTool)
+    return reg
+
+
+@pytest.fixture
+def ctx() -> ExecutionContext:
+    return ExecutionContext()
+
+
+@pytest.fixture
+def linear_plan() -> PlanSpec:
+    """A -> B -> C linear chain."""
+    return PlanSpec(
+        name="linear",
+        steps=(
+            StepSpec(id="a", tool="ts", params={"sleep": 0.01}),
+            StepSpec(id="b", tool="ts", params={"sleep": 0.01}, depends_on=("a",)),
+            StepSpec(id="c", tool="ts", params={"sleep": 0.01}, depends_on=("b",)),
+        ),
+    )
+
+
+@pytest.fixture
+def diamond_plan() -> PlanSpec:
+    """A -> (B, C) -> D diamond for parallel testing."""
+    return PlanSpec(
+        name="diamond",
+        steps=(
+            StepSpec(id="a", tool="ts", params={"sleep": 0.01}),
+            StepSpec(id="b", tool="ts", params={"sleep": 0.1}, depends_on=("a",)),
+            StepSpec(id="c", tool="ts", params={"sleep": 0.1}, depends_on=("a",)),
+            StepSpec(id="d", tool="ts", params={"sleep": 0.01}, depends_on=("b", "c")),
+        ),
+    )
+
