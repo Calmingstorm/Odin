@@ -6,7 +6,7 @@ import time
 
 from aiohttp import web
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 
 logger = get_logger("web")
 

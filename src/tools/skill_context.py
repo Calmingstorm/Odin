@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 
 if TYPE_CHECKING:
     from ..knowledge.store import KnowledgeStore

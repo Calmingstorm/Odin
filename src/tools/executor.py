@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 from ..config.schema import ToolsConfig
-from ..logging import get_logger
+from ..odin_log import get_logger
 from .ssh import is_local_address, run_local_command, run_ssh_command
 
 log = get_logger("tools")

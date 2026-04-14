@@ -11,7 +11,7 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 
 if TYPE_CHECKING:
     from ..search.fts import FullTextIndex

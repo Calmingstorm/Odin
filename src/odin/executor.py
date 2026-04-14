@@ -19,11 +19,19 @@ class StepExecutor:
         self._ctx = ctx
 
     async def execute_step(self, spec: StepSpec) -> StepResult:
-        tool_cls = self._registry.get(spec.tool)
-        tool = tool_cls()
-        params = self._ctx.resolve_params(spec.params)
-
         result = StepResult(step_id=spec.id, started_at=time.time())
+
+        try:
+            tool_cls = self._registry.get(spec.tool)
+            tool = tool_cls()
+            params = self._ctx.resolve_params(spec.params)
+        except Exception as exc:
+            result.status = StepStatus.FAILED
+            result.error = f"Step setup failed: {exc}"
+            result.attempts = 0
+            result.finished_at = time.time()
+            return result
+
         max_attempts = spec.retries + 1
 
         for attempt in range(1, max_attempts + 1):

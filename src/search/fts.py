@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 import sqlite3
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 
 log = get_logger("search.fts")
 

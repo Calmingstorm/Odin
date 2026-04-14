@@ -12,7 +12,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 
 log = get_logger("process_manager")
 

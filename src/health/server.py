@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 from aiohttp import web
 
 from ..config.schema import WebConfig, WebhookConfig
-from ..logging import get_logger
+from ..odin_log import get_logger
 
 if TYPE_CHECKING:
     from ..discord.client import OdinBot

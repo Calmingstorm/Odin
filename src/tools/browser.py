@@ -10,7 +10,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 
 log = get_logger("browser")
 

@@ -11,7 +11,7 @@ import time
 from typing import TYPE_CHECKING
 
 from ..llm.secret_scrubber import scrub_output_secrets
-from ..logging import get_logger
+from ..odin_log import get_logger
 
 if TYPE_CHECKING:
     from ..discord.client import OdinBot

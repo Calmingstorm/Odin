@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 
 if TYPE_CHECKING:
     from ..sessions.manager import Message, Session

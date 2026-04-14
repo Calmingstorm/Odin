@@ -12,7 +12,7 @@ import sqlite3
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 from ..search.hybrid import reciprocal_rank_fusion
 from ..search.sqlite_vec import load_extension, serialize_vector
 

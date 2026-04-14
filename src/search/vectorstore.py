@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 from .hybrid import reciprocal_rank_fusion
 from .sqlite_vec import load_extension, serialize_vector
 

@@ -5,7 +5,7 @@ import json
 
 import aiohttp
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 from .circuit_breaker import CircuitBreaker
 from .codex_auth import CodexAuth, CodexAuthPool
 from .types import LLMResponse, ToolCall

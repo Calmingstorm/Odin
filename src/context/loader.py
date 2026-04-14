@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 
 log = get_logger("context")
 

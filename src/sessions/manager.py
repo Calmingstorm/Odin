@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 if TYPE_CHECKING:
     from ..learning.reflector import ConversationReflector
     from ..search.embedder import LocalEmbedder

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from collections.abc import Awaitable, Callable
 
 from ..config.schema import MonitoringConfig, MonitorCheck
-from ..logging import get_logger
+from ..odin_log import get_logger
 from ..tools.executor import ToolExecutor
 
 log = get_logger("monitoring")

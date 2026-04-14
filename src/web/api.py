@@ -18,7 +18,7 @@ from croniter import croniter
 
 from ..config.schema import Config
 from ..llm.secret_scrubber import scrub_output_secrets
-from ..logging import get_logger
+from ..odin_log import get_logger
 from ..setup_wizard import (
     build_config,
     build_env,

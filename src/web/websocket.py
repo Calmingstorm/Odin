@@ -18,7 +18,7 @@ import aiohttp
 from aiohttp import web
 
 from ..llm.secret_scrubber import scrub_output_secrets
-from ..logging import get_logger
+from ..odin_log import get_logger
 from .chat import MAX_CHAT_CONTENT_LEN, process_web_chat
 
 if TYPE_CHECKING:

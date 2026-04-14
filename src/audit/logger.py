@@ -7,7 +7,7 @@ from pathlib import Path
 
 import aiofiles
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 
 log = get_logger("audit")
 

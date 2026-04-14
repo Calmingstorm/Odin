@@ -17,7 +17,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 from .executor import ToolExecutor
 from .registry import TOOLS
 from .skill_context import ResourceTracker, SkillContext

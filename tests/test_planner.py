@@ -152,3 +152,74 @@ def test_validate_duplicate_id(ts_registry):
     planner = Planner(ts_registry)
     errors = planner.validate(plan)
     assert any("duplicate" in e.lower() for e in errors)
+
+
+@pytest.mark.asyncio
+async def test_bad_variable_ref_fails_step_not_plan(ts_registry):
+    """A bad ${ref} in params should fail that step, not crash the plan."""
+    plan = PlanSpec(
+        name="bad-ref",
+        steps=(
+            StepSpec(id="a", tool="ts", params={"sleep": 0.01}),
+            StepSpec(
+                id="b",
+                tool="ts",
+                params={"value": "${nonexistent.output}"},
+                depends_on=("a",),
+            ),
+        ),
+    )
+    planner = Planner(ts_registry)
+    result = await planner.execute(plan)
+
+    assert not result.success
+    assert result.step_results["a"].status == StepStatus.SUCCESS
+    assert result.step_results["b"].status == StepStatus.FAILED
+    assert "setup failed" in result.step_results["b"].error.lower()
+
+
+@pytest.mark.asyncio
+async def test_bad_ref_cascades_to_dependents(ts_registry):
+    """When step setup fails, its dependents are cascade-skipped."""
+    plan = PlanSpec(
+        name="bad-ref-cascade",
+        steps=(
+            StepSpec(id="a", tool="ts", params={"sleep": 0.01}),
+            StepSpec(
+                id="b",
+                tool="ts",
+                params={"value": "${missing.output}"},
+                depends_on=("a",),
+            ),
+            StepSpec(id="c", tool="ts", params={"sleep": 0.01}, depends_on=("b",)),
+        ),
+    )
+    planner = Planner(ts_registry)
+    result = await planner.execute(plan)
+
+    assert result.step_results["a"].status == StepStatus.SUCCESS
+    assert result.step_results["b"].status == StepStatus.FAILED
+    assert result.step_results["c"].status == StepStatus.SKIPPED
+
+
+@pytest.mark.asyncio
+async def test_bad_nested_ref_on_failed_output(ts_registry):
+    """Accessing nested field of a failed step's None output fails gracefully."""
+    plan = PlanSpec(
+        name="none-output",
+        steps=(
+            StepSpec(id="a", tool="fail", continue_on_failure=True),
+            StepSpec(
+                id="b",
+                tool="echo",
+                params={"data": "${a.output.key}"},
+                depends_on=("a",),
+            ),
+        ),
+    )
+    planner = Planner(ts_registry)
+    result = await planner.execute(plan)
+
+    assert result.step_results["a"].status == StepStatus.FAILED
+    assert result.step_results["b"].status == StepStatus.FAILED
+    assert "setup failed" in result.step_results["b"].error.lower()

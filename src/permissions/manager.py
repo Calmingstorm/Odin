@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..logging import get_logger
+from ..odin_log import get_logger
 
 log = get_logger("permissions")
 
