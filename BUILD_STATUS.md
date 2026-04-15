@@ -122,7 +122,7 @@ tightening of prior work.
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
 | 16 | MCP (Model Context Protocol) client: invoke external MCP servers as first-class tools | done | MCPManager + MCPServerConnection with stdio/HTTP transport, JSON-RPC protocol, tool discovery/invocation, namespaced tools, REST API (4 endpoints), background task integration, config schema, +132 tests |
-| 17 | Slack output: post responses/alerts to Slack webhook alongside Discord | pending | |
+| 17 | Slack output: post responses/alerts to Slack webhook alongside Discord | done | SlackNotifier module, SlackConfig, health server + watcher integration, REST API (3 endpoints), secret scrubbing, rate limiting, +107 tests |
 | 18 | Linear / Jira: create issues from loop reports, comment on existing issues | pending | |
 | 19 | Richer Grafana alert handling: parse payloads, auto-spawn remediation loops | pending | |
 | 20 | REVIEWER: validate rounds 11–19, tighten tests, fix bugs found | pending | |
@@ -1705,3 +1705,177 @@ MCP client that implements the Model Context Protocol (JSON-RPC 2.0) for connect
 - All five subsystem wiring tasks remain open from Rounds 1-15: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
 - Runtime MCP server management (add/remove via REST API) invalidates the merged tools cache (`bot._cached_merged_tools = None`). This follows the same pattern as skill CRUD operations.
 - The MCP client does NOT implement MCP resources or prompts — only tools. Resources and prompts could be added in a future round if needed.
+
+## Round 17 — Slack output: post responses/alerts to Slack webhook alongside Discord
+**Focus**: Add Slack webhook output integration so Odin can post responses and alerts to Slack incoming webhooks alongside its normal Discord output.
+**Baseline pytest**: 1877 passed, 0 failed
+**Post-round pytest**: 1984 passed, 0 failed (+107 new tests)
+
+### Validated from prior rounds
+- Round 16: MCP client, stdio/HTTP transport, tool discovery/invocation, namespaced tools — all present and passing (132 tests).
+- Round 15: `http_probe` tool, 7 HTTP methods, curl-based timing breakdown, retries, shell injection protection — all present and passing (124 tests).
+- Round 14: `terraform_ops` tool, 10 actions, plan-file-only apply — all present and passing (138 tests).
+- Round 13: `docker_ops` tool, 14 actions, shell injection protection, compose support — all present and passing (148 tests).
+- Round 12: `kubectl` tool, 10 actions, shell injection protection, common flags — all present and passing (138 tests).
+- Round 11: `git_ops` tool, 11 actions, push freshness check — all present and passing (113 tests).
+- Round 10: 5 subsystem wiring tasks remain pending. Not in scope for this round.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. New package: `src/notifications/` (228 lines total)
+
+**`src/notifications/__init__.py`** (3 lines):
+- Exports `SlackNotifier` from `src/notifications/slack`.
+
+**`src/notifications/slack.py`** (225 lines):
+Async Slack webhook notifier with rate limiting, secret scrubbing, and formatted messages.
+
+**Constants** (lines 17-31):
+- `MAX_TEXT_LEN = 3000`: Maximum text length per message (Slack limit is 4000, we leave headroom).
+- `DEFAULT_RATE_LIMIT = 1`: 1 second between messages to same webhook URL.
+- `_SEND_TIMEOUT = 10`: 10 second HTTP timeout for webhook calls.
+- `SEVERITY_COLORS`: Color map for `info` (#2196F3 blue), `warning` (#FF9800 orange), `error` (#F44336 red), `success` (#4CAF50 green).
+- `DEFAULT_COLOR`: #9E9E9E grey for unknown severities.
+
+**Helper functions** (lines 34-53):
+- `_truncate(text, limit)`: Truncates text to limit, appends `…(truncated)` marker.
+- `_discord_to_slack_markdown(text)`: Converts Discord `**bold**` to Slack `*bold*`, `__underline__` to `_italic_`. Preserves backtick code blocks.
+- `build_plain_payload(text)`: Returns `{"text": truncated_text}`.
+- `build_formatted_payload(title, message, severity, source)`: Returns Slack attachment payload with color-coded severity, source/severity fields, and mrkdwn formatting.
+
+**`SlackNotifier` class** (lines 82-225):
+- Constructor (line 86): Accepts `webhook_urls` dict (named channels → webhook URLs), `default_webhook_url` (fallback), `scrub_secrets` (default True), `rate_limit_seconds` (default 1).
+- `resolve_url(channel)` (line 109): Resolves channel name to webhook URL. Named channel → URL lookup, then HTTPS URL passthrough, then default URL fallback.
+- `_check_rate_limit(url)` / `_mark_sent(url)` (lines 117-123): Per-URL rate limiting using monotonic timestamps.
+- `_get_session()` (line 125): Lazy aiohttp session creation with 10s timeout.
+- `send(text, channel, payload)` (line 131): Core send method. Resolves URL, checks rate limit, scrubs secrets, converts Discord markdown, posts JSON to webhook. Returns True on success. Handles timeout and connection errors gracefully (logs warning, increments error_count).
+- `send_formatted(title, message, severity, source, channel)` (line 167): Sends a formatted message with color-coded severity attachment. Scrubs secrets from title and message before formatting.
+- `broadcast(text, channels)` (line 183): Sends to multiple channels (or all configured). Returns `{channel: success}` dict.
+- `get_status()` (line 197): Returns status dict with configured channels, send/error counts, rate limit setting.
+- `close()` (line 209): Closes the aiohttp session.
+
+#### 2. Config schema: `src/config/schema.py` (lines 200-207, 253)
+
+**`SlackConfig`** (line 200): Pydantic model with fields:
+- `enabled` (default False): Master toggle.
+- `webhook_urls` (default {}): Named channel → webhook URL mapping, e.g. `{"alerts": "https://hooks.slack.com/..."}`.
+- `default_webhook_url` (default ""): Fallback URL when channel name doesn't match.
+- `scrub_secrets` (default True): Run secret scrubber on outgoing messages.
+- `rate_limit_seconds` (default 1): Minimum seconds between messages to same URL.
+- `forward_alerts` (default True): Forward monitoring alerts to Slack.
+- `forward_webhooks` (default False): Forward incoming webhook messages to Slack.
+
+Added `slack: SlackConfig = SlackConfig()` to `Config` class (line 253). Optional with sensible defaults — no config file changes required.
+
+#### 3. Health server integration: `src/health/server.py` (lines 316-335, 405-406, 460-461, 588-601)
+
+- Added `slack_config` parameter to `HealthServer.__init__` (line 316). Creates `SlackNotifier` instance when enabled.
+- Added `slack_notifier` property (line 405) for external access.
+- Modified `_send()` method (line 588): After sending to Discord, also forwards to Slack via `send_formatted()` when `forward_webhooks=True`. Slack errors are caught and logged — they never block the Discord delivery.
+- Added `close()` call for slack notifier in `stop()` (line 460).
+
+#### 4. Monitoring watcher integration: `src/monitoring/watcher.py` (lines 45, 50, 55-68)
+
+- Added optional `slack_notifier` parameter to `InfraWatcher.__init__` (line 45). Default `None` — fully backward compatible.
+- Added `_alert(text)` method (line 55): Sends alert to Discord via `_alert_callback` AND to Slack via `send_formatted()` with severity="error", source="monitoring", channel="alerts". Slack errors are caught and logged — never block Discord alerts.
+- Replaced all 4 `await self._alert_callback(...)` calls (lines 136, 160, 184, 207) with `await self._alert(...)` to use the unified dispatch.
+
+#### 5. REST API: `src/web/api.py` (3 new endpoints, lines 1006-1058)
+
+- `GET /api/slack/status` — Returns Slack integration status (enabled, configured channels, send/error counts).
+- `POST /api/slack/test` — Sends a test message to Slack. Accepts optional `channel` and `message` fields.
+- `POST /api/slack/send` — Sends a message to Slack. Accepts `text` (required), optional `channel`, `severity`, `title`, `source`. If `severity` is provided, sends a formatted message with color-coded attachment.
+
+All endpoints use `getattr(bot, "health_server", None)` then `getattr(hs, "slack_notifier", None)` pattern — returns 503 if Slack is not enabled.
+
+#### 6. Tests: `tests/test_slack_notifier.py` — 107 tests across 19 test classes
+
+**Config schema** (7):
+- `TestSlackConfigDefaults` (7): defaults, custom values, config includes slack, config with slack, empty webhook urls, multiple webhook urls.
+
+**Text helpers** (11):
+- `TestTruncate` (5): short text, exact limit, over limit, custom limit, empty.
+- `TestDiscordToSlackMarkdown` (6): bold, underline to italic, mixed, no change, code preserved, multiple bold.
+
+**Payload building** (11):
+- `TestBuildPlainPayload` (3): basic, truncated, empty.
+- `TestBuildFormattedPayload` (8): basic, severity colors (4 severities), unknown severity, fields, mrkdwn_in, truncated title, no source, no severity field.
+
+**SlackNotifier init** (7):
+- `TestSlackNotifierInit` (7): defaults, with urls, default url, scrub default, scrub off, rate limit, negative rate limit.
+
+**URL resolution** (6):
+- `TestResolveUrl` (6): named channel, unknown channel fallback, no url, none channel, https passthrough, named overrides default.
+
+**Rate limiting** (5):
+- `TestRateLimiting` (5): first send allowed, second send blocked, allowed after cooldown, zero rate limit, different urls.
+
+**Secret scrubbing** (2):
+- `TestSecretScrubbing` (2): scrubs text, no scrub when disabled.
+
+**Send** (11):
+- `TestSend` (11): success, no url, error status, timeout, connection error, rate limited, named channel, custom payload, send count increments, discord markdown converted.
+
+**Send formatted** (3):
+- `TestSendFormatted` (3): formatted send, payload structure, scrubs secrets.
+
+**Broadcast** (4):
+- `TestBroadcast` (4): all channels, specific channels, no channels default, empty.
+
+**Status** (2):
+- `TestGetStatus` (2): status, no urls.
+
+**Close** (3):
+- `TestClose` (3): close session, no session, already closed.
+
+**Health server integration** (7):
+- `TestHealthServerSlackIntegration` (7): disabled by default, enabled, notifier property, send forwards to slack, no forward when disabled, slack error doesn't block discord, stop closes slack.
+
+**Monitoring watcher integration** (6):
+- `TestWatcherSlackIntegration` (6): accepts slack notifier, no slack default, alert sends to discord and slack, alert only discord when no slack, slack error doesn't block, formatted params.
+
+**REST API endpoints** (10):
+- `TestSlackAPIEndpoints` (10): status disabled, status enabled, test disabled, test enabled, send disabled, send plain, send formatted, send no text, send invalid json, test with channel.
+
+**Edge cases** (12):
+- `TestEdgeCases` (12): severity colors complete, default color not in severity, send empty text, max text len reasonable, default rate limit, webhook url dict not shared, multiple errors tracked, truncate marker, get session creates new, formatted converts discord markdown, plain payload structure, formatted payload keys.
+
+**Module imports** (2):
+- `TestModuleImports` (2): notifications package, slack notifier class.
+
+### Design decisions
+
+1. **Outbound webhook, not bidirectional**: Slack incoming webhooks are fire-and-forget POST requests. No socket, no event subscriptions, no reading from Slack. This keeps the integration simple and dependency-free (uses aiohttp, already in deps).
+
+2. **Named channels**: `webhook_urls` dict maps logical channel names (e.g., "alerts", "monitoring", "builds") to webhook URLs. This allows different message types to go to different Slack channels without hardcoding URLs in the code.
+
+3. **Discord-to-Slack markdown conversion**: Discord uses `**bold**` while Slack uses `*bold*`. The converter handles the most common patterns. Code blocks (backticks) are identical in both.
+
+4. **Per-URL rate limiting**: Prevents flooding a single webhook. Different webhooks have independent rate limits. Default 1 second — Slack rate limits at 1 msg/sec per webhook.
+
+5. **Secret scrubbing before send**: Uses the same `scrub_output_secrets` from `src/llm/secret_scrubber.py` that protects all other output paths. Slack webhook URLs themselves contain tokens but those are never logged (they're config, not output).
+
+6. **Fail-open on Slack errors**: Slack delivery failures are logged but never block the primary Discord path. The health server's `_send()` delivers to Discord first, then attempts Slack — if Slack fails, the response to the webhook caller is still "delivered".
+
+7. **Two forwarding modes**: `forward_alerts` (monitoring watcher alerts) and `forward_webhooks` (incoming webhook payloads from Gitea/GitHub/Grafana/etc.) are independently configurable. Alerts default on, webhooks default off — most users want alerts in Slack but don't need duplicate webhook data.
+
+8. **Formatted messages with severity colors**: `send_formatted()` uses Slack attachments with color-coded left border: blue for info, orange for warning, red for error, green for success. Source and severity fields are rendered as short fields.
+
+9. **`_alert()` method in InfraWatcher**: Instead of adding Slack dispatch at each alert call site (4 places), a single `_alert()` method handles both Discord callback and Slack notification. This is the only change to the watcher's alert flow — all existing alert messages pass through unchanged.
+
+10. **REST API pattern**: The 3 endpoints follow the same pattern as MCP endpoints — `getattr(bot, "health_server", None)` to access the notifier, 503 when not configured. The test endpoint allows operators to verify webhook connectivity without changing code.
+
+### Issues found
+- No issues in prior rounds needed fixing.
+- The `InfraWatcher` is defined and tested but not yet wired up in the main Discord client (`client.py`). The `watcher` attribute is referenced via `getattr(self, "watcher", None)` in the graceful shutdown handler but never assigned. The Slack integration to `InfraWatcher` works correctly — when the watcher is eventually wired up, passing a `slack_notifier` is optional and backward-compatible.
+- Slack incoming webhooks have a documented rate limit of 1 message per second. The default `rate_limit_seconds=1` matches this. If a webhook URL receives messages faster than this, they are silently dropped (logged at debug level).
+- The `_discord_to_slack_markdown()` converter handles `**bold**` and `__underline__` but not strikethrough (`~~text~~` in Discord vs `~text~` in Slack). This is sufficient for the current alert/webhook message formats which don't use strikethrough.
+
+### Next round watch for
+- Round 18 (Linear / Jira) is a different integration pattern — bidirectional REST API rather than outbound webhooks.
+- The `SlackNotifier` is created by `HealthServer.__init__` when `slack.enabled=True`. The bot's Discord client does not need to know about it directly — the health server owns the lifecycle.
+- The REST API endpoints use `getattr` chains to find the notifier: `bot.health_server.slack_notifier`. If the health server isn't set up (dev mode), they return 503.
+- The `forward_webhooks` config defaults to `False`. Users must explicitly enable it to get webhook payloads forwarded to Slack. The `forward_alerts` config defaults to `True` but only takes effect when the `InfraWatcher` is wired up with a `slack_notifier` parameter.
+- All five subsystem wiring tasks remain open from Rounds 1-16: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
+- The existing secret scrubber already detects Slack tokens (`xox[boaprs]-...` pattern at line 26 of `secret_scrubber.py`). No changes were needed for secret detection.

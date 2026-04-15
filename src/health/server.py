@@ -13,7 +13,8 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
-from ..config.schema import WebConfig, WebhookConfig
+from ..config.schema import SlackConfig, WebConfig, WebhookConfig
+from ..notifications.slack import SlackNotifier
 from ..odin_log import get_logger
 from ..version import get_version
 from .metrics import MetricsCollector
@@ -312,15 +313,27 @@ class HealthServer:
         port: int = 3000,
         webhook_config: WebhookConfig | None = None,
         web_config: WebConfig | None = None,
+        slack_config: SlackConfig | None = None,
     ) -> None:
         self.port = port
         self._ready = False
         self._webhook_config = webhook_config or WebhookConfig()
         self._web_config = web_config or WebConfig()
+        self._slack_config = slack_config or SlackConfig()
         self._send_message: SendMessageCallback | None = None
         self._trigger_callback: TriggerCallback | None = None
+        self._slack_notifier: SlackNotifier | None = None
         self._start_time = time.monotonic()
         self._components: dict[str, ComponentCheck] = {}
+
+        if self._slack_config.enabled:
+            self._slack_notifier = SlackNotifier(
+                webhook_urls=self._slack_config.webhook_urls,
+                default_webhook_url=self._slack_config.default_webhook_url,
+                scrub_secrets=self._slack_config.scrub_secrets,
+                rate_limit_seconds=self._slack_config.rate_limit_seconds,
+            )
+            log.info("Slack notifier enabled")
 
         # Session management
         self._session_manager = SessionManager(
@@ -388,6 +401,10 @@ class HealthServer:
         # Keep metrics collector aware of component checks
         self._metrics_collector.set_component_check(self._check_components)
 
+    @property
+    def slack_notifier(self) -> SlackNotifier | None:
+        return self._slack_notifier
+
     def set_send_message(self, callback: SendMessageCallback) -> None:
         self._send_message = callback
 
@@ -440,6 +457,8 @@ class HealthServer:
         log.info("Health server listening on port %d", self.port)
 
     async def stop(self) -> None:
+        if self._slack_notifier:
+            await self._slack_notifier.close()
         if self._runner:
             await self._runner.cleanup()
 
@@ -566,10 +585,23 @@ class HealthServer:
 
         try:
             await self._send_message(channel_id, text)
-            return web.json_response({"status": "delivered"})
         except Exception as e:
             log.error("Webhook %s delivery failed: %s", source, e)
             return web.json_response({"error": str(e)}, status=500)
+
+        if self._slack_notifier and self._slack_config.forward_webhooks:
+            try:
+                await self._slack_notifier.send_formatted(
+                    title=f"Webhook: {source}",
+                    message=text,
+                    severity="info",
+                    source=source,
+                    channel=source,
+                )
+            except Exception as exc:
+                log.warning("Slack forward for webhook %s failed: %s", source, exc)
+
+        return web.json_response({"status": "delivered"})
 
     async def _webhook_gitea(self, request: web.Request) -> web.Response:
         body = await request.read()

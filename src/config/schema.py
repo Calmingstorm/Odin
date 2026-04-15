@@ -197,6 +197,16 @@ class MonitoringConfig(BaseModel):
     cooldown_minutes: int = 60
 
 
+class SlackConfig(BaseModel):
+    enabled: bool = False
+    webhook_urls: dict[str, str] = Field(default_factory=dict)
+    default_webhook_url: str = ""
+    scrub_secrets: bool = True
+    rate_limit_seconds: int = 1
+    forward_alerts: bool = True
+    forward_webhooks: bool = False
+
+
 class MCPServerConfig(BaseModel):
     transport: str = "stdio"  # "stdio" or "http"
     command: str = ""  # for stdio: executable path
@@ -240,6 +250,7 @@ class Config(BaseModel):
     reaction_triggers: ReactionTriggerConfig = ReactionTriggerConfig()
     message_triggers: MessageTriggerConfig = MessageTriggerConfig()
     mcp: MCPConfig = MCPConfig()
+    slack: SlackConfig = SlackConfig()
 
 
 def _substitute_env_vars(text: str) -> str:

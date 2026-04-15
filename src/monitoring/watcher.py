@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from collections.abc import Awaitable, Callable
 
 from ..config.schema import MonitoringConfig, MonitorCheck
+from ..notifications.slack import SlackNotifier
 from ..odin_log import get_logger
 from ..tools.executor import ToolExecutor
 
@@ -41,13 +42,30 @@ class InfraWatcher:
         config: MonitoringConfig,
         executor: ToolExecutor,
         alert_callback: Callable[[str], Awaitable[None]],
+        slack_notifier: SlackNotifier | None = None,
     ) -> None:
         self.config = config
         self._executor = executor
         self._alert_callback = alert_callback
+        self._slack_notifier = slack_notifier
         self._alert_state = AlertState()
         self._task: asyncio.Task | None = None
         self._check_tasks: dict[str, asyncio.Task] = {}
+
+    async def _alert(self, text: str) -> None:
+        """Send alert via Discord callback and optionally to Slack."""
+        await self._alert_callback(text)
+        if self._slack_notifier:
+            try:
+                await self._slack_notifier.send_formatted(
+                    title="Infrastructure Alert",
+                    message=text,
+                    severity="error",
+                    source="monitoring",
+                    channel="alerts",
+                )
+            except Exception as exc:
+                log.warning("Slack alert failed: %s", exc)
 
     # Seconds between each check's startup — spreads SSH connections over time
     STAGGER_INTERVAL = 5
@@ -115,7 +133,7 @@ class InfraWatcher:
                     if usage >= check.threshold:
                         key = f"{check.name}:{host}:{mount}"
                         if self._alert_state.should_alert(key, self.config.cooldown_minutes * 60):
-                            await self._alert_callback(
+                            await self._alert(
                                 f"**Disk Alert** on `{host}`: `{mount}` is at **{usage}%** "
                                 f"(threshold: {check.threshold}%)"
                             )
@@ -139,7 +157,7 @@ class InfraWatcher:
                             if pct >= check.threshold:
                                 key = f"{check.name}:{host}"
                                 if self._alert_state.should_alert(key, self.config.cooldown_minutes * 60):
-                                    await self._alert_callback(
+                                    await self._alert(
                                         f"**Memory Alert** on `{host}`: **{pct}%** used "
                                         f"(threshold: {check.threshold}%)"
                                     )
@@ -163,7 +181,7 @@ class InfraWatcher:
                     if self._alert_state.should_alert(key, self.config.cooldown_minutes * 60):
                         # Extract just the first relevant line
                         status_line = output.strip().split("\n")[0][:200]
-                        await self._alert_callback(
+                        await self._alert(
                             f"**Service Alert**: `{service}` on `{host}` appears down\n"
                             f"```{status_line}```"
                         )
@@ -186,7 +204,7 @@ class InfraWatcher:
         if output.strip() != "No results." and '"result":[]' not in output and '"result": []' not in output:
             key = f"{check.name}:promql"
             if self._alert_state.should_alert(key, self.config.cooldown_minutes * 60):
-                await self._alert_callback(
+                await self._alert(
                     f"**Prometheus Alert** (`{check.name}`): query `{check.query}` returned results\n"
                     f"```{output[:500]}```"
                 )

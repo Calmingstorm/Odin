@@ -1000,6 +1000,60 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": str(e)}, status=404)
 
     # ------------------------------------------------------------------
+    # Slack notifications
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/slack/status")
+    async def slack_status(_request: web.Request) -> web.Response:
+        hs = getattr(bot, "health_server", None)
+        notifier = getattr(hs, "slack_notifier", None) if hs else None
+        if notifier is None:
+            return web.json_response({"enabled": False})
+        return web.json_response({"enabled": True, **notifier.get_status()})
+
+    @routes.post("/api/slack/test")
+    async def slack_test(request: web.Request) -> web.Response:
+        hs = getattr(bot, "health_server", None)
+        notifier = getattr(hs, "slack_notifier", None) if hs else None
+        if notifier is None:
+            return web.json_response({"error": "Slack not enabled"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        channel = data.get("channel")
+        message = data.get("message", "Test message from Odin")
+        ok = await notifier.send(str(message)[:500], channel=channel)
+        return web.json_response({"sent": ok})
+
+    @routes.post("/api/slack/send")
+    async def slack_send(request: web.Request) -> web.Response:
+        hs = getattr(bot, "health_server", None)
+        notifier = getattr(hs, "slack_notifier", None) if hs else None
+        if notifier is None:
+            return web.json_response({"error": "Slack not enabled"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        text = data.get("text", "")
+        if not text:
+            return web.json_response({"error": "text is required"}, status=400)
+        channel = data.get("channel")
+        severity = data.get("severity")
+        if severity:
+            ok = await notifier.send_formatted(
+                title=str(data.get("title", "Odin"))[:150],
+                message=str(text)[:3000],
+                severity=str(severity),
+                source=str(data.get("source", "odin"))[:50],
+                channel=channel,
+            )
+        else:
+            ok = await notifier.send(str(text)[:3000], channel=channel)
+        return web.json_response({"sent": ok})
+
+    # ------------------------------------------------------------------
     # Knowledge
     # ------------------------------------------------------------------
 
