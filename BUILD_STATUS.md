@@ -142,7 +142,7 @@ tightening of prior work.
 | 26 | Action diffs: for file / config changes, audit log records before→after diff | done | DiffTracker module, compute_unified_diff/compute_dict_diff, AuditLogger diff field, background task integration, config update diff via web API, /api/audit/diffs endpoint, +82 tests |
 | 27 | Audit log signing: append-only with HMAC chain for tamper detection | done | AuditSigner HMAC-SHA256 chain, verify_log, AuditLogger signing integration, initialize_chain, verify_integrity, AuditConfig, /api/audit/verify endpoint, +86 tests |
 | 28 | Dangerous-command risk classifier: tag commands by risk before execution (observability only, NO blocking) | done | RiskClassifier module with 4-tier pattern matching (critical/high/medium/low), ToolExecutor + background_task integration, AuditLogger risk_level/risk_reason fields, search_by_risk, RiskStats tracker, 3 REST API endpoints, +174 tests |
-| 29 | Tool RBAC: honor `PermissionsConfig.tiers` on tool calls (not auth only) | pending | |
+| 29 | Tool RBAC: honor `PermissionsConfig.tiers` on tool calls (not auth only) | done | PermissionManager wired into ToolExecutor with check_permission(), RBAC enforcement in execute(), 4 REST API endpoints, background_task error detection, +79 tests |
 | 30 | REVIEWER: validate rounds 21–29, tighten tests, fix bugs found | pending | |
 
 ### Phase 7 — Agents, loops, lifecycle (rounds 31–35)
@@ -3480,4 +3480,143 @@ New module with pattern-based risk classification:
 - `RiskStats` is in-memory only — resets on bot restart. For persistent risk analytics, use `/api/audit/risk`.
 - The `risk_level` and `risk_reason` fields in audit entries are included in HMAC chain signing (verified by test).
 - The `ToolExecutor.__new__()` pattern in `test_http_probe_ops.py` and `test_terraform_ops.py` bypasses `__init__`. Future changes to `ToolExecutor.__init__` that add required attributes must update these fixtures.
+- All five subsystem wiring tasks remain open from prior rounds.
+
+## Round 29 — Tool RBAC: honor `PermissionsConfig.tiers` on tool calls (not auth only)
+**Focus**: Wire the existing `PermissionManager` (admin/user/guest tier system) into the `ToolExecutor` so tool calls are enforced at execution time. Add REST API endpoints for permission management. Ensure denied calls return clear error messages and are tracked in metrics.
+**Baseline pytest**: 2947 passed, 0 failed
+**Post-round pytest**: 3026 passed, 0 failed (+79 new tests)
+
+### Validated from prior rounds
+- Round 28 (Risk classifier): all 174 tests pass. Risk classification integrates cleanly with RBAC — denied calls skip risk classification entirely (no unnecessary work).
+- Round 28 noted "The `ToolExecutor.__new__()` pattern in `test_http_probe_ops.py` and `test_terraform_ops.py` bypasses `__init__`. Future changes to `ToolExecutor.__init__` that add required attributes must update these fixtures." — confirmed and fixed: both fixtures now set `_permission_manager = None`.
+- Round 28 noted "Round 29 (Tool RBAC) has no direct dependencies on Round 28" — confirmed, but RBAC check runs before risk classification in the execute() pipeline, which is the correct ordering (deny early, don't waste cycles on denied calls).
+- No bugs or watch-for items from prior rounds needed fixing beyond the `__new__()` fixture issue.
+
+### Work done
+
+#### 1. ToolExecutor RBAC integration: `src/tools/executor.py` (lines 10, 57-58, 84-109)
+
+- **Import**: Added `PermissionManager` import from `src.permissions.manager`.
+
+- **Constructor**: New `permission_manager: PermissionManager | None = None` keyword argument. When None (default), RBAC is disabled — fully backward compatible with all existing callers.
+
+- **`check_permission(tool_name, user_id)`** (new method, lines 84-100): Checks if a user has permission to use a specific tool. Returns `None` if allowed, or a descriptive error string if denied. Logic:
+  - No permission manager → allowed (RBAC disabled)
+  - No user_id → allowed (system/internal calls bypass RBAC)
+  - Admin tier → allowed (no restriction, `allowed_tool_names` returns None)
+  - User tier → allowed only for tools in `USER_TIER_TOOLS`
+  - Guest tier → denied for all tools (empty set)
+
+- **`execute()`** (lines 103-109): RBAC check runs immediately after handler lookup but before risk classification. On denial: logs a WARNING with tier/user/tool, increments the tool's error metric, and returns the denial message. The handler is never called.
+
+#### 2. Background task error detection: `src/discord/background_task.py` (line 285)
+
+- **`_is_error_output()`**: Added detection for `"Permission denied: "` prefix so background tasks correctly identify RBAC denials as errors and handle them appropriately (retries, error status, etc.).
+
+#### 3. REST API endpoints: `src/web/api.py` (lines 2015-2082)
+
+Four new endpoints for permission management:
+
+- **`GET /api/permissions/tiers`**: Returns the full permission configuration: valid tiers, default tier, config-file tiers, runtime overrides, and the `USER_TIER_TOOLS` allowlist. Useful for admin UIs.
+
+- **`GET /api/permissions/user/{user_id}`**: Returns a specific user's tier and their allowed tool names. Admin users get `allowed_tools: null` (no restriction). Guest users get `allowed_tools: []` (empty). User-tier users get the `USER_TIER_TOOLS` list.
+
+- **`PUT /api/permissions/user/{user_id}`**: Sets a user's permission tier via runtime override. Body: `{"tier": "admin"|"user"|"guest"}`. Returns 400 for invalid tiers. Override is persisted to the overrides JSON file.
+
+- **`DELETE /api/permissions/user/{user_id}`**: Removes a runtime override for a user, reverting them to their config-file tier or the default tier. Returns 404 if no override exists.
+
+All four endpoints return 503 if `permission_manager` is not available on the bot (graceful degradation).
+
+#### 4. Pre-existing test fixture fixes
+
+- **`tests/test_http_probe_ops.py`** (line 634): Added `exec_inst._permission_manager = None` to the `ToolExecutor.__new__()` fixture. This was the only pre-existing test failure caused by the new `_permission_manager` attribute.
+
+- **`tests/test_terraform_ops.py`** (line 650): Same defensive fix applied.
+
+#### 5. CLAUDE.md update
+
+- Added `src/permissions/manager.py` to the project structure documentation.
+
+#### 6. Tests: `tests/test_tool_rbac.py` — 79 tests across 15 test classes
+
+**PermissionManager init** (5):
+- `TestPermissionManagerInit` (5): default tier, custom default, invalid default fallback, config tiers stored, config tiers copied.
+
+**get_tier** (4):
+- `TestGetTier` (4): config tier, default for unknown, override precedence, custom default.
+
+**set_tier** (6):
+- `TestSetTier` (6): valid tier, invalid raises, persists to file, loads persisted, invalid overrides ignored, corrupt file handled.
+
+**filter_tools** (4):
+- `TestFilterTools` (4): admin gets all, user gets filtered, guest gets None, default tier applied.
+
+**allowed_tool_names** (3):
+- `TestAllowedToolNames` (3): admin None, user set, guest empty.
+
+**is_admin / is_guest** (2):
+- `TestIsAdminIsGuest` (2): admin and guest helper checks.
+
+**Constants** (4):
+- `TestConstants` (4): valid tiers count, USER_TIER_TOOLS type, includes read-only, excludes write.
+
+**Executor RBAC check** (7):
+- `TestExecutorRBACCheck` (7): no manager, no user_id, admin allowed, user allowed, user denied, guest denied all, guest denied even allowed tools.
+
+**Executor RBAC enforcement** (9):
+- `TestExecutorRBACEnforcement` (9): admin executes, user denied, user allowed, guest denied, no user_id bypass, no manager bypass, denied records error, denied doesn't call handler, denied doesn't classify risk.
+
+**Executor permission_manager attribute** (2):
+- `TestExecutorPermissionManagerAttribute` (2): default None, accepts manager.
+
+**Background task error detection** (3):
+- `TestBackgroundTaskErrorDetection` (3): permission denied detected, normal not detected, other errors detected.
+
+**REST API** (12):
+- `TestPermissionAPI` (12): list tiers, get admin/user/guest/unknown, set tier, set invalid, set missing, set invalid JSON, delete override, delete nonexistent, 503 when unavailable.
+
+**Config schema** (3):
+- `TestPermissionsConfig` (3): default, custom, config has field.
+
+**Module imports** (4):
+- `TestModuleImports` (4): PermissionManager, VALID_TIERS, USER_TIER_TOOLS, executor signature.
+
+**Edge cases** (11):
+- `TestEdgeCases` (11): all USER_TIER_TOOLS allowed, unknown tool before RBAC, RBAC before handler for denied, tier change immediate, overrides dir created, missing file ok, multiple users, user run_command allowed, denial message format, filter preserves order, concurrent checks.
+
+### Design decisions
+
+1. **RBAC before risk classification**: Permission check runs before `classify_tool()` in `execute()`. Denied calls skip risk assessment entirely — no unnecessary pattern matching or stats recording for blocked calls.
+
+2. **Backward compatible**: `permission_manager=None` disables RBAC. All existing `ToolExecutor()` callers work identically without changes. RBAC only activates when a `PermissionManager` is explicitly provided.
+
+3. **No user_id = bypass**: System/internal calls (monitoring watcher, background tasks without user context) pass `user_id=None` and bypass RBAC. This ensures infrastructure operations aren't blocked by tier restrictions.
+
+4. **Denial as return value, not exception**: Denied calls return an error string (same pattern as "Unknown tool" and timeout errors). This keeps the existing tool loop working — the LLM sees the denial message and can explain it to the user.
+
+5. **Three-tier model**: Admin (all tools), User (`USER_TIER_TOOLS` allowlist of read-only tools), Guest (no tools). Simple, predictable, easy to reason about.
+
+6. **Runtime overrides**: Tier changes via the API are persisted to a JSON file and take effect immediately. No restart needed. Runtime overrides take precedence over config-file tiers.
+
+7. **Denial message includes context**: Error messages name the tool, the user's tier, and suggest contacting an admin. This helps the LLM explain the situation to the user.
+
+8. **No new dependencies**: Uses only existing `PermissionManager` class. No external packages.
+
+### Files changed
+- `src/tools/executor.py` (lines 10, 57-58, 84-109): PermissionManager import, constructor param, check_permission method, RBAC check in execute().
+- `src/discord/background_task.py` (line 285): Permission denied detection in _is_error_output.
+- `src/web/api.py` (lines 2015-2082): 4 new permission endpoints.
+- `CLAUDE.md` (line 55): Added permissions/manager.py to project structure.
+- `tests/test_http_probe_ops.py` (line 634): Fixed __new__() fixture.
+- `tests/test_terraform_ops.py` (line 650): Fixed __new__() fixture.
+- `tests/test_tool_rbac.py` (new, 79 tests): Complete test coverage across 15 test classes.
+
+### Next round watch for
+- Round 30 is a REVIEWER round. The `PermissionManager` is now wired into `ToolExecutor` but not yet instantiated by the bot runtime. Whoever wires up the bot startup should create `PermissionManager(config.permissions.tiers, config.permissions.default_tier, config.permissions.overrides_path)` and pass it to `ToolExecutor(permission_manager=pm)` and store as `bot.permission_manager`.
+- REST API endpoint count is now 109 (was 105 after Round 28, +4 new: `GET /api/permissions/tiers`, `GET /api/permissions/user/{user_id}`, `PUT /api/permissions/user/{user_id}`, `DELETE /api/permissions/user/{user_id}`).
+- The `USER_TIER_TOOLS` allowlist in `src/permissions/manager.py` is a frozenset. New tools added in future rounds that should be accessible to the "user" tier should be added to this set.
+- Tools handled in `background_task.py`'s `_execute_tool()` (knowledge base, skills, MCP) are not currently subject to RBAC because they bypass `executor.execute()`. A future round could add RBAC checks there if needed.
+- The `ToolExecutor.__new__()` fixture pattern now requires `_permission_manager = None` in addition to `risk_stats = RiskStats()` and `_metrics = {}`. Any future `ToolExecutor.__init__` attribute additions must update these two test files.
+- Agent manager (`src/agents/manager.py`) stores `requester_id` but the tool executor callback in agents doesn't currently pass `user_id` — agents run as the system, not as the user who spawned them. This is intentional for now (agents are admin-like).
 - All five subsystem wiring tasks remain open from prior rounds.

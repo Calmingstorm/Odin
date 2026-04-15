@@ -647,6 +647,7 @@ class TestHandleTerraformOps:
         exec_inst = ToolExecutor.__new__(ToolExecutor)
         exec_inst.config = config
         exec_inst._metrics = {}
+        exec_inst._permission_manager = None
         exec_inst._exec_command = AsyncMock(return_value=(0, "Success"))
         return exec_inst
 

@@ -2010,6 +2010,71 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         )
         return web.json_response({"entries": results, "count": len(results)})
 
+    # ------------------------------------------------------------------
+    # Permissions / RBAC
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/permissions/tiers")
+    async def list_tiers(_request: web.Request) -> web.Response:
+        pm = getattr(bot, "permission_manager", None)
+        if not pm:
+            return web.json_response({"error": "permission manager not available"}, status=503)
+        from ..permissions.manager import VALID_TIERS, USER_TIER_TOOLS
+        config_tiers = dict(pm._config_tiers)
+        overrides = dict(pm._overrides)
+        return web.json_response({
+            "valid_tiers": list(VALID_TIERS),
+            "default_tier": pm._default_tier,
+            "config_tiers": config_tiers,
+            "overrides": overrides,
+            "user_tier_tools": sorted(USER_TIER_TOOLS),
+        })
+
+    @routes.get("/api/permissions/user/{user_id}")
+    async def get_user_tier(request: web.Request) -> web.Response:
+        pm = getattr(bot, "permission_manager", None)
+        if not pm:
+            return web.json_response({"error": "permission manager not available"}, status=503)
+        uid = request.match_info["user_id"]
+        tier = pm.get_tier(uid)
+        allowed = pm.allowed_tool_names(uid)
+        return web.json_response({
+            "user_id": uid,
+            "tier": tier,
+            "allowed_tools": sorted(allowed) if allowed is not None else None,
+        })
+
+    @routes.put("/api/permissions/user/{user_id}")
+    async def set_user_tier(request: web.Request) -> web.Response:
+        pm = getattr(bot, "permission_manager", None)
+        if not pm:
+            return web.json_response({"error": "permission manager not available"}, status=503)
+        uid = request.match_info["user_id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        tier = body.get("tier", "")
+        if not tier or not isinstance(tier, str):
+            return web.json_response({"error": "tier is required"}, status=400)
+        try:
+            pm.set_tier(uid, tier)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response({"user_id": uid, "tier": tier, "status": "updated"})
+
+    @routes.delete("/api/permissions/user/{user_id}")
+    async def delete_user_tier(request: web.Request) -> web.Response:
+        pm = getattr(bot, "permission_manager", None)
+        if not pm:
+            return web.json_response({"error": "permission manager not available"}, status=503)
+        uid = request.match_info["user_id"]
+        if uid in pm._overrides:
+            del pm._overrides[uid]
+            pm._save_overrides()
+            return web.json_response({"user_id": uid, "status": "override_removed"})
+        return web.json_response({"error": "no override found for user"}, status=404)
+
     return routes
 
 

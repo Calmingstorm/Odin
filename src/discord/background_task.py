@@ -282,6 +282,9 @@ def _is_error_output(output: str) -> bool:
     # executor.execute() returns "Unknown tool: <name>" for missing handlers
     if output.startswith("Unknown tool: "):
         return True
+    # executor.execute() returns "Permission denied: ..." for RBAC violations
+    if output.startswith("Permission denied: "):
+        return True
     return False
 
 

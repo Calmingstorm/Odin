@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
+from ..permissions.manager import PermissionManager
 from .bulkhead import BulkheadFullError, BulkheadRegistry
 from .risk_classifier import RiskStats, classify_tool
 from .ssh import is_local_address, run_local_command, run_ssh_command
@@ -56,10 +57,12 @@ class ToolExecutor:
     def __init__(
         self, config: ToolsConfig | None = None, memory_path: str | None = None,
         browser_manager: object | None = None,
+        permission_manager: PermissionManager | None = None,
     ) -> None:
         self.config = config or ToolsConfig()
         self._memory_path = Path(memory_path) if memory_path else None
         self._browser_manager = browser_manager
+        self._permission_manager = permission_manager
         self._metrics: dict[str, dict[str, int]] = {}
         self.risk_stats = RiskStats()
         self.bulkheads = _build_bulkhead_registry(self.config)
@@ -80,10 +83,35 @@ class ToolExecutor:
             return None
         return host.address, host.ssh_user, host.os
 
+    def check_permission(self, tool_name: str, user_id: str | None) -> str | None:
+        """Check if user has permission to use the tool.
+
+        Returns None if allowed, or an error message string if denied.
+        """
+        if not self._permission_manager or not user_id:
+            return None
+        allowed = self._permission_manager.allowed_tool_names(user_id)
+        if allowed is None:
+            return None
+        if tool_name not in allowed:
+            tier = self._permission_manager.get_tier(user_id)
+            return (
+                f"Permission denied: tool '{tool_name}' is not available "
+                f"for tier '{tier}'. Contact an admin to upgrade your permissions."
+            )
+        return None
+
     async def execute(self, tool_name: str, tool_input: dict, *, user_id: str | None = None) -> str:
         handler = getattr(self, f"_handle_{tool_name}", None)
         if handler is None:
             return f"Unknown tool: {tool_name}"
+
+        denial = self.check_permission(tool_name, user_id)
+        if denial:
+            log.warning("RBAC denied %s for user %s on tool %s", self._permission_manager.get_tier(user_id), user_id, tool_name)
+            self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
+            self._metrics[tool_name]["errors"] += 1
+            return denial
 
         assessment = classify_tool(tool_name, tool_input)
         self.risk_stats.record(tool_name, assessment)
