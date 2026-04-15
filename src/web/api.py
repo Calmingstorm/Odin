@@ -601,6 +601,32 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         activity = bot.sessions.get_activity_metrics()
         return web.json_response(activity)
 
+    @routes.get("/api/sessions/search")
+    async def search_sessions(request: web.Request) -> web.Response:
+        query = request.query.get("q", "").strip()
+        if not query:
+            return web.json_response({"error": "q parameter required"}, status=400)
+        limit = min(int(request.query.get("limit", "20")), 50)
+        channel_id = request.query.get("channel_id") or None
+        user_id = request.query.get("user_id") or None
+        after: float | None = None
+        before: float | None = None
+        if request.query.get("after"):
+            try:
+                after = float(request.query["after"])
+            except ValueError:
+                pass
+        if request.query.get("before"):
+            try:
+                before = float(request.query["before"])
+            except ValueError:
+                pass
+        results = await bot.sessions.search_history(
+            query, limit=limit, channel_id=channel_id,
+            user_id=user_id, after=after, before=before,
+        )
+        return web.json_response({"query": query, "results": results, "count": len(results)})
+
     # ------------------------------------------------------------------
     # Tools
     # ------------------------------------------------------------------

@@ -85,20 +85,32 @@ class FullTextIndex:
             log.error("FTS session index failed for %s: %s", doc_id, e)
             return False
 
-    def search_sessions(self, query: str, limit: int = 20) -> list[dict]:
+    def search_sessions(
+        self, query: str, limit: int = 20, channel_id: str | None = None,
+    ) -> list[dict]:
         if not self._conn:
             return []
         fts_query = _prepare_query(query)
         if not fts_query:
             return []
         try:
-            rows = self._conn.execute(
-                "SELECT doc_id, snippet(session_fts, 1, '>>>', '<<<', '...', 64), "
-                "channel_id, last_active, bm25(session_fts) as rank "
-                "FROM session_fts WHERE session_fts MATCH ? "
-                "ORDER BY rank LIMIT ?",
-                (fts_query, limit),
-            ).fetchall()
+            if channel_id:
+                rows = self._conn.execute(
+                    "SELECT doc_id, snippet(session_fts, 1, '>>>', '<<<', '...', 64), "
+                    "channel_id, last_active, bm25(session_fts) as rank "
+                    "FROM session_fts WHERE session_fts MATCH ? "
+                    "AND channel_id = ? "
+                    "ORDER BY rank LIMIT ?",
+                    (fts_query, channel_id, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT doc_id, snippet(session_fts, 1, '>>>', '<<<', '...', 64), "
+                    "channel_id, last_active, bm25(session_fts) as rank "
+                    "FROM session_fts WHERE session_fts MATCH ? "
+                    "ORDER BY rank LIMIT ?",
+                    (fts_query, limit),
+                ).fetchall()
             return [
                 {
                     "doc_id": r[0],

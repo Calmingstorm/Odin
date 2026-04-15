@@ -873,7 +873,15 @@ class SessionManager:
         except Exception as e:
             log.error("Session indexing failed for %s: %s", archive_path, e)
 
-    def _search_archives(self, query_lower: str, limit: int) -> list[dict]:
+    def _search_archives(
+        self,
+        query_lower: str,
+        limit: int,
+        channel_id: str | None = None,
+        user_id: str | None = None,
+        after: float | None = None,
+        before: float | None = None,
+    ) -> list[dict]:
         """Search archived session files for keyword matches (sync, for use in thread)."""
         results: list[dict] = []
         archive_dir = self.persist_dir / "archive"
@@ -882,22 +890,37 @@ class SessionManager:
         for path in sorted(archive_dir.glob("*.json"), reverse=True):
             try:
                 data = json.loads(path.read_text())
+                arch_cid = data.get("channel_id", "unknown")
+                if channel_id and arch_cid != channel_id:
+                    continue
                 summary = data.get("summary", "")
                 if summary and query_lower in summary.lower():
-                    results.append({
-                        "type": "summary",
-                        "content": summary[:500],
-                        "timestamp": data.get("last_active", 0),
-                        "channel_id": data.get("channel_id", "unknown"),
-                    })
+                    ts = data.get("last_active", 0)
+                    if (after and ts < after) or (before and ts > before):
+                        pass
+                    else:
+                        results.append({
+                            "type": "summary",
+                            "content": summary[:500],
+                            "timestamp": ts,
+                            "channel_id": arch_cid,
+                        })
                 for msg in reversed(data.get("messages", [])):
+                    if user_id and msg.get("user_id") != user_id:
+                        continue
+                    ts = msg.get("timestamp", 0)
+                    if after and ts < after:
+                        continue
+                    if before and ts > before:
+                        continue
                     content = msg.get("content", "")
                     if query_lower in content.lower():
                         results.append({
                             "type": msg["role"],
                             "content": content[:500],
-                            "timestamp": msg.get("timestamp", 0),
-                            "channel_id": data.get("channel_id", "unknown"),
+                            "timestamp": ts,
+                            "channel_id": arch_cid,
+                            "user_id": msg.get("user_id"),
                         })
                         if len(results) >= limit:
                             return results
@@ -905,35 +928,68 @@ class SessionManager:
                 continue
         return results
 
-    async def search_history(self, query: str, limit: int = 10) -> list[dict]:
-        """Search current and archived sessions for matching messages."""
+    async def search_history(
+        self,
+        query: str,
+        limit: int = 10,
+        channel_id: str | None = None,
+        user_id: str | None = None,
+        after: float | None = None,
+        before: float | None = None,
+    ) -> list[dict]:
+        """Search current and archived sessions for matching messages.
+
+        Optional filters:
+        - channel_id: restrict to a single channel
+        - user_id: restrict to messages from a specific user
+        - after: only messages with timestamp >= after (epoch seconds)
+        - before: only messages with timestamp <= before (epoch seconds)
+        """
         query_lower = query.lower()
-        results = []
+        results: list[dict] = []
+
+        def _ts_ok(ts: float) -> bool:
+            if after and ts < after:
+                return False
+            if before and ts > before:
+                return False
+            return True
 
         # Step 1: keyword search on current sessions
-        for session in self._sessions.values():
+        sessions_iter = self._sessions.values()
+        if channel_id:
+            s = self._sessions.get(channel_id)
+            sessions_iter = [s] if s else []
+
+        for session in sessions_iter:
             if session.summary and query_lower in session.summary.lower():
-                results.append({
-                    "type": "summary",
-                    "content": session.summary[:500],
-                    "timestamp": session.last_active,
-                    "channel_id": session.channel_id,
-                })
+                if _ts_ok(session.last_active):
+                    results.append({
+                        "type": "summary",
+                        "content": session.summary[:500],
+                        "timestamp": session.last_active,
+                        "channel_id": session.channel_id,
+                    })
             for msg in reversed(session.messages):
+                if user_id and msg.user_id != user_id:
+                    continue
+                if not _ts_ok(msg.timestamp):
+                    continue
                 if query_lower in msg.content.lower():
                     results.append({
                         "type": msg.role,
                         "content": msg.content[:500],
                         "timestamp": msg.timestamp,
                         "channel_id": session.channel_id,
+                        "user_id": msg.user_id,
                     })
                     if len(results) >= limit:
                         return results
 
         # Step 2: keyword search on archives (most recent first)
-        # Run in thread to avoid blocking the event loop with file I/O
         archive_results = await asyncio.to_thread(
             self._search_archives, query_lower, limit - len(results),
+            channel_id, user_id, after, before,
         )
         results.extend(archive_results)
         if len(results) >= limit:
@@ -945,10 +1001,14 @@ class SessionManager:
                 hybrid_results = await self._vector_store.search_hybrid(
                     query, self._embedder, limit=limit,
                 )
-                # De-duplicate by (channel_id, timestamp)
-                seen = {(r["channel_id"], r["timestamp"]) for r in results}
+                seen = {(r["channel_id"], r.get("timestamp", 0)) for r in results}
                 for hr in hybrid_results:
-                    key = (hr["channel_id"], hr["timestamp"])
+                    if channel_id and hr.get("channel_id") != channel_id:
+                        continue
+                    ts = hr.get("timestamp", 0)
+                    if not _ts_ok(ts):
+                        continue
+                    key = (hr["channel_id"], ts)
                     if key not in seen:
                         results.append(hr)
                         seen.add(key)
@@ -964,15 +1024,21 @@ class SessionManager:
                 fts = self._fts_index
                 channel_results = []
                 if fts and hasattr(fts, "search_channel_logs"):
-                    channel_results = fts.search_channel_logs(query, limit=remaining)
+                    channel_results = fts.search_channel_logs(
+                        query, limit=remaining, channel_id=channel_id,
+                    )
                 if not channel_results and hasattr(self._channel_logger, "search"):
                     channel_results = await asyncio.to_thread(
                         self._channel_logger.search, query, remaining,
                     )
-                # De-duplicate against existing results
                 seen = {(r.get("channel_id", ""), r.get("timestamp", 0)) for r in results}
                 for cr in channel_results:
-                    key = (cr.get("channel_id", ""), cr.get("timestamp", 0))
+                    ts = cr.get("timestamp", 0)
+                    if not _ts_ok(ts):
+                        continue
+                    if channel_id and cr.get("channel_id", "") != channel_id:
+                        continue
+                    key = (cr.get("channel_id", ""), ts)
                     if key not in seen:
                         results.append(cr)
                         seen.add(key)

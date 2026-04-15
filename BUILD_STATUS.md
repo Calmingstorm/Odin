@@ -133,7 +133,7 @@ tightening of prior work.
 | 21 | Knowledge deduplication: content hashing on ingest, skip or merge near-duplicates | done | Content hashing (SHA-256), exact + near-duplicate skip on ingest, find_duplicates/find_near_duplicates scan, merge_sources, 2 REST API endpoints, +63 tests |
 | 22 | Knowledge versioning: edit history per entry with audit trail | done | knowledge_versions table, version recording on ingest/delete, content snapshots, unified diffs, restore, 4 REST API endpoints, +69 tests |
 | 23 | Adaptive session consolidation: compaction target scales with channel activity | done | Activity rate tracking, adaptive threshold/keep/summary scaling, _get_compaction_params, get_activity_metrics, REST API endpoint, config field, +77 tests |
-| 24 | FTS5 session search in web UI: search prior conversations by keyword/user/time | pending | |
+| 24 | FTS5 session search in web UI: search prior conversations by keyword/user/time | done | search_history() filters, /api/sessions/search, web UI search panel with snippet highlighting |
 | 25 | Knowledge import: bulk ingest of markdown dirs, PDFs, web URLs | pending | |
 
 ### Phase 6 — Policy, audit, safety (rounds 26–30)
@@ -2807,4 +2807,152 @@ New endpoint `GET /api/sessions/activity`:
 - The `_compact()` method now computes `keep_count` differently: `round(len(messages) * keep_ratio)` clamped to `max_history // 2`. For the default 50 max_history and a normal-activity channel (ratio 0.50), this produces keep_count = min(round(N*0.50), 25) — which matches the old `max_history // 2 = 25` for 50+ messages. No behaviour change for normal activity.
 - The `get_activity_metrics()` method returns float `activity_rate` rounded to 1 decimal. For channels with <2 messages, rate is 0.0 and params fall back to defaults.
 - REST API endpoint count is now 98 (was 97 after Round 22, +1 new: `/api/sessions/activity`).
+- All five subsystem wiring tasks remain open from prior rounds.
+
+## Round 24 — FTS5 session search in web UI: search prior conversations by keyword/user/time
+**Focus**: Add full-text search capability for session history — enhanced `search_history()` with channel_id, user_id, and time range filters; new REST API endpoint; web UI search panel with FTS5 snippet highlighting.
+**Baseline pytest**: 2469 passed, 0 failed
+**Post-round pytest**: 2523 passed, 0 failed (+54 new tests)
+
+### Validated from prior rounds
+- Round 23 (Adaptive session consolidation): all 77 tests pass, adaptive compaction functions work correctly.
+- Round 23 noted "Round 24 has no dependencies on Round 23" — confirmed.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. Enhanced `search_history()`: `src/sessions/manager.py` (lines 908-1035)
+
+Added four optional filter parameters to `search_history()`:
+- `channel_id: str | None = None` — restrict results to a single channel
+- `user_id: str | None = None` — restrict to messages from a specific user
+- `after: float | None = None` — only messages with timestamp >= after (epoch seconds)
+- `before: float | None = None` — only messages with timestamp <= before (epoch seconds)
+
+Internal `_ts_ok()` helper validates timestamps against after/before bounds. All four search tiers (live sessions, archives, hybrid/FTS, channel logs) now respect these filters:
+- **Live sessions** (step 1): When `channel_id` is set, only that session is searched (O(1) lookup vs iterating all). Messages are filtered by `user_id` and time range. Summaries are filtered by time range (using `session.last_active`).
+- **Archives** (step 2): Passed through to `_search_archives()`.
+- **Hybrid/FTS** (step 3): Results from `search_hybrid()` are post-filtered by `channel_id` and time range.
+- **Channel logs** (step 4): `channel_id` is passed to `fts.search_channel_logs()` (which already supports it). Results are also post-filtered by `channel_id` and time range.
+
+Results now include `user_id` field when available (from both live sessions and archives).
+
+#### 2. Enhanced `_search_archives()`: `src/sessions/manager.py` (lines 876-933)
+
+Added the same four filter parameters: `channel_id`, `user_id`, `after`, `before`.
+- Archive files filtered by `channel_id` are skipped entirely (fast path).
+- Individual messages are filtered by `user_id` and time range.
+- Summary entries are filtered by time range (using `last_active` from archive JSON).
+- Archive results now include `user_id` field from the message data.
+
+#### 3. Enhanced `FullTextIndex.search_sessions()`: `src/search/fts.py` (lines 88-128)
+
+Added optional `channel_id: str | None = None` parameter, mirroring the existing `search_channel_logs()` pattern:
+- When `channel_id` is set, adds `AND channel_id = ?` to the FTS5 query.
+- When unset, behavior is unchanged (search all sessions).
+
+#### 4. REST API endpoint: `src/web/api.py` (lines 604-629)
+
+New endpoint `GET /api/sessions/search` with query parameters:
+- `q` (required) — search query string
+- `limit` (optional, default 20, max 50) — max results
+- `channel_id` (optional) — filter by channel
+- `user_id` (optional) — filter by user
+- `after` (optional, epoch float) — minimum timestamp
+- `before` (optional, epoch float) — maximum timestamp
+
+Returns JSON: `{"query": "...", "results": [...], "count": N}`.
+Invalid `after`/`before` values are silently ignored (graceful degradation). Missing `q` returns 400.
+
+#### 5. Web UI search panel: `ui/js/pages/sessions.js`
+
+Added a "Search History" panel above the session list with:
+- **Full-text search input** — text field with Enter-to-search
+- **Channel ID filter** — optional input to restrict by channel
+- **User ID filter** — optional input to restrict by user
+- **Search/Clear buttons** — trigger API call and reset state
+- **Results display** — scrollable list with:
+  - Type badge (user/assistant/summary/fts/channel) with color coding
+  - Channel ID and user ID/author metadata
+  - Timestamp with hover for full date
+  - BM25 score display for FTS results
+  - Snippet highlighting via `>>>` / `<<<` markers from FTS5
+
+The `highlightSnippet()` function converts FTS5 snippet markers (`>>>` / `<<<`) to `<mark class="fts-highlight">` HTML tags, with proper XSS-safe HTML escaping before marker replacement.
+
+Five result type color schemes: user (gray-900), assistant (indigo-950), summary (amber-950), fts (emerald-950), channel (purple-950).
+
+#### 6. CSS: `ui/css/style.css` (line 3120)
+
+New `.fts-highlight` class for search result highlighting:
+- Amber background (rgba 0.3 opacity) matching the Odin gold palette
+- Amber text color using `--hm-amber` design token
+- Subtle border-radius and padding for readability
+
+#### 7. Tests: `tests/test_session_search.py` — 54 tests across 11 test classes
+
+**search_history basic** (5):
+- `TestSearchHistoryBasic` (5): empty sessions, matching content, matching summary, limit, user_id in results.
+
+**search_history channel filter** (3):
+- `TestSearchHistoryChannelFilter` (3): filter by channel, no match, summary filter.
+
+**search_history user filter** (3):
+- `TestSearchHistoryUserFilter` (3): filter by user, skips assistant, no match.
+
+**search_history time filter** (5):
+- `TestSearchHistoryTimeFilter` (5): after, before, combined, summary excluded, summary included.
+
+**search_history combined filters** (2):
+- `TestSearchHistoryCombinedFilters` (2): channel + user, all four filters.
+
+**_search_archives filtered** (7):
+- `TestSearchArchivesFiltered` (7): channel filter, user filter, after/before, user_id in results, summary time filter.
+
+**archive integration** (3):
+- `TestSearchHistoryArchiveIntegration` (3): archives searched, channel filter, user filter.
+
+**FTS search_sessions channel filter** (4):
+- `TestFTSSearchSessionsChannelFilter` (4): unfiltered, filtered, no match, snippet markers.
+
+**hybrid/FTS filtering** (4):
+- `TestSearchHistoryHybridFiltering` (4): hybrid channel filter, hybrid time filter, channel log channel filter, FTS called with channel_id.
+
+**REST API** (10):
+- `TestSessionSearchAPI` (10): missing q 400, empty q 400, basic search, channel filter, user filter, time filters, limit, limit cap, invalid time params, response structure.
+
+**Edge cases** (8):
+- `TestSearchEdgeCases` (8): case insensitive, empty content, truncation, multiple channels, backward compat, no archive dir, summary not user-filtered, deduplication.
+
+### Design decisions
+
+1. **Backward compatible**: All new parameters on `search_history()` and `_search_archives()` default to `None`, preserving existing callers. The Discord bot's `search_knowledge` tool and internal search workflows are unaffected.
+
+2. **Channel filter as O(1) lookup**: When `channel_id` is set for live sessions, we do a dict lookup (`self._sessions.get(channel_id)`) instead of iterating all sessions. This is efficient for bots with many concurrent channels.
+
+3. **User ID included in results**: Both live session and archive search results now include a `user_id` field, making results more useful for the web UI and downstream consumers.
+
+4. **Graceful time param handling**: Invalid `after`/`before` values in the API are silently ignored rather than returning 400, following the principle of being liberal in what you accept.
+
+5. **XSS-safe snippet highlighting**: The `highlightSnippet()` function escapes HTML entities first, then replaces FTS5 markers. This prevents injection via search results while still rendering highlight marks.
+
+6. **Consistent FTS5 channel filter pattern**: `search_sessions()` now matches `search_channel_logs()` in accepting an optional `channel_id` parameter with the same SQL pattern.
+
+7. **No new dependencies**: All changes use existing stdlib and framework features.
+
+### Files changed
+- `src/sessions/manager.py` (lines 876-1035): `_search_archives()` with 4 new filter params + user_id in results; `search_history()` with 4 new filter params + user_id in results + channel/time filtering on hybrid/channel_log steps.
+- `src/search/fts.py` (lines 88-128): `search_sessions()` with optional `channel_id` parameter.
+- `src/web/api.py` (lines 604-629): `GET /api/sessions/search` endpoint with q, limit, channel_id, user_id, after, before params.
+- `ui/js/pages/sessions.js`: FTS search panel (template + 5 reactive refs + 4 methods + return bindings).
+- `ui/css/style.css` (line 3120): `.fts-highlight` CSS class.
+- `tests/test_session_search.py` (new, 54 tests): Complete test coverage for search_history filters, archive filters, FTS channel filter, hybrid filtering, REST API, and edge cases.
+
+### Next round watch for
+- Round 25 has no dependencies on Round 24.
+- The `search_history()` method signature changed: 4 new optional kwargs (`channel_id`, `user_id`, `after`, `before`). Any callers of `search_history()` outside of tests and `api.py` should still work since all params are optional.
+- The `_search_archives()` method signature changed similarly with 4 new optional kwargs.
+- `FullTextIndex.search_sessions()` now accepts optional `channel_id` param. Existing callers (e.g., `SessionVectorStore.search_hybrid`) pass no `channel_id` and are unaffected.
+- REST API endpoint count is now 99 (was 98 after Round 23, +1 new: `/api/sessions/search`).
+- The web UI `highlightSnippet()` uses `v-html` to render FTS5 snippet markers as `<mark>` tags. The content is HTML-escaped before marker replacement, so this is XSS-safe, but future changes to snippet rendering should maintain this ordering.
 - All five subsystem wiring tasks remain open from prior rounds.

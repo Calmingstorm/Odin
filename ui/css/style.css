@@ -3115,3 +3115,11 @@ a:focus-visible {
   .hm-main .p-6 { padding: var(--hm-space-4); }
 
 }
+
+/* FTS search highlight */
+.fts-highlight {
+  background: rgba(217, 119, 6, 0.3);
+  color: var(--hm-amber);
+  border-radius: 2px;
+  padding: 0 2px;
+}

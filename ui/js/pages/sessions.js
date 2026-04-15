@@ -99,6 +99,60 @@ export default {
         </div>
       </div>
 
+      <!-- Full-text search panel -->
+      <div class="hm-card mb-3 p-3">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="text-sm font-medium text-gray-300">Search History</span>
+          <span class="text-xs text-gray-500">Full-text search across all sessions and archives</span>
+        </div>
+        <div class="flex gap-2 items-end flex-wrap">
+          <div class="flex-1" style="min-width: 200px;">
+            <input v-model="ftsQuery" type="text" class="hm-input w-full"
+                   placeholder="Search message content..."
+                   @keyup.enter="runFtsSearch" />
+          </div>
+          <input v-model="ftsChannelId" type="text" class="hm-input text-xs"
+                 placeholder="Channel ID (optional)" style="max-width: 160px;" />
+          <input v-model="ftsUserId" type="text" class="hm-input text-xs"
+                 placeholder="User ID (optional)" style="max-width: 140px;" />
+          <button @click="runFtsSearch" class="btn btn-primary text-xs" :disabled="ftsSearching || !ftsQuery.trim()">
+            {{ ftsSearching ? 'Searching...' : 'Search' }}
+          </button>
+          <button v-if="ftsResults !== null" @click="clearFtsSearch" class="btn btn-ghost text-xs">
+            Clear
+          </button>
+        </div>
+        <!-- FTS results -->
+        <div v-if="ftsSearching" class="mt-3 flex items-center gap-2 text-gray-400 text-sm">
+          <div class="spinner" style="width:14px;height:14px;border-width:2px;"></div> Searching...
+        </div>
+        <div v-else-if="ftsResults !== null" class="mt-3">
+          <div v-if="ftsResults.length === 0" class="text-gray-500 text-sm">No results found</div>
+          <div v-else>
+            <div class="text-xs text-gray-500 mb-2">{{ ftsResults.length }} result{{ ftsResults.length !== 1 ? 's' : '' }}</div>
+            <div class="space-y-2 max-h-96 overflow-y-auto pr-1" style="scrollbar-gutter: stable;">
+              <div v-for="(r, i) in ftsResults" :key="i"
+                   class="p-2 rounded text-sm border"
+                   :class="ftsResultClass(r.type)">
+                <div class="flex items-center gap-2 mb-1 flex-wrap">
+                  <span class="badge" :class="ftsTypeBadge(r.type)">{{ r.type }}</span>
+                  <span class="text-xs text-gray-500 font-mono">{{ r.channel_id }}</span>
+                  <span v-if="r.user_id" class="text-xs text-gray-500 font-mono">{{ r.user_id }}</span>
+                  <span v-if="r.author" class="text-xs text-gray-500">{{ r.author }}</span>
+                  <span class="text-xs text-gray-600 ml-auto" :title="formatFullTimestamp(r.timestamp)">
+                    {{ formatTimestamp(r.timestamp) }}
+                  </span>
+                  <span v-if="r.rank != null" class="text-xs text-gray-600" :title="'BM25 rank: ' + r.rank.toFixed(2)">
+                    score: {{ Math.abs(r.rank).toFixed(1) }}
+                  </span>
+                </div>
+                <div class="whitespace-pre-wrap break-words text-gray-200 text-sm" v-html="highlightSnippet(r.content)"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Skeleton loading -->
       <div v-if="loading && sessions.length === 0" class="space-y-2">
         <div v-for="n in 4" :key="n" class="skeleton skeleton-row"></div>
@@ -323,6 +377,13 @@ export default {
     const threadView = ref('flat');
     const collapsedThreads = ref(new Set());
 
+    // FTS search state
+    const ftsQuery = ref('');
+    const ftsChannelId = ref('');
+    const ftsUserId = ref('');
+    const ftsResults = ref(null);
+    const ftsSearching = ref(false);
+
     // Load custom presets from localStorage
     function loadCustomPresets() {
       try {
@@ -533,6 +594,58 @@ export default {
       return content;
     }
 
+    async function runFtsSearch() {
+      const q = ftsQuery.value.trim();
+      if (!q) return;
+      ftsSearching.value = true;
+      try {
+        let url = `/api/sessions/search?q=${encodeURIComponent(q)}&limit=50`;
+        if (ftsChannelId.value.trim()) url += `&channel_id=${encodeURIComponent(ftsChannelId.value.trim())}`;
+        if (ftsUserId.value.trim()) url += `&user_id=${encodeURIComponent(ftsUserId.value.trim())}`;
+        const data = await api.get(url);
+        ftsResults.value = data.results || [];
+      } catch (e) {
+        ftsResults.value = [];
+      }
+      ftsSearching.value = false;
+    }
+
+    function clearFtsSearch() {
+      ftsQuery.value = '';
+      ftsChannelId.value = '';
+      ftsUserId.value = '';
+      ftsResults.value = null;
+    }
+
+    function highlightSnippet(text) {
+      if (!text) return '';
+      const escaped = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      return escaped
+        .replace(/&gt;&gt;&gt;/g, '<mark class="fts-highlight">')
+        .replace(/&lt;&lt;&lt;/g, '</mark>');
+    }
+
+    function ftsResultClass(type) {
+      if (type === 'user') return 'bg-gray-900/50 border-gray-800';
+      if (type === 'assistant') return 'bg-indigo-950/30 border-indigo-900/30';
+      if (type === 'summary') return 'bg-amber-950/20 border-amber-900/30';
+      if (type === 'fts') return 'bg-emerald-950/20 border-emerald-900/30';
+      if (type === 'channel') return 'bg-purple-950/20 border-purple-900/30';
+      return 'bg-gray-900/30 border-gray-800/50';
+    }
+
+    function ftsTypeBadge(type) {
+      if (type === 'user') return 'badge-info';
+      if (type === 'assistant') return 'badge-success';
+      if (type === 'summary') return 'badge-warning';
+      if (type === 'fts') return 'badge-success';
+      if (type === 'channel') return 'badge-info';
+      return 'badge-info';
+    }
+
     async function fetchSessions() {
       loading.value = true;
       error.value = null;
@@ -681,6 +794,9 @@ export default {
       customPresets, showSavePreset, newPresetName,
       // Thread view
       threadView, threads, collapsedThreads,
+      // FTS search
+      ftsQuery, ftsChannelId, ftsUserId,
+      ftsResults, ftsSearching,
       // Methods
       formatAge, formatTimestamp, formatFullTimestamp,
       messageClass, threadMsgClass, roleBadge, roleDotClass, roleLabelClass,
@@ -692,6 +808,8 @@ export default {
       exportSession,
       applyPreset, applyCustomPreset, saveCustomPreset, removeCustomPreset,
       resetFilters, toggleThread,
+      runFtsSearch, clearFtsSearch, highlightSnippet,
+      ftsResultClass, ftsTypeBadge,
     };
   },
 };
