@@ -98,3 +98,13 @@ reaction_triggers:
   channel_ids: []
   # Restrict to specific users (empty = all users)
   allowed_user_ids: []
+
+# Discord message triggers — fire scheduler triggers when users send messages
+# Matching is configured per-schedule trigger (content_contains, content_regex, starts_with, equals, author_id, channel_id)
+# All specified fields must match (AND logic). Bot messages are always ignored.
+message_triggers:
+  enabled: false
+  # Restrict to specific channels (empty = all channels)
+  channel_ids: []
+  # Restrict to specific users (empty = all users)
+  allowed_user_ids: []

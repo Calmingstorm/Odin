@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,11 +130,15 @@ class Scheduler:
         """Validate a webhook trigger definition."""
         if not isinstance(trigger, dict):
             raise ValueError("'trigger' must be a dict")
-        valid_keys = {"source", "event", "repo", "alert_name", "emoji", "user_id", "channel_id"}
+        valid_keys = {
+            "source", "event", "repo", "alert_name", "emoji", "user_id", "channel_id",
+            # discord_message content matching keys
+            "author_id", "content_contains", "content_regex", "starts_with", "equals",
+        }
         unknown = set(trigger.keys()) - valid_keys
         if unknown:
             raise ValueError(f"Unknown trigger keys: {', '.join(sorted(unknown))}")
-        valid_sources = {"gitea", "grafana", "generic", "github", "gitlab", "discord_reaction"}
+        valid_sources = {"gitea", "grafana", "generic", "github", "gitlab", "discord_reaction", "discord_message"}
         source = trigger.get("source")
         if source and source not in valid_sources:
             raise ValueError(
@@ -176,6 +181,26 @@ class Scheduler:
                 return False
         if trigger.get("channel_id"):
             if trigger["channel_id"] != event_data.get("channel_id", ""):
+                return False
+        if trigger.get("author_id"):
+            if trigger["author_id"] != event_data.get("author_id", ""):
+                return False
+        # Content matching (discord_message)
+        content = event_data.get("content", "")
+        if trigger.get("content_contains"):
+            if trigger["content_contains"] not in content:
+                return False
+        if trigger.get("content_regex"):
+            try:
+                if not re.search(trigger["content_regex"], content):
+                    return False
+            except re.error:
+                return False
+        if trigger.get("starts_with"):
+            if not content.startswith(trigger["starts_with"]):
+                return False
+        if trigger.get("equals"):
+            if content != trigger["equals"]:
                 return False
         return True
 

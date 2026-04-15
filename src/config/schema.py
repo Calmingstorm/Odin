@@ -139,6 +139,12 @@ class ReactionTriggerConfig(BaseModel):
     allowed_user_ids: list[str] = Field(default_factory=list)  # Empty = all users
 
 
+class MessageTriggerConfig(BaseModel):
+    enabled: bool = False
+    channel_ids: list[str] = Field(default_factory=list)  # Empty = all channels
+    allowed_user_ids: list[str] = Field(default_factory=list)  # Empty = all users
+
+
 class MonitorCheck(BaseModel):
     name: str
     type: str  # "disk", "memory", "service", "promql"
@@ -175,6 +181,7 @@ class Config(BaseModel):
     comfyui: ComfyUIConfig = ComfyUIConfig()
     web: WebConfig = WebConfig()
     reaction_triggers: ReactionTriggerConfig = ReactionTriggerConfig()
+    message_triggers: MessageTriggerConfig = MessageTriggerConfig()
 
 
 def _substitute_env_vars(text: str) -> str:

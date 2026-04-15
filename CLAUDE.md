@@ -44,7 +44,8 @@ You are running as part of an automated build loop. Each session, you:
   - `src/search/fts.py` — SQLite FTS5 full-text search
   - `src/search/hybrid.py` — Reciprocal Rank Fusion for hybrid search
   - `src/health/server.py` — webhook receiver (Gitea, Grafana, generic)
-  - `src/scheduler/scheduler.py` — cron/one-time task scheduler
+  - `src/scheduler/scheduler.py` — cron/one-time task scheduler (trigger sources: gitea, grafana, generic, github, gitlab, discord_reaction, discord_message)
+  - `src/discord/cogs/message_triggers.py` — Discord message-triggered scheduler workflows (content matching: contains, regex, starts_with, equals, author_id, channel_id)
   - `src/audit/logger.py` — append-only JSONL audit log
   - `src/tools/process_manager.py` — background process registry (start/poll/write/kill)
   - `src/tools/comfyui.py` — ComfyUI image generation client
