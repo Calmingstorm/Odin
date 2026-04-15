@@ -1415,6 +1415,60 @@ TOOLS: list[dict] = [
             "required": ["host", "action"],
         },
     },
+    # --- Docker operations ---
+    {
+        "name": "docker_ops",
+        "description": (
+            "Docker operations on a managed host. Actions: ps, run, exec, logs, build, pull, "
+            "stop, rm, inspect, stats, compose_up, compose_down, compose_ps, compose_logs. "
+            "Runs docker/docker-compose via SSH on the target host (or locally). "
+            "For complex multi-container workflows, use run_script."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "host": {
+                    "type": "string",
+                    "description": "Host alias from config",
+                },
+                "action": {
+                    "type": "string",
+                    "description": (
+                        "Docker action: ps, run, exec, logs, build, pull, stop, rm, "
+                        "inspect, stats, compose_up, compose_down, compose_ps, compose_logs"
+                    ),
+                    "enum": [
+                        "ps", "run", "exec", "logs", "build", "pull", "stop", "rm",
+                        "inspect", "stats", "compose_up", "compose_down", "compose_ps",
+                        "compose_logs",
+                    ],
+                },
+                "params": {
+                    "type": "object",
+                    "description": (
+                        "Action-specific params. "
+                        "ps: all (bool), filter (str), format (str). "
+                        "run: image (required), command, name, detach (bool), rm (bool), "
+                        "env (object), ports (array of 'host:container'), volumes (array), network. "
+                        "exec: container (required), command (required), workdir, env (object), user. "
+                        "logs: container (required), tail (int), since (e.g. '1h'), follow (bool), timestamps (bool). "
+                        "build: path (default '.'), tag, dockerfile, no_cache (bool), build_args (object), target. "
+                        "pull: image (required). "
+                        "stop: container (required), timeout (int). "
+                        "rm: container (required), force (bool), volumes (bool). "
+                        "inspect: target (required, container or image name/ID), format (str). "
+                        "stats: container (optional, all if omitted), no_stream (bool, default true), format. "
+                        "compose_up: services (array), detach (bool, default true), build (bool), "
+                        "force_recreate (bool), file (compose file path), project (name). "
+                        "compose_down: remove_volumes (bool), remove_images ('all'/'local'), file, project. "
+                        "compose_ps: services (array), format, file, project. "
+                        "compose_logs: services (array), tail (int), follow (bool), timestamps (bool), file, project."
+                    ),
+                },
+            },
+            "required": ["host", "action"],
+        },
+    },
     # --- Image generation (ComfyUI) ---
     {
         "name": "generate_image",

@@ -114,7 +114,7 @@ tightening of prior work.
 |---|-------|--------|---------|
 | 11 | `git_ops` tool: clone / commit / push / branch / diff / status with safe defaults and branch freshness check | done | git_ops helper module, 11 actions (clone/status/diff/branch/commit/push/pull/checkout/fetch/stash/log), push freshness check, force-with-lease safety, shell injection protection, executor handler, 113 tests |
 | 12 | `kubectl` tool: apply / get / logs / describe against clusters via SSH or kubeconfig | done | kubectl_ops helper module, 10 actions (get/describe/logs/apply/delete/exec/rollout/scale/top/config), shell injection protection, common flags (namespace/context/kubeconfig), executor handler, 138 tests |
-| 13 | `docker_ops` tool: build / run / exec / logs / compose up/down against local or remote hosts | pending | |
+| 13 | `docker_ops` tool: build / run / exec / logs / compose up/down against local or remote hosts | done | docker_ops helper module, 14 actions (ps/run/exec/logs/build/pull/stop/rm/inspect/stats/compose_up/compose_down/compose_ps/compose_logs), shell injection protection, compose file/project support, executor handler, 148 tests |
 | 14 | `terraform_ops` tool: plan / apply with safe plan preview, never auto-approves | pending | |
 | 15 | `http_probe` tool: issue requests with retries, timing, response capture; useful for API debugging | pending | |
 
@@ -1158,3 +1158,121 @@ Kubectl operations helper that builds safe shell commands for 10 kubectl actions
 - The tool count is now 63 (was 62 after Round 11). The system prompt char limit (5000) is not affected because tool definitions are sent as structured tool schemas, not in the system prompt text.
 - All five subsystem wiring tasks remain open from Rounds 1-11: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
 - The `config` action's `use-context` modifies kubeconfig state on the target host. This is persistent — the context change persists across future kubectl invocations. This is intentional (the LLM needs to switch contexts), but the next round should be aware that config changes on shared hosts affect all users.
+
+## Round 13 — docker_ops tool: ps / run / exec / logs / build / pull / stop / rm / inspect / stats / compose up/down/ps/logs
+**Focus**: Add a `docker_ops` tool that provides structured Docker and Docker Compose operations on managed hosts with shell injection protection.
+**Baseline pytest**: 1335 passed, 0 failed
+**Post-round pytest**: 1483 passed, 0 failed (+148 new tests)
+
+### Validated from prior rounds
+- Round 12: `kubectl` tool, 10 actions, shell injection protection, common flags — all present and passing (138 tests). Used `kubectl_ops.py` as the template for `docker_ops.py` per Round 12's recommendation.
+- Round 11: `git_ops` tool, 11 actions, push freshness check — all present and passing (113 tests).
+- Round 10: 5 subsystem wiring tasks remain pending (`cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics). Not in scope for this round.
+- RuntimeWarning in `test_connection_pools.py::TestSSHCommandWithPool::test_no_pool_no_control_master` still present (pre-existing, per Round 10 notes).
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. New module: `src/tools/docker_ops.py` (310 lines)
+Docker operations helper that builds safe shell commands for 14 docker/compose actions.
+
+- `ALLOWED_ACTIONS` (line 12): Frozen set of 14 actions: ps, run, exec, logs, build, pull, stop, rm, inspect, stats, compose_up, compose_down, compose_ps, compose_logs.
+- `build_docker_command(action, params)` (line 27): Main entry point. Validates action against ALLOWED_ACTIONS, dispatches to per-action builder. Returns a single command string.
+- `_build_ps(params)` (line 42): Builds `docker ps` with optional `-a` (all), `--filter`, `--format`.
+- `_build_run(params)` (line 55): Builds `docker run` with required `image`. Supports `detach` (-d), `rm` (--rm), `name`, `network`, `env` (dict → `-e` flags), `ports` (list → `-p` flags), `volumes` (list → `-v` flags), `extra_args`, `command` (runs via `sh -c`).
+- `_build_exec(params)` (line 97): Builds `docker exec` with required `container` and `command`. Supports `workdir` (-w), `user` (-u), `env` (dict → `-e`). Command runs via `sh -c`.
+- `_build_logs(params)` (line 119): Builds `docker logs` with required `container`. Default `--tail 100`, max 500. Supports `since`, `follow`, `timestamps`.
+- `_build_build(params)` (line 148): Builds `docker build` with path (default `.`), optional `tag` (-t), `dockerfile` (-f), `target`, `no_cache`, `build_args` (dict → `--build-arg` flags).
+- `_build_pull(params)` (line 173): Builds `docker pull` with required `image`.
+- `_build_stop(params)` (line 180): Builds `docker stop` with required `container`, optional `timeout` (-t, validated non-negative int).
+- `_build_rm(params)` (line 195): Builds `docker rm` with required `container`, optional `force` (-f), `volumes` (-v).
+- `_build_inspect(params)` (line 209): Builds `docker inspect` with required `target`, optional `format`.
+- `_build_stats(params)` (line 222): Builds `docker stats` with optional `container`, `no_stream` (default true), `format`.
+- `_compose_file_flags(params)` (line 236): Shared helper for `-f <file>` flag across compose actions.
+- `_build_compose_up(params)` (line 244): Builds `docker compose up` with `detach` (default true), `build`, `force_recreate`, `services` (array), `file`, `project` (-p).
+- `_build_compose_down(params)` (line 264): Builds `docker compose down` with `remove_volumes` (-v), `remove_images` (validated: 'all'/'local'), `file`, `project`.
+- `_build_compose_ps(params)` (line 280): Builds `docker compose ps` with `services`, `format`, `file`, `project`.
+- `_build_compose_logs(params)` (line 293): Builds `docker compose logs` with `tail` (default 100, max 500), `follow`, `timestamps`, `services`, `file`, `project`.
+- All user-provided values go through `shlex.quote()` for shell injection protection.
+
+#### 2. Tool definition in `src/tools/registry.py` (lines 1418-1470)
+- Added `docker_ops` tool to TOOLS list with `host`, `action` (enum of 14 values), and `params` (action-specific object).
+- Description documents all actions and their params inline so the LLM can use the tool without external docs.
+- Placed after `kubectl` and before "Image generation (ComfyUI)" section.
+
+#### 3. Handler in `src/tools/executor.py` (lines 1012-1038)
+- `_handle_docker_ops(self, inp)`: Validates action, resolves host, builds command via `build_docker_command()`, dispatches via `_exec_command()`.
+- Same pattern as kubectl handler — single command execution with truncated output.
+- Empty output from successful commands returns "docker <action> completed successfully."
+- Validation errors from `build_docker_command` (missing image, missing container, etc.) returned as user-friendly error messages.
+
+#### 4. Tests: `tests/test_docker_ops.py` — 148 tests across 22 test classes
+
+**Registration tests** (4):
+- `TestDockerOpsRegistration`: tool in registry, required fields, required params, enum matches ALLOWED_ACTIONS.
+
+**Allowed actions** (3):
+- `TestDockerOpsAllowedActions`: all 14 expected, unknown raises ValueError, frozenset immutable.
+
+**Compose file flags** (3):
+- `TestComposeFileFlags`: no file, with file, file quoted with spaces.
+
+**Per-action builder tests** (96):
+- `TestBuildPs` (5): basic, all, filter, format, all and filter combined.
+- `TestBuildRun` (14): basic, requires image, empty image, detach, rm, name, network, env, ports, volumes, command, full options, multiple env, multiple ports.
+- `TestBuildExec` (8): basic, requires container, requires command, empty container, empty command, workdir, user, env.
+- `TestBuildLogs` (9): basic default tail, requires container, custom tail, tail capped at 500, tail invalid defaults, tail zero defaults, follow, timestamps, since.
+- `TestBuildBuild` (9): default path, tag, dockerfile, no_cache, build_args, target, custom path, full options, multiple build_args.
+- `TestBuildPull` (3): basic, requires image, empty image.
+- `TestBuildStop` (6): basic, requires container, timeout, negative timeout ignored, invalid timeout ignored, zero timeout.
+- `TestBuildRm` (5): basic, requires container, force, volumes, force and volumes.
+- `TestBuildInspect` (4): basic, requires target, empty target, format.
+- `TestBuildStats` (4): basic no_stream default, with container, stream, format.
+- `TestBuildComposeUp` (8): basic detach default, no detach, build, force_recreate, services, file, project, full options.
+- `TestBuildComposeDown` (7): basic, remove_volumes, remove_images all, remove_images local, remove_images invalid ignored, file, project.
+- `TestBuildComposePs` (4): basic, services, format, file and project.
+- `TestBuildComposeLogs` (8): basic default tail, services, custom tail, tail capped, tail invalid defaults, follow, timestamps, file and project.
+
+**Shell injection safety** (7):
+- `TestShellInjectionSafety`: image with semicolons, container with `$(whoami)`, exec command injection (stays inside quoted token), volume path with spaces, build-arg injection, compose file injection, inspect target injection.
+
+**Handler integration tests** (22):
+- `TestHandleDockerOps` (22): unknown host, unknown action, missing action, ps/run/exec/logs/build/pull/stop/rm/inspect/stats/compose_up/compose_down/compose_ps/compose_logs dispatch, command failure, validation error, empty output, no params default, correct ssh_user, uses exec_command.
+
+**Edge cases** (13):
+- `TestEdgeCases`: all actions have builders, run extra_args passthrough, logs container at end, compose_up services at end, compose_down removes both, stats no_container no_stream, build defaults to dot, rm empty container raises, stop empty container raises, inspect with format quoted, compose_logs tail zero defaults, run env/ports/volumes non-dict/list skipped.
+
+### Design decisions
+
+1. **Separate helper module** (`docker_ops.py`): Same pattern as `git_ops.py` and `kubectl_ops.py` — command building logic is pure (no I/O), making it easy to test independently. The executor handler imports and uses it.
+
+2. **14 actions**: Beyond the 6 specified in the plan (build/run/exec/logs/compose up/down), added ps, pull, stop, rm, inspect, stats, compose_ps, compose_logs. These are essential docker operations. Not adding them would force fallback to `run_command` for common operations.
+
+3. **Compose uses `docker compose` (v2)**: Uses the v2 `docker compose` command (no hyphen), not the deprecated `docker-compose` (v1). This is the standard since Docker Compose v2 merged into the Docker CLI.
+
+4. **Compose file/project support**: All compose actions support `-f` (compose file path) and `-p` (project name) for targeting specific compose configurations. `_compose_file_flags()` is factored out to avoid duplication.
+
+5. **`run` command via `sh -c`**: When a `command` is provided, it runs via `sh -c <quoted_command>` for consistent shell behavior. Without a command, the container runs its default entrypoint.
+
+6. **`stats` defaults to `--no-stream`**: Without `--no-stream`, `docker stats` blocks indefinitely. Default is non-streaming (one snapshot), which fits the tool execution model. Users can set `no_stream: false` if they want streaming (tool timeout acts as upper bound).
+
+7. **`compose_up` defaults to detached**: `detach: true` by default because a non-detached `docker compose up` blocks until Ctrl+C. The tool timeout would eventually kill it, but detached is the expected default for a CLI tool.
+
+8. **`rm` `remove_images` validates against allowlist**: Only 'all' and 'local' are accepted for `--rmi`. Invalid values are silently ignored rather than passed through.
+
+9. **`run` `extra_args` is NOT quoted**: Intentionally not passed through `shlex.quote()` — it's a raw string for power users who need flags like `--memory 512m` or `--cpus 2` that aren't modeled as named params. The LLM can use this for less common docker run flags.
+
+10. **Type-safe collection handling**: `env`, `ports`, and `volumes` in `run` action check `isinstance` before iterating. If the LLM passes a string instead of a dict/list, the param is silently skipped rather than crashing.
+
+### Issues found
+- No issues in prior rounds needed fixing.
+- The `run` action's `extra_args` parameter is NOT shell-quoted. This is intentional (allows arbitrary flags) but means shell injection is possible via `extra_args`. The LLM is trusted with `run_command` already, so this is no worse than existing capabilities. The structured params (image, name, env, etc.) are all quoted.
+- The `logs --follow` and `stats --no-stream=false` flags will cause commands to block until the tool timeout fires. This is expected — the per-tool or global timeout acts as the upper bound.
+- The `exec` action uses `sh -c`, which assumes the container has `/bin/sh`. For distroless containers, the LLM should use `run_command` with a raw `docker exec ... <binary>` command.
+
+### Next round watch for
+- Round 14 (terraform_ops tool) follows the same pattern: tool definition in registry, handler in executor, helper module. Can use `docker_ops.py` as a template.
+- The `docker_ops` tool is an executor tool (handled via `_handle_docker_ops` on ToolExecutor), not a Discord-native tool. It uses `_exec_command` for dispatch, so it inherits bulkhead isolation, SSH retry, and connection pooling from the existing infrastructure.
+- The tool count is now 64 (was 63 after Round 12). The system prompt char limit (5000) is not affected because tool definitions are sent as structured tool schemas, not in the system prompt text.
+- All five subsystem wiring tasks remain open from Rounds 1-12: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
+- The `run` action's `extra_args` parameter bypasses shell quoting. This is a known design choice, not a bug. If future rounds want to close this, they could remove `extra_args` and model all common docker run flags as named params instead.
