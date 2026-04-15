@@ -936,6 +936,51 @@ class ToolExecutor:
             lines.append(f"{i}. {done_mark}{strike}{suffix}")
         return "\n".join(lines)
 
+    async def _handle_git_ops(self, inp: dict) -> str:
+        from .git_ops import ALLOWED_ACTIONS, build_git_command
+
+        action = inp.get("action", "")
+        if action not in ALLOWED_ACTIONS:
+            return (
+                f"Unknown git action: {action}. "
+                f"Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
+            )
+
+        host = inp.get("host", "")
+        resolved = self._resolve_host(host)
+        if not resolved:
+            return f"Unknown or disallowed host: {host}"
+        address, ssh_user, _os = resolved
+
+        params = inp.get("params") or {}
+
+        try:
+            cmds = build_git_command(action, params)
+        except ValueError as e:
+            return f"git_ops error: {e}"
+
+        if action == "push":
+            freshness_cmd, push_cmd = cmds
+            code, output = await self._exec_command(
+                address, freshness_cmd, ssh_user,
+            )
+            if code != 0:
+                return f"Branch freshness check failed (exit {code}):\n{output}"
+            if output.strip().startswith("STALE:"):
+                return f"Push blocked — {output.strip().split(':', 1)[1].strip()}"
+            code, output = await self._exec_command(
+                address, push_cmd, ssh_user,
+            )
+            if code != 0:
+                return f"Push failed (exit {code}):\n{_truncate_lines(output)}"
+            return _truncate_lines(output) if output.strip() else "Push completed successfully."
+        else:
+            cmd = cmds
+            code, output = await self._exec_command(address, cmd, ssh_user)
+            if code != 0:
+                return f"git {action} failed (exit {code}):\n{_truncate_lines(output)}"
+            return _truncate_lines(output) if output.strip() else f"git {action} completed successfully."
+
     async def _handle_execute_plan(self, inp: dict) -> str:
         """Execute a DAG plan using the Odin planner."""
         from src.tools.plan_runner import PlanRunner

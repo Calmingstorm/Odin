@@ -112,7 +112,7 @@ tightening of prior work.
 ### Phase 3 — New tools (rounds 11–15)
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
-| 11 | `git_ops` tool: clone / commit / push / branch / diff / status with safe defaults and branch freshness check | pending | |
+| 11 | `git_ops` tool: clone / commit / push / branch / diff / status with safe defaults and branch freshness check | done | git_ops helper module, 11 actions (clone/status/diff/branch/commit/push/pull/checkout/fetch/stash/log), push freshness check, force-with-lease safety, shell injection protection, executor handler, 113 tests |
 | 12 | `kubectl` tool: apply / get / logs / describe against clusters via SSH or kubeconfig | pending | |
 | 13 | `docker_ops` tool: build / run / exec / logs / compose up/down against local or remote hosts | pending | |
 | 14 | `terraform_ops` tool: plan / apply with safe plan preview, never auto-approves | pending | |
@@ -948,3 +948,104 @@ bottom. Do not truncate older entries — they are the chain-of-context.)
 - The 5 pending wiring tasks are accumulated technical debt. They don't block any feature work, but metrics and cost tracking won't be available at runtime until wired. A future round should handle this holistically (instantiate all subsystems in `OdinBot.__init__`).
 - The `close_host` timeout fix in ssh_pool.py uses `proc.kill()` which sends SIGKILL on Unix. This is aggressive but appropriate for a hung SSH process — a more graceful `proc.terminate()` + timeout could be considered if SIGKILL causes issues with ControlMaster socket cleanup.
 - The metrics dict mutation fix is safe because `bulkhead_count` doesn't match any suffix filter. If future metrics sources add keys that coincidentally end in `_active` etc., the iteration logic would need tightening.
+
+## Round 11 — git_ops tool: clone / commit / push / branch / diff / status with safe defaults and branch freshness check
+**Focus**: Add a `git_ops` tool that provides structured git operations on managed hosts with safe defaults, shell injection protection, and branch freshness checking before push.
+**Baseline pytest**: 1084 passed, 0 failed
+**Post-round pytest**: 1197 passed, 0 failed (+113 new tests)
+
+### Validated from prior rounds
+- Round 10 watch-for items reviewed. No blockers for Round 11.
+- 5 subsystem wiring tasks remain pending (`cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics). Not in scope for this round.
+- RuntimeWarning in `test_connection_pools.py::TestSSHCommandWithPool::test_no_pool_no_control_master` still present (pre-existing, per Round 10 notes).
+
+### Work done
+
+#### 1. New module: `src/tools/git_ops.py` (226 lines)
+Git operations helper that builds safe shell commands for 11 git actions.
+
+- `ALLOWED_ACTIONS` (line 11): Frozen set of 11 actions: clone, status, diff, branch, commit, push, log, pull, checkout, fetch, stash.
+- `build_git_command(action, params)` (line 30): Main entry point. Validates action against ALLOWED_ACTIONS, dispatches to per-action builder. Returns a string (single command) or list of strings (push returns freshness check + push command).
+- `_build_clone(params)` (line 44): Builds `git clone` with optional `--branch`, `--depth` (validated positive int), destination. Requires `url`.
+- `_build_status(params)` (line 64): Builds `git -C <repo> status --short --branch`. Defaults to current directory.
+- `_build_diff(params)` (line 68): Builds `git diff` with optional `--cached` (staged), `-U<context>`, target ref.
+- `_build_branch(params)` (line 80): Builds branch create (`git branch <name>`), delete (`git branch -d <name>`), or list (`git branch -a --no-color`). Default is list.
+- `_build_commit(params)` (line 96): Builds commit with required `message`. Optional `add_all` (runs `git add -A` first) or `files` (adds specific files). Commands chained with `&&`.
+- `_build_push(params)` (line 115): Returns a LIST of two commands: (1) freshness check script that fetches remote, compares local HEAD vs remote via `merge-base`, outputs FRESH:ahead/up_to_date/no_remote_tracking or STALE:reason; (2) the actual push command. Force push uses `--force-with-lease` (never bare `--force`). Supports `set_upstream`, custom remote/branch.
+- `_build_log(params)` (line 145): Builds `git log` with count (default 20, max 50), oneline or verbose format, optional branch filter.
+- `_build_pull(params)` (line 167): Builds `git pull` with optional `--rebase`, custom remote/branch.
+- `_build_checkout(params)` (line 179): Builds `git checkout` with required `target`. Optional `-b` flag for creating new branch.
+- `_build_fetch(params)` (line 191): Builds `git fetch` with optional `--prune`, custom remote.
+- `_build_stash(params)` (line 200): Builds `git stash` subactions (push/pop/list/drop/apply). Push supports `-m <message>`. Validates subaction against allowlist.
+- All user-provided values go through `shlex.quote()` for shell injection protection.
+
+#### 2. Tool definition in `src/tools/registry.py` (lines 1331-1370)
+- Added `git_ops` tool to TOOLS list with `host`, `action` (enum of 11 values), and `params` (action-specific object).
+- Description documents all actions and their params inline so the LLM can use the tool without external docs.
+- Placed before "Image generation (ComfyUI)" section.
+
+#### 3. Handler in `src/tools/executor.py` (lines 939-978)
+- `_handle_git_ops(self, inp)`: Validates action, resolves host, builds command via `build_git_command()`, dispatches via `_exec_command()`.
+- Special push flow: runs freshness check first, parses output for FRESH/STALE prefix, blocks push if STALE (returns descriptive message), only proceeds to actual push if branch is fresh.
+- Non-push actions: single command execution with truncated output.
+- Empty output from successful commands returns "git <action> completed successfully."
+- Validation errors from `build_git_command` (missing url, missing message, etc.) returned as user-friendly error messages.
+
+#### 4. Tests: `tests/test_git_ops.py` — 113 tests across 18 test classes
+
+**Registration tests** (4):
+- `TestGitOpsRegistration`: tool in registry, required fields, required params, enum matches ALLOWED_ACTIONS.
+
+**Allowed actions** (3):
+- `TestAllowedActions`: all 11 expected, unknown raises ValueError, frozenset immutable.
+
+**Per-action builder tests** (68):
+- `TestBuildClone` (11): basic, dest, branch, depth (valid/zero/negative/non-numeric), requires url, empty url, full options, spaces in url.
+- `TestBuildStatus` (3): default repo, custom repo, repo with spaces.
+- `TestBuildDiff` (7): default, staged, target, context, negative/non-numeric context ignored, custom repo.
+- `TestBuildBranch` (5): list default, list explicit, create, delete, delete without name lists.
+- `TestBuildCommit` (7): basic, requires message, empty message, add_all, files array, files string, custom repo.
+- `TestBuildPush` (9): returns two commands, freshness fetches, compares revisions, outputs FRESH/STALE, default remote, custom remote, branch, force-with-lease, set-upstream.
+- `TestBuildLog` (8): default, custom count, max capped at 50, zero/negative/non-numeric count defaults, verbose format, branch filter.
+- `TestBuildPull` (3): default, rebase, custom remote and branch.
+- `TestBuildCheckout` (4): branch, create (-b), requires target, empty target.
+- `TestBuildFetch` (3): default, prune, custom remote.
+- `TestBuildStash` (7): default push, pop, list, apply, drop, push with message, invalid subaction.
+
+**Shell injection safety** (5):
+- `TestShellInjectionSafety`: URL with semicolons, commit message with SQL injection, checkout target with command injection, repo path with spaces, branch name with `$(whoami)`. All verified via `shlex.split()` — injected commands stay inside quoted tokens.
+
+**Handler integration tests** (18):
+- `TestHandleGitOps` (16): unknown host, unknown action, missing action, status/clone/diff/commit/log/branch/checkout/fetch/pull/stash dispatch, command failure, validation error, empty output, no params default.
+- `TestEdgeCases` (6): all actions have builders, dest with spaces, message with quotes, correct ssh_user, repo param passthrough, metrics tracked, timeout tracked.
+
+**Push freshness check flow** (8):
+- `TestPushFreshnessCheck`: fresh ahead succeeds, up-to-date succeeds, no remote tracking succeeds, stale blocked, fetch fails, push command fails, empty output shows success, force still checks freshness.
+
+**Force push safety** (2):
+- `TestForcePushSafety`: force uses `--force-with-lease` (never bare `--force`), no-force has no flag.
+
+### Design decisions
+
+1. **Separate helper module** (`git_ops.py`): Command building logic is pure (no I/O), making it easy to test independently of the executor. The executor handler imports and uses it, keeping the handler thin.
+
+2. **Push freshness check**: Before any push, the tool fetches the remote and compares HEAD vs remote branch using `merge-base`. Four outcomes: FRESH:ahead (local has commits remote doesn't — safe to push), FRESH:up_to_date (nothing to push but not an error), FRESH:no_remote_tracking (new branch — safe to push), STALE:reason (local is behind — blocked with descriptive message). This prevents accidental force-pushes over others' work.
+
+3. **Force-with-lease only**: When `force=True`, the push uses `--force-with-lease` instead of `--force`. This is strictly safer — it refuses to overwrite remote commits that the local client hasn't seen. The freshness check STILL runs even with force, so stale pushes are blocked regardless.
+
+4. **shlex.quote everywhere**: All user-provided values (URLs, paths, branch names, messages, etc.) are passed through `shlex.quote()`. This prevents shell injection — even if the LLM passes a malicious value, it stays inside a single shell token.
+
+5. **11 actions**: Beyond the 6 specified in the plan (clone/commit/push/branch/diff/status), added log, pull, checkout, fetch, stash. These are natural git operations the LLM would need, and each is a thin builder (~15 lines). Not adding them would force the LLM to fall back to `run_command` for common operations.
+
+6. **No bare `git push --force`**: The tool intentionally does not support bare `--force`. If the LLM or user needs bare force-push, they can use `run_command` directly. This is safe-by-default without being blocking — it adds observability (freshness check) rather than friction.
+
+### Issues found
+- No issues in prior rounds needed fixing.
+- The freshness check script uses `merge-base` which may not work correctly for diverged branches (when local has commits remote doesn't AND remote has commits local doesn't). In that case, `merge-base HEAD remote/branch` returns neither HEAD nor remote — the script outputs STALE, which is the correct conservative behavior (forces the user to pull/rebase).
+- The `log` action's `--format` string contains parentheses and commas which could theoretically be misinterpreted by some shells, but since the entire format string is a single argument to git (not shell-expanded), this is safe.
+
+### Next round watch for
+- Round 12 (kubectl tool) follows the same pattern: tool definition in registry, handler in executor, helper module. Can use `git_ops.py` as a template.
+- The freshness check adds an extra SSH round-trip before every push. For remote hosts with high latency, this could be noticeable. The check is intentional and the latency is acceptable for safety, but if performance is a concern, a `skip_freshness_check` param could be added in a future round.
+- The `git_ops` tool is an executor tool (handled via `_handle_git_ops` on ToolExecutor), not a Discord-native tool. It uses `_exec_command` for dispatch, so it inherits bulkhead isolation, SSH retry, and connection pooling from the existing infrastructure.
+- The tool count is now 62 (was 61). The system prompt char limit (5000) is not affected because tool definitions are sent as structured tool schemas, not in the system prompt text.

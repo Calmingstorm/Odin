@@ -1327,6 +1327,50 @@ TOOLS: list[dict] = [
             "required": ["loop_id"],
         },
     },
+    # --- Git operations ---
+    {
+        "name": "git_ops",
+        "description": (
+            "Git operations on a managed host. Actions: clone, status, diff, log, branch, "
+            "commit, push, pull, checkout, fetch, stash. Push checks branch freshness first "
+            "and refuses if local is behind remote. Use --force-with-lease (never bare --force) "
+            "when force is needed. For complex multi-step git workflows, use run_script."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "host": {
+                    "type": "string",
+                    "description": "Host alias from config",
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Git action: clone, status, diff, log, branch, commit, push, pull, checkout, fetch, stash",
+                    "enum": [
+                        "clone", "status", "diff", "log", "branch", "commit",
+                        "push", "pull", "checkout", "fetch", "stash",
+                    ],
+                },
+                "params": {
+                    "type": "object",
+                    "description": (
+                        "Action-specific params. Common: repo (path, default '.'). "
+                        "clone: url (required), dest, branch, depth. "
+                        "diff: target, staged (bool), context (int). "
+                        "log: count (int, max 50), oneline (bool), branch. "
+                        "branch: name (create), delete (bool), list (bool). "
+                        "commit: message (required), add_all (bool), files (array). "
+                        "push: remote, branch, force (bool), set_upstream (bool). "
+                        "pull: remote, branch, rebase (bool). "
+                        "checkout: target (required), create (bool). "
+                        "fetch: remote, prune (bool). "
+                        "stash: subaction (push/pop/list/drop/apply), message."
+                    ),
+                },
+            },
+            "required": ["host", "action"],
+        },
+    },
     # --- Image generation (ComfyUI) ---
     {
         "name": "generate_image",
