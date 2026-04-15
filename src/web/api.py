@@ -373,6 +373,11 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         from ..health.checker import check_all
         return web.json_response(check_all(bot))
 
+    @routes.get("/api/resource-usage")
+    async def get_resource_usage(_request: web.Request) -> web.Response:
+        from ..monitoring.resource_usage import collect_all
+        return web.json_response(collect_all(bot))
+
     @routes.get("/api/config")
     async def get_config(_request: web.Request) -> web.Response:
         raw = bot.config.model_dump()

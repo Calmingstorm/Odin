@@ -158,7 +158,7 @@ tightening of prior work.
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
 | 36 | Health dashboard page: all component health at a glance (Codex, SSH hosts, DB, knowledge store, voice) | done | HealthChecker module (11 components: Discord, Codex, sessions, knowledge, SSH hosts, voice, monitoring, browser, scheduler, loops, agents), /api/health/components endpoint, health.js web UI page with auto-refresh, +74 tests |
-| 37 | Memory-usage widget: session count, knowledge DB size, trajectory volume | pending | |
+| 37 | Memory-usage widget: session count, knowledge DB size, trajectory volume | done | ResourceUsage module (4 dataclasses: DirStats, SessionStats, KnowledgeStats, TrajectoryStats), collect_all() aggregator, /api/resource-usage endpoint, resources.js web UI page with 4 tabs (sessions/knowledge/trajectories/storage) + storage bar chart, +81 tests |
 | 38 | Tool output streaming: ship partial results to Discord/UI as tools produce them (opt-in per tool, OFF by default — never spam) | pending | |
 | 39 | Auxiliary LLM client: separate cheap-model client for classification / summarization / vision description | pending | |
 | 40 | REVIEWER: validate rounds 31–39, tighten tests, fix bugs found | pending | |
@@ -4735,5 +4735,182 @@ New styles under `/* HEALTH DASHBOARD */` section:
 - The health checker probes subsystems via `getattr(bot, attr, None)`. If new subsystems are added in future rounds, they should get a checker function added to `_ALL_CHECKERS`.
 - The `check_codex` function accesses `codex._session` (private attribute) to check if the aiohttp session is alive. If `CodexChatClient` ever changes its session management, this check may need updating.
 - The health page auto-refreshes every 30 seconds. This adds one API call per 30s per open browser tab.
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
+- The `ToolExecutor.__new__()` fixture pattern was NOT changed by this round.
+
+## Round 37 — Memory-usage widget: session count, knowledge DB size, trajectory volume
+**Focus**: Build a resource-usage stats collector that gathers session count/tokens, knowledge DB chunk count/file size, and trajectory volume (message + agent), then expose it via a REST API endpoint and a web UI page with tabbed views and storage breakdown visualization.
+**Baseline pytest**: 3614 passed, 0 failed
+**Post-round pytest**: 3695 passed, 0 failed (+81 new tests)
+
+### Validated from prior rounds
+- Round 36 (Health dashboard): All 74 tests pass. No changes needed.
+- Round 35 (Nested agent spawning): All 73 tests pass. No changes needed.
+- Round 34 (Agent trajectory saving): All 75 tests pass. No changes needed.
+- Round 36 noted "Round 37 may want to use data from check_all() — sessions and knowledge components already report token counts and chunk counts." Acknowledged — chose to collect richer stats directly from subsystems rather than reusing the health checker's limited metadata. The health checker reports {count, total_tokens, over_budget} for sessions and {chunks, vector_search} for knowledge, but the resource usage widget needs per-session breakdown, message counts, persist directory scanning, source lists, trajectory file inventories, and storage size aggregation.
+- Round 36 noted REST API endpoint count was 121 — confirmed, now 122 (+1 new: `/api/resource-usage`).
+- Round 36 noted health page auto-refreshes every 30s — unchanged. Resource page also auto-refreshes every 30s.
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.) — unchanged.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. Resource usage collector module: `src/monitoring/resource_usage.py` (new, ~260 lines)
+
+**DirStats dataclass** (slots=True):
+- Fields: `path` (str), `file_count` (int), `total_bytes` (int).
+- `to_dict()`: Returns dict with path, file_count, total_bytes, total_mb (computed, rounded to 2 decimals).
+
+**SessionStats dataclass** (slots=True):
+- Fields: `active_count`, `total_tokens`, `total_messages`, `over_budget_count`, `token_budget`, `persist_dir` (DirStats), `per_session` (list of dicts).
+- `to_dict()`: Returns full dict including nested persist_dir.to_dict().
+
+**KnowledgeStats dataclass** (slots=True):
+- Fields: `available`, `chunk_count`, `source_count`, `vector_search`, `db_file` (DirStats), `sources` (list of dicts).
+- `to_dict()`: Returns full dict including nested db_file.to_dict().
+
+**TrajectoryStats dataclass** (slots=True):
+- Fields: `message_count`, `agent_count`, `message_dir` (DirStats), `agent_dir` (DirStats), `message_files` (list), `agent_files` (list).
+- `to_dict()`: Returns dict with computed `total_count` (message+agent), `combined_bytes`, `combined_mb`.
+
+**Utility functions**:
+- `scan_directory(path)`: Iterates top-level files in a directory, returns DirStats with file_count and total_bytes. Handles nonexistent/non-directory paths gracefully.
+- `scan_file(path)`: Gets size info for a single file, returns DirStats. Handles nonexistent/non-file paths.
+
+**Collector functions** (all take `bot: Any`, all crash-safe):
+- `collect_session_stats(bot)`: Reads `bot.sessions._sessions` dict, iterates sessions for token/message counts, checks over-budget, scans persist directory. Builds per_session list with channel_id/tokens/messages/has_summary.
+- `collect_knowledge_stats(bot)`: Checks `bot.knowledge.available`, calls `count()` and `list_sources()`, reads `_has_vec` for vector search status, finds DB file via `_db_path` attribute or `PRAGMA database_list` fallback.
+- `collect_trajectory_stats(bot)`: Reads `bot.trajectory_saver.count` (handles both property and callable), scans directory for JSONL files. Same for `bot.agent_trajectory_saver`. Filters to only `.jsonl` files.
+
+**`collect_all(bot)`**: Runs all three collectors, computes `storage_total_bytes` as sum of all four storage areas (session persist dir + knowledge DB + message trajectories + agent trajectories), adds `collected_at` ISO timestamp.
+
+All collectors use `getattr(bot, attr, None)` pattern for safe probing, with try/except around entire function body. Errors are logged at debug level and return empty defaults.
+
+#### 2. Monitoring __init__.py updated: `src/monitoring/__init__.py`
+
+Now exports: `DirStats`, `SessionStats`, `KnowledgeStats`, `TrajectoryStats`, `collect_all`, `collect_session_stats`, `collect_knowledge_stats`, `collect_trajectory_stats`, `scan_directory`, `scan_file`, plus existing `InfraWatcher`.
+
+#### 3. REST API endpoint: `src/web/api.py` (lines 376-378)
+
+New endpoint:
+- `GET /api/resource-usage`: Returns `collect_all(bot)` as JSON. Uses lazy import of `collect_all` from `..monitoring.resource_usage` to avoid circular imports at module load time.
+
+#### 4. Web UI resources page: `ui/js/pages/resources.js` (new, ~280 lines)
+
+Vue 3 component with 4 tabs:
+
+**Top-level summary cards** (always visible):
+- Active Sessions count
+- Knowledge Chunks count
+- Trajectories Saved count (message + agent combined)
+- Total Storage in MB (all four areas summed)
+
+**Sessions tab**:
+- Sub-cards: Total Tokens, Total Messages, Over Budget count (amber if > 0), Persist Storage MB.
+- Per-session table: Channel ID (monospace), Tokens, Messages, Summary (Yes/No with color).
+- Empty state when no active sessions.
+
+**Knowledge tab**:
+- Sub-cards: Sources count, Chunks count, Search Mode (green for Vector+FTS, amber for FTS Only), DB Size MB.
+- Ingested Sources table: Source name (truncated at 300px with title tooltip), Chunks, Uploader.
+- Empty state distinguishes "no documents" vs "store unavailable".
+
+**Trajectories tab**:
+- Sub-cards: Message Turns, Agent Turns, Message Files count, Total Volume MB.
+- Two-column grid showing message and agent trajectory file lists (sorted, scrollable with max-height).
+
+**Storage tab**:
+- Storage breakdown with color-coded progress bars (blue=sessions, purple=knowledge, emerald=messages, amber=agents).
+- Each bar shows label, MB, file count, and proportional width.
+
+**Features**:
+- Auto-refresh every 30 seconds.
+- Manual refresh button with loading state.
+- Loading skeleton and error state with retry.
+- Collected-at timestamp display.
+
+#### 5. CSS styles: `ui/css/style.css` (appended ~18 lines)
+
+New styles under `/* RESOURCE USAGE */` section:
+- `.res-bar-bg`: Background track for storage bars (dark slate, rounded).
+- `.res-bar-fill`: Animated fill bar (transition width 0.4s, min-width 2px).
+- `.res-bar-blue`, `.res-bar-purple`, `.res-bar-emerald`, `.res-bar-amber`: Color variants for storage categories.
+
+#### 6. Router registration: `ui/js/app.js`
+
+- Import: `import ResourcesPage from './pages/resources.js';`
+- Route: `{ path: '/resources', component: ResourcesPage, meta: { label: 'Resources', icon: '\u{1F4E6}' } }`
+- Appears in sidebar navigation automatically via existing `navRoutes` computed.
+
+#### 7. CLAUDE.md updates
+
+- Added `src/monitoring/resource_usage.py` to project structure.
+- Updated page count from 17 to 18.
+- Updated endpoint count from 121 to 122 across all 3 references.
+- Updated pages list in Web Management UI section.
+
+### Tests: `tests/test_resource_usage.py` — 81 tests across 13 test classes
+
+**DirStats** (5): default values, to_dict basic, to_dict large size, to_dict zero bytes, to_dict fractional MB.
+
+**SessionStats** (4): default values, to_dict, to_dict with per_session, independent persist_dir.
+
+**KnowledgeStats** (3): default values, to_dict, to_dict with sources.
+
+**TrajectoryStats** (5): default values, to_dict, to_dict combined bytes, to_dict files lists, independent dirs.
+
+**scan_directory** (5): existing directory, nonexistent, empty, with subdirectories (only top-level), path object.
+
+**scan_file** (3): existing file, nonexistent, directory instead of file.
+
+**collect_session_stats** (10): no session manager, None sessions, sessions not dict, with sessions, over budget, per_session data, zero token budget, exception handling, persist dir scanning, session stats no persist_dir attr.
+
+**collect_knowledge_stats** (9): no knowledge store, None knowledge, unavailable, with knowledge, FTS only, db_path attribute, db via pragma, list_sources exception, exception handling, sources field mapping.
+
+**collect_trajectory_stats** (9): no saver, None savers, with message trajectories, with agent trajectories, both trajectories, nonexistent directory, ignores non-jsonl, exception handling message, exception handling agent, count as callable.
+
+**collect_all** (8): returns all sections, collected_at is ISO, storage total aggregation, sessions section keys, knowledge section keys, trajectories section keys, zero storage total, with all subsystems.
+
+**REST API** (3): endpoint returns 200 with all sections, has session data, has trajectory section.
+
+**Exports** (6): module imports, init exports, DirStats is dataclass, SessionStats is dataclass, KnowledgeStats is dataclass, TrajectoryStats is dataclass.
+
+**Edge cases** (11): scan_directory with file path, collect_all empty bot, session stats no persist_dir attr, knowledge no db_path no conn, trajectory count is property, collect_all storage total sums, DirStats to_dict all keys, SessionStats to_dict all keys, KnowledgeStats to_dict all keys, TrajectoryStats to_dict all keys, collect_all empty bot.
+
+### Design decisions
+
+1. **Separate from health checker**: The health checker (Round 36) focuses on operational health (ok/degraded/down). Resource usage focuses on capacity/volume metrics. Different concerns, different modules. The health checker's session/knowledge metadata is too limited — it only has {count, total_tokens, over_budget} for sessions and {chunks, vector_search} for knowledge. The resource widget needs per-session breakdowns, message counts, file system scanning, source lists, and trajectory file inventories.
+
+2. **DirStats as building block**: A lightweight dataclass for directory/file size info, reused across all three subsystem stats (session persist dir, knowledge DB file, trajectory dirs). Always includes total_mb computed from total_bytes.
+
+3. **Synchronous collectors**: All collector functions are synchronous because they read in-memory state (session dicts, knowledge store attributes) and do lightweight file system scanning (os.stat). No async I/O needed.
+
+4. **Crash-safe with getattr**: Every collector wraps its entire body in try/except and uses `getattr(bot, attr, None)` for safe probing. A crashed collector returns empty defaults — never breaks the aggregate response.
+
+5. **Knowledge DB path discovery**: Tries `_db_path` attribute first, falls back to `PRAGMA database_list` on the SQLite connection. Handles both cases gracefully. If neither works, returns empty DirStats.
+
+6. **Trajectory count property vs callable**: The `TrajectorySaver.count` is a `@property` returning `self._count`. When accessed via MagicMock it may be a callable. The code handles both: checks `callable()` and invokes if needed.
+
+7. **Four tabs in UI**: Sessions, Knowledge, Trajectories, Storage. The Storage tab provides a cross-cutting view of disk usage with proportional color-coded bars. This is the key "at a glance" view.
+
+8. **30-second auto-refresh**: Consistent with the health page's refresh interval. Lightweight — the collector reads in-memory state and does a few `os.stat()` calls.
+
+### Files changed
+- `src/monitoring/resource_usage.py` (new, ~260 lines): DirStats, SessionStats, KnowledgeStats, TrajectoryStats, scan_directory, scan_file, collect_session_stats, collect_knowledge_stats, collect_trajectory_stats, collect_all.
+- `src/monitoring/__init__.py` (updated): Export all new types and functions.
+- `src/web/api.py` (lines 376-378): New GET /api/resource-usage endpoint.
+- `ui/js/pages/resources.js` (new, ~280 lines): Vue 3 resources page with 4 tabs.
+- `ui/css/style.css` (appended ~18 lines): Storage bar styles.
+- `ui/js/app.js` (2 lines): Import ResourcesPage, add route.
+- `CLAUDE.md` (4 updates): Structure, endpoint count (121→122), page count (17→18), pages list.
+- `tests/test_resource_usage.py` (new, 81 tests): 13 test classes.
+
+### Next round watch for
+- Round 38 (Tool output streaming) has no dependencies on Round 37. Resource usage is self-contained.
+- REST API endpoint count is now 122 (was 121, +1 new: `/api/resource-usage`).
+- The resource usage collector accesses `bot.sessions._sessions` (private dict), `bot.knowledge._has_vec` (private bool), `bot.knowledge._db_path` (private), and `bot.knowledge._conn` (private SQLite connection). If these subsystems refactor their internals, the collectors may need updating.
+- The `collect_trajectory_stats` function handles `count` as both a property and a callable (for MagicMock compatibility). Real `TrajectorySaver.count` is a `@property`.
+- The resource page auto-refreshes every 30 seconds. Combined with the health page's 30s refresh, an open browser with both tabs = 2 API calls per 30s.
+- The `scan_directory` function only counts top-level files, not recursively. Session persist directories with `archive/` subdirectories will NOT count archived files.
 - All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
 - The `ToolExecutor.__new__()` fixture pattern was NOT changed by this round.

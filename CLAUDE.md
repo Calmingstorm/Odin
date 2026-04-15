@@ -38,6 +38,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/tools/browser.py` — Playwright browser automation
   - `src/tools/web.py` — web search and URL fetching
   - `src/monitoring/watcher.py` — proactive infra monitoring checks
+  - `src/monitoring/resource_usage.py` — resource usage stats (sessions, knowledge, trajectories, storage)
   - `src/sessions/manager.py` — conversation history with compaction (via Codex)
   - `src/learning/reflector.py` — extracts lessons from conversations (via Codex)
   - `src/knowledge/store.py` — SQLite+sqlite-vec RAG knowledge base (local embeddings via fastembed)
@@ -59,7 +60,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/tools/comfyui.py` — ComfyUI image generation client
   - `src/tools/autonomous_loop.py` — autonomous loop system (LLM-driven recurring tasks)
   - `src/search/sqlite_vec.py` — SQLite vector search helpers (sqlite-vec extension)
-  - `src/web/api.py` — REST API for web management UI (121 endpoints)
+  - `src/web/api.py` — REST API for web management UI (122 endpoints)
   - `src/web/websocket.py` — WebSocket handler for live updates (logs, events)
   - `src/web/chat.py` — chat backend for web UI and WebSocket chat
   - `src/agents/manager.py` — multi-agent orchestration with lifecycle state machine (AgentState enum, AgentStateMachine, typed transitions, per-iteration recovery)
@@ -73,7 +74,7 @@ You are running as part of an automated build loop. Each session, you:
   - `ui/css/style.css` — dark theme styles
   - `ui/js/app.js` — Vue 3 app, router, sidebar, auth
   - `ui/js/api.js` — API client + WebSocket manager
-  - `ui/js/pages/` — 17 page components (dashboard, sessions, tools, skills, knowledge, schedules, loops, processes, audit, config, logs, memory, chat, agents, usage, traces, health)
+  - `ui/js/pages/` — 18 page components (dashboard, sessions, tools, skills, knowledge, schedules, loops, processes, audit, config, logs, memory, chat, agents, usage, traces, health, resources)
 
 ## Architecture (all free, subscription-based)
 ```
@@ -104,7 +105,7 @@ Background services:
 
 Web management UI:
   http://host:3939/ui/ → Vue 3 SPA (CDN, no build step)
-  /api/*               → REST API (121 endpoints, Bearer token auth)
+  /api/*               → REST API (122 endpoints, Bearer token auth)
   /api/ws              → WebSocket (live logs + events)
 ```
 
@@ -183,11 +184,11 @@ No classifier. No approval prompts. No keyword routing. One path: Codex with too
 - **create_poll**: Create native Discord polls (max 10 options, up to 7 days).
 
 ### Web Management UI
-- **Backend**: aiohttp REST API (121 endpoints) + WebSocket, mounted on the health server (port 3939)
+- **Backend**: aiohttp REST API (122 endpoints) + WebSocket, mounted on the health server (port 3939)
 - **Frontend**: Vue 3 + Tailwind CSS + Vue Router (all CDN, no build step), served as static files
 - **Auth**: Bearer token via `web.api_token` config (empty = no auth, dev mode)
 - **Security**: rate limiting (120 req/60s per IP), security headers (nosniff, frame deny), input validation
-- **Pages**: dashboard, sessions, tools, skills, knowledge, schedules, loops, processes, audit, config, logs, memory, chat, agents, usage, traces, health
+- **Pages**: dashboard, sessions, tools, skills, knowledge, schedules, loops, processes, audit, config, logs, memory, chat, agents, usage, traces, health, resources
 - **Live updates**: WebSocket at `/api/ws` with log tailing and event broadcasting
 - **Static serving**: `ui/` directory served at `/ui/`, redirect `/` → `/ui/`
 
