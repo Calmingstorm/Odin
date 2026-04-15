@@ -21,6 +21,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov",
     "ruff",
+    "aioresponses>=0.7",
 ]
 
 [project.scripts]

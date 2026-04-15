@@ -211,4 +211,57 @@ class MetricsCollector:
             except Exception:
                 pass
 
+        # -- LLM cost tracking --
+        cost_source = self._sources.get("cost_tracker")
+        if cost_source:
+            try:
+                cost_data = cost_source()
+                if cost_data:
+                    sections.append(_format_metric(
+                        "odin_llm_input_tokens_total",
+                        cost_data.get("total_input_tokens", 0),
+                        metric_type="counter",
+                        help_text="Total estimated LLM input tokens",
+                    ))
+                    sections.append(_format_metric(
+                        "odin_llm_output_tokens_total",
+                        cost_data.get("total_output_tokens", 0),
+                        metric_type="counter",
+                        help_text="Total estimated LLM output tokens",
+                    ))
+                    sections.append(_format_metric(
+                        "odin_llm_cost_usd_total",
+                        cost_data.get("total_cost_usd", 0),
+                        metric_type="counter",
+                        help_text="Total estimated LLM cost in USD",
+                    ))
+                    sections.append(_format_metric(
+                        "odin_llm_requests_total",
+                        cost_data.get("total_requests", 0),
+                        metric_type="counter",
+                        help_text="Total LLM API requests",
+                    ))
+                    by_user = cost_data.get("by_user", {})
+                    if by_user:
+                        sections.append(f"# HELP odin_llm_user_cost_usd LLM cost in USD by user")
+                        sections.append(f"# TYPE odin_llm_user_cost_usd counter")
+                        for uid, info in sorted(by_user.items()):
+                            sections.append(_format_metric(
+                                "odin_llm_user_cost_usd", info.get("cost_usd", 0),
+                                labels={"user": uid},
+                                include_header=False,
+                            ))
+                    by_channel = cost_data.get("by_channel", {})
+                    if by_channel:
+                        sections.append(f"# HELP odin_llm_channel_cost_usd LLM cost in USD by channel")
+                        sections.append(f"# TYPE odin_llm_channel_cost_usd counter")
+                        for cid, info in sorted(by_channel.items()):
+                            sections.append(_format_metric(
+                                "odin_llm_channel_cost_usd", info.get("cost_usd", 0),
+                                labels={"channel": cid},
+                                include_header=False,
+                            ))
+            except Exception:
+                pass
+
         return "\n".join(sections) + "\n"

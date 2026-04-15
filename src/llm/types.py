@@ -27,6 +27,8 @@ class LLMResponse:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     stop_reason: str = "end_turn"  # "end_turn" or "tool_use"
+    input_tokens: int = 0
+    output_tokens: int = 0
 
     @property
     def is_tool_use(self) -> bool:

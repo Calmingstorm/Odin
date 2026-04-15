@@ -610,6 +610,24 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response(counts)
 
     # ------------------------------------------------------------------
+    # Usage / cost tracking
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/usage")
+    async def get_usage(_request: web.Request) -> web.Response:
+        tracker = getattr(bot, "cost_tracker", None)
+        if tracker is None:
+            return web.json_response({"error": "cost tracking not available"}, status=503)
+        return web.json_response(tracker.get_summary())
+
+    @routes.get("/api/usage/totals")
+    async def get_usage_totals(_request: web.Request) -> web.Response:
+        tracker = getattr(bot, "cost_tracker", None)
+        if tracker is None:
+            return web.json_response({"error": "cost tracking not available"}, status=503)
+        return web.json_response(tracker.get_totals())
+
+    # ------------------------------------------------------------------
     # Skills
     # ------------------------------------------------------------------
 

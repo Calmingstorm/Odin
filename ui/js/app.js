@@ -17,6 +17,7 @@ import AuditPage from './pages/audit.js';
 import MemoryPage from './pages/memory.js';
 import AgentsPage from './pages/agents.js';
 import ChatPage from './pages/chat.js';
+import UsagePage from './pages/usage.js';
 
 const { createApp, ref, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
 const { createRouter, createWebHashHistory } = VueRouter;
@@ -42,6 +43,7 @@ const routes = [
   { path: '/logs',       component: LogsPage,       meta: { label: 'Logs',       icon: '\u{1F4C4}' } },
   { path: '/memory',     component: MemoryPage,     meta: { label: 'Memory',     icon: '\u{1F9E0}' } },
   { path: '/agents',     component: AgentsPage,     meta: { label: 'Agents',     icon: '\u{1F916}' } },
+  { path: '/usage',      component: UsagePage,      meta: { label: 'Usage',      icon: '\u{1F4B0}' } },
 ];
 
 const router = createRouter({

@@ -8,6 +8,7 @@ import aiohttp
 from ..odin_log import get_logger
 from .circuit_breaker import CircuitBreaker
 from .codex_auth import CodexAuth, CodexAuthPool
+from .cost_tracker import estimate_tokens
 from .types import LLMResponse, ToolCall
 
 log = get_logger("codex")
@@ -29,6 +30,9 @@ class CodexChatClient:
         # Tool conversion cache — avoids re-converting same tools across tool loop iterations
         self._last_tools_list: list[dict] | None = None
         self._last_tools_converted: list[dict] = []
+        # Token estimates from last call (for callers that use chat() which returns str)
+        self._last_input_tokens: int = 0
+        self._last_output_tokens: int = 0
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -79,7 +83,12 @@ class CodexChatClient:
         # Note: Codex Responses API does not support max_output_tokens.
         # Callers needing short responses should use prompt instructions instead.
 
-        return await self._stream_request(headers, body)
+        input_tokens = self._estimate_body_input_tokens(body)
+        text = await self._stream_request(headers, body)
+        output_tokens = estimate_tokens(text) if text else 0
+        self._last_input_tokens = input_tokens
+        self._last_output_tokens = output_tokens
+        return text
 
     def _convert_messages(self, messages: list[dict]) -> list[dict]:
         """Convert internal message format to Codex Responses API format."""
@@ -280,6 +289,19 @@ class CodexChatClient:
 
         return codex_input
 
+    @staticmethod
+    def _estimate_body_input_tokens(body: dict) -> int:
+        """Estimate input tokens from a Codex API request body."""
+        chars = len(body.get("instructions", ""))
+        for item in body.get("input", []):
+            if isinstance(item, dict):
+                for block in item.get("content", []):
+                    if isinstance(block, dict):
+                        chars += len(block.get("text", ""))
+                chars += len(item.get("arguments", ""))
+                chars += len(item.get("output", ""))
+        return estimate_tokens("x" * chars) if chars else 1
+
     def _convert_tools_cached(self, tools: list[dict]) -> list[dict]:
         """Convert tools with identity-based caching.
 
@@ -327,7 +349,14 @@ class CodexChatClient:
             "stream": True,
         }
 
-        return await self._stream_tool_request(headers, body)
+        input_tokens = self._estimate_body_input_tokens(body)
+        result = await self._stream_tool_request(headers, body)
+        output_chars = len(result.text)
+        for tc in result.tool_calls:
+            output_chars += len(tc.name) + len(json.dumps(tc.input))
+        result.input_tokens = input_tokens
+        result.output_tokens = estimate_tokens("x" * output_chars) if output_chars else 0
+        return result
 
     async def _stream_tool_request(self, headers: dict, body: dict) -> LLMResponse:
         """Send a streaming request and parse both text and function_call events."""
