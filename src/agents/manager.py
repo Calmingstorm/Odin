@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from ..llm.secret_scrubber import scrub_output_secrets
@@ -27,8 +28,7 @@ WAIT_DEFAULT_TIMEOUT = 300       # default timeout for wait_for_agents
 WAIT_POLL_INTERVAL = 2           # poll interval for wait_for_agents
 ITERATION_CB_TIMEOUT = 120       # 2 min timeout per LLM call
 TOOL_EXEC_TIMEOUT = 300          # 5 min timeout per tool execution
-
-_TERMINAL_STATUSES = frozenset({"completed", "failed", "timeout", "killed"})
+MAX_RECOVERY_ATTEMPTS = 1        # retries before transitioning to FAILED
 
 # Tools agents are NOT allowed to call (prevents nesting and cross-agent interference)
 AGENT_BLOCKED_TOOLS = frozenset({
@@ -44,6 +44,160 @@ AGENT_BLOCKED_TOOLS = frozenset({
 def filter_agent_tools(tools: list[dict]) -> list[dict]:
     """Remove agent-management tools from a tool list for agent isolation."""
     return [t for t in tools if t.get("name") not in AGENT_BLOCKED_TOOLS]
+
+
+# --- Agent State Machine ---
+
+
+class AgentState(str, Enum):
+    """Typed lifecycle states for agent workers."""
+    SPAWNING = "spawning"
+    READY = "ready"
+    EXECUTING = "executing"
+    RECOVERING = "recovering"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    KILLED = "killed"
+
+
+TERMINAL_STATES = frozenset({
+    AgentState.COMPLETED, AgentState.FAILED,
+    AgentState.TIMEOUT, AgentState.KILLED,
+})
+
+ACTIVE_STATES = frozenset({
+    AgentState.SPAWNING, AgentState.READY,
+    AgentState.EXECUTING, AgentState.RECOVERING,
+})
+
+VALID_TRANSITIONS: dict[AgentState, frozenset[AgentState]] = {
+    AgentState.SPAWNING: frozenset({
+        AgentState.READY, AgentState.KILLED,
+        AgentState.FAILED, AgentState.TIMEOUT,
+    }),
+    AgentState.READY: frozenset({
+        AgentState.EXECUTING, AgentState.COMPLETED,
+        AgentState.KILLED, AgentState.TIMEOUT,
+    }),
+    AgentState.EXECUTING: frozenset({
+        AgentState.READY, AgentState.RECOVERING,
+        AgentState.COMPLETED, AgentState.FAILED,
+        AgentState.KILLED, AgentState.TIMEOUT,
+    }),
+    AgentState.RECOVERING: frozenset({
+        AgentState.EXECUTING, AgentState.FAILED,
+        AgentState.KILLED, AgentState.TIMEOUT,
+    }),
+    AgentState.COMPLETED: frozenset(),
+    AgentState.FAILED: frozenset(),
+    AgentState.TIMEOUT: frozenset(),
+    AgentState.KILLED: frozenset(),
+}
+
+# Legacy status strings for backward compatibility
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "timeout", "killed"})
+
+_STATE_TO_LEGACY = {
+    AgentState.SPAWNING: "running",
+    AgentState.READY: "running",
+    AgentState.EXECUTING: "running",
+    AgentState.RECOVERING: "running",
+    AgentState.COMPLETED: "completed",
+    AgentState.FAILED: "failed",
+    AgentState.TIMEOUT: "timeout",
+    AgentState.KILLED: "killed",
+}
+
+
+class InvalidStateTransition(Exception):
+    """Raised when an invalid state transition is attempted."""
+    def __init__(self, from_state: AgentState, to_state: AgentState) -> None:
+        self.from_state = from_state
+        self.to_state = to_state
+        super().__init__(
+            f"Invalid state transition: {from_state.value} → {to_state.value}"
+        )
+
+
+@dataclass
+class StateTransition:
+    """Record of a single state transition."""
+    from_state: AgentState
+    to_state: AgentState
+    timestamp: float
+    reason: str = ""
+
+
+class AgentStateMachine:
+    """Enforced state machine for agent lifecycle.
+
+    Validates transitions against VALID_TRANSITIONS, records full history
+    with timestamps and reasons.
+    """
+
+    def __init__(self, initial: AgentState = AgentState.SPAWNING) -> None:
+        self._state = initial
+        self._history: list[StateTransition] = []
+        self._entered_at = time.time()
+
+    @property
+    def state(self) -> AgentState:
+        return self._state
+
+    @property
+    def is_terminal(self) -> bool:
+        return self._state in TERMINAL_STATES
+
+    @property
+    def is_active(self) -> bool:
+        return self._state in ACTIVE_STATES
+
+    @property
+    def status(self) -> str:
+        """Legacy status string for backward compatibility."""
+        return _STATE_TO_LEGACY.get(self._state, "running")
+
+    @property
+    def time_in_state(self) -> float:
+        """Seconds spent in the current state."""
+        return time.time() - self._entered_at
+
+    def can_transition(self, to: AgentState) -> bool:
+        return to in VALID_TRANSITIONS.get(self._state, frozenset())
+
+    def transition(self, to: AgentState, reason: str = "") -> StateTransition:
+        """Transition to a new state. Raises InvalidStateTransition if invalid."""
+        if not self.can_transition(to):
+            raise InvalidStateTransition(self._state, to)
+        old = self._state
+        now = time.time()
+        record = StateTransition(old, to, now, reason)
+        self._state = to
+        self._entered_at = now
+        self._history.append(record)
+        return record
+
+    @property
+    def history(self) -> list[StateTransition]:
+        return list(self._history)
+
+    @property
+    def transition_count(self) -> int:
+        return len(self._history)
+
+    def history_as_dicts(self) -> list[dict]:
+        """Serialize transition history for API responses."""
+        return [
+            {
+                "from": t.from_state.value,
+                "to": t.to_state.value,
+                "timestamp": t.timestamp,
+                "reason": t.reason,
+            }
+            for t in self._history
+        ]
+
 
 # Callback types
 # iteration_callback: (messages, system_prompt, tools) → LLMResponse-like dict
@@ -76,7 +230,6 @@ class AgentInfo:
     channel_id: str
     requester_id: str
     requester_name: str
-    status: str = "running"         # running | completed | failed | timeout | killed
     created_at: float = field(default_factory=time.time)
     ended_at: float | None = None
     result: str = ""
@@ -85,9 +238,36 @@ class AgentInfo:
     tools_used: list[str] = field(default_factory=list)
     iteration_count: int = 0
     last_activity: float = field(default_factory=time.time)
+    recovery_attempts: int = 0
     _task: asyncio.Task | None = field(default=None, repr=False)
     _cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     _inbox: asyncio.Queue = field(default_factory=asyncio.Queue)
+    _sm: AgentStateMachine = field(default_factory=AgentStateMachine)
+
+    @property
+    def status(self) -> str:
+        """Legacy status string: running/completed/failed/timeout/killed."""
+        return self._sm.status
+
+    @property
+    def state(self) -> AgentState:
+        """Current typed state."""
+        return self._sm.state
+
+    @property
+    def state_history(self) -> list[StateTransition]:
+        return self._sm.history
+
+    def transition(self, to: AgentState, reason: str = "") -> StateTransition:
+        """Transition agent state. Logs the transition."""
+        record = self._sm.transition(to, reason)
+        log.debug(
+            "Agent %s (%s): %s → %s%s",
+            self.id, self.label,
+            record.from_state.value, record.to_state.value,
+            f" ({reason})" if reason else "",
+        )
+        return record
 
 
 class AgentManager:
@@ -115,7 +295,7 @@ class AgentManager:
         # Check per-channel limit
         channel_count = sum(
             1 for a in self._agents.values()
-            if a.channel_id == channel_id and a.status == "running"
+            if a.channel_id == channel_id and a._sm.is_active
         )
         if channel_count >= MAX_CONCURRENT_AGENTS:
             return f"Error: Maximum concurrent agents ({MAX_CONCURRENT_AGENTS}) reached for this channel."
@@ -176,7 +356,7 @@ class AgentManager:
         agent = self._agents.get(agent_id)
         if not agent:
             return f"Error: Agent '{agent_id}' not found."
-        if agent.status != "running":
+        if agent._sm.is_terminal:
             return f"Error: Agent '{agent_id}' is not running (status: {agent.status})."
         if not message:
             return "Error: Message cannot be empty."
@@ -196,6 +376,7 @@ class AgentManager:
                 "id": agent.id,
                 "label": agent.label,
                 "status": agent.status,
+                "state": agent.state.value,
                 "iteration_count": agent.iteration_count,
                 "runtime_seconds": round(runtime, 1),
                 "tools_used": len(agent.tools_used),
@@ -208,7 +389,7 @@ class AgentManager:
         agent = self._agents.get(agent_id)
         if not agent:
             return f"Error: Agent '{agent_id}' not found."
-        if agent.status != "running":
+        if agent._sm.is_terminal:
             return f"Agent '{agent_id}' already in terminal state: {agent.status}."
 
         agent._cancel_event.set()
@@ -226,12 +407,15 @@ class AgentManager:
             "id": agent.id,
             "label": agent.label,
             "status": agent.status,
+            "state": agent.state.value,
             "result": agent.result,
             "error": agent.error,
             "iteration_count": agent.iteration_count,
             "tools_used": agent.tools_used,
             "runtime_seconds": round(runtime, 1),
             "goal": agent.goal,
+            "recovery_attempts": agent.recovery_attempts,
+            "state_history": agent._sm.history_as_dicts(),
         }
 
     async def wait_for_agents(
@@ -253,7 +437,7 @@ class AgentManager:
             all_done = True
             for aid in agent_ids:
                 agent = self._agents.get(aid)
-                if agent and agent.status not in _TERMINAL_STATUSES:
+                if agent and agent._sm.is_active:
                     all_done = False
                     break
             if all_done:
@@ -327,7 +511,7 @@ class AgentManager:
         now = time.time()
         to_remove = []
         for agent_id, agent in self._agents.items():
-            if agent.status in ("completed", "failed", "timeout", "killed"):
+            if agent._sm.is_terminal:
                 if agent.ended_at and (now - agent.ended_at) > CLEANUP_DELAY:
                     to_remove.append(agent_id)
 
@@ -364,7 +548,7 @@ class AgentManager:
         killed = 0
         stale = 0
         for agent in list(self._agents.values()):
-            if agent.status != "running":
+            if agent._sm.is_terminal:
                 continue
             elapsed = now - agent.created_at
             idle = now - agent.last_activity
@@ -385,7 +569,7 @@ class AgentManager:
 
     @property
     def active_count(self) -> int:
-        return sum(1 for a in self._agents.values() if a.status == "running")
+        return sum(1 for a in self._agents.values() if a._sm.is_active)
 
     @property
     def total_count(self) -> int:
@@ -403,27 +587,37 @@ async def _run_agent(
 ) -> None:
     """Execute an agent's tool loop until completion, error, or timeout.
 
-    Agents are silent internal workers — they do NOT post directly to Discord.
-    Results are stored in agent.result/agent.error for the parent to collect
-    via wait_for_agents or get_agent_results.
+    Uses the AgentStateMachine to enforce valid lifecycle transitions:
+    SPAWNING → READY → EXECUTING → READY (loop) or → terminal.
+    On transient LLM errors, transitions through RECOVERING for one retry.
     """
 
-    try:
-        for iteration in range(MAX_AGENT_ITERATIONS):
-            # Check cancellation
-            if agent._cancel_event.is_set():
-                agent.status = "killed"
-                agent.ended_at = time.time()
-                log.info("Agent %s (%s) killed after %ds", agent.id, agent.label, int(time.time() - agent.created_at))
-                return
+    def _check_kill() -> bool:
+        if agent._cancel_event.is_set():
+            agent.transition(AgentState.KILLED, "cancel signal")
+            agent.ended_at = time.time()
+            log.info("Agent %s (%s) killed after %ds", agent.id, agent.label, int(time.time() - agent.created_at))
+            return True
+        return False
 
-            # Check lifetime
-            elapsed = time.time() - agent.created_at
-            if elapsed > MAX_AGENT_LIFETIME:
-                agent.status = "timeout"
-                agent.result = _get_last_progress(agent)
-                agent.ended_at = time.time()
-                log.warning("Agent %s (%s) timed out after %ds, %d iterations", agent.id, agent.label, int(elapsed), agent.iteration_count)
+    def _check_lifetime() -> bool:
+        elapsed = time.time() - agent.created_at
+        if elapsed > MAX_AGENT_LIFETIME:
+            agent.transition(AgentState.TIMEOUT, f"lifetime exceeded ({int(elapsed)}s)")
+            agent.result = _get_last_progress(agent)
+            agent.ended_at = time.time()
+            log.warning("Agent %s (%s) timed out after %ds, %d iterations", agent.id, agent.label, int(elapsed), agent.iteration_count)
+            return True
+        return False
+
+    try:
+        # Transition from SPAWNING → READY
+        agent.transition(AgentState.READY, "initialization complete")
+
+        for iteration in range(MAX_AGENT_ITERATIONS):
+            if _check_kill():
+                return
+            if _check_lifetime():
                 return
 
             # Check inbox for injected messages
@@ -438,26 +632,17 @@ async def _run_agent(
                 except asyncio.QueueEmpty:
                     break
 
-            # Call LLM
+            # Transition READY → EXECUTING for LLM call
+            agent.transition(AgentState.EXECUTING, f"iteration {iteration + 1}")
             agent.last_activity = time.time()
             agent.iteration_count = iteration + 1
 
-            try:
-                response = await asyncio.wait_for(
-                    iteration_callback(agent.messages, system_prompt, tools),
-                    timeout=ITERATION_CB_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                log.error("Agent %s LLM call timed out at iteration %d", agent.id, iteration)
-                agent.status = "failed"
-                agent.error = f"LLM call timed out after {ITERATION_CB_TIMEOUT}s"
-                agent.ended_at = time.time()
-                return
-            except Exception as e:
-                log.error("Agent %s LLM call failed at iteration %d: %s", agent.id, iteration, e)
-                agent.status = "failed"
-                agent.error = f"LLM call failed: {e}"
-                agent.ended_at = time.time()
+            # Call LLM with recovery support
+            response = await _call_llm_with_recovery(
+                agent, iteration_callback, system_prompt, tools,
+            )
+            if response is None:
+                # Terminal state already set by recovery logic
                 return
 
             text = response.get("text", "")
@@ -468,7 +653,7 @@ async def _run_agent(
 
             # No tool calls = agent is done
             if not tool_calls:
-                agent.status = "completed"
+                agent.transition(AgentState.COMPLETED, "no more tool calls")
                 agent.result = text
                 agent.ended_at = time.time()
                 elapsed = time.time() - agent.created_at
@@ -505,6 +690,9 @@ async def _run_agent(
                     "content": f"[Tool result: {tool_name}]\n{result}",
                 })
 
+            # Back to READY for next iteration
+            agent.transition(AgentState.READY, "tools complete")
+
             # Check stale warning
             if time.time() - agent.last_activity > STALE_WARN_SECONDS:
                 log.warning(
@@ -512,23 +700,76 @@ async def _run_agent(
                     agent.id, agent.label, STALE_WARN_SECONDS,
                 )
 
-        # Exhausted iterations
-        agent.status = "completed"
+        # Exhausted iterations — transition from READY → COMPLETED
+        agent.transition(AgentState.COMPLETED, f"max iterations ({MAX_AGENT_ITERATIONS}) reached")
         agent.result = _get_last_progress(agent)
         agent.ended_at = time.time()
         elapsed = time.time() - agent.created_at
         log.info("Agent %s (%s) completed in %ds after %d iterations (max reached), %d tool calls", agent.id, agent.label, int(elapsed), MAX_AGENT_ITERATIONS, len(agent.tools_used))
 
     except asyncio.CancelledError:
-        agent.status = "killed"
+        if not agent._sm.is_terminal:
+            agent.transition(AgentState.KILLED, "task cancelled")
         agent.ended_at = time.time()
         log.info("Agent %s (%s) was cancelled", agent.id, agent.label)
 
     except Exception as e:
-        agent.status = "failed"
+        if not agent._sm.is_terminal:
+            agent.transition(AgentState.FAILED, f"unhandled: {e}")
         agent.error = str(e)
         agent.ended_at = time.time()
         log.error("Agent %s (%s) crashed: %s", agent.id, agent.label, e)
+
+
+async def _call_llm_with_recovery(
+    agent: AgentInfo,
+    iteration_callback: IterationCallback,
+    system_prompt: str,
+    tools: list[dict],
+) -> dict | None:
+    """Call LLM with single-retry recovery on transient errors.
+
+    On first failure: EXECUTING → RECOVERING → EXECUTING (retry).
+    On second failure: EXECUTING → FAILED.
+    Returns the LLM response dict, or None if agent reached terminal state.
+    """
+    try:
+        return await asyncio.wait_for(
+            iteration_callback(agent.messages, system_prompt, tools),
+            timeout=ITERATION_CB_TIMEOUT,
+        )
+    except (asyncio.TimeoutError, Exception) as first_err:
+        is_timeout = isinstance(first_err, asyncio.TimeoutError)
+        err_desc = f"LLM {'timeout' if is_timeout else 'error'}: {first_err}" if not is_timeout else f"LLM timeout after {ITERATION_CB_TIMEOUT}s"
+
+        if agent.recovery_attempts < MAX_RECOVERY_ATTEMPTS:
+            agent.recovery_attempts += 1
+            agent.transition(AgentState.RECOVERING, err_desc)
+            log.warning("Agent %s recovering (attempt %d): %s", agent.id, agent.recovery_attempts, err_desc)
+
+            # Brief pause before retry
+            await asyncio.sleep(1)
+
+            agent.transition(AgentState.EXECUTING, "retry after recovery")
+
+            try:
+                return await asyncio.wait_for(
+                    iteration_callback(agent.messages, system_prompt, tools),
+                    timeout=ITERATION_CB_TIMEOUT,
+                )
+            except (asyncio.TimeoutError, Exception) as retry_err:
+                retry_desc = f"retry failed: {retry_err}"
+                log.error("Agent %s recovery failed: %s", agent.id, retry_desc)
+                agent.transition(AgentState.FAILED, retry_desc)
+                agent.error = str(retry_err)
+                agent.ended_at = time.time()
+                return None
+        else:
+            log.error("Agent %s LLM call failed (no retries left): %s", agent.id, err_desc)
+            agent.transition(AgentState.FAILED, err_desc)
+            agent.error = str(first_err)
+            agent.ended_at = time.time()
+            return None
 
 
 def _get_last_progress(agent: AgentInfo) -> str:
@@ -537,5 +778,3 @@ def _get_last_progress(agent: AgentInfo) -> str:
         if msg["role"] == "assistant" and msg.get("content"):
             return msg["content"]
     return "(no output)"
-
-

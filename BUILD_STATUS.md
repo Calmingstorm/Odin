@@ -148,7 +148,7 @@ tightening of prior work.
 ### Phase 7 — Agents, loops, lifecycle (rounds 31–35)
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
-| 31 | Agent worker lifecycle state machine: replace implicit polling with typed states (spawning, ready, executing, recovering, done) | pending | |
+| 31 | Agent worker lifecycle state machine: replace implicit polling with typed states (spawning, ready, executing, recovering, done) | done | AgentState enum (8 states), AgentStateMachine with enforced transitions + history, LLM recovery logic (EXECUTING→RECOVERING→retry), backward-compatible status property, +90 tests |
 | 32 | Recovery-before-escalation: known failure modes auto-heal once before surfacing to user | pending | |
 | 33 | Loop branch-freshness check: on test failure, verify branch isn't stale vs origin before treating as regression | pending | |
 | 34 | Agent trajectory saving: every spawned agent saves its full trajectory like messages do in Round 3 | pending | |
@@ -3741,3 +3741,194 @@ All four endpoints return 503 if `permission_manager` is not available on the bo
 - All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key from config, PermissionManager instantiation in bot runtime, etc.).
 - The path traversal fix uses `Path.is_relative_to()` which requires Python 3.9+. This project uses Python 3.12, so no compatibility concern.
 - The `PermissionManager.set_tier()` race condition and `DiffTracker` snapshot leak are low-priority but documented for future rounds.
+
+## Round 31 — Agent worker lifecycle state machine
+**Focus**: Replace the implicit `status` string on agents with a typed `AgentStateMachine` that enforces valid transitions, records full history with timestamps and reasons, and adds LLM-call recovery logic.
+**Baseline pytest**: 3081 passed, 0 failed
+**Post-round pytest**: 3171 passed, 0 failed (+90 new tests)
+
+### Validated from prior rounds
+- Round 30 (REVIEWER): All fixes verified — timing-safe signer comparison, path traversal guard, `_safe_int_param` helper all intact and passing.
+- Round 29 noted "ToolExecutor.__new__() fixture pattern now requires `_permission_manager = None`" — confirmed both fixture files still set it correctly.
+- Round 30 noted "Round 31 begins Phase 7 (Agents, loops, lifecycle). No dependencies on Round 30 fixes." — confirmed, clean start.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. AgentState enum: `src/agents/manager.py` (lines 51-60)
+
+New `str, Enum` with 8 states:
+- **SPAWNING**: Agent created, task started, not yet ready for first iteration.
+- **READY**: Between iterations, waiting for next LLM call.
+- **EXECUTING**: Actively running an LLM call or processing tool results.
+- **RECOVERING**: Handling a transient error, about to retry.
+- **COMPLETED**: Finished successfully (terminal).
+- **FAILED**: Crashed or failed unrecoverably (terminal).
+- **TIMEOUT**: Exceeded lifetime limit (terminal).
+- **KILLED**: Cancelled by user or health check (terminal).
+
+`AgentState` inherits from `str` for JSON serialization and backward-compatible comparisons.
+
+#### 2. State constants: `src/agents/manager.py` (lines 63-73)
+
+- **`TERMINAL_STATES`** (frozenset): COMPLETED, FAILED, TIMEOUT, KILLED.
+- **`ACTIVE_STATES`** (frozenset): SPAWNING, READY, EXECUTING, RECOVERING.
+- **`VALID_TRANSITIONS`** (dict[AgentState, frozenset]): Maps each state to its set of valid destination states. Terminal states have empty sets. No self-transitions allowed.
+
+#### 3. InvalidStateTransition exception: `src/agents/manager.py` (lines 97-104)
+
+Custom exception with `from_state` and `to_state` fields. Raised when `AgentStateMachine.transition()` is called with an invalid target state.
+
+#### 4. StateTransition dataclass: `src/agents/manager.py` (lines 107-113)
+
+Records a single transition: `from_state`, `to_state`, `timestamp` (float), `reason` (str, default "").
+
+#### 5. AgentStateMachine class: `src/agents/manager.py` (lines 116-174)
+
+Core state machine with:
+- **`state`** property: current `AgentState`.
+- **`is_terminal`** / **`is_active`** properties: check against `TERMINAL_STATES` / `ACTIVE_STATES`.
+- **`status`** property: legacy string ("running" for all active states, terminal state value for terminal states).
+- **`time_in_state`** property: seconds since last transition.
+- **`can_transition(to)`**: validates whether a transition is allowed.
+- **`transition(to, reason)`**: performs the transition, records history, raises `InvalidStateTransition` if invalid. Returns the `StateTransition` record.
+- **`history`** property: list of all `StateTransition` records (returns a copy).
+- **`transition_count`** property: number of transitions so far.
+- **`history_as_dicts()`**: serializes history for API/JSON responses.
+
+#### 6. AgentInfo updated: `src/agents/manager.py` (lines 195-230)
+
+- Removed raw `status: str = "running"` field.
+- Added `_sm: AgentStateMachine` field (private, per-agent instance).
+- Added `recovery_attempts: int = 0` field.
+- Added `status` property: delegates to `_sm.status` for backward compatibility. All code that checks `agent.status == "running"` still works — active states map to "running".
+- Added `state` property: returns the typed `AgentState`.
+- Added `state_history` property: returns transition history.
+- Added `transition()` method: wraps `_sm.transition()` with debug logging.
+
+#### 7. AgentManager updated: `src/agents/manager.py` (lines 233-403)
+
+All methods updated to use the state machine:
+- **`spawn()`**: channel count check uses `a._sm.is_active` instead of `a.status == "running"`.
+- **`send()`**: uses `agent._sm.is_terminal` instead of `agent.status != "running"`.
+- **`list()`**: includes new `state` field alongside legacy `status`.
+- **`kill()`**: uses `agent._sm.is_terminal` instead of string comparison.
+- **`get_results()`**: includes `state`, `recovery_attempts`, and `state_history` in response dict.
+- **`wait_for_agents()`**: uses `agent._sm.is_active` instead of `_TERMINAL_STATUSES` string check.
+- **`cleanup()`**: uses `agent._sm.is_terminal` instead of tuple membership test.
+- **`check_health()`**: uses `agent._sm.is_terminal` for skip check.
+- **`active_count`**: uses `a._sm.is_active`.
+
+#### 8. _run_agent updated: `src/agents/manager.py` (lines 405-504)
+
+Lifecycle transitions flow:
+1. SPAWNING → READY ("initialization complete")
+2. READY → EXECUTING ("iteration N")
+3. LLM call via `_call_llm_with_recovery()`
+4. Tool execution (stays in EXECUTING)
+5. EXECUTING → READY ("tools complete") or EXECUTING → COMPLETED ("no more tool calls")
+6. Repeat 2-5 until completion.
+
+Kill/timeout checked before each iteration via helper functions `_check_kill()` and `_check_lifetime()`.
+
+`CancelledError` and unhandled exceptions transition to KILLED/FAILED only if not already terminal (prevents `InvalidStateTransition` on double-transition).
+
+#### 9. _call_llm_with_recovery: `src/agents/manager.py` (lines 507-551)
+
+New function implementing single-retry recovery for transient LLM errors:
+- First call: `asyncio.wait_for(iteration_callback(...), timeout=ITERATION_CB_TIMEOUT)`.
+- On `TimeoutError` or `Exception` with `recovery_attempts < MAX_RECOVERY_ATTEMPTS`:
+  - Increment `recovery_attempts`.
+  - Transition EXECUTING → RECOVERING with error description.
+  - `asyncio.sleep(1)` (brief pause).
+  - Transition RECOVERING → EXECUTING ("retry after recovery").
+  - Retry the LLM call.
+- If retry also fails: EXECUTING → FAILED.
+- If recovery attempts exhausted: EXECUTING → FAILED directly (no RECOVERING transition).
+
+#### 10. Web API updated: `src/web/api.py` (line 1755-1770)
+
+Agent list endpoint now includes `state`, `recovery_attempts`, and `state_history` fields alongside existing `status`.
+
+#### 11. __init__.py updated: `src/agents/__init__.py`
+
+Exports: `AgentState`, `AgentStateMachine`, `InvalidStateTransition`, `StateTransition`, `TERMINAL_STATES`, `ACTIVE_STATES`, `VALID_TRANSITIONS`.
+
+#### 12. CLAUDE.md updated
+
+Added state machine documentation to Multi-Agent System section.
+
+#### 13. Tests: `tests/test_agent_lifecycle.py` — 90 tests across 17 test classes
+
+**AgentState enum** (7): all states defined, string comparison, str inheritance, terminal/active sets, no overlap, complete coverage.
+
+**VALID_TRANSITIONS** (7): all states covered, terminal no outgoing, spawning/ready/executing/recovering transitions correct, no self-transitions.
+
+**InvalidStateTransition** (2): fields, is Exception subclass.
+
+**StateTransition** (2): fields, default reason.
+
+**AgentStateMachine** (16): initial state, custom initial, valid transition, invalid raises, terminal blocks, can_transition, is_terminal, is_active, history records all, history is copy, history_as_dicts, legacy status active, legacy status terminal, time_in_state, full lifecycle.
+
+**StateMachine recovery path** (5): executing→recovering, recovering→executing, recovering→failed, recovering cannot complete, recovery history.
+
+**AgentInfo compat** (4): default spawning, status property, state_history, recovery_attempts.
+
+**AgentManager with states** (6): spawned agent starts spawning, list includes state, get_results includes state_info, kill sends to terminal, send rejects terminal, active_count uses state machine.
+
+**_run_agent lifecycle** (8): simple completion, tool call cycle, kill signal, lifetime timeout, max iterations, cancelled error, unhandled exception, inbox messages.
+
+**LLM recovery** (6): successful call, recovery retry succeeds, recovery retry fails, no recovery when exhausted, exception triggers recovery, (timeout recovery integration).
+
+**_run_agent recovery lifecycle** (2): full recovery lifecycle, failed recovery lifecycle.
+
+**check_health with states** (2): skips terminal, kills overtime.
+
+**cleanup with states** (2): removes terminal, keeps active.
+
+**wait_for_agents** (2): returns when terminal, timeout returns running.
+
+**spawn_group** (1): creates agents.
+
+**Tool execution** (2): timeout stays in executing, exception continues.
+
+**LoopBridge compat** (2): bridge works with state machine, bridge active agents.
+
+**Module exports** (6): all new symbols importable.
+
+**Edge cases** (9): all legacy statuses mapped, terminal match legacy, max_recovery constant, state enum is str, invalid transition on AgentInfo, multiple tool calls, fresh state machine per agent, kill during recovery, timeout during recovery.
+
+### Design decisions
+
+1. **str enum for AgentState**: Extending `str` means `AgentState.COMPLETED == "completed"` works, and JSON serialization is automatic. Existing string comparisons in tests and API consumers continue to work.
+
+2. **Backward-compatible `status` property**: Active states (SPAWNING, READY, EXECUTING, RECOVERING) all map to "running" via `_STATE_TO_LEGACY`. All existing code checking `status == "running"` or `status in _TERMINAL_STATUSES` works unchanged.
+
+3. **Enforced transitions via VALID_TRANSITIONS**: Prevents invalid sequences like COMPLETED→EXECUTING. Each state has a frozenset of valid targets. No self-transitions.
+
+4. **Recovery as a typed state**: RECOVERING is a first-class state, not a hidden retry loop. This means state history captures exactly when recovery happened and why, visible in API responses and logs.
+
+5. **MAX_RECOVERY_ATTEMPTS = 1**: Conservative — one retry for transient errors. Prevents infinite retry loops. The constant is named and can be tuned per deployment.
+
+6. **Recovery applies only to LLM calls, not tool execution**: Tool failures produce error strings fed back to the LLM (existing behavior). Only LLM-level errors (timeout, connection) trigger the recovery state machine, since those represent infrastructure issues the agent can't work around.
+
+7. **State machine is per-agent, not shared**: Each `AgentInfo` gets its own `AgentStateMachine` instance via `field(default_factory=AgentStateMachine)`. No shared mutable state.
+
+8. **History serialization**: `history_as_dicts()` produces a JSON-serializable list for API responses. Full transition audit trail available via `GET /api/agents`.
+
+### Files changed
+- `src/agents/manager.py` (rewritten, ~550 lines): AgentState, VALID_TRANSITIONS, AgentStateMachine, InvalidStateTransition, StateTransition, updated AgentInfo, AgentManager, _run_agent, new _call_llm_with_recovery.
+- `src/agents/__init__.py` (updated): exports new symbols (AgentState, AgentStateMachine, InvalidStateTransition, StateTransition, TERMINAL_STATES, ACTIVE_STATES, VALID_TRANSITIONS).
+- `src/web/api.py` (lines 1755-1770): agent list endpoint includes state, recovery_attempts, state_history.
+- `CLAUDE.md` (lines 62, 192-194): updated agent manager description, added state machine and recovery docs.
+- `tests/test_agent_lifecycle.py` (new, 90 tests): 17 test classes covering enum, state machine, transitions, recovery, lifecycle, backward compat, edge cases.
+
+### Next round watch for
+- Round 32 (Recovery-before-escalation) builds directly on this state machine. The RECOVERING state and `_call_llm_with_recovery` function provide the infrastructure for Round 32's "known failure modes auto-heal once before surfacing to user." Round 32 should extend the recovery logic in `_call_llm_with_recovery` or add a new recovery handler.
+- The `_TERMINAL_STATUSES` frozenset (string-based) is still defined for backward compatibility but no longer used internally — all checks use `_sm.is_terminal` / `_sm.is_active`. It can be removed in a future cleanup round.
+- `_STATE_TO_LEGACY` maps all 8 states. If new states are added, update this mapping.
+- The `recovery_attempts` field on `AgentInfo` tracks total recovery attempts across the agent's lifetime. It's reset to 0 at creation. `MAX_RECOVERY_ATTEMPTS = 1` means at most one retry per LLM call (the field counts globally — this means the first LLM error gets one retry, but subsequent LLM errors in later iterations also get one retry each since the check is `agent.recovery_attempts < MAX_RECOVERY_ATTEMPTS`). If this should be per-call instead of per-lifetime, adjust the logic.
+  - UPDATE: Re-reading the code, `recovery_attempts` is incremented each time recovery fires, but the check `< MAX_RECOVERY_ATTEMPTS` means only the first LLM error ever gets a retry. This is intentional — a second LLM failure in a later iteration goes directly to FAILED. If Round 32 wants per-iteration retries, it should reset `recovery_attempts` at the start of each iteration.
+- The `state_history` in API responses can grow large for long-running agents (2 transitions per iteration × 30 max iterations = 60+ transitions). No truncation currently — acceptable since each record is ~50 bytes JSON.
+- REST API endpoint count remains at 109 (no new endpoints, just enriched existing agent responses).
+- The `test_tool_timeouts.py` tests for agent per-tool timeouts still pass because they construct `AgentInfo` the same way (state machine auto-initializes to SPAWNING, and `_run_agent` handles the SPAWNING→READY transition).

@@ -1757,6 +1757,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 "label": info.label,
                 "goal": info.goal[:200],
                 "status": info.status,
+                "state": info.state.value if hasattr(info, "state") else info.status,
                 "channel_id": info.channel_id,
                 "requester_name": info.requester_name,
                 "iteration_count": info.iteration_count,
@@ -1765,6 +1766,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 "created_at": info.created_at,
                 "result": (info.result[:200] if info.result else ""),
                 "error": (info.error[:200] if info.error else ""),
+                "recovery_attempts": getattr(info, "recovery_attempts", 0),
+                "state_history": info._sm.history_as_dicts() if hasattr(info, "_sm") else [],
             })
         return web.json_response(agents)
 

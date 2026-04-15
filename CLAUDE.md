@@ -59,7 +59,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/web/api.py` — REST API for web management UI (55 endpoints)
   - `src/web/websocket.py` — WebSocket handler for live updates (logs, events)
   - `src/web/chat.py` — chat backend for web UI and WebSocket chat
-  - `src/agents/manager.py` — multi-agent orchestration (spawn, manage, kill agents)
+  - `src/agents/manager.py` — multi-agent orchestration with lifecycle state machine (AgentState enum, AgentStateMachine, typed transitions, recovery)
   - `src/agents/loop_bridge.py` — bridge between autonomous loops and agent system
 - `tests/` — pytest test suite (async, mocked SSH/API calls), 9000+ tests
 - `config.yml` — runtime configuration
@@ -189,10 +189,12 @@ No classifier. No approval prompts. No keyword routing. One path: Codex with too
 
 ### Multi-Agent System
 - **AgentManager** (`src/agents/manager.py`) orchestrates autonomous agents: spawn, send messages, kill, wait for completion.
+- **AgentStateMachine**: Typed lifecycle states (SPAWNING→READY→EXECUTING→RECOVERING→terminal). Enforced transitions, full history with timestamps/reasons.
+- **Recovery**: On transient LLM errors (timeout, connection), agents transition EXECUTING→RECOVERING→EXECUTING for one retry before FAILED.
 - **LoopAgentBridge** (`src/agents/loop_bridge.py`) integrates agents with autonomous loops — loops can spawn sub-agents for parallel work.
 - Limits: 5 concurrent agents per channel, 30 iterations per agent, 1-hour lifetime, max 3 agents per loop iteration.
 - Agents cannot spawn sub-agents (blocked tools enforce isolation).
-- Agent CRUD exposed via REST API (`/api/agents`).
+- Agent CRUD exposed via REST API (`/api/agents`). Agent list/results include `state` (typed) and `state_history`.
 
 ### Caching Strategy (Rounds 21-22)
 - **Tool definitions**: merged tools list cached per message, invalidated on skill CRUD and `/reload`.
