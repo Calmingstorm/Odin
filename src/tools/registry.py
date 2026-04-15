@@ -266,6 +266,69 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "update_schedule",
+        "description": (
+            "Updates an existing schedule by ID. Only provided fields are changed. "
+            "Can change description, cron, run_at, trigger, message, tool_name, tool_input, steps, or channel_id. "
+            "Changing timing (cron/run_at/trigger) replaces the previous timing mode."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "schedule_id": {
+                    "type": "string",
+                    "description": "Schedule ID to update (from list_schedules)",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "New description",
+                },
+                "cron": {
+                    "type": "string",
+                    "description": "New cron expression (replaces previous timing)",
+                },
+                "run_at": {
+                    "type": "string",
+                    "description": "New ISO datetime for one-time (replaces previous timing)",
+                },
+                "trigger": {
+                    "type": "object",
+                    "description": "New webhook trigger (replaces previous timing)",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "New message (for reminder actions)",
+                },
+                "tool_name": {
+                    "type": "string",
+                    "description": "New tool name (for check actions)",
+                },
+                "tool_input": {
+                    "type": "object",
+                    "description": "New tool input parameters",
+                },
+                "steps": {
+                    "type": "array",
+                    "description": "New workflow steps",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tool_name": {"type": "string"},
+                            "tool_input": {"type": "object"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["tool_name"],
+                    },
+                },
+                "channel_id": {
+                    "type": "string",
+                    "description": "New channel ID for notifications",
+                },
+            },
+            "required": ["schedule_id"],
+        },
+    },
+    {
         "name": "delete_schedule",
         "description": "Deletes a scheduled task by ID. To list schedules first, use list_schedules.",
         "input_schema": {

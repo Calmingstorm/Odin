@@ -243,6 +243,96 @@ class Scheduler:
     def list_all(self) -> list[dict]:
         return list(self._schedules)
 
+    async def update(
+        self,
+        schedule_id: str,
+        *,
+        description: str | None = None,
+        cron: str | None = None,
+        run_at: str | None = None,
+        message: str | None = None,
+        tool_name: str | None = None,
+        tool_input: dict | None = None,
+        steps: list[dict] | None = None,
+        trigger: dict | None = None,
+        channel_id: str | None = None,
+    ) -> dict | None:
+        """Update mutable fields on an existing schedule.
+
+        Returns the updated schedule dict, or ``None`` if *schedule_id* was
+        not found.  Only supplied (non-``None``) fields are changed.
+
+        Changing timing (cron/run_at/trigger) replaces the previous timing
+        mode entirely — e.g. passing ``cron`` on a one-time schedule converts
+        it to recurring.
+        """
+        async with self._lock:
+            target: dict | None = None
+            for s in self._schedules:
+                if s["id"] == schedule_id:
+                    target = s
+                    break
+            if target is None:
+                return None
+
+            # --- simple text fields ---
+            if description is not None:
+                target["description"] = description
+            if message is not None:
+                target["message"] = message
+            if channel_id is not None:
+                target["channel_id"] = channel_id
+
+            # --- action-specific payload fields ---
+            action = target["action"]
+            if tool_name is not None:
+                if action == "check":
+                    if tool_name not in ALLOWED_CHECK_TOOLS:
+                        raise ValueError(
+                            f"Tool '{tool_name}' is not allowed for scheduled checks. "
+                            f"Allowed: {', '.join(sorted(ALLOWED_CHECK_TOOLS))}"
+                        )
+                target["tool_name"] = tool_name
+            if tool_input is not None:
+                target["tool_input"] = tool_input
+            if steps is not None:
+                if action == "workflow":
+                    for i, step in enumerate(steps):
+                        if not isinstance(step, dict) or "tool_name" not in step:
+                            raise ValueError(f"Step {i}: must be a dict with 'tool_name'")
+                target["steps"] = steps
+
+            # --- timing mode changes ---
+            new_timing = trigger is not None or cron is not None or run_at is not None
+            if new_timing:
+                # Clear previous timing fields
+                for key in ("cron", "run_at", "next_run", "trigger"):
+                    target.pop(key, None)
+
+                if trigger is not None:
+                    self._validate_trigger(trigger)
+                    target["trigger"] = trigger
+                    target["one_time"] = False
+                elif cron is not None:
+                    if not croniter.is_valid(cron):
+                        raise ValueError(f"Invalid cron expression: {cron}")
+                    target["cron"] = cron
+                    target["one_time"] = False
+                    cr = croniter(cron, datetime.now(timezone.utc))
+                    target["next_run"] = cr.get_next(datetime).isoformat()
+                elif run_at is not None:
+                    try:
+                        datetime.fromisoformat(run_at)
+                    except (ValueError, TypeError):
+                        raise ValueError(f"Invalid ISO datetime for run_at: {run_at!r}")
+                    target["run_at"] = run_at
+                    target["next_run"] = run_at
+                    target["one_time"] = True
+
+            await asyncio.to_thread(self._save)
+            log.info("Updated schedule %s", schedule_id)
+            return dict(target)
+
     async def delete(self, schedule_id: str) -> bool:
         async with self._lock:
             before = len(self._schedules)

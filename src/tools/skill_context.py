@@ -380,6 +380,16 @@ class SkillContext:
             return []
         return self._scheduler.list_all()
 
+    async def update_schedule(self, schedule_id: str, **kwargs: Any) -> dict | None:
+        """Update a scheduled task by ID. Returns the updated schedule, or None.
+
+        Keyword args are passed to Scheduler.update() — e.g. description,
+        cron, run_at, trigger, message, tool_name, tool_input, steps, channel_id.
+        """
+        if not self._scheduler:
+            return None
+        return await self._scheduler.update(schedule_id, **kwargs)
+
     async def delete_schedule(self, schedule_id: str) -> bool:
         """Delete a scheduled task by ID. Returns True if deleted."""
         if not self._scheduler:

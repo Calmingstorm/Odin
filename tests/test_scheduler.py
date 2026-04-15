@@ -320,3 +320,145 @@ class TestSchedulerConcurrency:
         remaining = s.list_all()
         assert len(remaining) == 1
         assert remaining[0]["description"] == "concurrent"
+
+
+# ---------------------------------------------------------------------------
+# Tests — update()
+# ---------------------------------------------------------------------------
+
+class TestSchedulerUpdate:
+    """Test schedule update (partial modification)."""
+
+    async def test_update_description(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("original", "reminder", "chan1", cron="*/5 * * * *")
+        updated = await s.update(sched["id"], description="renamed")
+        assert updated is not None
+        assert updated["description"] == "renamed"
+        assert s.list_all()[0]["description"] == "renamed"
+
+    async def test_update_message(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("reminder", "reminder", "chan1", cron="0 9 * * *", message="old msg")
+        updated = await s.update(sched["id"], message="new msg")
+        assert updated["message"] == "new msg"
+
+    async def test_update_channel_id(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("test", "reminder", "chan1", cron="0 * * * *")
+        updated = await s.update(sched["id"], channel_id="chan2")
+        assert updated["channel_id"] == "chan2"
+
+    async def test_update_cron_expression(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("cron job", "reminder", "chan1", cron="*/5 * * * *")
+        old_next = sched["next_run"]
+        updated = await s.update(sched["id"], cron="0 12 * * *")
+        assert updated["cron"] == "0 12 * * *"
+        assert updated["next_run"] != old_next
+        assert updated["one_time"] is False
+
+    async def test_update_cron_to_one_time(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("was cron", "reminder", "chan1", cron="*/5 * * * *")
+        run_at = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        updated = await s.update(sched["id"], run_at=run_at)
+        assert "cron" not in updated
+        assert updated["run_at"] == run_at
+        assert updated["one_time"] is True
+
+    async def test_update_one_time_to_cron(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        run_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        sched = await s.add("was one-time", "reminder", "chan1", run_at=run_at)
+        updated = await s.update(sched["id"], cron="0 * * * *")
+        assert "run_at" not in updated
+        assert updated["cron"] == "0 * * * *"
+        assert updated["one_time"] is False
+
+    async def test_update_to_trigger(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("was cron", "reminder", "chan1", cron="0 * * * *")
+        trigger = {"source": "github", "event": "push"}
+        updated = await s.update(sched["id"], trigger=trigger)
+        assert "cron" not in updated
+        assert "next_run" not in updated
+        assert updated["trigger"] == trigger
+        assert updated["one_time"] is False
+
+    async def test_update_nonexistent_returns_none(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        result = await s.update("bogus", description="nope")
+        assert result is None
+
+    async def test_update_invalid_cron_raises(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("test", "reminder", "chan1", cron="0 * * * *")
+        with pytest.raises(ValueError, match="Invalid cron"):
+            await s.update(sched["id"], cron="not-valid")
+
+    async def test_update_invalid_run_at_raises(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("test", "reminder", "chan1", cron="0 * * * *")
+        with pytest.raises(ValueError, match="Invalid ISO datetime"):
+            await s.update(sched["id"], run_at="not-a-date")
+
+    async def test_update_invalid_trigger_raises(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("test", "reminder", "chan1", cron="0 * * * *")
+        with pytest.raises(ValueError, match="Unknown trigger keys"):
+            await s.update(sched["id"], trigger={"bad_key": "x"})
+
+    async def test_update_check_disallowed_tool_raises(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add(
+            "check", "check", "chan1",
+            cron="0 * * * *", tool_name="run_command", tool_input={"command": "df -h"},
+        )
+        with pytest.raises(ValueError, match="not allowed"):
+            await s.update(sched["id"], tool_name="write_file")
+
+    async def test_update_workflow_invalid_steps_raises(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        steps = [{"tool_name": "run_command", "tool_input": {"command": "echo hi"}}]
+        sched = await s.add("wf", "workflow", "chan1", cron="0 0 * * *", steps=steps)
+        with pytest.raises(ValueError, match="Step 0"):
+            await s.update(sched["id"], steps=[{"bad": "step"}])
+
+    async def test_update_persists(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("persist", "reminder", "chan1", cron="0 * * * *")
+        await s.update(sched["id"], description="updated")
+        # Reload from disk
+        s2 = _make_scheduler(tmp_path)
+        assert s2.list_all()[0]["description"] == "updated"
+
+    async def test_update_tool_input(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add(
+            "check", "check", "chan1",
+            cron="0 * * * *", tool_name="run_command",
+            tool_input={"command": "df -h", "host": "server1"},
+        )
+        updated = await s.update(sched["id"], tool_input={"command": "free -m", "host": "server1"})
+        assert updated["tool_input"]["command"] == "free -m"
+
+    async def test_update_no_fields_still_persists(self, tmp_path):
+        """Calling update with no changed fields returns the schedule unchanged."""
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("stable", "reminder", "chan1", cron="0 * * * *")
+        updated = await s.update(sched["id"])
+        assert updated["description"] == "stable"
+
+    async def test_concurrent_updates_serialized(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("concurrent", "reminder", "chan1", cron="0 * * * *")
+        tasks = [
+            s.update(sched["id"], description=f"v{i}")
+            for i in range(10)
+        ]
+        results = await asyncio.gather(*tasks)
+        assert all(r is not None for r in results)
+        # Final state should be one of the updates
+        final = s.list_all()[0]["description"]
+        assert final.startswith("v")

@@ -885,6 +885,39 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except (ValueError, TypeError) as e:
             return web.json_response({"error": _sanitize_error(e)}, status=400)
 
+    @routes.put("/api/schedules/{schedule_id}")
+    async def update_schedule(request: web.Request) -> web.Response:
+        sid = request.match_info["schedule_id"]
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        if not isinstance(data, dict) or not data:
+            return web.json_response({"error": "request body must be a non-empty object"}, status=400)
+        desc = data.get("description")
+        if desc is not None:
+            err = _validate_string(desc, "description", _MAX_DESCRIPTION_LEN)
+            if err:
+                return web.json_response({"error": err}, status=400)
+        try:
+            updated = await bot.scheduler.update(
+                sid,
+                description=data.get("description"),
+                cron=data.get("cron"),
+                run_at=data.get("run_at"),
+                message=data.get("message"),
+                tool_name=data.get("tool_name"),
+                tool_input=data.get("tool_input"),
+                steps=data.get("steps"),
+                trigger=data.get("trigger"),
+                channel_id=data.get("channel_id"),
+            )
+        except (ValueError, TypeError) as e:
+            return web.json_response({"error": _sanitize_error(e)}, status=400)
+        if updated is None:
+            return web.json_response({"error": "schedule not found"}, status=404)
+        return web.json_response(updated)
+
     @routes.delete("/api/schedules/{schedule_id}")
     async def delete_schedule(request: web.Request) -> web.Response:
         sid = request.match_info["schedule_id"]
