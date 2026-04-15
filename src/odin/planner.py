@@ -112,13 +112,26 @@ class Planner:
             if not to_run:
                 continue
 
-            # Execute all ready steps concurrently
+            # Execute all ready steps concurrently with isolation —
+            # one step's exception must not cancel sibling steps.
             async def _run_step(sid: str) -> tuple[str, StepResult]:
                 return sid, await self._executor.execute_step(step_map[sid], ctx)
 
-            step_results = await asyncio.gather(
-                *(_run_step(sid) for sid in to_run)
+            raw_results = await asyncio.gather(
+                *(_run_step(sid) for sid in to_run),
+                return_exceptions=True,
             )
+
+            # Unpack results, converting unhandled exceptions to FAILED steps
+            step_results: list[tuple[str, StepResult]] = []
+            for sid, raw in zip(to_run, raw_results):
+                if isinstance(raw, BaseException):
+                    step_results.append((sid, StepResult(
+                        status=StepStatus.FAILED,
+                        error=f"unhandled exception: {raw}",
+                    )))
+                else:
+                    step_results.append(raw)
 
             # Record results and handle failures
             for step_id, sr in step_results:

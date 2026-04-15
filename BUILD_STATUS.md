@@ -105,7 +105,7 @@ tightening of prior work.
 |---|-------|--------|---------|
 | 6 | Exponential backoff with jitter on Codex and SSH retries (replace fixed [2s,5s,10s] ladder) | done | backoff module with full jitter, RetryConfig in schema, Codex + SSH retry integration |
 | 7 | Per-tool timeouts in `config.yml` instead of a single global tool_timeout_seconds | done | ToolsConfig.tool_timeouts dict + get_tool_timeout(), executor/agent/skill per-tool lookup, REST API endpoints, 36 tests |
-| 8 | Bulkhead isolation: SSH failures must not cascade into Codex; tool failures isolated from message handler | pending | |
+| 8 | Bulkhead isolation: SSH failures must not cascade into Codex; tool failures isolated from message handler | done | Bulkhead module with semaphore-based concurrency limits per resource category (SSH/subprocess/browser), config, executor integration, planner gather fix, Prometheus metrics, REST API |
 | 9 | SSH connection pooling (paramiko multiplex) and aiohttp keepalive pool | pending | |
 | 10 | REVIEWER: validate rounds 1–9, tighten tests, fix bugs found | pending | |
 
@@ -679,3 +679,91 @@ bottom. Do not truncate older entries — they are the chain-of-context.)
 - The `PUT /api/tools/timeouts` allows runtime timeout changes that take effect immediately (since `ToolExecutor.execute()` reads from `config` on each call). This is powerful but unsaved to disk — a restart resets to config.yml values.
 - The `_exec_command()` in executor.py still uses `command_timeout_seconds` as the SSH per-attempt timeout. If a per-tool timeout is shorter than `command_timeout_seconds`, the outer `asyncio.wait_for` in `execute()` will cancel the inner SSH before the SSH-level timeout fires. This is correct behavior.
 - All three subsystem wiring tasks remain open from Rounds 1-6: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`.
+
+## Round 8 — Bulkhead isolation: SSH failures isolated from Codex; tool failures isolated from message handler
+**Focus**: Add semaphore-based concurrency limiters (bulkheads) per resource category so SSH/subprocess/browser failures cannot cascade across categories. Fix planner gather isolation.
+**Baseline pytest**: 947 passed, 0 failed
+**Post-round pytest**: 996 passed, 0 failed (+49 new tests)
+
+### Validated from prior rounds
+- Round 1: `CostTracker`, `estimate_tokens`, `LLMResponse` token fields, `/api/usage` endpoints all present and passing (35 tests). `CostTracker` still not wired to bot object — still pending (noted Rounds 1-7).
+- Round 2: `Session.estimated_tokens`, `_needs_compaction()`, token metrics all present and passing (41 tests). `session_tokens` Prometheus source still needs wiring — still pending.
+- Round 3: `TrajectorySaver`, `TrajectoryTurn`, `ToolIteration`, REST API endpoints all present and passing (53 tests). `trajectory_saver` still needs wiring — still pending.
+- Round 4: Trace viewer page, `find_by_message_id()`, API endpoint all present and passing (8 tests).
+- Round 5: `AuditLogger.search_logs()`, `get_log_stats()`, `/api/logs/search`, `/api/logs/stats` all present and passing (37 tests).
+- Round 6: `compute_backoff`, `RetryConfig`, Codex + SSH retry integration all present and passing (54 tests).
+- Round 7: `ToolsConfig.tool_timeouts`, `get_tool_timeout()`, executor/agent/skill per-tool lookup, REST API all present and passing (36 tests). Round 7 flagged: "bulkhead isolation should add resource (connection/concurrency) isolation" — done: three bulkheads (ssh/subprocess/browser) with independent semaphores.
+- All three subsystem wiring tasks remain open: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`.
+
+### Work done
+
+#### 1. New module: `src/tools/bulkhead.py`
+- `BulkheadFullError` (line 20): Exception raised when a bulkhead's queue is full. Includes bulkhead name for diagnostics.
+- `Bulkhead` class (line 30): Semaphore-based concurrency limiter with observability.
+  - `__init__(name, max_concurrent, max_queued)`: max_concurrent controls the semaphore size; max_queued caps how many requests can wait (0 = unlimited queuing, no rejection).
+  - `acquire()` async context manager (line 82): acquires a semaphore slot. Rejects with `BulkheadFullError` if queue is full. Tracks active/queued/total/rejected/errors counts.
+  - `get_metrics()` (line 103): returns dict with all counters for Prometheus/observability.
+- `BulkheadRegistry` class (line 113): Named collection of bulkheads for different resource categories.
+  - `register(name, max_concurrent, max_queued)`: creates and stores a bulkhead.
+  - `get(name)`: returns bulkhead by name, or None.
+  - `get_or_create(name, max_concurrent, max_queued)`: idempotent registration.
+  - `get_all_metrics()`: returns per-bulkhead metrics dict.
+  - `get_prometheus_metrics()`: returns flattened dict for the Prometheus collector.
+
+#### 2. Config: `BulkheadConfig` in `src/config/schema.py:46-52`
+- `ssh_max_concurrent: int = 10` — max simultaneous SSH connections.
+- `subprocess_max_concurrent: int = 20` — max simultaneous local subprocesses.
+- `browser_max_concurrent: int = 3` — max simultaneous browser operations.
+- `ssh_max_queued: int = 20` — max SSH requests waiting in queue before rejection.
+- `subprocess_max_queued: int = 40` — max subprocess requests waiting.
+- `browser_max_queued: int = 6` — max browser requests waiting.
+- Added to `ToolsConfig` as `bulkhead: BulkheadConfig = BulkheadConfig()` (line 63).
+
+#### 3. `ToolExecutor` bulkhead integration — `src/tools/executor.py`
+- `_build_bulkhead_registry(config)` (line 46): factory function that creates a `BulkheadRegistry` with three bulkheads from config values.
+- `ToolExecutor.__init__()` (line 61): now creates `self.bulkheads` via `_build_bulkhead_registry()`.
+- `_exec_command()` (line 100): wraps SSH calls in the `ssh` bulkhead and local subprocess calls in the `subprocess` bulkhead. When a bulkhead is full, returns `(1, "Error: ... bulkhead full")` instead of raising — the executor's `execute()` error handler catches this gracefully.
+- `_browser_with_bulkhead()` (line 273): helper method wrapping browser coroutines in the `browser` bulkhead. Returns error string on rejection instead of raising.
+- All 5 browser handler methods (`_handle_browser_read_page`, `_handle_browser_read_table`, `_handle_browser_click`, `_handle_browser_fill`, `_handle_browser_evaluate`) now wrap their calls through `_browser_with_bulkhead()`.
+
+#### 4. Planner gather isolation — `src/odin/planner.py:119-130`
+- Changed `asyncio.gather(*tasks)` to `asyncio.gather(*tasks, return_exceptions=True)`. Previously, if any parallel step raised an unhandled exception, the entire gather would cancel all sibling tasks. Now exceptions are collected as results.
+- Added post-gather unpacking: `BaseException` results are converted to `StepResult(status=FAILED, error=...)`. Normal `(step_id, StepResult)` tuples pass through unchanged.
+- This ensures one step's crash does not prevent sibling steps from completing.
+
+#### 5. Prometheus metrics — `src/health/metrics.py:317-368`
+- Added `bulkheads` source rendering with three metric families:
+  - `odin_bulkhead_count` (gauge): number of registered bulkheads.
+  - `odin_bulkhead_active{bulkhead="..."}` (gauge): current active operations per bulkhead.
+  - `odin_bulkhead_rejected_total{bulkhead="..."}` (counter): rejected requests per bulkhead.
+  - `odin_bulkhead_operations_total{bulkhead="..."}` (counter): total operations per bulkhead.
+- Follows the same pattern as existing per-label metrics (cost_tracker, session_tokens).
+
+#### 6. REST API endpoint — `src/web/api.py:662-668`
+- `GET /api/tools/bulkheads`: returns per-bulkhead metrics (active, queued, total, rejected, errors, max_concurrent, max_queued). Returns 503 if executor not available.
+
+#### 7. Tests: `tests/test_bulkhead.py` — 49 tests across 11 test classes
+- `TestBulkhead` (7): acquire/release, concurrent limit enforcement, rejection when queue full, error tracking, metrics, properties, unlimited queuing.
+- `TestBulkheadRegistry` (8): register/get, get_missing, get_or_create (new + existing), names, get_all_metrics, get_prometheus_metrics, empty registry.
+- `TestBulkheadFullError` (1): error message contains bulkhead name.
+- `TestBulkheadConfig` (6): defaults, custom, on ToolsConfig (default + custom), from dict, without bulkhead key.
+- `TestExecutorBulkheadIntegration` (8): executor has registry, creates three bulkheads, config applied, SSH uses bulkhead, local uses subprocess bulkhead, SSH bulkhead full returns error, subprocess bulkhead full returns error, browser bulkhead wraps handler.
+- `TestPlannerGatherIsolation` (3): step exception doesn't crash gather, parallel steps both recorded, failed step cascades to dependents.
+- `TestBulkheadPrometheusMetrics` (5): metrics rendered, absent, empty registry, update after operations, rejected metrics.
+- `TestBulkheadAPI` (2): GET bulkheads, unavailable returns 503.
+- `TestBuildBulkheadRegistry` (2): from default config, from custom config.
+- `TestConfigRoundTrip` (3): full Config with bulkhead, without bulkhead, model_dump includes bulkhead.
+- `TestIsolationSemantics` (4): SSH errors don't block local, SSH bulkhead tracks errors, separate bulkheads independent, tool execute catches bulkhead error.
+
+### Issues found
+- The `CostTracker`, `session_tokens` Prometheus source, and `TrajectorySaver` are all still not wired to the bot object. This is a recurring note from Rounds 1-7. Unrelated to this round's scope.
+- The `bulkheads` Prometheus source needs to be registered on the `HealthServer.metrics` collector: `metrics.register_source("bulkheads", executor.bulkheads.get_prometheus_metrics)`. This wiring will happen when bot initialization is formalized.
+- The `_exec_command()` bulkhead wrapping catches `BulkheadFullError` and returns `(1, "Error: ...")`. This means the error is treated as a command failure, not a tool failure — the LLM will see it as a command that returned exit code 1 with an error message. This is the correct semantic for the LLM to understand the resource is congested.
+- Browser bulkhead is applied inside handler methods (after the `_browser_manager` check). If browser automation is disabled, the bulkhead is never touched — no wasted semaphore slots.
+
+### Next round watch for
+- Round 9 (SSH connection pooling) should be aware that bulkheads already cap SSH concurrency at 10. Connection pooling should work within the bulkhead — the pool manages connections, the bulkhead manages concurrency. They are complementary: the pool reuses connections, the bulkhead prevents new connections from being opened when the system is overloaded.
+- The `BulkheadConfig` defaults (ssh=10, subprocess=20, browser=3) are conservative. Production deployments with many hosts or heavy tool usage may need higher limits. The config is fully customizable via `config.yml`: `tools: { bulkhead: { ssh_max_concurrent: 30 } }`.
+- The `max_queued` values (ssh=20, subprocess=40, browser=6) mean that at most `max_concurrent + max_queued` operations can be pending per category. Beyond that, requests are rejected immediately with an error message. Setting `max_queued: 0` disables rejection (unlimited queuing).
+- The planner `asyncio.gather` fix in `src/odin/planner.py:119-130` converts unhandled `BaseException`s (not just `Exception`) into FAILED steps. This correctly handles `asyncio.CancelledError` (BaseException subclass) — a cancelled step is recorded as failed, not silently dropped.
+- All three subsystem wiring tasks remain open from Rounds 1-7: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`.

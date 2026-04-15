@@ -656,6 +656,17 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         })
 
     # ------------------------------------------------------------------
+    # Bulkhead isolation status
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/tools/bulkheads")
+    async def get_bulkheads(_request: web.Request) -> web.Response:
+        executor = getattr(bot, "executor", None)
+        if executor is None or not hasattr(executor, "bulkheads"):
+            return web.json_response({"error": "bulkheads not available"}, status=503)
+        return web.json_response(executor.bulkheads.get_all_metrics())
+
+    # ------------------------------------------------------------------
     # Usage / cost tracking
     # ------------------------------------------------------------------
 

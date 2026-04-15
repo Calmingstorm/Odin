@@ -312,4 +312,63 @@ class MetricsCollector:
             except Exception:
                 pass
 
+        # -- Bulkheads --
+        bulkhead_source = self._sources.get("bulkheads")
+        if bulkhead_source:
+            try:
+                bh_data = bulkhead_source()
+                if bh_data:
+                    bh_count = bh_data.pop("bulkhead_count", 0)
+                    sections.append(_format_metric(
+                        "odin_bulkhead_count", bh_count,
+                        help_text="Number of registered bulkheads",
+                    ))
+                    active_keys = sorted(
+                        k for k in bh_data if k.endswith("_active")
+                    )
+                    if active_keys:
+                        sections.append(
+                            "# HELP odin_bulkhead_active Current active operations per bulkhead"
+                        )
+                        sections.append("# TYPE odin_bulkhead_active gauge")
+                        for key in active_keys:
+                            name = key.replace("bulkhead_", "").replace("_active", "")
+                            sections.append(_format_metric(
+                                "odin_bulkhead_active", bh_data[key],
+                                labels={"bulkhead": name},
+                                include_header=False,
+                            ))
+                    rejected_keys = sorted(
+                        k for k in bh_data if k.endswith("_rejected")
+                    )
+                    if rejected_keys:
+                        sections.append(
+                            "# HELP odin_bulkhead_rejected_total Rejected requests per bulkhead"
+                        )
+                        sections.append("# TYPE odin_bulkhead_rejected_total counter")
+                        for key in rejected_keys:
+                            name = key.replace("bulkhead_", "").replace("_rejected", "")
+                            sections.append(_format_metric(
+                                "odin_bulkhead_rejected_total", bh_data[key],
+                                labels={"bulkhead": name},
+                                include_header=False,
+                            ))
+                    total_keys = sorted(
+                        k for k in bh_data if k.endswith("_total")
+                    )
+                    if total_keys:
+                        sections.append(
+                            "# HELP odin_bulkhead_operations_total Total operations per bulkhead"
+                        )
+                        sections.append("# TYPE odin_bulkhead_operations_total counter")
+                        for key in total_keys:
+                            name = key.replace("bulkhead_", "").replace("_total", "")
+                            sections.append(_format_metric(
+                                "odin_bulkhead_operations_total", bh_data[key],
+                                labels={"bulkhead": name},
+                                include_header=False,
+                            ))
+            except Exception:
+                pass
+
         return "\n".join(sections) + "\n"

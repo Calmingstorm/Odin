@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
+from .bulkhead import BulkheadFullError, BulkheadRegistry
 from .ssh import is_local_address, run_local_command, run_ssh_command
 
 log = get_logger("tools")
@@ -39,6 +40,16 @@ def _truncate_lines(text: str, max_lines: int = _RUN_COMMAND_MAX_LINES) -> str:
     )
 
 
+def _build_bulkhead_registry(config: ToolsConfig) -> BulkheadRegistry:
+    """Build a BulkheadRegistry from tools config."""
+    registry = BulkheadRegistry()
+    bh = config.bulkhead
+    registry.register("ssh", bh.ssh_max_concurrent, bh.ssh_max_queued)
+    registry.register("subprocess", bh.subprocess_max_concurrent, bh.subprocess_max_queued)
+    registry.register("browser", bh.browser_max_concurrent, bh.browser_max_queued)
+    return registry
+
+
 class ToolExecutor:
     def __init__(
         self, config: ToolsConfig | None = None, memory_path: str | None = None,
@@ -48,6 +59,7 @@ class ToolExecutor:
         self._memory_path = Path(memory_path) if memory_path else None
         self._browser_manager = browser_manager
         self._metrics: dict[str, dict[str, int]] = {}
+        self.bulkheads = _build_bulkhead_registry(self.config)
 
     def _resolve_host(self, alias: str) -> tuple[str, str, str] | None:
         """Resolve host alias to (address, ssh_user, os). Returns None if not allowed."""
@@ -102,12 +114,40 @@ class ToolExecutor:
 
         Local hosts (127.0.0.1, localhost, ::1) use direct subprocess —
         no SSH key needed, no network overhead.
+
+        Both paths are wrapped in bulkhead semaphores so that a flood of
+        SSH commands cannot exhaust subprocess/FD resources needed by
+        local commands (and vice versa).
         """
         if timeout is None:
             timeout = self.config.command_timeout_seconds
         if is_local_address(address):
+            bh = self.bulkheads.get("subprocess")
+            if bh:
+                try:
+                    async with bh.acquire():
+                        return await run_local_command(command, timeout=timeout)
+                except BulkheadFullError:
+                    return 1, "Error: subprocess bulkhead full — too many concurrent local commands"
             return await run_local_command(command, timeout=timeout)
         ssh_retry = self.config.ssh_retry
+        bh = self.bulkheads.get("ssh")
+        if bh:
+            try:
+                async with bh.acquire():
+                    return await run_ssh_command(
+                        host=address,
+                        command=command,
+                        ssh_key_path=self.config.ssh_key_path,
+                        known_hosts_path=self.config.ssh_known_hosts_path,
+                        timeout=timeout,
+                        ssh_user=ssh_user,
+                        max_retries=ssh_retry.max_retries,
+                        retry_base_delay=ssh_retry.base_delay,
+                        retry_max_delay=ssh_retry.max_delay,
+                    )
+            except BulkheadFullError:
+                return 1, "Error: SSH bulkhead full — too many concurrent SSH commands"
         return await run_ssh_command(
             host=address,
             command=command,
@@ -224,35 +264,46 @@ class ToolExecutor:
 
     # --- Browser tools (text-returning, screenshot handled in client.py) ---
 
+    async def _browser_with_bulkhead(self, coro):
+        """Wrap a browser coroutine with the browser bulkhead."""
+        bh = self.bulkheads.get("browser")
+        if bh:
+            try:
+                async with bh.acquire():
+                    return await coro
+            except BulkheadFullError:
+                return "Error: browser bulkhead full — too many concurrent browser operations"
+        return await coro
+
     async def _handle_browser_read_page(self, inp: dict) -> str:
         if not self._browser_manager:
             return "Browser automation is not enabled. Set browser.enabled=true in config."
         from .browser import handle_browser_read_page
-        return await handle_browser_read_page(self._browser_manager, inp)
+        return await self._browser_with_bulkhead(handle_browser_read_page(self._browser_manager, inp))
 
     async def _handle_browser_read_table(self, inp: dict) -> str:
         if not self._browser_manager:
             return "Browser automation is not enabled. Set browser.enabled=true in config."
         from .browser import handle_browser_read_table
-        return await handle_browser_read_table(self._browser_manager, inp)
+        return await self._browser_with_bulkhead(handle_browser_read_table(self._browser_manager, inp))
 
     async def _handle_browser_click(self, inp: dict) -> str:
         if not self._browser_manager:
             return "Browser automation is not enabled. Set browser.enabled=true in config."
         from .browser import handle_browser_click
-        return await handle_browser_click(self._browser_manager, inp)
+        return await self._browser_with_bulkhead(handle_browser_click(self._browser_manager, inp))
 
     async def _handle_browser_fill(self, inp: dict) -> str:
         if not self._browser_manager:
             return "Browser automation is not enabled. Set browser.enabled=true in config."
         from .browser import handle_browser_fill
-        return await handle_browser_fill(self._browser_manager, inp)
+        return await self._browser_with_bulkhead(handle_browser_fill(self._browser_manager, inp))
 
     async def _handle_browser_evaluate(self, inp: dict) -> str:
         if not self._browser_manager:
             return "Browser automation is not enabled. Set browser.enabled=true in config."
         from .browser import handle_browser_evaluate
-        return await handle_browser_evaluate(self._browser_manager, inp)
+        return await self._browser_with_bulkhead(handle_browser_evaluate(self._browser_manager, inp))
 
     # --- Web tools ---
 

@@ -43,6 +43,15 @@ class RetryConfig(BaseModel):
     max_delay: float = 30.0
 
 
+class BulkheadConfig(BaseModel):
+    ssh_max_concurrent: int = 10
+    subprocess_max_concurrent: int = 20
+    browser_max_concurrent: int = 3
+    ssh_max_queued: int = 20
+    subprocess_max_queued: int = 40
+    browser_max_queued: int = 6
+
+
 class ToolsConfig(BaseModel):
     enabled: bool = True
     ssh_key_path: str = "/app/.ssh/id_ed25519"
@@ -55,6 +64,7 @@ class ToolsConfig(BaseModel):
     claude_code_dir: str = "/opt/odin"
     skill_allowed_urls: list[str] = Field(default_factory=list)
     ssh_retry: RetryConfig = RetryConfig(max_retries=2, base_delay=0.5, max_delay=10.0)
+    bulkhead: BulkheadConfig = BulkheadConfig()
 
     def get_tool_timeout(self, tool_name: str) -> int:
         return self.tool_timeouts.get(tool_name, self.command_timeout_seconds)
