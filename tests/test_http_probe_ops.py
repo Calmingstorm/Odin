@@ -632,8 +632,11 @@ class TestHandleHttpProbe:
         exec_inst.config = config
         exec_inst._metrics = {}
         exec_inst._permission_manager = None
+        exec_inst._recovery_enabled = False
         from src.tools.risk_classifier import RiskStats
         exec_inst.risk_stats = RiskStats()
+        from src.tools.recovery import RecoveryStats
+        exec_inst.recovery_stats = RecoveryStats()
         exec_inst._exec_command = AsyncMock(return_value=(0, "HTTP/1.1 200 OK\n\nOK"))
         return exec_inst
 

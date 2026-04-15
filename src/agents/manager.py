@@ -636,6 +636,7 @@ async def _run_agent(
             agent.transition(AgentState.EXECUTING, f"iteration {iteration + 1}")
             agent.last_activity = time.time()
             agent.iteration_count = iteration + 1
+            agent.recovery_attempts = 0  # per-iteration recovery budget
 
             # Call LLM with recovery support
             response = await _call_llm_with_recovery(

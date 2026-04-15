@@ -648,6 +648,9 @@ class TestHandleTerraformOps:
         exec_inst.config = config
         exec_inst._metrics = {}
         exec_inst._permission_manager = None
+        exec_inst._recovery_enabled = False
+        from src.tools.recovery import RecoveryStats
+        exec_inst.recovery_stats = RecoveryStats()
         exec_inst._exec_command = AsyncMock(return_value=(0, "Success"))
         return exec_inst
 

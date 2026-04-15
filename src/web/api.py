@@ -2095,6 +2095,25 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"user_id": uid, "status": "override_removed"})
         return web.json_response({"error": "no override found for user"}, status=404)
 
+    # ------------------------------------------------------------------
+    # Recovery stats (observability)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/recovery/stats")
+    async def recovery_stats(_request: web.Request) -> web.Response:
+        executor = getattr(bot, "tool_executor", None)
+        if not executor:
+            return web.json_response({"error": "executor not available"}, status=503)
+        return web.json_response(executor.recovery_stats.get_summary())
+
+    @routes.get("/api/recovery/recent")
+    async def recovery_recent(request: web.Request) -> web.Response:
+        executor = getattr(bot, "tool_executor", None)
+        if not executor:
+            return web.json_response({"error": "executor not available"}, status=503)
+        limit = _safe_int_param(request, "limit", 20, hi=100)
+        return web.json_response({"entries": executor.recovery_stats.get_recent(limit)})
+
     return routes
 
 

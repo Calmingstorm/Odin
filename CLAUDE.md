@@ -52,6 +52,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/audit/signer.py` — HMAC-SHA256 chain signing for audit log tamper detection
   - `src/tools/process_manager.py` — background process registry (start/poll/write/kill)
   - `src/tools/risk_classifier.py` — command/tool risk classification (observability only, no blocking)
+  - `src/tools/recovery.py` — recovery-before-escalation: transient tool failure auto-retry (single retry, per-category delays)
   - `src/permissions/manager.py` — per-user permission tiers (admin/user/guest) with tool RBAC enforcement
   - `src/tools/comfyui.py` — ComfyUI image generation client
   - `src/tools/autonomous_loop.py` — autonomous loop system (LLM-driven recurring tasks)
@@ -59,7 +60,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/web/api.py` — REST API for web management UI (55 endpoints)
   - `src/web/websocket.py` — WebSocket handler for live updates (logs, events)
   - `src/web/chat.py` — chat backend for web UI and WebSocket chat
-  - `src/agents/manager.py` — multi-agent orchestration with lifecycle state machine (AgentState enum, AgentStateMachine, typed transitions, recovery)
+  - `src/agents/manager.py` — multi-agent orchestration with lifecycle state machine (AgentState enum, AgentStateMachine, typed transitions, per-iteration recovery)
   - `src/agents/loop_bridge.py` — bridge between autonomous loops and agent system
 - `tests/` — pytest test suite (async, mocked SSH/API calls), 9000+ tests
 - `config.yml` — runtime configuration

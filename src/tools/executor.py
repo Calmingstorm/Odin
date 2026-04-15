@@ -11,6 +11,13 @@ from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
 from ..permissions.manager import PermissionManager
 from .bulkhead import BulkheadFullError, BulkheadRegistry
+from .recovery import (
+    RecoveryCategory,
+    RecoveryStats,
+    classify_error as _classify_error,
+    classify_exception as _classify_exception,
+    get_retry_delay as _get_retry_delay,
+)
 from .risk_classifier import RiskStats, classify_tool
 from .ssh import is_local_address, run_local_command, run_ssh_command
 from .ssh_pool import SSHConnectionPool
@@ -65,6 +72,8 @@ class ToolExecutor:
         self._permission_manager = permission_manager
         self._metrics: dict[str, dict[str, int]] = {}
         self.risk_stats = RiskStats()
+        self.recovery_stats = RecoveryStats()
+        self._recovery_enabled = self.config.recovery.enabled
         self.bulkheads = _build_bulkhead_registry(self.config)
         pool_cfg = self.config.ssh_pool
         self.ssh_pool: SSHConnectionPool | None = (
@@ -122,6 +131,32 @@ class ToolExecutor:
             )
 
         timeout = self.config.get_tool_timeout(tool_name)
+        result = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
+
+        if self._recovery_enabled:
+            category = self._check_recoverable(result)
+            if category is not None:
+                delay = _get_retry_delay(category)
+                snippet = result[:120] if isinstance(result, str) else ""
+                self.recovery_stats.record_attempt(tool_name, category, snippet)
+                log.info("Recovery for %s (%s): retrying after %.1fs", tool_name, category.value, delay)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                retry_result = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
+                retry_cat = self._check_recoverable(retry_result)
+                if retry_cat is not None:
+                    self.recovery_stats.record_failure(tool_name, category, snippet)
+                    return retry_result
+                self.recovery_stats.record_success(tool_name, category, snippet)
+                return retry_result
+
+        return result
+
+    async def _try_tool(
+        self, tool_name: str, handler, tool_input: dict,
+        timeout: int, user_id: str | None,
+    ) -> str:
+        """Single attempt at executing a tool handler."""
         try:
             if tool_name in ("memory_manage", "manage_list"):
                 coro = handler(tool_input, user_id=user_id)
@@ -142,6 +177,24 @@ class ToolExecutor:
             self._metrics[tool_name]["errors"] += 1
             log.error("Tool %s failed: %s", tool_name, e)
             return f"Error executing {tool_name}: {e}"
+
+    # Categories excluded from tool-level recovery (they have their own
+    # retry logic or the cost of retrying exceeds the benefit).
+    _SKIP_RECOVERY = frozenset({RecoveryCategory.TIMEOUT})
+
+    @staticmethod
+    def _check_recoverable(result: str) -> RecoveryCategory | None:
+        """Check if a tool result indicates a recoverable failure."""
+        if not isinstance(result, str):
+            return None
+        cat = _classify_error(result)
+        if cat is not None and cat not in ToolExecutor._SKIP_RECOVERY:
+            return cat
+        if result.startswith("Error"):
+            cat = _classify_exception(result)
+            if cat is not None and cat not in ToolExecutor._SKIP_RECOVERY:
+                return cat
+        return None
 
     def get_metrics(self) -> dict[str, dict[str, int]]:
         """Return per-tool call and error counts."""

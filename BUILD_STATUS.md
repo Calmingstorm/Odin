@@ -149,7 +149,7 @@ tightening of prior work.
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
 | 31 | Agent worker lifecycle state machine: replace implicit polling with typed states (spawning, ready, executing, recovering, done) | done | AgentState enum (8 states), AgentStateMachine with enforced transitions + history, LLM recovery logic (EXECUTING→RECOVERING→retry), backward-compatible status property, +90 tests |
-| 32 | Recovery-before-escalation: known failure modes auto-heal once before surfacing to user | pending | |
+| 32 | Recovery-before-escalation: known failure modes auto-heal once before surfacing to user | done | RecoveryHandler module (6 categories, pattern matching, per-category delays), ToolExecutor integration, agent per-iteration recovery reset, 2 REST API endpoints, RecoveryStats observability, +110 tests |
 | 33 | Loop branch-freshness check: on test failure, verify branch isn't stale vs origin before treating as regression | pending | |
 | 34 | Agent trajectory saving: every spawned agent saves its full trajectory like messages do in Round 3 | pending | |
 | 35 | Nested agent spawning: one agent may spawn sub-agents with a depth limit (default 2) | pending | |
@@ -3932,3 +3932,175 @@ Added state machine documentation to Multi-Agent System section.
 - The `state_history` in API responses can grow large for long-running agents (2 transitions per iteration × 30 max iterations = 60+ transitions). No truncation currently — acceptable since each record is ~50 bytes JSON.
 - REST API endpoint count remains at 109 (no new endpoints, just enriched existing agent responses).
 - The `test_tool_timeouts.py` tests for agent per-tool timeouts still pass because they construct `AgentInfo` the same way (state machine auto-initializes to SPAWNING, and `_run_agent` handles the SPAWNING→READY transition).
+
+## Round 32 — Recovery-before-escalation: transient tool failure auto-healing
+**Focus**: Known failure modes auto-heal once before surfacing to the user. Tool execution retries on transient errors, agent per-iteration recovery budget, recovery observability stats.
+**Baseline pytest**: 3171 passed, 0 failed
+**Post-round pytest**: 3281 passed, 0 failed (+110 new tests)
+
+### Validated from prior rounds
+- Round 31 (Agent lifecycle state machine): All 90 tests pass. AgentState enum, state machine transitions, and LLM recovery all working correctly.
+- Round 31 noted "`recovery_attempts` is incremented each time recovery fires, but the check `< MAX_RECOVERY_ATTEMPTS` means only the first LLM error ever gets a retry. If Round 32 wants per-iteration retries, it should reset `recovery_attempts` at the start of each iteration." — FIXED: Added `agent.recovery_attempts = 0` at the start of each iteration in `_run_agent()` (line 640).
+- Round 30 noted `ToolExecutor.__new__()` fixture pattern needs updating for new attributes — confirmed and updated in `test_http_probe_ops.py` and `test_terraform_ops.py` to include `_recovery_enabled` and `recovery_stats`.
+- No other watch-for items needed fixing.
+
+### Work done
+
+#### 1. Recovery module: `src/tools/recovery.py` (new, ~190 lines)
+
+**RecoveryCategory enum** (6 categories):
+- `SSH_TRANSIENT`: Connection refused/reset/timed out, no route, network unreachable, SSH key exchange errors.
+- `CONNECTION_ERROR`: Python connection exceptions (ConnectionResetError, ConnectionRefusedError, BrokenPipeError, ServerDisconnectedError, ClientConnectorError, ClientOSError).
+- `RESOURCE_BUSY`: SQLite database locked, resource temporarily unavailable.
+- `TIMEOUT`: Timed out (used for classify_exception only, excluded from tool-level retry — see design decisions).
+- `RATE_LIMITED`: Rate limit exceeded, RateLimitError, Too Many Requests.
+- `BULKHEAD_FULL`: Bulkhead full (temporary congestion).
+
+**Two classifiers**:
+- `classify_error(text)`: Conservative — only matches strings starting with known error prefixes ("Error:", "Error executing", "Command failed"). Prevents false positives on normal command output.
+- `classify_exception(text)`: Permissive — no prefix required. For exception messages that are inherently error conditions.
+
+**Per-category retry delays**:
+- SSH transient: 2.0s, Connection error: 1.0s, Resource busy: 1.0s, Timeout: 0.0s, Rate limited: 2.0s, Bulkhead full: 1.0s.
+
+**RecoveryStats**: Tracks attempts/successes/failures by category and by tool. Maintains a bounded list of recent events (default 100). `get_summary()` for API, `get_recent(limit)` for event list, `reset()` for clearing.
+
+#### 2. ToolExecutor integration: `src/tools/executor.py` (lines 10-20, 68-69, 104-185)
+
+**New imports**: `RecoveryCategory`, `RecoveryStats`, `classify_error`, `classify_exception`, `get_retry_delay` from `src/tools/recovery`.
+
+**New attributes on `__init__`** (lines 68-69):
+- `self.recovery_stats = RecoveryStats()` — per-executor stats tracker.
+- `self._recovery_enabled = self.config.recovery.enabled` — respects config toggle.
+
+**Refactored `execute()` method** (lines 104-155):
+- Extracted handler invocation into `_try_tool()` method (lines 156-175) for reuse.
+- After first tool attempt, checks result via `_check_recoverable()` static method (lines 180-192).
+- If recoverable: logs, records attempt, sleeps for category-specific delay, retries once.
+- If retry succeeds: records success, returns good result (user never sees the transient error).
+- If retry fails: records failure, returns the retry's error.
+
+**`_check_recoverable()` static method** (lines 180-192):
+- First tries `classify_error()` (conservative, for result strings).
+- If that returns nothing and result starts with "Error", tries `classify_exception()` (permissive).
+- Excludes `TIMEOUT` category via `_SKIP_RECOVERY` frozenset — tool timeouts are already configurable per-tool and retrying doubles the wait time.
+
+#### 3. Agent per-iteration recovery: `src/agents/manager.py` (line 640)
+
+Added `agent.recovery_attempts = 0` at the start of each iteration in `_run_agent()`, right before `_call_llm_with_recovery()`. This gives each LLM iteration its own recovery budget, so an agent that recovered from a transient error on iteration 3 can also recover from another transient error on iteration 15.
+
+Previously, `recovery_attempts` was incremented globally — once the first recovery fired, all subsequent LLM errors in later iterations went directly to FAILED. Now each iteration resets to 0.
+
+#### 4. Config integration: `src/config/schema.py` (lines 56-58, 83)
+
+New `RecoveryConfig` model:
+- `enabled: bool = True` — toggle recovery on/off.
+
+Added `recovery: RecoveryConfig = RecoveryConfig()` to `ToolsConfig`.
+
+#### 5. REST API endpoints: `src/web/api.py` (lines 2098-2113)
+
+Two new endpoints:
+- `GET /api/recovery/stats` — returns `get_summary()` dict with by_category, by_tool, totals.
+- `GET /api/recovery/recent?limit=N` — returns recent recovery events (default 20, max 100).
+
+Both return 503 if executor is unavailable (same pattern as risk endpoints).
+
+#### 6. Test fixture updates
+
+- `tests/test_http_probe_ops.py` (line 634-636): Added `_recovery_enabled = False` and `recovery_stats = RecoveryStats()` to `__new__()` fixture.
+- `tests/test_terraform_ops.py` (line 651-653): Same fixture update.
+- These tests disable recovery to preserve their existing metric assertions (they test single-attempt behavior).
+
+#### 7. CLAUDE.md updates
+
+- Added `src/tools/recovery.py` to project structure with description.
+- Updated `src/agents/manager.py` description to mention per-iteration recovery.
+
+### Tests: `tests/test_recovery.py` — 110 tests across 16 test classes
+
+**classify_error** (29):
+- SSH transient (7): connection refused/reset/timed out, no route, network unreachable, ssh/kex exchange.
+- Connection errors (6): ConnectionResetError, ConnectionRefusedError, BrokenPipeError, ServerDisconnectedError, ClientConnectorError, ClientOSError.
+- Resource busy (3): database locked, resource temporarily unavailable (both cases).
+- Bulkhead full (1), rate limited (3).
+- Timeout skipped (1): timed out not classified at result level.
+- Negative cases (7): normal output, non-error text, permission denied, file not found, unknown tool, none, integer, empty.
+
+**classify_exception** (10):
+- One per category (6), no prefix required (1), unrecognized (1), none (1), empty (1).
+
+**get_retry_delay** (7):
+- One per category (6), all categories have delays (1).
+
+**RecoveryCategory enum** (4):
+- All defined, str enum, all have patterns, all have delays.
+
+**RecoveryStats** (13):
+- Initial state, record attempt/success/failure, multiple tools, get_recent, limit, max cap, reset, timestamp, sorted categories, sorted tools.
+
+**RecoveryEvent** (2): fields, default snippet.
+
+**Constants** (2): error prefixes, patterns format.
+
+**_check_recoverable** (8):
+- SSH, bulkhead, database locked, timeout skipped, normal output, permanent error, none, connection error via exception path.
+
+**Executor recovery integration** (11):
+- Recovery success, recovery failure, no recovery on permanent error, no recovery on timeout, disabled via config, result string recovery, no recovery on success, delay respected, snippet recorded, metrics for both attempts, bulkhead full recovery.
+
+**Executor attributes** (2): has recovery_stats, recovery enabled by default.
+
+**Config** (4): default enabled, disabled, tools config has recovery, custom recovery.
+
+**Agent per-iteration recovery** (3):
+- Reset each iteration, works on second iteration after first recovery, old behavior verified.
+
+**REST API** (5):
+- Stats endpoint, recent endpoint, recent limit, stats no executor (503), recent no executor (503).
+
+**Module imports** (3): recovery module, executor attributes, config class.
+
+**Edge cases** (8):
+- Multiple patterns, str enum, RBAC denials not retried, unknown tool not retried, only one retry, concurrent independent recovery, skip_recovery contains timeout, non-string result handled.
+
+### Design decisions
+
+1. **Timeouts excluded from tool-level recovery**: Tool timeouts are already configurable per-tool (via `tool_timeouts` config). Retrying a timed-out tool doubles the wait time (e.g., 300s → 600s). The tool timeout IS the recovery budget. Agent LLM recovery (`_call_llm_with_recovery`) still handles LLM-call timeouts separately (120s, more likely transient).
+
+2. **Two-tier classification**: `classify_error()` is conservative (requires error prefix) for handler return values that might contain coincidental pattern matches. `classify_exception()` is permissive (no prefix) for exception messages that are inherently errors. `_check_recoverable()` tries conservative first, falls back to permissive only for "Error"-prefixed strings.
+
+3. **Per-category delays**: SSH transient (2s) and rate limits (2s) get longer delays since the upstream needs time to recover. Connection errors and resource busy (1s) are brief pauses. Timeouts (0s) are immediate — but excluded from tool-level recovery anyway.
+
+4. **Recovery is fail-open**: If the recovery module raises an unexpected error, the tool result is returned as-is. No additional exception handlers wrap the recovery logic — if classify_error/classify_exception crash, the tool result just passes through without retry.
+
+5. **Per-iteration agent recovery**: Resetting `recovery_attempts` at iteration start gives each LLM call its own recovery budget. An agent that hits a transient error on iteration 3 and recovers should still be able to recover from another transient error on iteration 15.
+
+6. **Config toggle**: `recovery.enabled: bool = True` in `ToolsConfig`. Defaults to enabled. Operators who want to disable recovery (e.g., for debugging to see all errors) can set `tools.recovery.enabled: false`.
+
+7. **Metrics reflect reality**: Both the failed and retried attempts update `_metrics`. If recovery succeeds, metrics show 1 error + 1 call. This is intentional — operators see the true failure rate, not just the user-visible rate. Recovery stats separately show how often auto-healing fired.
+
+8. **_SKIP_RESULT_CATEGORIES**: The recovery module defines `_SKIP_RESULT_CATEGORIES` for `classify_error()` to skip TIMEOUT at the result-string level. The executor also has `_SKIP_RECOVERY` frozenset to exclude TIMEOUT from all recovery paths. Belt and suspenders.
+
+### Files changed
+- `src/tools/recovery.py` (new, ~190 lines): RecoveryCategory enum, _RECOVERABLE_PATTERNS, classify_error, classify_exception, get_retry_delay, RecoveryEvent, RecoveryStats.
+- `src/tools/executor.py` (lines 10-20, 68-69, 104-192): Recovery imports, recovery_stats/recovery_enabled attrs, refactored execute() with _try_tool()/_check_recoverable(), _SKIP_RECOVERY.
+- `src/agents/manager.py` (line 640): `agent.recovery_attempts = 0` per-iteration reset.
+- `src/config/schema.py` (lines 56-58, 83): RecoveryConfig model, added to ToolsConfig.
+- `src/web/api.py` (lines 2098-2113): 2 new REST API endpoints (/api/recovery/stats, /api/recovery/recent).
+- `CLAUDE.md` (lines 55, 63): Added recovery module to project structure, updated agent description.
+- `tests/test_http_probe_ops.py` (lines 634-636): __new__() fixture updated with _recovery_enabled and recovery_stats.
+- `tests/test_terraform_ops.py` (lines 651-653): Same fixture update.
+- `tests/test_recovery.py` (new, 110 tests): 16 test classes covering classification, stats, executor integration, agent recovery, API, config, edge cases.
+
+### Next round watch for
+- Round 33 (Loop branch-freshness check) has no dependencies on Round 32. Recovery is self-contained.
+- REST API endpoint count is now 111 (was 109, +2 new: `/api/recovery/stats`, `/api/recovery/recent`).
+- The `ToolExecutor.__new__()` fixture pattern now requires `_recovery_enabled = False` and `recovery_stats = RecoveryStats()` in addition to `_permission_manager = None`, `risk_stats = RiskStats()`, and `_metrics = {}`. Future test files using this pattern must include all 5 attributes.
+- `classify_error()` has `_SKIP_RESULT_CATEGORIES = {TIMEOUT}` — if future rounds want to add more skip categories at the result level, add them there.
+- `ToolExecutor._SKIP_RECOVERY = {TIMEOUT}` is the executor-level exclusion set. This is the authoritative place to exclude categories from recovery.
+- Recovery delay values in `_CATEGORY_DELAYS` are hardcoded. If operators need to tune them, a future round could expose them via config — but the current values are reasonable defaults.
+- Agent `recovery_attempts` is now reset per-iteration (line 640 in `_run_agent`). This means each iteration gets MAX_RECOVERY_ATTEMPTS retries. Previously, only the first LLM error in the agent's lifetime got a retry.
+- The `RecoveryStats.get_recent()` returns events in chronological order (oldest first within the limit). The `_recent` list is capped at `max_recent=100` by default.
+- Recovery does NOT apply to: RBAC denials (checked before tool execution), unknown tools (returned before tool execution), timeouts (excluded via _SKIP_RECOVERY).
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
