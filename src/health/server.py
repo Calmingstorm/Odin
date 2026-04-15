@@ -15,11 +15,15 @@ from aiohttp import web
 
 from ..config.schema import WebConfig, WebhookConfig
 from ..odin_log import get_logger
+from ..version import get_version
 
 if TYPE_CHECKING:
     from ..discord.client import OdinBot
 
 log = get_logger("health")
+
+# Type for component health check callbacks: returns (healthy: bool, detail: str)
+ComponentCheck = Callable[[], tuple[bool, str]]
 
 SendMessageCallback = Callable[[str, str], Awaitable[None]]
 TriggerCallback = Callable[[str, dict], Awaitable[int]]
@@ -314,6 +318,8 @@ class HealthServer:
         self._web_config = web_config or WebConfig()
         self._send_message: SendMessageCallback | None = None
         self._trigger_callback: TriggerCallback | None = None
+        self._start_time = time.monotonic()
+        self._components: dict[str, ComponentCheck] = {}
 
         # Session management
         self._session_manager = SessionManager(
@@ -331,6 +337,8 @@ class HealthServer:
         # Store session_manager on app for access by API routes
         self._app["session_manager"] = self._session_manager
         self._app.router.add_get("/health", self._health)
+        self._app.router.add_get("/health/live", self._health_live)
+        self._app.router.add_get("/health/ready", self._health_ready)
         if self._webhook_config.enabled:
             self._app.router.add_post("/webhook/gitea", self._webhook_gitea)
             self._app.router.add_post("/webhook/grafana", self._webhook_grafana)
@@ -352,6 +360,17 @@ class HealthServer:
 
     def set_ready(self, ready: bool = True) -> None:
         self._ready = ready
+
+    def register_component(self, name: str, check: ComponentCheck) -> None:
+        """Register a named component health check.
+
+        The *check* callable should return ``(healthy, detail)`` where
+        *healthy* is a bool and *detail* is a short human-readable string
+        (e.g. ``"3 active sessions"``).  Checks must be cheap and
+        non-blocking — they are called synchronously on every detailed
+        health request.
+        """
+        self._components[name] = check
 
     def set_send_message(self, callback: SendMessageCallback) -> None:
         self._send_message = callback
@@ -408,10 +427,68 @@ class HealthServer:
         if self._runner:
             await self._runner.cleanup()
 
-    async def _health(self, _request: web.Request) -> web.Response:
-        if self._ready:
+    async def _health(self, request: web.Request) -> web.Response:
+        """Combined health endpoint.
+
+        Without query parameters, returns the same compact response as
+        before (``{"status": "ok"}`` / 503 ``{"status": "starting"}``).
+
+        With ``?detail=1``, includes version, uptime, and per-component
+        status so operators can diagnose partial failures.
+        """
+        if not self._ready:
+            return web.json_response({"status": "starting"}, status=503)
+
+        if request.query.get("detail") != "1":
             return web.json_response({"status": "ok"})
-        return web.json_response({"status": "starting"}, status=503)
+
+        components = self._check_components()
+        all_healthy = all(c["healthy"] for c in components.values())
+        uptime = time.monotonic() - self._start_time
+
+        body = {
+            "status": "ok" if all_healthy else "degraded",
+            "version": get_version(),
+            "uptime_seconds": round(uptime, 1),
+            "components": components,
+        }
+        status_code = 200 if all_healthy else 200  # still 200 — the bot is running
+        return web.json_response(body, status=status_code)
+
+    async def _health_live(self, _request: web.Request) -> web.Response:
+        """Liveness probe — always 200 if the process is running.
+
+        Use this for container liveness checks (Docker HEALTHCHECK,
+        Kubernetes livenessProbe).  A non-200 here means the process
+        should be restarted.
+        """
+        return web.json_response({"status": "alive"})
+
+    async def _health_ready(self, _request: web.Request) -> web.Response:
+        """Readiness probe — 200 only when the bot is fully initialised.
+
+        Use this for load-balancer or Kubernetes readinessProbe so that
+        traffic is only routed once the bot can handle it.
+        """
+        if not self._ready:
+            return web.json_response({"status": "not_ready"}, status=503)
+
+        components = self._check_components()
+        all_healthy = all(c["healthy"] for c in components.values())
+        status_code = 200 if all_healthy else 503
+        status_text = "ready" if all_healthy else "degraded"
+        return web.json_response({"status": status_text, "components": components}, status=status_code)
+
+    def _check_components(self) -> dict[str, dict]:
+        """Run all registered component checks and return a summary dict."""
+        results: dict[str, dict] = {}
+        for name, check in self._components.items():
+            try:
+                healthy, detail = check()
+                results[name] = {"healthy": healthy, "detail": detail}
+            except Exception as exc:
+                results[name] = {"healthy": False, "detail": f"check error: {exc}"}
+        return results
 
     def _verify_hmac_sha256(self, body: bytes, signature: str) -> bool:
         """Verify HMAC-SHA256 signature against webhook secret.
