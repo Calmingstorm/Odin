@@ -200,11 +200,11 @@ TOOLS: list[dict] = [
                 },
                 "trigger": {
                     "type": "object",
-                    "description": "Webhook trigger (AND logic). E.g. {\"source\": \"gitea\", \"event\": \"push\", \"repo\": \"myproject\"}.",
+                    "description": "Webhook trigger (AND logic). E.g. {\"source\": \"github\", \"event\": \"push\", \"repo\": \"myproject\"}.",
                     "properties": {
                         "source": {
                             "type": "string",
-                            "enum": ["gitea", "grafana", "generic"],
+                            "enum": ["gitea", "grafana", "generic", "github"],
                             "description": "Webhook source to match",
                         },
                         "event": {

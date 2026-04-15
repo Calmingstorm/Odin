@@ -326,6 +326,7 @@ class HealthServer:
             self._app.router.add_post("/webhook/gitea", self._webhook_gitea)
             self._app.router.add_post("/webhook/grafana", self._webhook_grafana)
             self._app.router.add_post("/webhook/generic", self._webhook_generic)
+            self._app.router.add_post("/webhook/github", self._webhook_github)
             log.info("Webhook endpoints enabled")
         # Serve static UI files if the directory exists
         if self._web_config.enabled:
@@ -421,6 +422,8 @@ class HealthServer:
             return self._webhook_config.gitea_channel_id
         if source == "grafana" and self._webhook_config.grafana_channel_id:
             return self._webhook_config.grafana_channel_id
+        if source == "github" and self._webhook_config.github_channel_id:
+            return self._webhook_config.github_channel_id
         return self._webhook_config.channel_id or None
 
     async def _notify_triggers(self, source: str, event_data: dict) -> None:
@@ -567,3 +570,70 @@ class HealthServer:
         }
         await self._notify_triggers("generic", event_data_generic)
         return await self._send("generic", text)
+
+    async def _webhook_github(self, request: web.Request) -> web.Response:
+        body = await request.read()
+
+        # GitHub uses X-Hub-Signature-256 (HMAC-SHA256 with sha256= prefix)
+        signature = request.headers.get("X-Hub-Signature-256", "")
+        if signature.startswith("sha256="):
+            signature = signature[7:]
+        if not self._verify_hmac_sha256(body, signature):
+            return web.json_response({"error": "invalid signature"}, status=403)
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        event = request.headers.get("X-GitHub-Event", "unknown")
+        repo = data.get("repository", {}).get("full_name", "unknown")
+
+        if event == "push":
+            pusher = data.get("pusher", {}).get("name", "unknown")
+            commits = data.get("commits", [])
+            ref = data.get("ref", "").replace("refs/heads/", "")
+            commit_lines = []
+            for c in commits[:5]:
+                msg = c.get("message", "").split("\n")[0][:80]
+                commit_lines.append(f"  \u2022 `{c.get('id', '')[:7]}` {msg}")
+            commits_text = "\n".join(commit_lines)
+            text = f"**GitHub Push** \u2014 `{repo}` (`{ref}`)\nBy: {pusher} | {len(commits)} commit(s)\n{commits_text}"
+
+        elif event == "pull_request":
+            pr = data.get("pull_request", {})
+            action = data.get("action", "")
+            title = pr.get("title", "")
+            user = pr.get("user", {}).get("login", "unknown")
+            number = pr.get("number", "")
+            text = f"**GitHub PR #{number}** \u2014 `{repo}`\n{action}: **{title}** by {user}"
+
+        elif event == "issues":
+            issue = data.get("issue", {})
+            action = data.get("action", "")
+            title = issue.get("title", "")
+            user = data.get("sender", {}).get("login", "unknown")
+            number = issue.get("number", "")
+            text = f"**GitHub Issue #{number}** \u2014 `{repo}`\n{action}: **{title}** by {user}"
+
+        elif event == "release":
+            release = data.get("release", {})
+            action = data.get("action", "")
+            tag = release.get("tag_name", "")
+            author = release.get("author", {}).get("login", "unknown")
+            text = f"**GitHub Release** \u2014 `{repo}`\n{action}: **{tag}** by {author}"
+
+        elif event == "workflow_run":
+            workflow = data.get("workflow_run", {})
+            action = data.get("action", "")
+            name = workflow.get("name", "")
+            conclusion = workflow.get("conclusion", "")
+            branch = workflow.get("head_branch", "")
+            status_part = f" ({conclusion})" if conclusion else ""
+            text = f"**GitHub Workflow** \u2014 `{repo}`\n{action}: **{name}**{status_part} on `{branch}`"
+
+        else:
+            text = f"**GitHub** \u2014 `{repo}` \u2014 event: `{event}`"
+
+        await self._notify_triggers("github", {"event": event, "repo": repo})
+        return await self._send("github", text)

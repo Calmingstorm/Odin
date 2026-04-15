@@ -81,6 +81,7 @@ class WebhookConfig(BaseModel):
     channel_id: str = ""
     gitea_channel_id: str = ""
     grafana_channel_id: str = ""
+    github_channel_id: str = ""
 
 
 class LearningConfig(BaseModel):
