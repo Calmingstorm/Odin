@@ -24,6 +24,16 @@ OUTPUT_SECRET_PATTERNS = [
     re.compile(r"[sr]k_(live|test)_[A-Za-z0-9]{20,}"),
     # Slack tokens (xoxb, xoxp, xoxa, xoxo, xoxr, xoxs)
     re.compile(r"xox[boaprs]-[a-zA-Z0-9-]+"),
+    # JWT tokens (header.payload.signature, each part is base64url)
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    # Anthropic API keys (sk-ant-api03-...)
+    re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
+    # Discord bot tokens (base64-user-id.timestamp.hmac)
+    re.compile(r"[MN][A-Za-z0-9]{23,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}"),
+    # Google API keys
+    re.compile(r"AIza[A-Za-z0-9_-]{35}"),
+    # HashiCorp Vault tokens
+    re.compile(r"hvs\.[A-Za-z0-9_-]{24,}"),
 ]
 
 

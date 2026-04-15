@@ -327,6 +327,49 @@ class TestScrubOutputSecrets:
         result = scrub_output_secrets(text)
         assert "password@" not in result
 
+    def test_scrub_jwt_token(self):
+        # Real-format JWT (header.payload.signature)
+        text = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        result = scrub_output_secrets(text)
+        assert "eyJ" not in result
+        assert "[REDACTED]" in result
+
+    def test_scrub_anthropic_key(self):
+        text = "key: sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"
+        result = scrub_output_secrets(text)
+        assert "sk-ant-" not in result
+
+    def test_scrub_discord_bot_token(self):
+        text = "DISCORD_TOKEN=MTAwMDAwMDAwMDAwMDAwMDAwMA.GabcDE.abcdefghijklmnopqrstuvwxyz1234"
+        result = scrub_output_secrets(text)
+        assert "MTAwMDAwMDAwMDAwMDAwMDAwMA" not in result
+
+    def test_scrub_google_api_key(self):
+        text = "GOOGLE_API_KEY=AIzaSyA1234567890abcdefghijklmnopqrstuv"
+        result = scrub_output_secrets(text)
+        assert "AIza" not in result
+
+    def test_scrub_vault_token(self):
+        text = "VAULT_TOKEN=hvs.CAESIGQ1N2MyNGE5ZWUwMzk0MTM"
+        result = scrub_output_secrets(text)
+        assert "hvs." not in result
+
+    def test_scrub_multiple_secrets_in_one_text(self):
+        text = (
+            "Found: password=hunter2 and token eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+            ".eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+            " also ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+        )
+        result = scrub_output_secrets(text)
+        assert "hunter2" not in result
+        assert "eyJ" not in result
+        assert "ghp_" not in result
+
     def test_no_false_positive(self):
         text = "Everything looks normal, disk usage at 42%."
+        assert scrub_output_secrets(text) == text
+
+    def test_no_false_positive_short_eyj(self):
+        # Short strings starting with "eyJ" should NOT be scrubbed
+        text = "The eyJump module is loaded."
         assert scrub_output_secrets(text) == text
