@@ -1469,6 +1469,53 @@ TOOLS: list[dict] = [
             "required": ["host", "action"],
         },
     },
+    {
+        "name": "terraform_ops",
+        "description": (
+            "Terraform operations on a managed host. Actions: init, plan, apply, output, show, "
+            "validate, fmt, state, workspace, import. "
+            "Apply ALWAYS requires a saved plan file (run plan with out=<file> first). "
+            "-auto-approve is never used. Runs terraform via SSH on the target host (or locally)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "host": {
+                    "type": "string",
+                    "description": "Host alias from config",
+                },
+                "action": {
+                    "type": "string",
+                    "description": (
+                        "Terraform action: init, plan, apply, output, show, validate, "
+                        "fmt, state, workspace, import"
+                    ),
+                    "enum": [
+                        "init", "plan", "apply", "output", "show", "validate",
+                        "fmt", "state", "workspace", "import",
+                    ],
+                },
+                "params": {
+                    "type": "object",
+                    "description": (
+                        "Action-specific params. All actions support working_dir (string, -chdir). "
+                        "init: backend_config (object), upgrade (bool), reconfigure (bool), migrate_state (bool). "
+                        "plan: out (file path to save plan), destroy (bool), var (object), var_file (str), "
+                        "target (array of resource addresses), compact_warnings (bool). "
+                        "apply: plan_file (REQUIRED — saved plan file from plan action). "
+                        "output: name (specific output), json (bool). "
+                        "show: plan_file (optional, show plan instead of state), json (bool). "
+                        "validate: json (bool). "
+                        "fmt: check (bool), diff (bool), recursive (bool), path (str). "
+                        "state: subaction (list/show/mv/rm/pull), address, source, destination, id. "
+                        "workspace: subaction (list/select/new/delete/show), name. "
+                        "import: address (REQUIRED), id (REQUIRED), var (object), var_file (str)."
+                    ),
+                },
+            },
+            "required": ["host", "action"],
+        },
+    },
     # --- Image generation (ComfyUI) ---
     {
         "name": "generate_image",

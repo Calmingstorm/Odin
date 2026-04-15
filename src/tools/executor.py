@@ -1037,6 +1037,34 @@ class ToolExecutor:
             return f"docker {action} failed (exit {code}):\n{_truncate_lines(output)}"
         return _truncate_lines(output) if output.strip() else f"docker {action} completed successfully."
 
+    async def _handle_terraform_ops(self, inp: dict) -> str:
+        from .terraform_ops import ALLOWED_ACTIONS as TF_ACTIONS, build_terraform_command
+
+        action = inp.get("action", "")
+        if action not in TF_ACTIONS:
+            return (
+                f"Unknown terraform action: {action}. "
+                f"Allowed: {', '.join(sorted(TF_ACTIONS))}"
+            )
+
+        host = inp.get("host", "")
+        resolved = self._resolve_host(host)
+        if not resolved:
+            return f"Unknown or disallowed host: {host}"
+        address, ssh_user, _os = resolved
+
+        params = inp.get("params") or {}
+
+        try:
+            cmd = build_terraform_command(action, params)
+        except ValueError as e:
+            return f"terraform_ops error: {e}"
+
+        code, output = await self._exec_command(address, cmd, ssh_user)
+        if code != 0:
+            return f"terraform {action} failed (exit {code}):\n{_truncate_lines(output)}"
+        return _truncate_lines(output) if output.strip() else f"terraform {action} completed successfully."
+
     async def _handle_execute_plan(self, inp: dict) -> str:
         """Execute a DAG plan using the Odin planner."""
         from src.tools.plan_runner import PlanRunner

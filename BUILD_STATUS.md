@@ -115,7 +115,7 @@ tightening of prior work.
 | 11 | `git_ops` tool: clone / commit / push / branch / diff / status with safe defaults and branch freshness check | done | git_ops helper module, 11 actions (clone/status/diff/branch/commit/push/pull/checkout/fetch/stash/log), push freshness check, force-with-lease safety, shell injection protection, executor handler, 113 tests |
 | 12 | `kubectl` tool: apply / get / logs / describe against clusters via SSH or kubeconfig | done | kubectl_ops helper module, 10 actions (get/describe/logs/apply/delete/exec/rollout/scale/top/config), shell injection protection, common flags (namespace/context/kubeconfig), executor handler, 138 tests |
 | 13 | `docker_ops` tool: build / run / exec / logs / compose up/down against local or remote hosts | done | docker_ops helper module, 14 actions (ps/run/exec/logs/build/pull/stop/rm/inspect/stats/compose_up/compose_down/compose_ps/compose_logs), shell injection protection, compose file/project support, executor handler, 148 tests |
-| 14 | `terraform_ops` tool: plan / apply with safe plan preview, never auto-approves | pending | |
+| 14 | `terraform_ops` tool: plan / apply with safe plan preview, never auto-approves | done | terraform_ops helper module, 10 actions (init/plan/apply/output/show/validate/fmt/state/workspace/import), apply requires plan file (no -auto-approve ever), -input=false on interactive commands, shell injection protection, executor handler, 138 tests |
 | 15 | `http_probe` tool: issue requests with retries, timing, response capture; useful for API debugging | pending | |
 
 ### Phase 4 — Integrations (rounds 16–20)
@@ -1276,3 +1276,115 @@ Docker operations helper that builds safe shell commands for 14 docker/compose a
 - The tool count is now 64 (was 63 after Round 12). The system prompt char limit (5000) is not affected because tool definitions are sent as structured tool schemas, not in the system prompt text.
 - All five subsystem wiring tasks remain open from Rounds 1-12: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
 - The `run` action's `extra_args` parameter bypasses shell quoting. This is a known design choice, not a bug. If future rounds want to close this, they could remove `extra_args` and model all common docker run flags as named params instead.
+
+## Round 14 — terraform_ops tool: init / plan / apply / output / show / validate / fmt / state / workspace / import
+**Focus**: Add a `terraform_ops` tool that provides structured Terraform operations on managed hosts with shell injection protection. Apply ALWAYS requires a saved plan file — -auto-approve is never used.
+**Baseline pytest**: 1483 passed, 0 failed
+**Post-round pytest**: 1621 passed, 0 failed (+138 new tests)
+
+### Validated from prior rounds
+- Round 13: `docker_ops` tool, 14 actions, shell injection protection, compose support — all present and passing (148 tests). Used `docker_ops.py` as the template for `terraform_ops.py` per Round 13's recommendation.
+- Round 12: `kubectl` tool, 10 actions, shell injection protection, common flags — all present and passing (138 tests).
+- Round 11: `git_ops` tool, 11 actions, push freshness check — all present and passing (113 tests).
+- Round 10: 5 subsystem wiring tasks remain pending (`cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics). Not in scope for this round.
+- RuntimeWarning in `test_connection_pools.py::TestSSHCommandWithPool::test_no_pool_no_control_master` still present (pre-existing, per Round 10 notes).
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. New module: `src/tools/terraform_ops.py` (228 lines)
+Terraform operations helper that builds safe shell commands for 10 terraform actions.
+
+- `ALLOWED_ACTIONS` (line 13): Frozen set of 10 actions: init, plan, apply, output, show, validate, fmt, state, workspace, import.
+- `_chdir_flag(params)` (line 24): Builds `-chdir=<dir>` flag from `working_dir` param. Shared across all actions. Placed before the subcommand in the command string (terraform global flag).
+- `build_terraform_command(action, params)` (line 30): Main entry point. Validates action against ALLOWED_ACTIONS, dispatches to per-action builder. Returns a single command string.
+- `_build_init(params)` (line 49): Builds `terraform init` with optional `upgrade`, `reconfigure`, `migrate_state`, `backend_config` (object → `-backend-config=key=val` flags). Always appends `-input=false`.
+- `_build_plan(params)` (line 69): Builds `terraform plan` with optional `out` (save plan file), `destroy` (-destroy flag for destroy planning), `var` (object → `-var=key=val`), `var_file`, `target` (array → `-target=addr`), `compact_warnings`. Always appends `-input=false`.
+- `_build_apply(params)` (line 91): Builds `terraform apply <plan_file>`. REQUIRES `plan_file` parameter — raises ValueError if missing. Never uses `-auto-approve`. Always appends `-input=false`. This is the key safety feature: the LLM must run `plan -out=file` first, review the output, then `apply` the saved plan.
+- `_build_output(params)` (line 101): Builds `terraform output` with optional `name` (specific output), `json` (-json flag).
+- `_build_show(params)` (line 111): Builds `terraform show` with optional `plan_file` (show plan instead of state), `json` (-json flag).
+- `_build_validate(params)` (line 121): Builds `terraform validate` with optional `json` (-json flag).
+- `_build_fmt(params)` (line 129): Builds `terraform fmt` with optional `check`, `diff`, `recursive`, `path`.
+- `_build_state(params)` (line 142): Builds `terraform state` with subaction (list/show/mv/rm/pull). `show` requires `address`. `mv` requires `source` and `destination`. `rm` requires `address`. `list` supports optional `id` filter. `pull` has no additional args.
+- `_build_workspace(params)` (line 176): Builds `terraform workspace` with subaction (list/select/new/delete/show). `select`/`new`/`delete` require `name`.
+- `_build_import(params)` (line 196): Builds `terraform import` with `address` and `id` (both required). Supports optional `var` (object) and `var_file`. Always appends `-input=false`.
+- All user-provided values go through `shlex.quote()` for shell injection protection.
+
+#### 2. Tool definition in `src/tools/registry.py` (lines 1472-1519)
+- Added `terraform_ops` tool to TOOLS list with `host`, `action` (enum of 10 values), and `params` (action-specific object).
+- Description documents all actions and their params inline so the LLM can use the tool without external docs.
+- Description explicitly states: "Apply ALWAYS requires a saved plan file. -auto-approve is never used."
+- Placed after `docker_ops` and before "Image generation (ComfyUI)" section.
+
+#### 3. Handler in `src/tools/executor.py` (lines 1040-1066)
+- `_handle_terraform_ops(self, inp)`: Validates action, resolves host, builds command via `build_terraform_command()`, dispatches via `_exec_command()`.
+- Same pattern as docker_ops/kubectl handlers — single command execution with truncated output.
+- Empty output from successful commands returns "terraform <action> completed successfully."
+- Validation errors from `build_terraform_command` (missing plan_file, missing address, etc.) returned as user-friendly error messages.
+
+#### 4. Tests: `tests/test_terraform_ops.py` — 138 tests across 16 test classes
+
+**Registration tests** (4):
+- `TestTerraformRegistration`: tool in registry, required fields, required params, enum matches ALLOWED_ACTIONS.
+
+**Allowed actions** (3):
+- `TestTerraformAllowedActions`: all 10 expected, unknown raises ValueError, frozenset immutable.
+
+**Chdir flag** (3):
+- `TestChdirFlag`: no working_dir, with working_dir, working_dir with spaces (quoted).
+
+**Per-action builder tests** (88):
+- `TestBuildInit` (10): basic, upgrade, reconfigure, migrate_state, backend_config, working_dir, input_false, backend_config_non_dict_skipped, full_options.
+- `TestBuildPlan` (14): basic, out, destroy, var, var_file, target, multiple_targets, compact_warnings, working_dir, input_false, var_non_dict_skipped, target_non_list_skipped, full_options.
+- `TestBuildApply` (7): basic, requires_plan_file, empty_plan_file, working_dir, plan_file_quoted, no_auto_approve, input_false.
+- `TestBuildOutput` (5): basic, name, json, name_and_json, working_dir.
+- `TestBuildShow` (5): basic, plan_file, json, plan_file_and_json, working_dir.
+- `TestBuildValidate` (3): basic, json, working_dir.
+- `TestBuildFmt` (6): basic, check, diff, recursive, path, full_options.
+- `TestBuildState` (14): list_default, list_with_id, show, show_requires_address, show_empty_address, mv, mv_requires_both, mv_requires_source, rm, rm_requires_address, pull, invalid_subaction, working_dir.
+- `TestBuildWorkspace` (11): list_default, select, new, delete, show, select_requires_name, new_requires_name, delete_requires_name, empty_name_raises, invalid_subaction, working_dir.
+- `TestBuildImport` (10): basic, requires_address, requires_id, empty_address, empty_id, var, var_file, working_dir, input_false, var_non_dict_skipped.
+
+**Shell injection safety** (10):
+- `TestShellInjectionSafety`: working_dir_injection, plan_out_injection, var_value_injection, target_injection, address_injection, plan_file_injection, workspace_name_injection, import_id_injection, backend_config_injection, var_file_injection.
+
+**Handler integration tests** (21):
+- `TestHandleTerraformOps` (21): unknown_host, unknown_action, missing_action, init/plan/apply/output/show/validate/fmt/state/workspace/import dispatch, apply_validation_error, command_failure, empty_output, no_params_default, correct_ssh_user, state_validation_error, import_validation_error.
+
+**Edge cases** (16):
+- `TestEdgeCases`: all_actions_have_builders, apply_never_has_auto_approve, init/plan/apply/import_always_has_input_false, output/show/fmt_no_input_false, state_list_default_subaction, workspace_list_default_subaction, plan_destroy_with_out, chdir_before_subcommand, multiple_vars, state_mv_both_quoted, init_multiple_backend_configs.
+
+### Design decisions
+
+1. **Separate helper module** (`terraform_ops.py`): Same pattern as `git_ops.py`, `kubectl_ops.py`, `docker_ops.py` — command building logic is pure (no I/O), making it easy to test independently. The executor handler imports and uses it.
+
+2. **10 actions**: init, plan, apply, output, show, validate, fmt, state, workspace, import. These cover the complete terraform workflow. No `destroy` action — destroy is done via `plan -destroy -out=file` then `apply file`, which is safer and requires explicit review.
+
+3. **Apply REQUIRES plan_file**: This is the core safety feature. The LLM must run `plan -out=<file>` first to see what will change, then `apply <file>` to execute the saved plan. `-auto-approve` is never injected. This prevents blind infrastructure changes.
+
+4. **-input=false on interactive commands**: `init`, `plan`, `apply`, and `import` all append `-input=false` to prevent the command from hanging on interactive prompts (there's no TTY in SSH/subprocess execution).
+
+5. **-chdir flag**: All actions support `working_dir` param, which becomes `-chdir=<dir>`. This is a terraform global flag placed before the subcommand. Avoids needing to `cd` to a directory before running terraform.
+
+6. **No destroy action**: Instead of a dedicated `destroy`, the workflow is: `plan` with `destroy: true` + `out: destroy.plan` → review output → `apply` with `plan_file: destroy.plan`. This forces the LLM to see the destroy plan before executing it.
+
+7. **State subactions**: `list`, `show`, `mv`, `rm`, `pull` cover the common state management operations. `show` requires an address, `mv` requires source + destination, `rm` requires an address.
+
+8. **Workspace subactions**: `list`, `select`, `new`, `delete`, `show`. `select`/`new`/`delete` require a name. `list` and `show` take no arguments.
+
+9. **Import supports vars**: The `import` action supports `-var` and `-var-file` because terraform may need provider configuration to import resources.
+
+10. **Backend config as object**: `init`'s `backend_config` is an object (key-value pairs), each expanded to a separate `-backend-config=key=val` flag. This is cleaner than a raw string and prevents injection in backend config values.
+
+### Issues found
+- No issues in prior rounds needed fixing.
+- The `apply` action uses a plan file, which may have been generated on a different host or at a different time. If the terraform state has changed between `plan` and `apply`, terraform will detect the drift and may fail. This is expected terraform behavior and is actually a safety feature.
+- The `state mv` and `state rm` actions modify terraform state directly. These are powerful operations that can break the state-resource mapping. The direct-executor ethos means no "are you sure?" gate, but the LLM should use these carefully.
+- The `workspace select` action changes which workspace is active on the target host. Like kubectl's `config use-context`, this is persistent and affects future terraform invocations.
+
+### Next round watch for
+- Round 15 (http_probe tool) follows the same pattern: tool definition in registry, handler in executor, helper module. Can use `terraform_ops.py` as a template, though http_probe is conceptually different (issuing HTTP requests rather than running CLI commands).
+- The `terraform_ops` tool is an executor tool (handled via `_handle_terraform_ops` on ToolExecutor), not a Discord-native tool. It uses `_exec_command` for dispatch, so it inherits bulkhead isolation, SSH retry, and connection pooling from the existing infrastructure.
+- The tool count is now 65 (was 64 after Round 13). The system prompt char limit (5000) is not affected because tool definitions are sent as structured tool schemas, not in the system prompt text.
+- All five subsystem wiring tasks remain open from Rounds 1-13: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
+- The `plan_file` approach means the LLM needs two tool calls to make infrastructure changes (plan + apply). This is intentional — it mirrors the standard terraform workflow and prevents blind changes.
