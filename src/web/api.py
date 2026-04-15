@@ -636,6 +636,49 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response(tracker.get_totals())
 
     # ------------------------------------------------------------------
+    # Trajectories
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/trajectories")
+    async def list_trajectory_files(_request: web.Request) -> web.Response:
+        saver = getattr(bot, "trajectory_saver", None)
+        if saver is None:
+            return web.json_response({"error": "trajectory saving not available"}, status=503)
+        files = await saver.list_files()
+        return web.json_response({"files": files, "count": saver.count})
+
+    @routes.get("/api/trajectories/{filename}")
+    async def get_trajectory_file(request: web.Request) -> web.Response:
+        saver = getattr(bot, "trajectory_saver", None)
+        if saver is None:
+            return web.json_response({"error": "trajectory saving not available"}, status=503)
+        filename = request.match_info["filename"]
+        if not filename.endswith(".jsonl") or "/" in filename or "\\" in filename:
+            return web.json_response({"error": "invalid filename"}, status=400)
+        limit = min(int(request.query.get("limit", "100")), 500)
+        entries = await saver.read_file(filename, limit=limit)
+        return web.json_response({"entries": entries, "count": len(entries)})
+
+    @routes.get("/api/trajectories/search/query")
+    async def search_trajectories(request: web.Request) -> web.Response:
+        saver = getattr(bot, "trajectory_saver", None)
+        if saver is None:
+            return web.json_response({"error": "trajectory saving not available"}, status=503)
+        channel_id = request.query.get("channel_id")
+        user_id = request.query.get("user_id")
+        tool_name = request.query.get("tool_name")
+        errors_only = request.query.get("errors_only", "").lower() in ("1", "true")
+        limit = min(int(request.query.get("limit", "50")), 500)
+        results = await saver.search(
+            channel_id=channel_id,
+            user_id=user_id,
+            tool_name=tool_name,
+            errors_only=errors_only,
+            limit=limit,
+        )
+        return web.json_response({"results": results, "count": len(results)})
+
+    # ------------------------------------------------------------------
     # Skills
     # ------------------------------------------------------------------
 

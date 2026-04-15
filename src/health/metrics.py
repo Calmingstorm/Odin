@@ -298,4 +298,18 @@ class MetricsCollector:
             except Exception:
                 pass
 
+        # -- Trajectories --
+        trajectory_source = self._sources.get("trajectories")
+        if trajectory_source:
+            try:
+                traj_data = trajectory_source()
+                if traj_data:
+                    sections.append(_format_metric(
+                        "odin_trajectories_saved_total",
+                        traj_data.get("trajectories_saved_total", 0),
+                        help_text="Total trajectory turns saved to disk",
+                    ))
+            except Exception:
+                pass
+
         return "\n".join(sections) + "\n"

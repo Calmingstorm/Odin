@@ -96,7 +96,7 @@ tightening of prior work.
 |---|-------|--------|---------|
 | 1 | Cost tracking: prompt+completion tokens and estimated USD per Codex call, aggregated per user / channel / tool in Prometheus + web UI | done | CostTracker module, LLMResponse token fields, Prometheus metrics, /api/usage endpoint, web UI page |
 | 2 | Token-budget awareness: track running tokens per session, expose in `/metrics`, auto-compact when budget exceeded | done | Session.estimated_tokens, token-budget compaction, Prometheus metrics, /api/sessions/token-usage, config.sessions.token_budget |
-| 3 | Trajectory saving: dump every message's full turn (prompt, all tool calls, final response) as JSONL under `data/trajectories/` | pending | |
+| 3 | Trajectory saving: dump every message's full turn (prompt, all tool calls, final response) as JSONL under `data/trajectories/` | done | TrajectorySaver module, TrajectoryTurn/ToolIteration types, date-partitioned JSONL, search/list/read, REST API (3 endpoints), Prometheus metric |
 | 4 | Trace viewer web UI page: given a message id, render the full tool chain with timings and outputs | pending | |
 | 5 | Log filter UI: server-side search / time-range / level filtering on the Logs page | pending | |
 
@@ -341,3 +341,72 @@ bottom. Do not truncate older entries — they are the chain-of-context.)
 - The `session_tokens` Prometheus source needs to be registered on the `HealthServer.metrics` collector when the bot boots — look for where `metrics.register_source("sessions", ...)` is called and add the session token source alongside it.
 - The token budget default of 128K is conservative. Real Codex context windows may be larger or smaller — the config knob (`config.sessions.token_budget`) allows tuning.
 - `Session.estimated_tokens` is O(n) per call. If sessions grow large (>100 messages), consider caching. Currently bounded by `max_history=50` and compaction, so unlikely to be a bottleneck.
+
+## Round 3 — Trajectory saving: full message turn recording as JSONL
+**Focus**: Dump every message's full turn (prompt, all tool calls, final response) as JSONL under `data/trajectories/`.
+**Baseline pytest**: 759 passed, 0 failed
+**Post-round pytest**: 812 passed, 0 failed (+53 new tests)
+
+### Validated from prior rounds
+- Round 1: `CostTracker`, `estimate_tokens`, `LLMResponse` token fields all present and passing (35 tests). `CostTracker` still not wired to bot object — still pending (noted Round 1, Round 2).
+- Round 2: `Session.estimated_tokens`, `_needs_compaction()`, `get_session_token_usage()`, `get_token_metrics()` all present and passing (41 tests). `estimate_tokens` consolidated into `cost_tracker.py` as recommended — verified Round 2's import works. `session_tokens` Prometheus source still needs wiring — still pending.
+- Round 2 recommended: "Round 3 should ensure trajectories include per-message estimated token counts so cost analysis can be done offline." — Done: `TrajectoryTurn` includes `total_input_tokens`, `total_output_tokens` per turn, and each `ToolIteration` has `input_tokens`/`output_tokens`. If no token data is provided, `finalize()` falls back to `estimate_tokens()` from `cost_tracker.py`.
+
+### Work done
+
+#### 1. New module: `src/trajectories/saver.py`
+- `ToolIteration` dataclass (line 30): captures one round of the tool loop — tool calls, results, LLM text, token counts, duration.
+- `TrajectoryTurn` dataclass (line 39): captures the complete message turn — message metadata, user content, system prompt, history, iterations, final response, tools used, error/handoff flags, aggregate tokens/duration.
+  - `add_iteration()` (line 64): appends a tool iteration to the turn.
+  - `finalize()` (line 82): sets final response, aggregates totals from iterations, collects tools used. Falls back to `estimate_tokens()` if no token data.
+  - `to_dict()` (line 93): serializes to a dict suitable for JSON. Stores `system_prompt_length` instead of the full system prompt (avoids bloating trajectory files with 5000-char prompts).
+- `_collect_tools_used()` (line 108): deduplicates tool names across iterations, preserving first-seen order.
+- `_trajectory_filename()` (line 118): generates `YYYY-MM-DD.jsonl` from datetime.
+- `TrajectorySaver` class (line 122):
+  - `__init__(directory)` — creates `data/trajectories/` directory on init.
+  - `save(turn)` — async write of one JSONL line to today's file via `aiofiles`.
+  - `save_from_data(...)` — convenience method that builds a `TrajectoryTurn` from keyword args and saves it.
+  - `list_files()` — returns sorted list of `.jsonl` files in the directory.
+  - `read_file(filename, limit)` — reads entries from a file (most recent first).
+  - `search(channel_id, user_id, tool_name, errors_only, limit)` — searches across all files with filter predicates.
+  - `get_prometheus_metrics()` — returns `{"trajectories_saved_total": N}` for the metrics collector.
+  - `count` property — tracks total saves for metrics.
+
+#### 2. New module: `src/trajectories/__init__.py`
+- Exports `TrajectorySaver`, `TrajectoryTurn`, `ToolIteration`.
+
+#### 3. REST API endpoints: `src/web/api.py:638-680`
+- `GET /api/trajectories` — list trajectory files + total save count. Returns 503 if `trajectory_saver` not on bot.
+- `GET /api/trajectories/{filename}` — read entries from a specific file (limit param, max 500). Validates filename ends with `.jsonl` and contains no path separators.
+- `GET /api/trajectories/search/query` — search with filters: `channel_id`, `user_id`, `tool_name`, `errors_only`, `limit`.
+
+#### 4. Prometheus metrics: `src/health/metrics.py:302-311`
+- Added `trajectories` source rendering: `odin_trajectories_saved_total` gauge.
+
+#### 5. Tests: `tests/test_trajectories.py` — 53 tests across 13 test classes
+- `TestToolIteration` (2): defaults, with data
+- `TestTrajectoryTurn` (9): defaults, add_iteration, multiple iterations, finalize totals, finalize fallback tokens, finalize error, to_dict structure, to_dict excludes system prompt, to_dict serializable
+- `TestCollectToolsUsed` (4): empty, single, dedup with order, missing name
+- `TestTrajectoryFilename` (2): format, different dates
+- `TestTrajectorySaver` (9): creates file, writes valid JSON, increments count, appends to same file, sets timestamp, preserves timestamp, creates directory, includes tokens, includes duration
+- `TestTrajectorySaverSaveFromData` (1): full round-trip
+- `TestTrajectorySaverListFiles` (2): empty, with files
+- `TestTrajectorySaverReadFile` (3): nonexistent, read file, with limit
+- `TestTrajectorySaverSearch` (7): all, by channel, by user, by tool, errors only, with limit, combined filters
+- `TestTrajectoryPrometheusMetrics` (4): get_prometheus_metrics, rendered, absent, zero
+- `TestTrajectoryPrometheusMetrics.test_metrics_in_endpoint` (1): full HTTP round-trip via HealthServer
+- `TestTrajectoryAPI` (4): list, get file, invalid name, search
+- `TestTrajectoryAPIUnavailable` (3): list 503, get 503, search 503
+- `TestTrajectoryImports` (2): package import, default directory constant
+
+### Issues found
+- `_process_with_tools` is referenced in `src/web/chat.py:177` but not yet implemented on `OdinBot`. Trajectory saving cannot be wired into the tool loop until this method exists. The `TrajectorySaver` is designed to be called from inside the tool loop: create a `TrajectoryTurn` before the loop, call `add_iteration()` after each LLM call, then `finalize()` + `save()` after the loop completes.
+- `bot.trajectory_saver` needs to be instantiated and attached during bot startup (same pattern as `cost_tracker` — noted in Rounds 1-2 as still pending).
+- The `trajectory_saver` Prometheus source needs to be registered: `metrics.register_source("trajectories", saver.get_prometheus_metrics)`.
+- `to_dict()` stores `system_prompt_length` rather than the full system prompt to avoid bloating trajectory files. If full prompt replay is needed, a future round could add an opt-in `include_system_prompt` flag.
+
+### Next round watch for
+- Round 4 (trace viewer web UI) should use the `/api/trajectories/{filename}` and `/api/trajectories/search/query` endpoints as its data source. The trajectory JSONL entries contain `iterations` with full tool call/result data and timing — exactly what a trace viewer needs to render.
+- The `TrajectorySaver` needs wiring into the bot's `__init__` or startup sequence: `self.trajectory_saver = TrajectorySaver()` and `metrics.register_source("trajectories", self.trajectory_saver.get_prometheus_metrics)`.
+- Integration with the tool loop requires calling `turn.add_iteration()` after each LLM response inside `_process_with_tools`, then `turn.finalize()` + `await self.trajectory_saver.save(turn)` at the end. This is blocked until `_process_with_tools` is implemented.
+- The `search()` method reads all matching files sequentially — fine for moderate volume but may need optimization (index file, or SQLite storage) if trajectory volume grows large.
