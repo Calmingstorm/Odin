@@ -130,7 +130,7 @@ tightening of prior work.
 ### Phase 5 — Memory & knowledge (rounds 21–25)
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
-| 21 | Knowledge deduplication: content hashing on ingest, skip or merge near-duplicates | pending | |
+| 21 | Knowledge deduplication: content hashing on ingest, skip or merge near-duplicates | done | Content hashing (SHA-256), exact + near-duplicate skip on ingest, find_duplicates/find_near_duplicates scan, merge_sources, 2 REST API endpoints, +63 tests |
 | 22 | Knowledge versioning: edit history per entry with audit trail | pending | |
 | 23 | Adaptive session consolidation: compaction target scales with channel activity | pending | |
 | 24 | FTS5 session search in web UI: search prior conversations by keyword/user/time | pending | |
@@ -2346,3 +2346,164 @@ All endpoints use `getattr(bot, "health_server", None)` then `getattr(hs, "grafa
 - The Slack rate-limit fix means messages will be retried slightly more aggressively after failures, since failed sends no longer consume the cooldown window. This is correct behavior.
 - The JQL URL-encoding fix adds `urllib.parse.quote` as a new stdlib import. No external dependencies.
 - All five subsystem wiring tasks remain open from prior rounds.
+
+## Round 21 — Knowledge deduplication: content hashing on ingest, skip or merge near-duplicates
+**Focus**: Add content-based deduplication to the knowledge store — SHA-256 hashing on ingest, exact-duplicate skip, near-duplicate detection via chunk-hash overlap, find/scan/merge operations, and REST API endpoints.
+**Baseline pytest**: 2260 passed, 0 failed
+**Post-round pytest**: 2323 passed, 0 failed (+63 new tests)
+
+### Validated from prior rounds
+- Round 20 (REVIEWER): shell injection fix, Slack rate-limit fix, Grafana cooldown cleanup, JQL injection fix — all passing.
+- Round 20 notes say "Round 21 is a new feature round, no dependencies on Round 20 fixes" — confirmed.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. Schema additions: `src/knowledge/store.py` (lines 58-77)
+
+Two new columns added to `knowledge_chunks` via ALTER TABLE migration:
+- `content_hash TEXT` — SHA-256 of the individual chunk's content (normalised: stripped + lowercased).
+- `doc_content_hash TEXT` — SHA-256 of the full document content before chunking. Same for all chunks of a document.
+
+Two new indexes:
+- `idx_knowledge_content_hash` on `content_hash` — for fast chunk-level overlap lookups.
+- `idx_knowledge_doc_hash` on `doc_content_hash` — for fast exact-document duplicate detection.
+
+Migration is idempotent — uses `ALTER TABLE ... ADD COLUMN` wrapped in `try/except OperationalError` so it works for both new and existing databases.
+
+#### 2. Content hashing: `src/knowledge/store.py` (line 118)
+
+New static method `_content_hash(text: str) -> str`:
+- Normalises text: `text.strip().lower()`.
+- Returns SHA-256 hex digest (64 chars).
+- Case-insensitive and whitespace-tolerant — "Hello World" and "  hello world  " produce the same hash.
+
+#### 3. Exact duplicate detection: `src/knowledge/store.py` (lines 148-165)
+
+In `ingest()`, when `dedup=True` (default), before chunking:
+1. Computes `doc_content_hash = _content_hash(content)`.
+2. Calls `_find_by_doc_hash(doc_content_hash)` to check for existing documents with the same content.
+3. **Same source, same content**: Skips re-ingest entirely, returns the existing chunk count. Logs "content unchanged".
+4. **Different source, same content**: Skips ingest, returns 0. Logs "identical content already ingested as <existing source>".
+
+`_find_by_doc_hash()` (lines 466-478): Queries `knowledge_chunks` for any source with matching `doc_content_hash`, returns `(source, chunk_count)` or `None`.
+
+#### 4. Near-duplicate detection: `src/knowledge/store.py` (lines 167-177)
+
+After exact-dup check, in `ingest()`:
+1. Chunks the text and computes `content_hash` for each chunk.
+2. Calls `_find_near_duplicate(chunk_hashes, source)` to find any existing source sharing >= 80% (configurable via `NEAR_DUPE_THRESHOLD`) of chunk hashes.
+3. If found, skips ingest and logs a warning with overlap percentage and existing source name.
+
+`_find_near_duplicate()` (lines 480-502): SQL query counts matches in `content_hash IN (...)` grouped by source, excluding `exclude_source`. Returns `(source, overlap_ratio)` or `None`.
+
+#### 5. Hash storage in `_write_chunks_sync`: `src/knowledge/store.py` (lines 207-225)
+
+Updated to compute `chunk_hash = _content_hash(chunk)` for each chunk and store both `content_hash` and `doc_content_hash` in the INSERT statement.
+
+#### 6. Dedup scan methods: `src/knowledge/store.py` (lines 506-588)
+
+- `find_duplicates()` (lines 506-525): SQL query groups by `doc_content_hash`, returns groups with >1 distinct source. Each result: `{content_hash, sources, source_count}`.
+- `find_near_duplicates(threshold=0.5)` (lines 529-588): Builds per-source sets of chunk `content_hash` values, computes pairwise set intersection. Returns pairs with `overlap_ratio >= threshold`. Each result: `{source_a, source_b, shared_chunks, total_a, total_b, overlap_ratio}`.
+- `merge_sources(keep_source, remove_source)` (lines 590-600): Validates `keep_source` exists, then calls `delete_source(remove_source)`. Returns chunks removed.
+
+#### 7. `list_sources` updated: `src/knowledge/store.py` (lines 300-320)
+
+`list_sources()` now includes `doc_content_hash` in the GROUP BY query and returns `content_hash` field in each source entry. Legacy data (no hash) returns empty string.
+
+#### 8. `ingest()` new parameter: `dedup` (line 124)
+
+New optional keyword parameter `dedup: bool = True`. When `False`, skips all duplicate detection. Used by callers that intentionally want to create duplicate entries (e.g., testing) or where the caller has already performed its own dedup check.
+
+All existing callers use the default (`dedup=True`) and benefit from automatic deduplication with no code changes.
+
+#### 9. REST API: `src/web/api.py` (lines 1271-1304)
+
+Two new endpoints:
+
+- `GET /api/knowledge/duplicates` (line 1271): Returns `{exact: [...], near: [...]}`. The `threshold` query parameter controls near-duplicate sensitivity (default 0.5). Returns 503 if store unavailable.
+- `POST /api/knowledge/merge` (line 1285): Accepts `{keep_source, remove_source}`. Merges by deleting `remove_source` chunks. Returns `{status, kept, removed, chunks_removed}`. Returns 400 for missing fields, 404 if `keep_source` doesn't exist.
+
+#### 10. Tests: `tests/test_knowledge_dedup.py` — 63 tests across 16 test classes
+
+**Content hash** (5):
+- `TestContentHash` (5): deterministic, whitespace stripping, case insensitivity, different content, SHA-256 length.
+
+**Schema migration** (3):
+- `TestSchemaMigration` (3): new columns exist, indexes created, migration idempotent.
+
+**Exact duplicate ingest** (5):
+- `TestIngestExactDuplicate` (5): same source same content skip, cross-source skip, different content allowed, dedup=False bypass, case-insensitive duplicate.
+
+**Near-duplicate ingest** (2):
+- `TestIngestNearDuplicate` (2): skip near-duplicate, allow dissimilar content.
+
+**Hash storage** (3):
+- `TestIngestStoresHashes` (3): chunk content_hash stored, doc_content_hash stored, all chunks same doc hash.
+
+**Ingest unavailable** (2):
+- `TestIngestUnavailable` (2): unavailable returns zero, empty content returns zero.
+
+**_find_by_doc_hash** (3):
+- `TestFindByDocHash` (3): finds existing, returns none for unknown, returns none when unavailable.
+
+**_find_near_duplicate** (5):
+- `TestFindNearDuplicate` (5): detects overlap, excludes self, empty hashes, unavailable, custom threshold.
+
+**find_duplicates** (3):
+- `TestFindDuplicates` (3): no duplicates, finds exact dupes with dedup off, unavailable.
+
+**find_near_duplicates** (4):
+- `TestFindNearDuplicates` (4): empty store, finds overlapping sources, no overlap, unavailable.
+
+**merge_sources** (4):
+- `TestMergeSources` (4): merge removes source, same source noop, keep not found, unavailable.
+
+**list_sources hash** (2):
+- `TestListSourcesHash` (2): includes content_hash, empty hash for legacy data.
+
+**Constants** (3):
+- `TestConstants` (3): threshold value, chunk size, vector dim.
+
+**Module imports** (2):
+- `TestModuleImports` (2): store importable, threshold importable.
+
+**REST API — duplicates** (4):
+- `TestKnowledgeDuplicatesAPI` (4): unavailable 503, empty results, with data, custom threshold.
+
+**REST API — merge** (4):
+- `TestKnowledgeMergeAPI` (4): unavailable 503, missing fields 400, not found 404, success.
+
+**Edge cases** (8):
+- `TestEdgeCases` (8): whitespace-only ingest, ingest after delete, multiple exact dupes, doc hash changes on update, dedup with embedder, near-dupe below threshold, legacy data without hash, reingest idempotent, merge preserves keep source.
+
+### Design decisions
+
+1. **SHA-256 over MD5**: Content hashing uses SHA-256 for collision resistance. The existing MD5-based `doc_hash` (8 chars of MD5 of source name) is kept unchanged — it's used for chunk_id generation, not content deduplication.
+
+2. **Normalised hashing**: Content is stripped and lowercased before hashing. This handles trivial formatting differences (trailing whitespace, case changes) that shouldn't create duplicates.
+
+3. **Two-level dedup**: Document-level (`doc_content_hash`) catches exact duplicates in O(1). Chunk-level (`content_hash`) catches near-duplicates where most content is shared but some paragraphs differ. This handles both "copied the same file twice" and "copied then edited slightly".
+
+4. **80% threshold**: `NEAR_DUPE_THRESHOLD = 0.8` means a new document must share ≥80% of its chunk hashes with an existing source to be flagged. This avoids false positives from documents sharing only a few common paragraphs.
+
+5. **dedup=True default**: All existing callers benefit from deduplication with no code changes. The `dedup=False` parameter allows intentional duplicates (testing, forced re-ingest).
+
+6. **Skip over merge on auto-detect**: When a duplicate is detected during ingest, the default is to skip (return 0 or existing count) rather than silently merging. Explicit merging via `merge_sources()` or the `/api/knowledge/merge` endpoint gives operators control.
+
+7. **Backward compatible schema**: New columns are added via ALTER TABLE with try/except, so existing databases migrate automatically. Legacy data without hashes works fine — `list_sources()` returns empty string, dedup scan ignores NULL/empty hashes.
+
+8. **No new dependencies**: Uses only stdlib (hashlib.sha256). No external packages added.
+
+### Files changed
+- `src/knowledge/store.py` (lines 28, 58-77, 118-120, 124-200, 207-225, 300-320, 466-600): NEAR_DUPE_THRESHOLD constant, schema migration, _content_hash(), dedup logic in ingest(), hash storage in _write_chunks_sync(), content_hash in list_sources(), _find_by_doc_hash(), _find_near_duplicate(), find_duplicates(), find_near_duplicates(), merge_sources().
+- `src/web/api.py` (lines 1271-1304): GET /api/knowledge/duplicates, POST /api/knowledge/merge.
+- `tests/test_knowledge_dedup.py` (new, 63 tests): Complete test coverage for content hashing, schema, ingest dedup, scan, merge, REST API, and edge cases.
+
+### Next round watch for
+- Round 22 (Knowledge versioning: edit history per entry with audit trail) builds directly on the `knowledge_chunks` table. The new `content_hash` and `doc_content_hash` columns are available for version comparison — a version change can be detected by comparing `doc_content_hash` values.
+- The `ingest()` method now returns the existing chunk count (not 0) when same-source same-content duplicate is detected. Callers that check `if chunks == 0: "failed"` may need to handle this — but currently no callers treat 0 as an error.
+- Cross-source duplicate detection is aggressive: if doc A's content is already stored under source B, ingesting A returns 0 and logs. Use `dedup=False` to force-ingest despite duplicates.
+- The `merge_sources()` operation is destructive — it deletes the remove_source's chunks. There is no undo. The REST API endpoint requires explicit `keep_source` and `remove_source` parameters.
+- All five subsystem wiring tasks remain open from prior rounds.
+- REST API endpoint count is now 93 (was 91 after Round 20).

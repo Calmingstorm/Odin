@@ -1265,6 +1265,44 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "source not found or empty"}, status=404)
         return web.json_response(chunks)
 
+    # Knowledge dedup
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/knowledge/duplicates")
+    async def list_knowledge_duplicates(_request: web.Request) -> web.Response:
+        store = bot._knowledge_store
+        if not store or not store.available:
+            return web.json_response({"error": "knowledge store not available"}, status=503)
+        exact = await asyncio.to_thread(store.find_duplicates)
+        threshold = 0.5
+        try:
+            threshold = float(_request.query.get("threshold", "0.5"))
+        except ValueError:
+            pass
+        near = await asyncio.to_thread(store.find_near_duplicates, threshold)
+        return web.json_response({"exact": exact, "near": near})
+
+    @routes.post("/api/knowledge/merge")
+    async def merge_knowledge(request: web.Request) -> web.Response:
+        store = bot._knowledge_store
+        if not store or not store.available:
+            return web.json_response({"error": "knowledge store not available"}, status=503)
+        data = await request.json()
+        keep = data.get("keep_source", "").strip()
+        remove = data.get("remove_source", "").strip()
+        if not keep or not remove:
+            return web.json_response(
+                {"error": "keep_source and remove_source are required"}, status=400
+            )
+        removed = await asyncio.to_thread(store.merge_sources, keep, remove)
+        if removed == 0:
+            return web.json_response(
+                {"error": "keep_source not found or nothing to merge"}, status=404
+            )
+        return web.json_response(
+            {"status": "merged", "kept": keep, "removed": remove, "chunks_removed": removed}
+        )
+
     # ------------------------------------------------------------------
     # Schedules
     # ------------------------------------------------------------------

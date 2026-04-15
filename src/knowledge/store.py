@@ -25,6 +25,7 @@ log = get_logger("knowledge")
 CHUNK_SIZE = 1500  # chars per chunk (~375 tokens)
 CHUNK_OVERLAP = 200  # overlap between chunks
 VECTOR_DIM = 384  # must match LocalEmbedder.DIMENSIONS
+NEAR_DUPE_THRESHOLD = 0.8  # chunk overlap ratio to consider near-duplicate
 
 
 class KnowledgeStore:
@@ -54,6 +55,25 @@ class KnowledgeStore:
             """)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_knowledge_source ON knowledge_chunks(source)"
+            )
+            # Dedup columns (schema migration for pre-existing DBs)
+            for col, typedef in (
+                ("content_hash", "TEXT"),
+                ("doc_content_hash", "TEXT"),
+            ):
+                try:
+                    conn.execute(
+                        f"ALTER TABLE knowledge_chunks ADD COLUMN {col} {typedef}"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_content_hash "
+                "ON knowledge_chunks(content_hash)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_doc_hash "
+                "ON knowledge_chunks(doc_content_hash)"
             )
             # Vector table (only if sqlite-vec loaded)
             if self._has_vec:
@@ -94,6 +114,11 @@ class KnowledgeStore:
         except Exception:
             return 0
 
+    @staticmethod
+    def _content_hash(text: str) -> str:
+        """SHA-256 hash of normalised text (stripped, lowered)."""
+        return hashlib.sha256(text.strip().lower().encode()).hexdigest()
+
     async def ingest(
         self,
         content: str,
@@ -101,10 +126,13 @@ class KnowledgeStore:
         embedder: LocalEmbedder | None = None,
         *,
         uploader: str = "system",
+        dedup: bool = True,
     ) -> int:
         """Ingest a document by chunking and embedding it.
 
-        Returns the number of chunks indexed.
+        Returns the number of chunks indexed.  When *dedup* is True (default),
+        exact-content duplicates are skipped and near-duplicates (>=80 %
+        chunk-hash overlap) are skipped with a log warning.
         """
         if not self.available:
             return 0
@@ -113,9 +141,42 @@ class KnowledgeStore:
         if not chunks:
             return 0
 
-        # Generate a stable document ID from source name
-        doc_hash = hashlib.md5(source.encode()).hexdigest()[:8]
+        doc_hash_id = hashlib.md5(source.encode()).hexdigest()[:8]
+        doc_content_hash = self._content_hash(content)
         now = datetime.now().isoformat()
+
+        if dedup:
+            # --- exact duplicate check (full document) ---
+            existing = await asyncio.to_thread(
+                self._find_by_doc_hash, doc_content_hash
+            )
+            if existing:
+                existing_source = existing[0]
+                if existing_source == source:
+                    log.info(
+                        "Skipping ingest of '%s': content unchanged (hash=%s)",
+                        source, doc_content_hash[:12],
+                    )
+                    return existing[1]  # existing chunk count
+                log.info(
+                    "Skipping ingest of '%s': identical content already "
+                    "ingested as '%s' (hash=%s)",
+                    source, existing_source, doc_content_hash[:12],
+                )
+                return 0
+
+            # --- near-duplicate check (chunk-level overlap) ---
+            chunk_hashes = [self._content_hash(c) for c in chunks]
+            near_dup = await asyncio.to_thread(
+                self._find_near_duplicate, chunk_hashes, source
+            )
+            if near_dup:
+                log.warning(
+                    "Skipping ingest of '%s': %.0f%% chunk overlap with "
+                    "existing source '%s'",
+                    source, near_dup[1] * 100, near_dup[0],
+                )
+                return 0
 
         # Remove any existing chunks for this source (blocking → offload)
         await asyncio.to_thread(self.delete_source, source)
@@ -133,7 +194,8 @@ class KnowledgeStore:
 
         # Batch write metadata + vectors to DB (blocking → offload)
         indexed = await asyncio.to_thread(
-            self._write_chunks_sync, chunks, vectors, doc_hash, source, now, uploader,
+            self._write_chunks_sync, chunks, vectors, doc_hash_id, source,
+            now, uploader, doc_content_hash,
         )
         log.info("Ingested '%s': %d/%d chunks indexed", source, indexed, len(chunks))
         return indexed
@@ -146,17 +208,21 @@ class KnowledgeStore:
         source: str,
         now: str,
         uploader: str,
+        doc_content_hash: str = "",
     ) -> int:
         """Write chunk metadata, FTS entries, and vectors to database (sync)."""
         indexed = 0
         for i, chunk in enumerate(chunks):
             chunk_id = f"{doc_hash}_{i}"
+            chunk_hash = self._content_hash(chunk)
             try:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO knowledge_chunks "
-                    "(chunk_id, content, source, chunk_index, total_chunks, uploader, ingested_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (chunk_id, chunk, source, i, len(chunks), uploader, now),
+                    "(chunk_id, content, source, chunk_index, total_chunks, "
+                    "uploader, ingested_at, content_hash, doc_content_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (chunk_id, chunk, source, i, len(chunks), uploader, now,
+                     chunk_hash, doc_content_hash),
                 )
                 if self._fts:
                     self._fts.index_knowledge_chunk(chunk_id, chunk, source, i)
@@ -233,7 +299,9 @@ class KnowledgeStore:
         try:
             rows = self._conn.execute(
                 """
-                SELECT source, COUNT(*) as chunks, uploader, MAX(ingested_at) as ingested_at
+                SELECT source, COUNT(*) as chunks, uploader,
+                       MAX(ingested_at) as ingested_at,
+                       doc_content_hash
                 FROM knowledge_chunks
                 GROUP BY source
                 ORDER BY source
@@ -249,6 +317,7 @@ class KnowledgeStore:
                 "chunks": r[1],
                 "uploader": r[2],
                 "ingested_at": r[3],
+                "content_hash": r[4] or "",
             }
             # Add preview from first chunk
             try:
@@ -389,6 +458,149 @@ class KnowledgeStore:
                 self._fts.index_knowledge_chunk(chunk_id, content, source, chunk_index)
                 count += 1
         return count
+
+    # ------------------------------------------------------------------
+    # Deduplication helpers
+    # ------------------------------------------------------------------
+
+    def _find_by_doc_hash(self, doc_content_hash: str) -> tuple[str, int] | None:
+        """Return (source, chunk_count) if *doc_content_hash* already stored."""
+        if not self._conn:
+            return None
+        try:
+            row = self._conn.execute(
+                "SELECT source, COUNT(*) FROM knowledge_chunks "
+                "WHERE doc_content_hash = ? GROUP BY source LIMIT 1",
+                (doc_content_hash,),
+            ).fetchone()
+            return (row[0], row[1]) if row else None
+        except Exception:
+            return None
+
+    def _find_near_duplicate(
+        self,
+        chunk_hashes: list[str],
+        exclude_source: str,
+        threshold: float = NEAR_DUPE_THRESHOLD,
+    ) -> tuple[str, float] | None:
+        """Return (source, overlap_ratio) if any existing source shares
+        >= *threshold* of its chunk hashes with *chunk_hashes*."""
+        if not self._conn or not chunk_hashes:
+            return None
+        try:
+            placeholders = ",".join("?" * len(chunk_hashes))
+            rows = self._conn.execute(
+                f"SELECT source, COUNT(*) FROM knowledge_chunks "
+                f"WHERE content_hash IN ({placeholders}) AND source != ? "
+                f"GROUP BY source",
+                (*chunk_hashes, exclude_source),
+            ).fetchall()
+            for src, match_count in rows:
+                ratio = match_count / len(chunk_hashes)
+                if ratio >= threshold:
+                    return (src, ratio)
+        except Exception:
+            pass
+        return None
+
+    def find_duplicates(self) -> list[dict]:
+        """Scan the store for groups of sources with identical doc_content_hash."""
+        if not self.available:
+            return []
+        try:
+            rows = self._conn.execute(
+                "SELECT doc_content_hash, GROUP_CONCAT(DISTINCT source) as sources, "
+                "COUNT(DISTINCT source) as src_count "
+                "FROM knowledge_chunks "
+                "WHERE doc_content_hash IS NOT NULL AND doc_content_hash != '' "
+                "GROUP BY doc_content_hash HAVING src_count > 1"
+            ).fetchall()
+            return [
+                {
+                    "content_hash": r[0],
+                    "sources": r[1].split(","),
+                    "source_count": r[2],
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    def find_near_duplicates(
+        self, threshold: float = 0.5,
+    ) -> list[dict]:
+        """Find source pairs sharing more than *threshold* of chunk hashes.
+
+        Returns list of dicts with: source_a, source_b, shared_chunks,
+        total_a, total_b, overlap_ratio.
+        """
+        if not self.available:
+            return []
+        try:
+            sources = self._conn.execute(
+                "SELECT DISTINCT source FROM knowledge_chunks "
+                "WHERE content_hash IS NOT NULL AND content_hash != ''"
+            ).fetchall()
+            source_list = [r[0] for r in sources]
+        except Exception:
+            return []
+
+        # Build per-source hash sets
+        hash_sets: dict[str, set[str]] = {}
+        for src in source_list:
+            try:
+                rows = self._conn.execute(
+                    "SELECT content_hash FROM knowledge_chunks "
+                    "WHERE source = ? AND content_hash IS NOT NULL",
+                    (src,),
+                ).fetchall()
+                hash_sets[src] = {r[0] for r in rows}
+            except Exception:
+                continue
+
+        results: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for i, src_a in enumerate(source_list):
+            set_a = hash_sets.get(src_a)
+            if not set_a:
+                continue
+            for src_b in source_list[i + 1:]:
+                if (src_a, src_b) in seen:
+                    continue
+                seen.add((src_a, src_b))
+                set_b = hash_sets.get(src_b)
+                if not set_b:
+                    continue
+                shared = len(set_a & set_b)
+                if shared == 0:
+                    continue
+                min_len = min(len(set_a), len(set_b))
+                ratio = shared / min_len if min_len else 0
+                if ratio >= threshold:
+                    results.append({
+                        "source_a": src_a,
+                        "source_b": src_b,
+                        "shared_chunks": shared,
+                        "total_a": len(set_a),
+                        "total_b": len(set_b),
+                        "overlap_ratio": round(ratio, 3),
+                    })
+        return results
+
+    def merge_sources(self, keep_source: str, remove_source: str) -> int:
+        """Merge *remove_source* into *keep_source*: delete remove_source chunks.
+
+        Returns number of chunks removed.
+        """
+        if not self.available or keep_source == remove_source:
+            return 0
+        keep_exists = self._conn.execute(
+            "SELECT 1 FROM knowledge_chunks WHERE source = ? LIMIT 1",
+            (keep_source,),
+        ).fetchone()
+        if not keep_exists:
+            return 0
+        return self.delete_source(remove_source)
 
     @staticmethod
     def _chunk_text(text: str) -> list[str]:
