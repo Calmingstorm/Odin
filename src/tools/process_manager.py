@@ -161,6 +161,26 @@ class ProcessRegistry:
             lines.append(f"{pid:<8} {info.status:<12} {uptime:<10} {cmd_short}")
         return "\n".join(lines)
 
+    async def shutdown(self) -> int:
+        """Terminate all running processes and cancel reader tasks.
+
+        Returns the number of processes that were still running.
+        """
+        killed = 0
+        for pid, info in list(self._processes.items()):
+            if info.status == "running":
+                try:
+                    await self.kill(pid)
+                    killed += 1
+                except Exception:
+                    log.warning("Failed to kill PID %d during shutdown", pid)
+            # Cancel lingering reader tasks
+            if info._reader_task and not info._reader_task.done():
+                info._reader_task.cancel()
+        if killed:
+            log.info("Shutdown: terminated %d running process(es)", killed)
+        return killed
+
     def cleanup(self) -> int:
         """Remove dead processes older than 1 hour. Returns count removed."""
         now = time.time()

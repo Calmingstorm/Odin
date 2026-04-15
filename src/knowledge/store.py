@@ -74,6 +74,17 @@ class KnowledgeStore:
     def available(self) -> bool:
         return self._conn is not None
 
+    def close(self) -> None:
+        """Close the underlying SQLite connection (idempotent)."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+                log.info("Knowledge store connection closed")
+            except Exception as exc:
+                log.error("Error closing knowledge store: %s", exc)
+            finally:
+                self._conn = None
+
     def count(self) -> int:
         if not self._conn:
             return 0
