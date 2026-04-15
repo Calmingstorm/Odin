@@ -157,7 +157,7 @@ tightening of prior work.
 ### Phase 8 — UX & workflows (rounds 36–40)
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
-| 36 | Health dashboard page: all component health at a glance (Codex, SSH hosts, DB, knowledge store, voice) | pending | |
+| 36 | Health dashboard page: all component health at a glance (Codex, SSH hosts, DB, knowledge store, voice) | done | HealthChecker module (11 components: Discord, Codex, sessions, knowledge, SSH hosts, voice, monitoring, browser, scheduler, loops, agents), /api/health/components endpoint, health.js web UI page with auto-refresh, +74 tests |
 | 37 | Memory-usage widget: session count, knowledge DB size, trajectory volume | pending | |
 | 38 | Tool output streaming: ship partial results to Discord/UI as tools produce them (opt-in per tool, OFF by default — never spam) | pending | |
 | 39 | Auxiliary LLM client: separate cheap-model client for classification / summarization / vision description | pending | |
@@ -4555,3 +4555,185 @@ Updated `GET /api/agents` list endpoint to include `depth`, `parent_id`, `childr
 - `get_lineage` and `get_descendants` both have cycle protection. In normal operation, cycles are impossible since depth only increases. The guards are purely defensive.
 - The `ToolExecutor.__new__()` fixture pattern was NOT changed by this round — nested agent spawning is in the agent system, not the tool executor.
 - All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
+
+## Round 36 — Health dashboard page: all component health at a glance
+**Focus**: Build a comprehensive health dashboard that shows the status of all 11 bot subsystems (Discord gateway, Codex LLM, sessions, knowledge store, SSH hosts, voice, monitoring, browser, scheduler, loops, agents) via a new backend health checker, REST API endpoint, and web UI page.
+**Baseline pytest**: 3540 passed, 0 failed
+**Post-round pytest**: 3614 passed, 0 failed (+74 new tests)
+
+### Validated from prior rounds
+- Round 35 (Nested agent spawning): All 73 tests pass. No changes needed.
+- Round 34 (Agent trajectory saving): All 75 tests pass. No changes needed.
+- Round 35 noted "Round 36 has no dependencies on Round 35" — confirmed, clean start.
+- Round 35 noted REST API endpoint count was 120 — verified, now 121 (+1 new: `/api/health/components`).
+- Round 35 noted `LoopAgentBridge` does not pass `parent_id` and `AgentsConfig` not wired to spawn() — both unchanged, still future tasks.
+- No bugs or watch-for items from prior rounds needed fixing.
+- CLAUDE.md endpoint count was stale (said "55 endpoints" when actual count was 120). Updated to 121 across all references.
+- CLAUDE.md page count was stale (said "14 page components" when actual count was 16). Updated to 17 (with the new health page).
+
+### Work done
+
+#### 1. Health checker module: `src/health/checker.py` (new, ~310 lines)
+
+**ComponentStatus dataclass**:
+- Fields: `name`, `healthy` (bool), `status` ("ok"/"degraded"/"down"/"unconfigured"), `detail` (human-readable), `metadata` (optional dict).
+- `to_dict()`: Returns JSON-serializable dict. Omits `metadata` key entirely if empty.
+
+**11 individual checker functions**:
+
+1. **`check_discord(bot)`**: Checks `bot.is_ready()`, counts guilds and members. Returns "ok" if ready, "degraded" if not.
+
+2. **`check_codex(bot)`**: Probes `bot.codex` — circuit breaker state, HTTP session status, pool metrics. Returns "ok" if circuit closed + session alive, "degraded" if half-open or session closed, "down" if circuit open. Metadata includes model name, breaker state, pool connections/requests.
+
+3. **`check_sessions(bot)`**: Reads `bot.sessions._sessions` count and `get_token_metrics()`. Returns "degraded" if any sessions exceed token budget, "ok" otherwise. Metadata includes count, total tokens, over-budget count.
+
+4. **`check_knowledge(bot)`**: Checks `bot.knowledge.available`, `count()`, `_has_vec`. Returns "ok" with chunk count and search mode (vector+FTS vs FTS-only), "down" if connection closed.
+
+5. **`check_ssh_hosts(bot)`**: Enumerates `bot.tool_executor.config.hosts`, checks SSH pool connectivity per-host. Each host gets `pool_connected` (True/False/None if no pool). Metadata includes full host list and pool metrics.
+
+6. **`check_voice(bot)`**: Checks `bot.voice_manager.is_connected`, `current_channel`, and `_connected` (WebSocket). Returns "ok" if in a channel or WS connected, "degraded" if enabled but not connected.
+
+7. **`check_monitoring(bot)`**: Reads `bot.infra_watcher.get_status()`. Returns "degraded" if active alerts > 0, "ok" otherwise.
+
+8. **`check_browser(bot)`**: Checks `bot.tool_executor._browser_manager._browser.is_connected()`. Returns "ok" if connected, "degraded" if not yet connected (lazy init).
+
+9. **`check_scheduler(bot)`**: Counts `bot.scheduler.list_all()`.
+
+10. **`check_loops(bot)`**: Reads `bot.loop_manager.active_count`.
+
+11. **`check_agents(bot)`**: Counts `bot.agent_manager._agents` and filters for running status.
+
+**`check_all(bot)`**: Runs all 11 checkers, returns aggregate dict:
+- `overall`: "healthy"/"degraded"/"unhealthy" (down > degraded > ok)
+- `components`: list of per-component dicts
+- `healthy_count`, `degraded_count`, `down_count`, `unconfigured_count`, `total`
+- `checked_at`: ISO 8601 UTC timestamp
+- Crash-safe: if any individual checker raises, it reports "down" with the exception message instead of crashing the whole check.
+
+All checkers use `getattr(bot, attr, None)` to safely probe dynamically-attached subsystems. All catch exceptions and return error ComponentStatus rather than crashing.
+
+#### 2. Health __init__.py updated: `src/health/__init__.py`
+
+Now exports: `ComponentStatus`, `check_all`, `HealthServer`.
+
+#### 3. REST API endpoint: `src/web/api.py` (line 371-374)
+
+New endpoint:
+- `GET /api/health/components`: Returns the `check_all(bot)` result as JSON. Uses a lazy import of `check_all` to avoid circular imports at module load time.
+
+#### 4. Web UI health page: `ui/js/pages/health.js` (new, ~220 lines)
+
+Vue 3 component with:
+- **Overall status banner**: Large icon + label ("All Systems Healthy"/"Some Systems Degraded"/"System Issues Detected"), color-coded green/yellow/red. Shows counts of healthy/degraded/down/unconfigured. Last-checked timestamp and manual refresh button.
+- **Component cards grid**: Responsive 1/2/3-column grid. Each card shows:
+  - Left border color-coded by status (green/yellow/red/gray)
+  - Status icon + component name + status badge
+  - Detail text
+  - Expanded metadata sections for specific components:
+    - **Codex**: model, circuit breaker state, pool connections/requests
+    - **SSH hosts**: Per-host list with connection-pool dots (green=connected, gray=idle)
+    - **Knowledge**: chunk count, vector search status
+    - **Sessions**: active count, total tokens, over-budget warning
+    - **Voice**: channel name, WebSocket status
+    - **Monitoring**: check/running counts, active alerts
+    - **Generic**: key-value metadata for scheduler/loops/agents
+- **Auto-refresh**: Polls `/api/health/components` every 30 seconds
+- **Loading skeleton**: Shown while initial data loads
+- **Error state**: Shown with retry button on API failure
+
+#### 5. CSS styles: `ui/css/style.css` (appended ~55 lines)
+
+New styles under `/* HEALTH DASHBOARD */` section:
+- `.health-card`: Padding, left border accent, transition
+- `.health-card-{ok,degraded,down,unconfigured}`: Left-border color variants
+- `.health-card-header`, `.health-card-icon`, `.health-card-name`: Layout
+- `.health-card-detail`, `.health-card-meta`: Typography
+- `.health-meta-row`: Two-column key-value layout
+- `.health-host-item`, `.health-host-dot`: SSH host list items with connection dots
+- `.dot-connected`, `.dot-idle`, `.dot-unknown`: Dot color variants
+
+#### 6. Router registration: `ui/js/app.js`
+
+- Import: `import HealthPage from './pages/health.js';`
+- Route: `{ path: '/health', component: HealthPage, meta: { label: 'Health', icon: '\U0001FA7A' } }`
+- Appears in sidebar navigation automatically via existing `navRoutes` computed.
+
+#### 7. CLAUDE.md updates
+
+- Added `src/health/checker.py` to project structure.
+- Updated page count from 14 to 17.
+- Updated endpoint count from 55 to 121 across all 3 references.
+- Updated pages list in Web Management UI section.
+
+### Tests: `tests/test_health_checker.py` — 74 tests across 16 test classes
+
+**ComponentStatus** (5): basic to_dict, with metadata, empty metadata omitted, default metadata, all fields.
+
+**check_discord** (4): online, not ready, multiple guilds, exception.
+
+**check_codex** (6): healthy, circuit open, circuit half-open, session closed, no codex, exception.
+
+**check_sessions** (5): healthy, over budget, no sessions manager, no token_metrics method, exception.
+
+**check_knowledge** (5): healthy with vec, FTS only, connection closed, no knowledge, exception.
+
+**check_ssh_hosts** (6): with hosts and pool, host not connected, no pool, no hosts, no executor, multiple hosts.
+
+**check_voice** (5): connected to channel, WS connected idle, not connected, unconfigured, exception.
+
+**check_monitoring** (4): healthy no alerts, with alerts, unconfigured, exception.
+
+**check_browser** (4): connected, not connected, unconfigured, no executor.
+
+**check_scheduler** (4): with tasks, empty, unconfigured, exception.
+
+**check_loops** (3): active, none, unconfigured.
+
+**check_agents** (3): with agents, no agents, unconfigured.
+
+**check_all** (7): all healthy, has all component names, degraded overall, unhealthy overall, checker crash handled, counts add up, checked_at is ISO.
+
+**_ALL_CHECKERS** (3): count is 11, all callable, all names present.
+
+**Exports** (2): health __init__ exports, checker module imports.
+
+**REST API** (2): endpoint returns 200 with all components, has expected component names.
+
+**Edge cases** (6): None member_count, codex no breaker, sessions non-dict, agents non-dict, ssh_hosts exception, check_all returns ISO timestamp.
+
+### Design decisions
+
+1. **11 components, not 5**: The task spec mentioned 5 (Codex, SSH hosts, DB, knowledge store, voice), but a real health dashboard should show everything operators care about. Added Discord gateway, monitoring, browser, scheduler, loops, and agents for completeness.
+
+2. **Synchronous checkers**: All checker functions are synchronous (not async), because every check reads in-memory state — no I/O needed. SSH pool connectivity checks just look for socket files (os.path.exists), not actual SSH connections.
+
+3. **Four-state model**: ok/degraded/down/unconfigured. "Unconfigured" is separate from "down" — it means the subsystem isn't enabled, not that it's broken.
+
+4. **Crash-safe check_all**: If any individual checker crashes, `check_all` catches it and records the component as "down". Other checks still run.
+
+5. **Lazy import in API endpoint**: `check_all` is imported inside the handler to avoid circular imports.
+
+6. **30-second auto-refresh**: Frequent enough to catch issues quickly, infrequent enough to not spam the API.
+
+7. **No new config**: No new config fields needed. The health checker reads existing subsystem state.
+
+8. **CLAUDE.md count corrections**: Endpoint count updated from stale 55 to correct 121. Page count updated from stale 14 to correct 17.
+
+### Files changed
+- `src/health/checker.py` (new, ~310 lines): ComponentStatus, 11 checkers, check_all, _ALL_CHECKERS.
+- `src/health/__init__.py` (updated): Export ComponentStatus, check_all.
+- `src/web/api.py` (lines 371-374): New GET /api/health/components endpoint.
+- `ui/js/pages/health.js` (new, ~220 lines): Vue 3 health dashboard page.
+- `ui/css/style.css` (appended ~55 lines): Health card styles.
+- `ui/js/app.js` (2 lines): Import HealthPage, add route.
+- `CLAUDE.md` (4 updates): Structure, endpoint count, page count, pages list.
+- `tests/test_health_checker.py` (new, 74 tests): 16 test classes.
+
+### Next round watch for
+- Round 37 (Memory-usage widget) may want to use data from `check_all()` — the sessions and knowledge components already report token counts and chunk counts.
+- REST API endpoint count is now 121 (was 120, +1 new: `/api/health/components`).
+- The health checker probes subsystems via `getattr(bot, attr, None)`. If new subsystems are added in future rounds, they should get a checker function added to `_ALL_CHECKERS`.
+- The `check_codex` function accesses `codex._session` (private attribute) to check if the aiohttp session is alive. If `CodexChatClient` ever changes its session management, this check may need updating.
+- The health page auto-refreshes every 30 seconds. This adds one API call per 30s per open browser tab.
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
+- The `ToolExecutor.__new__()` fixture pattern was NOT changed by this round.

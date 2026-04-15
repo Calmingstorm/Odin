@@ -368,6 +368,11 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "monitoring": monitoring,
         })
 
+    @routes.get("/api/health/components")
+    async def get_health_components(_request: web.Request) -> web.Response:
+        from ..health.checker import check_all
+        return web.json_response(check_all(bot))
+
     @routes.get("/api/config")
     async def get_config(_request: web.Request) -> web.Response:
         raw = bot.config.model_dump()
