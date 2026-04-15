@@ -958,6 +958,34 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "schedule not found"}, status=404)
         return web.json_response(result)
 
+    @routes.get("/api/schedules/history")
+    async def schedule_history_all(request: web.Request) -> web.Response:
+        """Global schedule execution history (most recent first)."""
+        limit = min(int(request.query.get("limit", "50")), 200)
+        status_filter = request.query.get("status")
+        entries = await bot.scheduler.history.query(
+            status=status_filter, limit=limit,
+        )
+        return web.json_response(entries)
+
+    @routes.get("/api/schedules/{schedule_id}/history")
+    async def schedule_history(request: web.Request) -> web.Response:
+        """Execution history for a specific schedule."""
+        sid = request.match_info["schedule_id"]
+        limit = min(int(request.query.get("limit", "50")), 200)
+        status_filter = request.query.get("status")
+        entries = await bot.scheduler.history.query(
+            sid, status=status_filter, limit=limit,
+        )
+        return web.json_response(entries)
+
+    @routes.get("/api/schedules/{schedule_id}/stats")
+    async def schedule_stats(request: web.Request) -> web.Response:
+        """Summary stats for a specific schedule."""
+        sid = request.match_info["schedule_id"]
+        stats = await bot.scheduler.history.stats(sid)
+        return web.json_response(stats)
+
     @routes.post("/api/schedules/validate-cron")
     async def validate_cron(request: web.Request) -> web.Response:
         try:

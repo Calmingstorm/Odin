@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any
 from croniter import croniter
 
 from ..odin_log import get_logger
+from .history import ScheduleHistory
 
 log = get_logger("scheduler")
 
@@ -30,7 +32,7 @@ DEFAULT_FAILURE_ALERT_THRESHOLD = 3  # alert after N consecutive failures
 class Scheduler:
     """Manages scheduled tasks — recurring (cron), one-time, and webhook-triggered."""
 
-    def __init__(self, data_path: str) -> None:
+    def __init__(self, data_path: str, history_path: str | None = None) -> None:
         self.data_path = Path(data_path)
         self.data_path.parent.mkdir(parents=True, exist_ok=True)
         self._schedules: list[dict] = []
@@ -38,6 +40,9 @@ class Scheduler:
         self._callback: Callable[[dict], Awaitable[None]] | None = None
         self._failure_callback: Callable[[dict, int], Awaitable[None]] | None = None
         self._lock = asyncio.Lock()
+        # Execution history
+        _hist_path = history_path or str(self.data_path.parent / "schedule_history.jsonl")
+        self.history = ScheduleHistory(_hist_path)
         self._load()
 
     def _load(self) -> None:
@@ -255,11 +260,7 @@ class Scheduler:
                 schedule["last_run"] = now.isoformat()
                 fired += 1
 
-                try:
-                    await self._callback(schedule)
-                    await self._handle_success(schedule)
-                except Exception as e:
-                    await self._handle_failure(schedule, e)
+                await self._execute_and_record(schedule)
 
             if fired:
                 await asyncio.to_thread(self._save)
@@ -432,6 +433,36 @@ class Scheduler:
         retry_time = datetime.now(timezone.utc) + timedelta(seconds=delay)
         return retry_time.isoformat()
 
+    async def _execute_and_record(self, schedule: dict) -> None:
+        """Execute the schedule callback and record the result in history."""
+        if not self._callback:
+            return
+        start = time.monotonic()
+        try:
+            await self._callback(schedule)
+            duration_ms = int((time.monotonic() - start) * 1000)
+            await self._handle_success(schedule)
+            await self.history.record(
+                schedule_id=schedule["id"],
+                description=schedule.get("description", ""),
+                action=schedule.get("action", ""),
+                status="success",
+                duration_ms=duration_ms,
+            )
+        except Exception as e:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            retry_attempt = schedule.get("retry_count", 0) + 1
+            await self._handle_failure(schedule, e)
+            await self.history.record(
+                schedule_id=schedule["id"],
+                description=schedule.get("description", ""),
+                action=schedule.get("action", ""),
+                status="failure",
+                duration_ms=duration_ms,
+                error=str(e),
+                retry_attempt=retry_attempt if schedule.get("max_retries", 0) > 0 else 0,
+            )
+
     async def _handle_success(self, schedule: dict) -> None:
         """Reset failure tracking after a successful execution."""
         schedule["consecutive_failures"] = 0
@@ -496,12 +527,7 @@ class Scheduler:
                             schedule.get("retry_count", 0),
                         )
                         fired = True
-                        if self._callback:
-                            try:
-                                await self._callback(schedule)
-                                await self._handle_success(schedule)
-                            except Exception as e:
-                                await self._handle_failure(schedule, e)
+                        await self._execute_and_record(schedule)
                     continue
 
                 next_run_str = schedule.get("next_run")
@@ -519,12 +545,7 @@ class Scheduler:
                 schedule["last_run"] = now.isoformat()
                 fired = True
 
-                if self._callback:
-                    try:
-                        await self._callback(schedule)
-                        await self._handle_success(schedule)
-                    except Exception as e:
-                        await self._handle_failure(schedule, e)
+                await self._execute_and_record(schedule)
 
                 if schedule.get("one_time"):
                     # Don't remove if retry is pending
