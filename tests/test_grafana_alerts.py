@@ -1404,6 +1404,69 @@ class TestEdgeCases:
 # ---------------------------------------------------------------------------
 
 
+class TestRound20CooldownCleanup:
+    """Round 20 REVIEWER: verify cooldown entries are cleaned up."""
+
+    def _make_handler(self, **kwargs):
+        defaults = {"auto_remediate": True, "cooldown_seconds": 300}
+        defaults.update(kwargs)
+        return GrafanaAlertHandler(**defaults)
+
+    def _make_rule(self, **kwargs):
+        defaults = {
+            "id": "r1", "name_pattern": "*", "enabled": True,
+            "cooldown_seconds": 300, "severity_filter": [],
+            "label_matchers": {}, "remediation_goal": "fix it",
+            "mode": "act", "interval_seconds": 30, "max_iterations": 10,
+        }
+        defaults.update(kwargs)
+        return RemediationRule(**defaults)
+
+    def test_cleanup_removes_stale_cooldowns(self):
+        handler = self._make_handler()
+        rule = self._make_rule()
+        handler.add_rule(rule)
+        handler._cooldowns["fp1::r1"] = time.monotonic() - 700
+        handler._cooldowns["fp2::r1"] = time.monotonic() - 10
+        removed = handler.cleanup_old_remediations()
+        assert "fp1::r1" not in handler._cooldowns
+        assert "fp2::r1" in handler._cooldowns
+
+    def test_cleanup_keeps_fresh_cooldowns(self):
+        handler = self._make_handler()
+        rule = self._make_rule()
+        handler.add_rule(rule)
+        handler._cooldowns["fp1::r1"] = time.monotonic() - 5
+        removed = handler.cleanup_old_remediations()
+        assert "fp1::r1" in handler._cooldowns
+
+    def test_cleanup_removes_both_remediations_and_cooldowns(self):
+        handler = self._make_handler()
+        rule = self._make_rule()
+        handler.add_rule(rule)
+        handler._cooldowns["fp1::r1"] = time.monotonic() - 700
+        handler._remediations["loop1"] = RemediationRecord(
+            alert_fingerprint="fp1",
+            alert_name="test",
+            rule_id="r1",
+            loop_id="loop1",
+            started_at=time.monotonic() - 7200,
+            status="completed",
+        )
+        removed = handler.cleanup_old_remediations()
+        assert removed >= 2
+        assert "fp1::r1" not in handler._cooldowns
+        assert "loop1" not in handler._remediations
+
+    def test_cleanup_no_rules_uses_default_cooldown(self):
+        handler = self._make_handler(cooldown_seconds=60)
+        handler._cooldowns["key1"] = time.monotonic() - 200
+        handler._cooldowns["key2"] = time.monotonic() - 5
+        handler.cleanup_old_remediations()
+        assert "key1" not in handler._cooldowns
+        assert "key2" in handler._cooldowns
+
+
 class TestModuleImports:
     def test_grafana_alerts_module(self):
         from src.health import grafana_alerts

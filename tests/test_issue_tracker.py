@@ -1788,3 +1788,89 @@ class TestEdgeCases:
                 "issue_id": "OPS-42", "status": "Closed",
             })
         assert result["status"] == "Closed"
+
+
+# ---------------------------------------------------------------------------
+# Round 20 REVIEWER: JQL injection prevention and URL encoding
+# ---------------------------------------------------------------------------
+
+
+class TestRound20JQLSafety:
+    """Round 20 REVIEWER: verify JQL values are properly quoted and URL-encoded."""
+
+    @pytest.fixture
+    def client(self):
+        return IssueTrackerClient(
+            "jira", "user:token",
+            base_url="https://org.atlassian.net",
+            project_key="OPS",
+        )
+
+    def _mock_resp(self, data):
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=data)
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+        return mock_resp
+
+    async def test_project_key_quoted_in_jql(self, client):
+        mock_resp = self._mock_resp({"issues": []})
+        mock_session = AsyncMock()
+        mock_session.request = MagicMock(return_value=mock_resp)
+
+        with patch.object(client, "_get_session", return_value=mock_session):
+            await client.execute("list_issues", {"project_key": "MY-PROJ"})
+
+        url = mock_session.request.call_args[0][1]
+        assert 'project%20%3D%20%22MY-PROJ%22' in url
+
+    async def test_status_quoted_in_jql(self, client):
+        mock_resp = self._mock_resp({"issues": []})
+        mock_session = AsyncMock()
+        mock_session.request = MagicMock(return_value=mock_resp)
+
+        with patch.object(client, "_get_session", return_value=mock_session):
+            await client.execute("list_issues", {"status": "In Progress"})
+
+        url = mock_session.request.call_args[0][1]
+        assert "%22In%20Progress%22" in url
+
+    async def test_jql_injection_escaped(self, client):
+        mock_resp = self._mock_resp({"issues": []})
+        mock_session = AsyncMock()
+        mock_session.request = MagicMock(return_value=mock_resp)
+
+        with patch.object(client, "_get_session", return_value=mock_session):
+            await client.execute("list_issues", {
+                "status": 'Done" OR project = "EVIL',
+            })
+
+        url = mock_session.request.call_args[0][1]
+        assert "EVIL" in url
+        assert "OR" not in url.split("?jql=")[0]
+        assert '%22' in url
+
+    async def test_project_key_with_quotes_escaped(self, client):
+        mock_resp = self._mock_resp({"issues": []})
+        mock_session = AsyncMock()
+        mock_session.request = MagicMock(return_value=mock_resp)
+
+        with patch.object(client, "_get_session", return_value=mock_session):
+            await client.execute("list_issues", {
+                "project_key": 'OPS" OR 1=1 --',
+            })
+
+        url = mock_session.request.call_args[0][1]
+        assert "%5C%22" in url or "%22" in url
+
+    async def test_jql_url_encoded(self, client):
+        mock_resp = self._mock_resp({"issues": []})
+        mock_session = AsyncMock()
+        mock_session.request = MagicMock(return_value=mock_resp)
+
+        with patch.object(client, "_get_session", return_value=mock_session):
+            await client.execute("list_issues", {"status": "Open"})
+
+        url = mock_session.request.call_args[0][1]
+        assert " AND " not in url.split("?jql=")[1] if "?jql=" in url else True

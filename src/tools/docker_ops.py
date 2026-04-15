@@ -84,7 +84,7 @@ def _build_run(params: dict) -> str:
     for v in (volumes if isinstance(volumes, list) else []):
         parts += ["-v", _sq(str(v))]
     if extra_args:
-        parts.append(extra_args)
+        parts.append(_sq(str(extra_args)))
     parts.append(_sq(image))
     if command:
         parts += ["sh", "-c", _sq(command)]

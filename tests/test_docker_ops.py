@@ -1028,3 +1028,49 @@ class TestEdgeCases:
     def test_run_volumes_not_list_skipped(self):
         cmd = build_docker_command("run", {"image": "app", "volumes": "/data:/data"})
         assert "-v" not in cmd
+
+
+class TestRound20ShellInjectionFixes:
+    """Round 20 REVIEWER: verify shell injection fixes in docker_ops."""
+
+    def test_extra_args_shell_quoted(self):
+        cmd = build_docker_command("run", {
+            "image": "app", "extra_args": "--memory 512m; rm -rf /",
+        })
+        tokens = shlex.split(cmd)
+        assert "--memory 512m; rm -rf /" in tokens
+        assert "rm" not in tokens
+        assert ";" not in cmd.split("'")[0]
+
+    def test_extra_args_with_backticks(self):
+        cmd = build_docker_command("run", {
+            "image": "app", "extra_args": "`whoami`",
+        })
+        assert "'" in cmd
+        tokens = shlex.split(cmd)
+        assert "`whoami`" in tokens
+
+    def test_extra_args_with_dollar_expansion(self):
+        cmd = build_docker_command("run", {
+            "image": "app", "extra_args": "$(cat /etc/passwd)",
+        })
+        tokens = shlex.split(cmd)
+        assert "$(cat /etc/passwd)" in tokens
+
+    def test_extra_args_with_pipe(self):
+        cmd = build_docker_command("run", {
+            "image": "app", "extra_args": "--cpus 2 | tee /tmp/evil",
+        })
+        tokens = shlex.split(cmd)
+        assert "--cpus 2 | tee /tmp/evil" in tokens
+
+    def test_extra_args_non_string_coerced(self):
+        cmd = build_docker_command("run", {
+            "image": "app", "extra_args": 42,
+        })
+        assert "42" in cmd
+
+    def test_extra_args_empty_string_skipped(self):
+        cmd = build_docker_command("run", {"image": "app", "extra_args": ""})
+        tokens = shlex.split(cmd)
+        assert tokens[-1] == "app"

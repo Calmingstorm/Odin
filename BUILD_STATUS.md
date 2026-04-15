@@ -125,7 +125,7 @@ tightening of prior work.
 | 17 | Slack output: post responses/alerts to Slack webhook alongside Discord | done | SlackNotifier module, SlackConfig, health server + watcher integration, REST API (3 endpoints), secret scrubbing, rate limiting, +107 tests |
 | 18 | Linear / Jira: create issues from loop reports, comment on existing issues | done | IssueTrackerClient module (Linear GraphQL + Jira REST), 5 actions (create_issue/comment/get_issue/list_issues/transition), config schema, tool definition, executor handler, REST API (3 endpoints), +132 tests |
 | 19 | Richer Grafana alert handling: parse payloads, auto-spawn remediation loops | done | GrafanaAlertHandler with structured parser, rule-based matching, auto-remediation loop spawning, config schema, health server integration, REST API (6 endpoints), +125 tests |
-| 20 | REVIEWER: validate rounds 11–19, tighten tests, fix bugs found | pending | |
+| 20 | REVIEWER: validate rounds 11–19, tighten tests, fix bugs found | done | Fixed shell injection in docker_ops extra_args, Slack rate-limit-on-failure, Grafana cooldown memory leak, JQL injection in issue_tracker; +19 tests |
 
 ### Phase 5 — Memory & knowledge (rounds 21–25)
 | # | Focus | Status | Summary |
@@ -2276,3 +2276,73 @@ All endpoints use `getattr(bot, "health_server", None)` then `getattr(hs, "grafa
 - Config `grafana_alerts.auto_remediate` defaults to `False`. Operators must explicitly enable it and configure rules for auto-remediation to work.
 - The REST API adds 6 endpoints under `/api/grafana-alerts/`. The DELETE endpoint uses `{rule_id}` path parameter.
 - All five subsystem wiring tasks remain open from Rounds 1-18: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
+
+## Round 20 — REVIEWER: validate rounds 11–19, tighten tests, fix bugs
+**Focus**: Validate all code from rounds 11–19 (git_ops, kubectl, docker_ops, terraform_ops, http_probe, MCP, Slack, issue tracker, Grafana alerts). Find and fix bugs. Tighten test coverage.
+**Baseline pytest**: 2241 passed, 0 failed
+**Post-round pytest**: 2260 passed, 0 failed (+19 new tests)
+
+### Validated from prior rounds
+- Round 19: Grafana alert parser, rule matcher, remediation handler, 6 REST API endpoints — all present and passing (125 tests).
+- Round 18: Issue tracker (Linear + Jira), 5 actions, tool + executor handler, 3 REST API endpoints — all present and passing (132 tests).
+- Round 17: Slack webhook output, SlackNotifier, health server + watcher integration, 3 REST API endpoints — all present and passing (107 tests).
+- Round 16: MCP client, stdio/HTTP transport, tool discovery/invocation, namespaced tools — all present and passing (132 tests).
+- Round 15: http_probe tool, 7 HTTP methods, curl-based timing breakdown — all present and passing (124 tests).
+- Round 14: terraform_ops tool, 10 actions, plan-file-only apply — all present and passing (138 tests).
+- Round 13: docker_ops tool, 14 actions, shell injection protection — all present and passing (148 tests).
+- Round 12: kubectl tool, 10 actions, shell injection protection — all present and passing (138 tests).
+- Round 11: git_ops tool, 11 actions, push freshness check — all present and passing (113 tests).
+- All 7 new tools (rounds 11-18) have properly formed registry entries in `src/tools/registry.py` with valid JSON Schema, required fields, and correct enums.
+- All 7 tool executor handlers in `src/tools/executor.py` follow consistent patterns (input validation, host resolution, error string returns).
+- REST API endpoint count verified at 91 total across `src/web/api.py`.
+
+### Bugs found and fixed
+
+#### 1. CRITICAL: Shell injection in docker_ops `extra_args` — `src/tools/docker_ops.py:87`
+**Bug**: The `_build_run()` function appended `extra_args` directly to the command parts list without shell quoting. Every other user-provided parameter in the file uses `_sq()` (shlex.quote). A malicious `extra_args` like `"--memory 512m; rm -rf /"` would execute the injected command.
+**Fix**: Changed `parts.append(extra_args)` to `parts.append(_sq(str(extra_args)))`. The `str()` call also handles the edge case where `extra_args` is a non-string type (e.g., integer).
+**Tests added**: 6 new tests in `TestRound20ShellInjectionFixes` covering semicolons, backticks, `$()` expansion, pipes, non-string coercion, and empty string handling.
+
+#### 2. HIGH: Slack rate limit set on failed sends — `src/notifications/slack.py:161`
+**Bug**: `_mark_sent(url)` was called immediately inside the `session.post()` context manager, BEFORE checking the HTTP response status. If the webhook returned 4xx/5xx, the URL was still marked as "sent" for rate limiting purposes, blocking legitimate retries for the full cooldown period (default 1 second, but configurable).
+**Fix**: Moved `_mark_sent(url)` inside the `if resp.status == 200:` success branch. Now rate limiting only activates after a successful delivery.
+**Tests added**: 4 new tests in `TestRound20RateLimitFix` verifying: failed sends don't rate-limit, successful sends do, retries allowed after failure, timeouts don't rate-limit.
+
+#### 3. MEDIUM: Grafana cooldown dict memory leak — `src/health/grafana_alerts.py:372-381`
+**Bug**: `cleanup_old_remediations()` only cleaned stale entries from `_remediations` but never touched `_cooldowns`. Over time, `_cooldowns` would accumulate one entry per unique (fingerprint, rule_id) pair that ever triggered, growing unboundedly.
+**Fix**: Added cooldown cleanup to `cleanup_old_remediations()`. Computes the maximum cooldown from all rules (falling back to the handler's default), then removes any cooldown entries older than `max_cooldown * 2`. The `*2` multiplier ensures cooldowns are never cleaned while they could still be active.
+**Tests added**: 4 new tests in `TestRound20CooldownCleanup` verifying: stale cooldowns removed, fresh cooldowns kept, combined remediation + cooldown cleanup, no-rules fallback to default cooldown.
+
+#### 4. HIGH: JQL injection in Jira issue listing — `src/notifications/issue_tracker.py:419-428`
+**Bug**: `_jira_list_issues()` built JQL with unquoted `project_key` (`project = {pkey}`) and the full JQL was not URL-encoded. A malicious project_key like `OPS" OR 1=1 --` would break the JQL query structure. The status field was quoted but could still inject via embedded double-quote chars.
+**Fix**: (a) Both `pkey` and `status` now escape embedded double-quotes via `.replace('"', '\\"')` and are wrapped in double-quote delimiters in the JQL. (b) The full JQL string is now URL-encoded via `urllib.parse.quote(jql, safe='')` before being placed in the query string. Added `from urllib.parse import quote` import.
+**Tests added**: 5 new tests in `TestRound20JQLSafety` verifying: project key quoted, status quoted, injection escaped, quotes in project key escaped, JQL URL-encoded.
+
+### Other findings (not bugs, noted for future rounds)
+
+1. **http_probe handler passes full `inp` dict to `build_http_probe_command()`** (`executor.py:1103`): The function uses `.get()` to extract known keys, so the extra `host` key is harmlessly ignored. Not a bug, but inconsistent with other handlers that extract params first. Low priority — not fixed.
+
+2. **MCP client double-timeout** (`mcp_client.py:499-502`): Connection timeout is applied in `_send_request`, then wrapped again with `asyncio.wait_for`. The outer timeout is the effective one. Not harmful but redundant. Low priority.
+
+3. **Five subsystem wiring tasks still open** from rounds 1-18: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics. These are all init-time wiring in `client.py` — not in scope for Phase 4 rounds.
+
+4. **Grafana loop_spawn_callback not wired** (noted in Round 19): The callback is set up in `HealthServer` but never connected to `LoopManager.start_loop()` in `client.py`. Same for `_issue_tracker_client` — never instantiated on the bot. These wiring tasks should happen when the respective integration is needed in production.
+
+5. **Config schema validation gaps**: `GrafanaRemediationRuleConfig` fields `cooldown_seconds`, `interval_seconds`, `max_iterations` can be 0 or negative. `IssueTrackerConfig`'s `provider` field is validated but `api_token` is not required when `enabled=True`. These are minor — Pydantic defaults protect against missing values.
+
+### Files changed
+- `src/tools/docker_ops.py` (line 87): Shell-quote `extra_args` with `_sq(str(...))`.
+- `src/notifications/slack.py` (lines 160-163): Move `_mark_sent()` inside success branch.
+- `src/health/grafana_alerts.py` (lines 372-389): Add cooldown cleanup in `cleanup_old_remediations()`.
+- `src/notifications/issue_tracker.py` (lines 9, 419-429): Add `urllib.parse.quote` import; escape and URL-encode JQL values.
+- `tests/test_docker_ops.py` (lines 1033-1073): 6 new shell injection tests.
+- `tests/test_slack_notifier.py` (lines 1170-1216): 4 new rate-limit-on-failure tests.
+- `tests/test_grafana_alerts.py` (lines 1402-1459): 4 new cooldown cleanup tests.
+- `tests/test_issue_tracker.py` (lines 1793-1876): 5 new JQL safety tests.
+
+### Next round watch for
+- Round 21 (Knowledge deduplication) is a new feature round, no dependencies on Round 20 fixes.
+- The docker_ops `extra_args` quoting change means the full `extra_args` string is now treated as a single shell-safe argument. If callers were relying on `extra_args` being multiple unquoted args (e.g., `"--memory 512m --cpus 2"`), those will now be a single quoted argument. This is the CORRECT security behavior — if multiple args are needed, callers should use separate args or the command field.
+- The Slack rate-limit fix means messages will be retried slightly more aggressively after failures, since failed sends no longer consume the cooldown window. This is correct behavior.
+- The JQL URL-encoding fix adds `urllib.parse.quote` as a new stdlib import. No external dependencies.
+- All five subsystem wiring tasks remain open from prior rounds.

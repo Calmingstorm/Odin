@@ -370,7 +370,7 @@ class GrafanaAlertHandler:
         return sum(1 for r in self._remediations.values() if r.status == "running")
 
     def cleanup_old_remediations(self) -> int:
-        """Remove completed/errored remediations older than 1 hour."""
+        """Remove completed/errored remediations older than 1 hour and stale cooldowns."""
         now = time.monotonic()
         to_remove = [
             lid for lid, rec in self._remediations.items()
@@ -378,7 +378,17 @@ class GrafanaAlertHandler:
         ]
         for lid in to_remove:
             del self._remediations[lid]
-        return len(to_remove)
+        max_cooldown = max(
+            (r.cooldown_seconds for r in self._rules),
+            default=self._cooldown_seconds,
+        )
+        stale_keys = [
+            k for k, ts in self._cooldowns.items()
+            if (now - ts) > max_cooldown * 2
+        ]
+        for k in stale_keys:
+            del self._cooldowns[k]
+        return len(to_remove) + len(stale_keys)
 
     def get_status(self) -> dict:
         """Return handler status for API/status endpoints."""

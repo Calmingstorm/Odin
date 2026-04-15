@@ -1166,6 +1166,69 @@ class TestEdgeCases:
 # ---------------------------------------------------------------------------
 
 
+class TestRound20RateLimitFix:
+    """Round 20 REVIEWER: verify rate limit only set on successful send."""
+
+    def _make_notifier(self, **kwargs):
+        defaults = {
+            "default_webhook_url": "https://hooks.slack.com/test",
+            "rate_limit_seconds": 10,
+            "scrub_secrets": False,
+        }
+        defaults.update(kwargs)
+        return SlackNotifier(**defaults)
+
+    def _mock_session(self, status=200, body="ok"):
+        mock_resp = AsyncMock()
+        mock_resp.status = status
+        mock_resp.text = AsyncMock(return_value=body)
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_resp)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        session = AsyncMock()
+        session.post = MagicMock(return_value=ctx)
+        session.closed = False
+        return session
+
+    async def test_failed_send_does_not_rate_limit(self):
+        n = self._make_notifier()
+        n._session = self._mock_session(status=500, body="error")
+        result = await n.send("first try")
+        assert result is False
+        assert n._check_rate_limit(n.resolve_url(None))
+
+    async def test_successful_send_sets_rate_limit(self):
+        n = self._make_notifier()
+        n._session = self._mock_session(status=200)
+        result = await n.send("message")
+        assert result is True
+        assert not n._check_rate_limit(n.resolve_url(None))
+
+    async def test_retry_allowed_after_failure(self):
+        n = self._make_notifier()
+        fail_session = self._mock_session(status=502, body="bad gateway")
+        n._session = fail_session
+        r1 = await n.send("attempt 1")
+        assert r1 is False
+        ok_session = self._mock_session(status=200)
+        n._session = ok_session
+        r2 = await n.send("attempt 2")
+        assert r2 is True
+        assert n.send_count == 1
+
+    async def test_timeout_does_not_rate_limit(self):
+        n = self._make_notifier()
+        session = AsyncMock()
+        session.closed = False
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(side_effect=asyncio.TimeoutError)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        session.post = MagicMock(return_value=ctx)
+        n._session = session
+        await n.send("timeout msg")
+        assert n._check_rate_limit(n.resolve_url(None))
+
+
 class TestModuleImports:
     def test_notifications_package(self):
         from src.notifications import SlackNotifier as SN

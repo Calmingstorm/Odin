@@ -158,8 +158,8 @@ class SlackNotifier:
         try:
             session = await self._get_session()
             async with session.post(url, json=payload) as resp:
-                self._mark_sent(url)
                 if resp.status == 200:
+                    self._mark_sent(url)
                     self._send_count += 1
                     return True
                 body = await resp.text()

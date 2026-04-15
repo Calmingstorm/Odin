@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 
@@ -418,14 +419,16 @@ class IssueTrackerClient:
         pkey = project_key or self._project_key
         jql_parts = []
         if pkey:
-            jql_parts.append(f"project = {pkey}")
+            safe_pkey = pkey.replace('"', '\\"')
+            jql_parts.append(f'project = "{safe_pkey}"')
         if status:
-            jql_parts.append(f'status = "{status}"')
+            safe_status = status.replace('"', '\\"')
+            jql_parts.append(f'status = "{safe_status}"')
         jql = " AND ".join(jql_parts) if jql_parts else "ORDER BY created DESC"
 
         data = await self._jira_request(
             "GET",
-            f"search?jql={jql}&maxResults={min(limit, 50)}&fields=summary,status,priority,assignee,created",
+            f"search?jql={quote(jql, safe='')}&maxResults={min(limit, 50)}&fields=summary,status,priority,assignee,created",
         )
         issues = data.get("issues", [])
         return [
