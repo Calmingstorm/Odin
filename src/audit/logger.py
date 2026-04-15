@@ -40,6 +40,8 @@ class AuditLogger:
         execution_time_ms: int,
         error: str | None = None,
         diff: str | None = None,
+        risk_level: str | None = None,
+        risk_reason: str | None = None,
     ) -> None:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -55,6 +57,10 @@ class AuditLogger:
         }
         if diff:
             entry["diff"] = diff
+        if risk_level:
+            entry["risk_level"] = risk_level
+        if risk_reason:
+            entry["risk_reason"] = risk_reason
         if self._signer:
             self._signer.sign(entry)
         line = json.dumps(entry, default=str) + "\n"
@@ -326,6 +332,47 @@ class AuditLogger:
             ):
                 continue
             if date and not entry.get("timestamp", "").startswith(date):
+                continue
+
+            results.append(entry)
+            if len(results) >= limit:
+                break
+
+        return results
+
+    async def search_by_risk(
+        self,
+        *,
+        risk_level: str | None = None,
+        tool_name: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Return audit entries that have a risk_level field, most recent first."""
+        if not self.path.exists():
+            return []
+
+        try:
+            async with aiofiles.open(self.path, "r") as f:
+                lines = await f.readlines()
+        except Exception as e:
+            log.error("Failed to read audit log for risk search: %s", e)
+            return []
+
+        results: list[dict] = []
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if not entry.get("risk_level"):
+                continue
+            if risk_level and entry.get("risk_level") != risk_level:
+                continue
+            if tool_name and entry.get("tool_name") != tool_name:
                 continue
 
             results.append(entry)

@@ -10,6 +10,7 @@ from pathlib import Path
 from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
 from .bulkhead import BulkheadFullError, BulkheadRegistry
+from .risk_classifier import RiskStats, classify_tool
 from .ssh import is_local_address, run_local_command, run_ssh_command
 from .ssh_pool import SSHConnectionPool
 
@@ -60,6 +61,7 @@ class ToolExecutor:
         self._memory_path = Path(memory_path) if memory_path else None
         self._browser_manager = browser_manager
         self._metrics: dict[str, dict[str, int]] = {}
+        self.risk_stats = RiskStats()
         self.bulkheads = _build_bulkhead_registry(self.config)
         pool_cfg = self.config.ssh_pool
         self.ssh_pool: SSHConnectionPool | None = (
@@ -82,6 +84,14 @@ class ToolExecutor:
         handler = getattr(self, f"_handle_{tool_name}", None)
         if handler is None:
             return f"Unknown tool: {tool_name}"
+
+        assessment = classify_tool(tool_name, tool_input)
+        self.risk_stats.record(tool_name, assessment)
+        self._last_risk_assessment = assessment
+        if assessment.level.value in ("high", "critical"):
+            log.warning(
+                "Risk %s for %s: %s", assessment.level.value, tool_name, assessment.reason,
+            )
 
         timeout = self.config.get_tool_timeout(tool_name)
         try:

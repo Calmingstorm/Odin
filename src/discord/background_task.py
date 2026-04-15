@@ -18,6 +18,7 @@ import discord
 from ..audit.diff_tracker import DIFF_TOOLS, DiffTracker
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
+from ..tools.risk_classifier import classify_tool
 
 if TYPE_CHECKING:
     from ..audit.logger import AuditLogger
@@ -182,6 +183,9 @@ async def run_background_task(
                 output=output[:500], elapsed_ms=elapsed_ms,
             ))
 
+            # Classify risk level for observability
+            risk_assessment = classify_tool(tool_name, tool_input)
+
             if audit_logger:
                 try:
                     log_kwargs: dict = dict(
@@ -190,6 +194,8 @@ async def run_background_task(
                         tool_name=tool_name, tool_input=tool_input, approved=True,
                         result_summary=output[:500],
                         execution_time_ms=elapsed_ms,
+                        risk_level=risk_assessment.level.value,
+                        risk_reason=risk_assessment.reason,
                     )
                     if is_error:
                         log_kwargs["error"] = output[:500]
@@ -213,6 +219,7 @@ async def run_background_task(
                 output=error_msg[:500], elapsed_ms=elapsed_ms,
             ))
 
+            err_risk = classify_tool(tool_name, tool_input)
             if audit_logger:
                 try:
                     await audit_logger.log_execution(
@@ -221,6 +228,8 @@ async def run_background_task(
                         tool_name=tool_name, tool_input=tool_input, approved=True,
                         result_summary=error_msg[:500],
                         execution_time_ms=elapsed_ms, error=error_msg[:500],
+                        risk_level=err_risk.level.value,
+                        risk_reason=err_risk.reason,
                     )
                 except Exception:
                     log.warning("Failed to audit log step %d of task %s", i, task.task_id)

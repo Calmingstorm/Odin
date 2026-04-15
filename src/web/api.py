@@ -1975,6 +1975,41 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
         return web.json_response({"status": "deleted", "count": deleted})
 
+    # ------------------------------------------------------------------
+    # Risk classification (observability)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/risk/stats")
+    async def risk_stats(_request: web.Request) -> web.Response:
+        executor = getattr(bot, "tool_executor", None)
+        if not executor:
+            return web.json_response({"error": "executor not available"}, status=503)
+        return web.json_response(executor.risk_stats.get_summary())
+
+    @routes.get("/api/risk/recent")
+    async def risk_recent(request: web.Request) -> web.Response:
+        executor = getattr(bot, "tool_executor", None)
+        if not executor:
+            return web.json_response({"error": "executor not available"}, status=503)
+        try:
+            limit = min(max(1, int(request.query.get("limit", "20"))), 100)
+        except ValueError:
+            return web.json_response({"error": "limit must be an integer"}, status=400)
+        return web.json_response({"entries": executor.risk_stats.get_recent(limit)})
+
+    @routes.get("/api/audit/risk")
+    async def audit_by_risk(request: web.Request) -> web.Response:
+        risk_level = request.query.get("level") or None
+        tool_name = request.query.get("tool") or None
+        try:
+            limit = min(max(1, int(request.query.get("limit", "20"))), 100)
+        except ValueError:
+            return web.json_response({"error": "limit must be an integer"}, status=400)
+        results = await bot.audit.search_by_risk(
+            risk_level=risk_level, tool_name=tool_name, limit=limit,
+        )
+        return web.json_response({"entries": results, "count": len(results)})
+
     return routes
 
 

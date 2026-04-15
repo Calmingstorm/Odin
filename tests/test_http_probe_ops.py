@@ -631,6 +631,8 @@ class TestHandleHttpProbe:
         exec_inst = ToolExecutor.__new__(ToolExecutor)
         exec_inst.config = config
         exec_inst._metrics = {}
+        from src.tools.risk_classifier import RiskStats
+        exec_inst.risk_stats = RiskStats()
         exec_inst._exec_command = AsyncMock(return_value=(0, "HTTP/1.1 200 OK\n\nOK"))
         return exec_inst
 

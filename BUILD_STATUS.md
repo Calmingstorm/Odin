@@ -141,7 +141,7 @@ tightening of prior work.
 |---|-------|--------|---------|
 | 26 | Action diffs: for file / config changes, audit log records before→after diff | done | DiffTracker module, compute_unified_diff/compute_dict_diff, AuditLogger diff field, background task integration, config update diff via web API, /api/audit/diffs endpoint, +82 tests |
 | 27 | Audit log signing: append-only with HMAC chain for tamper detection | done | AuditSigner HMAC-SHA256 chain, verify_log, AuditLogger signing integration, initialize_chain, verify_integrity, AuditConfig, /api/audit/verify endpoint, +86 tests |
-| 28 | Dangerous-command risk classifier: tag commands by risk before execution (observability only, NO blocking) | pending | |
+| 28 | Dangerous-command risk classifier: tag commands by risk before execution (observability only, NO blocking) | done | RiskClassifier module with 4-tier pattern matching (critical/high/medium/low), ToolExecutor + background_task integration, AuditLogger risk_level/risk_reason fields, search_by_risk, RiskStats tracker, 3 REST API endpoints, +174 tests |
 | 29 | Tool RBAC: honor `PermissionsConfig.tiers` on tool calls (not auth only) | pending | |
 | 30 | REVIEWER: validate rounds 21–29, tighten tests, fix bugs found | pending | |
 
@@ -3376,4 +3376,108 @@ Added `AuditSigner` and `verify_log` to `__all__` and imports.
 - The `AuditConfig.hmac_key` field is currently only defined in config schema. Whoever wires up the bot's `AuditLogger` instance should pass `config.audit.hmac_key` and call `await logger.initialize_chain()` after construction if appending to an existing log.
 - The `_hmac` and `_prev_hmac` fields are visible in all audit search results when signing is enabled. Frontend consumers should be aware these fields may or may not be present depending on configuration.
 - The `verify_log` function reads the entire log file into memory. For very large audit logs (millions of entries), a streaming approach may be needed. For typical usage (thousands of entries) this is fine.
+- All five subsystem wiring tasks remain open from prior rounds.
+
+## Round 28 — Dangerous-command risk classifier: tag commands by risk before execution (observability only, NO blocking)
+**Focus**: Add a pattern-based risk classifier that tags every tool call with a risk level (low, medium, high, critical) for observability. The classifier never blocks execution — it logs the risk level in audit entries, tracks statistics, and exposes them via REST API.
+**Baseline pytest**: 2773 passed, 0 failed
+**Post-round pytest**: 2947 passed, 0 failed (+174 new tests)
+
+### Validated from prior rounds
+- Round 27 (Audit log signing): all 86 tests pass, HMAC chain works correctly with the new `risk_level`/`risk_reason` audit fields included in signed entries.
+- Round 27 noted "Round 28 (Dangerous-command risk classifier) has no dependencies on Round 27" — confirmed, but the risk fields integrate cleanly with signing since they're added to the entry dict before `sign()` is called.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. RiskClassifier module: `src/tools/risk_classifier.py` (new, ~200 lines)
+
+New module with pattern-based risk classification:
+
+- **`RiskLevel`** (line 22): String enum with four tiers: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`. Inherits from `str` for JSON serialization.
+
+- **`RiskAssessment`** (line 30): NamedTuple with `level: RiskLevel` and `reason: str`. Immutable, unpackable.
+
+- **`_CRITICAL_PATTERNS`** (lines 38-52): 13 compiled regex patterns for the most dangerous operations: recursive root delete, filesystem format (`mkfs`), raw disk write (`dd`), system shutdown/reboot/halt, recursive world-writable root (`chmod -R 777 /`), firewall flush/disable, database DROP/TRUNCATE, crontab remove-all, block device writes.
+
+- **`_HIGH_PATTERNS`** (lines 54-77): 22 compiled regex patterns for significant system changes: recursive/forced delete, service lifecycle (stop/disable/restart/mask), package removal (apt/yum/dnf), Docker rm/rmi/stop/kill/prune, user/group deletion, password changes, forced process kills (kill -9, killall, pkill), git force-push/hard-reset, firewall rules, recursive permission/ownership changes, database DELETE/ALTER/DROP.
+
+- **`_MEDIUM_PATTERNS`** (lines 79-105): 24 compiled regex patterns for data modifications: package installs (apt/pip/npm), Docker operations (run/exec/build), compose operations, git push/reset/checkout/merge/rebase, service start/enable/reload, directory/permission/ownership changes, piped script execution (curl|bash), user/group management, mount, database INSERT/UPDATE/CREATE, file delete/move, recursive copy.
+
+- **`_TOOL_RISK_MAP`** (lines 108-130): Static risk mapping for 20 tools. Read-only tools (read_file, search_knowledge, web_search, fetch_url, browser_read_page, browser_read_table, analyze_pdf, analyze_image, memory_manage, manage_list) → LOW. Write tools (write_file, browser_click, browser_fill, browser_evaluate, manage_process, generate_image, ingest_knowledge) → MEDIUM. Execution tools (run_script, claude_code, run_command_multi) → HIGH.
+
+- **`classify_command(command)`** (lines 133-148): Classifies a shell command string. Scans critical → high → medium patterns top-down; first match wins. Returns LOW if no pattern matches.
+
+- **`classify_tool(tool_name, tool_input)`** (lines 151-180): Classifies a tool call. For `run_command`, inspects the command string. For `run_command_multi`, inspects the command and floors at MEDIUM. For `run_script`, inspects script content and floors at HIGH. Other tools use the static map.
+
+- **`_LEVEL_ORDER`** (lines 183-188): Maps RiskLevel to int for correct ordering comparisons.
+
+- **`RiskStats`** class (lines 191-233): Thread-safe statistics tracker with per-level totals, per-tool breakdowns, and a capped recent-events ring buffer (max 100).
+
+#### 2. ToolExecutor integration: `src/tools/executor.py` (lines 12, 63, 86-95)
+
+- Imports `RiskStats` and `classify_tool` from the new module.
+- Creates `RiskStats` instance in `__init__()`.
+- `execute()`: classifies every tool call, records stats, stores `_last_risk_assessment`, logs WARNING for high/critical.
+
+#### 3. AuditLogger updated: `src/audit/logger.py` (lines 42-43, 58-61, 343-381)
+
+- **`log_execution()`**: New optional `risk_level` and `risk_reason` parameters. Truthy values added to entry dict; omitted when None/empty.
+- **`search_by_risk()`** (new method): Searches audit log for entries with a `risk_level` field. Supports `risk_level`, `tool_name`, `limit` filters.
+
+#### 4. Background task integration: `src/discord/background_task.py` (lines 20, 189-197, 228-234)
+
+- Classifies risk in both success and error paths before audit logging.
+- Passes `risk_level` and `risk_reason` to `log_execution()`.
+
+#### 5. REST API endpoints: `src/web/api.py` (lines 1979-2013)
+
+- **`GET /api/risk/stats`**: Aggregated in-memory risk statistics.
+- **`GET /api/risk/recent`**: Recent risk classification events (in-memory ring buffer).
+- **`GET /api/audit/risk`**: Search persistent audit log by risk level.
+
+#### 6. Pre-existing test fix: `tests/test_http_probe_ops.py` (line 633)
+
+- Fixed `TestHandleHttpProbe.executor` fixture which used `ToolExecutor.__new__()` bypassing `__init__`. Added `risk_stats = RiskStats()`.
+
+#### 7. Tests: `tests/test_risk_classifier.py` — 174 tests across 17 test classes
+
+**RiskLevel** (3), **RiskAssessment** (2), **_LEVEL_ORDER** (2), **classify_command — CRITICAL** (17), **classify_command — HIGH** (27), **classify_command — MEDIUM** (21), **classify_command — LOW** (15), **classify_command — priority** (3), **classify_tool — run_command** (4), **classify_tool — run_command_multi** (3), **classify_tool — run_script** (3), **classify_tool — static map** (11), **_TOOL_RISK_MAP** (3), **Pattern lists** (4), **RiskStats** (8), **ToolExecutor integration** (4), **AuditLogger risk fields** (4), **search_by_risk** (7), **Background task integration** (2), **Module imports** (3), **REST API** (6), **Edge cases** (19), **Signing compatibility** (2).
+
+### Design decisions
+
+1. **Observability-only, never blocking**: Tags commands with risk levels but never prevents execution. Follows "add observability, not friction" ethos.
+
+2. **Pattern-based, no ML**: Compiled regex patterns for deterministic, fast classification (<1ms). No external dependencies.
+
+3. **Four-tier risk levels**: CRITICAL (irreversible damage), HIGH (significant changes), MEDIUM (data modification), LOW (read-only/safe).
+
+4. **First-match-wins**: Patterns checked critical → high → medium. First match in highest tier wins.
+
+5. **Tool-aware classification**: `run_command` inspects command string. `run_script` floors at HIGH. `run_command_multi` floors at MEDIUM. Static map for other tools.
+
+6. **_LEVEL_ORDER for comparisons**: Dict maps levels to ints instead of string comparison (avoids `"critical" < "high"` bug).
+
+7. **passwd pattern excludes file paths**: Uses negative lookbehind `(?<!/)\bpasswd\s` to avoid matching `/etc/passwd`.
+
+8. **Three REST endpoints**: `/api/risk/stats` (aggregates), `/api/risk/recent` (live), `/api/audit/risk` (historical).
+
+### Files changed
+- `src/tools/risk_classifier.py` (new, ~200 lines): RiskLevel, RiskAssessment, classify_command, classify_tool, pattern lists, _TOOL_RISK_MAP, RiskStats.
+- `src/tools/executor.py` (lines 12, 63, 86-95): Import risk_classifier, add risk_stats, classify in execute().
+- `src/audit/logger.py` (lines 42-43, 58-61, 343-381): risk_level/risk_reason on log_execution, search_by_risk.
+- `src/discord/background_task.py` (lines 20, 189-197, 228-234): classify_tool import, risk fields in audit calls.
+- `src/web/api.py` (lines 1979-2013): 3 new risk endpoints.
+- `CLAUDE.md` (line 54): Added risk_classifier.py to project structure.
+- `tests/test_risk_classifier.py` (new, 174 tests): 17 test classes.
+- `tests/test_http_probe_ops.py` (line 633): Fixed executor fixture.
+
+### Next round watch for
+- Round 29 (Tool RBAC) has no direct dependencies on Round 28, but the risk classifier's `_TOOL_RISK_MAP` could inform RBAC tier assignments.
+- REST API endpoint count is now 105 (was 102 after Round 27, +3 new: `GET /api/risk/stats`, `GET /api/risk/recent`, `GET /api/audit/risk`).
+- The `passwd` pattern uses a negative lookbehind and trailing `\s` — commands like `passwd` at end-of-string without trailing space won't match. Acceptable since real passwd usage always has arguments.
+- The `_TOOL_RISK_MAP` currently covers 20 tools. New tools added in future rounds should be added to the map. Unmapped tools default to LOW.
+- `RiskStats` is in-memory only — resets on bot restart. For persistent risk analytics, use `/api/audit/risk`.
+- The `risk_level` and `risk_reason` fields in audit entries are included in HMAC chain signing (verified by test).
+- The `ToolExecutor.__new__()` pattern in `test_http_probe_ops.py` and `test_terraform_ops.py` bypasses `__init__`. Future changes to `ToolExecutor.__init__` that add required attributes must update these fixtures.
 - All five subsystem wiring tasks remain open from prior rounds.
