@@ -129,11 +129,11 @@ class Scheduler:
         """Validate a webhook trigger definition."""
         if not isinstance(trigger, dict):
             raise ValueError("'trigger' must be a dict")
-        valid_keys = {"source", "event", "repo", "alert_name"}
+        valid_keys = {"source", "event", "repo", "alert_name", "emoji", "user_id", "channel_id"}
         unknown = set(trigger.keys()) - valid_keys
         if unknown:
             raise ValueError(f"Unknown trigger keys: {', '.join(sorted(unknown))}")
-        valid_sources = {"gitea", "grafana", "generic", "github", "gitlab"}
+        valid_sources = {"gitea", "grafana", "generic", "github", "gitlab", "discord_reaction"}
         source = trigger.get("source")
         if source and source not in valid_sources:
             raise ValueError(
@@ -167,6 +167,15 @@ class Scheduler:
         if trigger.get("alert_name"):
             alert = event_data.get("alert_name", "")
             if trigger["alert_name"].lower() not in alert.lower():
+                return False
+        if trigger.get("emoji"):
+            if trigger["emoji"] != event_data.get("emoji", ""):
+                return False
+        if trigger.get("user_id"):
+            if trigger["user_id"] != event_data.get("user_id", ""):
+                return False
+        if trigger.get("channel_id"):
+            if trigger["channel_id"] != event_data.get("channel_id", ""):
                 return False
         return True
 

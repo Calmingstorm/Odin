@@ -31,6 +31,7 @@ INITIAL_EXTENSIONS: Sequence[str] = (
     "src.discord.cogs.logging_cog",
     "src.discord.cogs.reminders",
     "src.discord.cogs.fun",
+    "src.discord.cogs.reaction_triggers",
 )
 
 

@@ -133,6 +133,12 @@ class ComfyUIConfig(BaseModel):
     url: str = "http://localhost:8188"
 
 
+class ReactionTriggerConfig(BaseModel):
+    enabled: bool = False
+    channel_ids: list[str] = Field(default_factory=list)  # Empty = all channels
+    allowed_user_ids: list[str] = Field(default_factory=list)  # Empty = all users
+
+
 class MonitorCheck(BaseModel):
     name: str
     type: str  # "disk", "memory", "service", "promql"
@@ -168,6 +174,7 @@ class Config(BaseModel):
     permissions: PermissionsConfig = PermissionsConfig()
     comfyui: ComfyUIConfig = ComfyUIConfig()
     web: WebConfig = WebConfig()
+    reaction_triggers: ReactionTriggerConfig = ReactionTriggerConfig()
 
 
 def _substitute_env_vars(text: str) -> str:

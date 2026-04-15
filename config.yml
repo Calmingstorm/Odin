@@ -90,3 +90,11 @@ web:
   enabled: true
   port: 3001
   api_token: ''
+
+# Discord reaction triggers — fire scheduler triggers when users react with emoji
+reaction_triggers:
+  enabled: false
+  # Restrict to specific channels (empty = all channels)
+  channel_ids: []
+  # Restrict to specific users (empty = all users)
+  allowed_user_ids: []
