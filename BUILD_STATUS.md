@@ -97,7 +97,7 @@ tightening of prior work.
 | 1 | Cost tracking: prompt+completion tokens and estimated USD per Codex call, aggregated per user / channel / tool in Prometheus + web UI | done | CostTracker module, LLMResponse token fields, Prometheus metrics, /api/usage endpoint, web UI page |
 | 2 | Token-budget awareness: track running tokens per session, expose in `/metrics`, auto-compact when budget exceeded | done | Session.estimated_tokens, token-budget compaction, Prometheus metrics, /api/sessions/token-usage, config.sessions.token_budget |
 | 3 | Trajectory saving: dump every message's full turn (prompt, all tool calls, final response) as JSONL under `data/trajectories/` | done | TrajectorySaver module, TrajectoryTurn/ToolIteration types, date-partitioned JSONL, search/list/read, REST API (3 endpoints), Prometheus metric |
-| 4 | Trace viewer web UI page: given a message id, render the full tool chain with timings and outputs | pending | |
+| 4 | Trace viewer web UI page: given a message id, render the full tool chain with timings and outputs | done | Trace viewer page with message ID lookup, search/filter, expandable iteration timeline, duration bars, token counts |
 | 5 | Log filter UI: server-side search / time-range / level filtering on the Logs page | pending | |
 
 ### Phase 2 — Reliability hardening (rounds 6–10)
@@ -410,3 +410,66 @@ bottom. Do not truncate older entries — they are the chain-of-context.)
 - The `TrajectorySaver` needs wiring into the bot's `__init__` or startup sequence: `self.trajectory_saver = TrajectorySaver()` and `metrics.register_source("trajectories", self.trajectory_saver.get_prometheus_metrics)`.
 - Integration with the tool loop requires calling `turn.add_iteration()` after each LLM response inside `_process_with_tools`, then `turn.finalize()` + `await self.trajectory_saver.save(turn)` at the end. This is blocked until `_process_with_tools` is implemented.
 - The `search()` method reads all matching files sequentially — fine for moderate volume but may need optimization (index file, or SQLite storage) if trajectory volume grows large.
+
+## Round 4 — Trace viewer web UI page
+**Focus**: Build a trace viewer web UI page that renders full tool chains with timings and outputs, with message ID lookup.
+**Baseline pytest**: 812 passed, 0 failed
+**Post-round pytest**: 820 passed, 0 failed (+8 new tests)
+
+### Validated from prior rounds
+- Round 1: `CostTracker`, `estimate_tokens`, `LLMResponse` token fields all present and passing (35 tests). `CostTracker` still not wired to bot object — still pending (noted Rounds 1-3).
+- Round 2: `Session.estimated_tokens`, `_needs_compaction()`, token metrics all present and passing (41 tests). `session_tokens` Prometheus source still needs wiring — still pending.
+- Round 3: `TrajectorySaver`, `TrajectoryTurn`, `ToolIteration`, REST API endpoints (`/api/trajectories`, `/api/trajectories/{filename}`, `/api/trajectories/search/query`) all present and passing (53 tests). Trajectory data shape (`to_dict()`) matches what the trace viewer needs. No issues found in prior round implementations.
+
+### Work done
+
+#### 1. New method: `TrajectorySaver.find_by_message_id()`
+- `src/trajectories/saver.py:268-289` — Searches all trajectory files (most recent first) for a specific `message_id`. Returns the first matching entry dict, or `None`. Uses the same reverse-file-order pattern as `search()`.
+
+#### 2. New API endpoint: `GET /api/trajectories/message/{message_id}`
+- `src/web/api.py:662-671` — Returns `{"entry": {...}}` on match, 404 if not found, 503 if saver unavailable. Uses `find_by_message_id()`. No route conflict with `{filename}` endpoint — different path depth (2 segments vs 1 after `/api/trajectories/`).
+
+#### 3. New UI page: `ui/js/pages/traces.js`
+- Full trace viewer page with:
+  - **Message ID lookup**: text input + Enter to look up a specific message's full trace, displays as a dedicated single-trace detail view
+  - **Search/filter panel**: file selector dropdown, channel ID, user ID, tool name, errors-only checkbox, configurable limit (25/50/100)
+  - **Trace list table**: timestamp, user, message preview (truncated to 60 chars), tools used (first 3 + overflow count), duration, token count, status badge (ok/error/handoff)
+  - **Expandable trace detail**: clicking a row expands inline detail with:
+    - Quick stats row: iteration count, duration, input tokens, output tokens
+    - User message content (pre-formatted, scrollable)
+    - **Iteration timeline**: each iteration is a collapsible card showing:
+      - Header: iteration number, tool call badges (blue), duration, token count
+      - Duration bar: proportional width relative to total duration with percentage label
+      - LLM text (if present)
+      - Tool calls: name highlighted in blue, input as formatted JSON
+      - Tool results: name in green (or red for errors), output as formatted JSON (truncated to 5000 chars)
+    - Final response (pre-formatted, scrollable)
+  - **Single trace view** (from message ID lookup): same detail rendering but full-page, with summary stat cards (iterations, tools, duration, tokens) and back-to-list button
+  - Skeleton loading, error state, empty state — all matching existing UI patterns
+
+#### 4. Route registration: `ui/js/app.js`
+- Line 21: `import TracesPage from './pages/traces.js';`
+- Line 48: `{ path: '/traces', component: TracesPage, meta: { label: 'Traces', icon: '\u{1F50D}' } }`
+
+#### 5. Tests: `tests/test_trajectories.py` — 8 new tests
+- `TestTrajectorySaverFindByMessageId` (5 tests):
+  - `test_find_existing`: finds an entry by message_id in a multi-entry file
+  - `test_find_not_found`: returns None for nonexistent message_id
+  - `test_find_empty_directory`: returns None when no trajectory files exist
+  - `test_find_across_files`: finds entries in older files when not in recent ones
+  - `test_find_returns_most_recent_file_first`: with duplicate message_ids across files, returns from most recent
+- `TestTrajectoryMessageAPI` (3 tests):
+  - `test_get_by_message_id`: HTTP 200 with entry data
+  - `test_get_by_message_id_not_found`: HTTP 404 when message not in trajectories
+  - `test_get_by_message_id_unavailable`: HTTP 503 when saver not attached to bot
+
+### Issues found
+- The `CostTracker`, `session_tokens` Prometheus source, and `TrajectorySaver` are all still not wired to the bot object. This is a recurring note from Rounds 1-3. The wiring will happen when bot initialization is formalized (or a dedicated round handles subsystem wiring).
+- The `find_by_message_id()` method scans all files sequentially — same limitation as `search()`. For high-volume deployments, an index or SQLite storage would be better.
+- The trace viewer UI page cannot be browser-tested in this headless build loop environment. The page follows existing UI patterns exactly (audit.js, sessions.js) and uses the same API client, Vue 3 patterns, and Tailwind classes.
+
+### Next round watch for
+- Round 5 (log filter UI) should follow the same UI pattern established here: filter panel at top, table with expandable detail below.
+- The trace viewer depends on trajectory data having `iterations` arrays with tool call/result detail. Currently trajectories are not wired into the bot's tool loop, so no real data will appear until the wiring is done.
+- All three subsystem wiring tasks remain open: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`. A future round should handle this holistically.
+- The `/api/trajectories/message/{message_id}` endpoint sits between `/{filename}` and `/search/query` in the route table. No conflict exists (different path depths), but future trajectory sub-routes should be aware of the `{filename}` catch-all at depth 1.

@@ -265,5 +265,29 @@ class TrajectorySaver:
                     return results
         return results
 
+    async def find_by_message_id(self, message_id: str) -> dict | None:
+        """Find a single trajectory entry by message_id (most recent files first)."""
+        files = await self.list_files()
+        for filename in reversed(files):
+            filepath = self.directory / filename
+            if not filepath.exists():
+                continue
+            try:
+                async with aiofiles.open(filepath, "r") as f:
+                    lines = await f.readlines()
+                for line in reversed(lines):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if entry.get("message_id") == message_id:
+                        return entry
+            except Exception as e:
+                log.error("Error reading %s for message lookup: %s", filename, e)
+        return None
+
     def get_prometheus_metrics(self) -> dict:
         return {"trajectories_saved_total": self._count}

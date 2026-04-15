@@ -659,6 +659,17 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         entries = await saver.read_file(filename, limit=limit)
         return web.json_response({"entries": entries, "count": len(entries)})
 
+    @routes.get("/api/trajectories/message/{message_id}")
+    async def get_trajectory_by_message(request: web.Request) -> web.Response:
+        saver = getattr(bot, "trajectory_saver", None)
+        if saver is None:
+            return web.json_response({"error": "trajectory saving not available"}, status=503)
+        message_id = request.match_info["message_id"]
+        entry = await saver.find_by_message_id(message_id)
+        if entry is None:
+            return web.json_response({"error": "trajectory not found"}, status=404)
+        return web.json_response({"entry": entry})
+
     @routes.get("/api/trajectories/search/query")
     async def search_trajectories(request: web.Request) -> web.Response:
         saver = getattr(bot, "trajectory_saver", None)

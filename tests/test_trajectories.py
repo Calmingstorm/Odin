@@ -423,6 +423,65 @@ class TestTrajectorySaverReadFile:
         assert len(entries) == 3
 
 
+class TestTrajectorySaverFindByMessageId:
+    @pytest.fixture
+    def saver_with_data(self, tmp_path):
+        d = tmp_path / "traj"
+        d.mkdir()
+        data = [
+            {"message_id": "msg-1", "channel_id": "c1", "user_id": "u1"},
+            {"message_id": "msg-2", "channel_id": "c2", "user_id": "u2"},
+            {"message_id": "msg-3", "channel_id": "c1", "user_id": "u1"},
+        ]
+        (d / "2026-04-15.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in data) + "\n"
+        )
+        return TrajectorySaver(directory=str(d))
+
+    async def test_find_existing(self, saver_with_data):
+        entry = await saver_with_data.find_by_message_id("msg-2")
+        assert entry is not None
+        assert entry["message_id"] == "msg-2"
+        assert entry["channel_id"] == "c2"
+
+    async def test_find_not_found(self, saver_with_data):
+        entry = await saver_with_data.find_by_message_id("nonexistent")
+        assert entry is None
+
+    async def test_find_empty_directory(self, tmp_path):
+        saver = TrajectorySaver(directory=str(tmp_path / "empty"))
+        entry = await saver.find_by_message_id("msg-1")
+        assert entry is None
+
+    async def test_find_across_files(self, tmp_path):
+        d = tmp_path / "traj"
+        d.mkdir()
+        (d / "2026-04-14.jsonl").write_text(
+            json.dumps({"message_id": "old-msg", "channel_id": "c1"}) + "\n"
+        )
+        (d / "2026-04-15.jsonl").write_text(
+            json.dumps({"message_id": "new-msg", "channel_id": "c2"}) + "\n"
+        )
+        saver = TrajectorySaver(directory=str(d))
+        entry = await saver.find_by_message_id("old-msg")
+        assert entry is not None
+        assert entry["message_id"] == "old-msg"
+
+    async def test_find_returns_most_recent_file_first(self, tmp_path):
+        d = tmp_path / "traj"
+        d.mkdir()
+        (d / "2026-04-14.jsonl").write_text(
+            json.dumps({"message_id": "dup", "channel_id": "old"}) + "\n"
+        )
+        (d / "2026-04-15.jsonl").write_text(
+            json.dumps({"message_id": "dup", "channel_id": "new"}) + "\n"
+        )
+        saver = TrajectorySaver(directory=str(d))
+        entry = await saver.find_by_message_id("dup")
+        assert entry is not None
+        assert entry["channel_id"] == "new"
+
+
 class TestTrajectorySaverSearch:
     @pytest.fixture
     def saver_with_data(self, tmp_path):
@@ -529,6 +588,10 @@ def _make_bot_with_saver():
     saver.search = AsyncMock(return_value=[
         {"message_id": "1", "channel_id": "c1"},
     ])
+    saver.find_by_message_id = AsyncMock(return_value={
+        "message_id": "1", "channel_id": "c1", "tools_used": ["run_command"],
+        "iterations": [], "final_response": "Done",
+    })
     bot.trajectory_saver = saver
     bot.config = MagicMock()
     bot.config.web = MagicMock()
@@ -587,6 +650,32 @@ class TestTrajectoryAPI:
             assert resp.status == 200
             data = await resp.json()
             assert len(data["results"]) == 1
+
+
+class TestTrajectoryMessageAPI:
+    async def test_get_by_message_id(self):
+        bot = _make_bot_with_saver()
+        app = _make_app(bot)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/trajectories/message/1")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["entry"]["message_id"] == "1"
+
+    async def test_get_by_message_id_not_found(self):
+        bot = _make_bot_with_saver()
+        bot.trajectory_saver.find_by_message_id = AsyncMock(return_value=None)
+        app = _make_app(bot)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/trajectories/message/nonexistent")
+            assert resp.status == 404
+
+    async def test_get_by_message_id_unavailable(self):
+        bot = _make_bot_without_saver()
+        app = _make_app(bot)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/trajectories/message/1")
+            assert resp.status == 503
 
 
 class TestTrajectoryAPIUnavailable:
