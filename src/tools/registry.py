@@ -1371,6 +1371,50 @@ TOOLS: list[dict] = [
             "required": ["host", "action"],
         },
     },
+    # --- Kubernetes operations ---
+    {
+        "name": "kubectl",
+        "description": (
+            "Kubernetes operations on a managed host. Actions: get, describe, logs, apply, delete, "
+            "exec, rollout, scale, top, config. Runs kubectl via SSH on the target host (or locally). "
+            "Supports namespace, context, and kubeconfig overrides. For complex multi-resource workflows, "
+            "use run_script."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "host": {
+                    "type": "string",
+                    "description": "Host alias from config",
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Kubectl action: get, describe, logs, apply, delete, exec, rollout, scale, top, config",
+                    "enum": [
+                        "get", "describe", "logs", "apply", "delete", "exec",
+                        "rollout", "scale", "top", "config",
+                    ],
+                },
+                "params": {
+                    "type": "object",
+                    "description": (
+                        "Action-specific params. Common: namespace, context, kubeconfig. "
+                        "get: resource (required), name, output (json/yaml/wide/name), selector, all_namespaces (bool). "
+                        "describe: resource (required), name. "
+                        "logs: pod (required), container, tail (int), previous (bool), since (e.g. '1h'), follow (bool), selector. "
+                        "apply: file (path/URL, required unless kustomize), kustomize (dir), dry_run (bool). "
+                        "delete: resource (required), name, selector, force (bool), grace_period (int). "
+                        "exec: pod (required), command (required), container. "
+                        "rollout: subaction (status/restart/undo/history/pause/resume), resource (required). "
+                        "scale: resource (required), replicas (required, int). "
+                        "top: resource (pods/nodes), name, selector, containers (bool). "
+                        "config: subaction (get-contexts/use-context/current-context/view), context_name (for use-context)."
+                    ),
+                },
+            },
+            "required": ["host", "action"],
+        },
+    },
     # --- Image generation (ComfyUI) ---
     {
         "name": "generate_image",

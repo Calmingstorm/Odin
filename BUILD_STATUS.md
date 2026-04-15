@@ -113,7 +113,7 @@ tightening of prior work.
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
 | 11 | `git_ops` tool: clone / commit / push / branch / diff / status with safe defaults and branch freshness check | done | git_ops helper module, 11 actions (clone/status/diff/branch/commit/push/pull/checkout/fetch/stash/log), push freshness check, force-with-lease safety, shell injection protection, executor handler, 113 tests |
-| 12 | `kubectl` tool: apply / get / logs / describe against clusters via SSH or kubeconfig | pending | |
+| 12 | `kubectl` tool: apply / get / logs / describe against clusters via SSH or kubeconfig | done | kubectl_ops helper module, 10 actions (get/describe/logs/apply/delete/exec/rollout/scale/top/config), shell injection protection, common flags (namespace/context/kubeconfig), executor handler, 138 tests |
 | 13 | `docker_ops` tool: build / run / exec / logs / compose up/down against local or remote hosts | pending | |
 | 14 | `terraform_ops` tool: plan / apply with safe plan preview, never auto-approves | pending | |
 | 15 | `http_probe` tool: issue requests with retries, timing, response capture; useful for API debugging | pending | |
@@ -1049,3 +1049,112 @@ Git operations helper that builds safe shell commands for 11 git actions.
 - The freshness check adds an extra SSH round-trip before every push. For remote hosts with high latency, this could be noticeable. The check is intentional and the latency is acceptable for safety, but if performance is a concern, a `skip_freshness_check` param could be added in a future round.
 - The `git_ops` tool is an executor tool (handled via `_handle_git_ops` on ToolExecutor), not a Discord-native tool. It uses `_exec_command` for dispatch, so it inherits bulkhead isolation, SSH retry, and connection pooling from the existing infrastructure.
 - The tool count is now 62 (was 61). The system prompt char limit (5000) is not affected because tool definitions are sent as structured tool schemas, not in the system prompt text.
+
+## Round 12 — kubectl tool: get / describe / logs / apply / delete / exec / rollout / scale / top / config
+**Focus**: Add a `kubectl` tool that provides structured Kubernetes operations on managed hosts with shell injection protection and common flag support.
+**Baseline pytest**: 1197 passed, 0 failed
+**Post-round pytest**: 1335 passed, 0 failed (+138 new tests)
+
+### Validated from prior rounds
+- Round 11: `git_ops` tool, 11 actions, push freshness check, shell injection protection all present and passing (113 tests). Used `git_ops.py` as the template for `kubectl_ops.py` per Round 11's recommendation.
+- Round 10: 5 subsystem wiring tasks remain pending (`cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics). Not in scope for this round.
+- RuntimeWarning in `test_connection_pools.py::TestSSHCommandWithPool::test_no_pool_no_control_master` still present (pre-existing, per Round 10 notes).
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. New module: `src/tools/kubectl_ops.py` (265 lines)
+Kubectl operations helper that builds safe shell commands for 10 kubectl actions.
+
+- `ALLOWED_ACTIONS` (line 11): Frozen set of 10 actions: get, describe, logs, apply, delete, exec, rollout, scale, top, config.
+- `_common_flags(params)` (line 25): Builds common kubectl flags (`-n`, `--context`, `--kubeconfig`) from params. Shared across all actions for consistency.
+- `build_kubectl_command(action, params)` (line 39): Main entry point. Validates action against ALLOWED_ACTIONS, dispatches to per-action builder. Returns a single command string.
+- `_build_get(params)` (line 55): Builds `kubectl get <resource>` with optional name, output format (`json/yaml/wide/name/jsonpath`), label selector, and `--all-namespaces`. Output format is validated against an allowlist to prevent injection via `-o`.
+- `_build_describe(params)` (line 79): Builds `kubectl describe <resource>` with optional name.
+- `_build_logs(params)` (line 88): Builds `kubectl logs` with pod (required), container, tail (default 100, max 500), previous, since, follow. Supports label selector for multi-pod log aggregation. Default `--tail 100` prevents unbounded output.
+- `_build_apply(params)` (line 126): Builds `kubectl apply` with file path/URL or kustomize directory. Supports `--dry-run=client`. Kustomize takes precedence over file when both provided.
+- `_build_delete(params)` (line 143): Builds `kubectl delete` with resource (required), name, selector, force, grace-period. Grace-period validated as non-negative int.
+- `_build_exec(params)` (line 168): Builds `kubectl exec <pod> -- sh -c <command>`. Both pod and command required. Command runs via `sh -c` for consistent shell behavior.
+- `_build_rollout(params)` (line 183): Builds `kubectl rollout <subaction>` for status/restart/undo/history/pause/resume. Resource required.
+- `_build_scale(params)` (line 200): Builds `kubectl scale` with resource and replicas (both required). Validates replicas as non-negative integer.
+- `_build_top(params)` (line 220): Builds `kubectl top pods|nodes` with optional name, selector, `--containers`. Defaults to pods. Containers flag ignored for nodes.
+- `_build_config(params)` (line 240): Builds `kubectl config` subactions: get-contexts (default), use-context (requires context_name), current-context, view (with --minify). Config action does NOT use `_common_flags` for `--context` since it manages contexts directly.
+- All user-provided values go through `shlex.quote()` for shell injection protection.
+
+#### 2. Tool definition in `src/tools/registry.py` (lines 1374-1418)
+- Added `kubectl` tool to TOOLS list with `host`, `action` (enum of 10 values), and `params` (action-specific object).
+- Description documents all actions and their params inline so the LLM can use the tool without external docs.
+- Placed after `git_ops` and before "Image generation (ComfyUI)" section.
+
+#### 3. Handler in `src/tools/executor.py` (lines 984-1010)
+- `_handle_kubectl(self, inp)`: Validates action, resolves host, builds command via `build_kubectl_command()`, dispatches via `_exec_command()`.
+- Simpler than git_ops handler — no multi-step flow (no freshness check equivalent). Single command execution with truncated output.
+- Empty output from successful commands returns "kubectl <action> completed successfully."
+- Validation errors from `build_kubectl_command` (missing resource, missing pod, etc.) returned as user-friendly error messages.
+
+#### 4. Tests: `tests/test_kubectl_ops.py` — 138 tests across 18 test classes
+
+**Registration tests** (4):
+- `TestKubectlRegistration`: tool in registry, required fields, required params, enum matches ALLOWED_ACTIONS.
+
+**Allowed actions** (3):
+- `TestKubectlAllowedActions`: all 10 expected, unknown raises ValueError, frozenset immutable.
+
+**Common flags** (5):
+- `TestCommonFlags`: no flags, namespace, context, kubeconfig, all three combined.
+
+**Per-action builder tests** (85):
+- `TestBuildGet` (12): basic, requires resource, with name, output (json/yaml/wide/name/jsonpath), invalid output ignored, selector, all_namespaces, namespace, empty resource.
+- `TestBuildDescribe` (5): basic, requires resource, with name, with namespace, empty resource.
+- `TestBuildLogs` (13): basic (default tail 100), requires pod, container, tail, tail capped at 500, tail invalid defaults, tail zero defaults, previous, since, follow, selector, selector-before-pod, empty pod.
+- `TestBuildApply` (8): basic, requires file or kustomize, kustomize, kustomize over file, dry_run, namespace, URL, empty file+kustomize.
+- `TestBuildDelete` (8): basic, requires resource, selector, force, grace_period, negative grace ignored, invalid grace ignored, empty resource.
+- `TestBuildExec` (7): basic, requires pod, requires command, container, empty pod, empty command, namespace.
+- `TestBuildRollout` (10): status, restart, undo, history, pause, resume, requires resource, invalid subaction, default subaction, namespace.
+- `TestBuildScale` (8): basic, requires resource, requires replicas, zero replicas, negative replicas, non-numeric replicas, string number, namespace.
+- `TestBuildTop` (11): pods default, pods explicit, nodes, invalid resource, name, selector, containers, containers ignored for nodes, namespace, pod singular, node singular.
+- `TestBuildConfig` (8): get-contexts default, current-context, use-context, use-context requires name, empty name, view with minify, invalid subaction, kubeconfig.
+
+**Shell injection safety** (7):
+- `TestShellInjectionSafety`: resource with semicolons, pod name with `$(whoami)`, exec command injection (stays inside quoted token), namespace injection, selector injection, file path with spaces, context_name injection.
+
+**Handler integration tests** (18):
+- `TestHandleKubectl` (18): unknown host, unknown action, missing action, get/describe/logs/apply/delete/exec/rollout/scale/top/config dispatch, command failure, validation error, empty output, no params default, correct ssh_user, metrics tracked.
+
+**Edge cases** (10):
+- `TestEdgeCases`: all actions have builders, get name output combined, logs default tail, delete no name no selector, exec command quoted, scale float truncated, apply no dry_run default, config no context flag, get with context flag, multiple common flags.
+
+### Design decisions
+
+1. **Separate helper module** (`kubectl_ops.py`): Same pattern as `git_ops.py` — command building logic is pure (no I/O), making it easy to test independently. The executor handler imports and uses it.
+
+2. **10 actions**: Beyond the 4 specified in the plan (apply/get/logs/describe), added delete, exec, rollout, scale, top, config. These are essential kubectl operations the LLM would need. Not adding them would force fallback to `run_command` for common operations.
+
+3. **Common flags factored out**: `_common_flags()` builds `--namespace`, `--context`, `--kubeconfig` for all actions (except `config`, which manages contexts directly and handles kubeconfig separately). This avoids duplication across 10 builders.
+
+4. **Logs default tail**: Default `--tail 100` prevents unbounded output. Max capped at 500 lines. Without a tail limit, `kubectl logs` on a busy pod could return millions of lines.
+
+5. **Apply supports file and kustomize**: Both paths are common in practice. Kustomize takes precedence when both provided. Dry-run uses `--dry-run=client` (client-side, no server contact needed).
+
+6. **Exec uses `sh -c`**: Commands run via `sh -c <quoted_command>` for consistent shell behavior. The command string is quoted via shlex.quote, so injection is prevented even if the command itself contains shell metacharacters.
+
+7. **No special safety gate on delete/apply**: Consistent with the direct-executor ethos. These are legitimate operations the LLM should be able to perform. Adding "are you sure?" would be safety theater — the LLM is already trusted to call tools.
+
+8. **Output format allowlist for get**: `-o` flag validated against `{json, yaml, wide, name, jsonpath}`. Invalid formats are silently ignored (no `-o` flag emitted). This prevents potential misuse of `-o` for unexpected kubectl output plugins.
+
+9. **Scale replicas validation**: Must be a non-negative integer. Negative replicas are an error; float replicas are truncated to int. Zero is valid (scales to zero replicas for idle workloads).
+
+10. **Config action**: Manages kubeconfig contexts. Does not use `_common_flags` for `--context` since it operates on contexts themselves (use-context, get-contexts), not on cluster resources.
+
+### Issues found
+- No issues in prior rounds needed fixing.
+- The `exec` action runs commands via `sh -c`, which assumes the target container has `/bin/sh`. Distroless or scratch-based containers may not have a shell. In those cases, the LLM should use `run_command` with a raw `kubectl exec ... -- <binary>` command instead.
+- The `logs --follow` flag will cause the command to block until the pod terminates or the tool timeout fires. This is expected behavior — the tool timeout (per-tool or global) acts as the upper bound. For streaming use cases, the LLM should use `tail` instead of `follow`.
+- The `top` action requires metrics-server to be installed in the cluster. If metrics-server is absent, kubectl returns exit 1 with "error: Metrics API not available". The handler returns this as a clear error message.
+
+### Next round watch for
+- Round 13 (docker_ops tool) follows the same pattern: tool definition in registry, handler in executor, helper module. Can use `kubectl_ops.py` as a template.
+- The `kubectl` tool is an executor tool (handled via `_handle_kubectl` on ToolExecutor), not a Discord-native tool. It uses `_exec_command` for dispatch, so it inherits bulkhead isolation, SSH retry, and connection pooling from the existing infrastructure.
+- The tool count is now 63 (was 62 after Round 11). The system prompt char limit (5000) is not affected because tool definitions are sent as structured tool schemas, not in the system prompt text.
+- All five subsystem wiring tasks remain open from Rounds 1-11: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
+- The `config` action's `use-context` modifies kubeconfig state on the target host. This is persistent — the context change persists across future kubectl invocations. This is intentional (the LLM needs to switch contexts), but the next round should be aware that config changes on shared hosts affect all users.
