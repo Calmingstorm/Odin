@@ -526,3 +526,52 @@ class TestSearchAfterLog:
 
         stats = await logger.get_log_stats()
         assert stats["web_actions"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Edge case coverage (Round 10 tightening)
+# ---------------------------------------------------------------------------
+
+class TestLogSearchEdgeCases:
+    async def test_search_with_limit_one(self, tmp_path):
+        logger = AuditLogger(path=str(tmp_path / "audit.jsonl"))
+        for i in range(5):
+            await logger.log_execution(
+                tool_name=f"tool_{i}", user_name="u", user_id="1",
+                channel_id="c", tool_input={}, result_summary="ok",
+                approved=True, execution_time_ms=10,
+            )
+        results = await logger.search_logs(limit=1)
+        assert len(results) == 1
+
+    async def test_search_level_invalid_returns_all(self, tmp_path):
+        logger = AuditLogger(path=str(tmp_path / "audit.jsonl"))
+        await logger.log_execution(
+            tool_name="test", user_name="u", user_id="1",
+            channel_id="c", tool_input={}, result_summary="ok",
+            approved=True, execution_time_ms=10,
+        )
+        results = await logger.search_logs(level="all")
+        assert len(results) == 1
+
+    async def test_search_keyword_in_tool_input(self, tmp_path):
+        logger = AuditLogger(path=str(tmp_path / "audit.jsonl"))
+        await logger.log_execution(
+            tool_name="run_command", user_name="u", user_id="1",
+            channel_id="c", tool_input={"command": "docker ps"},
+            result_summary="ok", approved=True, execution_time_ms=10,
+        )
+        results = await logger.search_logs(keyword="docker")
+        assert len(results) == 1
+
+    async def test_get_log_stats_counts_unique_tools(self, tmp_path):
+        logger = AuditLogger(path=str(tmp_path / "audit.jsonl"))
+        for tool in ["run_command", "read_file", "run_command"]:
+            await logger.log_execution(
+                tool_name=tool, user_name="u", user_id="1",
+                channel_id="c", tool_input={}, result_summary="ok",
+                approved=True, execution_time_ms=10,
+            )
+        stats = await logger.get_log_stats()
+        assert stats["tool_count"] == 2
+        assert stats["total"] == 3

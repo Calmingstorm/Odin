@@ -92,18 +92,20 @@ class TestExecutorPerToolTimeout:
 
     async def test_uses_per_tool_timeout(self, executor):
         """Tool with a custom timeout uses that timeout, not the global default."""
-        called_timeout = None
-
         async def slow_handler(tool_input):
             return "ok"
 
         executor._handle_run_command = slow_handler
+        timeouts_used = []
+        original_wait = asyncio.wait_for
 
-        with patch("asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
-            mock_wait.return_value = "ok"
+        async def tracking_wait(coro, *, timeout=None):
+            timeouts_used.append(timeout)
+            return await original_wait(coro, timeout=timeout)
+
+        with patch("asyncio.wait_for", side_effect=tracking_wait):
             await executor.execute("run_command", {"command": "echo hi"})
-            called_timeout = mock_wait.call_args[1].get("timeout") or mock_wait.call_args[0][1]
-            assert called_timeout == 60
+        assert 60 in timeouts_used
 
     async def test_uses_global_default_for_unconfigured_tool(self, executor):
         """Tool without a custom timeout uses the global default."""
@@ -111,12 +113,16 @@ class TestExecutorPerToolTimeout:
             return "ok"
 
         executor._handle_read_file = handler
+        timeouts_used = []
+        original_wait = asyncio.wait_for
 
-        with patch("asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
-            mock_wait.return_value = "ok"
+        async def tracking_wait(coro, *, timeout=None):
+            timeouts_used.append(timeout)
+            return await original_wait(coro, timeout=timeout)
+
+        with patch("asyncio.wait_for", side_effect=tracking_wait):
             await executor.execute("read_file", {})
-            called_timeout = mock_wait.call_args[1].get("timeout") or mock_wait.call_args[0][1]
-            assert called_timeout == 300
+        assert 300 in timeouts_used
 
     async def test_timeout_fires_with_per_tool_value(self, executor):
         """When a tool times out, the error message uses the per-tool timeout value."""
@@ -126,7 +132,11 @@ class TestExecutorPerToolTimeout:
 
         executor._handle_run_command = slow_handler
 
-        with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
+        def close_and_raise(coro, *, timeout=None):
+            coro.close()
+            raise asyncio.TimeoutError
+
+        with patch("asyncio.wait_for", side_effect=close_and_raise):
             result = await executor.execute("run_command", {"command": "sleep 100"})
             assert "timed out after 60s" in result
 
@@ -138,7 +148,11 @@ class TestExecutorPerToolTimeout:
 
         executor._handle_write_file = slow_handler
 
-        with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
+        def close_and_raise(coro, *, timeout=None):
+            coro.close()
+            raise asyncio.TimeoutError
+
+        with patch("asyncio.wait_for", side_effect=close_and_raise):
             result = await executor.execute("write_file", {})
             assert "timed out after 300s" in result
 
@@ -149,7 +163,11 @@ class TestExecutorPerToolTimeout:
 
         executor._handle_run_command = slow_handler
 
-        with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
+        def close_and_raise(coro, *, timeout=None):
+            coro.close()
+            raise asyncio.TimeoutError
+
+        with patch("asyncio.wait_for", side_effect=close_and_raise):
             await executor.execute("run_command", {"command": "slow"})
             metrics = executor.get_metrics()
             assert metrics["run_command"]["timeouts"] == 1

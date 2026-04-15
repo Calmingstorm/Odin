@@ -107,9 +107,21 @@ class SSHConnectionPool:
             self._connections.pop(key, None)
             log.info("Closed SSH connection to %s@%s", ssh_user, host)
             return True
+        except asyncio.TimeoutError:
+            log.warning("Timeout closing SSH connection to %s@%s, killing process", ssh_user, host)
+            try:
+                proc.kill()
+                await proc.wait()
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                os.unlink(socket)
+            except OSError:
+                pass
+            self._connections.pop(key, None)
+            return False
         except Exception as e:
             log.warning("Failed to close SSH connection to %s@%s: %s", ssh_user, host, e)
-            # Try removing the socket file as fallback
             try:
                 os.unlink(socket)
             except OSError:

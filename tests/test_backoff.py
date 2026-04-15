@@ -436,3 +436,31 @@ class TestRetryConfigYAML:
         cfg = ToolsConfig()
         assert cfg.ssh_retry is not None
         assert cfg.ssh_retry.max_retries == 2
+
+
+# ---------------------------------------------------------------------------
+# Edge cases (Round 10 tightening)
+# ---------------------------------------------------------------------------
+
+class TestBackoffEdgeCases:
+    def test_negative_attempt_does_not_error(self):
+        val = compute_backoff(-1, base_delay=1.0, max_delay=30.0)
+        assert isinstance(val, float)
+        assert val >= 0
+
+    def test_zero_base_delay(self):
+        val = compute_backoff(5, base_delay=0.0, max_delay=30.0)
+        assert val == 0.0
+
+    def test_zero_max_delay(self):
+        val = compute_backoff(5, base_delay=1.0, max_delay=0.0)
+        assert val == 0.0
+
+    def test_no_jitter_negative_attempt(self):
+        val = compute_backoff_no_jitter(-1, base_delay=1.0, max_delay=30.0)
+        assert isinstance(val, float)
+        assert val >= 0
+
+    def test_no_jitter_zero_base_delay(self):
+        val = compute_backoff_no_jitter(5, base_delay=0.0, max_delay=30.0)
+        assert val == 0.0

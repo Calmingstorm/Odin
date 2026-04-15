@@ -318,7 +318,7 @@ class MetricsCollector:
             try:
                 bh_data = bulkhead_source()
                 if bh_data:
-                    bh_count = bh_data.pop("bulkhead_count", 0)
+                    bh_count = bh_data.get("bulkhead_count", 0)
                     sections.append(_format_metric(
                         "odin_bulkhead_count", bh_count,
                         help_text="Number of registered bulkheads",

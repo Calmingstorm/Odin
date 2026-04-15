@@ -714,3 +714,59 @@ class TestTrajectoryImports:
 
     def test_default_directory_constant(self):
         assert DEFAULT_TRAJECTORY_DIR == "./data/trajectories"
+
+
+# ---------------------------------------------------------------------------
+# Edge case coverage (Round 10 tightening)
+# ---------------------------------------------------------------------------
+
+class TestTrajectoryEdgeCases:
+    def test_finalize_with_empty_iterations_and_no_content(self):
+        t = TrajectoryTurn()
+        t.finalize("done")
+        assert t.total_input_tokens >= 0
+        assert t.tools_used == []
+
+    def test_to_dict_with_none_fields(self):
+        t = TrajectoryTurn(message_id=None, channel_id=None, user_id=None)
+        t.finalize("result")
+        d = t.to_dict()
+        assert d["message_id"] is None
+        assert isinstance(d, dict)
+
+    def test_collect_tools_preserves_order(self):
+        t = TrajectoryTurn()
+        t.add_iteration(
+            iteration=0,
+            tool_calls=[{"name": "z_tool"}, {"name": "a_tool"}],
+        )
+        t.add_iteration(
+            iteration=1,
+            tool_calls=[{"name": "a_tool"}, {"name": "m_tool"}],
+        )
+        t.finalize("done")
+        assert t.tools_used == ["z_tool", "a_tool", "m_tool"]
+
+    async def test_save_and_search_round_trip(self, tmp_path):
+        saver = TrajectorySaver(str(tmp_path / "traj"))
+        t = TrajectoryTurn(
+            message_id="msg123",
+            channel_id="ch1",
+            user_id="u1",
+            user_content="test",
+        )
+        t.add_iteration(
+            iteration=0,
+            tool_calls=[{"name": "run_command"}],
+            tool_results=[{"name": "run_command", "output": "ok"}],
+        )
+        t.finalize("done")
+        await saver.save(t)
+        results = await saver.search(channel_id="ch1")
+        assert len(results) == 1
+        assert results[0]["message_id"] == "msg123"
+
+    async def test_find_by_message_id_returns_none_for_empty(self, tmp_path):
+        saver = TrajectorySaver(str(tmp_path / "traj"))
+        result = await saver.find_by_message_id("nonexistent")
+        assert result is None

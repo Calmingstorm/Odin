@@ -538,6 +538,20 @@ class TestBulkheadPrometheusMetrics:
         output = collector.render()
         assert "odin_bulkhead_rejected_total" in output
 
+    def test_render_does_not_mutate_source_data(self):
+        """Rendering metrics must not modify the dict returned by the source."""
+        from src.health.metrics import MetricsCollector
+        reg = BulkheadRegistry()
+        reg.register("ssh", 10)
+        collector = MetricsCollector()
+        collector.register_source("bulkheads", reg.get_prometheus_metrics)
+        data_before = reg.get_prometheus_metrics()
+        assert "bulkhead_count" in data_before
+        collector.render()
+        data_after = reg.get_prometheus_metrics()
+        assert "bulkhead_count" in data_after
+        assert data_before == data_after
+
 
 # =====================================================================
 # REST API

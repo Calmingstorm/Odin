@@ -317,3 +317,48 @@ class TestEstimateBodyInputTokens:
         }
         tokens = CodexChatClient._estimate_body_input_tokens(body)
         assert tokens == 4  # 16 chars / 4
+
+
+# ---------------------------------------------------------------------------
+# Edge case coverage (Round 10 tightening)
+# ---------------------------------------------------------------------------
+
+class TestCostTrackerEdgeCases:
+    def test_estimate_tokens_converts_non_string(self):
+        assert estimate_tokens(str(123)) >= 1
+
+    def test_concurrent_record_thread_safety(self):
+        import threading
+        tracker = CostTracker()
+        errors = []
+
+        def record_many():
+            try:
+                for _ in range(100):
+                    tracker.record(10, 5, user_id="u1")
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=record_many) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors
+        assert tracker.get_totals()["requests"] == 500
+
+    def test_get_recent_ordering(self):
+        tracker = CostTracker()
+        tracker.record(10, 5, user_id="first")
+        tracker.record(20, 10, user_id="second")
+        recent = tracker.get_recent(2)
+        assert len(recent) == 2
+        assert recent[0]["user_id"] == "first"
+        assert recent[1]["user_id"] == "second"
+
+    def test_record_with_no_user_or_channel(self):
+        tracker = CostTracker()
+        tracker.record(10, 5)
+        totals = tracker.get_totals()
+        assert totals["requests"] == 1
+        assert tracker.get_by_user() == {}

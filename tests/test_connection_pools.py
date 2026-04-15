@@ -258,6 +258,44 @@ class TestSSHPoolClose:
             await pool.close_all()
             assert len(pool._connections) == 0
 
+    async def test_close_host_timeout_kills_process(self):
+        """When ssh -O exit hangs, the process must be killed (not leaked)."""
+        with tempfile.TemporaryDirectory() as td:
+            pool = SSHConnectionPool(socket_dir=td)
+            socket_file = pool.get_socket_path("host1", "root")
+            open(socket_file, "w").close()
+            pool._connections["root@host1"] = 1.0
+
+            mock_proc = AsyncMock()
+            mock_proc.communicate = AsyncMock(
+                side_effect=asyncio.TimeoutError,
+            )
+            mock_proc.kill = MagicMock()
+            mock_proc.wait = AsyncMock()
+
+            with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+                result = await pool.close_host("host1", "root")
+            assert result is False
+            mock_proc.kill.assert_called_once()
+            assert "root@host1" not in pool._connections
+
+    async def test_close_host_success_removes_connection(self):
+        """Successful close via ssh -O exit removes the connection tracking."""
+        with tempfile.TemporaryDirectory() as td:
+            pool = SSHConnectionPool(socket_dir=td)
+            socket_file = pool.get_socket_path("host1", "root")
+            open(socket_file, "w").close()
+            pool._connections["root@host1"] = 1.0
+
+            mock_proc = AsyncMock()
+            mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+
+            with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+                with patch("asyncio.wait_for", return_value=None):
+                    result = await pool.close_host("host1", "root")
+            assert result is True
+            assert "root@host1" not in pool._connections
+
 
 # ---------------------------------------------------------------------------
 # SSHConnectionPool.get_metrics / get_prometheus_metrics
