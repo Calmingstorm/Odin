@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -20,6 +20,12 @@ ALLOWED_CHECK_TOOLS = {
     "run_command", "run_command_multi", "run_script",
 }
 
+# Retry defaults
+DEFAULT_MAX_RETRIES = 0  # disabled by default
+DEFAULT_RETRY_BACKOFF_SECONDS = 60
+MAX_BACKOFF_SECONDS = 3600  # cap at 1 hour
+DEFAULT_FAILURE_ALERT_THRESHOLD = 3  # alert after N consecutive failures
+
 
 class Scheduler:
     """Manages scheduled tasks — recurring (cron), one-time, and webhook-triggered."""
@@ -30,6 +36,7 @@ class Scheduler:
         self._schedules: list[dict] = []
         self._task: asyncio.Task | None = None
         self._callback: Callable[[dict], Awaitable[None]] | None = None
+        self._failure_callback: Callable[[dict, int], Awaitable[None]] | None = None
         self._lock = asyncio.Lock()
         self._load()
 
@@ -57,6 +64,8 @@ class Scheduler:
         tool_input: dict | None = None,
         steps: list[dict] | None = None,
         trigger: dict | None = None,
+        max_retries: int | None = None,
+        retry_backoff_seconds: int | None = None,
     ) -> dict:
         if action == "digest":
             # Digest is a predefined action, no tool validation needed
@@ -118,6 +127,21 @@ class Scheduler:
             schedule["tool_input"] = tool_input or {}
         elif action == "workflow":
             schedule["steps"] = steps
+
+        # Retry configuration
+        retries = max_retries if max_retries is not None else DEFAULT_MAX_RETRIES
+        if retries < 0:
+            raise ValueError("max_retries must be >= 0")
+        backoff = retry_backoff_seconds if retry_backoff_seconds is not None else DEFAULT_RETRY_BACKOFF_SECONDS
+        if backoff < 1:
+            raise ValueError("retry_backoff_seconds must be >= 1")
+        schedule["max_retries"] = retries
+        schedule["retry_backoff_seconds"] = backoff
+        # Runtime failure tracking
+        schedule["consecutive_failures"] = 0
+        schedule["retry_count"] = 0
+        schedule["last_error"] = None
+        schedule["last_error_at"] = None
 
         async with self._lock:
             self._schedules.append(schedule)
@@ -233,8 +257,9 @@ class Scheduler:
 
                 try:
                     await self._callback(schedule)
+                    await self._handle_success(schedule)
                 except Exception as e:
-                    log.error("Trigger schedule %s callback failed: %s", schedule["id"], e)
+                    await self._handle_failure(schedule, e)
 
             if fired:
                 await asyncio.to_thread(self._save)
@@ -242,6 +267,21 @@ class Scheduler:
 
     def list_all(self) -> list[dict]:
         return list(self._schedules)
+
+    async def reset_failures(self, schedule_id: str) -> dict | None:
+        """Reset failure counters and cancel pending retries for a schedule."""
+        async with self._lock:
+            for s in self._schedules:
+                if s["id"] == schedule_id:
+                    s["consecutive_failures"] = 0
+                    s["retry_count"] = 0
+                    s["last_error"] = None
+                    s["last_error_at"] = None
+                    s.pop("retry_at", None)
+                    await asyncio.to_thread(self._save)
+                    log.info("Reset failure state for schedule %s", schedule_id)
+                    return dict(s)
+        return None
 
     async def update(
         self,
@@ -256,6 +296,8 @@ class Scheduler:
         steps: list[dict] | None = None,
         trigger: dict | None = None,
         channel_id: str | None = None,
+        max_retries: int | None = None,
+        retry_backoff_seconds: int | None = None,
     ) -> dict | None:
         """Update mutable fields on an existing schedule.
 
@@ -302,6 +344,16 @@ class Scheduler:
                             raise ValueError(f"Step {i}: must be a dict with 'tool_name'")
                 target["steps"] = steps
 
+            # --- retry configuration ---
+            if max_retries is not None:
+                if max_retries < 0:
+                    raise ValueError("max_retries must be >= 0")
+                target["max_retries"] = max_retries
+            if retry_backoff_seconds is not None:
+                if retry_backoff_seconds < 1:
+                    raise ValueError("retry_backoff_seconds must be >= 1")
+                target["retry_backoff_seconds"] = retry_backoff_seconds
+
             # --- timing mode changes ---
             new_timing = trigger is not None or cron is not None or run_at is not None
             if new_timing:
@@ -343,8 +395,13 @@ class Scheduler:
                 return True
         return False
 
-    def start(self, callback: Callable[[dict], Awaitable[None]]) -> None:
+    def start(
+        self,
+        callback: Callable[[dict], Awaitable[None]],
+        failure_callback: Callable[[dict, int], Awaitable[None]] | None = None,
+    ) -> None:
         self._callback = callback
+        self._failure_callback = failure_callback
         self._task = asyncio.create_task(self._loop())
         log.info("Scheduler started with %d schedule(s)", len(self._schedules))
 
@@ -367,6 +424,57 @@ class Scheduler:
             except Exception as e:
                 log.error("Scheduler tick error: %s", e, exc_info=True)
 
+    def _compute_retry_at(self, schedule: dict) -> str:
+        """Compute the next retry time using exponential backoff."""
+        retry_count = schedule.get("retry_count", 0)
+        base = schedule.get("retry_backoff_seconds", DEFAULT_RETRY_BACKOFF_SECONDS)
+        delay = min(base * (2 ** retry_count), MAX_BACKOFF_SECONDS)
+        retry_time = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        return retry_time.isoformat()
+
+    async def _handle_success(self, schedule: dict) -> None:
+        """Reset failure tracking after a successful execution."""
+        schedule["consecutive_failures"] = 0
+        schedule["retry_count"] = 0
+        schedule.pop("retry_at", None)
+
+    async def _handle_failure(self, schedule: dict, error: Exception) -> None:
+        """Track failure and schedule retry if within limits."""
+        now = datetime.now(timezone.utc)
+        schedule["consecutive_failures"] = schedule.get("consecutive_failures", 0) + 1
+        schedule["last_error"] = str(error)[:500]
+        schedule["last_error_at"] = now.isoformat()
+
+        max_retries = schedule.get("max_retries", DEFAULT_MAX_RETRIES)
+        retry_count = schedule.get("retry_count", 0)
+
+        if max_retries > 0 and retry_count < max_retries:
+            schedule["retry_count"] = retry_count + 1
+            schedule["retry_at"] = self._compute_retry_at(schedule)
+            log.warning(
+                "Schedule %s failed (attempt %d/%d), retry at %s: %s",
+                schedule["id"], retry_count + 1, max_retries,
+                schedule["retry_at"], error,
+            )
+        else:
+            schedule.pop("retry_at", None)
+            if max_retries > 0:
+                log.error(
+                    "Schedule %s exhausted all %d retries: %s",
+                    schedule["id"], max_retries, error,
+                )
+            else:
+                log.error("Schedule %s callback failed: %s", schedule["id"], error)
+
+        # Fire failure alert callback
+        consecutive = schedule["consecutive_failures"]
+        threshold = DEFAULT_FAILURE_ALERT_THRESHOLD
+        if self._failure_callback and consecutive >= threshold and consecutive % threshold == 0:
+            try:
+                await self._failure_callback(schedule, consecutive)
+            except Exception as alert_err:
+                log.error("Failure alert callback error for %s: %s", schedule["id"], alert_err)
+
     async def _tick(self) -> None:
         async with self._lock:
             now = datetime.now(timezone.utc)
@@ -375,6 +483,27 @@ class Scheduler:
             to_remove: list[str] = []
 
             for schedule in self._schedules:
+                # Check for pending retries first
+                retry_at_str = schedule.get("retry_at")
+                if retry_at_str:
+                    retry_at = datetime.fromisoformat(retry_at_str)
+                    if retry_at.tzinfo is not None:
+                        retry_at = retry_at.replace(tzinfo=None)
+                    if now_naive >= retry_at:
+                        log.info(
+                            "Retrying schedule %s: %s (attempt %d)",
+                            schedule["id"], schedule["description"],
+                            schedule.get("retry_count", 0),
+                        )
+                        fired = True
+                        if self._callback:
+                            try:
+                                await self._callback(schedule)
+                                await self._handle_success(schedule)
+                            except Exception as e:
+                                await self._handle_failure(schedule, e)
+                    continue
+
                 next_run_str = schedule.get("next_run")
                 if not next_run_str:
                     continue
@@ -393,11 +522,14 @@ class Scheduler:
                 if self._callback:
                     try:
                         await self._callback(schedule)
+                        await self._handle_success(schedule)
                     except Exception as e:
-                        log.error("Schedule %s callback failed: %s", schedule["id"], e)
+                        await self._handle_failure(schedule, e)
 
                 if schedule.get("one_time"):
-                    to_remove.append(schedule["id"])
+                    # Don't remove if retry is pending
+                    if not schedule.get("retry_at"):
+                        to_remove.append(schedule["id"])
                 elif schedule.get("cron"):
                     cr = croniter(schedule["cron"], now.replace(tzinfo=None))
                     schedule["next_run"] = cr.get_next(datetime).isoformat()

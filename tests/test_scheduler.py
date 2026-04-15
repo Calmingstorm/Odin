@@ -9,6 +9,10 @@ Covers:
 - One-time schedules removed after firing
 - fire_triggers matches and fires webhook-triggered schedules
 - Concurrent add/delete/tick operations are serialized by _lock
+- Retry with exponential backoff on failure
+- Failure tracking (consecutive_failures, last_error, last_error_at)
+- Failure alert callback at threshold
+- Reset failures API
 """
 
 from __future__ import annotations
@@ -462,3 +466,405 @@ class TestSchedulerUpdate:
         # Final state should be one of the updates
         final = s.list_all()[0]["description"]
         assert final.startswith("v")
+
+
+# ---------------------------------------------------------------------------
+# Tests — retry & failure tracking
+# ---------------------------------------------------------------------------
+
+class TestSchedulerRetry:
+    """Test retry with exponential backoff and failure tracking."""
+
+    async def test_add_with_retry_config(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        result = await s.add(
+            "retryable", "reminder", "chan1",
+            cron="*/5 * * * *", max_retries=3, retry_backoff_seconds=30,
+        )
+        assert result["max_retries"] == 3
+        assert result["retry_backoff_seconds"] == 30
+        assert result["consecutive_failures"] == 0
+        assert result["retry_count"] == 0
+        assert result["last_error"] is None
+
+    async def test_add_default_retry_config(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        result = await s.add("no retry", "reminder", "chan1", cron="*/5 * * * *")
+        assert result["max_retries"] == 0
+        assert result["retry_backoff_seconds"] == 60
+        assert result["consecutive_failures"] == 0
+
+    async def test_add_negative_max_retries_raises(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        with pytest.raises(ValueError, match="max_retries must be >= 0"):
+            await s.add("bad", "reminder", "chan1", cron="* * * * *", max_retries=-1)
+
+    async def test_add_zero_backoff_raises(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        with pytest.raises(ValueError, match="retry_backoff_seconds must be >= 1"):
+            await s.add("bad", "reminder", "chan1", cron="* * * * *", retry_backoff_seconds=0)
+
+    async def test_tick_failure_increments_counters(self, tmp_path):
+        """Failure should increment consecutive_failures and record error."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock(side_effect=RuntimeError("disk full"))
+
+        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        sched = await s.add("fail me", "reminder", "chan1", run_at=past)
+
+        await s._tick()
+
+        # Schedule was one-time with no retries, so it's removed
+        # But let's test with cron to see state
+        s2 = _make_scheduler(tmp_path)
+        s2._callback = AsyncMock(side_effect=RuntimeError("disk full"))
+        cron_sched = await s2.add("cron fail", "reminder", "chan1", cron="*/5 * * * *")
+
+        # Force next_run into the past
+        async with s2._lock:
+            s2._schedules[0]["next_run"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).isoformat()
+
+        await s2._tick()
+        state = s2.list_all()[0]
+        assert state["consecutive_failures"] == 1
+        assert state["last_error"] == "disk full"
+        assert state["last_error_at"] is not None
+
+    async def test_tick_success_resets_counters(self, tmp_path):
+        """Success after failure should reset consecutive_failures."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+
+        sched = await s.add("recover", "reminder", "chan1", cron="*/5 * * * *")
+
+        # Manually set failure state
+        async with s._lock:
+            s._schedules[0]["consecutive_failures"] = 5
+            s._schedules[0]["last_error"] = "old error"
+            s._schedules[0]["last_error_at"] = datetime.now(timezone.utc).isoformat()
+            s._schedules[0]["next_run"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).isoformat()
+
+        await s._tick()
+        state = s.list_all()[0]
+        assert state["consecutive_failures"] == 0
+        assert state["retry_count"] == 0
+
+    async def test_tick_schedules_retry_on_failure(self, tmp_path):
+        """With max_retries > 0, failure should schedule a retry."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock(side_effect=RuntimeError("timeout"))
+
+        sched = await s.add(
+            "retryable", "reminder", "chan1",
+            cron="*/5 * * * *", max_retries=3, retry_backoff_seconds=60,
+        )
+
+        # Force next_run into the past
+        async with s._lock:
+            s._schedules[0]["next_run"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).isoformat()
+
+        await s._tick()
+        state = s.list_all()[0]
+        assert state["retry_count"] == 1
+        assert state["consecutive_failures"] == 1
+        assert "retry_at" in state
+
+    async def test_retry_fires_on_tick(self, tmp_path):
+        """Pending retry should fire when retry_at is in the past."""
+        s = _make_scheduler(tmp_path)
+
+        # First call fails, second succeeds
+        call_count = 0
+        async def flaky_callback(schedule):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("transient")
+
+        s._callback = flaky_callback
+
+        sched = await s.add(
+            "flaky", "reminder", "chan1",
+            cron="*/5 * * * *", max_retries=3, retry_backoff_seconds=60,
+        )
+
+        # Force next_run into the past for first tick
+        async with s._lock:
+            s._schedules[0]["next_run"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).isoformat()
+
+        await s._tick()
+        assert call_count == 1
+        state = s.list_all()[0]
+        assert state["retry_count"] == 1
+        assert "retry_at" in state
+
+        # Force retry_at into the past
+        async with s._lock:
+            s._schedules[0]["retry_at"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).isoformat()
+
+        await s._tick()
+        assert call_count == 2
+        state = s.list_all()[0]
+        assert state["retry_count"] == 0  # reset on success
+        assert state["consecutive_failures"] == 0
+        assert "retry_at" not in state
+
+    async def test_retry_exhaustion(self, tmp_path):
+        """When retries are exhausted, retry_at should be cleared."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock(side_effect=RuntimeError("permanent"))
+
+        sched = await s.add(
+            "doomed", "reminder", "chan1",
+            cron="*/5 * * * *", max_retries=2, retry_backoff_seconds=10,
+        )
+
+        # Fire initial — schedules retry 1
+        async with s._lock:
+            s._schedules[0]["next_run"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).isoformat()
+        await s._tick()
+        assert s.list_all()[0]["retry_count"] == 1
+
+        # Fire retry 1 — schedules retry 2
+        async with s._lock:
+            s._schedules[0]["retry_at"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).isoformat()
+        await s._tick()
+        assert s.list_all()[0]["retry_count"] == 2
+
+        # Fire retry 2 — exhausted, no more retries
+        async with s._lock:
+            s._schedules[0]["retry_at"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).isoformat()
+        await s._tick()
+        state = s.list_all()[0]
+        assert "retry_at" not in state  # no more retries
+        assert state["consecutive_failures"] == 3
+
+    async def test_one_time_not_removed_while_retrying(self, tmp_path):
+        """One-time schedule should not be removed if retry is pending."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock(side_effect=RuntimeError("fail"))
+
+        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        await s.add(
+            "one-shot retry", "reminder", "chan1",
+            run_at=past, max_retries=2, retry_backoff_seconds=10,
+        )
+
+        await s._tick()
+        # Should NOT be removed — retry is pending
+        assert len(s.list_all()) == 1
+        assert s.list_all()[0].get("retry_at") is not None
+
+    async def test_exponential_backoff_grows(self, tmp_path):
+        """Each retry should have a longer backoff (exponential)."""
+        s = _make_scheduler(tmp_path)
+        schedule = {
+            "id": "test",
+            "retry_count": 0,
+            "retry_backoff_seconds": 60,
+        }
+        t1 = datetime.fromisoformat(s._compute_retry_at(schedule))
+
+        schedule["retry_count"] = 1
+        t2 = datetime.fromisoformat(s._compute_retry_at(schedule))
+
+        schedule["retry_count"] = 2
+        t3 = datetime.fromisoformat(s._compute_retry_at(schedule))
+
+        # Each should be progressively further in the future
+        # (relative to now, backoff doubles: 60, 120, 240)
+        # We can't check exact times, but t2 > t1 and t3 > t2
+        assert t2 > t1
+        assert t3 > t2
+
+    async def test_backoff_capped_at_max(self, tmp_path):
+        """Backoff should not exceed MAX_BACKOFF_SECONDS."""
+        from src.scheduler.scheduler import MAX_BACKOFF_SECONDS
+        s = _make_scheduler(tmp_path)
+        schedule = {
+            "id": "test",
+            "retry_count": 20,  # very high, would be 60 * 2^20 without cap
+            "retry_backoff_seconds": 60,
+        }
+        now = datetime.now(timezone.utc)
+        retry_at = datetime.fromisoformat(s._compute_retry_at(schedule))
+        # Should be at most MAX_BACKOFF_SECONDS from now (+ small tolerance)
+        diff = (retry_at - now).total_seconds()
+        assert diff <= MAX_BACKOFF_SECONDS + 2  # 2s tolerance for execution time
+
+    async def test_fire_triggers_tracks_failure(self, tmp_path):
+        """fire_triggers should also track failures."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock(side_effect=RuntimeError("webhook fail"))
+
+        trigger = {"source": "github", "event": "push"}
+        await s.add("gh push", "reminder", "chan1", trigger=trigger)
+
+        await s.fire_triggers("github", {"event": "push"})
+        state = s.list_all()[0]
+        assert state["consecutive_failures"] == 1
+        assert state["last_error"] == "webhook fail"
+
+    async def test_fire_triggers_resets_on_success(self, tmp_path):
+        """Successful trigger should reset failure state."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+
+        trigger = {"source": "github", "event": "push"}
+        await s.add("gh push", "reminder", "chan1", trigger=trigger)
+
+        # Set pre-existing failures
+        async with s._lock:
+            s._schedules[0]["consecutive_failures"] = 3
+            s._schedules[0]["last_error"] = "old"
+
+        await s.fire_triggers("github", {"event": "push"})
+        state = s.list_all()[0]
+        assert state["consecutive_failures"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests — failure alert callback
+# ---------------------------------------------------------------------------
+
+class TestSchedulerFailureAlerts:
+    """Test failure alert callback firing at threshold."""
+
+    async def test_alert_fires_at_threshold(self, tmp_path):
+        """Failure callback fires when consecutive_failures hits threshold."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock(side_effect=RuntimeError("down"))
+        alert_cb = AsyncMock()
+        s._failure_callback = alert_cb
+
+        sched = await s.add("alertable", "reminder", "chan1", cron="*/5 * * * *")
+
+        # Run 3 failures (DEFAULT_FAILURE_ALERT_THRESHOLD = 3)
+        for i in range(3):
+            async with s._lock:
+                s._schedules[0]["next_run"] = (
+                    datetime.now(timezone.utc) - timedelta(minutes=1)
+                ).isoformat()
+                # Clear retry_at to allow next_run to fire
+                s._schedules[0].pop("retry_at", None)
+            await s._tick()
+
+        # Alert should have been called once (at failure #3)
+        alert_cb.assert_called_once()
+        call_args = alert_cb.call_args
+        assert call_args[0][1] == 3  # consecutive_failures count
+
+    async def test_alert_fires_again_at_multiple(self, tmp_path):
+        """Alert fires again at 2x threshold."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock(side_effect=RuntimeError("still down"))
+        alert_cb = AsyncMock()
+        s._failure_callback = alert_cb
+
+        await s.add("multi-alert", "reminder", "chan1", cron="*/5 * * * *")
+
+        for i in range(6):
+            async with s._lock:
+                s._schedules[0]["next_run"] = (
+                    datetime.now(timezone.utc) - timedelta(minutes=1)
+                ).isoformat()
+                s._schedules[0].pop("retry_at", None)
+            await s._tick()
+
+        # Alert at 3 and 6
+        assert alert_cb.call_count == 2
+
+    async def test_alert_not_fired_below_threshold(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock(side_effect=RuntimeError("flaky"))
+        alert_cb = AsyncMock()
+        s._failure_callback = alert_cb
+
+        await s.add("below", "reminder", "chan1", cron="*/5 * * * *")
+
+        for i in range(2):
+            async with s._lock:
+                s._schedules[0]["next_run"] = (
+                    datetime.now(timezone.utc) - timedelta(minutes=1)
+                ).isoformat()
+                s._schedules[0].pop("retry_at", None)
+            await s._tick()
+
+        alert_cb.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests — reset_failures()
+# ---------------------------------------------------------------------------
+
+class TestSchedulerResetFailures:
+    async def test_reset_failures(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("failing", "reminder", "chan1", cron="*/5 * * * *")
+
+        # Simulate failure state
+        async with s._lock:
+            s._schedules[0]["consecutive_failures"] = 5
+            s._schedules[0]["retry_count"] = 2
+            s._schedules[0]["last_error"] = "some error"
+            s._schedules[0]["last_error_at"] = datetime.now(timezone.utc).isoformat()
+            s._schedules[0]["retry_at"] = datetime.now(timezone.utc).isoformat()
+
+        result = await s.reset_failures(sched["id"])
+        assert result is not None
+        assert result["consecutive_failures"] == 0
+        assert result["retry_count"] == 0
+        assert result["last_error"] is None
+        assert result["last_error_at"] is None
+        assert "retry_at" not in result
+
+    async def test_reset_failures_nonexistent(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        result = await s.reset_failures("bogus")
+        assert result is None
+
+    async def test_reset_failures_persists(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("persist reset", "reminder", "chan1", cron="*/5 * * * *")
+
+        async with s._lock:
+            s._schedules[0]["consecutive_failures"] = 3
+            s._schedules[0]["last_error"] = "err"
+
+        await s.reset_failures(sched["id"])
+
+        # Reload from disk
+        s2 = _make_scheduler(tmp_path)
+        assert s2.list_all()[0]["consecutive_failures"] == 0
+        assert s2.list_all()[0]["last_error"] is None
+
+    async def test_update_retry_config(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("update retry", "reminder", "chan1", cron="*/5 * * * *")
+        updated = await s.update(sched["id"], max_retries=5, retry_backoff_seconds=120)
+        assert updated["max_retries"] == 5
+        assert updated["retry_backoff_seconds"] == 120
+
+    async def test_update_invalid_retry_config(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("bad retry", "reminder", "chan1", cron="*/5 * * * *")
+        with pytest.raises(ValueError, match="max_retries must be >= 0"):
+            await s.update(sched["id"], max_retries=-1)
+        with pytest.raises(ValueError, match="retry_backoff_seconds must be >= 1"):
+            await s.update(sched["id"], retry_backoff_seconds=0)

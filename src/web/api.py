@@ -880,6 +880,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 tool_input=data.get("tool_input"),
                 steps=data.get("steps"),
                 trigger=data.get("trigger"),
+                max_retries=data.get("max_retries"),
+                retry_backoff_seconds=data.get("retry_backoff_seconds"),
             )
             return web.json_response(schedule, status=201)
         except (ValueError, TypeError) as e:
@@ -911,6 +913,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 steps=data.get("steps"),
                 trigger=data.get("trigger"),
                 channel_id=data.get("channel_id"),
+                max_retries=data.get("max_retries"),
+                retry_backoff_seconds=data.get("retry_backoff_seconds"),
             )
         except (ValueError, TypeError) as e:
             return web.json_response({"error": _sanitize_error(e)}, status=400)
@@ -945,6 +949,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"status": "triggered", "schedule_id": sid})
         except Exception as e:
             return web.json_response({"error": _sanitize_error(e)}, status=500)
+
+    @routes.post("/api/schedules/{schedule_id}/reset-failures")
+    async def reset_schedule_failures(request: web.Request) -> web.Response:
+        sid = request.match_info["schedule_id"]
+        result = await bot.scheduler.reset_failures(sid)
+        if result is None:
+            return web.json_response({"error": "schedule not found"}, status=404)
+        return web.json_response(result)
 
     @routes.post("/api/schedules/validate-cron")
     async def validate_cron(request: web.Request) -> web.Response:
