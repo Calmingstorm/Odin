@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..llm.cost_tracker import estimate_tokens
 from ..odin_log import get_logger
 if TYPE_CHECKING:
     from ..learning.reflector import ConversationReflector
@@ -44,6 +45,9 @@ CHAT_RESPONSE_MAX_CHARS = 1500  # max chars for text-only (no-tool) response in 
 CONTEXT_TOKEN_BUDGET = 16000  # max estimated tokens for history sent to LLM
 CHARS_PER_TOKEN = 4  # rough estimate: 1 token ≈ 4 chars
 BUDGET_KEEP_RECENT = 5  # always keep the most recent N messages regardless of budget
+
+# Session token budget — auto-compact when a session's estimated tokens exceed this
+DEFAULT_SESSION_TOKEN_BUDGET = 128_000
 
 # Common stop words to ignore when scoring relevance
 _STOP_WORDS = frozenset({
@@ -145,11 +149,6 @@ def summarize_tool_response(
     return result
 
 
-def estimate_tokens(text: str) -> int:
-    """Estimate token count from text length (~4 chars per token)."""
-    return max(1, len(text) // CHARS_PER_TOKEN)
-
-
 _SUMMARY_PREFIX = "[Previous conversation summary:"
 
 
@@ -226,6 +225,16 @@ class Message:
     user_id: str | None = None
 
 
+def _estimate_session_tokens(messages: list[Message], summary: str) -> int:
+    """Estimate total token count for a session's messages and summary."""
+    total = 0
+    if summary:
+        total += estimate_tokens(summary)
+    for m in messages:
+        total += estimate_tokens(m.content if isinstance(m.content, str) else str(m.content))
+    return total
+
+
 @dataclass(slots=True)
 class Session:
     channel_id: str
@@ -234,6 +243,11 @@ class Session:
     last_active: float = field(default_factory=time.time)
     summary: str = ""  # compacted summary of older messages
     last_user_id: str | None = None  # Discord user ID of most recent human message
+
+    @property
+    def estimated_tokens(self) -> int:
+        """Current estimated token count for this session's full content."""
+        return _estimate_session_tokens(self.messages, self.summary)
 
 
 class SessionManager:
@@ -245,11 +259,13 @@ class SessionManager:
         reflector: ConversationReflector | None = None,
         vector_store: SessionVectorStore | None = None,
         embedder: LocalEmbedder | None = None,
+        token_budget: int = DEFAULT_SESSION_TOKEN_BUDGET,
     ) -> None:
         self.max_history = max_history
         self.max_age_seconds = max_age_hours * 3600
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
+        self.token_budget = token_budget
         self._sessions: dict[str, Session] = {}
         self._dirty: set[str] = set()
         self._reflector = reflector
@@ -354,17 +370,28 @@ class SessionManager:
 
         return messages
 
+    def _needs_compaction(self, session: Session) -> bool:
+        """Check if a session needs compaction (message count or token budget)."""
+        if len(session.messages) > COMPACTION_THRESHOLD:
+            return True
+        if session.estimated_tokens > self.token_budget:
+            return True
+        return False
+
     async def get_history_with_compaction(
         self, channel_id: str,
     ) -> list[dict[str, str]]:
         """Get history, compacting old messages if threshold is exceeded.
+
+        Compaction triggers when message count exceeds COMPACTION_THRESHOLD
+        OR when estimated session tokens exceed the configured token_budget.
 
         A ``compaction_fn`` must be registered via :meth:`set_compaction_fn`
         before compaction can run.
         """
         session = self.get_or_create(channel_id)
 
-        if len(session.messages) > COMPACTION_THRESHOLD:
+        if self._needs_compaction(session):
             await self._compact(session)
 
         return self.get_history(channel_id)
@@ -454,8 +481,8 @@ class SessionManager:
         """
         session = self.get_or_create(channel_id)
 
-        # Compact first if needed
-        if len(session.messages) > COMPACTION_THRESHOLD:
+        # Compact first if needed (message count OR token budget exceeded)
+        if self._needs_compaction(session):
             await self._compact(session)
 
         # On topic change, shrink to just the most recent message
@@ -523,11 +550,49 @@ class SessionManager:
 
         return messages
 
+    def get_session_token_usage(self) -> dict[str, dict]:
+        """Return per-session token usage for all active sessions."""
+        result = {}
+        for cid, session in self._sessions.items():
+            tokens = session.estimated_tokens
+            result[cid] = {
+                "estimated_tokens": tokens,
+                "message_count": len(session.messages),
+                "has_summary": bool(session.summary),
+                "budget": self.token_budget,
+                "budget_pct": round(tokens / self.token_budget * 100, 1) if self.token_budget > 0 else 0.0,
+                "last_active": session.last_active,
+            }
+        return result
+
+    def get_token_metrics(self) -> dict:
+        """Return aggregate token metrics for Prometheus exposition."""
+        total_tokens = 0
+        session_count = len(self._sessions)
+        over_budget = 0
+        per_session: dict[str, int] = {}
+        for cid, session in self._sessions.items():
+            tokens = session.estimated_tokens
+            total_tokens += tokens
+            per_session[cid] = tokens
+            if self.token_budget > 0 and tokens > self.token_budget:
+                over_budget += 1
+        return {
+            "total_tokens": total_tokens,
+            "session_count": session_count,
+            "over_budget_count": over_budget,
+            "token_budget": self.token_budget,
+            "per_session": per_session,
+        }
+
     async def _compact(self, session: Session) -> None:
         """Summarize older messages and keep only recent ones."""
-        # Keep the most recent messages, summarize the rest
         keep_count = self.max_history // 2
-        to_summarize = session.messages[:-keep_count]
+        # When token budget triggers compaction with fewer messages than
+        # keep_count, reduce keep_count so there's actually something to compact
+        if len(session.messages) <= keep_count and len(session.messages) > 2:
+            keep_count = max(2, len(session.messages) // 2)
+        to_summarize = session.messages[:-keep_count] if keep_count < len(session.messages) else []
         to_keep = session.messages[-keep_count:]
 
         if not to_summarize:

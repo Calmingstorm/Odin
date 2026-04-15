@@ -1,3 +1,3 @@
-from .manager import SessionManager
+from .manager import DEFAULT_SESSION_TOKEN_BUDGET, SessionManager
 
-__all__ = ["SessionManager"]
+__all__ = ["DEFAULT_SESSION_TOKEN_BUDGET", "SessionManager"]

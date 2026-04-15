@@ -482,6 +482,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             sessions.append({
                 "channel_id": cid,
                 "message_count": len(session.messages),
+                "estimated_tokens": session.estimated_tokens,
                 "last_active": session.last_active,
                 "created_at": session.created_at,
                 "has_summary": bool(session.summary),
@@ -513,6 +514,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "summary": session.summary,
             "created_at": session.created_at,
             "last_active": session.last_active,
+            "estimated_tokens": session.estimated_tokens,
+            "token_budget": bot.sessions.token_budget,
         })
 
     @routes.get("/api/sessions/{channel_id}/export")
@@ -587,6 +590,11 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 bot.sessions.reset(cid)
                 cleared += 1
         return web.json_response({"status": "cleared", "count": cleared})
+
+    @routes.get("/api/sessions/token-usage")
+    async def session_token_usage(_request: web.Request) -> web.Response:
+        usage = bot.sessions.get_session_token_usage()
+        return web.json_response(usage)
 
     # ------------------------------------------------------------------
     # Tools

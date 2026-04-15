@@ -95,7 +95,7 @@ tightening of prior work.
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
 | 1 | Cost tracking: prompt+completion tokens and estimated USD per Codex call, aggregated per user / channel / tool in Prometheus + web UI | done | CostTracker module, LLMResponse token fields, Prometheus metrics, /api/usage endpoint, web UI page |
-| 2 | Token-budget awareness: track running tokens per session, expose in `/metrics`, auto-compact when budget exceeded | pending | |
+| 2 | Token-budget awareness: track running tokens per session, expose in `/metrics`, auto-compact when budget exceeded | done | Session.estimated_tokens, token-budget compaction, Prometheus metrics, /api/sessions/token-usage, config.sessions.token_budget |
 | 3 | Trajectory saving: dump every message's full turn (prompt, all tool calls, final response) as JSONL under `data/trajectories/` | pending | |
 | 4 | Trace viewer web UI page: given a message id, render the full tool chain with timings and outputs | pending | |
 | 5 | Log filter UI: server-side search / time-range / level filtering on the Logs page | pending | |
@@ -268,3 +268,76 @@ bottom. Do not truncate older entries — they are the chain-of-context.)
 - The `CostTracker` needs to be instantiated and attached to the bot object (as `bot.cost_tracker`) and registered with `MetricsCollector` (as `metrics.register_source("cost_tracker", tracker.get_prometheus_metrics)`) during bot startup. This wiring depends on how `OdinBot` initializes subsystems.
 - The `_last_input_tokens`/`_last_output_tokens` on `CodexChatClient` are for callers of `chat()` (returns str) that want token data — they should call `tracker.record(client._last_input_tokens, client._last_output_tokens, ...)` after each chat call.
 - Web UI page auto-refreshes every 15s — if usage volume is very high, consider WebSocket push instead.
+
+## Round 2 — Token-budget awareness: per-session token tracking + auto-compaction
+**Focus**: Track running tokens per session, expose in `/metrics`, auto-compact when budget exceeded.
+**Baseline pytest**: 718 passed, 0 failed
+**Post-round pytest**: 759 passed, 0 failed (+41 new tests)
+
+### Validated from prior rounds
+- Round 1: `CostTracker`, `estimate_tokens`, `LLMResponse` token fields, `/api/usage` endpoints all present and working. Tests pass (35 tests in `test_cost_tracker.py`). Round 1 asked Round 2 to consolidate `estimate_tokens` — done (see below). Round 1 noted `CostTracker` is not yet wired to the bot — still true, will need wiring when bot initialization code is built.
+
+### Work done
+
+#### 1. Consolidated `estimate_tokens` (Round 1 recommendation)
+- `src/sessions/manager.py:14` — Now imports `estimate_tokens` from `src.llm.cost_tracker` instead of defining a local copy. Both had identical logic (`max(1, len(text) // 4)`), so this is a straightforward dedup. The `CHARS_PER_TOKEN = 4` constant remains in both modules since it's referenced by other code in `sessions/manager.py` (`apply_token_budget`).
+
+#### 2. `_estimate_session_tokens()` helper and `Session.estimated_tokens` property
+- `src/sessions/manager.py:228-234` — New `_estimate_session_tokens(messages, summary)` function: sums `estimate_tokens()` across all messages and the summary.
+- `src/sessions/manager.py:247-249` — New `estimated_tokens` property on `Session` dataclass. Computed on access (not cached) so it always reflects current state. This was a design choice: sessions mutate frequently (messages added/removed, compaction), and caching would require invalidation hooks on every mutation. The property is cheap (O(n) over message list, which is bounded by `max_history`).
+
+#### 3. `SessionManager._needs_compaction()` — dual trigger
+- `src/sessions/manager.py:380-385` — New method returns `True` if message count > `COMPACTION_THRESHOLD` (existing behavior) OR if `session.estimated_tokens > self.token_budget` (new). This means compaction fires for sessions with few but very large messages (e.g., 10 messages with tool output that collectively consume 200K tokens).
+- `src/sessions/manager.py:397` and `src/sessions/manager.py:487` — `get_history_with_compaction()` and `get_task_history()` both now call `_needs_compaction()` instead of the inline `len(session.messages) > COMPACTION_THRESHOLD` check.
+
+#### 4. `_compact()` handles token-budget case with few messages
+- `src/sessions/manager.py:590-594` — When token budget triggers compaction but message count ≤ `keep_count` (default `max_history // 2 = 25`), the keep count is dynamically reduced to `max(2, len(messages) // 2)`. This ensures there's always something to summarize. Without this fix, the method would early-return because `to_summarize` would be empty.
+
+#### 5. `SessionManager.get_session_token_usage()` and `get_token_metrics()`
+- `src/sessions/manager.py:553-571` — `get_session_token_usage()`: returns dict keyed by channel_id with `estimated_tokens`, `message_count`, `has_summary`, `budget`, `budget_pct`, `last_active` per session. Used by the `/api/sessions/token-usage` endpoint.
+- `src/sessions/manager.py:573-586` — `get_token_metrics()`: returns aggregate metrics dict for Prometheus: `total_tokens`, `session_count`, `over_budget_count`, `token_budget`, `per_session` (channel→token mapping).
+
+#### 6. Config: `SessionsConfig.token_budget`
+- `src/config/schema.py:31` — Added `token_budget: int = 128_000` to `SessionsConfig`. Optional with sensible default (128K tokens ≈ 512K chars). This drives the `SessionManager.token_budget` parameter.
+
+#### 7. Prometheus metrics for session tokens
+- `src/health/metrics.py:268-301` — Added `session_tokens` source rendering:
+  - `odin_session_tokens_total` (gauge) — total estimated tokens across all sessions
+  - `odin_session_token_budget` (gauge) — configured per-session budget
+  - `odin_sessions_over_budget` (gauge) — count of sessions exceeding budget
+  - `odin_session_tokens{channel="..."}` (gauge, per-session) — tokens per active session
+
+#### 8. REST API endpoints
+- `src/web/api.py:592-594` — New `GET /api/sessions/token-usage` endpoint returning per-session token usage.
+- `src/web/api.py:485` — `GET /api/sessions` now includes `estimated_tokens` in each session object.
+- `src/web/api.py:515-516` — `GET /api/sessions/{channel_id}` now includes `estimated_tokens` and `token_budget`.
+
+#### 9. Module exports
+- `src/sessions/__init__.py` — Now exports `DEFAULT_SESSION_TOKEN_BUDGET` alongside `SessionManager`.
+- `src/sessions/manager.py:49` — New `DEFAULT_SESSION_TOKEN_BUDGET = 128_000` constant.
+
+#### 10. Tests
+- `tests/test_token_budget.py` — 41 new tests across 12 test classes:
+  - `TestEstimateSessionTokens` (4): empty, summary-only, messages-only, both
+  - `TestSessionEstimatedTokens` (4): empty, with messages, with summary, dynamic updates
+  - `TestNeedsCompaction` (5): below both, message count over, token budget exceeded, not exceeded, both exceeded
+  - `TestTokenBudgetCompaction` (4): get_history triggers, get_task_history triggers, no compaction under budget, compaction reduces tokens
+  - `TestGetSessionTokenUsage` (5): empty, single session, multiple sessions, budget percentage, has_summary field
+  - `TestGetTokenMetrics` (3): empty, with sessions, over budget count
+  - `TestSessionTokenPrometheusMetrics` (4): rendered, absent, empty, over budget value
+  - `TestSessionsConfigTokenBudget` (3): default, custom, zero
+  - `TestEstimateTokensConsolidation` (2): identity check, consistent results
+  - `TestDefaultSessionTokenBudget` (2): value, exported from __init__
+  - `TestSessionManagerTokenBudget` (2): default, custom
+  - `TestAPISessionTokenUsage` (2): token usage returns data, estimated_tokens property exists
+  - `TestCompactionFallbackTokens` (1): fallback preserves summary
+
+### Issues found
+- The `CostTracker` is still not wired to the bot object (noted in Round 1, still pending). The `session_tokens` metrics source also needs wiring: `metrics.register_source("session_tokens", session_manager.get_token_metrics)`. This wiring will happen when bot initialization is formalized.
+- The `HealthServer.SessionManager` (web auth sessions in `health/server.py:60`) and `sessions.manager.SessionManager` (conversation sessions) have the same class name — potentially confusing. The web auth one is purely for Bearer token session tracking and is unrelated to conversation token budgets.
+
+### Next round watch for
+- Round 3 (trajectory saving) should ensure trajectories include per-message estimated token counts so cost analysis can be done offline.
+- The `session_tokens` Prometheus source needs to be registered on the `HealthServer.metrics` collector when the bot boots — look for where `metrics.register_source("sessions", ...)` is called and add the session token source alongside it.
+- The token budget default of 128K is conservative. Real Codex context windows may be larger or smaller — the config knob (`config.sessions.token_budget`) allows tuning.
+- `Session.estimated_tokens` is O(n) per call. If sessions grow large (>100 messages), consider caching. Currently bounded by `max_history=50` and compaction, so unlikely to be a bottleneck.

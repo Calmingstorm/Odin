@@ -28,6 +28,7 @@ class SessionsConfig(BaseModel):
     max_history: int = 50
     max_age_hours: int = 24
     persist_directory: str = "./data/sessions"
+    token_budget: int = 128_000
 
 
 class ToolHost(BaseModel):

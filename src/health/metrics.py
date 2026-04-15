@@ -264,4 +264,38 @@ class MetricsCollector:
             except Exception:
                 pass
 
+        # -- Session token budget --
+        session_tokens_source = self._sources.get("session_tokens")
+        if session_tokens_source:
+            try:
+                token_data = session_tokens_source()
+                if token_data:
+                    sections.append(_format_metric(
+                        "odin_session_tokens_total",
+                        token_data.get("total_tokens", 0),
+                        help_text="Total estimated tokens across all active sessions",
+                    ))
+                    sections.append(_format_metric(
+                        "odin_session_token_budget",
+                        token_data.get("token_budget", 0),
+                        help_text="Configured per-session token budget",
+                    ))
+                    sections.append(_format_metric(
+                        "odin_sessions_over_budget",
+                        token_data.get("over_budget_count", 0),
+                        help_text="Number of sessions exceeding token budget",
+                    ))
+                    per_session = token_data.get("per_session", {})
+                    if per_session:
+                        sections.append(f"# HELP odin_session_tokens Estimated tokens per session")
+                        sections.append(f"# TYPE odin_session_tokens gauge")
+                        for cid, tokens in sorted(per_session.items()):
+                            sections.append(_format_metric(
+                                "odin_session_tokens", tokens,
+                                labels={"channel": cid},
+                                include_header=False,
+                            ))
+            except Exception:
+                pass
+
         return "\n".join(sections) + "\n"
