@@ -1,6 +1,7 @@
 /**
  * Odin Management UI — Logs Page (Redesigned)
  * Live log tail with timeline visualization, filter presets, time range filtering
+ * + server-side search/history mode (Round 5)
  */
 import { api, ws } from '../api.js';
 
@@ -12,8 +13,8 @@ const LOG_PRESETS = [
   { id: 'all', name: 'All Logs', icon: '\u2630', filters: {} },
   { id: 'errors', name: 'Errors Only', icon: '\u274C', filters: { level: 'ERROR' } },
   { id: 'warnings', name: 'Warnings+', icon: '\u26A0', filters: { levels: ['WARNING', 'ERROR'] } },
-  { id: 'tools', name: 'Tool Activity', icon: '\u{1F527}', filters: { hasToolName: true } },
-  { id: 'recent-errors', name: 'Recent Errors', icon: '\u{1F525}', filters: { level: 'ERROR', timeRange: 'last_1h' } },
+  { id: 'tools', name: 'Tool Activity', icon: '\uD83D\uDD27', filters: { hasToolName: true } },
+  { id: 'recent-errors', name: 'Recent Errors', icon: '\uD83D\uDD25', filters: { level: 'ERROR', timeRange: 'last_1h' } },
 ];
 
 const TIME_RANGES = [
@@ -25,161 +26,364 @@ const TIME_RANGES = [
   { value: 'last_24h', label: 'Last 24 hours', seconds: 86400 },
 ];
 
+const SEARCH_LIMITS = [50, 100, 200, 500];
+
 export default {
   template: `
     <div class="p-6 page-fade-in flex flex-col" style="height: calc(100vh - 56px);">
       <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div>
           <h1 class="text-xl font-semibold">Logs</h1>
-          <p class="text-xs text-gray-500 mt-0.5" v-if="logs.length > 0">
+          <p class="text-xs text-gray-500 mt-0.5" v-if="mode === 'live' && logs.length > 0">
             {{ filteredLogs.length.toLocaleString() }} / {{ logs.length.toLocaleString() }} entries
+          </p>
+          <p class="text-xs text-gray-500 mt-0.5" v-if="mode === 'search' && searchResults.length > 0">
+            {{ searchResults.length.toLocaleString() }} results
           </p>
         </div>
         <div class="flex gap-2 items-center">
-          <button @click="togglePause" class="btn text-xs" :class="paused ? 'btn-primary' : 'btn-ghost'">
-            {{ paused ? 'Resume' : 'Pause' }}
-          </button>
-          <button @click="clearLogs" class="btn btn-ghost text-xs">Clear</button>
+          <!-- Mode toggle -->
+          <div class="flex rounded overflow-hidden border border-gray-700">
+            <button @click="mode = 'live'" class="px-3 py-1 text-xs"
+                    :class="mode === 'live' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">
+              Live Tail
+            </button>
+            <button @click="switchToSearch" class="px-3 py-1 text-xs"
+                    :class="mode === 'search' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">
+              Search History
+            </button>
+          </div>
+          <template v-if="mode === 'live'">
+            <button @click="togglePause" class="btn text-xs" :class="paused ? 'btn-primary' : 'btn-ghost'">
+              {{ paused ? 'Resume' : 'Pause' }}
+            </button>
+            <button @click="clearLogs" class="btn btn-ghost text-xs">Clear</button>
+          </template>
           <button @click="exportLogs" class="btn btn-ghost text-xs">Export</button>
         </div>
       </div>
 
-      <!-- Filter presets bar -->
-      <div class="logs-filter-bar mb-2">
-        <div class="flex gap-1.5 flex-wrap items-center">
-          <button v-for="preset in logPresets" :key="preset.id"
-                  @click="applyLogPreset(preset)"
-                  class="sess-preset-chip"
-                  :class="{ 'sess-preset-active': activeLogPreset === preset.id }">
-            <span class="sess-preset-icon">{{ preset.icon }}</span>
-            <span>{{ preset.name }}</span>
-          </button>
-        </div>
-      </div>
-
-      <!-- Filters row -->
-      <div class="flex gap-2 mb-2 flex-wrap items-center">
-        <!-- Level chips -->
-        <div class="flex gap-1">
-          <button v-for="lvl in levels" :key="lvl"
-                  @click="toggleLevel(lvl)"
-                  class="log-chip"
-                  :class="[levelChipClass(lvl), { 'log-chip-active': levelFilter === lvl }]">
-            {{ lvl }}
-          </button>
-          <button v-if="levelFilter" @click="levelFilter = ''" class="log-chip log-chip-clear">ALL</button>
-        </div>
-
-        <!-- Time range -->
-        <select v-model="timeRange" class="hm-select text-xs">
-          <option v-for="tr in timeRanges" :key="tr.value" :value="tr.value">{{ tr.label }}</option>
-        </select>
-
-        <div class="flex-1" style="min-width:0;">
-          <div class="flex gap-1.5 items-center">
-            <input v-model="textFilter" type="text" class="hm-input flex-1"
-                   :placeholder="useRegex ? 'Regex pattern...' : 'Filter logs...'"
-                   :class="{ 'border-red-700': regexError }"
-                   style="min-width:120px;" />
-            <button @click="useRegex = !useRegex" class="btn text-xs"
-                    :class="useRegex ? 'btn-primary' : 'btn-ghost'"
-                    title="Toggle regex filtering">.*</button>
+      <!-- ===== LIVE MODE ===== -->
+      <template v-if="mode === 'live'">
+        <!-- Filter presets bar -->
+        <div class="logs-filter-bar mb-2">
+          <div class="flex gap-1.5 flex-wrap items-center">
+            <button v-for="preset in logPresets" :key="preset.id"
+                    @click="applyLogPreset(preset)"
+                    class="sess-preset-chip"
+                    :class="{ 'sess-preset-active': activeLogPreset === preset.id }">
+              <span class="sess-preset-icon">{{ preset.icon }}</span>
+              <span>{{ preset.name }}</span>
+            </button>
           </div>
-          <div v-if="regexError" class="text-red-400 text-xs mt-0.5">{{ regexError }}</div>
         </div>
 
-        <label class="flex items-center gap-1.5 text-xs text-gray-400 select-none cursor-pointer flex-shrink-0">
-          <input type="checkbox" v-model="autoScroll" class="rounded" />
-          Auto-scroll
-        </label>
-      </div>
+        <!-- Filters row -->
+        <div class="flex gap-2 mb-2 flex-wrap items-center">
+          <!-- Level chips -->
+          <div class="flex gap-1">
+            <button v-for="lvl in levels" :key="lvl"
+                    @click="toggleLevel(lvl)"
+                    class="log-chip"
+                    :class="[levelChipClass(lvl), { 'log-chip-active': levelFilter === lvl }]">
+              {{ lvl }}
+            </button>
+            <button v-if="levelFilter" @click="levelFilter = ''" class="log-chip log-chip-clear">ALL</button>
+          </div>
 
-      <!-- Custom preset save bar -->
-      <div class="flex gap-2 items-center mb-2 flex-wrap">
-        <button v-if="hasActiveLogFilters" @click="showSaveLogPreset = !showSaveLogPreset"
-                class="btn btn-ghost text-xs">Save as preset</button>
-        <template v-if="showSaveLogPreset">
-          <input v-model="newLogPresetName" type="text" class="hm-input text-xs"
-                 placeholder="Preset name..." style="max-width: 180px;" />
-          <button @click="saveLogCustomPreset" class="btn btn-primary text-xs"
-                  :disabled="!newLogPresetName.trim()">Save</button>
-        </template>
-        <!-- Custom presets -->
-        <button v-for="cp in customLogPresets" :key="cp.id"
-                @click="applyCustomLogPreset(cp)"
-                class="sess-preset-chip sess-preset-custom"
-                :class="{ 'sess-preset-active': activeLogPreset === cp.id }">
-          <span>\u2605</span>
-          <span>{{ cp.name }}</span>
-          <span class="sess-preset-remove" @click.stop="removeLogCustomPreset(cp.id)">&times;</span>
-        </button>
-      </div>
+          <!-- Time range -->
+          <select v-model="timeRange" class="hm-select text-xs">
+            <option v-for="tr in timeRanges" :key="tr.value" :value="tr.value">{{ tr.label }}</option>
+          </select>
 
-      <!-- Timeline visualization -->
-      <div v-if="logs.length > 0" class="logs-timeline mb-2">
-        <div class="logs-timeline-header">
-          <span class="text-xs text-gray-500">Activity Timeline</span>
-          <span class="text-xs text-gray-600">{{ timelineSpanLabel }}</span>
-        </div>
-        <div class="logs-timeline-chart">
-          <div v-for="(bucket, bi) in timelineBuckets" :key="bi"
-               class="logs-timeline-bar-wrap"
-               :title="bucket.label + ': ' + bucket.total + ' entries'"
-               @click="jumpToTimelineBucket(bucket)">
-            <div class="logs-timeline-bar">
-              <div v-if="bucket.errors > 0" class="logs-timeline-segment logs-tl-error"
-                   :style="{ height: segmentHeight(bucket.errors, timelineMax) }"></div>
-              <div v-if="bucket.warnings > 0" class="logs-timeline-segment logs-tl-warning"
-                   :style="{ height: segmentHeight(bucket.warnings, timelineMax) }"></div>
-              <div v-if="bucket.info > 0" class="logs-timeline-segment logs-tl-info"
-                   :style="{ height: segmentHeight(bucket.info, timelineMax) }"></div>
+          <div class="flex-1" style="min-width:0;">
+            <div class="flex gap-1.5 items-center">
+              <input v-model="textFilter" type="text" class="hm-input flex-1"
+                     :placeholder="useRegex ? 'Regex pattern...' : 'Filter logs...'"
+                     :class="{ 'border-red-700': regexError }"
+                     style="min-width:120px;" />
+              <button @click="useRegex = !useRegex" class="btn text-xs"
+                      :class="useRegex ? 'btn-primary' : 'btn-ghost'"
+                      title="Toggle regex filtering">.*</button>
             </div>
-            <span class="logs-timeline-label" v-if="bi % timelineLabelSkip === 0">{{ bucket.shortLabel }}</span>
+            <div v-if="regexError" class="text-red-400 text-xs mt-0.5">{{ regexError }}</div>
           </div>
-        </div>
-      </div>
 
-      <!-- Status bar -->
-      <div class="flex items-center gap-3 mb-2 text-xs text-gray-500 flex-wrap">
-        <div class="flex items-center gap-1.5">
-          <span class="ws-indicator" :class="'ws-' + wsState"></span>
-          {{ wsStateLabel }}
-        </div>
-        <span class="font-mono">{{ filteredLogs.length.toLocaleString() }} / {{ logs.length.toLocaleString() }} lines</span>
-        <span v-if="paused" class="badge badge-warning">Paused ({{ pauseBuffer.length }} buffered)</span>
-        <span v-if="timeRange" class="badge badge-info">{{ timeRangeLabel }}</span>
-        <span v-if="copiedIndex !== null" class="text-green-400">Copied!</span>
-      </div>
-
-      <!-- Log output -->
-      <div class="relative flex-1" style="min-height:200px;">
-        <div ref="logContainer" @scroll="onScroll"
-             class="absolute inset-0 overflow-y-auto bg-gray-950 border border-gray-800 rounded p-3 font-mono text-xs">
-          <div v-if="filteredLogs.length === 0" class="empty-state" style="padding:2rem 0;">
-            <span class="empty-state-icon">{{ logs.length === 0 ? '\u{1F4C4}' : '\u{1F50D}' }}</span>
-            <span class="empty-state-text">{{ logs.length === 0 ? 'Waiting for log entries...' : 'No entries match the current filter' }}</span>
-          </div>
-          <div v-for="(entry, i) in filteredLogs" :key="i"
-               class="log-line py-0.5 leading-relaxed whitespace-pre-wrap break-all"
-               :class="logLineClass(entry)">
-            <span class="log-ts text-gray-600 cursor-pointer hover:text-gray-400"
-                  @click="copyLine(entry, i)"
-                  title="Click to copy line">{{ entry.ts || '' }}</span>
-            <span class="log-level mx-1" :class="levelClass(entry.level)">{{ entry.level || 'INFO' }}</span>
-            <span v-if="entry.tool" class="logs-tool-badge">{{ entry.tool }}</span>
-            <span>{{ entry.text || entry.raw || '' }}</span>
-          </div>
+          <label class="flex items-center gap-1.5 text-xs text-gray-400 select-none cursor-pointer flex-shrink-0">
+            <input type="checkbox" v-model="autoScroll" class="rounded" />
+            Auto-scroll
+          </label>
         </div>
 
-        <!-- Jump to bottom -->
-        <button v-if="showJumpBottom" @click="jumpToBottom"
-                class="log-jump-btn">
-          &#x2193; Jump to bottom
-        </button>
-      </div>
+        <!-- Custom preset save bar -->
+        <div class="flex gap-2 items-center mb-2 flex-wrap">
+          <button v-if="hasActiveLogFilters" @click="showSaveLogPreset = !showSaveLogPreset"
+                  class="btn btn-ghost text-xs">Save as preset</button>
+          <template v-if="showSaveLogPreset">
+            <input v-model="newLogPresetName" type="text" class="hm-input text-xs"
+                   placeholder="Preset name..." style="max-width: 180px;" />
+            <button @click="saveLogCustomPreset" class="btn btn-primary text-xs"
+                    :disabled="!newLogPresetName.trim()">Save</button>
+          </template>
+          <!-- Custom presets -->
+          <button v-for="cp in customLogPresets" :key="cp.id"
+                  @click="applyCustomLogPreset(cp)"
+                  class="sess-preset-chip sess-preset-custom"
+                  :class="{ 'sess-preset-active': activeLogPreset === cp.id }">
+            <span>\u2605</span>
+            <span>{{ cp.name }}</span>
+            <span class="sess-preset-remove" @click.stop="removeLogCustomPreset(cp.id)">&times;</span>
+          </button>
+        </div>
+
+        <!-- Timeline visualization -->
+        <div v-if="logs.length > 0" class="logs-timeline mb-2">
+          <div class="logs-timeline-header">
+            <span class="text-xs text-gray-500">Activity Timeline</span>
+            <span class="text-xs text-gray-600">{{ timelineSpanLabel }}</span>
+          </div>
+          <div class="logs-timeline-chart">
+            <div v-for="(bucket, bi) in timelineBuckets" :key="bi"
+                 class="logs-timeline-bar-wrap"
+                 :title="bucket.label + ': ' + bucket.total + ' entries'"
+                 @click="jumpToTimelineBucket(bucket)">
+              <div class="logs-timeline-bar">
+                <div v-if="bucket.errors > 0" class="logs-timeline-segment logs-tl-error"
+                     :style="{ height: segmentHeight(bucket.errors, timelineMax) }"></div>
+                <div v-if="bucket.warnings > 0" class="logs-timeline-segment logs-tl-warning"
+                     :style="{ height: segmentHeight(bucket.warnings, timelineMax) }"></div>
+                <div v-if="bucket.info > 0" class="logs-timeline-segment logs-tl-info"
+                     :style="{ height: segmentHeight(bucket.info, timelineMax) }"></div>
+              </div>
+              <span class="logs-timeline-label" v-if="bi % timelineLabelSkip === 0">{{ bucket.shortLabel }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Status bar -->
+        <div class="flex items-center gap-3 mb-2 text-xs text-gray-500 flex-wrap">
+          <div class="flex items-center gap-1.5">
+            <span class="ws-indicator" :class="'ws-' + wsState"></span>
+            {{ wsStateLabel }}
+          </div>
+          <span class="font-mono">{{ filteredLogs.length.toLocaleString() }} / {{ logs.length.toLocaleString() }} lines</span>
+          <span v-if="paused" class="badge badge-warning">Paused ({{ pauseBuffer.length }} buffered)</span>
+          <span v-if="timeRange" class="badge badge-info">{{ timeRangeLabel }}</span>
+          <span v-if="copiedIndex !== null" class="text-green-400">Copied!</span>
+        </div>
+
+        <!-- Log output -->
+        <div class="relative flex-1" style="min-height:200px;">
+          <div ref="logContainer" @scroll="onScroll"
+               class="absolute inset-0 overflow-y-auto bg-gray-950 border border-gray-800 rounded p-3 font-mono text-xs">
+            <div v-if="filteredLogs.length === 0" class="empty-state" style="padding:2rem 0;">
+              <span class="empty-state-icon">{{ logs.length === 0 ? '\uD83D\uDCC4' : '\uD83D\uDD0D' }}</span>
+              <span class="empty-state-text">{{ logs.length === 0 ? 'Waiting for log entries...' : 'No entries match the current filter' }}</span>
+            </div>
+            <div v-for="(entry, i) in filteredLogs" :key="i"
+                 class="log-line py-0.5 leading-relaxed whitespace-pre-wrap break-all"
+                 :class="logLineClass(entry)">
+              <span class="log-ts text-gray-600 cursor-pointer hover:text-gray-400"
+                    @click="copyLine(entry, i)"
+                    title="Click to copy line">{{ entry.ts || '' }}</span>
+              <span class="log-level mx-1" :class="levelClass(entry.level)">{{ entry.level || 'INFO' }}</span>
+              <span v-if="entry.tool" class="logs-tool-badge">{{ entry.tool }}</span>
+              <span>{{ entry.text || entry.raw || '' }}</span>
+            </div>
+          </div>
+
+          <!-- Jump to bottom -->
+          <button v-if="showJumpBottom" @click="jumpToBottom"
+                  class="log-jump-btn">
+            &#x2193; Jump to bottom
+          </button>
+        </div>
+      </template>
+
+      <!-- ===== SEARCH HISTORY MODE ===== -->
+      <template v-if="mode === 'search'">
+        <!-- Stats bar -->
+        <div v-if="searchStats" class="flex gap-4 mb-3 flex-wrap">
+          <div class="bg-gray-800 rounded px-3 py-2 text-center min-w-[100px]">
+            <div class="text-lg font-semibold">{{ (searchStats.total || 0).toLocaleString() }}</div>
+            <div class="text-xs text-gray-500">Total entries</div>
+          </div>
+          <div class="bg-gray-800 rounded px-3 py-2 text-center min-w-[100px]">
+            <div class="text-lg font-semibold text-red-400">{{ (searchStats.errors || 0).toLocaleString() }}</div>
+            <div class="text-xs text-gray-500">Errors</div>
+          </div>
+          <div class="bg-gray-800 rounded px-3 py-2 text-center min-w-[100px]">
+            <div class="text-lg font-semibold text-blue-400">{{ (searchStats.tool_count || 0).toLocaleString() }}</div>
+            <div class="text-xs text-gray-500">Unique tools</div>
+          </div>
+          <div class="bg-gray-800 rounded px-3 py-2 text-center min-w-[100px]">
+            <div class="text-lg font-semibold text-purple-400">{{ (searchStats.web_actions || 0).toLocaleString() }}</div>
+            <div class="text-xs text-gray-500">Web actions</div>
+          </div>
+        </div>
+
+        <!-- Search filters -->
+        <div class="bg-gray-800 rounded p-3 mb-3">
+          <div class="flex gap-3 flex-wrap items-end">
+            <!-- Level -->
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500">Level</label>
+              <select v-model="searchLevel" class="hm-select text-xs" style="min-width:100px;">
+                <option value="all">All</option>
+                <option value="error">Errors only</option>
+                <option value="info">Info only</option>
+              </select>
+            </div>
+
+            <!-- Tool name -->
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500">Tool</label>
+              <select v-model="searchTool" class="hm-select text-xs" style="min-width:140px;">
+                <option value="">Any tool</option>
+                <option v-for="t in (searchStats ? searchStats.tools || [] : [])" :key="t" :value="t">{{ t }}</option>
+              </select>
+            </div>
+
+            <!-- Time range quick select -->
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500">Time range</label>
+              <select v-model="searchTimePreset" @change="applySearchTimePreset" class="hm-select text-xs" style="min-width:130px;">
+                <option value="">Custom / All</option>
+                <option value="last_5m">Last 5 min</option>
+                <option value="last_15m">Last 15 min</option>
+                <option value="last_1h">Last 1 hour</option>
+                <option value="last_4h">Last 4 hours</option>
+                <option value="last_24h">Last 24 hours</option>
+                <option value="last_7d">Last 7 days</option>
+              </select>
+            </div>
+
+            <!-- Start time -->
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500">From</label>
+              <input v-model="searchStart" type="datetime-local" class="hm-input text-xs" style="min-width:170px;" />
+            </div>
+
+            <!-- End time -->
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500">To</label>
+              <input v-model="searchEnd" type="datetime-local" class="hm-input text-xs" style="min-width:170px;" />
+            </div>
+
+            <!-- Keyword -->
+            <div class="flex flex-col gap-1 flex-1" style="min-width:150px;">
+              <label class="text-xs text-gray-500">Keyword</label>
+              <input v-model="searchKeyword" type="text" class="hm-input text-xs"
+                     placeholder="Search text..."
+                     @keyup.enter="runSearch" />
+            </div>
+
+            <!-- Limit -->
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500">Limit</label>
+              <select v-model.number="searchLimit" class="hm-select text-xs" style="min-width:80px;">
+                <option v-for="l in searchLimits" :key="l" :value="l">{{ l }}</option>
+              </select>
+            </div>
+
+            <!-- Search button -->
+            <button @click="runSearch" class="btn btn-primary text-xs self-end"
+                    :disabled="searching">
+              {{ searching ? 'Searching...' : 'Search' }}
+            </button>
+
+            <!-- Clear filters -->
+            <button @click="clearSearchFilters" class="btn btn-ghost text-xs self-end">Clear</button>
+          </div>
+        </div>
+
+        <!-- Search error -->
+        <div v-if="searchError" class="bg-red-900/30 border border-red-800 rounded p-3 mb-3 text-sm text-red-300">
+          {{ searchError }}
+        </div>
+
+        <!-- Search results -->
+        <div class="relative flex-1" style="min-height:200px;">
+          <div class="absolute inset-0 overflow-y-auto bg-gray-950 border border-gray-800 rounded p-3 font-mono text-xs">
+            <!-- Loading -->
+            <div v-if="searching" class="empty-state" style="padding:2rem 0;">
+              <span class="empty-state-icon">\u23F3</span>
+              <span class="empty-state-text">Searching...</span>
+            </div>
+
+            <!-- No results -->
+            <div v-else-if="searchResults.length === 0 && searchRan" class="empty-state" style="padding:2rem 0;">
+              <span class="empty-state-icon">\uD83D\uDD0D</span>
+              <span class="empty-state-text">No entries match the search criteria</span>
+            </div>
+
+            <!-- Prompt to search -->
+            <div v-else-if="searchResults.length === 0 && !searchRan" class="empty-state" style="padding:2rem 0;">
+              <span class="empty-state-icon">\uD83D\uDCCA</span>
+              <span class="empty-state-text">Set filters and click Search to query log history</span>
+            </div>
+
+            <!-- Results list -->
+            <template v-else>
+              <div v-for="(entry, i) in searchResults" :key="i"
+                   class="log-line py-0.5 leading-relaxed whitespace-pre-wrap break-all cursor-pointer"
+                   :class="searchLogLineClass(entry)"
+                   @click="toggleSearchExpand(i)">
+                <span class="log-ts text-gray-600">{{ formatSearchTs(entry) }}</span>
+                <span class="log-level mx-1" :class="entry.error ? 'text-red-500 font-semibold' : 'text-blue-500'">
+                  {{ entry.error ? 'ERROR' : 'INFO' }}
+                </span>
+                <span v-if="entry.tool_name" class="logs-tool-badge">{{ entry.tool_name }}</span>
+                <span v-if="entry.type === 'web_action'" class="logs-tool-badge" style="background:rgba(139,92,246,.18);color:#a78bfa;">
+                  {{ entry.method }} {{ entry.path }}
+                </span>
+                <span v-if="entry.user_name" class="text-gray-500 mr-1">[{{ entry.user_name }}]</span>
+                <span>{{ searchEntryText(entry) }}</span>
+
+                <!-- Expanded detail -->
+                <div v-if="expandedSearch === i" class="mt-2 ml-4 p-2 bg-gray-900 border border-gray-700 rounded text-xs"
+                     @click.stop>
+                  <div class="grid grid-cols-2 gap-x-4 gap-y-1 mb-2" style="max-width:500px;">
+                    <span class="text-gray-500">Timestamp:</span>
+                    <span>{{ entry.timestamp || 'N/A' }}</span>
+                    <template v-if="entry.user_id">
+                      <span class="text-gray-500">User:</span>
+                      <span>{{ entry.user_name || '' }} ({{ entry.user_id }})</span>
+                    </template>
+                    <template v-if="entry.channel_id">
+                      <span class="text-gray-500">Channel:</span>
+                      <span>{{ entry.channel_id }}</span>
+                    </template>
+                    <template v-if="entry.execution_time_ms !== undefined">
+                      <span class="text-gray-500">Duration:</span>
+                      <span>{{ entry.execution_time_ms }}ms</span>
+                    </template>
+                  </div>
+                  <div v-if="entry.tool_input" class="mb-2">
+                    <div class="text-gray-500 mb-1">Input:</div>
+                    <pre class="bg-gray-800 rounded p-2 overflow-x-auto" style="max-height:150px;">{{ formatJson(entry.tool_input) }}</pre>
+                  </div>
+                  <div v-if="entry.result_summary">
+                    <div class="text-gray-500 mb-1">Result:</div>
+                    <pre class="bg-gray-800 rounded p-2 overflow-x-auto whitespace-pre-wrap" style="max-height:200px;">{{ entry.result_summary }}</pre>
+                  </div>
+                  <div v-if="entry.error" class="mt-2">
+                    <div class="text-red-400 mb-1">Error:</div>
+                    <pre class="bg-red-900/20 rounded p-2 overflow-x-auto whitespace-pre-wrap" style="max-height:150px;">{{ entry.error }}</pre>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
     </div>`,
 
   setup() {
+    // ===== SHARED =====
+    const mode = ref('live');
+
+    // ===== LIVE MODE STATE =====
     const logs = ref([]);
     const paused = ref(false);
     const autoScroll = ref(true);
@@ -296,7 +500,6 @@ export default {
     });
 
     const timelineLabelSkip = computed(() => {
-      // Show every Nth label to avoid crowding
       return TIMELINE_BUCKETS <= 12 ? 1 : Math.ceil(TIMELINE_BUCKETS / 8);
     });
 
@@ -312,7 +515,6 @@ export default {
     }
 
     function jumpToTimelineBucket(bucket) {
-      // Find first log entry in this bucket and scroll to it
       const idx = filteredLogs.value.findIndex(e =>
         e._time && e._time.getTime() >= bucket.start.getTime() && e._time.getTime() < bucket.end.getTime()
       );
@@ -328,12 +530,10 @@ export default {
     const filteredLogs = computed(() => {
       let result = logs.value;
 
-      // Level filter
       if (levelFilter.value) {
         result = result.filter(e => (e.level || 'INFO') === levelFilter.value);
       }
 
-      // Time range filter
       if (timeRange.value) {
         const tr = TIME_RANGES.find(t => t.value === timeRange.value);
         if (tr && tr.seconds) {
@@ -342,7 +542,6 @@ export default {
         }
       }
 
-      // Text filter
       if (textFilter.value && !regexError.value) {
         if (useRegex.value) {
           try {
@@ -471,7 +670,16 @@ export default {
     }
 
     function exportLogs() {
-      const text = filteredLogs.value.map(e => `${e.ts} ${e.level} ${e.text}`).join('\n');
+      let text;
+      if (mode.value === 'search') {
+        text = searchResults.value.map(e => {
+          const level = e.error ? 'ERROR' : 'INFO';
+          const tool = e.tool_name ? `[${e.tool_name}] ` : '';
+          return `${e.timestamp || ''} ${level} ${tool}${e.result_summary || e.message || ''}`;
+        }).join('\n');
+      } else {
+        text = filteredLogs.value.map(e => `${e.ts} ${e.level} ${e.text}`).join('\n');
+      }
       const blob = new Blob([text], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -519,7 +727,6 @@ export default {
       levelFilter.value = f.level || '';
       timeRange.value = f.timeRange || '';
       textFilter.value = f.text || '';
-      // For multi-level presets like "warnings+", handle differently
       if (f.levels) levelFilter.value = f.levels[0] || '';
       if (f.hasToolName) textFilter.value = '';
     }
@@ -554,6 +761,135 @@ export default {
       if (activeLogPreset.value === id) activeLogPreset.value = 'all';
     }
 
+    // ===== SEARCH HISTORY MODE =====
+    const searchLevel = ref('all');
+    const searchTool = ref('');
+    const searchKeyword = ref('');
+    const searchStart = ref('');
+    const searchEnd = ref('');
+    const searchTimePreset = ref('');
+    const searchLimit = ref(100);
+    const searchLimits = SEARCH_LIMITS;
+    const searching = ref(false);
+    const searchRan = ref(false);
+    const searchError = ref('');
+    const searchResults = ref([]);
+    const searchStats = ref(null);
+    const expandedSearch = ref(null);
+
+    function switchToSearch() {
+      mode.value = 'search';
+      if (!searchStats.value) loadSearchStats();
+    }
+
+    async function loadSearchStats() {
+      try {
+        searchStats.value = await api.get('/api/logs/stats');
+      } catch { /* ignore */ }
+    }
+
+    function applySearchTimePreset() {
+      const preset = searchTimePreset.value;
+      if (!preset) {
+        searchStart.value = '';
+        searchEnd.value = '';
+        return;
+      }
+      const secondsMap = {
+        last_5m: 300, last_15m: 900, last_1h: 3600,
+        last_4h: 14400, last_24h: 86400, last_7d: 604800,
+      };
+      const secs = secondsMap[preset];
+      if (secs) {
+        const start = new Date(Date.now() - secs * 1000);
+        searchStart.value = toLocalDatetime(start);
+        searchEnd.value = '';
+      }
+    }
+
+    function toLocalDatetime(d) {
+      const pad = n => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function localToISO(localStr) {
+      if (!localStr) return '';
+      const d = new Date(localStr);
+      return isNaN(d.getTime()) ? '' : d.toISOString();
+    }
+
+    async function runSearch() {
+      searching.value = true;
+      searchError.value = '';
+      searchRan.value = true;
+      expandedSearch.value = null;
+      try {
+        const params = new URLSearchParams();
+        if (searchLevel.value && searchLevel.value !== 'all') params.set('level', searchLevel.value);
+        if (searchTool.value) params.set('tool', searchTool.value);
+        if (searchKeyword.value) params.set('q', searchKeyword.value);
+        const startISO = localToISO(searchStart.value);
+        const endISO = localToISO(searchEnd.value);
+        if (startISO) params.set('start', startISO);
+        if (endISO) params.set('end', endISO);
+        params.set('limit', String(searchLimit.value));
+        const resp = await api.get(`/api/logs/search?${params.toString()}`);
+        searchResults.value = resp.entries || [];
+      } catch (e) {
+        searchError.value = e.message || 'Search failed';
+        searchResults.value = [];
+      } finally {
+        searching.value = false;
+      }
+    }
+
+    function clearSearchFilters() {
+      searchLevel.value = 'all';
+      searchTool.value = '';
+      searchKeyword.value = '';
+      searchStart.value = '';
+      searchEnd.value = '';
+      searchTimePreset.value = '';
+      searchLimit.value = 100;
+      searchResults.value = [];
+      searchRan.value = false;
+      searchError.value = '';
+      expandedSearch.value = null;
+    }
+
+    function toggleSearchExpand(i) {
+      expandedSearch.value = expandedSearch.value === i ? null : i;
+    }
+
+    function formatSearchTs(entry) {
+      if (!entry.timestamp) return '';
+      try {
+        return new Date(entry.timestamp).toLocaleString();
+      } catch {
+        return entry.timestamp;
+      }
+    }
+
+    function searchEntryText(entry) {
+      if (entry.type === 'web_action') {
+        return `${entry.status || ''} (${entry.execution_time_ms || 0}ms)`;
+      }
+      return (entry.result_summary || '').slice(0, 200);
+    }
+
+    function searchLogLineClass(entry) {
+      if (entry.error) return 'log-line-error';
+      return 'text-gray-300';
+    }
+
+    function formatJson(obj) {
+      try {
+        return JSON.stringify(obj, null, 2);
+      } catch {
+        return String(obj);
+      }
+    }
+
     // Track WS connection status via state callback
     let prevStateHandler = null;
 
@@ -562,7 +898,6 @@ export default {
       ws.subscribe('logs', onLog);
       subscribed.value = ws.connected;
       wsState.value = ws.state || 'disconnected';
-      // Listen to state changes
       prevStateHandler = ws.onStateChange;
       const origHandler = ws.onStateChange;
       ws.onStateChange = (state, detail) => {
@@ -574,13 +909,14 @@ export default {
 
     onUnmounted(() => {
       ws.unsubscribe('logs', onLog);
-      // Restore previous handler
       if (prevStateHandler !== undefined) {
         ws.onStateChange = prevStateHandler;
       }
     });
 
     return {
+      mode,
+      // Live mode
       logs, paused, autoScroll, levelFilter, textFilter, useRegex,
       subscribed, wsState, wsStateLabel, logContainer, filteredLogs, pauseBuffer,
       showJumpBottom, copiedIndex, regexError, levels,
@@ -588,14 +924,20 @@ export default {
       activeLogPreset, customLogPresets,
       showSaveLogPreset, newLogPresetName,
       hasActiveLogFilters, timeRangeLabel,
-      // Timeline
       timelineBuckets, timelineMax, timelineSpanLabel, timelineLabelSkip,
-      // Methods
       togglePause, clearLogs, exportLogs, logLineClass, levelClass,
       levelChipClass, toggleLevel, copyLine, jumpToBottom, onScroll,
       applyLogPreset, applyCustomLogPreset,
       saveLogCustomPreset, removeLogCustomPreset,
       segmentHeight, jumpToTimelineBucket,
+      // Search mode
+      searchLevel, searchTool, searchKeyword, searchStart, searchEnd,
+      searchTimePreset, searchLimit, searchLimits,
+      searching, searchRan, searchError, searchResults, searchStats,
+      expandedSearch,
+      switchToSearch, runSearch, clearSearchFilters, toggleSearchExpand,
+      formatSearchTs, searchEntryText, searchLogLineClass, formatJson,
+      applySearchTimePreset,
     };
   },
 };

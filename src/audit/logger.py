@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import aiofiles
 
@@ -171,3 +172,107 @@ class AuditLogger:
                 break
 
         return results
+
+    async def search_logs(
+        self,
+        *,
+        level: Literal["error", "info", "all"] | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        keyword: str | None = None,
+        tool_name: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Search audit log with level, time-range, and keyword filters.
+
+        Level is derived from the ``error`` field: entries with a non-null
+        ``error`` value are ``error``, everything else is ``info``.
+        ``start_time`` / ``end_time`` are ISO-8601 prefixes compared
+        lexicographically against the entry timestamp.
+        """
+        if not self.path.exists():
+            return []
+
+        try:
+            async with aiofiles.open(self.path, "r") as f:
+                lines = await f.readlines()
+        except Exception as exc:
+            log.error("Failed to read audit log for search_logs: %s", exc)
+            return []
+
+        results: list[dict] = []
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            ts = entry.get("timestamp", "")
+
+            if start_time and ts < start_time:
+                continue
+            if end_time and ts > end_time:
+                continue
+
+            if level and level != "all":
+                has_error = bool(entry.get("error"))
+                if level == "error" and not has_error:
+                    continue
+                if level == "info" and has_error:
+                    continue
+
+            if tool_name and entry.get("tool_name") != tool_name:
+                continue
+
+            if keyword:
+                blob = json.dumps(entry).lower()
+                if keyword.lower() not in blob:
+                    continue
+
+            results.append(entry)
+            if len(results) >= limit:
+                break
+
+        return results
+
+    async def get_log_stats(self) -> dict:
+        """Return summary statistics for the log file."""
+        if not self.path.exists():
+            return {"total": 0, "errors": 0, "tools": 0, "web_actions": 0}
+
+        total = 0
+        errors = 0
+        tools: set[str] = set()
+        web_actions = 0
+
+        try:
+            async with aiofiles.open(self.path, "r") as f:
+                async for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    total += 1
+                    if entry.get("error"):
+                        errors += 1
+                    tn = entry.get("tool_name")
+                    if tn:
+                        tools.add(tn)
+                    if entry.get("type") == "web_action":
+                        web_actions += 1
+        except Exception as exc:
+            log.error("Failed to read audit log for stats: %s", exc)
+
+        return {
+            "total": total,
+            "errors": errors,
+            "tool_count": len(tools),
+            "tools": sorted(tools),
+            "web_actions": web_actions,
+        }

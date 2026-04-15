@@ -98,7 +98,7 @@ tightening of prior work.
 | 2 | Token-budget awareness: track running tokens per session, expose in `/metrics`, auto-compact when budget exceeded | done | Session.estimated_tokens, token-budget compaction, Prometheus metrics, /api/sessions/token-usage, config.sessions.token_budget |
 | 3 | Trajectory saving: dump every message's full turn (prompt, all tool calls, final response) as JSONL under `data/trajectories/` | done | TrajectorySaver module, TrajectoryTurn/ToolIteration types, date-partitioned JSONL, search/list/read, REST API (3 endpoints), Prometheus metric |
 | 4 | Trace viewer web UI page: given a message id, render the full tool chain with timings and outputs | done | Trace viewer page with message ID lookup, search/filter, expandable iteration timeline, duration bars, token counts |
-| 5 | Log filter UI: server-side search / time-range / level filtering on the Logs page | pending | |
+| 5 | Log filter UI: server-side search / time-range / level filtering on the Logs page | done | AuditLogger.search_logs + get_log_stats, /api/logs/search + /api/logs/stats endpoints, Logs page Search History mode with level/time/keyword/tool filters |
 
 ### Phase 2 — Reliability hardening (rounds 6–10)
 | # | Focus | Status | Summary |
@@ -473,3 +473,69 @@ bottom. Do not truncate older entries — they are the chain-of-context.)
 - The trace viewer depends on trajectory data having `iterations` arrays with tool call/result detail. Currently trajectories are not wired into the bot's tool loop, so no real data will appear until the wiring is done.
 - All three subsystem wiring tasks remain open: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`. A future round should handle this holistically.
 - The `/api/trajectories/message/{message_id}` endpoint sits between `/{filename}` and `/search/query` in the route table. No conflict exists (different path depths), but future trajectory sub-routes should be aware of the `{filename}` catch-all at depth 1.
+
+## Round 5 — Log filter UI: server-side search + time-range + level filtering
+**Focus**: Add server-side log search/filter capabilities to the Logs page with level, time-range, keyword, and tool name filtering.
+**Baseline pytest**: 820 passed, 0 failed
+**Post-round pytest**: 857 passed, 0 failed (+37 new tests)
+
+### Validated from prior rounds
+- Round 1: `CostTracker`, `estimate_tokens`, `LLMResponse` token fields, `/api/usage` endpoints all present and passing (35 tests). `CostTracker` still not wired to bot object — still pending (noted Rounds 1-4).
+- Round 2: `Session.estimated_tokens`, `_needs_compaction()`, token metrics all present and passing (41 tests). `session_tokens` Prometheus source still needs wiring — still pending.
+- Round 3: `TrajectorySaver`, `TrajectoryTurn`, `ToolIteration`, REST API endpoints all present and passing (53 tests). `trajectory_saver` still needs wiring — still pending.
+- Round 4: Trace viewer page, `find_by_message_id()`, `/api/trajectories/message/{message_id}` endpoint all present and passing (8 tests). UI pattern (filter panel + expandable detail) used as reference for this round's Search History mode.
+- All three subsystem wiring tasks remain open: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`.
+
+### Work done
+
+#### 1. `AuditLogger.search_logs()` — server-side log search
+- `src/audit/logger.py:176-232` — New `search_logs()` method with filters:
+  - `level`: `"error"` (entries with non-null `error` field), `"info"` (entries without error), `"all"` (no level filter). Level is derived from the `error` field — the audit JSONL has no explicit level.
+  - `start_time` / `end_time`: ISO-8601 prefix strings compared lexicographically against `entry.timestamp`. Supports both date-only (`2026-04-15`) and full ISO prefixes (`2026-04-15T12:00:00+00:00`).
+  - `keyword`: case-insensitive substring match against the full JSON-serialized entry (same approach as `search()`).
+  - `tool_name`: exact match on `entry.tool_name`.
+  - `limit`: max results (default 100).
+  - Returns results in reverse chronological order (most recent first), matching `search()` behavior.
+
+#### 2. `AuditLogger.get_log_stats()` — summary statistics
+- `src/audit/logger.py:234-268` — New method returning `{"total": N, "errors": N, "tool_count": N, "tools": [...], "web_actions": N}`. Streams through the file once. Used by the `/api/logs/stats` endpoint to populate the Search History mode stats bar and the tool name dropdown.
+
+#### 3. REST API endpoints
+- `src/web/api.py:1338-1376` — Two new endpoints:
+  - `GET /api/logs/search` — query params: `level` (error/info/all), `start` (ISO), `end` (ISO), `q` (keyword), `tool` (name), `limit` (1-500, default 100). Returns `{"entries": [...], "count": N}`. Validates `level` enum (400 on invalid). Validates `limit` as integer (400 on invalid).
+  - `GET /api/logs/stats` — returns summary stats dict from `get_log_stats()`.
+
+#### 4. Logs page UI: Search History mode
+- `ui/js/pages/logs.js` — Redesigned with dual-mode interface:
+  - **Mode toggle**: "Live Tail" / "Search History" buttons at the top. Live mode preserves all existing functionality (WebSocket streaming, client-side filters, presets, timeline, pause/resume, export).
+  - **Search History mode** adds:
+    - **Stats bar**: Total entries, errors, unique tools, web actions — loaded from `/api/logs/stats` on first switch.
+    - **Filter panel**: Level dropdown (All/Errors only/Info only), Tool dropdown (populated from stats), Time range quick-select (5m/15m/1h/4h/24h/7d), custom Start/End datetime inputs, keyword text search, configurable limit (50/100/200/500), Search and Clear buttons.
+    - **Time range quick-select**: Selecting a preset (e.g., "Last 1 hour") auto-fills the Start datetime input to `now - N seconds`, making it easy to combine with other filters.
+    - **Search results**: Rendered as log lines matching the live-tail format, with level coloring, tool badges, and user names. Each line is clickable to expand full detail (timestamp, user, channel, duration, tool input as formatted JSON, result summary, error text).
+    - **Export**: Works in both modes — exports either filtered live logs or search results.
+    - **Empty states**: "Set filters and click Search" before first search, "No entries match" when search returns empty, loading spinner during search.
+
+#### 5. Tests: `tests/test_log_search.py` — 37 tests across 12 test classes
+- `TestSearchLogsNoFilter` (4): returns all in reverse, empty file, no file, limit
+- `TestSearchLogsLevel` (3): error level, info level, all level
+- `TestSearchLogsTimeRange` (4): start time, end time, both, empty range
+- `TestSearchLogsKeyword` (3): match, case-insensitive, no match
+- `TestSearchLogsToolName` (2): filter by tool, tool not found
+- `TestSearchLogsCombined` (3): level+tool, time+keyword, all filters combined
+- `TestSearchLogsResilience` (2): skips invalid JSON, entries missing fields
+- `TestGetLogStats` (3): with data, empty, no file
+- `TestLogSearchAPI` (9): no filters, level, invalid level (400), time range, keyword, tool, limit, invalid limit (400), combined
+- `TestLogStatsAPI` (2): stats, empty stats
+- `TestSearchAfterLog` (2): log_execution → searchable, log_web_action → searchable (integration tests verifying the full write→read round-trip)
+
+### Issues found
+- The audit log entries have no explicit `level` field — level is derived from the `error` field presence. This means "WARNING" is not distinguishable from "INFO" on the server side. The live-tail mode also derives level this way (`entry.error ? 'ERROR' : 'INFO'`), so this is consistent. A future round could add an explicit `level` field to `log_execution()` if granular levels are needed.
+- The `search_logs()` method reads the entire file into memory (`readlines()`), same as the existing `search()` method. For very large audit logs (>100MB), this could be slow. A future optimization could use seek-based reverse reading or SQLite storage.
+- All three subsystem wiring tasks remain open from Rounds 1-4: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`. These are not in-scope for Round 5 but should be addressed holistically in a future round.
+
+### Next round watch for
+- Round 6 (exponential backoff) is a different subsystem and shouldn't conflict with these changes.
+- The `/api/logs/search` and `/api/logs/stats` endpoints use `bot.audit` directly — no `getattr` guard needed since the audit logger is always present (created in bot init).
+- The Logs page Search History mode loads stats on first switch to populate the tool dropdown. If tool list changes frequently, the dropdown won't auto-update until the user switches modes again. This is fine for typical usage.
+- The `get_log_stats()` method reads the entire file each call. For dashboards that poll stats frequently, consider caching with a short TTL (similar to the `format_hints` pattern in tool_memory with 30s TTL).

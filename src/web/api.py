@@ -1335,6 +1335,42 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response(results)
 
     # ------------------------------------------------------------------
+    # Log search (server-side filtered log queries)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/logs/search")
+    async def search_logs(request: web.Request) -> web.Response:
+        level = request.query.get("level") or None
+        if level and level not in ("error", "info", "all"):
+            return web.json_response(
+                {"error": "level must be 'error', 'info', or 'all'"}, status=400
+            )
+        start_time = request.query.get("start") or None
+        end_time = request.query.get("end") or None
+        keyword = request.query.get("q") or None
+        tool_name = request.query.get("tool") or None
+        try:
+            limit = min(max(1, int(request.query.get("limit", "100"))), 500)
+        except ValueError:
+            return web.json_response(
+                {"error": "limit must be an integer"}, status=400
+            )
+        results = await bot.audit.search_logs(
+            level=level,
+            start_time=start_time,
+            end_time=end_time,
+            keyword=keyword,
+            tool_name=tool_name,
+            limit=limit,
+        )
+        return web.json_response({"entries": results, "count": len(results)})
+
+    @routes.get("/api/logs/stats")
+    async def log_stats(_request: web.Request) -> web.Response:
+        stats = await bot.audit.get_log_stats()
+        return web.json_response(stats)
+
+    # ------------------------------------------------------------------
     # Memory (persistent notes — global + per-user scopes)
     # ------------------------------------------------------------------
 
