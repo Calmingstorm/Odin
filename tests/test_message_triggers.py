@@ -460,9 +460,9 @@ class TestSchedulerMessageSource:
 
     # -- Schedule creation --
 
-    def test_add_message_trigger_schedule(self, tmp_path):
+    async def test_add_message_trigger_schedule(self, tmp_path):
         sched = Scheduler(data_path=str(tmp_path / "schedules.json"))
-        result = sched.add(
+        result = await sched.add(
             description="Deploy on command",
             action="reminder",
             channel_id="999",
@@ -474,9 +474,9 @@ class TestSchedulerMessageSource:
         assert result["one_time"] is False
         assert len(sched.list_all()) == 1
 
-    def test_add_message_trigger_with_regex(self, tmp_path):
+    async def test_add_message_trigger_with_regex(self, tmp_path):
         sched = Scheduler(data_path=str(tmp_path / "schedules.json"))
-        result = sched.add(
+        result = await sched.add(
             description="Regex trigger",
             action="reminder",
             channel_id="999",
@@ -568,7 +568,7 @@ class TestFireTriggersIntegration:
             fired_schedules.append(schedule)
 
         sched.start(cb)
-        sched.add(
+        await sched.add(
             description="Deploy on command",
             action="reminder",
             channel_id="999",
@@ -596,7 +596,7 @@ class TestFireTriggersIntegration:
             fired_schedules.append(schedule)
 
         sched.start(cb)
-        sched.add(
+        await sched.add(
             description="Deploy on command",
             action="reminder",
             channel_id="999",
@@ -623,14 +623,14 @@ class TestFireTriggersIntegration:
             fired_schedules.append(schedule)
 
         sched.start(cb)
-        sched.add(
+        await sched.add(
             description="Action A",
             action="reminder",
             channel_id="999",
             message="A",
             trigger={"source": "discord_message", "content_contains": "deploy"},
         )
-        sched.add(
+        await sched.add(
             description="Action B",
             action="reminder",
             channel_id="999",
@@ -655,7 +655,7 @@ class TestFireTriggersIntegration:
             fired_schedules.append(schedule)
 
         sched.start(cb)
-        sched.add(
+        await sched.add(
             description="Regex deploy",
             action="reminder",
             channel_id="999",
@@ -679,7 +679,7 @@ class TestFireTriggersIntegration:
             fired_schedules.append(schedule)
 
         sched.start(cb)
-        sched.add(
+        await sched.add(
             description="Regex deploy",
             action="reminder",
             channel_id="999",
@@ -704,14 +704,14 @@ class TestFireTriggersIntegration:
             fired_schedules.append(schedule)
 
         sched.start(cb)
-        sched.add(
+        await sched.add(
             description="Message trigger",
             action="reminder",
             channel_id="999",
             message="Msg",
             trigger={"source": "discord_message", "content_contains": "deploy"},
         )
-        sched.add(
+        await sched.add(
             description="Reaction trigger",
             action="reminder",
             channel_id="999",
@@ -737,7 +737,7 @@ class TestFireTriggersIntegration:
             fired_schedules.append(schedule)
 
         sched.start(cb)
-        sched.add(
+        await sched.add(
             description="Exact match",
             action="reminder",
             channel_id="999",

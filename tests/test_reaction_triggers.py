@@ -436,9 +436,9 @@ class TestSchedulerReactionSource:
             {"event": "push", "emoji": "\U0001f680"},
         )
 
-    def test_add_reaction_trigger_schedule(self, tmp_path):
+    async def test_add_reaction_trigger_schedule(self, tmp_path):
         sched = Scheduler(data_path=str(tmp_path / "schedules.json"))
-        result = sched.add(
+        result = await sched.add(
             description="Deploy on rocket reaction",
             action="reminder",
             channel_id="999",
@@ -450,9 +450,9 @@ class TestSchedulerReactionSource:
         assert result["one_time"] is False
         assert len(sched.list_all()) == 1
 
-    def test_add_reaction_trigger_with_user_filter(self, tmp_path):
+    async def test_add_reaction_trigger_with_user_filter(self, tmp_path):
         sched = Scheduler(data_path=str(tmp_path / "schedules.json"))
-        result = sched.add(
+        result = await sched.add(
             description="Admin-only deploy",
             action="reminder",
             channel_id="999",
@@ -544,7 +544,7 @@ class TestFireTriggersIntegration:
             fired_schedules.append(schedule)
 
         sched.start(cb)
-        sched.add(
+        await sched.add(
             description="Deploy on rocket",
             action="reminder",
             channel_id="999",
@@ -572,7 +572,7 @@ class TestFireTriggersIntegration:
             fired_schedules.append(schedule)
 
         sched.start(cb)
-        sched.add(
+        await sched.add(
             description="Deploy on rocket",
             action="reminder",
             channel_id="999",
@@ -600,14 +600,14 @@ class TestFireTriggersIntegration:
 
         sched.start(cb)
         # Two triggers for same emoji
-        sched.add(
+        await sched.add(
             description="Action A",
             action="reminder",
             channel_id="999",
             message="A",
             trigger={"source": "discord_reaction", "emoji": "\U0001f680"},
         )
-        sched.add(
+        await sched.add(
             description="Action B",
             action="reminder",
             channel_id="999",
@@ -633,14 +633,14 @@ class TestFireTriggersIntegration:
             fired_schedules.append(schedule)
 
         sched.start(cb)
-        sched.add(
+        await sched.add(
             description="GitHub trigger",
             action="reminder",
             channel_id="999",
             message="GitHub push",
             trigger={"source": "github", "event": "push"},
         )
-        sched.add(
+        await sched.add(
             description="Reaction trigger",
             action="reminder",
             channel_id="999",

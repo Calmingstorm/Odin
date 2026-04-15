@@ -472,9 +472,9 @@ class TestSchedulerGitHubSource:
             trigger, "github", {"event": "pull_request"}
         )
 
-    def test_add_github_trigger_schedule(self, tmp_path):
+    async def test_add_github_trigger_schedule(self, tmp_path):
         sched = Scheduler(data_path=str(tmp_path / "schedules.json"))
-        result = sched.add(
+        result = await sched.add(
             description="Deploy on push to main",
             action="reminder",
             channel_id="999",

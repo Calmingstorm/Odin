@@ -358,7 +358,7 @@ class SkillContext:
             return []
         return await self._session_manager.search_history(query, limit=limit)
 
-    def schedule_task(
+    async def schedule_task(
         self,
         description: str,
         action: str,
@@ -372,7 +372,7 @@ class SkillContext:
         """
         if not self._scheduler:
             return None
-        return self._scheduler.add(description, action, channel_id, **kwargs)
+        return await self._scheduler.add(description, action, channel_id, **kwargs)
 
     def list_schedules(self) -> list[dict]:
         """List all scheduled tasks."""
@@ -380,11 +380,11 @@ class SkillContext:
             return []
         return self._scheduler.list_all()
 
-    def delete_schedule(self, schedule_id: str) -> bool:
+    async def delete_schedule(self, schedule_id: str) -> bool:
         """Delete a scheduled task by ID. Returns True if deleted."""
         if not self._scheduler:
             return False
-        return self._scheduler.delete(schedule_id)
+        return await self._scheduler.delete(schedule_id)
 
     async def execute_tool(self, tool_name: str, tool_input: dict | None = None) -> str:
         """Execute a safe built-in tool by name. Returns the tool's output string.

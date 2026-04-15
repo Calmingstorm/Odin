@@ -869,7 +869,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if err:
             return web.json_response({"error": err}, status=400)
         try:
-            schedule = bot.scheduler.add(
+            schedule = await bot.scheduler.add(
                 description=description,
                 action=action,
                 channel_id=channel_id,
@@ -888,7 +888,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.delete("/api/schedules/{schedule_id}")
     async def delete_schedule(request: web.Request) -> web.Response:
         sid = request.match_info["schedule_id"]
-        if bot.scheduler.delete(sid):
+        if await bot.scheduler.delete(sid):
             return web.json_response({"status": "deleted"})
         return web.json_response({"error": "schedule not found"}, status=404)
 

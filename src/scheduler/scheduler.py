@@ -45,7 +45,7 @@ class Scheduler:
     def _save(self) -> None:
         self.data_path.write_text(json.dumps(self._schedules, indent=2))
 
-    def add(
+    async def add(
         self,
         description: str,
         action: str,
@@ -119,8 +119,9 @@ class Scheduler:
         elif action == "workflow":
             schedule["steps"] = steps
 
-        self._schedules.append(schedule)
-        self._save()
+        async with self._lock:
+            self._schedules.append(schedule)
+            await asyncio.to_thread(self._save)
         log_next = schedule.get("next_run", "on trigger")
         log.info("Added schedule %s: %s (next: %s)", schedule["id"], description, log_next)
         return schedule
@@ -242,13 +243,14 @@ class Scheduler:
     def list_all(self) -> list[dict]:
         return list(self._schedules)
 
-    def delete(self, schedule_id: str) -> bool:
-        before = len(self._schedules)
-        self._schedules = [s for s in self._schedules if s["id"] != schedule_id]
-        if len(self._schedules) < before:
-            self._save()
-            log.info("Deleted schedule %s", schedule_id)
-            return True
+    async def delete(self, schedule_id: str) -> bool:
+        async with self._lock:
+            before = len(self._schedules)
+            self._schedules = [s for s in self._schedules if s["id"] != schedule_id]
+            if len(self._schedules) < before:
+                await asyncio.to_thread(self._save)
+                log.info("Deleted schedule %s", schedule_id)
+                return True
         return False
 
     def start(self, callback: Callable[[dict], Awaitable[None]]) -> None:
@@ -278,6 +280,7 @@ class Scheduler:
     async def _tick(self) -> None:
         async with self._lock:
             now = datetime.now(timezone.utc)
+            now_naive = now.replace(tzinfo=None)
             fired = False
             to_remove: list[str] = []
 
@@ -287,10 +290,10 @@ class Scheduler:
                     continue
 
                 next_run = datetime.fromisoformat(next_run_str)
-                # Strip timezone info so comparison with naive now() always works
+                # Strip timezone info so comparison is always naive-vs-naive
                 if next_run.tzinfo is not None:
                     next_run = next_run.replace(tzinfo=None)
-                if now < next_run:
+                if now_naive < next_run:
                     continue
 
                 log.info("Firing schedule %s: %s", schedule["id"], schedule["description"])
