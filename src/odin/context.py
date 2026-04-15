@@ -12,10 +12,29 @@ stringified before substitution.
 from __future__ import annotations
 
 import copy
+import enum
 import re
 from typing import Any
 
 from src.odin.types import StepResult
+
+
+def _interpolation_str(value: Any) -> str:
+    """Stringify a value for embedding in an interpolated string.
+
+    Python's default ``str()`` produces representations that don't match what
+    users naturally write in conditions/params (e.g. ``str(True)`` → ``"True"``
+    instead of ``"true"``, ``str(SomeEnum.X)`` → ``"SomeEnum.X"`` instead of
+    the enum *value*).  This helper normalises the common cases.
+    """
+    # bool must be checked before int (bool is a subclass of int)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "none"
+    if isinstance(value, enum.Enum):
+        return str(value.value)
+    return str(value)
 
 # ---------------------------------------------------------------------------
 # Regex patterns
@@ -122,10 +141,10 @@ class ExecutionContext:
             def _replacer(match: re.Match) -> str:
                 dollar, steps, inputs = match.group(1), match.group(2), match.group(3)
                 if dollar is not None:
-                    return str(self._lookup(dollar))
+                    return _interpolation_str(self._lookup(dollar))
                 if steps is not None:
-                    return str(self._lookup_step(steps))
-                return str(self._lookup_input(inputs))
+                    return _interpolation_str(self._lookup_step(steps))
+                return _interpolation_str(self._lookup_input(inputs))
             return _ANY_REF.sub(_replacer, value)
 
         return value

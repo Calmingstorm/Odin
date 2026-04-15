@@ -223,7 +223,8 @@ class TestConditionEvaluation:
     def test_step_status_in_condition(self):
         ctx = ExecutionContext()
         ctx.record("a", StepResult(status=StepStatus.FAILED, error="boom"))
-        assert ctx.evaluate_condition("${a.status} == StepStatus.FAILED") is True
+        # Enum values stringify to their .value ("failed"), not repr ("StepStatus.FAILED")
+        assert ctx.evaluate_condition("${a.status} == failed") is True
 
     def test_missing_ref_raises(self):
         ctx = ExecutionContext()
@@ -309,3 +310,118 @@ class TestConditionEvaluation:
     def test_step_output_empty_list_is_falsy(self):
         ctx = _ctx_with_results(check=[])
         assert ctx.evaluate_condition("${check.output}") is False
+
+
+# ---------------------------------------------------------------------------
+# Interpolation stringification — booleans, enums, None  (regression)
+# ---------------------------------------------------------------------------
+
+class TestInterpolationStringification:
+    """Embedded references must stringify booleans, enums, and None in a
+    user-friendly way so that condition comparisons work naturally."""
+
+    # -- booleans in conditions -----------------------------------------------
+
+    def test_bool_true_eq_true(self):
+        ctx = ExecutionContext(inputs={"flag": True})
+        assert ctx.evaluate_condition("${inputs.flag} == true") is True
+
+    def test_bool_false_eq_false(self):
+        ctx = ExecutionContext(inputs={"flag": False})
+        assert ctx.evaluate_condition("${inputs.flag} == false") is True
+
+    def test_bool_true_ne_false(self):
+        ctx = ExecutionContext(inputs={"flag": True})
+        assert ctx.evaluate_condition("${inputs.flag} != false") is True
+
+    def test_bool_false_ne_true(self):
+        ctx = ExecutionContext(inputs={"flag": False})
+        assert ctx.evaluate_condition("${inputs.flag} != true") is True
+
+    def test_bool_true_eq_false_is_false(self):
+        ctx = ExecutionContext(inputs={"flag": True})
+        assert ctx.evaluate_condition("${inputs.flag} == false") is False
+
+    # -- booleans from step outputs -------------------------------------------
+
+    def test_step_output_bool_comparison(self):
+        ctx = _ctx_with_results(gate=True)
+        assert ctx.evaluate_condition("${gate.output} == true") is True
+
+    def test_step_output_bool_false_comparison(self):
+        ctx = _ctx_with_results(gate=False)
+        assert ctx.evaluate_condition("${gate.output} == false") is True
+
+    # -- enum values in conditions --------------------------------------------
+
+    def test_step_status_enum_eq_value(self):
+        ctx = ExecutionContext()
+        ctx.record("a", StepResult(status=StepStatus.SUCCESS, output="ok"))
+        assert ctx.evaluate_condition("${a.status} == success") is True
+
+    def test_step_status_enum_eq_wrong_value(self):
+        ctx = ExecutionContext()
+        ctx.record("a", StepResult(status=StepStatus.SUCCESS, output="ok"))
+        assert ctx.evaluate_condition("${a.status} == failed") is False
+
+    def test_step_status_enum_ne(self):
+        ctx = ExecutionContext()
+        ctx.record("a", StepResult(status=StepStatus.SKIPPED, error="skip"))
+        assert ctx.evaluate_condition("${a.status} != success") is True
+
+    def test_step_status_timeout_eq(self):
+        ctx = ExecutionContext()
+        ctx.record("a", StepResult(status=StepStatus.TIMEOUT, error="slow"))
+        assert ctx.evaluate_condition("${a.status} == timeout") is True
+
+    # -- None in conditions ---------------------------------------------------
+
+    def test_none_eq_none_string(self):
+        ctx = ExecutionContext(inputs={"val": None})
+        assert ctx.evaluate_condition("${inputs.val} == none") is True
+
+    def test_none_ne_something(self):
+        ctx = ExecutionContext(inputs={"val": None})
+        assert ctx.evaluate_condition("${inputs.val} != ready") is True
+
+    # -- embedded stringification in params (not just conditions) --------------
+
+    def test_bool_embedded_in_param_string(self):
+        ctx = ExecutionContext(inputs={"verbose": True})
+        r = ctx.resolve_params({"flag": "--verbose=${inputs.verbose}"})
+        assert r == {"flag": "--verbose=true"}
+
+    def test_bool_false_embedded_in_param_string(self):
+        ctx = ExecutionContext(inputs={"debug": False})
+        r = ctx.resolve_params({"flag": "debug=${inputs.debug}"})
+        assert r == {"flag": "debug=false"}
+
+    def test_enum_embedded_in_param_string(self):
+        ctx = ExecutionContext()
+        ctx.record("a", StepResult(status=StepStatus.SUCCESS, output="data"))
+        r = ctx.resolve_params({"msg": "step status: ${a.status}"})
+        assert r == {"msg": "step status: success"}
+
+    def test_none_embedded_in_param_string(self):
+        ctx = ExecutionContext(inputs={"val": None})
+        r = ctx.resolve_params({"msg": "value is ${inputs.val}"})
+        assert r == {"msg": "value is none"}
+
+    # -- full-value refs still preserve raw types -----------------------------
+
+    def test_full_ref_bool_preserves_type(self):
+        ctx = ExecutionContext(inputs={"flag": True})
+        r = ctx.resolve_params({"x": "${inputs.flag}"})
+        assert r == {"x": True}
+        assert isinstance(r["x"], bool)
+
+    def test_full_ref_none_preserves_type(self):
+        ctx = ExecutionContext(inputs={"val": None})
+        r = ctx.resolve_params({"x": "${inputs.val}"})
+        assert r["x"] is None
+
+    def test_full_ref_enum_preserves_type(self):
+        ctx = ExecutionContext()
+        ctx.record("a", StepResult(status=StepStatus.FAILED, error="boom"))
+        r = ctx.resolve_params({"s": "${a.status}"})
+        assert r["s"] is StepStatus.FAILED
