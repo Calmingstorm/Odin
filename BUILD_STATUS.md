@@ -150,7 +150,7 @@ tightening of prior work.
 |---|-------|--------|---------|
 | 31 | Agent worker lifecycle state machine: replace implicit polling with typed states (spawning, ready, executing, recovering, done) | done | AgentState enum (8 states), AgentStateMachine with enforced transitions + history, LLM recovery logic (EXECUTING→RECOVERING→retry), backward-compatible status property, +90 tests |
 | 32 | Recovery-before-escalation: known failure modes auto-heal once before surfacing to user | done | RecoveryHandler module (6 categories, pattern matching, per-category delays), ToolExecutor integration, agent per-iteration recovery reset, 2 REST API endpoints, RecoveryStats observability, +110 tests |
-| 33 | Loop branch-freshness check: on test failure, verify branch isn't stale vs origin before treating as regression | pending | |
+| 33 | Loop branch-freshness check: on test failure, verify branch isn't stale vs origin before treating as regression | done | BranchFreshnessChecker module (test command/failure detection, async git freshness check, staleness annotation), ToolExecutor integration for run_command/run_script, BranchFreshnessConfig, FreshnessStats observability, 2 REST API endpoints, +111 tests |
 | 34 | Agent trajectory saving: every spawned agent saves its full trajectory like messages do in Round 3 | pending | |
 | 35 | Nested agent spawning: one agent may spawn sub-agents with a depth limit (default 2) | pending | |
 
@@ -4103,4 +4103,163 @@ Both return 503 if executor is unavailable (same pattern as risk endpoints).
 - Agent `recovery_attempts` is now reset per-iteration (line 640 in `_run_agent`). This means each iteration gets MAX_RECOVERY_ATTEMPTS retries. Previously, only the first LLM error in the agent's lifetime got a retry.
 - The `RecoveryStats.get_recent()` returns events in chronological order (oldest first within the limit). The `_recent` list is capped at `max_recent=100` by default.
 - Recovery does NOT apply to: RBAC denials (checked before tool execution), unknown tools (returned before tool execution), timeouts (excluded via _SKIP_RECOVERY).
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
+
+## Round 33 — Loop branch-freshness check: stale branch detection on test failure
+**Focus**: On test failure, verify the local branch isn't stale vs origin before treating the failure as a regression. Annotate test failure results with staleness warnings so the LLM/loop can decide to pull first.
+**Baseline pytest**: 3281 passed, 0 failed
+**Post-round pytest**: 3392 passed, 0 failed (+111 new tests)
+
+### Validated from prior rounds
+- Round 32 (Recovery-before-escalation): All 110 tests pass. Recovery module, executor integration, and agent per-iteration reset all working correctly.
+- Round 32 noted "`ToolExecutor.__new__()` fixture pattern now requires `_recovery_enabled = False` and `recovery_stats = RecoveryStats()`" — confirmed and extended: fixtures in `test_http_probe_ops.py` and `test_terraform_ops.py` updated with `_branch_freshness_enabled = False` and `freshness_stats = FreshnessStats()`.
+- Round 32 noted "Round 33 has no dependencies on Round 32. Recovery is self-contained." — confirmed, clean start.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. Branch freshness module: `src/tools/branch_freshness.py` (new, ~185 lines)
+
+**Test command detection — `is_test_command(command: str) -> bool`**:
+18 compiled regex patterns detecting test suite invocations: pytest, python -m pytest, npm/yarn/pnpm test, go test, cargo test, make test, gradle test, mvn test/verify, rspec, jest, mocha, vitest, phpunit, dotnet test, unittest, nosetest. Conservative — only matches test runner names, not the word "test" in arbitrary context.
+
+**Test failure detection — `is_test_failure(result: str, exit_code: int | None) -> bool`**:
+6 compiled regex patterns detecting test-specific failure indicators: `N failed`, `FAILED`, `FAILURES`, `Test(s) failed`, `Assertion(Error|Failed)`, `FAIL <path>`. Only triggers when result starts with "Command failed" or "Script failed" prefixes (or when exit_code is explicitly non-zero). Does NOT match generic non-zero exit codes — prevents false positives on regular command failures.
+
+**Branch status checking — `check_branch_freshness(exec_fn, address, ssh_user) -> BranchStatus`**:
+- Runs `git rev-parse --abbrev-ref HEAD` to get current branch.
+- Runs `git fetch origin --quiet` to update remote refs (non-fatal on failure).
+- Runs `git rev-list --count HEAD..origin/{branch}` to count commits behind.
+- Returns `BranchStatus` dataclass with: `is_stale`, `commits_behind`, `local_branch`, `remote_ref`, `fetch_failed`, `error`.
+- Handles all error cases gracefully: not a git repo, detached HEAD, fetch failure, rev-list failure, exec_fn exceptions.
+- Uses the same `exec_fn` as the original command, so freshness checks run on the same host (local or remote).
+
+**Staleness warning formatting — `format_staleness_warning(status) -> str`**:
+Returns `"[STALE BRANCH] {branch} is {N} commit(s) behind {remote}. This test failure may be from outdated code — pull before investigating."` when stale, empty string when fresh.
+
+**FreshnessStats tracker**:
+- `record(event)`: tracks total checks, stale-found count.
+- `record_fetch_failure()`: counts git fetch failures.
+- `get_summary()`: returns dict with total_checks, stale_found, fetch_failures.
+- `get_recent(limit)`: returns recent events as dicts, capped at `MAX_RECENT_CHECKS` (50).
+- `reset()`: clears all counters and history.
+
+#### 2. ToolExecutor integration: `src/tools/executor.py` (lines 10-20, 82-83, 210-240, 281-286, 326-330)
+
+**New imports** (lines 10-20): `BranchStatus`, `FreshnessEvent`, `FreshnessStats`, `check_branch_freshness`, `format_staleness_warning`, `is_test_command`, `is_test_failure` from `src/tools/branch_freshness`.
+
+**New attributes on `__init__`** (lines 82-83):
+- `self.freshness_stats = FreshnessStats()` — per-executor stats tracker.
+- `self._branch_freshness_enabled = self.config.branch_freshness.enabled` — respects config toggle.
+
+**`_annotate_with_freshness()` method** (lines 210-240):
+- Resolves host alias to address/ssh_user.
+- Calls `check_branch_freshness()` using `self._exec_command` as the exec function.
+- Records freshness event in stats (stale or fresh).
+- If stale, appends the staleness warning to the result.
+- Fail-open: returns the original result unchanged on any exception.
+
+**`_handle_run_command` updated** (lines 281-286):
+- After getting the result, checks if the command is a test command AND the result indicates a test failure.
+- If both conditions met and freshness checking enabled, calls `_annotate_with_freshness()`.
+
+**`_handle_run_script` updated** (lines 326-330):
+- Same logic but checks the script content for test commands.
+- Only triggers on `Script failed` results.
+
+#### 3. Config integration: `src/config/schema.py` (lines 60-61, 88)
+
+New `BranchFreshnessConfig` model:
+- `enabled: bool = True` — toggle freshness checking on/off.
+
+Added `branch_freshness: BranchFreshnessConfig = BranchFreshnessConfig()` to `ToolsConfig`.
+
+#### 4. REST API endpoints: `src/web/api.py` (lines 2118-2133)
+
+Two new endpoints:
+- `GET /api/freshness/stats` — returns `get_summary()` dict with total_checks, stale_found, fetch_failures.
+- `GET /api/freshness/recent?limit=N` — returns recent freshness check events (default 10, max 50).
+
+Both return 503 if executor is unavailable (same pattern as recovery/risk endpoints).
+
+#### 5. Test fixture updates
+
+- `tests/test_http_probe_ops.py` (lines 637-640): Added `_branch_freshness_enabled = False` and `freshness_stats = FreshnessStats()` to `__new__()` fixture.
+- `tests/test_terraform_ops.py` (lines 653-656): Same fixture update.
+
+#### 6. CLAUDE.md updates
+
+- Added `src/tools/branch_freshness.py` to project structure with description.
+
+### Tests: `tests/test_branch_freshness.py` — 111 tests across 16 test classes
+
+**is_test_command** (28): pytest, python -m pytest, npm/yarn/pnpm test, go test, cargo test, make test, gradle test, mvn test/verify, rspec, jest, mocha, vitest, phpunit, dotnet test, unittest, nosetest, negative cases (ls, git, empty, grep, echo), pipeline embedding, all patterns compiled.
+
+**is_test_failure** (13): pytest failure, FAILURES, FAILED keyword, script failure, assertion error, assertion failed, go FAIL, exit_code param, success no match, success exit_code=0, empty string, normal command failure, all patterns compiled.
+
+**BranchStatus** (3): fields, error, fetch_failed.
+
+**check_branch_freshness** (10): fresh branch, stale branch, not a git repo, detached HEAD, fetch failure continues, fetch exception continues, rev-list failure, bad rev-list output, exec_fn crash, empty branch name.
+
+**format_staleness_warning** (3): stale warning content, fresh returns empty, single commit.
+
+**FreshnessEvent** (2): fields, default timestamp.
+
+**FreshnessStats** (11): initial state, record fresh, record stale, fetch failure, get_recent empty, get_recent dicts, get_recent limit, max_recent cap, reset, command truncation, multiple records.
+
+**Constants** (4): timeout value, max_recent, patterns not empty.
+
+**Executor integration** (8): stale annotation appended, fresh no annotation, non-test no check, test success no check, disabled via config, exception safe, fetch failure tracked.
+
+**run_script freshness** (2): script with test annotated, non-test script not annotated.
+
+**Executor attributes** (3): has freshness_stats, enabled by default, disabled via config.
+
+**Config** (4): default enabled, disabled, tools config has branch_freshness, custom config.
+
+**REST API** (5): stats endpoint, recent endpoint, recent with limit, stats no executor (503), recent no executor (503).
+
+**Module imports** (3): branch_freshness module, executor imports, config import.
+
+**Edge cases** (11): embedded test command, case sensitive, failure prefix required, warning newline prefix, branch name whitespace, exit_code=0 with failure text, empty rev-list, multiple patterns, stats default limit, resolve failure safe, check exception safe.
+
+**Fixture compatibility** (1): __new__() pattern with new attributes.
+
+### Design decisions
+
+1. **Test-specific failure patterns only**: The `_TEST_FAILURE_PATTERNS` intentionally excludes generic non-zero exit code detection. A test failure must contain test-specific text like "N failed", "FAILED", "FAILURES", "AssertionError", etc. This prevents false positives from regular `Command failed (exit 1)` results (e.g., `ls /nonexistent`).
+
+2. **Freshness check uses the same exec_fn**: The freshness check runs `git` commands via `self._exec_command`, which dispatches to the same host (local or remote) where the test ran. This means the staleness check reflects the actual state of the repo where tests executed.
+
+3. **Git fetch is non-fatal**: If `git fetch origin` fails (network issues, no remote), the freshness check still runs `git rev-list` against cached remote refs. The fetch failure is tracked in stats but doesn't prevent the check from completing.
+
+4. **Fail-open**: If the freshness check crashes for any reason (not a git repo, exec_fn raises, etc.), the original test failure result is returned unchanged. No additional error is surfaced to the user.
+
+5. **Annotation format**: The staleness warning uses `[STALE BRANCH]` prefix (similar to `[NOTIFY]`/`[ALERT]` in the autonomous loop system). This is a machine-readable tag that the LLM can parse and act on (e.g., "pull before investigating").
+
+6. **Config toggle**: `branch_freshness.enabled: bool = True` in `ToolsConfig`. Defaults to enabled. Operators who want to disable the overhead of git commands on every test failure can set `tools.branch_freshness.enabled: false`.
+
+7. **Separate from recovery**: Branch freshness checks are orthogonal to the recovery system. Recovery retries transient tool failures; freshness annotation provides context about WHY a test failure occurred. They don't interfere with each other.
+
+8. **Script content checked for test commands**: For `run_script`, the script body (not the wrapper command) is checked for test command patterns. This catches scripts that invoke pytest/jest/etc.
+
+### Files changed
+- `src/tools/branch_freshness.py` (new, ~185 lines): is_test_command, is_test_failure, BranchStatus, check_branch_freshness, format_staleness_warning, FreshnessEvent, FreshnessStats.
+- `src/tools/executor.py` (lines 10-20, 82-83, 210-240, 281-286, 326-330): branch_freshness imports, freshness_stats/branch_freshness_enabled attrs, _annotate_with_freshness method, _handle_run_command annotation, _handle_run_script annotation.
+- `src/config/schema.py` (lines 60-61, 88): BranchFreshnessConfig model, added to ToolsConfig.
+- `src/web/api.py` (lines 2118-2133): 2 new REST API endpoints (/api/freshness/stats, /api/freshness/recent).
+- `CLAUDE.md` (line 56): Added branch_freshness module to project structure.
+- `tests/test_http_probe_ops.py` (lines 637-640): __new__() fixture updated with _branch_freshness_enabled and freshness_stats.
+- `tests/test_terraform_ops.py` (lines 653-656): Same fixture update.
+- `tests/test_branch_freshness.py` (new, 111 tests): 16 test classes covering detection, checking, annotation, stats, executor integration, API, config, edge cases.
+
+### Next round watch for
+- Round 34 (Agent trajectory saving) has no dependencies on Round 33. Branch freshness is self-contained.
+- REST API endpoint count is now 113 (was 111, +2 new: `/api/freshness/stats`, `/api/freshness/recent`).
+- The `ToolExecutor.__new__()` fixture pattern now requires 7 attributes: `_permission_manager = None`, `risk_stats = RiskStats()`, `_metrics = {}`, `_recovery_enabled = False`, `recovery_stats = RecoveryStats()`, `_branch_freshness_enabled = False`, `freshness_stats = FreshnessStats()`. Future test files using this pattern must include all 7.
+- `is_test_command()` has 18 patterns. To add more test runners, add a compiled regex to `_TEST_COMMAND_PATTERNS` in `branch_freshness.py`.
+- `is_test_failure()` has 6 patterns. Deliberately excludes generic exit code patterns. Only matches test-specific failure indicators.
+- The freshness check runs `git fetch origin --quiet` on every test failure check. This adds network I/O (~1-2s). If this becomes a performance concern, a future round could add a cooldown (e.g., skip fetch if fetched within last 60s).
+- `FRESHNESS_CHECK_TIMEOUT = 15` is not currently enforced as a timeout on individual git commands — it's available as a constant for future use. The individual git commands are subject to the normal command timeout.
+- The `format_staleness_warning()` output starts with `\n` so it appends cleanly to existing result text.
 - All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).

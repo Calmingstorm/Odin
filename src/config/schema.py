@@ -57,6 +57,10 @@ class RecoveryConfig(BaseModel):
     enabled: bool = True
 
 
+class BranchFreshnessConfig(BaseModel):
+    enabled: bool = True
+
+
 class SSHPoolConfig(BaseModel):
     enabled: bool = True
     control_persist: int = 60
@@ -83,6 +87,7 @@ class ToolsConfig(BaseModel):
     bulkhead: BulkheadConfig = BulkheadConfig()
     ssh_pool: SSHPoolConfig = SSHPoolConfig()
     recovery: RecoveryConfig = RecoveryConfig()
+    branch_freshness: BranchFreshnessConfig = BranchFreshnessConfig()
 
     def get_tool_timeout(self, tool_name: str) -> int:
         return self.tool_timeouts.get(tool_name, self.command_timeout_seconds)

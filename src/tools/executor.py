@@ -10,6 +10,15 @@ from pathlib import Path
 from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
 from ..permissions.manager import PermissionManager
+from .branch_freshness import (
+    BranchStatus,
+    FreshnessEvent,
+    FreshnessStats,
+    check_branch_freshness,
+    format_staleness_warning,
+    is_test_command,
+    is_test_failure,
+)
 from .bulkhead import BulkheadFullError, BulkheadRegistry
 from .recovery import (
     RecoveryCategory,
@@ -74,6 +83,8 @@ class ToolExecutor:
         self.risk_stats = RiskStats()
         self.recovery_stats = RecoveryStats()
         self._recovery_enabled = self.config.recovery.enabled
+        self.freshness_stats = FreshnessStats()
+        self._branch_freshness_enabled = self.config.branch_freshness.enabled
         self.bulkheads = _build_bulkhead_registry(self.config)
         pool_cfg = self.config.ssh_pool
         self.ssh_pool: SSHConnectionPool | None = (
@@ -196,6 +207,42 @@ class ToolExecutor:
                 return cat
         return None
 
+    async def _annotate_with_freshness(
+        self, result: str, host_alias: str, tool_name: str, command: str,
+    ) -> str:
+        """Check branch freshness and annotate test failure result if stale."""
+        resolved = self._resolve_host(host_alias)
+        if not resolved:
+            return result
+        address, ssh_user, _ = resolved
+        try:
+            status = await check_branch_freshness(
+                self._exec_command, address, ssh_user,
+            )
+        except Exception:
+            return result
+
+        if status.fetch_failed:
+            self.freshness_stats.record_fetch_failure()
+
+        event = FreshnessEvent(
+            tool_name=tool_name,
+            command=command[:120],
+            is_stale=status.is_stale,
+            commits_behind=status.commits_behind,
+            branch=status.local_branch,
+        )
+        self.freshness_stats.record(event)
+
+        warning = format_staleness_warning(status)
+        if warning:
+            log.info(
+                "Branch %s is %d commit(s) behind %s — test failure may be stale",
+                status.local_branch, status.commits_behind, status.remote_ref,
+            )
+            return result + warning
+        return result
+
     def get_metrics(self) -> dict[str, dict[str, int]]:
         """Return per-tool call and error counts."""
         return dict(self._metrics)
@@ -264,8 +311,12 @@ class ToolExecutor:
         return output
 
     async def _handle_run_command(self, inp: dict) -> str:
-        output = await self._run_on_host(inp["host"], inp["command"])
-        return _truncate_lines(output)
+        command = inp["command"]
+        output = await self._run_on_host(inp["host"], command)
+        output = _truncate_lines(output)
+        if self._branch_freshness_enabled and is_test_command(command) and is_test_failure(output):
+            output = await self._annotate_with_freshness(output, inp["host"], "run_command", command)
+        return output
 
     async def _handle_run_script(self, inp: dict) -> str:
         """Write a script to a temp file, execute it, and clean up."""
@@ -306,7 +357,10 @@ class ToolExecutor:
 
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:
-            return f"Script failed (exit {code}):\n{_truncate_lines(output)}"
+            result = f"Script failed (exit {code}):\n{_truncate_lines(output)}"
+            if self._branch_freshness_enabled and is_test_command(script) and is_test_failure(result):
+                result = await self._annotate_with_freshness(result, host, "run_script", script[:120])
+            return result
         return _truncate_lines(output)
 
     async def _handle_read_file(self, inp: dict) -> str:

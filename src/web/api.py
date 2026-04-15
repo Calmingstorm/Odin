@@ -2114,6 +2114,25 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         limit = _safe_int_param(request, "limit", 20, hi=100)
         return web.json_response({"entries": executor.recovery_stats.get_recent(limit)})
 
+    # ------------------------------------------------------------------
+    # Branch freshness stats (observability)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/freshness/stats")
+    async def freshness_stats(_request: web.Request) -> web.Response:
+        executor = getattr(bot, "tool_executor", None)
+        if not executor:
+            return web.json_response({"error": "executor not available"}, status=503)
+        return web.json_response(executor.freshness_stats.get_summary())
+
+    @routes.get("/api/freshness/recent")
+    async def freshness_recent(request: web.Request) -> web.Response:
+        executor = getattr(bot, "tool_executor", None)
+        if not executor:
+            return web.json_response({"error": "executor not available"}, status=503)
+        limit = _safe_int_param(request, "limit", 10, hi=50)
+        return web.json_response({"entries": executor.freshness_stats.get_recent(limit)})
+
     return routes
 
 

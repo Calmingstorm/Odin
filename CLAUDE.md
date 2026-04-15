@@ -53,6 +53,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/tools/process_manager.py` — background process registry (start/poll/write/kill)
   - `src/tools/risk_classifier.py` — command/tool risk classification (observability only, no blocking)
   - `src/tools/recovery.py` — recovery-before-escalation: transient tool failure auto-retry (single retry, per-category delays)
+  - `src/tools/branch_freshness.py` — branch freshness checker: detects stale branches on test failure, annotates results for LLM/loop awareness
   - `src/permissions/manager.py` — per-user permission tiers (admin/user/guest) with tool RBAC enforcement
   - `src/tools/comfyui.py` — ComfyUI image generation client
   - `src/tools/autonomous_loop.py` — autonomous loop system (LLM-driven recurring tasks)
