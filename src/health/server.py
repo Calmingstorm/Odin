@@ -158,8 +158,9 @@ def _make_auth_middleware(
 
 def _make_rate_limit_middleware() -> web.middleware:
     """Simple in-memory rate limiter for /api/ routes (per remote IP)."""
-    # {ip: [(timestamp, ...),]}
+    # {ip: [timestamp, ...]}
     _buckets: dict[str, list[float]] = defaultdict(list)
+    _last_eviction = [0.0]  # mutable container for nonlocal access
 
     @web.middleware
     async def rate_limit_middleware(
@@ -171,12 +172,20 @@ def _make_rate_limit_middleware() -> web.middleware:
         ip = request.remote or "unknown"
         now = time.monotonic()
         window_start = now - _RATE_LIMIT_WINDOW
-        # Prune old entries
+        # Prune old entries for this IP
         bucket = _buckets[ip]
         _buckets[ip] = bucket = [t for t in bucket if t > window_start]
         if len(bucket) >= _RATE_LIMIT_MAX:
             return web.json_response({"error": "rate limit exceeded"}, status=429)
         bucket.append(now)
+
+        # Periodic eviction of stale IP keys (every 5 minutes)
+        if now - _last_eviction[0] > 300:
+            _last_eviction[0] = now
+            stale = [k for k, v in _buckets.items() if not v or v[-1] < window_start]
+            for k in stale:
+                del _buckets[k]
+
         return await handler(request)
 
     return rate_limit_middleware
