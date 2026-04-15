@@ -441,3 +441,44 @@ class TestConditionalExecution:
         p = Planner(ts_registry)
         r = p.execute(plan)
         assert r.steps["warn"].status == StepStatus.SUCCESS
+
+    def test_when_numeric_gt_runs_step(self, ts_registry):
+        plan = PlanSpec(
+            name="numeric_gt",
+            steps=(
+                StepSpec(id="count", tool="echo", params={"message": 15}),
+                StepSpec(id="alert", tool="echo", params={"message": "threshold exceeded"},
+                         depends_on=("count",),
+                         when="${count.output} > 10"),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["alert"].status == StepStatus.SUCCESS
+
+    def test_when_numeric_gt_skips_step(self, ts_registry):
+        plan = PlanSpec(
+            name="numeric_gt_skip",
+            steps=(
+                StepSpec(id="count", tool="echo", params={"message": 3}),
+                StepSpec(id="alert", tool="echo", params={"message": "threshold exceeded"},
+                         depends_on=("count",),
+                         when="${count.output} > 10"),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["alert"].status == StepStatus.SKIPPED
+
+    def test_when_numeric_lte_from_input(self, ts_registry):
+        plan = PlanSpec(
+            name="numeric_lte",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "go"},
+                         when="${inputs.retries} <= 3"),
+            ),
+            inputs={"retries": 2},
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["a"].status == StepStatus.SUCCESS

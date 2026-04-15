@@ -311,6 +311,77 @@ class TestConditionEvaluation:
         ctx = _ctx_with_results(check=[])
         assert ctx.evaluate_condition("${check.output}") is False
 
+    # -- numeric comparisons ---------------------------------------------------
+
+    def test_gt_true(self):
+        ctx = ExecutionContext(inputs={"count": 10})
+        assert ctx.evaluate_condition("${inputs.count} > 5") is True
+
+    def test_gt_false(self):
+        ctx = ExecutionContext(inputs={"count": 3})
+        assert ctx.evaluate_condition("${inputs.count} > 5") is False
+
+    def test_gt_equal_is_false(self):
+        ctx = ExecutionContext(inputs={"count": 5})
+        assert ctx.evaluate_condition("${inputs.count} > 5") is False
+
+    def test_gte_true(self):
+        ctx = ExecutionContext(inputs={"count": 5})
+        assert ctx.evaluate_condition("${inputs.count} >= 5") is True
+
+    def test_gte_false(self):
+        ctx = ExecutionContext(inputs={"count": 4})
+        assert ctx.evaluate_condition("${inputs.count} >= 5") is False
+
+    def test_lt_true(self):
+        ctx = ExecutionContext(inputs={"duration": 2})
+        assert ctx.evaluate_condition("${inputs.duration} < 10") is True
+
+    def test_lt_false(self):
+        ctx = ExecutionContext(inputs={"duration": 15})
+        assert ctx.evaluate_condition("${inputs.duration} < 10") is False
+
+    def test_lte_true(self):
+        ctx = ExecutionContext(inputs={"duration": 10})
+        assert ctx.evaluate_condition("${inputs.duration} <= 10") is True
+
+    def test_lte_false(self):
+        ctx = ExecutionContext(inputs={"duration": 11})
+        assert ctx.evaluate_condition("${inputs.duration} <= 10") is False
+
+    def test_numeric_comparison_with_floats(self):
+        ctx = ExecutionContext(inputs={"ratio": "0.75"})
+        assert ctx.evaluate_condition("${inputs.ratio} >= 0.5") is True
+        assert ctx.evaluate_condition("${inputs.ratio} < 0.5") is False
+
+    def test_numeric_comparison_with_negative(self):
+        ctx = ExecutionContext(inputs={"delta": -3})
+        assert ctx.evaluate_condition("${inputs.delta} < 0") is True
+        assert ctx.evaluate_condition("${inputs.delta} > 0") is False
+
+    def test_numeric_comparison_non_numeric_returns_false(self):
+        ctx = ExecutionContext(inputs={"val": "abc"})
+        assert ctx.evaluate_condition("${inputs.val} > 5") is False
+
+    def test_numeric_comparison_from_step_output(self):
+        ctx = _ctx_with_results(scan={"count": 42})
+        assert ctx.evaluate_condition("${scan.output.count} > 10") is True
+        assert ctx.evaluate_condition("${scan.output.count} <= 41") is False
+
+    def test_numeric_comparison_step_output_nested(self):
+        ctx = _ctx_with_results(fetch={"response": {"code": 200}})
+        assert ctx.evaluate_condition("${fetch.output.response.code} >= 200") is True
+        assert ctx.evaluate_condition("${fetch.output.response.code} < 200") is False
+
+    def test_equality_still_works_with_numbers(self):
+        """== remains string comparison — '10 == 10' should still pass."""
+        ctx = ExecutionContext(inputs={"val": 10})
+        assert ctx.evaluate_condition("${inputs.val} == 10") is True
+
+    def test_inequality_still_works_with_numbers(self):
+        ctx = ExecutionContext(inputs={"val": 10})
+        assert ctx.evaluate_condition("${inputs.val} != 20") is True
+
 
 # ---------------------------------------------------------------------------
 # Interpolation stringification — booleans, enums, None  (regression)

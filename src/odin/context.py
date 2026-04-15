@@ -19,6 +19,20 @@ from typing import Any
 from src.odin.types import StepResult
 
 
+def _numeric_compare(left: str, right: str, fn) -> bool:
+    """Try to compare *left* and *right* as numbers using *fn*.
+
+    Returns ``False`` if either side cannot be parsed as a number.
+    Supports ints and floats.
+    """
+    try:
+        lv = int(left) if left.lstrip("-").isdigit() else float(left)
+        rv = int(right) if right.lstrip("-").isdigit() else float(right)
+    except (ValueError, ArithmeticError):
+        return False
+    return fn(lv, rv)
+
+
 def _interpolation_str(value: Any) -> str:
     """Stringify a value for embedding in an interpolated string.
 
@@ -86,6 +100,8 @@ class ExecutionContext:
         After interpolation the result is checked for truthiness:
         - Non-string objects use Python truthiness directly.
         - Strings support ``==`` / ``!=`` comparison operators (whitespace-trimmed).
+        - Strings support ``>``, ``>=``, ``<``, ``<=`` numeric comparison operators.
+          Both sides must be parseable as numbers; otherwise the condition is ``False``.
         - Plain strings are truthy unless empty or one of the canonical false
           literals: ``"false"``, ``"0"``, ``"no"``, ``"null"``, ``"none"`` (case-insensitive).
         """
@@ -95,11 +111,25 @@ class ExecutionContext:
         if not isinstance(resolved, str):
             return bool(resolved)
 
-        # Check for comparison operators in the *resolved* string
+        # Check for comparison operators in the *resolved* string.
+        # Order matters: multi-char operators (!=, >=, <=) must be tried
+        # before their single-char prefixes (>, <) to avoid partial matches;
+        # == before = is already ensured.  != / == use string comparison;
+        # >= / <= / > / < use numeric comparison.
         for op, fn in (("!=", lambda a, b: a != b), ("==", lambda a, b: a == b)):
             if op in resolved:
                 left, _, right = resolved.partition(op)
                 return fn(left.strip(), right.strip())
+
+        for op, fn in (
+            (">=", lambda a, b: a >= b),
+            ("<=", lambda a, b: a <= b),
+            (">", lambda a, b: a > b),
+            ("<", lambda a, b: a < b),
+        ):
+            if op in resolved:
+                left, _, right = resolved.partition(op)
+                return _numeric_compare(left.strip(), right.strip(), fn)
 
         # Plain string truthiness
         return resolved.strip().lower() not in ("", "false", "0", "no", "null", "none")
