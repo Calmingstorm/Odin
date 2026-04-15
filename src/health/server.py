@@ -16,6 +16,7 @@ from aiohttp import web
 from ..config.schema import WebConfig, WebhookConfig
 from ..odin_log import get_logger
 from ..version import get_version
+from .metrics import MetricsCollector
 
 if TYPE_CHECKING:
     from ..discord.client import OdinBot
@@ -29,7 +30,7 @@ SendMessageCallback = Callable[[str, str], Awaitable[None]]
 TriggerCallback = Callable[[str, dict], Awaitable[int]]
 
 # Paths that skip API token authentication
-_AUTH_SKIP_PREFIXES = ("/health", "/webhook/", "/ui")
+_AUTH_SKIP_PREFIXES = ("/health", "/metrics", "/webhook/", "/ui")
 
 # Exact API paths that skip token auth (login must be accessible unauthenticated)
 _AUTH_SKIP_PATHS = frozenset({"/api/auth/login"})
@@ -326,6 +327,12 @@ class HealthServer:
             timeout_minutes=self._web_config.session_timeout_minutes,
         )
 
+        # Prometheus metrics collector
+        self._metrics_collector = MetricsCollector()
+        self._metrics_collector.register_source(
+            "sessions", lambda: self._session_manager.active_count,
+        )
+
         middlewares = []
         if self._web_config.enabled:
             middlewares.append(_make_security_headers_middleware())
@@ -339,6 +346,7 @@ class HealthServer:
         self._app.router.add_get("/health", self._health)
         self._app.router.add_get("/health/live", self._health_live)
         self._app.router.add_get("/health/ready", self._health_ready)
+        self._app.router.add_get("/metrics", self._metrics)
         if self._webhook_config.enabled:
             self._app.router.add_post("/webhook/gitea", self._webhook_gitea)
             self._app.router.add_post("/webhook/grafana", self._webhook_grafana)
@@ -358,8 +366,14 @@ class HealthServer:
                 log.info("Serving web UI from %s", ui_dir)
         self._runner: web.AppRunner | None = None
 
+    @property
+    def metrics(self) -> MetricsCollector:
+        """Access the Prometheus metrics collector for registering sources."""
+        return self._metrics_collector
+
     def set_ready(self, ready: bool = True) -> None:
         self._ready = ready
+        self._metrics_collector.set_ready(ready)
 
     def register_component(self, name: str, check: ComponentCheck) -> None:
         """Register a named component health check.
@@ -371,6 +385,8 @@ class HealthServer:
         health request.
         """
         self._components[name] = check
+        # Keep metrics collector aware of component checks
+        self._metrics_collector.set_component_check(self._check_components)
 
     def set_send_message(self, callback: SendMessageCallback) -> None:
         self._send_message = callback
@@ -478,6 +494,19 @@ class HealthServer:
         status_code = 200 if all_healthy else 503
         status_text = "ready" if all_healthy else "degraded"
         return web.json_response({"status": status_text, "components": components}, status=status_code)
+
+    async def _metrics(self, _request: web.Request) -> web.Response:
+        """Prometheus metrics endpoint.
+
+        Returns metrics in Prometheus exposition format (text/plain).
+        Unauthenticated — intended for Prometheus scraper access.
+        """
+        body = self._metrics_collector.render()
+        return web.Response(
+            text=body,
+            content_type="text/plain",
+            charset="utf-8",
+        )
 
     def _check_components(self) -> dict[str, dict]:
         """Run all registered component checks and return a summary dict."""
