@@ -13,10 +13,17 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
-from ..config.schema import SlackConfig, WebConfig, WebhookConfig
+from ..config.schema import GrafanaAlertConfig, SlackConfig, WebConfig, WebhookConfig
 from ..notifications.slack import SlackNotifier
 from ..odin_log import get_logger
 from ..version import get_version
+from .grafana_alerts import (
+    GrafanaAlertHandler,
+    RemediationRule,
+    build_remediation_prompt,
+    format_alert_message,
+    parse_grafana_payload,
+)
 from .metrics import MetricsCollector
 
 if TYPE_CHECKING:
@@ -314,17 +321,41 @@ class HealthServer:
         webhook_config: WebhookConfig | None = None,
         web_config: WebConfig | None = None,
         slack_config: SlackConfig | None = None,
+        grafana_alert_config: GrafanaAlertConfig | None = None,
     ) -> None:
         self.port = port
         self._ready = False
         self._webhook_config = webhook_config or WebhookConfig()
         self._web_config = web_config or WebConfig()
         self._slack_config = slack_config or SlackConfig()
+        self._grafana_alert_config = grafana_alert_config or GrafanaAlertConfig()
         self._send_message: SendMessageCallback | None = None
         self._trigger_callback: TriggerCallback | None = None
+        self._loop_spawn_callback: Callable | None = None
         self._slack_notifier: SlackNotifier | None = None
         self._start_time = time.monotonic()
         self._components: dict[str, ComponentCheck] = {}
+
+        # Grafana alert handler
+        rules = []
+        for rc in self._grafana_alert_config.rules:
+            rules.append(RemediationRule(
+                id=rc.id or f"rule_{len(rules)}",
+                name_pattern=rc.name_pattern,
+                label_matchers=rc.label_matchers,
+                severity_filter=rc.severity_filter,
+                remediation_goal=rc.remediation_goal,
+                mode=rc.mode,
+                interval_seconds=rc.interval_seconds,
+                max_iterations=rc.max_iterations,
+                cooldown_seconds=rc.cooldown_seconds,
+            ))
+        self._grafana_handler = GrafanaAlertHandler(
+            rules=rules,
+            auto_remediate=self._grafana_alert_config.auto_remediate,
+            cooldown_seconds=self._grafana_alert_config.cooldown_seconds,
+            max_concurrent=self._grafana_alert_config.max_concurrent_remediations,
+        )
 
         if self._slack_config.enabled:
             self._slack_notifier = SlackNotifier(
@@ -405,12 +436,23 @@ class HealthServer:
     def slack_notifier(self) -> SlackNotifier | None:
         return self._slack_notifier
 
+    @property
+    def grafana_handler(self) -> GrafanaAlertHandler:
+        return self._grafana_handler
+
     def set_send_message(self, callback: SendMessageCallback) -> None:
         self._send_message = callback
 
     def set_trigger_callback(self, callback: TriggerCallback) -> None:
         """Set callback for webhook-triggered scheduler actions."""
         self._trigger_callback = callback
+
+    def set_loop_spawn_callback(self, callback: Callable) -> None:
+        """Set callback for spawning remediation loops from alerts.
+
+        Callback signature: (goal, channel_id, mode, interval, max_iter) -> loop_id
+        """
+        self._loop_spawn_callback = callback
 
     def set_bot(self, bot: OdinBot) -> None:
         """Wire the bot instance to enable the REST API and WebSocket endpoints."""
@@ -662,38 +704,55 @@ class HealthServer:
         except json.JSONDecodeError:
             return web.json_response({"error": "invalid JSON"}, status=400)
 
-        # Grafana unified alerting format
-        alerts = data.get("alerts", [])
-        if not alerts:
-            title = data.get("title", data.get("ruleName", "Grafana Alert"))
-            message = data.get("message", data.get("state", ""))
-            text = f"**Grafana Alert** \u2014 {title}\n{message}"
-        else:
-            lines = []
-            for alert in alerts[:10]:
-                status = alert.get("status", "unknown")
-                labels = alert.get("labels", {})
-                name = labels.get("alertname", alert.get("alertname", "Unknown"))
-                instance = labels.get("instance", "")
-                emoji = "\U0001f534" if status == "firing" else "\U0001f7e2"
-                line = f"{emoji} **{name}** ({status})"
-                if instance:
-                    line += f" \u2014 `{instance}`"
-                annotations = alert.get("annotations", {})
-                summary = annotations.get("summary", annotations.get("description", ""))
-                if summary:
-                    line += f"\n  {summary[:200]}"
-                lines.append(line)
-            text = f"**Grafana Alerts** ({len(alerts)} alert(s)):\n" + "\n".join(lines)
+        # Parse alerts using structured parser
+        parsed_alerts = parse_grafana_payload(data)
+        text = format_alert_message(parsed_alerts)
 
-        # Build event data for trigger matching — use first alert's name if available
+        # Process alerts through remediation handler
+        matches = self._grafana_handler.process_alerts(parsed_alerts)
+
+        # Spawn remediation loops for matched alerts
+        spawned_loops: list[str] = []
+        if matches and self._loop_spawn_callback:
+            channel_id = self._get_channel_id("grafana")
+            for alert, rule in matches:
+                try:
+                    goal = build_remediation_prompt(alert, rule)
+                    loop_id = await self._loop_spawn_callback(
+                        goal, channel_id, rule.mode,
+                        rule.interval_seconds, rule.max_iterations,
+                    )
+                    if loop_id and not loop_id.startswith("Error"):
+                        self._grafana_handler.record_remediation(alert, rule, loop_id)
+                        spawned_loops.append(loop_id)
+                except Exception as exc:
+                    log.warning(
+                        "Failed to spawn remediation for %s: %s",
+                        alert.alert_name, exc,
+                    )
+
+        if spawned_loops:
+            text += f"\n\n\U0001f527 Auto-remediation started: {', '.join(f'`{lid}`' for lid in spawned_loops)}"
+
+        # Build event data for trigger matching
         alert_name = ""
-        if alerts:
-            labels = alerts[0].get("labels", {})
-            alert_name = labels.get("alertname", alerts[0].get("alertname", ""))
+        if parsed_alerts:
+            alert_name = parsed_alerts[0].alert_name
         else:
             alert_name = data.get("ruleName", data.get("title", ""))
-        event_data: dict = {"event": "alert", "alert_name": alert_name}
+
+        event_data: dict = {
+            "event": "alert",
+            "alert_name": alert_name,
+            "alert_count": len(parsed_alerts),
+            "firing_count": sum(1 for a in parsed_alerts if a.status == "firing"),
+            "resolved_count": sum(1 for a in parsed_alerts if a.status == "resolved"),
+        }
+        if parsed_alerts:
+            first = parsed_alerts[0]
+            event_data["severity"] = first.severity
+            event_data["instance"] = first.instance
+
         await self._notify_triggers("grafana", event_data)
         return await self._send("grafana", text)
 

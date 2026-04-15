@@ -224,6 +224,33 @@ class IssueTrackerConfig(BaseModel):
         return v.lower()
 
 
+class GrafanaRemediationRuleConfig(BaseModel):
+    id: str = ""
+    name_pattern: str = "*"  # fnmatch pattern for alertname
+    label_matchers: dict[str, str] = Field(default_factory=dict)
+    severity_filter: list[str] = Field(default_factory=list)  # empty = match all
+    remediation_goal: str = ""
+    mode: str = "notify"  # "notify", "act", "silent"
+    interval_seconds: int = 30
+    max_iterations: int = 10
+    cooldown_seconds: int = 300
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, v: str) -> str:
+        if v not in ("notify", "act", "silent"):
+            raise ValueError(f"Invalid mode '{v}'. Must be 'notify', 'act', or 'silent'.")
+        return v
+
+
+class GrafanaAlertConfig(BaseModel):
+    enabled: bool = False
+    auto_remediate: bool = False
+    rules: list[GrafanaRemediationRuleConfig] = Field(default_factory=list)
+    cooldown_seconds: int = 300
+    max_concurrent_remediations: int = 5
+
+
 class MCPServerConfig(BaseModel):
     transport: str = "stdio"  # "stdio" or "http"
     command: str = ""  # for stdio: executable path
@@ -269,6 +296,7 @@ class Config(BaseModel):
     mcp: MCPConfig = MCPConfig()
     slack: SlackConfig = SlackConfig()
     issue_tracker: IssueTrackerConfig = IssueTrackerConfig()
+    grafana_alerts: GrafanaAlertConfig = GrafanaAlertConfig()
 
 
 def _substitute_env_vars(text: str) -> str:
