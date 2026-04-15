@@ -132,7 +132,7 @@ tightening of prior work.
 |---|-------|--------|---------|
 | 21 | Knowledge deduplication: content hashing on ingest, skip or merge near-duplicates | done | Content hashing (SHA-256), exact + near-duplicate skip on ingest, find_duplicates/find_near_duplicates scan, merge_sources, 2 REST API endpoints, +63 tests |
 | 22 | Knowledge versioning: edit history per entry with audit trail | done | knowledge_versions table, version recording on ingest/delete, content snapshots, unified diffs, restore, 4 REST API endpoints, +69 tests |
-| 23 | Adaptive session consolidation: compaction target scales with channel activity | pending | |
+| 23 | Adaptive session consolidation: compaction target scales with channel activity | done | Activity rate tracking, adaptive threshold/keep/summary scaling, _get_compaction_params, get_activity_metrics, REST API endpoint, config field, +77 tests |
 | 24 | FTS5 session search in web UI: search prior conversations by keyword/user/time | pending | |
 | 25 | Knowledge import: bulk ingest of markdown dirs, PDFs, web URLs | pending | |
 
@@ -2652,4 +2652,159 @@ All endpoints follow existing patterns: 503 when store unavailable, `asyncio.to_
 - Version history is never cleaned up. For a frequently-updated source, versions accumulate unboundedly. A future round could add a `max_versions` config option with oldest-version pruning.
 - The `restore_version` method calls `ingest()` with `dedup=False`, which means it records its own version entry. The uploader for restored versions is `restore-v{N}` where N is the version being restored.
 - REST API endpoint count is now 97 (was 93 after Round 21, +4 new).
+- All five subsystem wiring tasks remain open from prior rounds.
+
+## Round 23 — Adaptive session consolidation: compaction target scales with channel activity
+**Focus**: Make session compaction scale with channel activity — busy channels compact sooner and more aggressively, quiet channels keep more history. Activity is measured as messages per hour over a sliding window.
+**Baseline pytest**: 2392 passed, 0 failed
+**Post-round pytest**: 2469 passed, 0 failed (+77 new tests)
+
+### Validated from prior rounds
+- Round 22 (Knowledge versioning): version table, recording, diff, restore, 4 REST endpoints — all passing (69 tests).
+- Round 22 noted "Round 23 has no dependencies on Round 22" — confirmed.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. Activity rate computation: `src/sessions/manager.py` (lines 80-91)
+
+New function `compute_activity_rate(messages, window=ACTIVITY_WINDOW)`:
+- Measures messages per hour over a sliding window (default 1 hour, `ACTIVITY_WINDOW = 3600`).
+- Uses the last message's timestamp as "now", counts messages within `[now - window, now]`.
+- Requires ≥2 messages in the window and a positive time span; returns 0.0 otherwise.
+- Defensive: handles edge cases like single messages, same-timestamp bursts, empty lists.
+
+#### 2. Adaptive threshold functions: `src/sessions/manager.py` (lines 94-121)
+
+Three pure functions that linearly interpolate between low and high activity tiers:
+
+- `adaptive_compaction_threshold(rate)`: Returns trigger threshold — 60 messages for ≤5 msg/hr (low), 25 messages for ≥20 msg/hr (high), linearly interpolated between.
+- `adaptive_summary_chars(rate)`: Returns summary char budget — 1200 chars (low), 500 chars (high).
+- `adaptive_keep_ratio(rate)`: Returns fraction of messages to keep after compaction — 0.60 (low), 0.35 (high).
+
+All use a shared `_lerp(low, high, t)` helper (line 80) with clamping to [0, 1].
+
+#### 3. Adaptive constants: `src/sessions/manager.py` (lines 29-39)
+
+Ten new module-level constants:
+- `ACTIVITY_LOW = 5.0`, `ACTIVITY_HIGH = 20.0` — rate tier boundaries (msgs/hr)
+- `ADAPTIVE_THRESHOLD_LOW = 60`, `ADAPTIVE_THRESHOLD_HIGH = 25` — compaction trigger
+- `ADAPTIVE_SUMMARY_LOW = 1200`, `ADAPTIVE_SUMMARY_HIGH = 500` — summary char budget
+- `ADAPTIVE_KEEP_LOW = 0.60`, `ADAPTIVE_KEEP_HIGH = 0.35`, `ADAPTIVE_KEEP_DEFAULT = 0.50` — keep ratio
+- `ACTIVITY_WINDOW = 3600` — sliding window for rate measurement (seconds)
+
+#### 4. `_get_compaction_params()`: `src/sessions/manager.py` (lines 438-454)
+
+New method on `SessionManager` that returns a dict of `{threshold, summary_chars, keep_ratio, activity_rate}`:
+- When `adaptive_compaction` is disabled or <2 messages, returns fixed defaults (COMPACTION_THRESHOLD, COMPACTION_MAX_CHARS, ADAPTIVE_KEEP_DEFAULT).
+- When enabled, computes activity rate and scales all three parameters.
+- Called by both `_needs_compaction()` and `_compact()` to ensure consistent adaptive behaviour.
+
+#### 5. `_needs_compaction()` updated: `src/sessions/manager.py` (lines 456-462)
+
+Now calls `_get_compaction_params()` to get the adaptive threshold instead of using the fixed `COMPACTION_THRESHOLD`. Token budget check remains unchanged.
+
+#### 6. `_compact()` updated: `src/sessions/manager.py` (lines 691-755)
+
+Rewritten to use adaptive parameters:
+- `keep_count` computed as `round(len(messages) * keep_ratio)`, clamped to `[2, max_history // 2]`.
+- Summary char budget from `adaptive_summary_chars(rate)` used in both the LLM system instruction and the post-compaction truncation.
+- Logs adaptive parameters when activity rate is measurable (rate > 0).
+- Fallback on compaction failure is unchanged (trim to max_history).
+
+#### 7. `get_activity_metrics()`: `src/sessions/manager.py` (lines 670-682)
+
+New method on `SessionManager` returns per-channel activity metrics:
+- `activity_rate` (msgs/hr, rounded to 1 decimal)
+- `compaction_threshold`, `summary_chars`, `keep_ratio` (adaptive parameters)
+- `message_count`, `adaptive_enabled` flag
+
+#### 8. `SessionManager.__init__` updated: `src/sessions/manager.py` (line 326)
+
+New optional parameter `adaptive_compaction: bool = True`. Stored as `self.adaptive_compaction`.
+
+#### 9. Config schema: `src/config/schema.py` (line 32)
+
+New field `adaptive_compaction: bool = True` on `SessionsConfig`. Optional with sensible default, backward-compatible.
+
+#### 10. REST API: `src/web/api.py` (lines 598-601)
+
+New endpoint `GET /api/sessions/activity`:
+- Returns the result of `bot.sessions.get_activity_metrics()`.
+- Follows existing session endpoint patterns.
+
+#### 11. Tests: `tests/test_adaptive_compaction.py` — 77 tests across 14 test classes
+
+**_lerp** (6):
+- `TestLerp` (6): at zero, at one, midpoint, clamp below, clamp above, decreasing.
+
+**compute_activity_rate** (8):
+- `TestComputeActivityRate` (8): empty, single msg, same timestamp, 10/hr, high rate, low rate, window parameter, messages outside window.
+
+**adaptive_compaction_threshold** (6):
+- `TestAdaptiveCompactionThreshold` (6): zero rate, low, high, very high, mid interpolation, monotonically decreasing.
+
+**adaptive_summary_chars** (4):
+- `TestAdaptiveSummaryChars` (4): zero rate, low, high, mid interpolation, monotonically decreasing.
+
+**adaptive_keep_ratio** (4):
+- `TestAdaptiveKeepRatio` (4): zero rate, low, high, mid interpolation, monotonically decreasing.
+
+**_get_compaction_params** (4):
+- `TestGetCompactionParams` (4): disabled returns defaults, few messages fallback, high activity scales down, low activity scales up.
+
+**_needs_compaction adaptive** (5):
+- `TestNeedsCompactionAdaptive` (5): below adaptive threshold, above high-activity threshold, token budget still triggers, disabled uses fixed, disabled above fixed.
+
+**_compact adaptive** (7):
+- `TestCompactAdaptive` (7): high activity keeps fewer, low activity keeps more (clamped), disabled uses fixed, summary chars scale, truncation uses adaptive budget, compaction failure fallback, compaction via get_history_with_compaction, compaction via get_task_history.
+
+**get_activity_metrics** (5):
+- `TestGetActivityMetrics` (5): no sessions, single session fields, multiple sessions, disabled flag, high activity params.
+
+**SessionsConfig** (4):
+- `TestSessionsConfigAdaptive` (4): default enabled, can disable, from dict, other defaults unchanged.
+
+**Constants** (6):
+- `TestConstants` (6): activity_low positive, high > low, threshold low > high, summary low > high, keep low > high, keep ratios in (0,1).
+
+**Module imports** (2):
+- `TestModuleImports` (2): compute_activity_rate importable, adaptive functions importable.
+
+**REST API** (2):
+- `TestSessionActivityAPI` (2): empty sessions, returns typed dict per channel.
+
+**Edge cases** (12):
+- `TestEdgeCases` (12): burst then silence, steady low, boundary low/high, just above low, keep ratio clamp, compact with existing summary, constructor default/disabled, negative timestamps, get_history_with_compaction adapts.
+
+### Design decisions
+
+1. **Linear interpolation over step functions**: Smooth scaling between low/high tiers avoids abrupt jumps when activity crosses a boundary. A channel fluctuating around 20 msg/hr doesn't oscillate between two different compaction strategies.
+
+2. **Sliding window (1 hour)**: Activity rate is measured over the last hour of message timestamps (relative to the session's latest message, not wall clock). This captures current channel behaviour without being influenced by a burst from hours ago.
+
+3. **Compaction threshold range [25, 60]**: Low-activity channels (≤5 msg/hr) compact at 60 messages — they accumulate slowly, so keeping more context is cheap. High-activity channels (≥20 msg/hr) compact at 25 messages — they fill up fast, so compacting sooner keeps the context window lean.
+
+4. **Summary char budget [500, 1200]**: Busy channels get tighter summaries because they'll need to be re-compacted soon anyway. Quiet channels get richer summaries since there's more time between compactions.
+
+5. **Keep ratio [0.35, 0.60], clamped to max_history//2**: The ratio determines how many messages survive compaction. High-activity channels keep 35% (aggressive), low-activity keep 60% (lenient). The ceiling clamp ensures we never exceed the original fixed behaviour.
+
+6. **`adaptive_compaction=True` by default**: All existing installations benefit immediately. Operators who prefer fixed thresholds can set `adaptive_compaction: false` in config.
+
+7. **No new dependencies**: All computation uses stdlib math. No external packages.
+
+8. **Backward compatible**: When adaptive is disabled, `_get_compaction_params` returns exact legacy values (COMPACTION_THRESHOLD, COMPACTION_MAX_CHARS, 0.5 keep ratio). Existing test expectations still hold.
+
+### Files changed
+- `src/sessions/manager.py` (lines 29-39, 80-121, 326, 438-462, 670-682, 691-755): Adaptive constants, `_lerp`, `compute_activity_rate`, `adaptive_compaction_threshold`, `adaptive_summary_chars`, `adaptive_keep_ratio`, `__init__` parameter, `_get_compaction_params`, `_needs_compaction` update, `get_activity_metrics`, `_compact` adaptive rewrite.
+- `src/config/schema.py` (line 32): `adaptive_compaction: bool = True` on SessionsConfig.
+- `src/web/api.py` (lines 598-601): `GET /api/sessions/activity` endpoint.
+- `tests/test_adaptive_compaction.py` (new, 77 tests): Complete test coverage for activity rate, adaptive functions, compaction integration, metrics, config, REST API, and edge cases.
+
+### Next round watch for
+- Round 24 (FTS5 session search in web UI) has no dependencies on Round 23.
+- The adaptive compaction changes the `_needs_compaction()` behaviour: with adaptive enabled, a channel with low activity now has a higher compaction threshold (60 vs 40). This means low-activity sessions accumulate more messages before compacting. If a test relies on the fixed threshold of 40, it may need adjustment — verified no existing tests depend on this.
+- The `_compact()` method now computes `keep_count` differently: `round(len(messages) * keep_ratio)` clamped to `max_history // 2`. For the default 50 max_history and a normal-activity channel (ratio 0.50), this produces keep_count = min(round(N*0.50), 25) — which matches the old `max_history // 2 = 25` for 50+ messages. No behaviour change for normal activity.
+- The `get_activity_metrics()` method returns float `activity_rate` rounded to 1 decimal. For channels with <2 messages, rate is 0.0 and params fall back to defaults.
+- REST API endpoint count is now 98 (was 97 after Round 22, +1 new: `/api/sessions/activity`).
 - All five subsystem wiring tasks remain open from prior rounds.

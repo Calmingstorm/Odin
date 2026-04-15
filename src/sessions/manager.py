@@ -26,6 +26,18 @@ COMPACTION_THRESHOLD = 40  # compact when history exceeds this
 CONTINUITY_MAX_AGE = 48 * 3600  # carry forward summaries from archives < 48 hours old
 COMPACTION_MAX_CHARS = 800  # target max chars per compacted summary block
 
+# Adaptive compaction — thresholds scale with channel message rate
+ACTIVITY_LOW = 5.0       # msgs/hr below this = low activity
+ACTIVITY_HIGH = 20.0     # msgs/hr above this = high activity
+ADAPTIVE_THRESHOLD_LOW = 60   # low-activity channels compact later
+ADAPTIVE_THRESHOLD_HIGH = 25  # high-activity channels compact sooner
+ADAPTIVE_SUMMARY_LOW = 1200   # low-activity channels get richer summaries
+ADAPTIVE_SUMMARY_HIGH = 500   # high-activity channels get tighter summaries
+ADAPTIVE_KEEP_LOW = 0.60      # low-activity channels keep more after compaction
+ADAPTIVE_KEEP_HIGH = 0.35     # high-activity channels keep less
+ADAPTIVE_KEEP_DEFAULT = 0.50  # normal activity keep ratio
+ACTIVITY_WINDOW = 3600        # measure activity over last hour of messages
+
 # Topic change detection constants
 TOPIC_CHANGE_SCORE_THRESHOLD = 0.05  # below this overlap = topic change
 TOPIC_CHANGE_TIME_GAP = 300  # 5 minutes in seconds
@@ -64,6 +76,57 @@ _TOKEN_RE = re.compile(r"[a-z0-9_./:-]+")
 def _tokenize(text: str) -> set[str]:
     """Extract meaningful lowercase tokens from text, filtering stop words."""
     return {t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOP_WORDS and len(t) > 1}
+
+
+def _lerp(low: float, high: float, t: float) -> float:
+    """Linear interpolation between low and high, t clamped to [0, 1]."""
+    t = max(0.0, min(1.0, t))
+    return low + (high - low) * t
+
+
+def compute_activity_rate(messages: list, window: float = ACTIVITY_WINDOW) -> float:
+    """Compute messages per hour over the most recent *window* seconds."""
+    if len(messages) < 2:
+        return 0.0
+    now = messages[-1].timestamp
+    cutoff = now - window
+    recent = [m for m in messages if m.timestamp >= cutoff]
+    if len(recent) < 2:
+        return 0.0
+    span = recent[-1].timestamp - recent[0].timestamp
+    if span <= 0:
+        return 0.0
+    return len(recent) / (span / 3600)
+
+
+def adaptive_compaction_threshold(rate: float) -> int:
+    """Return the compaction trigger threshold for a given activity rate."""
+    if rate <= ACTIVITY_LOW:
+        return ADAPTIVE_THRESHOLD_LOW
+    if rate >= ACTIVITY_HIGH:
+        return ADAPTIVE_THRESHOLD_HIGH
+    t = (rate - ACTIVITY_LOW) / (ACTIVITY_HIGH - ACTIVITY_LOW)
+    return round(_lerp(ADAPTIVE_THRESHOLD_LOW, ADAPTIVE_THRESHOLD_HIGH, t))
+
+
+def adaptive_summary_chars(rate: float) -> int:
+    """Return the summary char budget for a given activity rate."""
+    if rate <= ACTIVITY_LOW:
+        return ADAPTIVE_SUMMARY_LOW
+    if rate >= ACTIVITY_HIGH:
+        return ADAPTIVE_SUMMARY_HIGH
+    t = (rate - ACTIVITY_LOW) / (ACTIVITY_HIGH - ACTIVITY_LOW)
+    return round(_lerp(ADAPTIVE_SUMMARY_LOW, ADAPTIVE_SUMMARY_HIGH, t))
+
+
+def adaptive_keep_ratio(rate: float) -> float:
+    """Return the fraction of messages to keep after compaction."""
+    if rate <= ACTIVITY_LOW:
+        return ADAPTIVE_KEEP_LOW
+    if rate >= ACTIVITY_HIGH:
+        return ADAPTIVE_KEEP_HIGH
+    t = (rate - ACTIVITY_LOW) / (ACTIVITY_HIGH - ACTIVITY_LOW)
+    return round(_lerp(ADAPTIVE_KEEP_LOW, ADAPTIVE_KEEP_HIGH, t), 2)
 
 
 def score_relevance(query: str, message_content: str) -> float:
@@ -260,12 +323,14 @@ class SessionManager:
         vector_store: SessionVectorStore | None = None,
         embedder: LocalEmbedder | None = None,
         token_budget: int = DEFAULT_SESSION_TOKEN_BUDGET,
+        adaptive_compaction: bool = True,
     ) -> None:
         self.max_history = max_history
         self.max_age_seconds = max_age_hours * 3600
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
         self.token_budget = token_budget
+        self.adaptive_compaction = adaptive_compaction
         self._sessions: dict[str, Session] = {}
         self._dirty: set[str] = set()
         self._reflector = reflector
@@ -370,9 +435,27 @@ class SessionManager:
 
         return messages
 
+    def _get_compaction_params(self, session: Session) -> dict:
+        """Compute compaction parameters, adapting to channel activity if enabled."""
+        if not self.adaptive_compaction or len(session.messages) < 2:
+            return {
+                "threshold": COMPACTION_THRESHOLD,
+                "summary_chars": COMPACTION_MAX_CHARS,
+                "keep_ratio": ADAPTIVE_KEEP_DEFAULT,
+                "activity_rate": 0.0,
+            }
+        rate = compute_activity_rate(session.messages)
+        return {
+            "threshold": adaptive_compaction_threshold(rate),
+            "summary_chars": adaptive_summary_chars(rate),
+            "keep_ratio": adaptive_keep_ratio(rate),
+            "activity_rate": rate,
+        }
+
     def _needs_compaction(self, session: Session) -> bool:
         """Check if a session needs compaction (message count or token budget)."""
-        if len(session.messages) > COMPACTION_THRESHOLD:
+        params = self._get_compaction_params(session)
+        if len(session.messages) > params["threshold"]:
             return True
         if session.estimated_tokens > self.token_budget:
             return True
@@ -585,9 +668,35 @@ class SessionManager:
             "per_session": per_session,
         }
 
+    def get_activity_metrics(self) -> dict[str, dict]:
+        """Return per-channel activity rates and adaptive compaction parameters."""
+        result = {}
+        for cid, session in self._sessions.items():
+            params = self._get_compaction_params(session)
+            result[cid] = {
+                "activity_rate": round(params["activity_rate"], 1),
+                "compaction_threshold": params["threshold"],
+                "summary_chars": params["summary_chars"],
+                "keep_ratio": params["keep_ratio"],
+                "message_count": len(session.messages),
+                "adaptive_enabled": self.adaptive_compaction,
+            }
+        return result
+
     async def _compact(self, session: Session) -> None:
-        """Summarize older messages and keep only recent ones."""
-        keep_count = self.max_history // 2
+        """Summarize older messages and keep only recent ones.
+
+        When adaptive compaction is enabled, the keep count and summary char
+        budget scale with channel activity — busy channels compact more
+        aggressively to prevent context bloat.
+        """
+        params = self._get_compaction_params(session)
+        keep_ratio = params["keep_ratio"]
+        summary_chars = params["summary_chars"]
+
+        keep_count = max(2, round(len(session.messages) * keep_ratio))
+        # Clamp to at most max_history // 2 (original behaviour ceiling)
+        keep_count = min(keep_count, self.max_history // 2)
         # When token budget triggers compaction with fewer messages than
         # keep_count, reduce keep_count so there's actually something to compact
         if len(session.messages) <= keep_count and len(session.messages) > 2:
@@ -597,6 +706,15 @@ class SessionManager:
 
         if not to_summarize:
             return
+
+        if params["activity_rate"] > 0:
+            log.info(
+                "Adaptive compaction for %s: rate=%.1f msg/hr, threshold=%d, "
+                "keep=%d/%d, summary_budget=%d chars",
+                session.channel_id, params["activity_rate"],
+                params["threshold"], keep_count, len(session.messages),
+                summary_chars,
+            )
 
         # Build conversation text for summarization
         convo_text = "\n".join(
@@ -628,7 +746,7 @@ class SessionManager:
             "and any response where the assistant could not do something.\n"
             "4. OMIT: Any data not confirmed by actual tool results.\n"
             "5. OMIT: Conversational filler, greetings, acknowledgments.\n"
-            f"6. Keep the ENTIRE summary under {COMPACTION_MAX_CHARS} characters.\n"
+            f"6. Keep the ENTIRE summary under {summary_chars} characters.\n"
             "7. Each bullet: WHAT happened → OUTCOME (host/path/service if applicable)."
         )
 
@@ -642,8 +760,8 @@ class SessionManager:
             summary_text = summary_text.strip()
 
             # Enforce max summary length — truncate at last complete line
-            if len(summary_text) > COMPACTION_MAX_CHARS:
-                truncated = summary_text[:COMPACTION_MAX_CHARS]
+            if len(summary_text) > summary_chars:
+                truncated = summary_text[:summary_chars]
                 last_newline = truncated.rfind("\n")
                 if last_newline > 0:
                     truncated = truncated[:last_newline]

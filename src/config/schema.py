@@ -29,6 +29,7 @@ class SessionsConfig(BaseModel):
     max_age_hours: int = 24
     persist_directory: str = "./data/sessions"
     token_budget: int = 128_000
+    adaptive_compaction: bool = True
 
 
 class ToolHost(BaseModel):

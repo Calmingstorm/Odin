@@ -596,6 +596,11 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         usage = bot.sessions.get_session_token_usage()
         return web.json_response(usage)
 
+    @routes.get("/api/sessions/activity")
+    async def session_activity(_request: web.Request) -> web.Response:
+        activity = bot.sessions.get_activity_metrics()
+        return web.json_response(activity)
+
     # ------------------------------------------------------------------
     # Tools
     # ------------------------------------------------------------------
