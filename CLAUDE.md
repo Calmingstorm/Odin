@@ -29,7 +29,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/llm/types.py` — Backend-agnostic LLMResponse and ToolCall types
   - `src/llm/secret_scrubber.py` — Secret detection and redaction
   - `src/llm/circuit_breaker.py` — Circuit breaker for LLM backend health
-  - `src/tools/registry.py` — tool definitions (61 tools as dicts)
+  - `src/tools/registry.py` — tool definitions (66 tools as dicts)
   - `src/tools/executor.py` — tool execution (local subprocess, SSH, Prometheus, Incus, etc.)
   - `src/tools/ssh.py` — SSH + local subprocess dispatch (is_local_address, run_local_command, run_ssh_command)
   - `src/tools/tool_memory.py` — per-tool learning from past executions
@@ -69,7 +69,7 @@ You are running as part of an automated build loop. Each session, you:
 ## Architecture (all free, subscription-based)
 ```
 Every Discord message
-  → Codex (with 61 tools + personality in system prompt)
+  → Codex (with 66 tools + personality in system prompt)
       ├── CHAT: Codex responds directly with personality
       ├── SIMPLE TASK: Codex calls tools directly (run_command, read_file, etc.)
       ├── COMPLEX TASK: Codex delegates to claude -p via claude_code tool

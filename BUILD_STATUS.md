@@ -116,7 +116,7 @@ tightening of prior work.
 | 12 | `kubectl` tool: apply / get / logs / describe against clusters via SSH or kubeconfig | done | kubectl_ops helper module, 10 actions (get/describe/logs/apply/delete/exec/rollout/scale/top/config), shell injection protection, common flags (namespace/context/kubeconfig), executor handler, 138 tests |
 | 13 | `docker_ops` tool: build / run / exec / logs / compose up/down against local or remote hosts | done | docker_ops helper module, 14 actions (ps/run/exec/logs/build/pull/stop/rm/inspect/stats/compose_up/compose_down/compose_ps/compose_logs), shell injection protection, compose file/project support, executor handler, 148 tests |
 | 14 | `terraform_ops` tool: plan / apply with safe plan preview, never auto-approves | done | terraform_ops helper module, 10 actions (init/plan/apply/output/show/validate/fmt/state/workspace/import), apply requires plan file (no -auto-approve ever), -input=false on interactive commands, shell injection protection, executor handler, 138 tests |
-| 15 | `http_probe` tool: issue requests with retries, timing, response capture; useful for API debugging | pending | |
+| 15 | `http_probe` tool: issue requests with retries, timing, response capture; useful for API debugging | done | http_probe_ops helper module, 7 HTTP methods, curl-based with timing breakdown (DNS/connect/TLS/TTFB/total), retries, optional host dispatch, shell injection protection, executor handler with local fallback, 124 tests |
 
 ### Phase 4 — Integrations (rounds 16–20)
 | # | Focus | Status | Summary |
@@ -1388,3 +1388,146 @@ Terraform operations helper that builds safe shell commands for 10 terraform act
 - The tool count is now 65 (was 64 after Round 13). The system prompt char limit (5000) is not affected because tool definitions are sent as structured tool schemas, not in the system prompt text.
 - All five subsystem wiring tasks remain open from Rounds 1-13: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
 - The `plan_file` approach means the LLM needs two tool calls to make infrastructure changes (plan + apply). This is intentional — it mirrors the standard terraform workflow and prevents blind changes.
+
+## Round 15 — http_probe tool: HTTP/HTTPS probing with timing, retries, and response capture
+**Focus**: Add an `http_probe` tool that issues HTTP requests via curl on managed hosts (or locally), with timing breakdown, retries, and full response capture for API debugging.
+**Baseline pytest**: 1621 passed, 0 failed
+**Post-round pytest**: 1745 passed, 0 failed (+124 new tests)
+
+### Validated from prior rounds
+- Round 14: `terraform_ops` tool, 10 actions, plan-file-only apply, shell injection protection — all present and passing (138 tests).
+- Round 13: `docker_ops` tool, 14 actions, shell injection protection, compose support — all present and passing (148 tests).
+- Round 12: `kubectl` tool, 10 actions, shell injection protection, common flags — all present and passing (138 tests).
+- Round 11: `git_ops` tool, 11 actions, push freshness check — all present and passing (113 tests).
+- Round 10: 5 subsystem wiring tasks remain pending (`cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics). Not in scope for this round.
+- RuntimeWarning in `test_connection_pools.py::TestSSHCommandWithPool::test_no_pool_no_control_master` still present (pre-existing, per Round 10 notes).
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. New module: `src/tools/http_probe_ops.py` (126 lines)
+HTTP probe operations helper that builds safe curl commands for HTTP probing with timing, retries, and response capture.
+
+- `ALLOWED_METHODS` (line 13): Frozen set of 7 HTTP methods: GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS.
+- `MAX_TIMEOUT` (line 17): 120 seconds maximum. `DEFAULT_TIMEOUT` is 30 seconds.
+- `MAX_RETRIES` (line 19): 5 maximum. `DEFAULT_RETRIES` is 0 (no retries by default).
+- `MAX_RETRY_DELAY` (line 21): 30 seconds maximum. `DEFAULT_RETRY_DELAY` is 1 second.
+- `MAX_BODY_SIZE` (line 23): 50KB body limit to prevent oversized payloads.
+- `_TIMING_FORMAT` (line 25): curl `-w` write-out format string that captures: status_code, time_dns, time_connect, time_tls, time_ttfb, time_total, size_download, speed_download, redirects, remote_ip, remote_port. Output is clearly delimited with `---PROBE-RESULTS---`.
+- `validate_url(url)` (line 47): Validates URL scheme (http/https only), requires a host, strips whitespace. Raises ValueError for invalid URLs.
+- `_clamp_int(value, default, minimum, maximum)` (line 58): Safely converts and clamps integer parameters. Returns default for None or invalid strings. Used for timeout, retries, retry_delay.
+- `build_http_probe_command(params)` (line 66): Main entry point. Builds a curl command with all options. Returns a single command string. Validates URL and method, then assembles curl flags in order: -sS (silent+errors), -w (timing), -i (headers), -X (method), timeouts, redirects, SSL, retries, headers, body, URL (always last).
+
+#### Command flags in detail:
+- `-sS`: Silent mode with error display. Suppresses progress bar but shows errors.
+- `-w <format>`: Write-out format for timing metrics. Appended after response body with `---PROBE-RESULTS---` separator.
+- `-i`: Include response headers in output. Gives full HTTP response visibility.
+- `-X METHOD`: HTTP method (omitted for GET since it's curl's default).
+- `--max-time <n>`: Total request timeout (default 30s, max 120s, min 1s).
+- `--connect-timeout <n>`: Connection timeout (min of main timeout and 10s).
+- `-L --max-redirs 10`: Follow redirects (default on, max 10 hops).
+- `-k`: Skip SSL verification (off by default).
+- `--retry <n> --retry-delay <n>`: curl-native retries with configurable delay.
+- `-H 'Name: Value'`: Custom headers from dict. Each header quoted via shlex.
+- `-d <body>`: Request body (POST/PUT/PATCH only, max 50KB, quoted via shlex).
+- All user-provided values go through `shlex.quote()` for shell injection protection.
+
+#### 2. Tool definition in `src/tools/registry.py` (lines 1519-1572)
+- Added `http_probe` tool to TOOLS list with `url` (required), optional `host`, `method` (enum of 7), `headers`, `body`, `timeout`, `follow_redirects`, `verify_ssl`, `retries`, `retry_delay`.
+- Unlike other ops tools, `host` is optional — omitting it runs curl locally from the bot's host. This is the common case for probing external APIs.
+- `url` is the only required field (not `host` + `action` like other ops tools).
+- Description documents timing breakdown, retry support, and local/remote dispatch.
+- Placed after `terraform_ops` and before "Image generation (ComfyUI)" section.
+
+#### 3. Handler in `src/tools/executor.py` (lines 1068-1089)
+- `_handle_http_probe(self, inp)`: Optional host resolution — if `host` param provided, resolves via `_resolve_host()`; if omitted, defaults to `127.0.0.1` (local dispatch via `run_local_command`). Builds curl command via `build_http_probe_command()`, dispatches via `_exec_command()`.
+- Unlike other ops tools, this handler does NOT reject empty host — it defaults to local. This is a deliberate design choice: `http_probe` is primarily used to probe external endpoints, so the "from where" is secondary.
+- Non-zero exit code WITH output (e.g., curl error message) is returned as-is (curl errors are informative).
+- Non-zero exit code WITHOUT output returns a clear error with exit code.
+- Empty successful response returns "no response received" message.
+
+#### 4. Tests: `tests/test_http_probe_ops.py` — 124 tests across 15 test classes
+
+**Registration tests** (4):
+- `TestHttpProbeRegistration`: tool in registry, required fields (only url), all 10 properties present, method enum matches ALLOWED_METHODS.
+
+**Allowed methods** (3):
+- `TestAllowedMethods`: all 7 expected, frozenset immutable, unknown method raises ValueError.
+
+**URL validation** (12):
+- `TestValidateUrl`: valid https, valid http, valid with path, port, query string, empty raises, whitespace only raises, ftp raises, no scheme raises, no host raises, strips whitespace.
+
+**Clamp int** (7):
+- `TestClampInt`: normal value, below minimum, above maximum, None returns default, invalid string returns default, valid string number, float truncated.
+
+**Basic command building** (11):
+- `TestBuildBasic`: minimal GET starts with curl, includes URL, includes timing format, includes response headers (-i), default follow redirects, default timeout, default connect timeout, URL always last, no -X for GET, URL required, empty URL raises.
+
+**HTTP methods** (9):
+- `TestBuildMethods`: GET no flag, POST/PUT/DELETE/PATCH/HEAD/OPTIONS have -X flag, lowercase normalized to uppercase, invalid method raises.
+
+**Headers** (5):
+- `TestBuildHeaders`: single header, multiple headers, no headers, non-dict headers ignored, empty dict no -H.
+
+**Body** (10):
+- `TestBuildBody`: POST/PUT/PATCH with body, GET/DELETE/HEAD body ignored, empty body not added, None body not added, oversized body ignored, body at limit included.
+
+**Timeout** (7):
+- `TestBuildTimeout`: default 30s, custom value, capped at max (120), minimum 1s, invalid uses default, connect timeout max 10s, connect timeout follows main when under 10.
+
+**Redirects** (3):
+- `TestBuildRedirects`: default true, explicit true with max-redirs, false no -L.
+
+**SSL** (3):
+- `TestBuildSSL`: default verify true (no -k), explicit true (no -k), false adds -k.
+
+**Retries** (10):
+- `TestBuildRetries`: no retries default, zero retries, retries with count, capped at max (5), default retry delay (1s), custom delay, delay capped (30s), delay minimum 0, invalid delay uses default, delay without retries not added.
+
+**Shell injection safety** (6):
+- `TestShellInjectionSafety`: URL with semicolons, URL with command substitution, header value injection (stays quoted), body injection (stays quoted), URL with backticks, header name injection.
+
+**Full options combined** (2):
+- `TestBuildFullOptions`: all options combined (POST with headers, body, timeout, no redirects, no SSL, retries), GET with custom headers and SSL off.
+
+**Handler integration tests** (18):
+- `TestHandleHttpProbe`: local probe (no host → 127.0.0.1), remote probe (with host), unknown host error, correct ssh_user, local default ssh_user, curl command built, validation error, missing URL error, command failure with output, command failure no output, empty success, success returns output, GET dispatch, POST with body dispatch, retries dispatch, SSL off dispatch, no redirects dispatch, metrics tracked.
+
+**Edge cases** (14):
+- `TestEdgeCases`: URL with fragment, URL with auth, IPv4, localhost, non-string body ignored, default method GET, all timing fields present, connect timeout equals main when under 10, negative timeout becomes minimum, silent and show errors (-sS), OPTIONS method, headers with special chars, body with newlines, URL with encoded chars.
+
+### Design decisions
+
+1. **curl-based via `_exec_command`**: Uses curl commands dispatched through the standard `_exec_command` pipeline, which means http_probe inherits bulkhead isolation, SSH retry, and connection pooling. This also means probing can run from any managed host, not just the bot's host — useful for testing internal endpoints that are only reachable from specific hosts.
+
+2. **Optional host (local default)**: Unlike other ops tools where `host` is required, http_probe defaults to local execution when `host` is omitted. The primary use case is probing external APIs from the bot's host, so requiring a host alias would be unnecessary friction.
+
+3. **curl `-w` timing format**: Uses curl's write-out feature to capture detailed timing breakdown (DNS, connect, TLS, TTFB, total) plus metadata (status code, download size, speed, redirect count, remote IP/port). This is structured output appended after the response body with a `---PROBE-RESULTS---` delimiter.
+
+4. **curl `-i` for response headers**: Includes full response headers in the output. Combined with the timing section, this gives complete visibility into the HTTP exchange — useful for debugging content-type issues, cache headers, CORS, etc.
+
+5. **curl-native retries**: Uses `--retry` and `--retry-delay` instead of building retry logic in Python. This keeps the command self-contained and means retries happen on the target host (important for remote probing).
+
+6. **Body only for POST/PUT/PATCH**: Request body is silently ignored for GET, DELETE, HEAD, OPTIONS. This prevents accidental body inclusion on methods where it's unexpected.
+
+7. **50KB body limit**: Prevents sending oversized payloads that could cause issues with shell argument length limits or target servers. Oversized bodies are silently ignored rather than raising an error.
+
+8. **connect-timeout capped at 10s**: `--connect-timeout` is set to `min(timeout, 10)`. This ensures the connection phase never takes more than 10 seconds, even if the overall timeout is 120s. Most connection failures are evident within a few seconds.
+
+9. **No action pattern**: Unlike other ops tools (git_ops, kubectl, docker_ops, terraform_ops) which have multiple actions, http_probe is a single operation: "make an HTTP request". The variety comes from method/headers/body, not from a dispatched action. This simplifies both the helper module and the handler.
+
+10. **URL validation with scheme check**: Only http and https are allowed. This prevents accidental use of file://, ftp://, or other schemes that curl supports but shouldn't be exposed through this tool.
+
+### Issues found
+- No issues in prior rounds needed fixing.
+- URLs without shell metacharacters (e.g., `http://localhost:3000/health`) are NOT quoted by `shlex.quote()` because they contain only safe characters (`[a-zA-Z0-9@%+=:,./-]`). This is correct behavior — these URLs don't need quoting. URLs with special characters (query strings with `?`, `&`, `#`, `;`, etc.) ARE quoted.
+- The `--retry` flag in curl only retries on transient errors (timeout, connection refused). It does NOT retry on HTTP 5xx responses unless `--retry-all-errors` is added. This is intentional — a 500 response is still a valid probe result that should be returned to the LLM.
+- The response body is not truncated by the helper module — that's handled by `_truncate_lines` in the executor, keeping the helper pure.
+
+### Next round watch for
+- Round 16 (MCP client) is a different category — integrations rather than CLI-wrapping tools. The ops tools pattern (helper module + registry + handler) may not apply directly.
+- The `http_probe` tool is an executor tool (handled via `_handle_http_probe` on ToolExecutor), not a Discord-native tool. It uses `_exec_command` for dispatch, so it inherits bulkhead isolation, SSH retry, and connection pooling from the existing infrastructure.
+- The tool count is now 66 (was 65 after Round 14). The system prompt char limit (5000) is not affected because tool definitions are sent as structured tool schemas, not in the system prompt text.
+- All five subsystem wiring tasks remain open from Rounds 1-14: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
+- The `-w` timing format uses curl format specifiers (`%{http_code}`, `%{time_total}`, etc.). These are well-supported across curl versions but very old versions (pre-7.x) may not support all specifiers. All modern distros ship curl 7.68+.
+- For endpoints that return large responses, the output will be truncated by `_truncate_lines` in the executor. The timing breakdown (`---PROBE-RESULTS---` section) appears at the end of curl output, so if the response body is very large, the timing info may be in the truncated portion. The LLM can use `--max-time` to bound response time or add specific curl flags via `run_command` for more control.

@@ -1516,6 +1516,66 @@ TOOLS: list[dict] = [
             "required": ["host", "action"],
         },
     },
+    # --- HTTP probe ---
+    {
+        "name": "http_probe",
+        "description": (
+            "Probe an HTTP/HTTPS endpoint with timing, retries, and full response capture. "
+            "Useful for API debugging, health checks, and latency measurement. "
+            "Runs curl on a managed host (or locally if host omitted). "
+            "Returns response headers, body, status code, and timing breakdown "
+            "(DNS, connect, TLS, TTFB, total)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "URL to probe (http or https)",
+                },
+                "host": {
+                    "type": "string",
+                    "description": "Host alias to run curl from (omit to run locally)",
+                },
+                "method": {
+                    "type": "string",
+                    "description": "HTTP method (default GET)",
+                    "enum": [
+                        "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
+                    ],
+                },
+                "headers": {
+                    "type": "object",
+                    "description": "Request headers as key-value pairs (e.g. {\"Authorization\": \"Bearer tok\"})",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Request body string (for POST/PUT/PATCH). Max 50KB.",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Request timeout in seconds (default 30, max 120)",
+                },
+                "follow_redirects": {
+                    "type": "boolean",
+                    "description": "Follow HTTP redirects (default true)",
+                },
+                "verify_ssl": {
+                    "type": "boolean",
+                    "description": "Verify SSL certificates (default true)",
+                },
+                "retries": {
+                    "type": "integer",
+                    "description": "Number of retries on failure (default 0, max 5)",
+                },
+                "retry_delay": {
+                    "type": "integer",
+                    "description": "Delay between retries in seconds (default 1, max 30)",
+                },
+            },
+            "required": ["url"],
+        },
+    },
     # --- Image generation (ComfyUI) ---
     {
         "name": "generate_image",

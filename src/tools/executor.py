@@ -1065,6 +1065,29 @@ class ToolExecutor:
             return f"terraform {action} failed (exit {code}):\n{_truncate_lines(output)}"
         return _truncate_lines(output) if output.strip() else f"terraform {action} completed successfully."
 
+    async def _handle_http_probe(self, inp: dict) -> str:
+        from .http_probe_ops import build_http_probe_command
+
+        host = inp.get("host", "")
+        if host:
+            resolved = self._resolve_host(host)
+            if not resolved:
+                return f"Unknown or disallowed host: {host}"
+            address, ssh_user, _os = resolved
+        else:
+            address = "127.0.0.1"
+            ssh_user = "root"
+
+        try:
+            cmd = build_http_probe_command(inp)
+        except ValueError as e:
+            return f"http_probe error: {e}"
+
+        code, output = await self._exec_command(address, cmd, ssh_user)
+        if code != 0 and not output.strip():
+            return f"http_probe failed (exit {code}): curl returned no output"
+        return _truncate_lines(output) if output.strip() else "http_probe: no response received"
+
     async def _handle_execute_plan(self, inp: dict) -> str:
         """Execute a DAG plan using the Odin planner."""
         from src.tools.plan_runner import PlanRunner
