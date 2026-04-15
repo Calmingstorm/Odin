@@ -6,6 +6,7 @@ import json
 import aiohttp
 
 from ..odin_log import get_logger
+from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
 from .codex_auth import CodexAuth, CodexAuthPool
 from .cost_tracker import estimate_tokens
@@ -14,17 +15,26 @@ from .types import LLMResponse, ToolCall
 log = get_logger("codex")
 
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
-MAX_RETRIES = 3
-RETRY_BACKOFF = [2, 5, 10]
 
 
 class CodexChatClient:
     """Chat client using OpenAI Codex backend API (ChatGPT subscription)."""
 
-    def __init__(self, auth: CodexAuth | CodexAuthPool, model: str, max_tokens: int) -> None:
+    def __init__(
+        self,
+        auth: CodexAuth | CodexAuthPool,
+        model: str,
+        max_tokens: int,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_base_delay: float = DEFAULT_BASE_DELAY,
+        retry_max_delay: float = DEFAULT_MAX_DELAY,
+    ) -> None:
         self.auth = auth
         self.model = model
         self.max_tokens = max_tokens
+        self.max_retries = max_retries
+        self.retry_base_delay = retry_base_delay
+        self.retry_max_delay = retry_max_delay
         self.breaker = CircuitBreaker("codex_api")
         self._session: aiohttp.ClientSession | None = None
         # Tool conversion cache — avoids re-converting same tools across tool loop iterations
@@ -364,7 +374,7 @@ class CodexChatClient:
         session = await self._get_session()
         last_error = None
 
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(self.max_retries):
             try:
                 async with session.post(
                     CODEX_API_URL,
@@ -377,15 +387,14 @@ class CodexChatClient:
                         if result.text or result.tool_calls:
                             self.breaker.record_success()
                             return result
-                        # 200 but empty — treat as transient, retry
                         log.warning(
                             "Codex tool request returned 200 with empty response (attempt %d/%d)",
-                            attempt + 1, MAX_RETRIES,
+                            attempt + 1, self.max_retries,
                         )
-                        if attempt < MAX_RETRIES - 1:
-                            await asyncio.sleep(RETRY_BACKOFF[attempt])
+                        if attempt < self.max_retries - 1:
+                            wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
+                            await asyncio.sleep(wait)
                             continue
-                        # Exhausted retries on empty — record as degraded
                         self.breaker.record_failure()
                         return result
 
@@ -402,19 +411,17 @@ class CodexChatClient:
                         continue
 
                     if resp.status == 429:
-                        # Rate limited — rotate to next account if pool
                         if hasattr(self.auth, "mark_current_limited"):
                             self.auth.mark_current_limited()
                         self.breaker.record_failure()
                         last_error = f"HTTP 429: {error_body[:200]}"
-                        if attempt < MAX_RETRIES - 1:
-                            wait = RETRY_BACKOFF[attempt]
+                        if attempt < self.max_retries - 1:
+                            wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                             log.warning(
-                                "Codex rate limited (attempt %d/%d): %s. Rotating + retry in %ds...",
-                                attempt + 1, MAX_RETRIES, last_error, wait,
+                                "Codex rate limited (attempt %d/%d): %s. Rotating + retry in %.1fs...",
+                                attempt + 1, self.max_retries, last_error, wait,
                             )
                             await asyncio.sleep(wait)
-                            # Refresh token from (possibly new) account
                             access_token = await self.auth.get_access_token()
                             headers["Authorization"] = f"Bearer {access_token}"
                             if hasattr(self.auth, "get_account_id"):
@@ -426,11 +433,11 @@ class CodexChatClient:
                     if resp.status in (500, 502, 503, 504):
                         self.breaker.record_failure()
                         last_error = f"HTTP {resp.status}: {error_body[:200]}"
-                        if attempt < MAX_RETRIES - 1:
-                            wait = RETRY_BACKOFF[attempt]
+                        if attempt < self.max_retries - 1:
+                            wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                             log.warning(
-                                "Codex tool API error (attempt %d/%d): %s. Retrying in %ds...",
-                                attempt + 1, MAX_RETRIES, last_error, wait,
+                                "Codex tool API error (attempt %d/%d): %s. Retrying in %.1fs...",
+                                attempt + 1, self.max_retries, last_error, wait,
                             )
                             await asyncio.sleep(wait)
                             continue
@@ -441,17 +448,17 @@ class CodexChatClient:
             except aiohttp.ClientError as e:
                 self.breaker.record_failure()
                 last_error = str(e)
-                if attempt < MAX_RETRIES - 1:
-                    wait = RETRY_BACKOFF[attempt]
+                if attempt < self.max_retries - 1:
+                    wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                     log.warning(
-                        "Codex tool connection error (attempt %d/%d): %s. Retrying in %ds...",
-                        attempt + 1, MAX_RETRIES, e, wait,
+                        "Codex tool connection error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, self.max_retries, e, wait,
                     )
                     await asyncio.sleep(wait)
                 else:
                     raise RuntimeError(f"Codex API connection failed: {e}") from e
 
-        raise RuntimeError(f"Codex API failed after {MAX_RETRIES} retries: {last_error}")
+        raise RuntimeError(f"Codex API failed after {self.max_retries} retries: {last_error}")
 
     async def _read_tool_stream(self, resp: aiohttp.ClientResponse) -> LLMResponse:
         """Read SSE stream and extract text content and function calls.
@@ -593,11 +600,11 @@ class CodexChatClient:
 
     async def _stream_request(self, headers: dict, body: dict) -> str:
         """Send a streaming request and collect the full response text."""
-        self.breaker.check()  # Fast-fail if Codex is known to be down
+        self.breaker.check()
         session = await self._get_session()
         last_error = None
 
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(self.max_retries):
             try:
                 async with session.post(
                     CODEX_API_URL,
@@ -610,21 +617,19 @@ class CodexChatClient:
                         if result:
                             self.breaker.record_success()
                             return result
-                        # 200 but empty — treat as transient, retry
                         log.warning(
                             "Codex returned 200 with empty response (attempt %d/%d)",
-                            attempt + 1, MAX_RETRIES,
+                            attempt + 1, self.max_retries,
                         )
-                        if attempt < MAX_RETRIES - 1:
-                            await asyncio.sleep(RETRY_BACKOFF[attempt])
+                        if attempt < self.max_retries - 1:
+                            wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
+                            await asyncio.sleep(wait)
                             continue
-                        # Exhausted retries on empty — record as degraded
                         self.breaker.record_failure()
                         return result
 
                     error_body = (await resp.read()).decode("utf-8", errors="replace")
 
-                    # Auth expired — try refreshing once
                     if resp.status == 401 and attempt == 0:
                         log.warning("Codex auth expired, refreshing token...")
                         await self.auth._refresh(self.auth._load())
@@ -640,11 +645,11 @@ class CodexChatClient:
                             self.auth.mark_current_limited()
                         self.breaker.record_failure()
                         last_error = f"HTTP 429: {error_body[:200]}"
-                        if attempt < MAX_RETRIES - 1:
-                            wait = RETRY_BACKOFF[attempt]
+                        if attempt < self.max_retries - 1:
+                            wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                             log.warning(
-                                "Codex rate limited (attempt %d/%d): %s. Rotating + retry in %ds...",
-                                attempt + 1, MAX_RETRIES, last_error, wait,
+                                "Codex rate limited (attempt %d/%d): %s. Rotating + retry in %.1fs...",
+                                attempt + 1, self.max_retries, last_error, wait,
                             )
                             await asyncio.sleep(wait)
                             access_token = await self.auth.get_access_token()
@@ -658,11 +663,11 @@ class CodexChatClient:
                     if resp.status in (500, 502, 503, 504):
                         self.breaker.record_failure()
                         last_error = f"HTTP {resp.status}: {error_body[:200]}"
-                        if attempt < MAX_RETRIES - 1:
-                            wait = RETRY_BACKOFF[attempt]
+                        if attempt < self.max_retries - 1:
+                            wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                             log.warning(
-                                "Codex API error (attempt %d/%d): %s. Retrying in %ds...",
-                                attempt + 1, MAX_RETRIES, last_error, wait,
+                                "Codex API error (attempt %d/%d): %s. Retrying in %.1fs...",
+                                attempt + 1, self.max_retries, last_error, wait,
                             )
                             await asyncio.sleep(wait)
                             continue
@@ -673,17 +678,17 @@ class CodexChatClient:
             except aiohttp.ClientError as e:
                 self.breaker.record_failure()
                 last_error = str(e)
-                if attempt < MAX_RETRIES - 1:
-                    wait = RETRY_BACKOFF[attempt]
+                if attempt < self.max_retries - 1:
+                    wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                     log.warning(
-                        "Codex connection error (attempt %d/%d): %s. Retrying in %ds...",
-                        attempt + 1, MAX_RETRIES, e, wait,
+                        "Codex connection error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, self.max_retries, e, wait,
                     )
                     await asyncio.sleep(wait)
                 else:
                     raise RuntimeError(f"Codex API connection failed: {e}") from e
 
-        raise RuntimeError(f"Codex API failed after {MAX_RETRIES} retries: {last_error}")
+        raise RuntimeError(f"Codex API failed after {self.max_retries} retries: {last_error}")
 
     async def _read_stream(self, resp: aiohttp.ClientResponse) -> str:
         """Read SSE stream and extract text content."""

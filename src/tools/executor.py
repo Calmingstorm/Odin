@@ -107,6 +107,7 @@ class ToolExecutor:
             timeout = self.config.command_timeout_seconds
         if is_local_address(address):
             return await run_local_command(command, timeout=timeout)
+        ssh_retry = self.config.ssh_retry
         return await run_ssh_command(
             host=address,
             command=command,
@@ -114,6 +115,9 @@ class ToolExecutor:
             known_hosts_path=self.config.ssh_known_hosts_path,
             timeout=timeout,
             ssh_user=ssh_user,
+            max_retries=ssh_retry.max_retries,
+            retry_base_delay=ssh_retry.base_delay,
+            retry_max_delay=ssh_retry.max_delay,
         )
 
     async def _run_on_host(self, alias: str, command: str) -> str:

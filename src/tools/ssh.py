@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+from ..llm.backoff import compute_backoff
 from ..odin_log import get_logger
 
 log = get_logger("ssh")
@@ -10,6 +11,21 @@ MAX_OUTPUT_CHARS = 16000
 
 # Addresses considered "local" — commands run via subprocess, not SSH.
 _LOCAL_ADDRESSES = frozenset({"127.0.0.1", "localhost", "::1"})
+
+# SSH exit codes that indicate a connection-level failure (not a command failure).
+# 255 is the canonical SSH connection error code.
+_SSH_TRANSIENT_EXIT_CODES = frozenset({255})
+
+# Substrings in SSH stderr that indicate transient connection problems worth retrying.
+_SSH_TRANSIENT_PATTERNS = (
+    "Connection refused",
+    "Connection reset",
+    "Connection timed out",
+    "No route to host",
+    "Network is unreachable",
+    "ssh_exchange_identification",
+    "kex_exchange_identification",
+)
 
 
 def is_local_address(address: str) -> bool:
@@ -23,6 +39,13 @@ def _truncate_output(output: str) -> str:
         return output
     half = MAX_OUTPUT_CHARS // 2
     return output[:half] + "\n\n... (output truncated) ...\n\n" + output[-half:]
+
+
+def _is_ssh_transient_failure(exit_code: int, output: str) -> bool:
+    """Return True if the SSH result looks like a transient connection failure."""
+    if exit_code in _SSH_TRANSIENT_EXIT_CODES:
+        return any(p in output for p in _SSH_TRANSIENT_PATTERNS)
+    return False
 
 
 async def run_local_command(
@@ -60,8 +83,16 @@ async def run_ssh_command(
     known_hosts_path: str,
     timeout: int = 30,
     ssh_user: str = "root",
+    max_retries: int = 1,
+    retry_base_delay: float = 0.5,
+    retry_max_delay: float = 10.0,
 ) -> tuple[int, str]:
-    """Run a command on a remote host via SSH. Returns (exit_code, output)."""
+    """Run a command on a remote host via SSH. Returns (exit_code, output).
+
+    Retries on transient SSH connection failures (exit code 255 with known
+    error patterns). Command-level failures (nonzero exit from the remote
+    command itself) are NOT retried — they represent valid remote results.
+    """
     ssh_args = [
         "ssh",
         "-i", ssh_key_path,
@@ -74,20 +105,55 @@ async def run_ssh_command(
     ]
 
     log.info("SSH to %s@%s: %s", ssh_user, host, command)
+    last_exit_code = 1
+    last_output = ""
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *ssh_args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        output = stdout.decode("utf-8", errors="replace")
-        return proc.returncode or 0, _truncate_output(output)
+    for attempt in range(max_retries):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            output = stdout.decode("utf-8", errors="replace")
+            exit_code = proc.returncode or 0
 
-    except asyncio.TimeoutError:
-        proc.kill()
-        return 1, f"Command timed out after {timeout} seconds"
-    except Exception as e:
-        log.error("SSH command failed: %s", e)
-        return 1, f"SSH error: {e}"
+            if exit_code == 0 or not _is_ssh_transient_failure(exit_code, output):
+                return exit_code, _truncate_output(output)
+
+            last_exit_code = exit_code
+            last_output = output
+
+            if attempt < max_retries - 1:
+                wait = compute_backoff(attempt, retry_base_delay, retry_max_delay)
+                log.warning(
+                    "SSH transient failure to %s (attempt %d/%d): %s. Retrying in %.1fs...",
+                    host, attempt + 1, max_retries, output.strip()[:200], wait,
+                )
+                await asyncio.sleep(wait)
+            else:
+                log.warning(
+                    "SSH transient failure to %s (attempt %d/%d, exhausted): %s",
+                    host, attempt + 1, max_retries, output.strip()[:200],
+                )
+
+        except asyncio.TimeoutError:
+            last_exit_code = 1
+            last_output = f"Command timed out after {timeout} seconds"
+            if attempt < max_retries - 1:
+                wait = compute_backoff(attempt, retry_base_delay, retry_max_delay)
+                log.warning(
+                    "SSH timeout to %s (attempt %d/%d). Retrying in %.1fs...",
+                    host, attempt + 1, max_retries, wait,
+                )
+                await asyncio.sleep(wait)
+            else:
+                proc.kill()
+                return 1, last_output
+
+        except Exception as e:
+            log.error("SSH command failed: %s", e)
+            return 1, f"SSH error: {e}"
+
+    return last_exit_code, _truncate_output(last_output)

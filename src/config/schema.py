@@ -37,6 +37,12 @@ class ToolHost(BaseModel):
     os: str = "linux"  # "linux" or "macos"
 
 
+class RetryConfig(BaseModel):
+    max_retries: int = 3
+    base_delay: float = 1.0
+    max_delay: float = 30.0
+
+
 class ToolsConfig(BaseModel):
     enabled: bool = True
     ssh_key_path: str = "/app/.ssh/id_ed25519"
@@ -48,6 +54,7 @@ class ToolsConfig(BaseModel):
     claude_code_user: str = ""
     claude_code_dir: str = "/opt/odin"
     skill_allowed_urls: list[str] = Field(default_factory=list)
+    ssh_retry: RetryConfig = RetryConfig(max_retries=2, base_delay=0.5, max_delay=10.0)
 
 
 class LoggingConfig(BaseModel):
@@ -74,6 +81,7 @@ class OpenAICodexConfig(BaseModel):
     model: str = "gpt-4o"
     max_tokens: int = 4096
     credentials_path: str = "./data/codex_auth.json"
+    retry: RetryConfig = RetryConfig()
 
 
 class WebhookConfig(BaseModel):

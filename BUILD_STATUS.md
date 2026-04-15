@@ -103,7 +103,7 @@ tightening of prior work.
 ### Phase 2 — Reliability hardening (rounds 6–10)
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
-| 6 | Exponential backoff with jitter on Codex and SSH retries (replace fixed [2s,5s,10s] ladder) | pending | |
+| 6 | Exponential backoff with jitter on Codex and SSH retries (replace fixed [2s,5s,10s] ladder) | done | backoff module with full jitter, RetryConfig in schema, Codex + SSH retry integration |
 | 7 | Per-tool timeouts in `config.yml` instead of a single global tool_timeout_seconds | pending | |
 | 8 | Bulkhead isolation: SSH failures must not cascade into Codex; tool failures isolated from message handler | pending | |
 | 9 | SSH connection pooling (paramiko multiplex) and aiohttp keepalive pool | pending | |
@@ -539,3 +539,72 @@ bottom. Do not truncate older entries — they are the chain-of-context.)
 - The `/api/logs/search` and `/api/logs/stats` endpoints use `bot.audit` directly — no `getattr` guard needed since the audit logger is always present (created in bot init).
 - The Logs page Search History mode loads stats on first switch to populate the tool dropdown. If tool list changes frequently, the dropdown won't auto-update until the user switches modes again. This is fine for typical usage.
 - The `get_log_stats()` method reads the entire file each call. For dashboards that poll stats frequently, consider caching with a short TTL (similar to the `format_hints` pattern in tool_memory with 30s TTL).
+
+## Round 6 — Exponential backoff with jitter on Codex and SSH retries
+**Focus**: Replace fixed [2s, 5s, 10s] retry delay ladder with proper exponential backoff + full jitter; add SSH retry for transient connection failures.
+**Baseline pytest**: 857 passed, 0 failed
+**Post-round pytest**: 911 passed, 0 failed (+54 new tests)
+
+### Validated from prior rounds
+- Round 1: `CostTracker`, `estimate_tokens`, `LLMResponse` token fields, `/api/usage` endpoints all present and passing (35 tests). `CostTracker` still not wired to bot object — still pending (noted Rounds 1-5).
+- Round 2: `Session.estimated_tokens`, `_needs_compaction()`, token metrics all present and passing (41 tests). `session_tokens` Prometheus source still needs wiring — still pending.
+- Round 3: `TrajectorySaver`, `TrajectoryTurn`, `ToolIteration`, REST API endpoints all present and passing (53 tests). `trajectory_saver` still needs wiring — still pending.
+- Round 4: Trace viewer page, `find_by_message_id()`, API endpoint all present and passing (8 tests).
+- Round 5: `AuditLogger.search_logs()`, `get_log_stats()`, `/api/logs/search`, `/api/logs/stats` all present and passing (37 tests). No issues found in prior implementations.
+- All three subsystem wiring tasks remain open: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`.
+
+### Work done
+
+#### 1. New module: `src/llm/backoff.py`
+- `compute_backoff(attempt, base_delay, max_delay)` (line 19): Full jitter exponential backoff using the AWS Architecture Blog algorithm: `random(0, min(max_delay, base_delay * 2^attempt))`. This decorrelates concurrent retriers to reduce thundering-herd effects on shared backends (Codex API, SSH hosts).
+- `compute_backoff_no_jitter(attempt, base_delay, max_delay)` (line 33): Deterministic variant for testing and predictable use cases.
+- Constants: `DEFAULT_BASE_DELAY=1.0`, `DEFAULT_MAX_DELAY=30.0`, `DEFAULT_MAX_RETRIES=3`.
+
+#### 2. New config model: `RetryConfig` in `src/config/schema.py:38-41`
+- `max_retries: int = 3` — maximum number of attempts.
+- `base_delay: float = 1.0` — base delay in seconds for the exponential curve.
+- `max_delay: float = 30.0` — upper cap on any single retry delay.
+- Added to `OpenAICodexConfig` as `retry: RetryConfig = RetryConfig()` (line 79).
+- Added to `ToolsConfig` as `ssh_retry: RetryConfig = RetryConfig(max_retries=2, base_delay=0.5, max_delay=10.0)` (line 51). SSH defaults are more conservative (2 retries, 0.5s base) since SSH failures often indicate persistent issues — retrying too aggressively wastes time.
+
+#### 3. `src/llm/openai_codex.py` — Codex retry overhaul
+- Removed module-level `MAX_RETRIES = 3` and `RETRY_BACKOFF = [2, 5, 10]` constants.
+- `CodexChatClient.__init__()` (line 24): Now accepts `max_retries`, `retry_base_delay`, `retry_max_delay` kwargs with sensible defaults from the backoff module.
+- `_stream_tool_request()` (line 367): All 5 retry sites (empty 200, 429 rate limit, 500-504 server error, aiohttp.ClientError) now use `compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)` instead of fixed `RETRY_BACKOFF[attempt]`. Log messages updated from `%ds` to `%.1fs` for fractional delay display.
+- `_stream_request()` (line 607): Same changes as `_stream_tool_request` — 4 retry sites updated to use `compute_backoff`.
+- Both methods use `self.max_retries` instead of the old `MAX_RETRIES` constant, making retry count configurable per client instance.
+
+#### 4. `src/tools/ssh.py` — SSH retry for transient failures
+- Added `_SSH_TRANSIENT_EXIT_CODES = frozenset({255})` (line 18): SSH convention — exit code 255 indicates SSH-level (not command-level) failure.
+- Added `_SSH_TRANSIENT_PATTERNS` tuple (line 22): 7 known transient failure strings: "Connection refused", "Connection reset", "Connection timed out", "No route to host", "Network is unreachable", "ssh_exchange_identification", "kex_exchange_identification".
+- `_is_ssh_transient_failure(exit_code, output)` (line 43): Returns True only when exit code is 255 AND output contains a known transient pattern. This prevents retrying on SSH auth failures (255 + "Permission denied"), which are not transient.
+- `run_ssh_command()` (line 79): New params `max_retries=1`, `retry_base_delay=0.5`, `retry_max_delay=10.0`. Default `max_retries=1` means no retry unless callers opt in — backward compatible. The retry loop only fires for `_is_ssh_transient_failure()` results and `asyncio.TimeoutError`. Non-SSH exceptions (OSError, etc.) are NOT retried since they indicate local system problems. Command-level failures (exit != 0 but not 255+transient) are returned immediately — the remote command actually ran and produced a valid result.
+
+#### 5. `src/tools/executor.py:108-118` — Plumbing
+- `_exec_command()` now reads `self.config.ssh_retry` and passes `max_retries`, `retry_base_delay`, `retry_max_delay` to `run_ssh_command()`. Local commands via `run_local_command()` are unaffected — they don't have the same transient failure profile as SSH.
+
+#### 6. `src/llm/__init__.py` — Exports
+- Added `compute_backoff`, `compute_backoff_no_jitter` to `__all__`.
+
+#### 7. Tests: `tests/test_backoff.py` — 54 tests across 12 test classes
+- `TestComputeBackoff` (8): bounds checking for attempts 0/1/5, max_delay cap, custom base, float return, jitter variation, large attempt cap.
+- `TestComputeBackoffNoJitter` (6): attempts 0/1/2, max cap, custom base, determinism.
+- `TestBackoffDefaults` (3): default constant values.
+- `TestRetryConfig` (6): defaults, custom values, on OpenAICodexConfig (default + custom), on ToolsConfig (default + custom).
+- `TestCodexClientRetryConfig` (2): default and custom retry params on CodexChatClient.
+- `TestIsSSHTransientFailure` (12): all 7 transient patterns at exit 255, exit 255 with non-transient output, exit 1 not transient, exit 0 not transient, exit code set, patterns nonempty.
+- `TestSSHRetry` (8): no retry on success, no retry on command failure (exit 127), retry on connection refused (255), exhausted retries, retry on timeout, no retry on exception (OSError), default retry params, backoff called with correct params.
+- `TestExecutorSSHRetryConfig` (3): passes retry config, default config values, local command unaffected.
+- `TestCodexRetriesUseBackoff` (3): old RETRY_BACKOFF constant gone, old MAX_RETRIES constant gone, compute_backoff imported.
+- `TestRetryConfigYAML` (3): ToolsConfig from dict, OpenAICodexConfig from dict, ToolsConfig without retry key.
+
+### Issues found
+- The `CostTracker`, `session_tokens` Prometheus source, and `TrajectorySaver` are all still not wired to the bot object. This is a recurring note from Rounds 1-5. Unrelated to this round's scope.
+- The `CodexChatClient` constructor now accepts `max_retries`/`retry_base_delay`/`retry_max_delay` but the bot initialization code that creates the client doesn't pass `config.openai_codex.retry` values yet — it will need to when `OdinBot.__init__` is formalized. The defaults match the old behavior (3 retries) but with jittered delays instead of fixed [2, 5, 10].
+- SSH retry defaults to `max_retries=1` (no retry) on the function signature for backward compat, but the executor passes `ssh_retry.max_retries=2` from config — so the effective default for tool execution is 2 attempts. Direct callers of `run_ssh_command()` without passing retry params get no retry.
+
+### Next round watch for
+- Round 7 (per-tool timeouts) will interact with the retry config in `ToolsConfig`. The `ssh_retry` field and per-tool timeout fields will both live on `ToolsConfig` — ensure they don't conflict semantically. A per-tool timeout should be the total timeout per attempt, not the total across all retries.
+- When `OdinBot` initialization is formalized, the `CodexChatClient` constructor should receive `config.openai_codex.retry.max_retries`, `.base_delay`, `.max_delay`.
+- The `compute_backoff` function uses `random.uniform` which is not cryptographically secure — this is fine for retry jitter where the goal is decorrelation, not security. No change needed.
+- The scheduler's existing exponential backoff in `src/scheduler/scheduler.py:552-558` uses a different formula (`base * 2^n`, no jitter, different cap). It was left unchanged since it serves a different purpose (task retry over minutes/hours) and its defaults are appropriate for that timescale.
