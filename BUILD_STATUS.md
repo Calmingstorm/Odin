@@ -121,7 +121,7 @@ tightening of prior work.
 ### Phase 4 — Integrations (rounds 16–20)
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
-| 16 | MCP (Model Context Protocol) client: invoke external MCP servers as first-class tools | pending | |
+| 16 | MCP (Model Context Protocol) client: invoke external MCP servers as first-class tools | done | MCPManager + MCPServerConnection with stdio/HTTP transport, JSON-RPC protocol, tool discovery/invocation, namespaced tools, REST API (4 endpoints), background task integration, config schema, +132 tests |
 | 17 | Slack output: post responses/alerts to Slack webhook alongside Discord | pending | |
 | 18 | Linear / Jira: create issues from loop reports, comment on existing issues | pending | |
 | 19 | Richer Grafana alert handling: parse payloads, auto-spawn remediation loops | pending | |
@@ -1531,3 +1531,177 @@ HTTP probe operations helper that builds safe curl commands for HTTP probing wit
 - All five subsystem wiring tasks remain open from Rounds 1-14: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
 - The `-w` timing format uses curl format specifiers (`%{http_code}`, `%{time_total}`, etc.). These are well-supported across curl versions but very old versions (pre-7.x) may not support all specifiers. All modern distros ship curl 7.68+.
 - For endpoints that return large responses, the output will be truncated by `_truncate_lines` in the executor. The timing breakdown (`---PROBE-RESULTS---` section) appears at the end of curl output, so if the response body is very large, the timing info may be in the truncated portion. The LLM can use `--max-time` to bound response time or add specific curl flags via `run_command` for more control.
+
+## Round 16 — MCP (Model Context Protocol) client
+**Focus**: Add MCP client subsystem to connect to external MCP servers (stdio or HTTP transport) and expose their tools as first-class Odin tools.
+**Baseline pytest**: 1745 passed, 0 failed
+**Post-round pytest**: 1877 passed, 0 failed (+132 new tests)
+
+### Validated from prior rounds
+- Round 15: `http_probe` tool, 7 HTTP methods, curl-based timing breakdown, retries, shell injection protection — all present and passing (124 tests).
+- Round 14: `terraform_ops` tool, 10 actions, plan-file-only apply — all present and passing (138 tests).
+- Round 13: `docker_ops` tool, 14 actions, shell injection protection, compose support — all present and passing (148 tests).
+- Round 12: `kubectl` tool, 10 actions, shell injection protection, common flags — all present and passing (138 tests).
+- Round 11: `git_ops` tool, 11 actions, push freshness check — all present and passing (113 tests).
+- Round 10: 5 subsystem wiring tasks remain pending. Not in scope for this round.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. New module: `src/tools/mcp_client.py` (313 lines)
+MCP client that implements the Model Context Protocol (JSON-RPC 2.0) for connecting to external tool servers.
+
+**Constants** (lines 15-27):
+- `PROTOCOL_VERSION = "2024-11-05"`: MCP protocol version for handshake.
+- `CLIENT_INFO`: Odin client identifier sent during initialization.
+- `_INIT_TIMEOUT = 15`, `_CALL_TIMEOUT = 120`, `_READ_TIMEOUT = 5`: Default timeouts.
+
+**Helper functions** (lines 30-43):
+- `make_tool_name(server_name, tool_name)`: Creates namespaced tool name `mcp_{server}_{tool}` to avoid collisions with built-in tools.
+- `parse_tool_name(namespaced)`: Extracts `(server_name, tool_name)` tuple from a namespaced name. Returns None for non-MCP names.
+
+**`MCPError`** (line 46): Exception class for MCP operation failures.
+
+**`MCPServerConnection`** (lines 49-270): Connection to a single MCP server.
+- Constructor (line 53): Accepts name, transport ("stdio" or "http"), command/args (for stdio), url/headers (for http), env vars, and timeout.
+- `connect()` (line 93): Dispatches to `_connect_stdio()` or `_connect_http()` based on transport.
+- `_connect_stdio()` (line 99): Spawns subprocess via `asyncio.create_subprocess_exec`, starts `_stdio_reader` background task, performs MCP initialize handshake.
+- `_connect_http()` (line 120): Performs MCP initialize handshake via HTTP POST.
+- `_stdio_reader()` (line 126): Background task that reads JSON-RPC messages from subprocess stdout, resolves pending request futures by message ID.
+- `_send_request(method, params)` (line 149): Dispatches to stdio or HTTP transport.
+- `_send_stdio_request()` (line 155): Writes JSON-RPC request to subprocess stdin, waits on future resolved by `_stdio_reader`.
+- `_send_http_request()` (line 178): Sends JSON-RPC request via aiohttp POST, parses response JSON.
+- `_send_notification()` (line 199): Sends JSON-RPC notification (no response expected). Used for `notifications/initialized`.
+- `_initialize()` (line 208): MCP initialize handshake — sends `protocolVersion`, `capabilities`, `clientInfo`; receives server info.
+- `discover_tools()` (line 237): Sends `tools/list` request, parses tool definitions (name, description, inputSchema).
+- `call_tool(tool_name, arguments)` (line 259): Sends `tools/call` request, parses result content. Handles text, image, resource, and unknown content types. Returns `"(no output)"` for empty results.
+- `disconnect()` (line 293): Cancels reader task, terminates subprocess (with kill fallback on timeout), clears state.
+
+**`MCPManager`** (lines 273-340): Manages multiple MCP server connections.
+- `add_server(name, transport, ...)` (line 289): Creates connection, connects, discovers tools, registers in tool index. Server names must be valid Python identifiers.
+- `remove_server(name)` (line 320): Disconnects and removes server, clears tool index entries.
+- `has_tool(tool_name)` (line 332): Checks if a namespaced tool name exists in any connected server.
+- `get_tool_definitions()` (line 335): Returns tool definitions in Odin format (name, description, input_schema). Caches result, invalidated on add/remove. Descriptions prefixed with `[MCP:server_name]`.
+- `execute(tool_name, tool_input)` (line 354): Resolves namespaced name to server + original tool name, calls `call_tool`. Handles timeout, MCPError, and generic exceptions gracefully.
+- `get_status()` (line 374): Returns status of all servers (name, transport, connected, tool count, tool names).
+- `shutdown()` (line 387): Disconnects all servers, tolerates individual disconnect errors.
+
+#### 2. Config schema: `src/config/schema.py` (lines 200-216)
+- `MCPServerConfig` (line 200): Pydantic model for a single MCP server. Fields: `transport` (validated: "stdio" or "http"), `command`, `args`, `url`, `headers`, `env`, `timeout_seconds` (default 120).
+- `MCPConfig` (line 216): Pydantic model wrapping `enabled` (default False) and `servers` dict.
+- Added `mcp: MCPConfig = MCPConfig()` to `Config` (line 239). Optional with sensible defaults — no config file changes required.
+
+#### 3. Tool dispatch: `src/discord/background_task.py` (lines 300-303)
+- Added `mcp_manager: MCPManager | None = None` parameter to `_execute_tool()` function (line 267).
+- Added MCP tool dispatch between skills and built-in tools (lines 300-302): if `mcp_manager` is not None and has the tool, routes to `mcp_manager.execute()`.
+- Priority order: knowledge tools → skills → MCP tools → built-in tools via executor.
+- New parameter is keyword-only with None default — fully backward compatible with existing callers.
+
+#### 4. REST API: `src/web/api.py` (4 new endpoints)
+- `GET /api/mcp/servers` — List all connected MCP servers with status, tool counts, and tool names.
+- `GET /api/mcp/servers/{name}/tools` — List tools from a specific server with namespaced and original names.
+- `POST /api/mcp/servers` — Add and connect a new MCP server at runtime. Accepts name, transport, command/args/url/headers/env/timeout. Returns server info + discovered tools. Invalidates merged tools cache.
+- `DELETE /api/mcp/servers/{name}` — Disconnect and remove a server. Invalidates merged tools cache.
+- All endpoints use `getattr(bot, "mcp_manager", None)` pattern — returns 503 if MCP is not enabled.
+
+#### 5. Exports: `src/tools/__init__.py` (line 4)
+- Added `MCPManager` to imports and `__all__`.
+
+#### 6. Tests: `tests/test_mcp_client.py` — 132 tests across 18 test classes
+
+**Tool name helpers** (12):
+- `TestMakeToolName` (4): basic, single char, underscores, numeric.
+- `TestParseToolName` (8): basic, underscores, not mcp prefix, no separator, empty, just prefix, roundtrip, single char.
+
+**Config schema** (9):
+- `TestMCPConfig` (9): defaults, with servers, http transport, invalid transport, default timeout, env dict, config includes mcp, stdio defaults, http defaults.
+
+**Connection init** (6):
+- `TestMCPServerConnectionInit` (6): stdio defaults, http defaults, custom timeout, env, headers, args.
+
+**Connection errors** (4):
+- `TestMCPServerConnectionConnectErrors` (4): stdio no command, http no url, unsupported transport, command not found.
+
+**Protocol** (18):
+- `TestMCPServerConnectionProtocol` (18): initialize success, init error, discover tools, discover error, discover not connected, discover skips unnamed, discover empty, call tool success, call error flag, call rpc error, call not connected, call empty content, call image, call resource, call multiple text, call string content, call unknown type, call mixed content, call rpc error string.
+
+**HTTP transport** (6):
+- `TestMCPServerConnectionHTTP` (6): connect success, error status, init error, discover tools, call tool, headers passed.
+
+**Disconnect** (6):
+- `TestMCPServerConnectionDisconnect` (6): not connected, clears tools, terminates process, kills on timeout, cancels reader task, clears pending.
+
+**Properties & internals** (6):
+- `TestMCPServerConnectionNextId` (1): increments.
+- `TestMCPServerConnectionProperties` (2): server_info copy, tools copy.
+- `TestMCPServerConnectionSendRequest` (4): unsupported transport, not connected, notification not connected, notification no process.
+
+**Manager core** (13):
+- `TestMCPManager` (13): init, add success, duplicate name, invalid name, leading digit, valid names, remove, remove not found, get server, get server after add, multiple tools, connection params, default timeout.
+
+**Manager tool definitions** (10):
+- `TestMCPManagerToolDefinitions` (10): get definitions, cached, cache invalidated on add, cache invalidated on remove, disconnected excluded, empty, multiple servers, input schema mapping, description prefix, missing schema defaults.
+
+**Manager execution** (7):
+- `TestMCPManagerExecute` (7): success, unknown tool, server disconnected, timeout, mcp error, generic exception, empty input.
+
+**Manager status** (3):
+- `TestMCPManagerStatus` (3): empty, with servers, multiple servers.
+
+**Manager shutdown** (3):
+- `TestMCPManagerShutdown` (3): disconnects all, empty, tolerates errors.
+
+**Manager has_tool** (3):
+- `TestMCPManagerHasTool` (3): true, false, non-mcp.
+
+**Tool isolation** (2):
+- `TestMCPManagerToolIsolation` (2): same tool name different servers, remove one keeps other.
+
+**Background task integration** (4):
+- `TestBackgroundTaskMCPIntegration` (4): routes to mcp, mcp none falls through, skill takes priority, mcp false falls to executor.
+
+**JSON-RPC format** (5):
+- `TestJSONRPCFormat` (5): request format, request with params, notification format, protocol version, client info.
+
+**Edge cases** (11):
+- `TestEdgeCases` (11): parse no underscore, make empty server, make empty tool, error str, error inherits exception, empty server info, empty init result, discover preserves schema, routes to correct server.
+
+**REST API** (4):
+- `TestMCPRESTAPI` (4): list no manager, list with manager, server tools, server tools not found.
+
+### Design decisions
+
+1. **Separate manager (not built into executor)**: MCP servers are fundamentally different from built-in tools — they're external processes with their own lifecycle. `MCPManager` parallels `SkillManager` as an independent dispatch target rather than adding MCP logic into `ToolExecutor`.
+
+2. **Tool namespacing**: `mcp_{server}_{tool}` prevents collisions. Two MCP servers can expose the same tool name (e.g., both have `read_file`) and they'll be `mcp_fs_read_file` vs `mcp_db_read_file`. The LLM sees and calls the namespaced name.
+
+3. **Server name validation**: Server names must be valid Python identifiers (letters, digits, underscores, no leading digit). This ensures clean namespaced tool names and prevents injection in tool name matching.
+
+4. **Dispatch priority**: knowledge → skills → MCP → executor. Skills take priority over MCP because skills are user-defined and closer to the bot. MCP tools are external servers that may be less trusted.
+
+5. **JSON-RPC 2.0 protocol**: Follows the MCP specification exactly — `initialize` handshake, `notifications/initialized` acknowledgment, `tools/list` discovery, `tools/call` invocation. Request/response matching by integer ID.
+
+6. **Stdio transport**: Spawns subprocess, communicates via stdin (JSON lines), reads responses from stdout via `_stdio_reader` background task. Clean separation between write path (locked) and read path (background task resolving futures).
+
+7. **HTTP transport**: Uses aiohttp POST for each JSON-RPC request. Each call creates a new session (per-request). Headers are merged with user-configured headers (e.g., Authorization).
+
+8. **Fail-open on errors**: Tool execution errors return string error messages (not exceptions) — consistent with how `ToolExecutor.execute()` handles errors. The LLM sees the error and can decide what to do.
+
+9. **Runtime server management**: Servers can be added/removed at runtime via REST API. This supports dynamic MCP server discovery without restarting the bot. Cache is invalidated on add/remove.
+
+10. **No new pip dependencies**: Uses asyncio.subprocess for stdio (stdlib) and aiohttp (already in deps) for HTTP. No MCP SDK or other libraries needed.
+
+### Issues found
+- No issues in prior rounds needed fixing.
+- The `_stdio_reader` background task and `_send_stdio_request` method coordinate via `asyncio.Future` objects in `_pending` dict. This requires careful async scheduling — the reader must run concurrently with the request sender. This coordination is hard to unit test with mocked subprocesses (tests hang due to async task scheduling), so protocol tests mock at the `_send_request` level instead.
+- `_send_notification` for stdio transport calls `self._process.stdin.write()` without drain — this is intentional since notifications don't need confirmation and drain could deadlock if the process isn't consuming stdin.
+- The `inputSchema` key from MCP servers (camelCase per MCP spec) is mapped to `input_schema` (snake_case per Odin convention) in `get_tool_definitions()`.
+
+### Next round watch for
+- Round 17 (Slack output) is a different integration pattern — outbound webhooks rather than bidirectional tool protocol. No dependencies on MCP.
+- MCP tools are NOT added to the built-in TOOLS list in registry.py — they're merged at runtime via the merged tools mechanism (like skills). The tool count in registry.py (66) is unchanged.
+- The `_execute_tool` function in background_task.py now accepts an optional `mcp_manager` parameter. All existing callers use the default (None) and are unaffected. The main tool loop in the Discord client will need to pass `bot.mcp_manager` when wired up.
+- The REST API endpoints for MCP are not auth-gated separately — they follow the same Bearer token auth as all other `/api/` endpoints.
+- All five subsystem wiring tasks remain open from Rounds 1-15: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
+- Runtime MCP server management (add/remove via REST API) invalidates the merged tools cache (`bot._cached_merged_tools = None`). This follows the same pattern as skill CRUD operations.
+- The MCP client does NOT implement MCP resources or prompts — only tools. Resources and prompts could be added in a future round if needed.

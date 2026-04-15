@@ -197,6 +197,28 @@ class MonitoringConfig(BaseModel):
     cooldown_minutes: int = 60
 
 
+class MCPServerConfig(BaseModel):
+    transport: str = "stdio"  # "stdio" or "http"
+    command: str = ""  # for stdio: executable path
+    args: list[str] = Field(default_factory=list)  # for stdio: command arguments
+    url: str = ""  # for http: endpoint URL
+    headers: dict[str, str] = Field(default_factory=dict)  # for http: extra headers
+    env: dict[str, str] = Field(default_factory=dict)  # extra env vars for stdio
+    timeout_seconds: int = 120
+
+    @field_validator("transport")
+    @classmethod
+    def _validate_transport(cls, v: str) -> str:
+        if v not in ("stdio", "http"):
+            raise ValueError(f"Invalid transport '{v}'. Must be 'stdio' or 'http'.")
+        return v
+
+
+class MCPConfig(BaseModel):
+    enabled: bool = False
+    servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+
 class Config(BaseModel):
     timezone: str = "UTC"
     discord: DiscordConfig
@@ -217,6 +239,7 @@ class Config(BaseModel):
     web: WebConfig = WebConfig()
     reaction_triggers: ReactionTriggerConfig = ReactionTriggerConfig()
     message_triggers: MessageTriggerConfig = MessageTriggerConfig()
+    mcp: MCPConfig = MCPConfig()
 
 
 def _substitute_env_vars(text: str) -> str:

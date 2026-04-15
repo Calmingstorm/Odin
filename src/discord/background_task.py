@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from ..audit.logger import AuditLogger
     from ..tools.executor import ToolExecutor
     from ..tools.skill_manager import SkillManager
+    from ..tools.mcp_client import MCPManager
     from ..knowledge.store import KnowledgeStore
     from ..search.embedder import LocalEmbedder
 
@@ -264,6 +265,7 @@ async def _execute_tool(
     embedder: LocalEmbedder | None,
     requester: str,
     step_desc: str = "",
+    mcp_manager: MCPManager | None = None,
 ) -> str:
     """Execute a single tool, routing to the right handler."""
     # Knowledge base tools need special handling (not in executor)
@@ -296,6 +298,10 @@ async def _execute_tool(
     # Skills
     if skill_manager.has_skill(tool_name):
         return await skill_manager.execute(tool_name, tool_input)
+
+    # MCP tools (namespaced as mcp_<server>_<tool>)
+    if mcp_manager is not None and mcp_manager.has_tool(tool_name):
+        return await mcp_manager.execute(tool_name, tool_input)
 
     # Built-in tools via executor — default missing required fields
     if "host" not in tool_input:

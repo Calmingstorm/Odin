@@ -931,6 +931,75 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response({"config": bot.skill_manager.get_skill_config(name)})
 
     # ------------------------------------------------------------------
+    # MCP servers
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/mcp/servers")
+    async def list_mcp_servers(_request: web.Request) -> web.Response:
+        mgr = getattr(bot, "mcp_manager", None)
+        if mgr is None:
+            return web.json_response({"error": "MCP not enabled"}, status=503)
+        return web.json_response({"servers": mgr.get_status()})
+
+    @routes.get("/api/mcp/servers/{name}/tools")
+    async def list_mcp_server_tools(request: web.Request) -> web.Response:
+        mgr = getattr(bot, "mcp_manager", None)
+        if mgr is None:
+            return web.json_response({"error": "MCP not enabled"}, status=503)
+        name = request.match_info["name"]
+        conn = mgr.get_server(name)
+        if conn is None:
+            return web.json_response({"error": "server not found"}, status=404)
+        from ..tools.mcp_client import make_tool_name
+        tools = [
+            {
+                "name": make_tool_name(name, t["name"]),
+                "original_name": t["name"],
+                "description": t.get("description", ""),
+            }
+            for t in conn.tools
+        ]
+        return web.json_response({"server": name, "tools": tools})
+
+    @routes.post("/api/mcp/servers")
+    async def add_mcp_server(request: web.Request) -> web.Response:
+        mgr = getattr(bot, "mcp_manager", None)
+        if mgr is None:
+            return web.json_response({"error": "MCP not enabled"}, status=503)
+        data = await request.json()
+        name = data.get("name", "").strip()
+        transport = data.get("transport", "stdio")
+        if not name:
+            return web.json_response({"error": "name is required"}, status=400)
+        try:
+            info = await mgr.add_server(
+                name, transport,
+                command=data.get("command", ""),
+                args=data.get("args", []),
+                url=data.get("url", ""),
+                headers=data.get("headers", {}),
+                env=data.get("env", {}),
+                timeout=data.get("timeout"),
+            )
+            bot._cached_merged_tools = None
+            return web.json_response(info, status=201)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    @routes.delete("/api/mcp/servers/{name}")
+    async def remove_mcp_server(request: web.Request) -> web.Response:
+        mgr = getattr(bot, "mcp_manager", None)
+        if mgr is None:
+            return web.json_response({"error": "MCP not enabled"}, status=503)
+        name = request.match_info["name"]
+        try:
+            await mgr.remove_server(name)
+            bot._cached_merged_tools = None
+            return web.json_response({"status": "removed", "server": name})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=404)
+
+    # ------------------------------------------------------------------
     # Knowledge
     # ------------------------------------------------------------------
 
