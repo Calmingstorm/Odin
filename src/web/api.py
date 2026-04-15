@@ -1390,6 +1390,29 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "one or both versions not found"}, status=404)
         return web.json_response(diff)
 
+    # Knowledge bulk import
+    # ------------------------------------------------------------------
+
+    @routes.post("/api/knowledge/import")
+    async def import_knowledge(request: web.Request) -> web.Response:
+        store = bot._knowledge_store
+        if not store or not store.available:
+            return web.json_response({"error": "knowledge store not available"}, status=503)
+        data = await request.json()
+        items = data.get("items")
+        if not items or not isinstance(items, list):
+            return web.json_response({"error": "items (array) is required"}, status=400)
+        from ..knowledge.importer import BulkImporter
+        importer = BulkImporter(store, bot._embedder)
+        batch = await importer.import_batch(items, uploader="web-api")
+        return web.json_response({
+            "total": batch.total,
+            "succeeded": batch.succeeded,
+            "failed": batch.failed,
+            "skipped": batch.skipped,
+            "results": batch.results,
+        })
+
     # ------------------------------------------------------------------
     # Schedules
     # ------------------------------------------------------------------

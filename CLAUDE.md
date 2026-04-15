@@ -41,6 +41,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/sessions/manager.py` — conversation history with compaction (via Codex)
   - `src/learning/reflector.py` — extracts lessons from conversations (via Codex)
   - `src/knowledge/store.py` — SQLite+sqlite-vec RAG knowledge base (local embeddings via fastembed)
+  - `src/knowledge/importer.py` — Bulk knowledge import (markdown dirs, PDFs, web URLs)
   - `src/search/fts.py` — SQLite FTS5 full-text search
   - `src/search/hybrid.py` — Reciprocal Rank Fusion for hybrid search
   - `src/health/server.py` — webhook receiver (Gitea, Grafana, generic)

@@ -295,6 +295,21 @@ async def _execute_tool(
             return "Knowledge base is empty."
         return "\n".join(f"- {s['source']} ({s['chunks']} chunks)" for s in sources)
 
+    if tool_name == "bulk_ingest_knowledge" and knowledge_store:
+        items = tool_input.get("items")
+        if not items or not isinstance(items, list):
+            return "items (array) is required."
+        from ..knowledge.importer import BulkImporter
+        importer = BulkImporter(knowledge_store, embedder)
+        batch = await importer.import_batch(items, uploader=requester)
+        lines = [f"Bulk import: {batch.succeeded} succeeded, {batch.failed} failed, {batch.skipped} skipped"]
+        for r in batch.results:
+            tag = r["status"].upper()
+            detail = f" ({r['chunks']} chunks)" if r["chunks"] else ""
+            err = f" — {r['error']}" if r["error"] else ""
+            lines.append(f"  [{tag}] {r['source']}{detail}{err}")
+        return "\n".join(lines)
+
     # Skills
     if skill_manager.has_skill(tool_name):
         return await skill_manager.execute(tool_name, tool_input)

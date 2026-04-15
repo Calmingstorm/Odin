@@ -708,6 +708,40 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "bulk_ingest_knowledge",
+        "description": (
+            "Bulk-import documents into the knowledge base. Accepts a list of items: "
+            "directories of markdown/text files, PDF URLs, or web page URLs. "
+            "Each item needs a type ('directory', 'pdf', or 'url') plus type-specific params."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": (
+                        "Import jobs. Each object needs 'type' plus: "
+                        "directory → 'path' (+ optional 'pattern', default '**/*.md'); "
+                        "pdf → 'url' (+ optional 'source'); "
+                        "url → 'url' (+ optional 'source')"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["directory", "pdf", "url"]},
+                            "path": {"type": "string"},
+                            "url": {"type": "string"},
+                            "source": {"type": "string"},
+                            "pattern": {"type": "string"},
+                        },
+                        "required": ["type"],
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    },
+    {
         "name": "list_knowledge",
         "description": "Lists all knowledge base documents with source names and chunk counts. To search, use search_knowledge. To remove, use delete_knowledge.",
         "input_schema": {

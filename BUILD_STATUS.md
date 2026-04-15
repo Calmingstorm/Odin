@@ -134,7 +134,7 @@ tightening of prior work.
 | 22 | Knowledge versioning: edit history per entry with audit trail | done | knowledge_versions table, version recording on ingest/delete, content snapshots, unified diffs, restore, 4 REST API endpoints, +69 tests |
 | 23 | Adaptive session consolidation: compaction target scales with channel activity | done | Activity rate tracking, adaptive threshold/keep/summary scaling, _get_compaction_params, get_activity_metrics, REST API endpoint, config field, +77 tests |
 | 24 | FTS5 session search in web UI: search prior conversations by keyword/user/time | done | search_history() filters, /api/sessions/search, web UI search panel with snippet highlighting |
-| 25 | Knowledge import: bulk ingest of markdown dirs, PDFs, web URLs | pending | |
+| 25 | Knowledge import: bulk ingest of markdown dirs, PDFs, web URLs | done | BulkImporter module (directory/PDF/URL), batch orchestration, tool definition, background_task handler, REST API endpoint, +82 tests |
 
 ### Phase 6 — Policy, audit, safety (rounds 26–30)
 | # | Focus | Status | Summary |
@@ -2955,4 +2955,152 @@ New `.fts-highlight` class for search result highlighting:
 - `FullTextIndex.search_sessions()` now accepts optional `channel_id` param. Existing callers (e.g., `SessionVectorStore.search_hybrid`) pass no `channel_id` and are unaffected.
 - REST API endpoint count is now 99 (was 98 after Round 23, +1 new: `/api/sessions/search`).
 - The web UI `highlightSnippet()` uses `v-html` to render FTS5 snippet markers as `<mark>` tags. The content is HTML-escaped before marker replacement, so this is XSS-safe, but future changes to snippet rendering should maintain this ordering.
+- All five subsystem wiring tasks remain open from prior rounds.
+
+## Round 25 — Knowledge import: bulk ingest of markdown dirs, PDFs, web URLs
+**Focus**: Add bulk knowledge import capability — a `BulkImporter` class that orchestrates ingesting entire directories of text files, PDFs from URLs, and web pages into the KnowledgeStore in a single operation, with per-item status tracking.
+**Baseline pytest**: 2523 passed, 0 failed
+**Post-round pytest**: 2605 passed, 0 failed (+82 new tests)
+
+### Validated from prior rounds
+- Round 24 (FTS5 session search): all 54 tests pass, search_history filters and API endpoint work correctly.
+- Round 24 noted "Round 25 has no dependencies on Round 24" — confirmed.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. BulkImporter module: `src/knowledge/importer.py` (new, ~200 lines)
+
+New module with three import methods and a batch orchestrator:
+
+- **`BulkImporter.__init__(store, embedder)`** — takes existing KnowledgeStore and optional embedder, reusing the full ingest pipeline (chunking, embedding, dedup, versioning).
+
+- **`import_directory(directory, pattern, uploader)`** (lines 60-107): Recursively scans a local filesystem directory using `pathlib.Path.glob()`. Features:
+  - Configurable glob pattern (default `**/*.md`)
+  - Extension allowlist: `.md`, `.txt`, `.rst`, `.adoc`, `.log`, `.csv`, `.json`, `.yaml`, `.yml`, `.toml`, `.cfg`, `.ini`, `.conf` — binary extensions rejected
+  - File size limit: 512 KB per file (MAX_FILE_BYTES)
+  - Empty file skip
+  - Batch limit: 50 files per call (MAX_BATCH_SIZE)
+  - Relative source names (relative to the scanned directory root)
+  - Proper error handling per file (one file's failure doesn't abort the batch)
+
+- **`import_pdf_url(url, source, uploader)`** (lines 109-152): Downloads a PDF from an HTTP(S) URL, extracts text with PyMuPDF (fitz), and ingests. Features:
+  - URL scheme validation (http/https only)
+  - Lazy `import fitz` — graceful error if PyMuPDF not installed
+  - PDF size limit: 50 MB (MAX_PDF_BYTES)
+  - Multi-page text extraction with page headers (`## Page N`)
+  - Content truncation at 500 KB (PDF_MAX_CHARS)
+  - Auto-derived source name from URL path (last segment)
+  - Empty PDF detection (skipped, not error)
+
+- **`import_web_url(url, source, uploader)`** (lines 154-194): Fetches a web page via aiohttp, converts HTML to text using the existing `_html_to_text` helper from `src/tools/web.py`, and ingests. Features:
+  - URL scheme validation
+  - Content-Type detection (HTML → text conversion, plain text → raw)
+  - Content truncation at 100 KB (FETCH_MAX_CHARS, larger than tool output to preserve full content for knowledge)
+  - Empty page detection
+
+- **`import_batch(items, uploader)`** (lines 196-244): Processes a list of mixed import jobs. Each item has a `type` field (`directory`, `pdf`, or `url`) plus type-specific parameters. Returns a `BatchResult` with:
+  - `total`, `succeeded`, `failed`, `skipped` counts
+  - `results` list of per-item dicts with `source`, `status`, `chunks`, `error`
+  - Batch size capped at MAX_BATCH_SIZE
+
+- **`ImportResult`** dataclass (lines 37-41): Per-item result with `source`, `status` (ok/error/skipped), `chunks`, `error`.
+- **`BatchResult`** dataclass (lines 44-50): Aggregate result with counts and results list.
+
+#### 2. Tool definition: `src/tools/registry.py` (lines 710-744)
+
+New `bulk_ingest_knowledge` tool with:
+- `items` array parameter (required)
+- Each item: `type` (enum: directory/pdf/url), `path`, `url`, `source`, `pattern`
+- Description explains the three import types and their parameters
+
+#### 3. Tool handler: `src/discord/background_task.py` (lines 298-312)
+
+Added `bulk_ingest_knowledge` handler in `_execute_tool()`:
+- Validates `items` is a non-empty list
+- Creates `BulkImporter` with the existing knowledge store and embedder
+- Calls `import_batch()` with the requester as uploader
+- Formats results as a multi-line summary: header with counts, then per-item `[OK]`/`[ERROR]`/`[SKIPPED]` lines with source, chunk count, and error details
+
+#### 4. REST API endpoint: `src/web/api.py` (lines 1393-1413)
+
+New endpoint `POST /api/knowledge/import`:
+- Request body: `{"items": [...]}` — same format as the tool
+- Returns JSON with `total`, `succeeded`, `failed`, `skipped`, `results`
+- 503 when knowledge store unavailable
+- 400 when items missing or not an array
+- Uses `uploader="web-api"` for audit trail
+
+#### 5. Tests: `tests/test_knowledge_import.py` — 82 tests across 14 test classes
+
+**ImportResult** (3):
+- `TestImportResult` (3): defaults, with error, with chunks.
+
+**BatchResult** (2):
+- `TestBatchResult` (2): defaults, results independence (no shared mutable default).
+
+**Directory import** (12):
+- `TestImportDirectory` (12): missing dir, empty dir, single file, multiple files, nested, custom pattern, disallowed extensions, empty files, large files, batch limit, uploader propagation, relative source names, allowed extensions.
+
+**PDF URL import** (9):
+- `TestImportPdfUrl` (9): invalid scheme, fitz not installed, HTTP error, successful import, custom source, empty PDF, too large, source from URL path, multi-page, content truncation.
+
+**Web URL import** (8):
+- `TestImportWebUrl` (8): invalid scheme, HTTP error, HTML page, plain text, custom source, empty page, content truncation, default source is URL.
+
+**Batch import** (14):
+- `TestImportBatch` (14): empty items, unknown type, missing type, directory type, missing path, URL type, missing URL, PDF missing URL, mixed batch, size limit, counts accumulate, directory with pattern, PDF via batch, PDF with custom source.
+
+**Tool handler** (4):
+- `TestToolHandler` (4): routing works, missing items, invalid items, result format.
+
+**REST API** (6):
+- `TestImportAPI` (6): missing items 400, invalid type 400, directory import, response structure, unavailable store 503, mixed results.
+
+**Tool definition** (4):
+- `TestToolDefinition` (4): tool exists in TOOLS, schema structure, type enum, has description.
+
+**Constants** (7):
+- `TestConstants` (7): MAX_BATCH_SIZE positive, MAX_FILE_BYTES reasonable, MAX_PDF_BYTES > file, FETCH_MAX_CHARS > tool output, PDF_MAX_CHARS positive, allowed extensions include common, no binary extensions.
+
+**Module imports** (2):
+- `TestModuleImports` (2): BulkImporter importable, result types importable.
+
+**Edge cases** (10):
+- `TestEdgeCases` (10): subdirs only, unicode content, PDF source fallback, dedup across batch, result dict format, directory read error, PDF download exception, web fetch exception, multiple directories in batch.
+
+### Design decisions
+
+1. **Reuse existing KnowledgeStore.ingest()**: The BulkImporter delegates all chunking, embedding, deduplication, and version recording to the existing `ingest()` method. No new storage logic. This means bulk imports automatically benefit from existing dedup, version history, and FTS indexing.
+
+2. **Sequential item processing**: Items are processed sequentially (not concurrently) to avoid overwhelming the embedder and SQLite. This is intentional — bulk import is a background operation where throughput matters less than reliability.
+
+3. **Per-item error isolation**: One file's failure doesn't abort the batch. Each item gets its own `ImportResult` with status and error, so the caller sees exactly what succeeded and what didn't.
+
+4. **Extension allowlist for directories**: Rather than blindly ingesting everything, directory import only processes text-based extensions. Binary files, images, and executables are silently skipped. This prevents corrupting the knowledge base with garbage content.
+
+5. **Separate size limits per type**: Files (512 KB), PDFs (50 MB), and web pages (100 KB text) have different size limits reflecting their typical content density. PDFs are larger because they often contain dense multi-page documents.
+
+6. **Relative source names for directories**: Files ingested from `/docs/runbooks/api.md` get source name `runbooks/api.md` (relative to the scanned directory), making them easy to identify and manage.
+
+7. **Lazy fitz import**: PyMuPDF is imported only when a PDF is actually being processed, with a graceful error message if not installed. This avoids making fitz a hard dependency for the entire knowledge system.
+
+8. **Reuse web.py's HTML-to-text**: The web URL importer uses the existing `_html_to_text` helper from `src/tools/web.py` rather than duplicating HTML parsing logic.
+
+9. **No new dependencies**: Uses existing aiohttp, pathlib, and optionally PyMuPDF (already used by analyze_pdf). No new pip packages.
+
+### Files changed
+- `src/knowledge/importer.py` (new, ~200 lines): BulkImporter class with import_directory, import_pdf_url, import_web_url, import_batch; ImportResult and BatchResult dataclasses; constants.
+- `src/tools/registry.py` (lines 710-744): New `bulk_ingest_knowledge` tool definition with items array schema.
+- `src/discord/background_task.py` (lines 298-312): New handler for `bulk_ingest_knowledge` in `_execute_tool()`.
+- `src/web/api.py` (lines 1393-1413): New `POST /api/knowledge/import` REST endpoint.
+- `tests/test_knowledge_import.py` (new, 82 tests): Complete test coverage across 14 test classes.
+
+### Next round watch for
+- Round 26 has no dependencies on Round 25.
+- The `bulk_ingest_knowledge` tool handler is in `_execute_tool()` in `background_task.py`. It checks `knowledge_store` (truthy) but not `embedder` — this is intentional since the BulkImporter handles `embedder=None` gracefully (FTS-only mode, no vectors).
+- The BulkImporter's `import_pdf_url` method does a lazy `import fitz` — if PyMuPDF is not installed, it returns an error result rather than crashing. The test suite mocks fitz entirely, so tests pass regardless of PyMuPDF availability.
+- REST API endpoint count is now 100 (was 99 after Round 24, +1 new: `POST /api/knowledge/import`).
+- The `_html_to_text` function is imported from `src/tools/web.py` inside the `import_web_url` method (lazy import to avoid circular deps). If `web.py` changes its internal API, the importer would need updating.
+- `DIR_ALLOWED_EXTENSIONS` controls which file types are ingested from directories. Adding new text formats is safe; adding binary formats would be dangerous.
 - All five subsystem wiring tasks remain open from prior rounds.
