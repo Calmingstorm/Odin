@@ -371,4 +371,55 @@ class MetricsCollector:
             except Exception:
                 pass
 
+        # -- SSH Connection Pool --
+        ssh_pool_source = self._sources.get("ssh_pool")
+        if ssh_pool_source:
+            try:
+                pool_data = ssh_pool_source()
+                if pool_data:
+                    sections.append(_format_metric(
+                        "odin_ssh_pool_active_connections",
+                        pool_data.get("ssh_pool_active_connections", 0),
+                        help_text="Active SSH ControlMaster connections",
+                    ))
+                    sections.append(_format_metric(
+                        "odin_ssh_pool_total_opened",
+                        pool_data.get("ssh_pool_total_opened", 0),
+                        help_text="Total SSH connections opened",
+                        metric_type="counter",
+                    ))
+                    sections.append(_format_metric(
+                        "odin_ssh_pool_total_reused",
+                        pool_data.get("ssh_pool_total_reused", 0),
+                        help_text="Total SSH connections reused via multiplexing",
+                        metric_type="counter",
+                    ))
+            except Exception:
+                pass
+
+        # -- HTTP Connection Pool --
+        http_pool_source = self._sources.get("http_pool")
+        if http_pool_source:
+            try:
+                pool_data = http_pool_source()
+                if pool_data:
+                    sections.append(_format_metric(
+                        "odin_http_pool_active_connections",
+                        pool_data.get("http_pool_active_connections", 0),
+                        help_text="Active HTTP keepalive connections",
+                    ))
+                    sections.append(_format_metric(
+                        "odin_http_pool_max_connections",
+                        pool_data.get("http_pool_max_connections", 0),
+                        help_text="HTTP connection pool max size",
+                    ))
+                    sections.append(_format_metric(
+                        "odin_http_pool_total_requests",
+                        pool_data.get("http_pool_total_requests", 0),
+                        help_text="Total HTTP requests made via pool",
+                        metric_type="counter",
+                    ))
+            except Exception:
+                pass
+
         return "\n".join(sections) + "\n"

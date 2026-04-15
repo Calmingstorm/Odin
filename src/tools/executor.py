@@ -11,6 +11,7 @@ from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
 from .bulkhead import BulkheadFullError, BulkheadRegistry
 from .ssh import is_local_address, run_local_command, run_ssh_command
+from .ssh_pool import SSHConnectionPool
 
 log = get_logger("tools")
 
@@ -60,6 +61,15 @@ class ToolExecutor:
         self._browser_manager = browser_manager
         self._metrics: dict[str, dict[str, int]] = {}
         self.bulkheads = _build_bulkhead_registry(self.config)
+        pool_cfg = self.config.ssh_pool
+        self.ssh_pool: SSHConnectionPool | None = (
+            SSHConnectionPool(
+                control_persist=pool_cfg.control_persist,
+                socket_dir=pool_cfg.socket_dir,
+            )
+            if pool_cfg.enabled
+            else None
+        )
 
     def _resolve_host(self, alias: str) -> tuple[str, str, str] | None:
         """Resolve host alias to (address, ssh_user, os). Returns None if not allowed."""
@@ -131,24 +141,7 @@ class ToolExecutor:
                     return 1, "Error: subprocess bulkhead full — too many concurrent local commands"
             return await run_local_command(command, timeout=timeout)
         ssh_retry = self.config.ssh_retry
-        bh = self.bulkheads.get("ssh")
-        if bh:
-            try:
-                async with bh.acquire():
-                    return await run_ssh_command(
-                        host=address,
-                        command=command,
-                        ssh_key_path=self.config.ssh_key_path,
-                        known_hosts_path=self.config.ssh_known_hosts_path,
-                        timeout=timeout,
-                        ssh_user=ssh_user,
-                        max_retries=ssh_retry.max_retries,
-                        retry_base_delay=ssh_retry.base_delay,
-                        retry_max_delay=ssh_retry.max_delay,
-                    )
-            except BulkheadFullError:
-                return 1, "Error: SSH bulkhead full — too many concurrent SSH commands"
-        return await run_ssh_command(
+        ssh_kwargs = dict(
             host=address,
             command=command,
             ssh_key_path=self.config.ssh_key_path,
@@ -158,7 +151,16 @@ class ToolExecutor:
             max_retries=ssh_retry.max_retries,
             retry_base_delay=ssh_retry.base_delay,
             retry_max_delay=ssh_retry.max_delay,
+            pool=self.ssh_pool,
         )
+        bh = self.bulkheads.get("ssh")
+        if bh:
+            try:
+                async with bh.acquire():
+                    return await run_ssh_command(**ssh_kwargs)
+            except BulkheadFullError:
+                return 1, "Error: SSH bulkhead full — too many concurrent SSH commands"
+        return await run_ssh_command(**ssh_kwargs)
 
     async def _run_on_host(self, alias: str, command: str) -> str:
         resolved = self._resolve_host(alias)

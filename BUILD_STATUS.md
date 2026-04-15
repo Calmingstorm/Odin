@@ -106,7 +106,7 @@ tightening of prior work.
 | 6 | Exponential backoff with jitter on Codex and SSH retries (replace fixed [2s,5s,10s] ladder) | done | backoff module with full jitter, RetryConfig in schema, Codex + SSH retry integration |
 | 7 | Per-tool timeouts in `config.yml` instead of a single global tool_timeout_seconds | done | ToolsConfig.tool_timeouts dict + get_tool_timeout(), executor/agent/skill per-tool lookup, REST API endpoints, 36 tests |
 | 8 | Bulkhead isolation: SSH failures must not cascade into Codex; tool failures isolated from message handler | done | Bulkhead module with semaphore-based concurrency limits per resource category (SSH/subprocess/browser), config, executor integration, planner gather fix, Prometheus metrics, REST API |
-| 9 | SSH connection pooling (paramiko multiplex) and aiohttp keepalive pool | pending | |
+| 9 | SSH connection pooling (paramiko multiplex) and aiohttp keepalive pool | done | SSHConnectionPool with OpenSSH ControlMaster multiplexing, configurable aiohttp pool, Prometheus metrics, REST API |
 | 10 | REVIEWER: validate rounds 1–9, tighten tests, fix bugs found | pending | |
 
 ### Phase 3 — New tools (rounds 11–15)
@@ -767,3 +767,105 @@ bottom. Do not truncate older entries — they are the chain-of-context.)
 - The `max_queued` values (ssh=20, subprocess=40, browser=6) mean that at most `max_concurrent + max_queued` operations can be pending per category. Beyond that, requests are rejected immediately with an error message. Setting `max_queued: 0` disables rejection (unlimited queuing).
 - The planner `asyncio.gather` fix in `src/odin/planner.py:119-130` converts unhandled `BaseException`s (not just `Exception`) into FAILED steps. This correctly handles `asyncio.CancelledError` (BaseException subclass) — a cancelled step is recorded as failed, not silently dropped.
 - All three subsystem wiring tasks remain open from Rounds 1-7: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`.
+
+## Round 9 — SSH connection pooling and aiohttp keepalive pool configuration
+**Focus**: Add SSH connection multiplexing via OpenSSH ControlMaster and make the aiohttp HTTP connection pool configurable with observability.
+**Baseline pytest**: 996 passed, 0 failed
+**Post-round pytest**: 1063 passed, 0 failed (+67 new tests)
+
+### Validated from prior rounds
+- Round 1: `CostTracker`, `estimate_tokens`, `LLMResponse` token fields, `/api/usage` endpoints all present and passing (35 tests). `CostTracker` still not wired to bot object — still pending (noted Rounds 1-8).
+- Round 2: `Session.estimated_tokens`, `_needs_compaction()`, token metrics all present and passing (41 tests). `session_tokens` Prometheus source still needs wiring — still pending.
+- Round 3: `TrajectorySaver`, `TrajectoryTurn`, `ToolIteration`, REST API endpoints all present and passing (53 tests). `trajectory_saver` still needs wiring — still pending.
+- Round 4: Trace viewer page, `find_by_message_id()`, API endpoint all present and passing (8 tests).
+- Round 5: `AuditLogger.search_logs()`, `get_log_stats()`, `/api/logs/search`, `/api/logs/stats` all present and passing (37 tests).
+- Round 6: `compute_backoff`, `RetryConfig`, Codex + SSH retry integration all present and passing (54 tests).
+- Round 7: `ToolsConfig.tool_timeouts`, `get_tool_timeout()`, executor/agent/skill per-tool lookup, REST API all present and passing (36 tests).
+- Round 8: `Bulkhead`, `BulkheadRegistry`, `BulkheadConfig`, executor integration, planner gather fix all present and passing (49 tests). Round 8 flagged: "Connection pooling should work within the bulkhead — the pool manages connections, the bulkhead manages concurrency" — done: SSH pool operates within the bulkhead semaphore; bulkhead limits concurrency, pool reuses connections.
+- All three subsystem wiring tasks remain open: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`.
+
+### Work done
+
+#### 1. New module: `src/tools/ssh_pool.py`
+- `SSHConnectionPool` class (line 27): Manages persistent SSH connections via OpenSSH ControlMaster multiplexing.
+  - `__init__(control_persist, socket_dir)` (line 34): Creates socket directory (mode 0o700), initializes connection tracking counters (`_total_opened`, `_total_reused`).
+  - `get_ssh_args(host, command, ssh_key_path, known_hosts_path, ssh_user)` (line 49): Builds complete SSH command args with ControlMaster options (`-o ControlMaster=auto`, `-o ControlPath=...`, `-o ControlPersist=N`). Tracks open/reuse counts based on socket file existence.
+  - `is_connected(host, ssh_user)` (line 79): Checks if a ControlMaster socket exists for this host/user pair.
+  - `get_active_hosts()` (line 84): Returns list of host keys with active socket files.
+  - `close_host(host, ssh_user)` (line 90): Closes a specific ControlMaster connection via `ssh -O exit`. Falls back to socket file removal if the SSH command fails.
+  - `close_all()` (line 115): Closes all active ControlMaster connections. Returns count of successfully closed connections.
+  - `get_metrics()` (line 122): Returns detailed pool metrics (active connections, hosts, counters, config).
+  - `get_prometheus_metrics()` (line 135): Returns flat dict for Prometheus collector (`ssh_pool_active_connections`, `ssh_pool_total_opened`, `ssh_pool_total_reused`).
+- `_socket_path(socket_dir, host, ssh_user)` (line 16): Helper to compute socket file path as `{socket_dir}/{ssh_user}@{host}`.
+- Design decision: Used OpenSSH ControlMaster instead of paramiko. ControlMaster achieves the same goal (TCP connection reuse, no repeated handshake/auth) with zero new dependencies, native SSH binary support, and transparent integration with existing SSH args. Paramiko would require a new pip dependency, synchronous-to-async wrapping, and a significant rewrite of the SSH path.
+
+#### 2. Config: `SSHPoolConfig` in `src/config/schema.py:55-57`
+- `enabled: bool = True` — connection pooling on by default.
+- `control_persist: int = 60` — idle ControlMaster connections stay open for 60 seconds.
+- `socket_dir: str = "/tmp/odin_ssh_sockets"` — socket directory for ControlMaster sockets.
+- Added to `ToolsConfig` as `ssh_pool: SSHPoolConfig = SSHPoolConfig()` (line 69).
+
+#### 3. Config: `ConnectionPoolConfig` in `src/config/schema.py:60-62`
+- `max_connections: int = 10` — aiohttp TCPConnector connection limit.
+- `keepalive_timeout: int = 30` — keepalive timeout in seconds.
+- Added to `OpenAICodexConfig` as `connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()` (line 100).
+
+#### 4. `src/tools/ssh.py` — pool parameter
+- `run_ssh_command()` (line 79): Added `pool: SSHConnectionPool | None = None` parameter. When pool is provided, uses `pool.get_ssh_args()` for SSH args with ControlMaster multiplexing. When `None`, uses existing one-shot SSH args. Backward compatible — default is `None`.
+
+#### 5. `src/tools/executor.py` — pool integration
+- `ToolExecutor.__init__()` (line 63): Creates `self.ssh_pool` from `config.ssh_pool` when enabled, `None` when disabled.
+- `_exec_command()` (line 134): SSH kwargs now include `pool=self.ssh_pool`, passing it through to `run_ssh_command()`. The pool operates within the bulkhead — first acquire the bulkhead semaphore, then run the SSH command (which reuses the connection via ControlMaster).
+
+#### 6. `src/llm/openai_codex.py` — configurable HTTP pool
+- `CodexChatClient.__init__()` (line 23): Added `pool_max_connections: int = 10` and `pool_keepalive_timeout: int = 30` parameters. Added `_total_requests: int = 0` counter.
+- `_get_session()` (line 48): Now uses `self.pool_max_connections` and `self.pool_keepalive_timeout` instead of hardcoded values.
+- `_stream_tool_request()` (line 398) and `_stream_request()` (line 630): Both now increment `self._total_requests` before each HTTP request.
+- `get_pool_metrics()` (line 68): New method returning HTTP pool observability: `http_pool_max_connections`, `http_pool_keepalive_timeout`, `http_pool_active_connections` (reads from aiohttp connector internals), `http_pool_total_requests`.
+
+#### 7. Prometheus metrics — `src/health/metrics.py:375-412`
+- SSH pool metrics (3 metric families):
+  - `odin_ssh_pool_active_connections` (gauge): Active ControlMaster connections.
+  - `odin_ssh_pool_total_opened` (counter): Total SSH connections opened.
+  - `odin_ssh_pool_total_reused` (counter): Total SSH connections reused via multiplexing.
+- HTTP pool metrics (3 metric families):
+  - `odin_http_pool_active_connections` (gauge): Active HTTP keepalive connections.
+  - `odin_http_pool_max_connections` (gauge): HTTP connection pool max size.
+  - `odin_http_pool_total_requests` (counter): Total HTTP requests made via pool.
+
+#### 8. REST API endpoints — `src/web/api.py:669-700`
+- `GET /api/pools/ssh`: Returns SSH pool metrics (active connections, hosts, counters, config). Returns 503 if pool not available.
+- `GET /api/pools/http`: Returns HTTP pool metrics. Returns 503 if codex client not available.
+- `POST /api/pools/ssh/close`: Close SSH connections. Body `{"host": "...", "ssh_user": "..."}` closes a specific connection; empty body closes all. Returns close result.
+
+#### 9. Tests: `tests/test_connection_pools.py` — 67 tests across 15 test classes
+- `TestSSHPoolConfig` (6): defaults, custom values, on ToolsConfig default/custom, from dict, without key.
+- `TestConnectionPoolConfig` (5): defaults, custom, on OpenAICodexConfig default/custom, from dict.
+- `TestSocketPath` (2): format, different users.
+- `TestSSHConnectionPool` (9): creates socket dir, default values, custom control_persist, get_socket_path, is_connected false/true, get_active_hosts empty/with sockets.
+- `TestSSHPoolGetArgs` (5): includes ControlMaster, includes standard SSH options, tracks opened count, tracks reused count, different hosts separate count.
+- `TestSSHPoolClose` (4): close_host no socket, close_host with socket, close_all empty, close_all clears connections.
+- `TestSSHPoolMetrics` (4): get_metrics structure, after activity, get_prometheus_metrics structure/values.
+- `TestSSHCommandWithPool` (3): pool args used, no pool no ControlMaster, pool tracks reuse.
+- `TestExecutorSSHPool` (6): creates pool when enabled, no pool when disabled, default pool enabled, passes pool to SSH, no pool when disabled passes None, local command unaffected.
+- `TestCodexPoolConfig` (3): default pool params, custom pool params, total_requests starts zero.
+- `TestCodexPoolMetrics` (3): metrics no session, with custom config, tracks requests.
+- `TestSSHPoolPrometheusMetrics` (3): rendered, absent, empty values.
+- `TestHTTPPoolPrometheusMetrics` (3): rendered, absent, counter type.
+- `TestPoolAPI` (6): SSH pool endpoint, SSH pool unavailable, HTTP pool endpoint, HTTP pool unavailable, close SSH pool all, close SSH pool host.
+- `TestConfigRoundTrip` (4): full Config with pools, without pools, ToolsConfig model_dump, OpenAICodexConfig model_dump.
+- `TestPoolBulkheadCoexistence` (2): executor has both, pool works within bulkhead.
+
+### Issues found
+- The `CostTracker`, `session_tokens` Prometheus source, and `TrajectorySaver` are all still not wired to the bot object. This is a recurring note from Rounds 1-8. Unrelated to this round's scope.
+- The SSH pool Prometheus source needs to be registered: `metrics.register_source("ssh_pool", executor.ssh_pool.get_prometheus_metrics)`. The HTTP pool source needs: `metrics.register_source("http_pool", codex.get_pool_metrics)`. Both need wiring when bot initialization is formalized.
+- Used OpenSSH ControlMaster instead of paramiko as specified in the plan. ControlMaster achieves identical connection reuse with zero new dependencies. If paramiko is specifically needed for programmatic SSH (e.g., SFTP, tunneling), it can be added in a future round.
+- The `CodexChatClient` constructor now accepts `pool_max_connections` and `pool_keepalive_timeout` but bot initialization code doesn't pass `config.openai_codex.connection_pool` values yet. The defaults match existing behavior (10 connections, 30s keepalive).
+- The `get_pool_metrics()` method on `CodexChatClient` reads from `self._session.connector._conns` which is an internal aiohttp attribute. This is fragile but aiohttp doesn't expose a public API for connection counts. The `try/except` wrapping prevents breakage on aiohttp version changes.
+
+### Next round watch for
+- Round 10 (REVIEWER) should validate that SSH pool, bulkhead, and retry all coexist correctly. The three mechanisms are complementary: pool reuses connections (efficiency), bulkhead limits concurrency (isolation), retry handles transient failures (resilience). The ordering is: bulkhead acquire → SSH command with pool → retry on failure.
+- The `SSHConnectionPool.close_all()` method is useful for graceful shutdown — it should be called when the bot is stopping. This needs wiring into the bot's shutdown sequence.
+- The ControlMaster socket directory (`/tmp/odin_ssh_sockets`) needs proper cleanup on bot crash/restart. Stale socket files are harmless (SSH will ignore them and create new masters), but they do accumulate. A startup cleanup sweep could be added.
+- The `_total_reused` counter tracks connection reuse intent (socket exists when args are built), not actual TCP reuse (which is transparent to the process). The real reuse happens at the SSH binary level — ControlMaster handles it.
+- All three subsystem wiring tasks remain open from Rounds 1-8: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`. The SSH pool and HTTP pool metric sources are now added to this list (5 total wiring tasks pending).

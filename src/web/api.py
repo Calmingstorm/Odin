@@ -667,6 +667,41 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response(executor.bulkheads.get_all_metrics())
 
     # ------------------------------------------------------------------
+    # Connection pool status
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/pools/ssh")
+    async def get_ssh_pool(_request: web.Request) -> web.Response:
+        executor = getattr(bot, "executor", None)
+        if executor is None or not hasattr(executor, "ssh_pool") or executor.ssh_pool is None:
+            return web.json_response({"error": "SSH pool not available"}, status=503)
+        return web.json_response(executor.ssh_pool.get_metrics())
+
+    @routes.get("/api/pools/http")
+    async def get_http_pool(_request: web.Request) -> web.Response:
+        codex = getattr(bot, "codex", None)
+        if codex is None or not hasattr(codex, "get_pool_metrics"):
+            return web.json_response({"error": "HTTP pool not available"}, status=503)
+        return web.json_response(codex.get_pool_metrics())
+
+    @routes.post("/api/pools/ssh/close")
+    async def close_ssh_pool_host(request: web.Request) -> web.Response:
+        executor = getattr(bot, "executor", None)
+        if executor is None or not hasattr(executor, "ssh_pool") or executor.ssh_pool is None:
+            return web.json_response({"error": "SSH pool not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        host = data.get("host")
+        if host:
+            ssh_user = data.get("ssh_user", "root")
+            closed = await executor.ssh_pool.close_host(host, ssh_user)
+            return web.json_response({"closed": closed, "host": host})
+        count = await executor.ssh_pool.close_all()
+        return web.json_response({"closed_count": count})
+
+    # ------------------------------------------------------------------
     # Usage / cost tracking
     # ------------------------------------------------------------------
 

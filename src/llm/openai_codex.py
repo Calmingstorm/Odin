@@ -28,6 +28,8 @@ class CodexChatClient:
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_base_delay: float = DEFAULT_BASE_DELAY,
         retry_max_delay: float = DEFAULT_MAX_DELAY,
+        pool_max_connections: int = 10,
+        pool_keepalive_timeout: int = 30,
     ) -> None:
         self.auth = auth
         self.model = model
@@ -35,8 +37,12 @@ class CodexChatClient:
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.retry_max_delay = retry_max_delay
+        self.pool_max_connections = pool_max_connections
+        self.pool_keepalive_timeout = pool_keepalive_timeout
         self.breaker = CircuitBreaker("codex_api")
         self._session: aiohttp.ClientSession | None = None
+        self._total_requests: int = 0
+        self._total_reused: int = 0
         # Tool conversion cache — avoids re-converting same tools across tool loop iterations
         self._last_tools_list: list[dict] | None = None
         self._last_tools_converted: list[dict] = []
@@ -47,9 +53,9 @@ class CodexChatClient:
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             connector = aiohttp.TCPConnector(
-                limit=10,                # max connections (single-host API)
-                limit_per_host=10,       # same as limit — one host only
-                keepalive_timeout=30,    # reuse connections across requests
+                limit=self.pool_max_connections,
+                limit_per_host=self.pool_max_connections,
+                keepalive_timeout=self.pool_keepalive_timeout,
                 enable_cleanup_closed=True,
             )
             self._session = aiohttp.ClientSession(
@@ -62,6 +68,22 @@ class CodexChatClient:
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
+
+    def get_pool_metrics(self) -> dict:
+        """Return HTTP connection pool metrics for observability."""
+        active = 0
+        if self._session and not self._session.closed and self._session.connector:
+            try:
+                conns = self._session.connector._conns  # type: ignore[union-attr]
+                active = sum(len(v) for v in conns.values()) if conns else 0
+            except (AttributeError, TypeError):
+                pass
+        return {
+            "http_pool_max_connections": self.pool_max_connections,
+            "http_pool_keepalive_timeout": self.pool_keepalive_timeout,
+            "http_pool_active_connections": active,
+            "http_pool_total_requests": self._total_requests,
+        }
 
     async def chat(
         self, messages: list[dict], system: str,
@@ -372,6 +394,7 @@ class CodexChatClient:
         """Send a streaming request and parse both text and function_call events."""
         self.breaker.check()
         session = await self._get_session()
+        self._total_requests += 1
         last_error = None
 
         for attempt in range(self.max_retries):
@@ -602,6 +625,7 @@ class CodexChatClient:
         """Send a streaming request and collect the full response text."""
         self.breaker.check()
         session = await self._get_session()
+        self._total_requests += 1
         last_error = None
 
         for attempt in range(self.max_retries):

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 from ..llm.backoff import compute_backoff
 from ..odin_log import get_logger
+
+if TYPE_CHECKING:
+    from .ssh_pool import SSHConnectionPool
 
 log = get_logger("ssh")
 
@@ -86,23 +90,32 @@ async def run_ssh_command(
     max_retries: int = 1,
     retry_base_delay: float = 0.5,
     retry_max_delay: float = 10.0,
+    pool: SSHConnectionPool | None = None,
 ) -> tuple[int, str]:
     """Run a command on a remote host via SSH. Returns (exit_code, output).
+
+    When *pool* is provided, uses OpenSSH ControlMaster multiplexing to
+    reuse persistent connections. Otherwise falls back to one-shot SSH.
 
     Retries on transient SSH connection failures (exit code 255 with known
     error patterns). Command-level failures (nonzero exit from the remote
     command itself) are NOT retried — they represent valid remote results.
     """
-    ssh_args = [
-        "ssh",
-        "-i", ssh_key_path,
-        "-o", f"UserKnownHostsFile={known_hosts_path}",
-        "-o", "StrictHostKeyChecking=yes",
-        "-o", "ConnectTimeout=10",
-        "-o", "BatchMode=yes",
-        f"{ssh_user}@{host}",
-        command,
-    ]
+    if pool is not None:
+        ssh_args = pool.get_ssh_args(
+            host, command, ssh_key_path, known_hosts_path, ssh_user,
+        )
+    else:
+        ssh_args = [
+            "ssh",
+            "-i", ssh_key_path,
+            "-o", f"UserKnownHostsFile={known_hosts_path}",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", "ConnectTimeout=10",
+            "-o", "BatchMode=yes",
+            f"{ssh_user}@{host}",
+            command,
+        ]
 
     log.info("SSH to %s@%s: %s", ssh_user, host, command)
     last_exit_code = 1

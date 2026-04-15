@@ -52,6 +52,17 @@ class BulkheadConfig(BaseModel):
     browser_max_queued: int = 6
 
 
+class SSHPoolConfig(BaseModel):
+    enabled: bool = True
+    control_persist: int = 60
+    socket_dir: str = "/tmp/odin_ssh_sockets"
+
+
+class ConnectionPoolConfig(BaseModel):
+    max_connections: int = 10
+    keepalive_timeout: int = 30
+
+
 class ToolsConfig(BaseModel):
     enabled: bool = True
     ssh_key_path: str = "/app/.ssh/id_ed25519"
@@ -65,6 +76,7 @@ class ToolsConfig(BaseModel):
     skill_allowed_urls: list[str] = Field(default_factory=list)
     ssh_retry: RetryConfig = RetryConfig(max_retries=2, base_delay=0.5, max_delay=10.0)
     bulkhead: BulkheadConfig = BulkheadConfig()
+    ssh_pool: SSHPoolConfig = SSHPoolConfig()
 
     def get_tool_timeout(self, tool_name: str) -> int:
         return self.tool_timeouts.get(tool_name, self.command_timeout_seconds)
@@ -95,6 +107,7 @@ class OpenAICodexConfig(BaseModel):
     max_tokens: int = 4096
     credentials_path: str = "./data/codex_auth.json"
     retry: RetryConfig = RetryConfig()
+    connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()
 
 
 class WebhookConfig(BaseModel):
