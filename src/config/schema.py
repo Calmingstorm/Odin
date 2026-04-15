@@ -49,12 +49,15 @@ class ToolsConfig(BaseModel):
     ssh_known_hosts_path: str = "/app/.ssh/known_hosts"
     hosts: dict[str, ToolHost] = Field(default_factory=dict)
     command_timeout_seconds: int = 300
-    tool_timeout_seconds: int = 300
+    tool_timeouts: dict[str, int] = Field(default_factory=dict)
     claude_code_host: str = ""
     claude_code_user: str = ""
     claude_code_dir: str = "/opt/odin"
     skill_allowed_urls: list[str] = Field(default_factory=list)
     ssh_retry: RetryConfig = RetryConfig(max_retries=2, base_delay=0.5, max_delay=10.0)
+
+    def get_tool_timeout(self, tool_name: str) -> int:
+        return self.tool_timeouts.get(tool_name, self.command_timeout_seconds)
 
 
 class LoggingConfig(BaseModel):

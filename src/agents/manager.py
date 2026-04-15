@@ -109,6 +109,7 @@ class AgentManager:
         announce_callback: AnnounceCallback | None = None,
         tools: list[dict] | None = None,
         system_prompt: str = "",
+        tool_timeouts: dict[str, int] | None = None,
     ) -> str:
         """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string."""
         # Check per-channel limit
@@ -156,6 +157,7 @@ class AgentManager:
                 iteration_callback=iteration_callback,
                 tool_executor_callback=tool_executor_callback,
                 announce_callback=announce_callback,
+                tool_timeouts=tool_timeouts or {},
             )
         )
         agent._task = task
@@ -397,6 +399,7 @@ async def _run_agent(
     iteration_callback: IterationCallback,
     tool_executor_callback: ToolExecutorCallback,
     announce_callback: AnnounceCallback | None = None,
+    tool_timeouts: dict[str, int] | None = None,
 ) -> None:
     """Execute an agent's tool loop until completion, error, or timeout.
 
@@ -482,14 +485,15 @@ async def _run_agent(
 
                 agent.last_activity = time.time()
 
+                tool_timeout = (tool_timeouts or {}).get(tool_name, TOOL_EXEC_TIMEOUT)
                 try:
                     result = await asyncio.wait_for(
                         tool_executor_callback(tool_name, tool_input),
-                        timeout=TOOL_EXEC_TIMEOUT,
+                        timeout=tool_timeout,
                     )
                     result = scrub_output_secrets(str(result))
                 except asyncio.TimeoutError:
-                    result = f"Error: Tool '{tool_name}' timed out after {TOOL_EXEC_TIMEOUT}s"
+                    result = f"Error: Tool '{tool_name}' timed out after {tool_timeout}s"
                     log.warning("Agent %s tool %s timed out", agent.id, tool_name)
                 except Exception as e:
                     result = f"Error: {e}"

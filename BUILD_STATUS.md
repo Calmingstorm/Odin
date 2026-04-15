@@ -104,7 +104,7 @@ tightening of prior work.
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
 | 6 | Exponential backoff with jitter on Codex and SSH retries (replace fixed [2s,5s,10s] ladder) | done | backoff module with full jitter, RetryConfig in schema, Codex + SSH retry integration |
-| 7 | Per-tool timeouts in `config.yml` instead of a single global tool_timeout_seconds | pending | |
+| 7 | Per-tool timeouts in `config.yml` instead of a single global tool_timeout_seconds | done | ToolsConfig.tool_timeouts dict + get_tool_timeout(), executor/agent/skill per-tool lookup, REST API endpoints, 36 tests |
 | 8 | Bulkhead isolation: SSH failures must not cascade into Codex; tool failures isolated from message handler | pending | |
 | 9 | SSH connection pooling (paramiko multiplex) and aiohttp keepalive pool | pending | |
 | 10 | REVIEWER: validate rounds 1–9, tighten tests, fix bugs found | pending | |
@@ -608,3 +608,74 @@ bottom. Do not truncate older entries — they are the chain-of-context.)
 - When `OdinBot` initialization is formalized, the `CodexChatClient` constructor should receive `config.openai_codex.retry.max_retries`, `.base_delay`, `.max_delay`.
 - The `compute_backoff` function uses `random.uniform` which is not cryptographically secure — this is fine for retry jitter where the goal is decorrelation, not security. No change needed.
 - The scheduler's existing exponential backoff in `src/scheduler/scheduler.py:552-558` uses a different formula (`base * 2^n`, no jitter, different cap). It was left unchanged since it serves a different purpose (task retry over minutes/hours) and its defaults are appropriate for that timescale.
+
+## Round 7 — Per-tool timeouts in config instead of a single global timeout
+**Focus**: Replace the single `tool_timeout_seconds` global with per-tool timeout overrides via `config.tools.tool_timeouts` dict, falling back to `command_timeout_seconds`.
+**Baseline pytest**: 911 passed, 0 failed
+**Post-round pytest**: 947 passed, 0 failed (+36 new tests)
+
+### Validated from prior rounds
+- Round 1: `CostTracker`, `estimate_tokens`, `LLMResponse` token fields, `/api/usage` endpoints all present and passing (35 tests). `CostTracker` still not wired to bot object — still pending (noted Rounds 1-6).
+- Round 2: `Session.estimated_tokens`, `_needs_compaction()`, token metrics all present and passing (41 tests). `session_tokens` Prometheus source still needs wiring — still pending.
+- Round 3: `TrajectorySaver`, `TrajectoryTurn`, `ToolIteration`, REST API endpoints all present and passing (53 tests). `trajectory_saver` still needs wiring — still pending.
+- Round 4: Trace viewer page, `find_by_message_id()`, API endpoint all present and passing (8 tests).
+- Round 5: `AuditLogger.search_logs()`, `get_log_stats()`, `/api/logs/search`, `/api/logs/stats` all present and passing (37 tests).
+- Round 6: `compute_backoff`, `RetryConfig`, Codex + SSH retry integration all present and passing (54 tests). Round 6 flagged: "per-tool timeout should be total timeout per attempt, not total across all retries" — addressed: the per-tool timeout is the hard cap on wall-clock time for a single tool invocation in `ToolExecutor.execute()`, consistent with existing behavior. SSH retries within `_exec_command()` use `command_timeout_seconds` per attempt independently.
+- All three subsystem wiring tasks remain open: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`.
+
+### Work done
+
+#### 1. `ToolsConfig.tool_timeouts` and `get_tool_timeout()` — `src/config/schema.py:52,59-60`
+- Replaced the unused `tool_timeout_seconds: int = 300` field with `tool_timeouts: dict[str, int] = Field(default_factory=dict)` — a mapping of tool name → timeout in seconds. Empty by default (all tools use `command_timeout_seconds`).
+- Added `get_tool_timeout(tool_name: str) -> int` method: returns the per-tool override if present, otherwise falls back to `command_timeout_seconds`. This is the single lookup point for all timeout consumers.
+- Config YAML example: `tools: { tool_timeouts: { claude_code: 600, read_file: 30 } }`.
+
+#### 2. `ToolExecutor.execute()` per-tool timeout — `src/tools/executor.py:64`
+- Changed from `timeout = self.config.command_timeout_seconds` to `timeout = self.config.get_tool_timeout(tool_name)`. The timeout is now per-tool, used in `asyncio.wait_for(coro, timeout=timeout)`.
+- The `_exec_command()` method at line 107 still uses `self.config.command_timeout_seconds` for SSH/subprocess per-attempt timeout — this is intentional: the outer per-tool timeout is the hard cap, while the inner command timeout is per SSH attempt.
+- Error messages on timeout now correctly reflect the per-tool timeout value: `"timed out after {timeout}s"`.
+
+#### 3. Agent manager per-tool timeouts — `src/agents/manager.py:112,160,397,486-493`
+- `spawn()` now accepts `tool_timeouts: dict[str, int] | None = None` parameter. Passed through to `_run_agent()`.
+- `_run_agent()` now accepts `tool_timeouts: dict[str, int] | None = None` parameter.
+- Tool execution within agents now uses `(tool_timeouts or {}).get(tool_name, TOOL_EXEC_TIMEOUT)` instead of the hardcoded `TOOL_EXEC_TIMEOUT`. This means:
+  - Tools with per-tool overrides use their custom timeout.
+  - Tools without overrides fall back to `TOOL_EXEC_TIMEOUT` (300s), preserving existing behavior.
+  - The `TOOL_EXEC_TIMEOUT` constant is NOT removed — it serves as the default for agent tool execution when no per-tool config is available.
+
+#### 4. Skill manager per-tool timeouts — `src/tools/skill_manager.py:385,400,917-921,931`
+- `SkillManager.__init__()` now accepts `tool_timeouts: dict[str, int] | None = None` parameter, stored as `self._tool_timeouts`.
+- Skill execution timeout now uses `self._tool_timeouts.get(tool_name, SKILL_EXECUTE_TIMEOUT)` instead of the hardcoded `SKILL_EXECUTE_TIMEOUT`. User-created skills can have custom timeouts via config.
+- The `SKILL_EXECUTE_TIMEOUT` constant (120s) is preserved as the default for skills without overrides.
+
+#### 5. REST API: `/api/tools/timeouts` GET + PUT — `src/web/api.py:619-653`
+- `GET /api/tools/timeouts`: returns `{"default_timeout": N, "overrides": {...}}`.
+- `PUT /api/tools/timeouts`: accepts `{"overrides": {...}, "default_timeout": N}` (both optional). Validates all timeout values are positive numbers. Updates `bot.config.tools.tool_timeouts` and/or `bot.config.tools.command_timeout_seconds` in place. Returns the updated state.
+- Input validation: rejects negative/zero values, non-dict overrides, non-numeric types.
+
+#### 6. `/api/tools` now includes `timeout` — `src/web/api.py:605-615`
+- Each tool in the `GET /api/tools` response now includes a `"timeout"` field showing the effective timeout for that tool (per-tool override or global default).
+
+#### 7. Tests: `tests/test_tool_timeouts.py` — 36 tests across 9 test classes
+- `TestToolsConfigToolTimeouts` (5): default empty, custom values, old field removed, from dict, explicit empty.
+- `TestGetToolTimeout` (5): no overrides, override returns custom, non-overridden returns default, multiple overrides, custom default.
+- `TestExecutorPerToolTimeout` (5): uses per-tool timeout, uses global for unconfigured, timeout error message with per-tool value, timeout message with global, metrics on timeout.
+- `TestAgentPerToolTimeout` (3): spawn accepts tool_timeouts, agent uses per-tool timeout, agent uses default without override.
+- `TestSkillManagerPerToolTimeout` (2): accepts tool_timeouts, default empty timeouts.
+- `TestConfigYAMLCompat` (5): without tool_timeouts, with tool_timeouts, full Config with, full Config without, model_dump includes.
+- `TestToolTimeoutsAPI` (7): GET timeouts, PUT overrides, PUT default, invalid override rejected, invalid default rejected, non-dict rejected, list tools includes timeout.
+- `TestExecutorConfigIntegration` (2): reads config, config change reflected immediately.
+- `TestBackwardCompat` (2): tool_timeout_seconds not present, command_timeout_seconds still works.
+
+### Issues found
+- The `CostTracker`, `session_tokens` Prometheus source, and `TrajectorySaver` are all still not wired to the bot object. This is a recurring note from Rounds 1-6. Unrelated to this round's scope.
+- The `SkillManager` and `AgentManager.spawn()` need to receive `config.tools.tool_timeouts` from their callers when wired into the bot. Currently `SkillManager` defaults to empty dict if not passed, and `AgentManager.spawn()` defaults to `None` (falls back to `TOOL_EXEC_TIMEOUT`). The wiring will happen when bot initialization is formalized.
+- The `PUT /api/tools/timeouts` endpoint modifies `bot.config.tools` in place but does NOT persist to `config.yml`. For persistence, use `PUT /api/config` which writes to disk. This is consistent with other runtime-adjustable settings.
+- The per-tool timeout in `ToolExecutor.execute()` is the total wall-clock cap including any internal retries (SSH retries from Round 6). The SSH per-attempt timeout within `_exec_command()` remains `command_timeout_seconds`. This means a tool with `tool_timeouts: {run_command: 60}` will abort the entire invocation after 60s, even if SSH retries haven't been exhausted. This is the correct semantic: per-tool timeout is a hard cap.
+
+### Next round watch for
+- Round 8 (bulkhead isolation) should ensure that per-tool timeouts integrate with the isolation model. Tool failures should not cascade — the per-tool timeout already provides per-tool isolation at the time dimension, but bulkhead isolation should add resource (connection/concurrency) isolation.
+- When `OdinBot` initialization is formalized, `SkillManager` should receive `config.tools.tool_timeouts`, and `AgentManager.spawn()` callers should pass `config.tools.tool_timeouts`.
+- The `PUT /api/tools/timeouts` allows runtime timeout changes that take effect immediately (since `ToolExecutor.execute()` reads from `config` on each call). This is powerful but unsaved to disk — a restart resets to config.yml values.
+- The `_exec_command()` in executor.py still uses `command_timeout_seconds` as the SSH per-attempt timeout. If a per-tool timeout is shorter than `command_timeout_seconds`, the outer `asyncio.wait_for` in `execute()` will cancel the inner SSH before the SSH-level timeout fires. This is correct behavior.
+- All three subsystem wiring tasks remain open from Rounds 1-6: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`.

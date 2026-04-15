@@ -61,7 +61,7 @@ class ToolExecutor:
         if handler is None:
             return f"Unknown tool: {tool_name}"
 
-        timeout = self.config.command_timeout_seconds
+        timeout = self.config.get_tool_timeout(tool_name)
         try:
             if tool_name in ("memory_manage", "manage_list"):
                 coro = handler(tool_input, user_id=user_id)

@@ -603,10 +603,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.get("/api/tools")
     async def list_tools(_request: web.Request) -> web.Response:
         all_tools = get_tool_definitions()
+        tools_config = bot.config.tools
         result = [
             {
                 "name": tool["name"],
                 "description": tool["description"],
+                "timeout": tools_config.get_tool_timeout(tool["name"]),
             }
             for tool in all_tools
         ]
@@ -616,6 +618,42 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     async def tool_stats(_request: web.Request) -> web.Response:
         counts = await bot.audit.count_by_tool()
         return web.json_response(counts)
+
+    @routes.get("/api/tools/timeouts")
+    async def get_tool_timeouts(_request: web.Request) -> web.Response:
+        tools_config = bot.config.tools
+        return web.json_response({
+            "default_timeout": tools_config.command_timeout_seconds,
+            "overrides": tools_config.tool_timeouts,
+        })
+
+    @routes.put("/api/tools/timeouts")
+    async def set_tool_timeouts(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "expected JSON object"}, status=400)
+        overrides = body.get("overrides")
+        if overrides is not None:
+            if not isinstance(overrides, dict):
+                return web.json_response({"error": "overrides must be a dict"}, status=400)
+            for k, v in overrides.items():
+                if not isinstance(k, str) or not isinstance(v, (int, float)) or v <= 0:
+                    return web.json_response(
+                        {"error": f"invalid timeout for '{k}': must be a positive number"}, status=400,
+                    )
+            bot.config.tools.tool_timeouts = {k: int(v) for k, v in overrides.items()}
+        default = body.get("default_timeout")
+        if default is not None:
+            if not isinstance(default, (int, float)) or default <= 0:
+                return web.json_response({"error": "default_timeout must be a positive number"}, status=400)
+            bot.config.tools.command_timeout_seconds = int(default)
+        return web.json_response({
+            "default_timeout": bot.config.tools.command_timeout_seconds,
+            "overrides": bot.config.tools.tool_timeouts,
+        })
 
     # ------------------------------------------------------------------
     # Usage / cost tracking

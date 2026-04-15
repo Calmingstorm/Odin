@@ -382,6 +382,7 @@ class SkillManager:
     def __init__(
         self, skills_dir: str, tool_executor: ToolExecutor,
         memory_path: str | None = None,
+        tool_timeouts: dict[str, int] | None = None,
     ) -> None:
         self.skills_dir = Path(skills_dir)
         self.skills_dir.mkdir(parents=True, exist_ok=True)
@@ -389,6 +390,7 @@ class SkillManager:
         self._config_dir.mkdir(parents=True, exist_ok=True)
         self._disabled_path = self.skills_dir / ".disabled.json"
         self._executor = tool_executor
+        self._tool_timeouts = tool_timeouts or {}
         # Derive a separate skill memory file to avoid corrupting the
         # executor's scoped memory structure (global/user_* namespaces).
         if memory_path:
@@ -914,10 +916,11 @@ class SkillManager:
         start = time.monotonic()
         truncated = False
         output_chars = 0
+        skill_timeout = self._tool_timeouts.get(tool_name, SKILL_EXECUTE_TIMEOUT)
         try:
             result = await asyncio.wait_for(
                 skill.execute_fn(tool_input, context),
-                timeout=SKILL_EXECUTE_TIMEOUT,
+                timeout=skill_timeout,
             )
             if not isinstance(result, str):
                 result = str(result)
@@ -928,7 +931,7 @@ class SkillManager:
             output_chars = len(result)
             return result
         except asyncio.TimeoutError:
-            return f"Skill '{tool_name}' timed out after {SKILL_EXECUTE_TIMEOUT}s."
+            return f"Skill '{tool_name}' timed out after {skill_timeout}s."
         except Exception as e:
             log.error("Skill %s execution error: %s", tool_name, e, exc_info=True)
             return f"Skill error: {e}"
