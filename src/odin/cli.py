@@ -71,7 +71,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
         planner = Planner(ToolRegistry.with_defaults())
 
         try:
-            result = planner.execute(plan)
+            result = await planner.execute(plan)
         except PlanValidationError as exc:
             for e in exc.errors:
                 print(f"ERROR: {e}", file=sys.stderr)

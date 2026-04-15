@@ -1,4 +1,4 @@
-"""Step executor with retry and timeout support."""
+"""Step executor with retry, timeout, and async support."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ class StepExecutor:
     def __init__(self, registry: ToolRegistry) -> None:
         self._registry = registry
 
-    def execute_step(self, spec: StepSpec, ctx: ExecutionContext) -> StepResult:
+    async def execute_step(self, spec: StepSpec, ctx: ExecutionContext) -> StepResult:
         try:
             tool_cls = self._registry.get(spec.tool)
         except KeyError:
@@ -44,7 +44,7 @@ class StepExecutor:
             attempts += 1
             start = time.monotonic()
             try:
-                output = self._invoke_tool(tool, resolved, ctx)
+                output = await self._invoke_tool(tool, resolved, ctx)
                 elapsed = time.monotonic() - start
                 if elapsed > spec.timeout:
                     return StepResult(
@@ -71,15 +71,10 @@ class StepExecutor:
         )
 
     @staticmethod
-    def _invoke_tool(tool: Any, params: dict[str, Any], ctx: ExecutionContext) -> Any:
+    async def _invoke_tool(
+        tool: Any, params: dict[str, Any], ctx: ExecutionContext
+    ) -> Any:
         result = tool.execute(params, ctx)
         if inspect.isawaitable(result):
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                return asyncio.run(result)
-            # Running inside an event loop — use a new thread to avoid blocking
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, result).result()
+            return await result
         return result

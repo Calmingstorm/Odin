@@ -1,7 +1,8 @@
-"""DAG planner with dependency-aware execution."""
+"""DAG planner with dependency-aware parallel execution."""
 
 from __future__ import annotations
 
+import asyncio
 from graphlib import TopologicalSorter
 from typing import Any
 
@@ -52,7 +53,7 @@ class Planner:
 
         return errors
 
-    def execute(
+    async def execute(
         self, plan: PlanSpec, inputs: dict[str, Any] | None = None
     ) -> PlanResult:
         errors = self.validate(plan)
@@ -76,6 +77,9 @@ class Planner:
 
         while sorter.is_active():
             ready = sorter.get_ready()
+
+            # Separate steps into those we can dispatch vs. those we skip
+            to_run: list[str] = []
             for step_id in ready:
                 spec = step_map[step_id]
 
@@ -103,11 +107,25 @@ class Planner:
                         sorter.done(step_id)
                         continue
 
-                sr = self._executor.execute_step(spec, ctx)
+                to_run.append(step_id)
+
+            if not to_run:
+                continue
+
+            # Execute all ready steps concurrently
+            async def _run_step(sid: str) -> tuple[str, StepResult]:
+                return sid, await self._executor.execute_step(step_map[sid], ctx)
+
+            step_results = await asyncio.gather(
+                *(_run_step(sid) for sid in to_run)
+            )
+
+            # Record results and handle failures
+            for step_id, sr in step_results:
                 ctx.record(step_id, sr)
                 result.steps[step_id] = sr
 
-                if sr.status not in (StepStatus.SUCCESS,) and not spec.continue_on_failure:
+                if sr.status not in (StepStatus.SUCCESS,) and not step_map[step_id].continue_on_failure:
                     result.success = False
                     # cascade-skip dependents
                     for s in plan.steps:

@@ -78,7 +78,7 @@ class PlanRunner:
         log.info("Executing plan '%s' (%d steps)", plan.name, len(plan.steps))
         start = time.time()
         try:
-            result = self._planner.execute(plan)
+            result = await self._planner.execute(plan)
         except PlanValidationError as exc:
             return f"Plan validation error: {exc}"
         except Exception as exc:

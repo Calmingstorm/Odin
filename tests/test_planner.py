@@ -7,19 +7,19 @@ from src.odin.types import PlanSpec, StepSpec, StepStatus
 
 
 class TestExecution:
-    def test_linear(self, ts_registry, linear_plan):
+    async def test_linear(self, ts_registry, linear_plan):
         p = Planner(ts_registry)
-        r = p.execute(linear_plan)
+        r = await p.execute(linear_plan)
         assert r.success
         assert r.steps["c"].status == StepStatus.SUCCESS
 
-    def test_diamond(self, ts_registry, diamond_plan):
+    async def test_diamond(self, ts_registry, diamond_plan):
         p = Planner(ts_registry)
-        r = p.execute(diamond_plan)
+        r = await p.execute(diamond_plan)
         assert r.success
         assert set(r.steps) == {"a", "b", "c", "d"}
 
-    def test_failure_cascades(self, ts_registry):
+    async def test_failure_cascades(self, ts_registry):
         plan = PlanSpec(
             name="cascade",
             steps=(
@@ -28,12 +28,12 @@ class TestExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert not r.success
         assert r.steps["a"].status == StepStatus.FAILED
         assert r.steps["b"].status == StepStatus.SKIPPED
 
-    def test_step_result_interpolation_chain(self, ts_registry):
+    async def test_step_result_interpolation_chain(self, ts_registry):
         plan = PlanSpec(
             name="chain",
             steps=(
@@ -42,7 +42,7 @@ class TestExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.success
         assert r.steps["b"].output == "got first"
 
@@ -75,29 +75,29 @@ class TestValidation:
 # ---------------------------------------------------------------------------
 
 class TestPlanInputs:
-    def test_inputs_from_spec(self, ts_registry):
+    async def test_inputs_from_spec(self, ts_registry):
         plan = PlanSpec(
             name="with_inputs",
             steps=(StepSpec(id="a", tool="echo", params={"message": "${inputs.greeting}"}),),
             inputs={"greeting": "hello world"},
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.success
         assert r.steps["a"].output == "hello world"
 
-    def test_runtime_inputs_override_spec(self, ts_registry):
+    async def test_runtime_inputs_override_spec(self, ts_registry):
         plan = PlanSpec(
             name="override",
             steps=(StepSpec(id="a", tool="echo", params={"message": "${inputs.x}"}),),
             inputs={"x": "default"},
         )
         p = Planner(ts_registry)
-        r = p.execute(plan, inputs={"x": "override"})
+        r = await p.execute(plan, inputs={"x": "override"})
         assert r.success
         assert r.steps["a"].output == "override"
 
-    def test_mixed_input_and_step_refs(self, ts_registry):
+    async def test_mixed_input_and_step_refs(self, ts_registry):
         plan = PlanSpec(
             name="mixed",
             steps=(
@@ -112,11 +112,11 @@ class TestPlanInputs:
             inputs={"prefix": "hello", "suffix": "world"},
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.success
         assert r.steps["b"].output == "hello-world"
 
-    def test_bad_input_ref_fails_step_not_plan(self, ts_registry):
+    async def test_bad_input_ref_fails_step_not_plan(self, ts_registry):
         plan = PlanSpec(
             name="bad_ref",
             steps=(
@@ -125,13 +125,13 @@ class TestPlanInputs:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         # The bad step fails, good step succeeds
         assert r.steps["good"].status == StepStatus.SUCCESS
         assert r.steps["bad"].status == StepStatus.FAILED
         assert "param resolution failed" in r.steps["bad"].error
 
-    def test_complex_input_object(self, ts_registry):
+    async def test_complex_input_object(self, ts_registry):
         plan = PlanSpec(
             name="complex",
             steps=(
@@ -140,11 +140,11 @@ class TestPlanInputs:
             inputs={"cfg": {"db": {"host": "localhost", "port": 5432}}},
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.success
         assert r.steps["a"].output == "localhost"
 
-    def test_input_as_full_object_passthrough(self, ts_registry):
+    async def test_input_as_full_object_passthrough(self, ts_registry):
         data = {"servers": ["a", "b"], "count": 2}
         plan = PlanSpec(
             name="passthrough",
@@ -152,7 +152,7 @@ class TestPlanInputs:
             inputs={"data": data},
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.success
         assert r.steps["a"].output == data
 
@@ -162,7 +162,7 @@ class TestPlanInputs:
 # ---------------------------------------------------------------------------
 
 class TestConditionalExecution:
-    def test_when_true_runs_step(self, ts_registry):
+    async def test_when_true_runs_step(self, ts_registry):
         plan = PlanSpec(
             name="cond",
             steps=(
@@ -171,11 +171,11 @@ class TestConditionalExecution:
             inputs={"run": True},
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.success
         assert r.steps["a"].status == StepStatus.SUCCESS
 
-    def test_when_false_skips_step(self, ts_registry):
+    async def test_when_false_skips_step(self, ts_registry):
         plan = PlanSpec(
             name="cond",
             steps=(
@@ -184,23 +184,23 @@ class TestConditionalExecution:
             inputs={"run": False},
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.success  # skip is not a failure
         assert r.steps["a"].status == StepStatus.SKIPPED
         assert r.steps["a"].error == "condition not met"
 
-    def test_when_none_always_runs(self, ts_registry):
+    async def test_when_none_always_runs(self, ts_registry):
         """Steps without a when clause always execute (backwards compatible)."""
         plan = PlanSpec(
             name="no_when",
             steps=(StepSpec(id="a", tool="echo", params={"message": "hi"}),),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.success
         assert r.steps["a"].status == StepStatus.SUCCESS
 
-    def test_when_string_equality(self, ts_registry):
+    async def test_when_string_equality(self, ts_registry):
         plan = PlanSpec(
             name="eq",
             steps=(
@@ -210,10 +210,10 @@ class TestConditionalExecution:
             inputs={"env": "prod"},
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["a"].status == StepStatus.SUCCESS
 
-    def test_when_string_equality_false(self, ts_registry):
+    async def test_when_string_equality_false(self, ts_registry):
         plan = PlanSpec(
             name="eq",
             steps=(
@@ -223,10 +223,10 @@ class TestConditionalExecution:
             inputs={"env": "staging"},
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["a"].status == StepStatus.SKIPPED
 
-    def test_when_inequality(self, ts_registry):
+    async def test_when_inequality(self, ts_registry):
         plan = PlanSpec(
             name="neq",
             steps=(
@@ -236,10 +236,10 @@ class TestConditionalExecution:
             inputs={"env": "staging"},
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["a"].status == StepStatus.SUCCESS
 
-    def test_when_references_step_output(self, ts_registry):
+    async def test_when_references_step_output(self, ts_registry):
         plan = PlanSpec(
             name="step_ref",
             steps=(
@@ -249,10 +249,10 @@ class TestConditionalExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["act"].status == StepStatus.SUCCESS
 
-    def test_when_skip_does_not_cascade(self, ts_registry):
+    async def test_when_skip_does_not_cascade(self, ts_registry):
         """A when-skipped step should NOT cascade-skip its dependents."""
         plan = PlanSpec(
             name="no_cascade",
@@ -265,11 +265,11 @@ class TestConditionalExecution:
             inputs={"run_optional": False},
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["optional"].status == StepStatus.SKIPPED
         assert r.steps["always"].status == StepStatus.SUCCESS
 
-    def test_when_missing_ref_skips(self, ts_registry):
+    async def test_when_missing_ref_skips(self, ts_registry):
         """Bad interpolation in when expression skips the step (doesn't crash)."""
         plan = PlanSpec(
             name="bad_when",
@@ -279,7 +279,7 @@ class TestConditionalExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["a"].status == StepStatus.SKIPPED
 
     def test_when_loaded_from_dict(self):
@@ -291,7 +291,7 @@ class TestConditionalExecution:
         })
         assert plan.steps[0].when == "${inputs.go}"
 
-    def test_when_with_runtime_input_override(self, ts_registry):
+    async def test_when_with_runtime_input_override(self, ts_registry):
         """Runtime inputs can toggle conditional steps."""
         plan = PlanSpec(
             name="toggle",
@@ -303,15 +303,15 @@ class TestConditionalExecution:
         )
         p = Planner(ts_registry)
         # Default: disabled
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["a"].status == StepStatus.SKIPPED
         # Override: enabled
-        r = p.execute(plan, inputs={"enabled": True})
+        r = await p.execute(plan, inputs={"enabled": True})
         assert r.steps["a"].status == StepStatus.SUCCESS
 
     # -- branching on prior step outputs ------------------------------------
 
-    def test_when_step_output_nested_path(self, ts_registry):
+    async def test_when_step_output_nested_path(self, ts_registry):
         """Condition can reference nested dict paths in prior step output."""
         plan = PlanSpec(
             name="nested_branch",
@@ -325,10 +325,10 @@ class TestConditionalExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["deploy"].status == StepStatus.SUCCESS
 
-    def test_when_step_output_nested_mismatch_skips(self, ts_registry):
+    async def test_when_step_output_nested_mismatch_skips(self, ts_registry):
         plan = PlanSpec(
             name="nested_skip",
             steps=(
@@ -341,10 +341,10 @@ class TestConditionalExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["deploy"].status == StepStatus.SKIPPED
 
-    def test_when_step_output_truthiness(self, ts_registry):
+    async def test_when_step_output_truthiness(self, ts_registry):
         """Condition on step output truthy value (non-string)."""
         plan = PlanSpec(
             name="truthy_branch",
@@ -358,10 +358,10 @@ class TestConditionalExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["process"].status == StepStatus.SUCCESS
 
-    def test_when_step_output_falsy_skips(self, ts_registry):
+    async def test_when_step_output_falsy_skips(self, ts_registry):
         """Empty list output should cause condition to skip."""
         plan = PlanSpec(
             name="falsy_branch",
@@ -375,10 +375,10 @@ class TestConditionalExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["process"].status == StepStatus.SKIPPED
 
-    def test_when_dollar_brace_steps_prefix(self, ts_registry):
+    async def test_when_dollar_brace_steps_prefix(self, ts_registry):
         """${steps.X.output} form works in when conditions."""
         plan = PlanSpec(
             name="steps_prefix",
@@ -390,10 +390,10 @@ class TestConditionalExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["act"].status == StepStatus.SUCCESS
 
-    def test_when_bare_brace_steps_prefix(self, ts_registry):
+    async def test_when_bare_brace_steps_prefix(self, ts_registry):
         """{steps.X.output} form works in when conditions."""
         plan = PlanSpec(
             name="bare_steps",
@@ -405,10 +405,10 @@ class TestConditionalExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["act"].status == StepStatus.SUCCESS
 
-    def test_when_multi_step_chain_branching(self, ts_registry):
+    async def test_when_multi_step_chain_branching(self, ts_registry):
         """Three-step chain: A produces data, B branches on A, C branches on B."""
         plan = PlanSpec(
             name="chain_branch",
@@ -423,12 +423,12 @@ class TestConditionalExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["a"].status == StepStatus.SUCCESS
         assert r.steps["b"].status == StepStatus.SUCCESS
         assert r.steps["c"].status == StepStatus.SUCCESS
 
-    def test_when_step_output_inequality(self, ts_registry):
+    async def test_when_step_output_inequality(self, ts_registry):
         plan = PlanSpec(
             name="neq_step",
             steps=(
@@ -439,10 +439,10 @@ class TestConditionalExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["warn"].status == StepStatus.SUCCESS
 
-    def test_when_numeric_gt_runs_step(self, ts_registry):
+    async def test_when_numeric_gt_runs_step(self, ts_registry):
         plan = PlanSpec(
             name="numeric_gt",
             steps=(
@@ -453,10 +453,10 @@ class TestConditionalExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["alert"].status == StepStatus.SUCCESS
 
-    def test_when_numeric_gt_skips_step(self, ts_registry):
+    async def test_when_numeric_gt_skips_step(self, ts_registry):
         plan = PlanSpec(
             name="numeric_gt_skip",
             steps=(
@@ -467,10 +467,10 @@ class TestConditionalExecution:
             ),
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["alert"].status == StepStatus.SKIPPED
 
-    def test_when_numeric_lte_from_input(self, ts_registry):
+    async def test_when_numeric_lte_from_input(self, ts_registry):
         plan = PlanSpec(
             name="numeric_lte",
             steps=(
@@ -480,5 +480,113 @@ class TestConditionalExecution:
             inputs={"retries": 2},
         )
         p = Planner(ts_registry)
-        r = p.execute(plan)
+        r = await p.execute(plan)
         assert r.steps["a"].status == StepStatus.SUCCESS
+
+
+# ---------------------------------------------------------------------------
+# Parallel execution — independent steps run concurrently
+# ---------------------------------------------------------------------------
+
+class TestParallelExecution:
+    async def test_diamond_parallel_speedup(self, ts_registry):
+        """Diamond plan B and C (both depend on A only) run concurrently.
+
+        B and C each sleep 0.1s. Sequential would take ~0.2s; parallel < 0.15s.
+        """
+        plan = PlanSpec(
+            name="diamond",
+            steps=(
+                StepSpec(id="a", tool="ts", params={"sleep": 0.01}),
+                StepSpec(id="b", tool="ts", params={"sleep": 0.1}, depends_on=("a",)),
+                StepSpec(id="c", tool="ts", params={"sleep": 0.1}, depends_on=("a",)),
+                StepSpec(id="d", tool="ts", params={"sleep": 0.01}, depends_on=("b", "c")),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = await p.execute(plan)
+        assert r.success
+        assert set(r.steps) == {"a", "b", "c", "d"}
+
+        # B and C should have overlapping time windows
+        b_start = r.steps["b"].output["start"]
+        b_end = r.steps["b"].output["end"]
+        c_start = r.steps["c"].output["start"]
+        c_end = r.steps["c"].output["end"]
+        assert b_start < c_end and c_start < b_end, "B and C should overlap in time"
+
+    async def test_wide_fan_out_parallel(self, ts_registry):
+        """Many independent steps all run concurrently from a single root."""
+        n = 5
+        steps = [StepSpec(id="root", tool="ts", params={"sleep": 0.01})]
+        for i in range(n):
+            steps.append(
+                StepSpec(id=f"fan_{i}", tool="ts", params={"sleep": 0.1}, depends_on=("root",))
+            )
+        plan = PlanSpec(name="fan_out", steps=tuple(steps))
+        p = Planner(ts_registry)
+
+        import time
+        t0 = time.monotonic()
+        r = await p.execute(plan)
+        elapsed = time.monotonic() - t0
+
+        assert r.success
+        # 5 x 0.1s sequential = 0.5s; parallel should be ~0.1s + overhead
+        assert elapsed < 0.3, f"Fan-out took {elapsed:.3f}s — expected parallel execution"
+
+    async def test_independent_roots_parallel(self, ts_registry):
+        """Steps with no dependencies at all run concurrently."""
+        plan = PlanSpec(
+            name="roots",
+            steps=(
+                StepSpec(id="a", tool="ts", params={"sleep": 0.1}),
+                StepSpec(id="b", tool="ts", params={"sleep": 0.1}),
+                StepSpec(id="c", tool="ts", params={"sleep": 0.1}),
+            ),
+        )
+        p = Planner(ts_registry)
+
+        import time
+        t0 = time.monotonic()
+        r = await p.execute(plan)
+        elapsed = time.monotonic() - t0
+
+        assert r.success
+        # 3 x 0.1s sequential = 0.3s; parallel should be ~0.1s
+        assert elapsed < 0.2, f"Independent roots took {elapsed:.3f}s — expected parallel"
+
+    async def test_parallel_failure_still_cascades(self, ts_registry):
+        """When one parallel branch fails, its dependents are still skipped."""
+        plan = PlanSpec(
+            name="parallel_fail",
+            steps=(
+                StepSpec(id="root", tool="echo", params={"message": "ok"}),
+                StepSpec(id="ok_branch", tool="ts", params={"sleep": 0.01}, depends_on=("root",)),
+                StepSpec(id="bad_branch", tool="fail", params={"message": "boom"}, depends_on=("root",)),
+                StepSpec(id="after_ok", tool="echo", params={"message": "yes"}, depends_on=("ok_branch",)),
+                StepSpec(id="after_bad", tool="echo", params={"message": "no"}, depends_on=("bad_branch",)),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = await p.execute(plan)
+        assert not r.success
+        assert r.steps["ok_branch"].status == StepStatus.SUCCESS
+        assert r.steps["bad_branch"].status == StepStatus.FAILED
+        assert r.steps["after_ok"].status == StepStatus.SUCCESS
+        assert r.steps["after_bad"].status == StepStatus.SKIPPED
+
+    async def test_serial_chain_still_works(self, ts_registry):
+        """A purely serial chain executes correctly with the async planner."""
+        plan = PlanSpec(
+            name="serial",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "1"}),
+                StepSpec(id="b", tool="echo", params={"message": "got ${a.output}"}, depends_on=("a",)),
+                StepSpec(id="c", tool="echo", params={"message": "got ${b.output}"}, depends_on=("b",)),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = await p.execute(plan)
+        assert r.success
+        assert r.steps["c"].output == "got got 1"
