@@ -61,16 +61,24 @@ class ToolExecutor:
         if handler is None:
             return f"Unknown tool: {tool_name}"
 
+        timeout = self.config.command_timeout_seconds
         try:
             if tool_name in ("memory_manage", "manage_list"):
-                result = await handler(tool_input, user_id=user_id)
+                coro = handler(tool_input, user_id=user_id)
             else:
-                result = await handler(tool_input)
-            self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0})
+                coro = handler(tool_input)
+            result = await asyncio.wait_for(coro, timeout=timeout)
+            self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
             self._metrics[tool_name]["calls"] += 1
             return result
+        except asyncio.TimeoutError:
+            self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
+            self._metrics[tool_name]["errors"] += 1
+            self._metrics[tool_name]["timeouts"] += 1
+            log.error("Tool %s timed out after %ds", tool_name, timeout)
+            return f"Error: tool '{tool_name}' timed out after {timeout}s"
         except Exception as e:
-            self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0})
+            self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
             self._metrics[tool_name]["errors"] += 1
             log.error("Tool %s failed: %s", tool_name, e)
             return f"Error executing {tool_name}: {e}"

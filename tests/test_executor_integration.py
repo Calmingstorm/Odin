@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
 
+from src.config.schema import ToolsConfig
 from src.tools.executor import ToolExecutor
 
 
@@ -43,3 +45,62 @@ async def test_metrics_recorded():
     metrics = executor.get_metrics()
     assert "execute_plan" in metrics
     assert metrics["execute_plan"]["calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_timeout_returns_error():
+    """Tool handler that exceeds timeout returns a timeout error string."""
+    config = ToolsConfig(command_timeout_seconds=1)
+    executor = ToolExecutor(config=config)
+
+    # Monkey-patch a handler that sleeps longer than the timeout
+    async def _slow_handler(inp: dict) -> str:
+        await asyncio.sleep(10)
+        return "should not reach"
+
+    executor._handle_slow_tool = _slow_handler  # type: ignore[attr-defined]
+
+    result = await executor.execute("slow_tool", {})
+    assert "timed out" in result
+    assert "1s" in result
+
+    metrics = executor.get_metrics()
+    assert "slow_tool" in metrics
+    assert metrics["slow_tool"]["errors"] == 1
+    assert metrics["slow_tool"]["timeouts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_timeout_does_not_affect_fast_tools():
+    """Tools that complete within the timeout work normally."""
+    config = ToolsConfig(command_timeout_seconds=30)
+    executor = ToolExecutor(config=config)
+
+    async def _fast_handler(inp: dict) -> str:
+        return "done"
+
+    executor._handle_fast_tool = _fast_handler  # type: ignore[attr-defined]
+
+    result = await executor.execute("fast_tool", {})
+    assert result == "done"
+
+    metrics = executor.get_metrics()
+    assert metrics["fast_tool"]["calls"] == 1
+    assert metrics["fast_tool"]["errors"] == 0
+    assert metrics["fast_tool"]["timeouts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_metrics_include_timeouts_field():
+    """Metrics dict includes a 'timeouts' counter alongside calls and errors."""
+    executor = ToolExecutor()
+
+    async def _ok_handler(inp: dict) -> str:
+        return "ok"
+
+    executor._handle_ok_tool = _ok_handler  # type: ignore[attr-defined]
+    await executor.execute("ok_tool", {})
+
+    metrics = executor.get_metrics()
+    assert "timeouts" in metrics["ok_tool"]
+    assert metrics["ok_tool"]["timeouts"] == 0
