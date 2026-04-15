@@ -131,7 +131,7 @@ tightening of prior work.
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
 | 21 | Knowledge deduplication: content hashing on ingest, skip or merge near-duplicates | done | Content hashing (SHA-256), exact + near-duplicate skip on ingest, find_duplicates/find_near_duplicates scan, merge_sources, 2 REST API endpoints, +63 tests |
-| 22 | Knowledge versioning: edit history per entry with audit trail | pending | |
+| 22 | Knowledge versioning: edit history per entry with audit trail | done | knowledge_versions table, version recording on ingest/delete, content snapshots, unified diffs, restore, 4 REST API endpoints, +69 tests |
 | 23 | Adaptive session consolidation: compaction target scales with channel activity | pending | |
 | 24 | FTS5 session search in web UI: search prior conversations by keyword/user/time | pending | |
 | 25 | Knowledge import: bulk ingest of markdown dirs, PDFs, web URLs | pending | |
@@ -2507,3 +2507,149 @@ Two new endpoints:
 - The `merge_sources()` operation is destructive — it deletes the remove_source's chunks. There is no undo. The REST API endpoint requires explicit `keep_source` and `remove_source` parameters.
 - All five subsystem wiring tasks remain open from prior rounds.
 - REST API endpoint count is now 93 (was 91 after Round 20).
+
+## Round 22 — Knowledge versioning: edit history per entry with audit trail
+**Focus**: Add version tracking to the knowledge store — every ingest, update, and delete records a version entry with content snapshot, diff summary, and audit metadata. Versions can be listed, inspected, diffed, and restored via REST API.
+**Baseline pytest**: 2323 passed, 0 failed
+**Post-round pytest**: 2392 passed, 0 failed (+69 new tests)
+
+### Validated from prior rounds
+- Round 21 (Knowledge deduplication): content hashing, exact/near-duplicate detection, merge — all passing (63 tests).
+- Round 21 noted that `doc_content_hash` is available for version comparison — confirmed and used.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. Schema additions: `src/knowledge/store.py` (lines 78-95)
+
+New `knowledge_versions` table with columns:
+- `id` INTEGER PRIMARY KEY AUTOINCREMENT — unique version row ID
+- `source` TEXT NOT NULL — the document source name
+- `version` INTEGER NOT NULL — auto-incrementing per source (1, 2, 3, ...)
+- `content_hash` TEXT — SHA-256 hash of the versioned content
+- `content` TEXT — full content snapshot (NULL for delete actions)
+- `chunk_count` INTEGER — number of chunks at this version
+- `uploader` TEXT — who made the change (e.g., "system", "web-api", "restore-v1")
+- `action` TEXT — "create", "update", or "delete"
+- `created_at` TEXT — UTC ISO-8601 timestamp
+- `diff_summary` TEXT — human-readable summary (e.g., "+3 lines, -1 lines")
+
+Index: `idx_knowledge_versions_source` on `(source, version)`.
+
+Migration is idempotent via `CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`.
+
+#### 2. Version recording in ingest: `src/knowledge/store.py` (lines 201-223)
+
+Modified `ingest()` to:
+1. Capture `old_content` via `get_source_content()` BEFORE deleting existing chunks.
+2. Determine `action` as "create" (no old content) or "update" (old content existed).
+3. Compute `diff_summary` via `_make_diff_summary(old_content, new_content)`.
+4. Call `_record_version()` after successful chunk write.
+
+The internal `delete_source()` call during ingest passes `_record_version=False` to avoid recording a spurious delete version when content is being replaced.
+
+#### 3. Version recording in delete: `src/knowledge/store.py` (lines 410-432)
+
+Modified `delete_source()` to:
+1. Accept `_record_version: bool = True` keyword parameter (private, prefixed with underscore).
+2. When `_record_version=True` and chunks exist, capture content hash and record a "delete" version with `content=None` and `chunk_count=0`.
+3. When called from `ingest()`, `_record_version=False` prevents double-recording.
+
+#### 4. Core version methods: `src/knowledge/store.py` (lines 629-763)
+
+- `_next_version(source)` (line 629): Returns `MAX(version) + 1` for a source, or 1 if no versions exist.
+- `_record_version(source, content_hash, content, chunk_count, uploader, action, diff_summary)` (line 635): Inserts a row into `knowledge_versions`. Returns the version number or 0 on failure.
+- `_make_diff_summary(old_content, new_content)` (line 660): Generates human-readable summary using `difflib.unified_diff`. Returns "initial version", "deleted", "no content changes", or "+N lines, -M lines".
+- `get_versions(source)` (line 676): Returns version history (descending) WITHOUT content field (for list views).
+- `get_version(source, version)` (line 697): Returns a single version WITH content snapshot.
+- `get_version_diff(source, v1, v2)` (line 720): Computes unified diff between two versions. Returns diff text, line counts, and content hashes.
+- `restore_version(source, version, embedder)` (line 748): Re-ingests a previous version's content snapshot with `dedup=False` and `uploader="restore-v{N}"`.
+
+#### 5. REST API: `src/web/api.py` (lines 1306-1366)
+
+Four new endpoints:
+
+- `GET /api/knowledge/{source}/versions` (line 1308): List version history for a source. Returns array of version records without content.
+- `GET /api/knowledge/{source}/versions/{version}` (line 1316): Get a specific version including content snapshot. 404 if version not found.
+- `POST /api/knowledge/{source}/versions/{version}/restore` (line 1325): Restore a previous version by re-ingesting its content. 400 if version has no content (delete version). 404 if version not found.
+- `GET /api/knowledge/{source}/versions/{v1}/diff/{v2}` (line 1345): Compute unified diff between two versions. 404 if either version not found.
+
+All endpoints follow existing patterns: 503 when store unavailable, `asyncio.to_thread` for sync DB calls.
+
+#### 6. Tests: `tests/test_knowledge_versions.py` — 69 tests across 15 test classes
+
+**Schema** (3):
+- `TestVersionsSchema` (3): table exists, index exists, migration idempotent.
+
+**_record_version** (6):
+- `TestRecordVersion` (6): records version, auto-increments, independent per source, unavailable returns 0, stores content snapshot, stores null for delete.
+
+**_make_diff_summary** (6):
+- `TestMakeDiffSummary` (6): initial version, deleted, no changes, lines added, lines removed, mixed changes.
+
+**Ingest version recording** (8):
+- `TestIngestVersionRecording` (8): create records version, update records version, stores content hash, records chunk count, diff summary initial, diff summary update, preserves uploader, multiple versions.
+
+**Delete version recording** (4):
+- `TestDeleteVersionRecording` (4): delete records version, delete version has no content, zero chunk count, nonexistent no version.
+
+**get_versions** (4):
+- `TestGetVersions` (4): empty for unknown, unavailable returns empty, descending order, excludes content field.
+
+**get_version** (6):
+- `TestGetVersion` (6): returns specific version, includes content, none for missing, none for wrong version, unavailable returns none, old version preserved after update.
+
+**get_version_diff** (6):
+- `TestGetVersionDiff` (6): diff between versions, unified format, includes hashes, missing version returns none, one version missing, same version.
+
+**restore_version** (5):
+- `TestRestoreVersion` (5): restores previous version, records version, nonexistent returns zero, delete version returns zero, uses dedup false.
+
+**_next_version** (2):
+- `TestNextVersion` (2): first version is one, increments.
+
+**Edge cases** (6):
+- `TestVersioningEdgeCases` (6): history survives delete, reingest after delete, content independent of chunks, UTC ISO timestamp, diff_summary always string, concurrent ingests versioned.
+
+**REST API — versions list** (3):
+- `TestVersionsListAPI` (3): unavailable 503, empty versions, versions returned.
+
+**REST API — version detail** (3):
+- `TestVersionDetailAPI` (3): unavailable 503, not found 404, returns version with content.
+
+**REST API — restore** (4):
+- `TestVersionRestoreAPI` (4): unavailable 503, not found 404, cannot restore delete version 400, success.
+
+**REST API — diff** (3):
+- `TestVersionDiffAPI` (3): unavailable 503, not found 404, diff returned.
+
+### Design decisions
+
+1. **Content snapshots**: Each version stores the full content at that point in time. This makes restore and diff trivial without needing to reconstruct from deltas. Knowledge entries are typically runbooks/configs (KB-sized), so storage cost is minimal.
+
+2. **Separate table**: `knowledge_versions` is a separate table from `knowledge_chunks`. Versions are never deleted when chunks are deleted — the audit trail is permanent. This means version history survives source deletion, which is important for audit compliance.
+
+3. **Auto-incrementing per source**: Version numbers are scoped to each source, starting at 1. A source that goes through create→update→delete→create will have versions 1, 2, 3, 4 with actions create, update, delete, create.
+
+4. **`_record_version` flag on delete**: The internal `delete_source()` call during `ingest()` skips version recording (via `_record_version=False`). The ingest itself records the "update" or "create" version. Without this, every update would create both a delete and a create/update version entry.
+
+5. **Diff via difflib**: Uses Python stdlib `difflib.unified_diff` for both the summary and the full diff endpoint. No external dependencies.
+
+6. **UTC timestamps**: Version `created_at` uses `datetime.now(timezone.utc).isoformat()` for consistency with the audit logger (the existing `ingested_at` in chunks uses naive `datetime.now()`; not changed to avoid breaking existing data).
+
+7. **restore_version uses dedup=False**: Restoring a version re-ingests the content snapshot, bypassing duplicate detection. This ensures restore always works even if the content matches an existing source.
+
+8. **No new dependencies**: Uses only stdlib (difflib, datetime.timezone). No external packages added.
+
+### Files changed
+- `src/knowledge/store.py` (lines 9, 13, 78-95, 201-223, 410-432, 629-763): Added difflib + timezone imports, knowledge_versions table, version recording in ingest/delete, _next_version, _record_version, _make_diff_summary, get_versions, get_version, get_version_diff, restore_version.
+- `src/web/api.py` (lines 1306-1366): GET /api/knowledge/{source}/versions, GET /api/knowledge/{source}/versions/{version}, POST /api/knowledge/{source}/versions/{version}/restore, GET /api/knowledge/{source}/versions/{v1}/diff/{v2}.
+- `tests/test_knowledge_versions.py` (new, 69 tests): Complete test coverage for schema, version recording, query methods, restore, diff, REST API, and edge cases.
+
+### Next round watch for
+- Round 23 (Adaptive session consolidation) has no dependencies on Round 22.
+- The `delete_source()` method now has a `_record_version` keyword parameter. It's private (underscore-prefixed) and defaults to `True`. If any new callers of `delete_source` appear that are internal cleanup (not user-initiated), they should pass `_record_version=False`.
+- Version history is never cleaned up. For a frequently-updated source, versions accumulate unboundedly. A future round could add a `max_versions` config option with oldest-version pruning.
+- The `restore_version` method calls `ingest()` with `dedup=False`, which means it records its own version entry. The uploader for restored versions is `restore-v{N}` where N is the version being restored.
+- REST API endpoint count is now 97 (was 93 after Round 21, +4 new).
+- All five subsystem wiring tasks remain open from prior rounds.

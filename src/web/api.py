@@ -1303,6 +1303,62 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             {"status": "merged", "kept": keep, "removed": remove, "chunks_removed": removed}
         )
 
+    # Knowledge versioning
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/knowledge/{source}/versions")
+    async def list_knowledge_versions(request: web.Request) -> web.Response:
+        store = bot._knowledge_store
+        if not store or not store.available:
+            return web.json_response({"error": "knowledge store not available"}, status=503)
+        source = request.match_info["source"]
+        versions = await asyncio.to_thread(store.get_versions, source)
+        return web.json_response(versions)
+
+    @routes.get("/api/knowledge/{source}/versions/{version:\\d+}")
+    async def get_knowledge_version(request: web.Request) -> web.Response:
+        store = bot._knowledge_store
+        if not store or not store.available:
+            return web.json_response({"error": "knowledge store not available"}, status=503)
+        source = request.match_info["source"]
+        version = int(request.match_info["version"])
+        ver = await asyncio.to_thread(store.get_version, source, version)
+        if not ver:
+            return web.json_response({"error": "version not found"}, status=404)
+        return web.json_response(ver)
+
+    @routes.post("/api/knowledge/{source}/versions/{version:\\d+}/restore")
+    async def restore_knowledge_version(request: web.Request) -> web.Response:
+        store = bot._knowledge_store
+        if not store or not store.available:
+            return web.json_response({"error": "knowledge store not available"}, status=503)
+        source = request.match_info["source"]
+        version = int(request.match_info["version"])
+        ver = await asyncio.to_thread(store.get_version, source, version)
+        if not ver:
+            return web.json_response({"error": "version not found"}, status=404)
+        if not ver.get("content"):
+            return web.json_response(
+                {"error": "version has no content snapshot (delete version)"}, status=400
+            )
+        chunks = await store.restore_version(source, version, embedder=bot._embedder)
+        return web.json_response(
+            {"status": "restored", "source": source, "version": version, "chunks": chunks}
+        )
+
+    @routes.get("/api/knowledge/{source}/versions/{v1:\\d+}/diff/{v2:\\d+}")
+    async def diff_knowledge_versions(request: web.Request) -> web.Response:
+        store = bot._knowledge_store
+        if not store or not store.available:
+            return web.json_response({"error": "knowledge store not available"}, status=503)
+        source = request.match_info["source"]
+        v1 = int(request.match_info["v1"])
+        v2 = int(request.match_info["v2"])
+        diff = await asyncio.to_thread(store.get_version_diff, source, v1, v2)
+        if not diff:
+            return web.json_response({"error": "one or both versions not found"}, status=404)
+        return web.json_response(diff)
+
     # ------------------------------------------------------------------
     # Schedules
     # ------------------------------------------------------------------

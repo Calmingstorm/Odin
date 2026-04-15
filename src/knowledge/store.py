@@ -6,10 +6,11 @@ Documents are chunked into ~500-token segments with overlap for better retrieval
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
@@ -74,6 +75,25 @@ class KnowledgeStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_knowledge_doc_hash "
                 "ON knowledge_chunks(doc_content_hash)"
+            )
+            # Version history table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS knowledge_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL DEFAULT '',
+                    content TEXT,
+                    chunk_count INTEGER NOT NULL DEFAULT 0,
+                    uploader TEXT NOT NULL DEFAULT 'system',
+                    action TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    diff_summary TEXT DEFAULT ''
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_versions_source "
+                "ON knowledge_versions(source, version)"
             )
             # Vector table (only if sqlite-vec loaded)
             if self._has_vec:
@@ -178,8 +198,12 @@ class KnowledgeStore:
                 )
                 return 0
 
+        # Capture old content for version diff
+        old_content = await asyncio.to_thread(self.get_source_content, source)
+        is_update = old_content is not None
+
         # Remove any existing chunks for this source (blocking → offload)
-        await asyncio.to_thread(self.delete_source, source)
+        await asyncio.to_thread(self.delete_source, source, _record_version=False)
 
         # Embed all chunks first (async, non-blocking)
         vectors: list[list[float] | None] = []
@@ -197,6 +221,15 @@ class KnowledgeStore:
             self._write_chunks_sync, chunks, vectors, doc_hash_id, source,
             now, uploader, doc_content_hash,
         )
+
+        # Record version
+        action = "update" if is_update else "create"
+        diff_summary = self._make_diff_summary(old_content, content)
+        await asyncio.to_thread(
+            self._record_version, source, doc_content_hash, content,
+            indexed, uploader, action, diff_summary,
+        )
+
         log.info("Ingested '%s': %d/%d chunks indexed", source, indexed, len(chunks))
         return indexed
 
@@ -374,7 +407,7 @@ class KnowledgeStore:
         except Exception:
             return None
 
-    def delete_source(self, source: str) -> int:
+    def delete_source(self, source: str, *, _record_version: bool = True) -> int:
         """Delete all chunks for a document source. Returns count deleted."""
         if not self.available:
             return 0
@@ -389,6 +422,14 @@ class KnowledgeStore:
             ]
             if not ids:
                 return 0
+
+            # Record version before deleting content
+            if _record_version:
+                content = self.get_source_content(source)
+                content_hash = self._content_hash(content) if content else ""
+                self._record_version(
+                    source, content_hash, None, 0, "system", "delete", "deleted",
+                )
 
             # Delete from vector table
             if self._has_vec:
@@ -601,6 +642,167 @@ class KnowledgeStore:
         if not keep_exists:
             return 0
         return self.delete_source(remove_source)
+
+    # ------------------------------------------------------------------
+    # Version history
+    # ------------------------------------------------------------------
+
+    def _next_version(self, source: str) -> int:
+        """Return the next version number for *source*."""
+        row = self._conn.execute(
+            "SELECT MAX(version) FROM knowledge_versions WHERE source = ?",
+            (source,),
+        ).fetchone()
+        return (row[0] or 0) + 1
+
+    def _record_version(
+        self,
+        source: str,
+        content_hash: str,
+        content: str | None,
+        chunk_count: int,
+        uploader: str,
+        action: str,
+        diff_summary: str = "",
+    ) -> int:
+        """Record a version entry. Returns the version number."""
+        if not self._conn:
+            return 0
+        try:
+            version = self._next_version(source)
+            now = datetime.now(timezone.utc).isoformat()
+            self._conn.execute(
+                "INSERT INTO knowledge_versions "
+                "(source, version, content_hash, content, chunk_count, "
+                "uploader, action, created_at, diff_summary) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (source, version, content_hash, content, chunk_count,
+                 uploader, action, now, diff_summary),
+            )
+            self._conn.commit()
+            return version
+        except Exception as e:
+            log.error("Failed to record version for '%s': %s", source, e)
+            return 0
+
+    def _make_diff_summary(self, old_content: str | None, new_content: str | None) -> str:
+        """Generate a human-readable diff summary between two content versions."""
+        if old_content is None:
+            return "initial version"
+        if new_content is None:
+            return "deleted"
+        old_lines = old_content.splitlines(keepends=True)
+        new_lines = new_content.splitlines(keepends=True)
+        diff = list(difflib.unified_diff(old_lines, new_lines, n=0))
+        added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
+        removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+        if added == 0 and removed == 0:
+            return "no content changes"
+        parts = []
+        if added:
+            parts.append(f"+{added} lines")
+        if removed:
+            parts.append(f"-{removed} lines")
+        return ", ".join(parts)
+
+    def get_versions(self, source: str) -> list[dict]:
+        """Return version history for *source* (without content)."""
+        if not self.available:
+            return []
+        try:
+            rows = self._conn.execute(
+                "SELECT id, version, content_hash, chunk_count, uploader, "
+                "action, created_at, diff_summary "
+                "FROM knowledge_versions WHERE source = ? ORDER BY version DESC",
+                (source,),
+            ).fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "version": r[1],
+                    "content_hash": r[2],
+                    "chunk_count": r[3],
+                    "uploader": r[4],
+                    "action": r[5],
+                    "created_at": r[6],
+                    "diff_summary": r[7] or "",
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    def get_version(self, source: str, version: int) -> dict | None:
+        """Return a specific version including content snapshot."""
+        if not self.available:
+            return None
+        try:
+            row = self._conn.execute(
+                "SELECT id, version, content_hash, content, chunk_count, "
+                "uploader, action, created_at, diff_summary "
+                "FROM knowledge_versions WHERE source = ? AND version = ?",
+                (source, version),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "version": row[1],
+                "content_hash": row[2],
+                "content": row[3],
+                "chunk_count": row[4],
+                "uploader": row[5],
+                "action": row[6],
+                "created_at": row[7],
+                "diff_summary": row[8] or "",
+            }
+        except Exception:
+            return None
+
+    def get_version_diff(self, source: str, v1: int, v2: int) -> dict | None:
+        """Compute a unified diff between two versions of *source*."""
+        ver1 = self.get_version(source, v1)
+        ver2 = self.get_version(source, v2)
+        if not ver1 or not ver2:
+            return None
+        old_content = ver1.get("content") or ""
+        new_content = ver2.get("content") or ""
+        old_lines = old_content.splitlines(keepends=True)
+        new_lines = new_content.splitlines(keepends=True)
+        diff_lines = list(difflib.unified_diff(
+            old_lines, new_lines,
+            fromfile=f"v{v1}", tofile=f"v{v2}",
+        ))
+        added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+        removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+        return {
+            "source": source,
+            "from_version": v1,
+            "to_version": v2,
+            "diff": "".join(diff_lines),
+            "lines_added": added,
+            "lines_removed": removed,
+            "from_hash": ver1.get("content_hash", ""),
+            "to_hash": ver2.get("content_hash", ""),
+        }
+
+    async def restore_version(
+        self,
+        source: str,
+        version: int,
+        embedder: "LocalEmbedder | None" = None,
+    ) -> int:
+        """Restore a previous version by re-ingesting its content snapshot.
+
+        Returns chunk count of the restored version, or 0 on failure.
+        """
+        ver = await asyncio.to_thread(self.get_version, source, version)
+        if not ver or not ver.get("content"):
+            return 0
+        return await self.ingest(
+            ver["content"], source, embedder=embedder,
+            uploader=f"restore-v{version}", dedup=False,
+        )
 
     @staticmethod
     def _chunk_text(text: str) -> list[str]:
