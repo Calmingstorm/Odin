@@ -207,6 +207,23 @@ class SlackConfig(BaseModel):
     forward_webhooks: bool = False
 
 
+class IssueTrackerConfig(BaseModel):
+    enabled: bool = False
+    provider: str = "linear"  # "linear" or "jira"
+    api_token: str = ""
+    base_url: str = ""  # Required for Jira (e.g. https://yourorg.atlassian.net)
+    project_key: str = ""  # Default Jira project key
+    default_team_id: str = ""  # Default Linear team ID
+    scrub_secrets: bool = True
+
+    @field_validator("provider")
+    @classmethod
+    def _validate_provider(cls, v: str) -> str:
+        if v.lower() not in ("linear", "jira"):
+            raise ValueError(f"Invalid provider '{v}'. Must be 'linear' or 'jira'.")
+        return v.lower()
+
+
 class MCPServerConfig(BaseModel):
     transport: str = "stdio"  # "stdio" or "http"
     command: str = ""  # for stdio: executable path
@@ -251,6 +268,7 @@ class Config(BaseModel):
     message_triggers: MessageTriggerConfig = MessageTriggerConfig()
     mcp: MCPConfig = MCPConfig()
     slack: SlackConfig = SlackConfig()
+    issue_tracker: IssueTrackerConfig = IssueTrackerConfig()
 
 
 def _substitute_env_vars(text: str) -> str:

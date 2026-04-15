@@ -1576,6 +1576,70 @@ TOOLS: list[dict] = [
             "required": ["url"],
         },
     },
+    # --- Issue tracker (Linear / Jira) ---
+    {
+        "name": "issue_tracker",
+        "description": (
+            "Create, comment on, query, list, and transition issues in Linear or Jira. "
+            "Useful for filing bugs from loop reports, tracking remediation, and updating issue status."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["create_issue", "comment", "get_issue", "list_issues", "transition"],
+                    "description": "Action to perform",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Issue title (for create_issue)",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Issue body/description (for create_issue)",
+                },
+                "issue_id": {
+                    "type": "string",
+                    "description": "Issue ID or key (for comment, get_issue, transition). Linear: UUID. Jira: PROJECT-123",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Comment text (for comment action)",
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Target status name (for transition and list_issues filter)",
+                },
+                "priority": {
+                    "type": "string",
+                    "description": "Priority: urgent/high/medium/low (for create_issue)",
+                },
+                "labels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Label IDs (Linear) or label names (Jira) to apply",
+                },
+                "team_id": {
+                    "type": "string",
+                    "description": "Linear team ID (overrides default from config)",
+                },
+                "project_key": {
+                    "type": "string",
+                    "description": "Jira project key (overrides default from config)",
+                },
+                "issue_type": {
+                    "type": "string",
+                    "description": "Jira issue type (default: Task). Common: Bug, Story, Epic",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max issues to return for list_issues (default 25, max 50)",
+                },
+            },
+            "required": ["action"],
+        },
+    },
     # --- Image generation (ComfyUI) ---
     {
         "name": "generate_image",

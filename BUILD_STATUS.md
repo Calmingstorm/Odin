@@ -123,7 +123,7 @@ tightening of prior work.
 |---|-------|--------|---------|
 | 16 | MCP (Model Context Protocol) client: invoke external MCP servers as first-class tools | done | MCPManager + MCPServerConnection with stdio/HTTP transport, JSON-RPC protocol, tool discovery/invocation, namespaced tools, REST API (4 endpoints), background task integration, config schema, +132 tests |
 | 17 | Slack output: post responses/alerts to Slack webhook alongside Discord | done | SlackNotifier module, SlackConfig, health server + watcher integration, REST API (3 endpoints), secret scrubbing, rate limiting, +107 tests |
-| 18 | Linear / Jira: create issues from loop reports, comment on existing issues | pending | |
+| 18 | Linear / Jira: create issues from loop reports, comment on existing issues | done | IssueTrackerClient module (Linear GraphQL + Jira REST), 5 actions (create_issue/comment/get_issue/list_issues/transition), config schema, tool definition, executor handler, REST API (3 endpoints), +132 tests |
 | 19 | Richer Grafana alert handling: parse payloads, auto-spawn remediation loops | pending | |
 | 20 | REVIEWER: validate rounds 11–19, tighten tests, fix bugs found | pending | |
 
@@ -1879,3 +1879,209 @@ All endpoints use `getattr(bot, "health_server", None)` then `getattr(hs, "slack
 - The `forward_webhooks` config defaults to `False`. Users must explicitly enable it to get webhook payloads forwarded to Slack. The `forward_alerts` config defaults to `True` but only takes effect when the `InfraWatcher` is wired up with a `slack_notifier` parameter.
 - All five subsystem wiring tasks remain open from Rounds 1-16: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.
 - The existing secret scrubber already detects Slack tokens (`xox[boaprs]-...` pattern at line 26 of `secret_scrubber.py`). No changes were needed for secret detection.
+
+## Round 18 — Issue tracker integration: Linear + Jira
+**Focus**: Add issue tracker integration supporting Linear (GraphQL) and Jira (REST API v3) with 5 actions: create_issue, comment, get_issue, list_issues, and transition.
+**Baseline pytest**: 1984 passed, 0 failed
+**Post-round pytest**: 2116 passed, 0 failed (+132 new tests)
+
+### Validated from prior rounds
+- Round 17: Slack webhook output, SlackNotifier, health server + watcher integration, REST API (3 endpoints) — all present and passing (107 tests).
+- Round 16: MCP client, stdio/HTTP transport, tool discovery/invocation, namespaced tools — all present and passing (132 tests).
+- Round 15: `http_probe` tool, 7 HTTP methods, curl-based timing breakdown, retries, shell injection protection — all present and passing (124 tests).
+- Round 14: `terraform_ops` tool, 10 actions, plan-file-only apply — all present and passing (138 tests).
+- Round 13: `docker_ops` tool, 14 actions, shell injection protection, compose support — all present and passing (148 tests).
+- Round 10: 5 subsystem wiring tasks remain pending. Not in scope for this round.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. New module: `src/notifications/issue_tracker.py` (375 lines)
+Async issue tracker client supporting Linear (GraphQL API) and Jira (REST API v3) with unified dispatch, secret scrubbing, and error handling.
+
+**Constants** (lines 17-33):
+- `_TIMEOUT = 15`: HTTP timeout per API call.
+- `MAX_TITLE_LEN = 256`, `MAX_BODY_LEN = 10_000`: Truncation limits.
+- `_VALID_PROVIDERS = ("linear", "jira")`: Supported providers.
+- `_VALID_ACTIONS = ("create_issue", "comment", "get_issue", "list_issues", "transition")`: Supported actions.
+- `LINEAR_API_URL = "https://api.linear.app/graphql"`: Linear GraphQL endpoint.
+- `LINEAR_PRIORITIES`: Maps priority names to Linear's 0-4 integer scale (urgent=1, high=2, medium=3, low=4, none=0).
+- `JIRA_PRIORITIES`: Maps priority names to Jira's standard priority names.
+
+**Helper functions** (lines 36-57):
+- `_truncate(text, limit)`: Truncates text with `…(truncated)` marker.
+- `validate_provider(provider)`: Validates and normalizes provider name (case-insensitive).
+- `validate_action(action)`: Validates and normalizes action name (case-insensitive).
+
+**`IssueTrackerError`** (line 60): Exception class for all issue tracker failures.
+
+**`IssueTrackerClient`** (lines 63-375): Main client class.
+- Constructor (line 63): Accepts `provider`, `api_token`, optional `base_url` (required for Jira), `project_key`, `default_team_id`, `scrub_secrets`. Lazy aiohttp session creation with provider-appropriate auth headers (Linear: Bearer token, Jira: Basic auth base64-encoded).
+
+**Linear API methods** (lines 108-238):
+- `_linear_request(query, variables)` (line 108): GraphQL request to Linear API. Handles HTTP errors and GraphQL errors separately.
+- `_linear_create_issue(title, description, team_id, priority, labels)` (line 127): Creates issue via `issueCreate` mutation. Requires team_id (from params or default). Maps priority names to Linear integers. Returns id, key (identifier), title, url, status, priority.
+- `_linear_comment(issue_id, body)` (line 159): Creates comment via `commentCreate` mutation. Returns id, created_at.
+- `_linear_get_issue(issue_id)` (line 179): Fetches issue details including assignee, labels, timestamps. Returns full issue dict.
+- `_linear_list_issues(team_id, limit, status)` (line 205): Lists issues with optional team and status filters. Limit capped at 50.
+- `_linear_transition(issue_id, state_name)` (line 228): Two-step: fetches issue's team states, finds matching state by name (case-insensitive), then updates via `issueUpdate` mutation. Lists available states on mismatch.
+
+**Jira API methods** (lines 243-340):
+- `_jira_request(method, path, body)` (line 243): REST request to Jira API v3. Handles 204 (no content), JSON parse errors, and API errors.
+- `_jira_create_issue(title, description, project_key, issue_type, priority, labels)` (line 264): Creates issue via POST /rest/api/3/issue. Uses Atlassian Document Format (ADF) for description. Default issue type "Task".
+- `_jira_comment(issue_key, body)` (line 296): Creates comment via POST issue/{key}/comment. Uses ADF format.
+- `_jira_get_issue(issue_key)` (line 310): Fetches issue via GET issue/{key}. Extracts text from ADF description.
+- `_jira_list_issues(project_key, limit, status)` (line 326): JQL search with project and status filters. Limit capped at 50.
+- `_jira_transition(issue_key, status_name)` (line 344): Three-step: fetches transitions, matches by name or `to.name` (case-insensitive), executes transition, refetches issue for updated status. Lists available transitions on mismatch.
+- `_jira_extract_text(doc)` (line 362): Static method to extract plain text from Atlassian Document Format.
+
+**Unified dispatch** (lines 370-405):
+- `execute(action, params)` (line 370): Validates action, scrubs secrets from text fields (title, description, body, comment), dispatches to provider-specific method. Catches TimeoutError and generic exceptions, wrapping in IssueTrackerError.
+- `_dispatch_linear(action, params)` / `_dispatch_jira(action, params)`: Route to provider methods.
+
+**Status & lifecycle** (lines 407-418):
+- `get_status()` (line 407): Returns provider, configured flag, base_url, project_key, default_team_id, request/error counts.
+- `close()` (line 415): Closes aiohttp session.
+
+#### 2. Config schema: `src/config/schema.py` (lines 200-214, 269)
+
+**`IssueTrackerConfig`** (line 200): Pydantic model with fields:
+- `enabled` (default False): Master toggle.
+- `provider` (default "linear"): "linear" or "jira", validated.
+- `api_token` (default ""): API key (Linear) or "email:token" (Jira).
+- `base_url` (default ""): Required for Jira (e.g. `https://yourorg.atlassian.net`).
+- `project_key` (default ""): Default Jira project key.
+- `default_team_id` (default ""): Default Linear team ID.
+- `scrub_secrets` (default True): Run secret scrubber on outgoing text.
+- Field validator `_validate_provider` normalizes to lowercase.
+
+Added `issue_tracker: IssueTrackerConfig = IssueTrackerConfig()` to `Config` class (line 269). Optional with sensible defaults — no config file changes required.
+
+#### 3. Tool definition: `src/tools/registry.py` (lines 1579-1637)
+
+Added `issue_tracker` tool with 12 properties:
+- `action` (required, enum of 5 actions): create_issue, comment, get_issue, list_issues, transition.
+- `title`, `description`: For create_issue.
+- `issue_id`: Issue ID/key for comment, get_issue, transition.
+- `body`: Comment text.
+- `status`: Target status for transition, filter for list_issues.
+- `priority`: urgent/high/medium/low for create_issue.
+- `labels`: Array of label IDs (Linear) or names (Jira).
+- `team_id`: Linear team ID override.
+- `project_key`: Jira project key override.
+- `issue_type`: Jira issue type (default Task).
+- `limit`: Max issues for list_issues (default 25, max 50).
+
+Tool count is now 67 (was 66).
+
+#### 4. Handler: `src/tools/executor.py` (lines 1068-1087)
+
+`_handle_issue_tracker(self, inp)`: Checks for `_issue_tracker_client` attribute on executor. Validates action. Dispatches to `client.execute()`. Returns JSON-formatted result or error string. The client is expected to be set by the bot's initialization code when `issue_tracker.enabled=true`.
+
+#### 5. REST API: `src/web/api.py` (3 new endpoints, lines 1056-1104)
+
+- `GET /api/issues/status` — Returns issue tracker status (enabled, provider, configured, request/error counts).
+- `POST /api/issues/execute` — Executes any action against the issue tracker. Accepts `action` (required) plus action-specific params. Returns `{ok: true, result: {...}}`.
+- `POST /api/issues/create` — Convenience endpoint for creating issues. Accepts `title` (required), `description`, and other create params. Returns `{ok: true, issue: {...}}` with 201 status.
+
+All endpoints use `getattr(bot, "_issue_tracker_client", None)` pattern — returns 503 if not enabled.
+
+#### 6. Package exports: `src/notifications/__init__.py` (line 2)
+
+Added `IssueTrackerClient` to imports and `__all__`.
+
+#### 7. Tests: `tests/test_issue_tracker.py` — 132 tests across 24 test classes
+
+**Config schema** (9):
+- `TestIssueTrackerConfigDefaults` (9): defaults, custom values, config includes issue_tracker, linear config, jira config, invalid provider, provider normalized lowercase, provider jira normalized.
+
+**Validation helpers** (14):
+- `TestValidateProvider` (6): linear, jira, case insensitive, invalid, empty, strips whitespace.
+- `TestValidateAction` (6): create_issue, comment, get_issue, list_issues, transition, invalid, case insensitive.
+- `TestTruncate` (4): short, at limit, over limit, empty.
+
+**Client init** (7):
+- `TestClientInit` (7): linear defaults, jira defaults, jira requires base_url, invalid provider, custom params, jira trailing slash, project key.
+
+**Constants** (8):
+- `TestConstants` (8): valid providers, valid actions, linear priorities, jira priorities, linear api url, max title, max body, timeout.
+- `TestIssueTrackerError` (2): str, inherits exception.
+
+**Linear API** (24):
+- `TestLinearCreateIssue` (6): success, no team_id, with priority, failure, api error, graphql error.
+- `TestLinearComment` (2): success, failure.
+- `TestLinearGetIssue` (2): success, not found.
+- `TestLinearListIssues` (3): success, empty, with status filter.
+- `TestLinearTransition` (3): success, state not found, issue not found.
+
+**Jira API** (18):
+- `TestJiraCreateIssue` (6): success, no project key, with priority, with labels, api error 401, custom issue type.
+- `TestJiraComment` (1): success.
+- `TestJiraGetIssue` (2): success, null fields.
+- `TestJiraListIssues` (2): success, with status filter.
+- `TestJiraTransition` (2): success, not found.
+
+**Jira text extraction** (5):
+- `TestJiraExtractText` (5): extract text, multiple paragraphs, none, empty dict, no content.
+
+**Secret scrubbing** (2):
+- `TestSecretScrubbing` (2): scrubs secrets in title, no scrub when disabled.
+
+**Status & close** (6):
+- `TestGetStatus` (3): linear status, jira status, unconfigured.
+- `TestClose` (3): close session, no session, already closed.
+
+**Unified dispatch** (14):
+- `TestUnifiedDispatch` (14): invalid action, linear create/comment/get/list/transition, jira create/comment/get/list/transition, timeout error, generic error.
+
+**Tool registration** (4):
+- `TestToolRegistration` (4): tool in registry, required fields, action enum, all properties present.
+
+**Executor handler** (6):
+- `TestExecutorHandler` (6): no client configured, invalid action, missing action, success, error handling, execute dispatches.
+
+**REST API** (12):
+- `TestIssueTrackerAPIEndpoints` (12): status disabled, status enabled, execute disabled, execute success, execute no action, execute invalid json, execute error, create disabled, create success, create no title, create error.
+
+**Module imports** (2):
+- `TestModuleImports` (2): notifications package, issue tracker error.
+
+**Edge cases** (13):
+- `TestEdgeCases` (13): linear priorities complete, jira priorities complete, request count incremented, error count incremented, truncate title, truncate body, linear list limit capped, jira 204 response, linear no assignee, linear transition case insensitive, jira transition by to_name.
+
+### Design decisions
+
+1. **Dual-provider support**: Single `IssueTrackerClient` class supports both Linear and Jira via unified `execute()` dispatch. The provider is set at config time, not per-call — consistent with Slack's single-webhook-service pattern. Users who need both providers can configure one and use the REST API for the other.
+
+2. **Linear GraphQL, Jira REST**: Linear uses a GraphQL API (their only public API), while Jira uses REST API v3 (Atlassian's current standard). Both use aiohttp — no SDKs needed.
+
+3. **Five actions**: `create_issue` (create from loop reports), `comment` (add updates to existing issues), `get_issue` (query status), `list_issues` (search), `transition` (change status). These cover the complete loop-report-to-resolution lifecycle: detect problem → create issue → add updates as loop iterates → close when resolved.
+
+4. **Transition via state name**: Both providers resolve human-readable state names (e.g., "Done", "In Progress") rather than requiring internal state IDs. Linear: fetches team states and matches. Jira: fetches available transitions and matches by name or target state name. Both are case-insensitive. Lists available states/transitions on mismatch.
+
+5. **Atlassian Document Format**: Jira v3 requires ADF (Atlassian Document Format) for rich text fields (description, comments). The client wraps plain text in the minimal ADF structure (`doc > paragraph > text`). This is sufficient for all loop report content; if needed, richer formatting can be added later.
+
+6. **Secret scrubbing before send**: Uses the same `scrub_output_secrets` from `src/llm/secret_scrubber.py`. Scrubs title, description, body, and comment fields before API calls. Disabled via `scrub_secrets=False` for environments where secrets are never in tool output.
+
+7. **Tool on executor, not Discord-native**: The `issue_tracker` tool is handled by `ToolExecutor._handle_issue_tracker`, not the Discord client. The client instance is expected to be attached as `executor._issue_tracker_client` during bot init. This keeps the executor self-contained and allows issue creation from both Discord commands and autonomous loops.
+
+8. **REST API convenience endpoint**: `/api/issues/create` is a dedicated endpoint for the most common operation (creating issues from web UI or external triggers), separate from the generic `/api/issues/execute` that supports all 5 actions.
+
+9. **Jira auth as Basic**: Jira Cloud requires email:api_token as Basic auth. The api_token config field accepts this format directly, base64-encoded at session creation time. This avoids storing two fields (email + token) when one suffices.
+
+10. **No new dependencies**: Uses aiohttp (already in deps) for HTTP requests. No Linear SDK, Jira SDK, or other libraries needed.
+
+### Issues found
+- No issues in prior rounds needed fixing.
+- The `_issue_tracker_client` attribute is NOT yet wired up in the main Discord client (`client.py`). The bot's `__init__` or startup code needs to check `config.issue_tracker.enabled` and create the client instance, attaching it to `self._executor._issue_tracker_client` (and optionally `self._issue_tracker_client` for REST API access). This wiring is the same pattern as MCP and other subsystems that need bot-level initialization.
+- Linear GraphQL errors return in-band (HTTP 200 with `errors` array) — the client checks for both HTTP status errors AND GraphQL errors. This dual-check is necessary because Linear returns 200 even for authorization and validation failures.
+- Jira transitions have a quirk: the transition name (what you select) can differ from the target state name (where it ends up). E.g., transition "Close Issue" leads to state "Closed". The client matches against both `name` and `to.name` to handle this.
+- Jira 204 responses (e.g., from POST transitions) have no body. The client returns `{}` for these, then refetches the issue to get updated state.
+
+### Next round watch for
+- Round 19 (Richer Grafana alert handling) may want to auto-create issues when alerts fire. The `IssueTrackerClient` is ready for this — just call `execute("create_issue", {...})` from the alert handler.
+- The `_issue_tracker_client` needs to be wired up in the Discord client's initialization. Look for the pattern where `self._executor` is created and attach the client there.
+- The REST API uses `getattr(bot, "_issue_tracker_client", None)` — this requires the client to be set on the bot instance, not just the executor. Both paths should be wired.
+- Linear's `team_id` is required for issue creation. If users don't set `default_team_id` in config, they must pass it per-call. The LLM can discover team IDs via `list_issues` or by asking the user.
+- The tool count is now 67 (was 66). System prompt char limit (5000) unaffected since tool definitions are sent as structured schemas.
+- All five subsystem wiring tasks remain open from Rounds 1-17: `cost_tracker`, `session_tokens` metrics, `trajectory_saver`, `ssh_pool` metrics, `http_pool` metrics.

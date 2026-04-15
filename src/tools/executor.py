@@ -1065,6 +1065,27 @@ class ToolExecutor:
             return f"terraform {action} failed (exit {code}):\n{_truncate_lines(output)}"
         return _truncate_lines(output) if output.strip() else f"terraform {action} completed successfully."
 
+    async def _handle_issue_tracker(self, inp: dict) -> str:
+        action = inp.get("action", "")
+        if not action:
+            return "Error: 'action' is required"
+
+        if not hasattr(self, "_issue_tracker_client") or self._issue_tracker_client is None:
+            return "Error: issue tracker not configured (set issue_tracker.enabled=true in config)"
+
+        try:
+            from ..notifications.issue_tracker import validate_action, IssueTrackerError
+            validate_action(action)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        try:
+            result = await self._issue_tracker_client.execute(action, dict(inp))
+            import json
+            return json.dumps(result, indent=2)
+        except IssueTrackerError as e:
+            return f"issue_tracker error: {e}"
+
     async def _handle_http_probe(self, inp: dict) -> str:
         from .http_probe_ops import build_http_probe_command
 
