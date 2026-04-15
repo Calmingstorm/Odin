@@ -9,6 +9,7 @@ from typing import Literal
 import aiofiles
 
 from ..odin_log import get_logger
+from .signer import AuditSigner, verify_log
 
 log = get_logger("audit")
 
@@ -16,10 +17,11 @@ log = get_logger("audit")
 class AuditLogger:
     """Append-only JSON Lines audit log for tool executions."""
 
-    def __init__(self, path: str = "./data/audit.jsonl") -> None:
+    def __init__(self, path: str = "./data/audit.jsonl", *, hmac_key: str = "") -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._event_callback: Callable | None = None
+        self._signer: AuditSigner | None = AuditSigner(hmac_key) if hmac_key else None
 
     def set_event_callback(self, callback: Callable) -> None:
         """Set a callback to be invoked with each audit entry (for live WS events)."""
@@ -53,6 +55,8 @@ class AuditLogger:
         }
         if diff:
             entry["diff"] = diff
+        if self._signer:
+            self._signer.sign(entry)
         line = json.dumps(entry, default=str) + "\n"
         try:
             async with aiofiles.open(self.path, "a") as f:
@@ -60,12 +64,11 @@ class AuditLogger:
         except Exception as e:
             log.error("Failed to write audit log: %s", e)
 
-        # Notify WebSocket subscribers (fire-and-forget, don't block audit)
         if self._event_callback:
             try:
                 await self._event_callback(entry)
             except Exception:
-                pass  # Never let callback errors affect audit logging
+                pass
 
     async def log_web_action(
         self,
@@ -89,6 +92,8 @@ class AuditLogger:
         }
         if diff:
             entry["diff"] = diff
+        if self._signer:
+            self._signer.sign(entry)
         line = json.dumps(entry, default=str) + "\n"
         try:
             async with aiofiles.open(self.path, "a") as f:
@@ -328,3 +333,42 @@ class AuditLogger:
                 break
 
         return results
+
+    async def initialize_chain(self) -> None:
+        """Read the last signed entry to resume the HMAC chain state."""
+        if not self._signer or not self.path.exists():
+            return
+        try:
+            async with aiofiles.open(self.path, "r") as f:
+                lines = await f.readlines()
+        except Exception as exc:
+            log.error("Failed to read audit log for chain init: %s", exc)
+            return
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            prev = entry.get("_hmac")
+            if prev:
+                self._signer.prev_hmac = prev
+            return
+
+    async def verify_integrity(self) -> dict:
+        """Verify the HMAC chain of the audit log.
+
+        Returns a dict with ``valid``, ``total``, ``verified``, ``first_bad``,
+        and ``error`` fields.  Requires signing to be enabled.
+        """
+        if not self._signer:
+            return {
+                "valid": False,
+                "total": 0,
+                "verified": 0,
+                "first_bad": None,
+                "error": "Signing not enabled (no hmac_key configured)",
+            }
+        return await verify_log(self.path, self._signer._key.decode())

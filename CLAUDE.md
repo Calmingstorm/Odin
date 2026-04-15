@@ -49,6 +49,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/discord/cogs/message_triggers.py` — Discord message-triggered scheduler workflows (content matching: contains, regex, starts_with, equals, author_id, channel_id)
   - `src/audit/logger.py` — append-only JSONL audit log
   - `src/audit/diff_tracker.py` — before/after diff capture for file and config changes
+  - `src/audit/signer.py` — HMAC-SHA256 chain signing for audit log tamper detection
   - `src/tools/process_manager.py` — background process registry (start/poll/write/kill)
   - `src/tools/comfyui.py` — ComfyUI image generation client
   - `src/tools/autonomous_loop.py` — autonomous loop system (LLM-driven recurring tasks)

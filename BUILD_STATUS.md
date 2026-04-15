@@ -140,7 +140,7 @@ tightening of prior work.
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
 | 26 | Action diffs: for file / config changes, audit log records before→after diff | done | DiffTracker module, compute_unified_diff/compute_dict_diff, AuditLogger diff field, background task integration, config update diff via web API, /api/audit/diffs endpoint, +82 tests |
-| 27 | Audit log signing: append-only with HMAC chain for tamper detection | pending | |
+| 27 | Audit log signing: append-only with HMAC chain for tamper detection | done | AuditSigner HMAC-SHA256 chain, verify_log, AuditLogger signing integration, initialize_chain, verify_integrity, AuditConfig, /api/audit/verify endpoint, +86 tests |
 | 28 | Dangerous-command risk classifier: tag commands by risk before execution (observability only, NO blocking) | pending | |
 | 29 | Tool RBAC: honor `PermissionsConfig.tiers` on tool calls (not auth only) | pending | |
 | 30 | REVIEWER: validate rounds 21–29, tighten tests, fix bugs found | pending | |
@@ -3240,4 +3240,140 @@ New endpoint `GET /api/audit/diffs`:
 - The `DiffTracker.capture_before()` method calls `executor._run_on_host()` which is a private method. If the executor API changes, this will need updating.
 - The config diff in the web API uses `_redact_config()` for both before and after states, so sensitive fields appear as `"***"` in both sides of the diff (not leaked).
 - The `request["_config_diff"]` mechanism relies on the audit middleware running after the handler. This is guaranteed by aiohttp's middleware ordering.
+- All five subsystem wiring tasks remain open from prior rounds.
+
+## Round 27 — Audit log signing: append-only HMAC chain for tamper detection
+**Focus**: Add HMAC-SHA256 chain signing to the audit log for tamper detection. Each audit entry gets a cryptographic signature computed over its content and the previous entry's signature, creating an append-only chain. Any modification, deletion, or reordering of entries is detectable.
+**Baseline pytest**: 2687 passed, 0 failed
+**Post-round pytest**: 2773 passed, 0 failed (+86 new tests)
+
+### Validated from prior rounds
+- Round 26 (Action diffs): all 82 tests pass, DiffTracker and REST endpoint work correctly.
+- Round 26 noted "Round 27 (Audit log signing) builds directly on this round's audit logger changes. The `diff` field is part of the audit entry and should be included in any HMAC chain computation." — confirmed: the `diff` field is part of the entry dict when `sign()` is called, so it is included in the HMAC computation automatically. No special handling needed.
+- Round 26 noted no bugs or watch-for items that needed fixing.
+
+### Work done
+
+#### 1. AuditSigner module: `src/audit/signer.py` (new, ~100 lines)
+
+New module with HMAC chain signer and verification utilities:
+
+- **`GENESIS_HASH`** (line 11): `"0" * 64` — the initial "previous HMAC" for the first entry in a chain. 64 hex zeros (SHA-256 digest length).
+
+- **`_canonical(entry)`** (lines 56-59): Produces deterministic JSON for HMAC computation. Sorted keys, no whitespace, `_hmac` field excluded (since it's the output). Uses `default=str` for non-serializable types (e.g. datetime).
+
+- **`AuditSigner`** class (lines 14-52):
+  - `__init__(key)`: Stores the HMAC key as bytes. Initializes `_prev_hmac` to `GENESIS_HASH`.
+  - `prev_hmac` property: Get/set the chain state (previous entry's HMAC).
+  - `sign(entry)`: Mutates the entry in-place, adding `_prev_hmac` (the chain link) and `_hmac` (the signature). The HMAC is computed over the canonical JSON of the entry (including `_prev_hmac` but excluding `_hmac`). Updates internal state so the next call chains correctly.
+  - `verify_entry(entry, expected_prev)`: Verifies a single entry's HMAC against the expected previous HMAC. Checks `_prev_hmac` matches `expected_prev`, then recomputes the HMAC and uses `hmac.compare_digest` for timing-safe comparison.
+  - `_compute(data)`: HMAC-SHA256 of the data string using the stored key. Returns hex digest.
+
+- **`verify_log(path, key)`** (lines 62-106): Async function that reads an entire audit log file and verifies every entry's HMAC chain from top to bottom. Returns a dict with:
+  - `valid` (bool): True if the entire chain is intact
+  - `total` (int): Total entries examined
+  - `verified` (int): Entries that passed verification
+  - `first_bad` (int or None): 1-indexed line number of the first bad entry
+  - `error` (str or None): Human-readable error description
+
+  Handles edge cases: nonexistent files (valid, 0 entries), blank lines (skipped), invalid JSON (reported with line number), unsigned entries (reported), and HMAC mismatches (reported as "tampered or reordered").
+
+#### 2. AuditLogger updated: `src/audit/logger.py` (lines 12, 20-22, 55-56, 90-91, 338-380)
+
+- **Constructor**: New `hmac_key: str = ""` keyword argument. When non-empty, creates an `AuditSigner` instance. When empty (default), signing is disabled — fully backward compatible.
+
+- **`log_execution()`** (line 55-56): When `_signer` is set, calls `self._signer.sign(entry)` before serializing to JSON. The sign call adds `_prev_hmac` and `_hmac` fields to the entry dict.
+
+- **`log_web_action()`** (line 90-91): Same signing treatment as `log_execution`.
+
+- **`initialize_chain()`** (new method, lines 338-358): Reads the last entry from the log file to resume the HMAC chain state. Essential for appending to an existing signed log after restart. Scans backwards from the end of the file, finds the last entry with an `_hmac` field, and sets the signer's `prev_hmac` to that value. Handles gracefully: no signer → no-op, no file → no-op, empty file → no-op, no `_hmac` in last entry → stays at genesis, corrupt JSON → stays at genesis.
+
+- **`verify_integrity()`** (new method, lines 360-380): Delegates to `verify_log()` with the signer's key. Returns an error dict when signing is not enabled.
+
+#### 3. AuditConfig: `src/config/schema.py` (lines 163-164, 304)
+
+- New `AuditConfig` Pydantic model with a single field: `hmac_key: str = ""`. Empty string means signing is disabled.
+- Added `audit: AuditConfig = AuditConfig()` to the `Config` model. Fully optional — existing config files work without changes.
+
+#### 4. REST API endpoint: `src/web/api.py` (lines 1851-1854)
+
+New endpoint `GET /api/audit/verify`:
+- Calls `bot.audit.verify_integrity()`.
+- Returns 200 when the chain is valid, 409 (Conflict) when tampering is detected or signing is not enabled.
+- Response body matches the `verify_log` return format: `valid`, `total`, `verified`, `first_bad`, `error`.
+
+#### 5. Exports: `src/audit/__init__.py`
+
+Added `AuditSigner` and `verify_log` to `__all__` and imports.
+
+#### 6. Tests: `tests/test_audit_signing.py` — 86 tests across 12 test classes
+
+**_canonical helper** (7):
+- `TestCanonical` (7): sorted keys, excludes _hmac, no whitespace, preserves _prev_hmac, empty dict, nested dict, datetime default.
+
+**GENESIS_HASH** (2):
+- `TestGenesisHash` (2): is 64 zeros, is string.
+
+**AuditSigner** (12):
+- `TestAuditSigner` (12): init key, init prev_hmac, sign adds fields, first entry prev is genesis, chains hmac, deterministic, different keys different hmacs, updates prev_hmac, prev_hmac setter, hmac is sha256 hex, three-entry chain.
+
+**verify_entry** (10):
+- `TestVerifyEntry` (10): valid entry, tampered data, tampered hmac, wrong prev, missing hmac field, missing prev_hmac field, wrong key fails, chain verification, extra fields, entry with diff.
+
+**verify_log** (11):
+- `TestVerifyLog` (11): empty file, nonexistent file, valid chain, tampered entry, deleted entry, reordered entries, invalid JSON, missing hmac field, wrong key, blank lines skipped, single entry.
+
+**AuditLogger signing** (9):
+- `TestAuditLoggerSigning` (9): no signing by default, enabled with key, empty key disables, log_execution adds hmac, without signing no hmac, log_web_action adds hmac, chain across mixed entries, signed log verifiable, diff field included in hmac, error field included in hmac.
+
+**initialize_chain** (6):
+- `TestInitializeChain` (6): resumes from last entry, no-op when no signer, no-op when file missing, empty file, unsigned entries, corrupt JSON.
+
+**verify_integrity** (4):
+- `TestVerifyIntegrity` (4): valid log, tampered log, no signing returns error, empty log.
+
+**AuditConfig** (4):
+- `TestAuditConfig` (4): default empty key, custom key, config has audit field, config with audit key.
+
+**REST API /api/audit/verify** (4):
+- `TestAuditVerifyAPI` (4): valid log 200, tampered log 409, no signing 409, empty signed log 200.
+
+**Module imports** (5):
+- `TestModuleImports` (5): signer, verify_log, genesis_hash, canonical, audit __init__ exports.
+
+**Edge cases** (12):
+- `TestEdgeCases` (12): unicode, empty strings, large entry, nested complex, null values, booleans, callback fires with signing, search returns signed entries, count_by_tool works, search_diffs works, log_stats work, long chain (50 entries).
+
+### Design decisions
+
+1. **Backward compatible**: `hmac_key=""` disables signing. Existing code calling `AuditLogger()` or `AuditLogger(path=...)` continues to work identically. No signing fields are added unless explicitly enabled.
+
+2. **HMAC-SHA256 chain**: Each entry's HMAC covers the entry's content plus the previous entry's HMAC (`_prev_hmac` field). This creates a hash chain similar to a blockchain — modifying, deleting, or reordering any entry breaks the chain. The first entry chains from `GENESIS_HASH` (64 zeros).
+
+3. **Deterministic canonical form**: The `_canonical()` function produces sorted-key, no-whitespace JSON with the `_hmac` field excluded. This ensures the same entry always produces the same HMAC regardless of dict iteration order or JSON formatting.
+
+4. **Sign before serialize**: Signing happens before `json.dumps`, so the HMAC fields are part of the serialized JSON line. This means existing read methods (`search`, `count_by_tool`, `search_diffs`, `search_logs`, `get_log_stats`) transparently see the `_hmac` and `_prev_hmac` fields in returned entries.
+
+5. **Timing-safe comparison**: Uses `hmac.compare_digest` for HMAC verification to prevent timing attacks.
+
+6. **`initialize_chain()` for restart**: When appending to an existing signed log after a bot restart, `initialize_chain()` reads the last entry to resume the chain state. Without this, the next entry would chain from `GENESIS_HASH` instead of the last entry's HMAC, breaking the chain.
+
+7. **HTTP 409 for integrity failures**: The `/api/audit/verify` endpoint returns 409 Conflict when the chain is broken, and 200 OK when valid. 409 is semantically correct — the resource state is inconsistent.
+
+8. **No new dependencies**: Uses stdlib `hmac`, `hashlib`, and `json`. No external packages.
+
+### Files changed
+- `src/audit/signer.py` (new, ~100 lines): AuditSigner class, _canonical, verify_log, GENESIS_HASH.
+- `src/audit/logger.py` (lines 12, 20-22, 55-56, 90-91, 338-380): hmac_key constructor param, signing in log_execution/log_web_action, initialize_chain, verify_integrity.
+- `src/audit/__init__.py` (lines 1-4): Export AuditSigner and verify_log.
+- `src/config/schema.py` (lines 163-164, 304): AuditConfig model, audit field on Config.
+- `src/web/api.py` (lines 1851-1854): GET /api/audit/verify endpoint.
+- `tests/test_audit_signing.py` (new, 86 tests): Complete test coverage across 12 test classes.
+
+### Next round watch for
+- Round 28 (Dangerous-command risk classifier) has no dependencies on Round 27.
+- REST API endpoint count is now 102 (was 101 after Round 26, +1 new: `GET /api/audit/verify`).
+- The `AuditConfig.hmac_key` field is currently only defined in config schema. Whoever wires up the bot's `AuditLogger` instance should pass `config.audit.hmac_key` and call `await logger.initialize_chain()` after construction if appending to an existing log.
+- The `_hmac` and `_prev_hmac` fields are visible in all audit search results when signing is enabled. Frontend consumers should be aware these fields may or may not be present depending on configuration.
+- The `verify_log` function reads the entire log file into memory. For very large audit logs (millions of entries), a streaming approach may be needed. For typical usage (thousands of entries) this is fine.
 - All five subsystem wiring tasks remain open from prior rounds.

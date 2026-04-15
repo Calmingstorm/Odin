@@ -157,6 +157,10 @@ class PermissionsConfig(BaseModel):
     overrides_path: str = "./data/permissions.json"
 
 
+class AuditConfig(BaseModel):
+    hmac_key: str = ""  # Empty = signing disabled
+
+
 class WebConfig(BaseModel):
     enabled: bool = True
     api_token: str = ""  # Empty = no auth required (dev mode)
@@ -297,6 +301,7 @@ class Config(BaseModel):
     mcp: MCPConfig = MCPConfig()
     slack: SlackConfig = SlackConfig()
     issue_tracker: IssueTrackerConfig = IssueTrackerConfig()
+    audit: AuditConfig = AuditConfig()
     grafana_alerts: GrafanaAlertConfig = GrafanaAlertConfig()
 
 

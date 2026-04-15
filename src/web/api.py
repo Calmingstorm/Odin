@@ -1848,6 +1848,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         )
         return web.json_response({"entries": results, "count": len(results)})
 
+    @routes.get("/api/audit/verify")
+    async def verify_audit_integrity(request: web.Request) -> web.Response:
+        result = await bot.audit.verify_integrity()
+        status = 200 if result["valid"] else 409
+        return web.json_response(result, status=status)
+
     # ------------------------------------------------------------------
     # Log search (server-side filtered log queries)
     # ------------------------------------------------------------------
