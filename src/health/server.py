@@ -327,6 +327,7 @@ class HealthServer:
             self._app.router.add_post("/webhook/grafana", self._webhook_grafana)
             self._app.router.add_post("/webhook/generic", self._webhook_generic)
             self._app.router.add_post("/webhook/github", self._webhook_github)
+            self._app.router.add_post("/webhook/gitlab", self._webhook_gitlab)
             log.info("Webhook endpoints enabled")
         # Serve static UI files if the directory exists
         if self._web_config.enabled:
@@ -424,6 +425,8 @@ class HealthServer:
             return self._webhook_config.grafana_channel_id
         if source == "github" and self._webhook_config.github_channel_id:
             return self._webhook_config.github_channel_id
+        if source == "gitlab" and self._webhook_config.gitlab_channel_id:
+            return self._webhook_config.gitlab_channel_id
         return self._webhook_config.channel_id or None
 
     async def _notify_triggers(self, source: str, event_data: dict) -> None:
@@ -637,3 +640,62 @@ class HealthServer:
 
         await self._notify_triggers("github", {"event": event, "repo": repo})
         return await self._send("github", text)
+
+    async def _webhook_gitlab(self, request: web.Request) -> web.Response:
+        body = await request.read()
+
+        # GitLab uses X-Gitlab-Token (shared secret, not HMAC)
+        token = request.headers.get("X-Gitlab-Token", "")
+        secret = self._webhook_config.secret
+        if not secret:
+            log.warning("Webhook rejected: no secret configured for GitLab verification")
+            return web.json_response({"error": "invalid token"}, status=403)
+        if not hmac.compare_digest(token, secret):
+            return web.json_response({"error": "invalid token"}, status=403)
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        event = data.get("object_kind", request.headers.get("X-Gitlab-Event", "unknown"))
+        project = data.get("project", {})
+        repo = project.get("path_with_namespace", "unknown")
+
+        if event == "push":
+            user = data.get("user_name", "unknown")
+            commits = data.get("commits", [])
+            ref = data.get("ref", "").replace("refs/heads/", "")
+            commit_lines = []
+            for c in commits[:5]:
+                msg = c.get("message", "").split("\n")[0][:80]
+                commit_lines.append(f"  \u2022 `{c.get('id', '')[:7]}` {msg}")
+            commits_text = "\n".join(commit_lines)
+            text = f"**GitLab Push** \u2014 `{repo}` (`{ref}`)\nBy: {user} | {len(commits)} commit(s)\n{commits_text}"
+
+        elif event == "merge_request":
+            attrs = data.get("object_attributes", {})
+            action = attrs.get("action", attrs.get("state", ""))
+            title = attrs.get("title", "")
+            user = data.get("user", {}).get("name", "unknown")
+            iid = attrs.get("iid", "")
+            text = f"**GitLab MR !{iid}** \u2014 `{repo}`\n{action}: **{title}** by {user}"
+
+        elif event == "tag_push":
+            user = data.get("user_name", "unknown")
+            ref = data.get("ref", "").replace("refs/tags/", "")
+            text = f"**GitLab Tag** \u2014 `{repo}`\nTag `{ref}` pushed by {user}"
+
+        elif event == "pipeline":
+            attrs = data.get("object_attributes", {})
+            status = attrs.get("status", "unknown")
+            ref = attrs.get("ref", "")
+            pipeline_id = attrs.get("id", "")
+            user = data.get("user", {}).get("name", "unknown")
+            text = f"**GitLab Pipeline #{pipeline_id}** \u2014 `{repo}`\nStatus: **{status}** on `{ref}` by {user}"
+
+        else:
+            text = f"**GitLab** \u2014 `{repo}` \u2014 event: `{event}`"
+
+        await self._notify_triggers("gitlab", {"event": event, "repo": repo})
+        return await self._send("gitlab", text)

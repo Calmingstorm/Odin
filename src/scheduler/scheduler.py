@@ -133,7 +133,7 @@ class Scheduler:
         unknown = set(trigger.keys()) - valid_keys
         if unknown:
             raise ValueError(f"Unknown trigger keys: {', '.join(sorted(unknown))}")
-        valid_sources = {"gitea", "grafana", "generic", "github"}
+        valid_sources = {"gitea", "grafana", "generic", "github", "gitlab"}
         source = trigger.get("source")
         if source and source not in valid_sources:
             raise ValueError(
