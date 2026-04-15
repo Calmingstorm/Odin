@@ -10,6 +10,7 @@ from pathlib import Path
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import aiohttp
 from croniter import croniter
 
 from ..odin_log import get_logger
@@ -27,6 +28,14 @@ DEFAULT_MAX_RETRIES = 0  # disabled by default
 DEFAULT_RETRY_BACKOFF_SECONDS = 60
 MAX_BACKOFF_SECONDS = 3600  # cap at 1 hour
 DEFAULT_FAILURE_ALERT_THRESHOLD = 3  # alert after N consecutive failures
+
+# Webhook action defaults
+WEBHOOK_VALID_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}
+WEBHOOK_DEFAULT_METHOD = "POST"
+WEBHOOK_DEFAULT_TIMEOUT = 30  # seconds
+WEBHOOK_MAX_TIMEOUT = 300  # 5 minutes
+WEBHOOK_MAX_URL_LEN = 2048
+WEBHOOK_MAX_BODY_LEN = 1_000_000  # 1 MB
 
 
 class Scheduler:
@@ -71,6 +80,7 @@ class Scheduler:
         trigger: dict | None = None,
         max_retries: int | None = None,
         retry_backoff_seconds: int | None = None,
+        webhook_config: dict | None = None,
     ) -> dict:
         if action == "digest":
             # Digest is a predefined action, no tool validation needed
@@ -83,6 +93,10 @@ class Scheduler:
                     f"Tool '{tool_name}' is not allowed for scheduled checks. "
                     f"Allowed: {', '.join(sorted(ALLOWED_CHECK_TOOLS))}"
                 )
+        elif action == "webhook":
+            if not isinstance(webhook_config, dict):
+                raise ValueError("'webhook_config' (dict) is required for 'webhook' actions")
+            self._validate_webhook_config(webhook_config)
         elif action == "workflow":
             if not steps or not isinstance(steps, list):
                 raise ValueError("'steps' (list) is required for 'workflow' actions")
@@ -130,6 +144,8 @@ class Scheduler:
         elif action == "check":
             schedule["tool_name"] = tool_name
             schedule["tool_input"] = tool_input or {}
+        elif action == "webhook":
+            schedule["webhook_config"] = self._normalize_webhook_config(webhook_config)
         elif action == "workflow":
             schedule["steps"] = steps
 
@@ -177,6 +193,110 @@ class Scheduler:
             )
         if not trigger:
             raise ValueError("Trigger must have at least one condition")
+
+    @staticmethod
+    def _validate_webhook_config(config: dict) -> None:
+        """Validate a webhook action configuration."""
+        if not isinstance(config, dict):
+            raise ValueError("'webhook_config' must be a dict")
+
+        url = config.get("url")
+        if not url or not isinstance(url, str):
+            raise ValueError("webhook_config.url is required and must be a string")
+        if len(url) > WEBHOOK_MAX_URL_LEN:
+            raise ValueError(f"webhook_config.url exceeds maximum length ({WEBHOOK_MAX_URL_LEN})")
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("webhook_config.url must start with http:// or https://")
+
+        method = config.get("method", WEBHOOK_DEFAULT_METHOD)
+        if method.upper() not in WEBHOOK_VALID_METHODS:
+            raise ValueError(
+                f"Invalid webhook method '{method}'. "
+                f"Valid: {', '.join(sorted(WEBHOOK_VALID_METHODS))}"
+            )
+
+        headers = config.get("headers")
+        if headers is not None:
+            if not isinstance(headers, dict):
+                raise ValueError("webhook_config.headers must be a dict")
+            for k, v in headers.items():
+                if not isinstance(k, str) or not isinstance(v, str):
+                    raise ValueError("webhook_config.headers keys and values must be strings")
+
+        body = config.get("body")
+        if body is not None and isinstance(body, str) and len(body) > WEBHOOK_MAX_BODY_LEN:
+            raise ValueError(
+                f"webhook_config.body exceeds maximum length ({WEBHOOK_MAX_BODY_LEN})"
+            )
+
+        timeout = config.get("timeout")
+        if timeout is not None:
+            if not isinstance(timeout, (int, float)) or timeout <= 0:
+                raise ValueError("webhook_config.timeout must be a positive number")
+            if timeout > WEBHOOK_MAX_TIMEOUT:
+                raise ValueError(
+                    f"webhook_config.timeout exceeds maximum ({WEBHOOK_MAX_TIMEOUT}s)"
+                )
+
+        expected_status = config.get("expected_status_codes")
+        if expected_status is not None:
+            if not isinstance(expected_status, list):
+                raise ValueError("webhook_config.expected_status_codes must be a list")
+            for code in expected_status:
+                if not isinstance(code, int) or not (100 <= code <= 599):
+                    raise ValueError(
+                        "webhook_config.expected_status_codes must contain valid HTTP status codes (100-599)"
+                    )
+
+    @staticmethod
+    def _normalize_webhook_config(config: dict) -> dict:
+        """Return a webhook config with defaults filled in."""
+        return {
+            "url": config["url"],
+            "method": config.get("method", WEBHOOK_DEFAULT_METHOD).upper(),
+            "headers": config.get("headers") or {},
+            "body": config.get("body"),
+            "timeout": config.get("timeout", WEBHOOK_DEFAULT_TIMEOUT),
+            "expected_status_codes": config.get("expected_status_codes"),
+        }
+
+    async def _execute_webhook(self, config: dict) -> dict:
+        """Execute an outbound HTTP request for a webhook action.
+
+        Returns a dict with status_code, response body (truncated), and headers.
+        Raises on timeout, connection error, or unexpected status code.
+        """
+        method = config.get("method", WEBHOOK_DEFAULT_METHOD)
+        url = config["url"]
+        headers = config.get("headers") or {}
+        body = config.get("body")
+        timeout_sec = config.get("timeout", WEBHOOK_DEFAULT_TIMEOUT)
+        expected_codes = config.get("expected_status_codes")
+
+        timeout = aiohttp.ClientTimeout(total=timeout_sec)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            kwargs: dict[str, Any] = {"headers": headers}
+            if body is not None:
+                if isinstance(body, (dict, list)):
+                    kwargs["json"] = body
+                else:
+                    kwargs["data"] = str(body)
+
+            async with session.request(method, url, **kwargs) as resp:
+                resp_body = await resp.text()
+                result = {
+                    "status_code": resp.status,
+                    "body": resp_body[:4096],
+                    "headers": dict(resp.headers),
+                }
+
+                if expected_codes and resp.status not in expected_codes:
+                    raise RuntimeError(
+                        f"Webhook returned status {resp.status}, "
+                        f"expected one of {expected_codes}"
+                    )
+
+                return result
 
     @staticmethod
     def _trigger_matches(trigger: dict, source: str, event_data: dict) -> bool:
@@ -299,6 +419,7 @@ class Scheduler:
         channel_id: str | None = None,
         max_retries: int | None = None,
         retry_backoff_seconds: int | None = None,
+        webhook_config: dict | None = None,
     ) -> dict | None:
         """Update mutable fields on an existing schedule.
 
@@ -344,6 +465,9 @@ class Scheduler:
                         if not isinstance(step, dict) or "tool_name" not in step:
                             raise ValueError(f"Step {i}: must be a dict with 'tool_name'")
                 target["steps"] = steps
+            if webhook_config is not None:
+                self._validate_webhook_config(webhook_config)
+                target["webhook_config"] = self._normalize_webhook_config(webhook_config)
 
             # --- retry configuration ---
             if max_retries is not None:
@@ -434,7 +558,14 @@ class Scheduler:
         return retry_time.isoformat()
 
     async def _execute_and_record(self, schedule: dict) -> None:
-        """Execute the schedule callback and record the result in history."""
+        """Execute the schedule callback and record the result in history.
+
+        For 'webhook' actions, the built-in HTTP executor is used directly.
+        All other actions are dispatched through the registered callback.
+        """
+        if schedule.get("action") == "webhook":
+            await self._execute_and_record_webhook(schedule)
+            return
         if not self._callback:
             return
         start = time.monotonic()
@@ -457,6 +588,40 @@ class Scheduler:
                 schedule_id=schedule["id"],
                 description=schedule.get("description", ""),
                 action=schedule.get("action", ""),
+                status="failure",
+                duration_ms=duration_ms,
+                error=str(e),
+                retry_attempt=retry_attempt if schedule.get("max_retries", 0) > 0 else 0,
+            )
+
+    async def _execute_and_record_webhook(self, schedule: dict) -> None:
+        """Execute a webhook action and record the result."""
+        config = schedule.get("webhook_config", {})
+        start = time.monotonic()
+        try:
+            result = await self._execute_webhook(config)
+            duration_ms = int((time.monotonic() - start) * 1000)
+            await self._handle_success(schedule)
+            await self.history.record(
+                schedule_id=schedule["id"],
+                description=schedule.get("description", ""),
+                action="webhook",
+                status="success",
+                duration_ms=duration_ms,
+            )
+            log.info(
+                "Webhook schedule %s executed: %s %s -> %d",
+                schedule["id"], config.get("method", "POST"),
+                config.get("url", ""), result.get("status_code", 0),
+            )
+        except Exception as e:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            retry_attempt = schedule.get("retry_count", 0) + 1
+            await self._handle_failure(schedule, e)
+            await self.history.record(
+                schedule_id=schedule["id"],
+                description=schedule.get("description", ""),
+                action="webhook",
                 status="failure",
                 duration_ms=duration_ms,
                 error=str(e),

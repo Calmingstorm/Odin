@@ -868,3 +868,136 @@ class TestSchedulerResetFailures:
             await s.update(sched["id"], max_retries=-1)
         with pytest.raises(ValueError, match="retry_backoff_seconds must be >= 1"):
             await s.update(sched["id"], retry_backoff_seconds=0)
+
+
+class TestSchedulerWebhookAction:
+    async def test_add_webhook_schedule(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        result = await s.add(
+            "ping endpoint",
+            "webhook",
+            "chan1",
+            cron="*/5 * * * *",
+            webhook_config={
+                "url": "https://example.com/hook",
+                "method": "post",
+                "headers": {"Authorization": "Bearer test"},
+                "body": '{"ok":true}',
+                "timeout": 10,
+                "expected_status_codes": [200, 202],
+            },
+        )
+        assert result["action"] == "webhook"
+        assert result["webhook_config"] == {
+            "url": "https://example.com/hook",
+            "method": "POST",
+            "headers": {"Authorization": "Bearer test"},
+            "body": '{"ok":true}',
+            "timeout": 10,
+            "expected_status_codes": [200, 202],
+        }
+
+    async def test_add_webhook_requires_config(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        with pytest.raises(ValueError, match="webhook_config"):
+            await s.add("bad webhook", "webhook", "chan1", cron="*/5 * * * *")
+
+    async def test_add_webhook_rejects_invalid_method(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        with pytest.raises(ValueError, match="Invalid webhook method"):
+            await s.add(
+                "bad webhook",
+                "webhook",
+                "chan1",
+                cron="*/5 * * * *",
+                webhook_config={"url": "https://example.com/hook", "method": "TRACE"},
+            )
+
+    async def test_add_webhook_rejects_invalid_expected_status_codes(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        with pytest.raises(ValueError, match="expected_status_codes"):
+            await s.add(
+                "bad webhook",
+                "webhook",
+                "chan1",
+                cron="*/5 * * * *",
+                webhook_config={
+                    "url": "https://example.com/hook",
+                    "expected_status_codes": [99],
+                },
+            )
+
+    async def test_execute_and_record_webhook_success(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._execute_webhook = AsyncMock(return_value={"status_code": 204})
+        schedule = await s.add(
+            "webhook success",
+            "webhook",
+            "chan1",
+            cron="*/5 * * * *",
+            webhook_config={"url": "https://example.com/hook"},
+        )
+
+        await s._execute_and_record(schedule)
+
+        s._execute_webhook.assert_awaited_once()
+        entries = await s.history.query(schedule["id"])
+        assert len(entries) == 1
+        assert entries[0]["action"] == "webhook"
+        assert entries[0]["status"] == "success"
+
+    async def test_execute_and_record_webhook_failure_tracks_error(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._execute_webhook = AsyncMock(side_effect=RuntimeError("bad status"))
+        schedule = await s.add(
+            "webhook failure",
+            "webhook",
+            "chan1",
+            cron="*/5 * * * *",
+            webhook_config={
+                "url": "https://example.com/hook",
+                "expected_status_codes": [200],
+            },
+            max_retries=1,
+        )
+
+        await s._execute_and_record(schedule)
+
+        state = s.list_all()[0]
+        assert state["consecutive_failures"] == 1
+        assert state["last_error"] == "bad status"
+        entries = await s.history.query(schedule["id"])
+        assert len(entries) == 1
+        assert entries[0]["action"] == "webhook"
+        assert entries[0]["status"] == "failure"
+        assert entries[0]["error"] == "bad status"
+
+    async def test_update_webhook_config(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        schedule = await s.add(
+            "webhook update",
+            "webhook",
+            "chan1",
+            cron="*/5 * * * *",
+            webhook_config={"url": "https://example.com/old"},
+        )
+
+        updated = await s.update(
+            schedule["id"],
+            webhook_config={
+                "url": "https://example.com/new",
+                "method": "patch",
+                "timeout": 5,
+                "expected_status_codes": [202],
+            },
+        )
+
+        assert updated is not None
+        assert updated["webhook_config"] == {
+            "url": "https://example.com/new",
+            "method": "PATCH",
+            "headers": {},
+            "body": None,
+            "timeout": 5,
+            "expected_status_codes": [202],
+        }
