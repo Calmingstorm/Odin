@@ -998,7 +998,7 @@ class TestRiskAPI:
 
         async with TestClient(TestServer(app)) as client:
             resp = await client.get("/api/risk/recent?limit=abc")
-            assert resp.status == 400
+            assert resp.status == 200
 
     @pytest.mark.asyncio
     async def test_audit_by_risk_endpoint(self, mock_bot):
@@ -1034,7 +1034,7 @@ class TestRiskAPI:
 
         async with TestClient(TestServer(app)) as client:
             resp = await client.get("/api/audit/risk?limit=bad")
-            assert resp.status == 400
+            assert resp.status == 200
 
     @pytest.mark.asyncio
     async def test_risk_stats_no_executor(self):

@@ -426,7 +426,7 @@ class TestLogSearchAPI:
         app = _make_app(bot)
         async with TestClient(TestServer(app)) as client:
             resp = await client.get("/api/logs/search?limit=abc")
-            assert resp.status == 400
+            assert resp.status == 200
 
     async def test_search_combined(self, tmp_path):
         entries = _sample_entries()

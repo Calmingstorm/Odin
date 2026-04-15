@@ -71,6 +71,17 @@ def _sanitize_error(msg: str) -> str:
     return scrub_output_secrets(str(msg))
 
 
+def _safe_int_param(request: web.Request, name: str, default: int, lo: int = 1, hi: int = 500) -> int:
+    """Parse an integer query parameter, clamping to [lo, hi]. Falls back to *default*."""
+    raw = request.query.get(name)
+    if raw is None:
+        return min(max(default, lo), hi)
+    try:
+        return min(max(int(raw), lo), hi)
+    except (ValueError, TypeError):
+        return min(max(default, lo), hi)
+
+
 def _contains_blocked_fields(d: dict, blocked: frozenset[str], *, _depth: int = 0) -> bool:
     """Recursively check if any keys in *d* are in *blocked*."""
     if _depth > 10:
@@ -620,7 +631,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         query = request.query.get("q", "").strip()
         if not query:
             return web.json_response({"error": "q parameter required"}, status=400)
-        limit = min(int(request.query.get("limit", "20")), 50)
+        limit = _safe_int_param(request, "limit", 20, hi=50)
         channel_id = request.query.get("channel_id") or None
         user_id = request.query.get("user_id") or None
         after: float | None = None
@@ -784,7 +795,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         filename = request.match_info["filename"]
         if not filename.endswith(".jsonl") or "/" in filename or "\\" in filename:
             return web.json_response({"error": "invalid filename"}, status=400)
-        limit = min(int(request.query.get("limit", "100")), 500)
+        limit = _safe_int_param(request, "limit", 100, hi=500)
         entries = await saver.read_file(filename, limit=limit)
         return web.json_response({"entries": entries, "count": len(entries)})
 
@@ -808,7 +819,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         user_id = request.query.get("user_id")
         tool_name = request.query.get("tool_name")
         errors_only = request.query.get("errors_only", "").lower() in ("1", "true")
-        limit = min(int(request.query.get("limit", "50")), 500)
+        limit = _safe_int_param(request, "limit", 50, hi=500)
         results = await saver.search(
             channel_id=channel_id,
             user_id=user_id,
@@ -1165,7 +1176,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         handler = getattr(hs, "grafana_handler", None) if hs else None
         if handler is None:
             return web.json_response({"error": "Grafana alert handler not available"}, status=503)
-        limit = min(int(request.query.get("limit", "50")), 200)
+        limit = _safe_int_param(request, "limit", 50, hi=200)
         history = handler.alert_history[-limit:]
         return web.json_response({"alerts": history, "total": len(handler.alert_history)})
 
@@ -1293,7 +1304,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not query:
             return web.json_response({"error": "q parameter required"}, status=400)
         try:
-            limit = min(int(request.query.get("limit", "10")), 50)
+            limit = _safe_int_param(request, "limit", 10, hi=50)
         except ValueError:
             return web.json_response({"error": "limit must be an integer"}, status=400)
         results = await store.search_hybrid(query, embedder=bot._embedder, limit=limit)
@@ -1332,7 +1343,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         store = bot._knowledge_store
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
-        data = await request.json()
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
         keep = data.get("keep_source", "").strip()
         remove = data.get("remove_source", "").strip()
         if not keep or not remove:
@@ -1412,7 +1426,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         store = bot._knowledge_store
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
-        data = await request.json()
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
         items = data.get("items")
         if not items or not isinstance(items, list):
             return web.json_response({"error": "items (array) is required"}, status=400)
@@ -1541,7 +1558,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.get("/api/schedules/history")
     async def schedule_history_all(request: web.Request) -> web.Response:
         """Global schedule execution history (most recent first)."""
-        limit = min(int(request.query.get("limit", "50")), 200)
+        limit = _safe_int_param(request, "limit", 50, hi=200)
         status_filter = request.query.get("status")
         entries = await bot.scheduler.history.query(
             status=status_filter, limit=limit,
@@ -1552,7 +1569,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     async def schedule_history(request: web.Request) -> web.Response:
         """Execution history for a specific schedule."""
         sid = request.match_info["schedule_id"]
-        limit = min(int(request.query.get("limit", "50")), 200)
+        limit = _safe_int_param(request, "limit", 50, hi=200)
         status_filter = request.query.get("status")
         entries = await bot.scheduler.history.query(
             sid, status=status_filter, limit=limit,
@@ -1819,7 +1836,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         date = request.query.get("date") or None
         error_only = request.query.get("error_only", "").lower() in ("1", "true", "yes")
         try:
-            limit = min(int(request.query.get("limit", "50")), 200)
+            limit = _safe_int_param(request, "limit", 50, hi=200)
         except ValueError:
             return web.json_response({"error": "limit must be an integer"}, status=400)
         results = await bot.audit.search(
@@ -1840,7 +1857,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         user = request.query.get("user") or None
         date = request.query.get("date") or None
         try:
-            limit = min(int(request.query.get("limit", "20")), 100)
+            limit = _safe_int_param(request, "limit", 20, hi=100)
         except ValueError:
             return web.json_response({"error": "limit must be an integer"}, status=400)
         results = await bot.audit.search_diffs(
@@ -1870,7 +1887,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         keyword = request.query.get("q") or None
         tool_name = request.query.get("tool") or None
         try:
-            limit = min(max(1, int(request.query.get("limit", "100"))), 500)
+            limit = _safe_int_param(request, "limit", 100, hi=500)
         except ValueError:
             return web.json_response(
                 {"error": "limit must be an integer"}, status=400
@@ -1992,7 +2009,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not executor:
             return web.json_response({"error": "executor not available"}, status=503)
         try:
-            limit = min(max(1, int(request.query.get("limit", "20"))), 100)
+            limit = _safe_int_param(request, "limit", 20, hi=100)
         except ValueError:
             return web.json_response({"error": "limit must be an integer"}, status=400)
         return web.json_response({"entries": executor.risk_stats.get_recent(limit)})
@@ -2002,7 +2019,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         risk_level = request.query.get("level") or None
         tool_name = request.query.get("tool") or None
         try:
-            limit = min(max(1, int(request.query.get("limit", "20"))), 100)
+            limit = _safe_int_param(request, "limit", 20, hi=100)
         except ValueError:
             return web.json_response({"error": "limit must be an integer"}, status=400)
         results = await bot.audit.search_by_risk(

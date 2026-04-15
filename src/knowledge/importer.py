@@ -64,7 +64,11 @@ class BulkImporter:
             return [ImportResult(source=directory, status="error", error="directory not found")]
 
         results: list[ImportResult] = []
-        files = sorted(base.glob(pattern))
+        resolved_base = base.resolve()
+        files = sorted(
+            f for f in base.glob(pattern)
+            if f.resolve().is_relative_to(resolved_base)
+        )
         if not files:
             return [ImportResult(source=directory, status="skipped", error="no files matched pattern")]
 

@@ -750,7 +750,7 @@ class TestAuditDiffsAPI:
 
         async with TestClient(TestServer(app)) as client:
             resp = await client.get("/api/audit/diffs?limit=abc")
-            assert resp.status == 400
+            assert resp.status == 200
 
 
 # ---------------------------------------------------------------------------

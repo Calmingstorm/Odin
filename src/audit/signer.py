@@ -45,7 +45,7 @@ class AuditSigner:
         stored_prev = entry.get("_prev_hmac")
         if not stored_hmac or stored_prev is None:
             return False
-        if stored_prev != expected_prev:
+        if not hmac.compare_digest(stored_prev, expected_prev):
             return False
         check = dict(entry)
         del check["_hmac"]
