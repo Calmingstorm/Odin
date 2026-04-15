@@ -172,10 +172,10 @@ class TestAgentTrajectoryTurn:
         d = turn.to_dict()
         expected_keys = {
             "agent_id", "label", "goal", "channel_id", "requester_id",
-            "requester_name", "timestamp", "source", "system_prompt_length",
-            "iterations", "final_state", "result", "error", "tools_used",
-            "iteration_count", "total_duration_ms", "recovery_attempts",
-            "state_history",
+            "requester_name", "timestamp", "source", "depth", "parent_id",
+            "system_prompt_length", "iterations", "final_state", "result",
+            "error", "tools_used", "iteration_count", "total_duration_ms",
+            "recovery_attempts", "state_history",
         }
         assert set(d.keys()) == expected_keys
 

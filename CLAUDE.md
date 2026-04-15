@@ -196,8 +196,8 @@ No classifier. No approval prompts. No keyword routing. One path: Codex with too
 - **Recovery**: On transient LLM errors (timeout, connection), agents transition EXECUTING→RECOVERING→EXECUTING for one retry before FAILED.
 - **LoopAgentBridge** (`src/agents/loop_bridge.py`) integrates agents with autonomous loops — loops can spawn sub-agents for parallel work.
 - Limits: 5 concurrent agents per channel, 30 iterations per agent, 1-hour lifetime, max 3 agents per loop iteration.
-- Agents cannot spawn sub-agents (blocked tools enforce isolation).
-- Agent CRUD exposed via REST API (`/api/agents`). Agent list/results include `state` (typed) and `state_history`.
+- **Nested spawning**: Agents may spawn sub-agents up to `max_nesting_depth` (default 2). Agents at max depth have agent-management tools removed. Max 3 children per agent. Kill cascades to descendants.
+- Agent CRUD exposed via REST API (`/api/agents`). Agent list/results include `state` (typed), `state_history`, `depth`, `parent_id`, `children_ids`. Additional endpoints: `/api/agents/{id}/children`, `/api/agents/{id}/lineage`, `/api/agents/{id}/descendants`.
 
 ### Caching Strategy (Rounds 21-22)
 - **Tool definitions**: merged tools list cached per message, invalidated on skill CRUD and `/reload`.

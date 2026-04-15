@@ -1,7 +1,8 @@
 """Agent manager — spawn, track, and coordinate autonomous agents.
 
 Each agent runs as an independent asyncio task with its own LLM session,
-isolated message history, and full tool access. Agents cannot spawn sub-agents.
+isolated message history, and full tool access. Agents may spawn sub-agents
+up to a configurable nesting depth (default 2).
 """
 from __future__ import annotations
 
@@ -30,9 +31,11 @@ WAIT_POLL_INTERVAL = 2           # poll interval for wait_for_agents
 ITERATION_CB_TIMEOUT = 120       # 2 min timeout per LLM call
 TOOL_EXEC_TIMEOUT = 300          # 5 min timeout per tool execution
 MAX_RECOVERY_ATTEMPTS = 1        # retries before transitioning to FAILED
+MAX_NESTING_DEPTH = 2            # default max sub-agent depth (root=0)
+MAX_CHILDREN_PER_AGENT = 3       # max direct children one agent can spawn
 
-# Tools agents are NOT allowed to call (prevents nesting and cross-agent interference)
-AGENT_BLOCKED_TOOLS = frozenset({
+# Agent-management tools — allowed or blocked based on nesting depth
+AGENT_MANAGEMENT_TOOLS = frozenset({
     "spawn_agent",
     "send_to_agent",
     "list_agents",
@@ -41,10 +44,23 @@ AGENT_BLOCKED_TOOLS = frozenset({
     "wait_for_agents",
 })
 
+# Legacy alias for backward compatibility
+AGENT_BLOCKED_TOOLS = AGENT_MANAGEMENT_TOOLS
 
-def filter_agent_tools(tools: list[dict]) -> list[dict]:
-    """Remove agent-management tools from a tool list for agent isolation."""
-    return [t for t in tools if t.get("name") not in AGENT_BLOCKED_TOOLS]
+
+def filter_agent_tools(
+    tools: list[dict],
+    depth: int = 0,
+    max_depth: int = MAX_NESTING_DEPTH,
+) -> list[dict]:
+    """Filter agent-management tools based on nesting depth.
+
+    Agents below max_depth keep agent tools (can spawn children).
+    Agents at or above max_depth have agent tools removed.
+    """
+    if depth < max_depth:
+        return list(tools)
+    return [t for t in tools if t.get("name") not in AGENT_MANAGEMENT_TOOLS]
 
 
 # --- Agent State Machine ---
@@ -240,6 +256,9 @@ class AgentInfo:
     iteration_count: int = 0
     last_activity: float = field(default_factory=time.time)
     recovery_attempts: int = 0
+    depth: int = 0
+    parent_id: str | None = None
+    children_ids: list[str] = field(default_factory=list)
     _task: asyncio.Task | None = field(default=None, repr=False)
     _cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     _inbox: asyncio.Queue = field(default_factory=asyncio.Queue)
@@ -292,6 +311,8 @@ class AgentManager:
         system_prompt: str = "",
         tool_timeouts: dict[str, int] | None = None,
         trajectory_saver: AgentTrajectorySaver | None = None,
+        parent_id: str | None = None,
+        max_depth: int = MAX_NESTING_DEPTH,
     ) -> str:
         """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string."""
         # Check per-channel limit
@@ -305,6 +326,24 @@ class AgentManager:
         if not label or not goal:
             return "Error: Both 'label' and 'goal' are required."
 
+        # Compute depth from parent
+        depth = 0
+        if parent_id:
+            parent = self._agents.get(parent_id)
+            if not parent:
+                return f"Error: Parent agent '{parent_id}' not found."
+            depth = parent.depth + 1
+            if depth > max_depth:
+                return (
+                    f"Error: Maximum nesting depth ({max_depth}) exceeded. "
+                    f"Parent '{parent_id}' is at depth {parent.depth}."
+                )
+            if len(parent.children_ids) >= MAX_CHILDREN_PER_AGENT:
+                return (
+                    f"Error: Parent agent '{parent_id}' has reached the "
+                    f"maximum of {MAX_CHILDREN_PER_AGENT} children."
+                )
+
         agent_id = uuid.uuid4().hex[:8]
         agent = AgentInfo(
             id=agent_id,
@@ -313,7 +352,13 @@ class AgentManager:
             channel_id=channel_id,
             requester_id=requester_id,
             requester_name=requester_name,
+            depth=depth,
+            parent_id=parent_id,
         )
+
+        # Register as child of parent
+        if parent_id and parent_id in self._agents:
+            self._agents[parent_id].children_ids.append(agent_id)
 
         # Build agent system prompt
         agent_system = system_prompt
@@ -321,11 +366,25 @@ class AgentManager:
             agent_system += "\n\n"
         else:
             agent_system = ""
-        agent_system += (
-            f"AGENT CONTEXT: You are agent '{label}' working on a specific task. "
-            f"Focus ONLY on this task. Do NOT spawn sub-agents. "
-            f"When done, provide a clear summary of results."
-        )
+
+        can_nest = depth < max_depth
+        if can_nest:
+            remaining = max_depth - depth
+            agent_system += (
+                f"AGENT CONTEXT: You are agent '{label}' (depth {depth}). "
+                f"You may spawn up to {MAX_CHILDREN_PER_AGENT} sub-agents "
+                f"({remaining} nesting level{'s' if remaining != 1 else ''} remaining). "
+                f"When done, provide a clear summary of results."
+            )
+        else:
+            agent_system += (
+                f"AGENT CONTEXT: You are agent '{label}' (depth {depth}). "
+                f"You are at the maximum nesting depth — do NOT spawn sub-agents. "
+                f"When done, provide a clear summary of results."
+            )
+
+        # Filter tools based on depth
+        filtered_tools = filter_agent_tools(tools or [], depth=depth, max_depth=max_depth)
 
         # Seed messages with the goal
         agent.messages = [{"role": "user", "content": goal}]
@@ -335,7 +394,7 @@ class AgentManager:
             _run_agent(
                 agent=agent,
                 system_prompt=agent_system,
-                tools=tools or [],
+                tools=filtered_tools,
                 iteration_callback=iteration_callback,
                 tool_executor_callback=tool_executor_callback,
                 announce_callback=announce_callback,
@@ -349,8 +408,8 @@ class AgentManager:
         self._agents[agent_id] = agent
 
         log.info(
-            "Spawned agent %s (%s) for channel %s by %s: %s",
-            agent_id, label, channel_id, requester_name, goal[:100],
+            "Spawned agent %s (%s) depth=%d for channel %s by %s: %s",
+            agent_id, label, depth, channel_id, requester_name, goal[:100],
         )
         return agent_id
 
@@ -384,20 +443,40 @@ class AgentManager:
                 "runtime_seconds": round(runtime, 1),
                 "tools_used": len(agent.tools_used),
                 "goal": agent.goal[:100],
+                "depth": agent.depth,
+                "parent_id": agent.parent_id,
+                "children_count": len(agent.children_ids),
             })
         return result
 
-    def kill(self, agent_id: str) -> str:
-        """Cancel a running agent."""
+    def kill(self, agent_id: str, cascade: bool = True) -> str:
+        """Cancel a running agent. If cascade=True, also kill all descendants."""
         agent = self._agents.get(agent_id)
         if not agent:
             return f"Error: Agent '{agent_id}' not found."
         if agent._sm.is_terminal:
             return f"Agent '{agent_id}' already in terminal state: {agent.status}."
 
+        killed_ids = [agent_id]
         agent._cancel_event.set()
-        log.info("Kill signal sent to agent %s (%s)", agent_id, agent.label)
-        return f"Kill signal sent to agent '{agent.label}'."
+
+        if cascade:
+            for desc_id in self.get_descendants(agent_id):
+                desc = self._agents.get(desc_id)
+                if desc and desc._sm.is_active:
+                    desc._cancel_event.set()
+                    killed_ids.append(desc_id)
+
+        log.info(
+            "Kill signal sent to agent %s (%s) and %d descendants",
+            agent_id, agent.label, len(killed_ids) - 1,
+        )
+        if len(killed_ids) == 1:
+            return f"Kill signal sent to agent '{agent.label}'."
+        return (
+            f"Kill signal sent to agent '{agent.label}' "
+            f"and {len(killed_ids) - 1} descendant(s)."
+        )
 
     def get_results(self, agent_id: str) -> dict | None:
         """Get structured results of an agent."""
@@ -419,7 +498,56 @@ class AgentManager:
             "goal": agent.goal,
             "recovery_attempts": agent.recovery_attempts,
             "state_history": agent._sm.history_as_dicts(),
+            "depth": agent.depth,
+            "parent_id": agent.parent_id,
+            "children_ids": list(agent.children_ids),
         }
+
+    def get_children(self, agent_id: str) -> list[dict]:
+        """Get results of all direct children of an agent."""
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return []
+        results = []
+        for child_id in agent.children_ids:
+            r = self.get_results(child_id)
+            if r:
+                results.append(r)
+        return results
+
+    def get_lineage(self, agent_id: str) -> list[str]:
+        """Get the chain of parent IDs from root to this agent (inclusive)."""
+        lineage: list[str] = []
+        current = agent_id
+        visited: set[str] = set()
+        while current and current not in visited:
+            visited.add(current)
+            lineage.append(current)
+            agent = self._agents.get(current)
+            if not agent or not agent.parent_id:
+                break
+            current = agent.parent_id
+        lineage.reverse()
+        return lineage
+
+    def get_descendants(self, agent_id: str) -> list[str]:
+        """Get all descendant agent IDs (children, grandchildren, etc.)."""
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return []
+        descendants: list[str] = []
+        queue = list(agent.children_ids)
+        visited: set[str] = set()
+        while queue:
+            child_id = queue.pop(0)
+            if child_id in visited:
+                continue
+            visited.add(child_id)
+            descendants.append(child_id)
+            child = self._agents.get(child_id)
+            if child:
+                queue.extend(child.children_ids)
+        return descendants
 
     async def wait_for_agents(
         self,
@@ -602,6 +730,8 @@ async def _run_agent(
         channel_id=agent.channel_id,
         requester_id=agent.requester_id,
         requester_name=agent.requester_name,
+        depth=agent.depth,
+        parent_id=agent.parent_id,
         system_prompt_length=len(system_prompt),
     )
     agent_start = time.time()

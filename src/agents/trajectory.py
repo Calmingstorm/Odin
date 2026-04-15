@@ -36,6 +36,8 @@ class AgentTrajectoryTurn:
     timestamp: str = ""
     source: str = "agent"
 
+    depth: int = 0
+    parent_id: str | None = None
     system_prompt_length: int = 0
 
     iterations: list[ToolIteration] = field(default_factory=list)
@@ -98,6 +100,8 @@ class AgentTrajectoryTurn:
             "requester_name": self.requester_name,
             "timestamp": self.timestamp,
             "source": self.source,
+            "depth": self.depth,
+            "parent_id": self.parent_id,
             "system_prompt_length": self.system_prompt_length,
             "iterations": [asdict(it) for it in self.iterations],
             "final_state": self.final_state,

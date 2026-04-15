@@ -152,7 +152,7 @@ tightening of prior work.
 | 32 | Recovery-before-escalation: known failure modes auto-heal once before surfacing to user | done | RecoveryHandler module (6 categories, pattern matching, per-category delays), ToolExecutor integration, agent per-iteration recovery reset, 2 REST API endpoints, RecoveryStats observability, +110 tests |
 | 33 | Loop branch-freshness check: on test failure, verify branch isn't stale vs origin before treating as regression | done | BranchFreshnessChecker module (test command/failure detection, async git freshness check, staleness annotation), ToolExecutor integration for run_command/run_script, BranchFreshnessConfig, FreshnessStats observability, 2 REST API endpoints, +111 tests |
 | 34 | Agent trajectory saving: every spawned agent saves its full trajectory like messages do in Round 3 | done | AgentTrajectoryTurn and AgentTrajectorySaver modules, _run_agent integration (all terminal states), reuses ToolIteration from Round 3, date-partitioned JSONL under data/trajectories/agents/, AgentManager.spawn trajectory_saver param, 4 REST API endpoints, +75 tests |
-| 35 | Nested agent spawning: one agent may spawn sub-agents with a depth limit (default 2) | pending | |
+| 35 | Nested agent spawning: one agent may spawn sub-agents with a depth limit (default 2) | done | Depth-aware filter_agent_tools, AgentInfo depth/parent_id/children_ids fields, AgentManager spawn parent_id/max_depth params, depth limit enforcement, MAX_CHILDREN_PER_AGENT=3, cascade kill, get_children/get_lineage/get_descendants, AgentsConfig, 3 REST API endpoints, trajectory depth/parent_id, +73 tests |
 
 ### Phase 8 — UX & workflows (rounds 36–40)
 | # | Focus | Status | Summary |
@@ -4392,4 +4392,166 @@ Added `src/agents/trajectory.py` to project structure with description.
 - The `trajectory_saver` parameter on `AgentManager.spawn()` is optional with `None` default. Existing callers (including `LoopAgentBridge`) are unaffected.
 - `LoopAgentBridge` does not currently pass `trajectory_saver` to the agent manager. To wire it up, the bridge would need a reference to the saver instance. This is a future wiring task.
 - The `ToolExecutor.__new__()` fixture pattern was NOT changed by this round — agent trajectory saving is in the agent system, not the tool executor.
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
+
+## Round 35 — Nested agent spawning: depth-limited sub-agent hierarchy
+**Focus**: Allow agents to spawn sub-agents up to a configurable nesting depth (default 2), with parent-child tracking, cascade kill, and depth-aware tool filtering.
+**Baseline pytest**: 3467 passed, 0 failed
+**Post-round pytest**: 3540 passed, 0 failed (+73 new tests)
+
+### Validated from prior rounds
+- Round 34 (Agent trajectory saving): All 75 tests pass. One test (`test_to_dict_all_keys_present`) needed update to include new `depth` and `parent_id` fields added to `AgentTrajectoryTurn.to_dict()` — this is expected and correct.
+- Round 34 noted "Round 35 will need to decide whether child agents should share the parent's trajectory_saver" — confirmed: child agents receive the same `trajectory_saver` parameter as passed to `spawn()`, so they share if the caller passes it through.
+- Round 34 noted `LoopAgentBridge` does not pass `trajectory_saver` — unchanged by this round, still a future wiring task.
+- Round 33 (Branch freshness): All 111 tests pass. No changes needed.
+- No bugs or watch-for items from prior rounds needed fixing beyond the trajectory test key update.
+
+### Work done
+
+#### 1. Nesting constants: `src/agents/manager.py` (lines 34-35)
+
+- `MAX_NESTING_DEPTH = 2`: Default maximum sub-agent depth. Root agents are depth 0, their children depth 1, grandchildren depth 2. Agents at depth >= max cannot spawn further.
+- `MAX_CHILDREN_PER_AGENT = 3`: Maximum direct children one agent can spawn. Prevents runaway fan-out.
+
+#### 2. AGENT_MANAGEMENT_TOOLS and depth-aware filtering: `src/agents/manager.py` (lines 37-66)
+
+**Renamed constant**: `AGENT_BLOCKED_TOOLS` is now an alias for `AGENT_MANAGEMENT_TOOLS`. The old name still works (backward compatible).
+
+**`filter_agent_tools(tools, depth=0, max_depth=2)`**:
+- Agents at depth < max_depth: keep all tools (including agent-management tools like spawn_agent, list_agents, etc.)
+- Agents at depth >= max_depth: remove all agent-management tools (same as old behavior)
+- Default parameters maintain backward compatibility — calling `filter_agent_tools(tools)` with no depth/max_depth works identically to the old API (keeps agent tools since depth=0 < max_depth=2).
+
+#### 3. AgentInfo nesting fields: `src/agents/manager.py` (lines 245-247)
+
+Three new fields on `AgentInfo`:
+- `depth: int = 0`: Nesting depth (0 = root, 1 = child, 2 = grandchild, etc.)
+- `parent_id: str | None = None`: ID of the parent agent, or None for root agents.
+- `children_ids: list[str]`: IDs of direct children, populated by `spawn()`.
+
+#### 4. AgentManager.spawn nesting support: `src/agents/manager.py` (lines 289-414)
+
+**New parameters**: `parent_id: str | None = None` and `max_depth: int = MAX_NESTING_DEPTH`.
+
+**Depth computation**: When `parent_id` is provided, looks up the parent agent and sets `depth = parent.depth + 1`.
+
+**Enforcement**:
+1. Parent must exist in `_agents` dict (returns Error if not found).
+2. Depth must not exceed `max_depth` (returns Error if parent.depth + 1 > max_depth).
+3. Parent must have fewer than `MAX_CHILDREN_PER_AGENT` children (returns Error if at limit).
+
+**Parent-child registration**: After creating the child agent, adds child's ID to parent's `children_ids` list.
+
+**System prompt**: Depth-aware context injected into agent system prompt:
+- Can nest: "You may spawn up to 3 sub-agents (N nesting levels remaining)"
+- At max depth: "You are at the maximum nesting depth — do NOT spawn sub-agents"
+
+**Tool filtering**: Calls `filter_agent_tools(tools, depth=depth, max_depth=max_depth)` before passing tools to `_run_agent`.
+
+#### 5. AgentManager hierarchy methods: `src/agents/manager.py`
+
+**`get_children(agent_id)`**: Returns `get_results()` for all direct children.
+
+**`get_lineage(agent_id)`**: Walks `parent_id` chain from agent to root. Returns list of IDs from root to agent (inclusive). Protected against cycles via visited set.
+
+**`get_descendants(agent_id)`**: BFS traversal of all descendants (children, grandchildren, etc.). Protected against cycles via visited set.
+
+#### 6. Cascade kill: `src/agents/manager.py`
+
+**`kill(agent_id, cascade=True)`**: When `cascade=True` (the default), sends kill signal to the agent AND all active descendants. Returns message indicating how many descendants were also killed. When `cascade=False`, only kills the specified agent.
+
+#### 7. Updated list() and get_results(): `src/agents/manager.py`
+
+**`list()`**: Now includes `depth`, `parent_id`, `children_count` in each entry.
+
+**`get_results()`**: Now includes `depth`, `parent_id`, `children_ids` (as a copy).
+
+#### 8. AgentTrajectoryTurn nesting fields: `src/agents/trajectory.py`
+
+Added `depth: int = 0` and `parent_id: str | None = None` fields. Both included in `to_dict()` output. `_run_agent` now passes agent's depth/parent_id to the trajectory.
+
+#### 9. Config: `src/config/schema.py`
+
+New `AgentsConfig` model:
+- `max_nesting_depth: int = 2`
+- `max_children_per_agent: int = 3`
+
+Added `agents: AgentsConfig = AgentsConfig()` to `Config`.
+
+#### 10. REST API: `src/web/api.py`
+
+Three new endpoints:
+- `GET /api/agents/{id}/children`: Returns `get_children()` results.
+- `GET /api/agents/{id}/lineage`: Returns `{"lineage": [...]}` chain from root to agent.
+- `GET /api/agents/{id}/descendants`: Returns `{"descendants": [...]}` all descendant IDs.
+
+Updated `GET /api/agents` list endpoint to include `depth`, `parent_id`, `children_ids` in each agent entry.
+
+### Tests: `tests/test_nested_agents.py` — 73 tests across 12 test classes
+
+**Constants** (4): MAX_NESTING_DEPTH, MAX_CHILDREN_PER_AGENT, AGENT_MANAGEMENT_TOOLS contents, BLOCKED_TOOLS alias.
+
+**filter_agent_tools** (9): depth below max keeps all, depth at max removes, depth above max removes, one below keeps, default params, max_depth=0 blocks all, empty tools, no agent tools in input, returns new list.
+
+**AgentInfo nesting** (6): default depth, custom depth, default parent_id, custom parent_id, default children_ids, independent children_ids.
+
+**Spawn nesting** (9): root depth zero, child depth one, grandchild depth two, depth exceeds max, custom max_depth, parent not found, max children per agent, parent registers child.
+
+**System prompt nesting** (2): root can nest, deep agent no-spawn.
+
+**Hierarchy methods** (10): get_children empty, with children, not found; get_lineage root, three levels, not found; get_descendants empty, multi-level, not found.
+
+**Kill cascade** (4): cascades to children, no cascade, multi-level cascade, no children same message.
+
+**List and results** (5): list includes depth, parent_id, children_count; get_results includes nesting, parent children.
+
+**_run_agent trajectory** (2): trajectory includes depth/parent_id, root agent.
+
+**Trajectory turn nesting** (4): default depth, custom depth, to_dict includes depth, to_dict root.
+
+**Config** (4): defaults, custom, Config has agents, Config agents override.
+
+**REST API** (4): list includes depth, children endpoint data, lineage endpoint data, descendants endpoint data.
+
+**Exports** (2): agents init exports, filter_agent_tools importable.
+
+**Edge cases** (10): max_depth=0, independent children_ids, lineage cycle protection, descendants cycle protection, kill cascade skips terminal, high max_depth deep nesting, backward compat no parent_id, concurrent children tracking, get_results children_ids is copy, filter preserves non-agent tools.
+
+### Design decisions
+
+1. **Depth-aware tool filtering vs. tool blocking**: Instead of hard-blocking agent tools for all agents, `filter_agent_tools` now checks depth against max_depth. Agents below the limit get full tool access (including spawn_agent). This is cleaner than maintaining separate tool lists.
+
+2. **AGENT_BLOCKED_TOOLS as alias**: The old `AGENT_BLOCKED_TOOLS` constant is kept as an alias for `AGENT_MANAGEMENT_TOOLS` for backward compatibility. Any code referencing the old name still works.
+
+3. **MAX_CHILDREN_PER_AGENT = 3**: Prevents a single agent from spawning unbounded children. Combined with the per-channel limit of 5 concurrent agents and the nesting depth limit, this creates a bounded hierarchy: root + 3 children each spawning 3 grandchildren = up to 13 agents if channels/depth allow.
+
+4. **Cascade kill by default**: When killing a parent, descendants are also killed. This matches intuition — if you kill a coordinator agent, its worker agents should stop too. `cascade=False` is available for surgical kills.
+
+5. **Cycle protection**: Both `get_lineage` and `get_descendants` use visited-set guards. Cycles shouldn't happen in normal operation, but the guards prevent infinite loops if agent state is corrupted.
+
+6. **AgentsConfig in schema**: The `max_nesting_depth` and `max_children_per_agent` are configurable via `config.yml`. The constants in `manager.py` serve as defaults. Note: the current `spawn()` method uses `MAX_NESTING_DEPTH` as the default for `max_depth` parameter — wiring to `config.agents.max_nesting_depth` is a future task when the config is available at the call site (in `client.py` or wherever `spawn()` is invoked).
+
+7. **Backward compatible spawn()**: `parent_id` defaults to `None`, `max_depth` defaults to `MAX_NESTING_DEPTH`. Existing callers (including `LoopAgentBridge`) work without changes. The loop bridge can pass `parent_id` in a future round to create agent hierarchies from loops.
+
+8. **Trajectory records depth**: `AgentTrajectoryTurn` now includes `depth` and `parent_id`, making hierarchy relationships queryable in stored trajectory data.
+
+### Files changed
+- `src/agents/manager.py` (lines 34-35, 37-66, 245-247, 289-414, 435-445, 452-495, 502-522): Constants, filter_agent_tools, AgentInfo fields, spawn nesting, list/get_results, hierarchy methods, cascade kill.
+- `src/agents/trajectory.py` (lines 39-40, 99-100): depth and parent_id fields on AgentTrajectoryTurn, included in to_dict().
+- `src/agents/__init__.py` (updated): Export AGENT_MANAGEMENT_TOOLS, MAX_NESTING_DEPTH, MAX_CHILDREN_PER_AGENT.
+- `src/config/schema.py` (lines 63-65, 316): AgentsConfig model, added to Config.
+- `src/web/api.py` (3 new endpoints + list update): /api/agents/{id}/children, /api/agents/{id}/lineage, /api/agents/{id}/descendants, depth/parent/children in list endpoint.
+- `CLAUDE.md` (line 199-200): Updated agent documentation for nesting.
+- `tests/test_agent_trajectory.py` (line 173-179): Updated expected keys for to_dict test.
+- `tests/test_nested_agents.py` (new, 73 tests): 12 test classes covering constants, filtering, AgentInfo fields, spawn nesting, hierarchy methods, cascade kill, list/results, trajectory, config, REST API, exports, edge cases.
+
+### Next round watch for
+- Round 36 has no dependencies on Round 35. Nested agent spawning is self-contained.
+- REST API endpoint count is now 120 (was 117, +3 new: `/api/agents/{id}/children`, `/api/agents/{id}/lineage`, `/api/agents/{id}/descendants`).
+- The `LoopAgentBridge.spawn_agents_for_loop()` does NOT yet pass `parent_id`. To create hierarchical agent structures from loops, a future round should wire `parent_id` through the bridge.
+- The `AgentsConfig.max_nesting_depth` and `max_children_per_agent` are in config but NOT yet wired to `AgentManager.spawn()` at the call site. The `spawn()` method uses the constants as defaults. Wiring config values requires passing them from the Discord client (where config is available) to spawn calls.
+- The `filter_agent_tools` function is called inside `spawn()` during tool filtering. It is NOT called by external code (like client.py's tool merging). If client.py also calls `filter_agent_tools`, it should pass the correct depth.
+- Cascade kill sends cancel signals to ALL active descendants. If an agent has many descendants, this could be a lot of signals, but each is just `event.set()` (O(1)).
+- `get_lineage` and `get_descendants` both have cycle protection. In normal operation, cycles are impossible since depth only increases. The guards are purely defensive.
+- The `ToolExecutor.__new__()` fixture pattern was NOT changed by this round — nested agent spawning is in the agent system, not the tool executor.
 - All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).

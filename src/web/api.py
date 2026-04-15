@@ -1768,6 +1768,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 "error": (info.error[:200] if info.error else ""),
                 "recovery_attempts": getattr(info, "recovery_attempts", 0),
                 "state_history": info._sm.history_as_dicts() if hasattr(info, "_sm") else [],
+                "depth": getattr(info, "depth", 0),
+                "parent_id": getattr(info, "parent_id", None),
+                "children_ids": list(getattr(info, "children_ids", [])),
             })
         return web.json_response(agents)
 
@@ -1783,6 +1786,36 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response(
             {"result": result}, status=404 if "not found" in result.lower() else 200
         )
+
+    @routes.get("/api/agents/{agent_id}/children")
+    async def get_agent_children(request: web.Request) -> web.Response:
+        try:
+            mgr = bot.agent_manager
+        except (AttributeError, TypeError):
+            return web.json_response({"error": "no agent manager"}, status=503)
+        agent_id = request.match_info["agent_id"]
+        children = mgr.get_children(agent_id)
+        return web.json_response(children)
+
+    @routes.get("/api/agents/{agent_id}/lineage")
+    async def get_agent_lineage(request: web.Request) -> web.Response:
+        try:
+            mgr = bot.agent_manager
+        except (AttributeError, TypeError):
+            return web.json_response({"error": "no agent manager"}, status=503)
+        agent_id = request.match_info["agent_id"]
+        lineage = mgr.get_lineage(agent_id)
+        return web.json_response({"lineage": lineage})
+
+    @routes.get("/api/agents/{agent_id}/descendants")
+    async def get_agent_descendants(request: web.Request) -> web.Response:
+        try:
+            mgr = bot.agent_manager
+        except (AttributeError, TypeError):
+            return web.json_response({"error": "no agent manager"}, status=503)
+        agent_id = request.match_info["agent_id"]
+        descendants = mgr.get_descendants(agent_id)
+        return web.json_response({"descendants": descendants})
 
     # ------------------------------------------------------------------
     # Processes

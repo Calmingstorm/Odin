@@ -61,6 +61,11 @@ class BranchFreshnessConfig(BaseModel):
     enabled: bool = True
 
 
+class AgentsConfig(BaseModel):
+    max_nesting_depth: int = 2
+    max_children_per_agent: int = 3
+
+
 class SSHPoolConfig(BaseModel):
     enabled: bool = True
     control_persist: int = 60
@@ -312,6 +317,7 @@ class Config(BaseModel):
     slack: SlackConfig = SlackConfig()
     issue_tracker: IssueTrackerConfig = IssueTrackerConfig()
     audit: AuditConfig = AuditConfig()
+    agents: AgentsConfig = AgentsConfig()
     grafana_alerts: GrafanaAlertConfig = GrafanaAlertConfig()
 
 
