@@ -63,6 +63,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/web/chat.py` — chat backend for web UI and WebSocket chat
   - `src/agents/manager.py` — multi-agent orchestration with lifecycle state machine (AgentState enum, AgentStateMachine, typed transitions, per-iteration recovery)
   - `src/agents/loop_bridge.py` — bridge between autonomous loops and agent system
+  - `src/agents/trajectory.py` — agent trajectory saving (AgentTrajectoryTurn, AgentTrajectorySaver, JSONL under data/trajectories/agents/)
 - `tests/` — pytest test suite (async, mocked SSH/API calls), 9000+ tests
 - `config.yml` — runtime configuration
 - `data/skills/` — user-created Python skill files

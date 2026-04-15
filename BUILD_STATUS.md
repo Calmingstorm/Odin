@@ -151,7 +151,7 @@ tightening of prior work.
 | 31 | Agent worker lifecycle state machine: replace implicit polling with typed states (spawning, ready, executing, recovering, done) | done | AgentState enum (8 states), AgentStateMachine with enforced transitions + history, LLM recovery logic (EXECUTING→RECOVERING→retry), backward-compatible status property, +90 tests |
 | 32 | Recovery-before-escalation: known failure modes auto-heal once before surfacing to user | done | RecoveryHandler module (6 categories, pattern matching, per-category delays), ToolExecutor integration, agent per-iteration recovery reset, 2 REST API endpoints, RecoveryStats observability, +110 tests |
 | 33 | Loop branch-freshness check: on test failure, verify branch isn't stale vs origin before treating as regression | done | BranchFreshnessChecker module (test command/failure detection, async git freshness check, staleness annotation), ToolExecutor integration for run_command/run_script, BranchFreshnessConfig, FreshnessStats observability, 2 REST API endpoints, +111 tests |
-| 34 | Agent trajectory saving: every spawned agent saves its full trajectory like messages do in Round 3 | pending | |
+| 34 | Agent trajectory saving: every spawned agent saves its full trajectory like messages do in Round 3 | done | AgentTrajectoryTurn and AgentTrajectorySaver modules, _run_agent integration (all terminal states), reuses ToolIteration from Round 3, date-partitioned JSONL under data/trajectories/agents/, AgentManager.spawn trajectory_saver param, 4 REST API endpoints, +75 tests |
 | 35 | Nested agent spawning: one agent may spawn sub-agents with a depth limit (default 2) | pending | |
 
 ### Phase 8 — UX & workflows (rounds 36–40)
@@ -4262,4 +4262,134 @@ Both return 503 if executor is unavailable (same pattern as recovery/risk endpoi
 - The freshness check runs `git fetch origin --quiet` on every test failure check. This adds network I/O (~1-2s). If this becomes a performance concern, a future round could add a cooldown (e.g., skip fetch if fetched within last 60s).
 - `FRESHNESS_CHECK_TIMEOUT = 15` is not currently enforced as a timeout on individual git commands — it's available as a constant for future use. The individual git commands are subject to the normal command timeout.
 - The `format_staleness_warning()` output starts with `\n` so it appends cleanly to existing result text.
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
+
+## Round 34 — Agent trajectory saving: full agent execution recording
+**Focus**: Every spawned agent saves its full trajectory (metadata, each LLM iteration with tool calls/results, final state, timing) as JSONL, mirroring how messages are saved in Round 3.
+**Baseline pytest**: 3392 passed, 0 failed
+**Post-round pytest**: 3467 passed, 0 failed (+75 new tests)
+
+### Validated from prior rounds
+- Round 33 (Branch freshness): All 111 tests pass. Branch freshness module, executor integration, and config all working correctly.
+- Round 33 noted "Round 34 has no dependencies on Round 33. Branch freshness is self-contained." — confirmed, clean start.
+- Round 33 noted `ToolExecutor.__new__()` fixture pattern now requires 7 attributes — no changes needed from this round (trajectory saving is in the agent system, not the tool executor).
+- Round 31's agent lifecycle state machine and Round 32's recovery integration both verified working and unmodified.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. Agent trajectory module: `src/agents/trajectory.py` (new, ~195 lines)
+
+**AgentTrajectoryTurn dataclass**:
+- Fields: `agent_id`, `label`, `goal`, `channel_id`, `requester_id`, `requester_name`, `timestamp`, `source` (default: "agent"), `system_prompt_length`, `iterations` (list[ToolIteration]), `final_state`, `result`, `error`, `tools_used`, `iteration_count`, `total_duration_ms`, `recovery_attempts`, `state_history`.
+- `add_iteration(iteration, tool_calls, tool_results, llm_text, duration_ms)` → `ToolIteration`: Reuses the existing `ToolIteration` type from `src/trajectories/saver.py` for consistency with message trajectories.
+- `finalize(**kwargs)` → None: Sets all final-state fields at once.
+- `to_dict()` → dict: JSON-serializable dict for JSONL storage.
+
+**AgentTrajectorySaver class**:
+- Constructor takes `directory` (default: `./data/trajectories/agents`), creates it on init.
+- `async save(turn)` → Path: Writes one JSON line to date-partitioned file (`YYYY-MM-DD.jsonl`), sets timestamp if not set, uses `aiofiles`.
+- `count` property: Total trajectories saved in this session.
+- `async list_files()` → list[str]: Sorted JSONL filenames.
+- `async read_file(filename, limit=100)` → list[dict]: Reads entries newest-first.
+- `async find_by_agent_id(agent_id)` → dict | None: Searches all files newest-first.
+- `async search(*, channel_id, requester_id, tool_name, state, limit=50)` → list[dict]: Filtered search across all files.
+- `get_prometheus_metrics()` → dict: Returns `{"agent_trajectories_saved_total": N}`.
+
+#### 2. _run_agent integration: `src/agents/manager.py`
+
+**New parameter**: `trajectory_saver: AgentTrajectorySaver | None = None` on `_run_agent`.
+
+**Trajectory recording flow**:
+1. At function entry: Create `AgentTrajectoryTurn` with agent metadata and system prompt length.
+2. After each LLM call (with or without tool calls): `trajectory.add_iteration()` captures tool_calls, tool_results, LLM text, and iteration duration.
+3. In `finally` block: `trajectory.finalize()` with the agent's final state, result, error, tools_used, iteration_count, recovery_attempts, state_history, and total duration. Then `await trajectory_saver.save(trajectory)` if saver is present.
+4. Save errors are caught and logged — never crash the agent.
+
+**Tool call recording**: Each tool call in an iteration now builds `iter_tool_calls` and `iter_tool_results` lists that capture `{"name": ..., "input": ...}` and `{"name": ..., "result": ...}` respectively.
+
+#### 3. AgentManager.spawn updated: `src/agents/manager.py`
+
+New optional parameter `trajectory_saver: AgentTrajectorySaver | None = None`, passed through to `_run_agent`.
+
+#### 4. REST API endpoints: `src/web/api.py`
+
+Four new endpoints accessing `bot.agent_trajectory_saver`:
+- `GET /api/agent-trajectories` — list files and count.
+- `GET /api/agent-trajectories/agent/{agent_id}` — find trajectory by agent ID (404 if not found).
+- `GET /api/agent-trajectories/search/query` — search with filters: `channel_id`, `requester_id`, `tool_name`, `state`, `limit`.
+- `GET /api/agent-trajectories/{filename}` — read a specific JSONL file with `limit` param.
+
+All return 503 if `agent_trajectory_saver` is not attached to the bot. Filename validation rejects non-`.jsonl` names and path separators.
+
+#### 5. __init__.py updated: `src/agents/__init__.py`
+
+Exports: `AgentTrajectorySaver`, `AgentTrajectoryTurn`.
+
+#### 6. CLAUDE.md updated
+
+Added `src/agents/trajectory.py` to project structure with description.
+
+### Tests: `tests/test_agent_trajectory.py` — 75 tests across 14 test classes
+
+**AgentTrajectoryTurn** (11): default fields, initialized fields, add_iteration, multiple iterations, iteration defaults, finalize, finalize defaults, to_dict, to_dict serializable, to_dict all keys, separate instances.
+
+**ToolIteration reuse** (2): ToolIteration from trajectories module, agent trajectory uses same type.
+
+**AgentTrajectorySaver** (6): init creates directory, default directory, save creates file, save sets timestamp, save preserves timestamp, save multiple, save appends.
+
+**AgentTrajectorySaver list_files** (3): empty, after save, ignores non-jsonl.
+
+**AgentTrajectorySaver read_file** (4): existing, nonexistent, limit, newest first.
+
+**AgentTrajectorySaver find_by_agent_id** (3): existing, nonexistent, among many.
+
+**AgentTrajectorySaver search** (7): by channel, by requester, by tool, by state, limit, empty, combined filters.
+
+**AgentTrajectorySaver metrics** (2): prometheus metrics, after saves.
+
+**_run_agent trajectory integration** (13): saved on completion, captures iterations, captures tools_used, saved on failure, saved on kill, saved on timeout, has state history, records duration, records system prompt length, no saver no error, save error does not crash, recovery attempts recorded, tool error recorded.
+
+**AgentManager.spawn** (2): with trajectory_saver, without trajectory_saver.
+
+**REST API** (9): list no saver (503), list with saver, find by agent_id, find not found (404), search endpoint, search no saver (503), read file, read file invalid name (400), read file no saver (503).
+
+**Module exports** (3): trajectory module, agents init, tool iteration reexported.
+
+**Edge cases** (11): empty iterations, large result, unicode content, concurrent saves, separate instances, max iterations trajectory (30 iterations recorded), cancelled agent, multiple tool calls per iteration, directory deleted, bad JSON handling.
+
+### Design decisions
+
+1. **Reuse ToolIteration**: Agent iterations reuse `ToolIteration` from `src/trajectories/saver.py` for schema consistency. Both message trajectories and agent trajectories use the same iteration format — tools, results, text, timing.
+
+2. **Separate directory**: Agent trajectories go to `data/trajectories/agents/` instead of mixing with message trajectories. This keeps queries separate and allows independent retention policies.
+
+3. **Separate saver class**: `AgentTrajectorySaver` follows the same pattern as `TrajectorySaver` (date-partitioned JSONL, async I/O, same API shape) but stores agent-specific metadata and offers `find_by_agent_id` instead of `find_by_message_id`.
+
+4. **Finally block for save**: Trajectory saving happens in the `finally` block of `_run_agent`, guaranteeing it fires on all exit paths: normal completion, kill, timeout, failure, cancellation, and unhandled exceptions.
+
+5. **Fail-safe save**: If `trajectory_saver.save()` raises, the error is logged but never propagates. The agent's terminal state is already set — the trajectory is observability, not critical path.
+
+6. **No trajectory for saver-less agents**: If `trajectory_saver=None` (the default), no trajectory recording happens. This maintains backward compatibility — existing code that spawns agents without a saver works unchanged.
+
+7. **Per-iteration tool call/result capture**: Each iteration now builds explicit `iter_tool_calls` and `iter_tool_results` lists alongside the existing message append logic. These capture the structured tool data (name + input/result) that the trajectory needs, without changing the message format the LLM sees.
+
+8. **System prompt stored by length only**: Like `TrajectoryTurn`, `AgentTrajectoryTurn` stores `system_prompt_length` rather than the full prompt. The prompt is the same across all iterations — storing it once by length keeps JSONL compact.
+
+### Files changed
+- `src/agents/trajectory.py` (new, ~195 lines): AgentTrajectoryTurn, AgentTrajectorySaver, DEFAULT_AGENT_TRAJECTORY_DIR.
+- `src/agents/manager.py` (imports, spawn, _run_agent): Import AgentTrajectorySaver and AgentTrajectoryTurn, trajectory_saver parameter on spawn() and _run_agent(), trajectory recording in iteration loop, finalize+save in finally block.
+- `src/agents/__init__.py` (updated): Export AgentTrajectorySaver, AgentTrajectoryTurn.
+- `src/web/api.py` (4 new endpoints): /api/agent-trajectories, /api/agent-trajectories/agent/{id}, /api/agent-trajectories/search/query, /api/agent-trajectories/{filename}.
+- `CLAUDE.md` (line 66): Added src/agents/trajectory.py to project structure.
+- `tests/test_agent_trajectory.py` (new, 75 tests): 14 test classes covering turn dataclass, saver CRUD, _run_agent integration, AgentManager.spawn, REST API, exports, edge cases.
+
+### Next round watch for
+- Round 35 (Nested agent spawning) will need to decide whether child agents should share the parent's trajectory_saver or get their own. The `trajectory_saver` parameter is already threaded through `spawn()`, so the wiring is straightforward.
+- REST API endpoint count is now 117 (was 113, +4 new: `/api/agent-trajectories`, `/api/agent-trajectories/agent/{id}`, `/api/agent-trajectories/search/query`, `/api/agent-trajectories/{filename}`).
+- The `AgentTrajectoryTurn.to_dict()` stores tool results as-is (no truncation). If agents produce very large tool outputs, a future round could add truncation similar to `MAX_TOOL_OUTPUT_CHARS` in `TrajectoryTurn`.
+- `AgentTrajectorySaver.save()` uses `aiofiles` for async I/O, same as `TrajectorySaver`. The `aiofiles` dependency is already present.
+- The `trajectory_saver` parameter on `AgentManager.spawn()` is optional with `None` default. Existing callers (including `LoopAgentBridge`) are unaffected.
+- `LoopAgentBridge` does not currently pass `trajectory_saver` to the agent manager. To wire it up, the bridge would need a reference to the saver instance. This is a future wiring task.
+- The `ToolExecutor.__new__()` fixture pattern was NOT changed by this round — agent trajectory saving is in the agent system, not the tool executor.
 - All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).

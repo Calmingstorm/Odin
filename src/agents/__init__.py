@@ -17,6 +17,7 @@ from .manager import (
     StateTransition,
     filter_agent_tools,
 )
+from .trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
 
 __all__ = [
     "AGENT_BLOCKED_TOOLS",
@@ -29,6 +30,8 @@ __all__ = [
     "AgentManager",
     "AgentState",
     "AgentStateMachine",
+    "AgentTrajectorySaver",
+    "AgentTrajectoryTurn",
     "InvalidStateTransition",
     "LoopAgentBridge",
     "StateTransition",

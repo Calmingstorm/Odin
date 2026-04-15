@@ -15,6 +15,7 @@ from typing import Any
 
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
+from .trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
 
 log = get_logger("agents")
 
@@ -290,6 +291,7 @@ class AgentManager:
         tools: list[dict] | None = None,
         system_prompt: str = "",
         tool_timeouts: dict[str, int] | None = None,
+        trajectory_saver: AgentTrajectorySaver | None = None,
     ) -> str:
         """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string."""
         # Check per-channel limit
@@ -338,6 +340,7 @@ class AgentManager:
                 tool_executor_callback=tool_executor_callback,
                 announce_callback=announce_callback,
                 tool_timeouts=tool_timeouts or {},
+                trajectory_saver=trajectory_saver,
             )
         )
         agent._task = task
@@ -584,6 +587,7 @@ async def _run_agent(
     tool_executor_callback: ToolExecutorCallback,
     announce_callback: AnnounceCallback | None = None,
     tool_timeouts: dict[str, int] | None = None,
+    trajectory_saver: AgentTrajectorySaver | None = None,
 ) -> None:
     """Execute an agent's tool loop until completion, error, or timeout.
 
@@ -591,6 +595,16 @@ async def _run_agent(
     SPAWNING → READY → EXECUTING → READY (loop) or → terminal.
     On transient LLM errors, transitions through RECOVERING for one retry.
     """
+    trajectory = AgentTrajectoryTurn(
+        agent_id=agent.id,
+        label=agent.label,
+        goal=agent.goal,
+        channel_id=agent.channel_id,
+        requester_id=agent.requester_id,
+        requester_name=agent.requester_name,
+        system_prompt_length=len(system_prompt),
+    )
+    agent_start = time.time()
 
     def _check_kill() -> bool:
         if agent._cancel_event.is_set():
@@ -637,6 +651,7 @@ async def _run_agent(
             agent.last_activity = time.time()
             agent.iteration_count = iteration + 1
             agent.recovery_attempts = 0  # per-iteration recovery budget
+            iter_start = time.time()
 
             # Call LLM with recovery support
             response = await _call_llm_with_recovery(
@@ -654,6 +669,11 @@ async def _run_agent(
 
             # No tool calls = agent is done
             if not tool_calls:
+                trajectory.add_iteration(
+                    iteration=iteration + 1,
+                    llm_text=text,
+                    duration_ms=int((time.time() - iter_start) * 1000),
+                )
                 agent.transition(AgentState.COMPLETED, "no more tool calls")
                 agent.result = text
                 agent.ended_at = time.time()
@@ -662,6 +682,8 @@ async def _run_agent(
                 return
 
             # Execute tool calls
+            iter_tool_calls: list[dict] = []
+            iter_tool_results: list[dict] = []
             for tc in tool_calls:
                 tool_name = tc.get("name", "")
                 tool_input = tc.get("input", {})
@@ -670,6 +692,7 @@ async def _run_agent(
                     agent.tools_used.append(tool_name)
 
                 agent.last_activity = time.time()
+                iter_tool_calls.append({"name": tool_name, "input": tool_input})
 
                 tool_timeout = (tool_timeouts or {}).get(tool_name, TOOL_EXEC_TIMEOUT)
                 try:
@@ -685,11 +708,21 @@ async def _run_agent(
                     result = f"Error: {e}"
                     log.warning("Agent %s tool %s failed: %s", agent.id, tool_name, e)
 
+                iter_tool_results.append({"name": tool_name, "result": result})
+
                 # Append tool result to messages
                 agent.messages.append({
                     "role": "user",
                     "content": f"[Tool result: {tool_name}]\n{result}",
                 })
+
+            trajectory.add_iteration(
+                iteration=iteration + 1,
+                tool_calls=iter_tool_calls,
+                tool_results=iter_tool_results,
+                llm_text=text,
+                duration_ms=int((time.time() - iter_start) * 1000),
+            )
 
             # Back to READY for next iteration
             agent.transition(AgentState.READY, "tools complete")
@@ -720,6 +753,23 @@ async def _run_agent(
         agent.error = str(e)
         agent.ended_at = time.time()
         log.error("Agent %s (%s) crashed: %s", agent.id, agent.label, e)
+
+    finally:
+        trajectory.finalize(
+            final_state=agent.state.value,
+            result=agent.result,
+            error=agent.error,
+            tools_used=list(agent.tools_used),
+            iteration_count=agent.iteration_count,
+            recovery_attempts=agent.recovery_attempts,
+            state_history=agent._sm.history_as_dicts(),
+            total_duration_ms=int((time.time() - agent_start) * 1000),
+        )
+        if trajectory_saver:
+            try:
+                await trajectory_saver.save(trajectory)
+            except Exception as save_err:
+                log.error("Failed to save agent trajectory for %s: %s", agent.id, save_err)
 
 
 async def _call_llm_with_recovery(
