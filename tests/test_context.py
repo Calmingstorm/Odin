@@ -229,3 +229,83 @@ class TestConditionEvaluation:
         ctx = ExecutionContext()
         with pytest.raises(KeyError):
             ctx.evaluate_condition("${inputs.missing}")
+
+    # -- step-output references in conditions --------------------------------
+
+    def test_step_output_equality_dollar_brace(self):
+        ctx = _ctx_with_results(check={"status": "ready"})
+        assert ctx.evaluate_condition("${check.output.status} == ready") is True
+
+    def test_step_output_equality_dollar_brace_mismatch(self):
+        ctx = _ctx_with_results(check={"status": "pending"})
+        assert ctx.evaluate_condition("${check.output.status} == ready") is False
+
+    def test_step_output_truthiness_bool(self):
+        ctx = _ctx_with_results(gate=True)
+        assert ctx.evaluate_condition("${gate.output}") is True
+
+    def test_step_output_truthiness_false(self):
+        ctx = _ctx_with_results(gate=False)
+        assert ctx.evaluate_condition("${gate.output}") is False
+
+    def test_step_output_truthiness_nonempty_dict(self):
+        ctx = _ctx_with_results(gate={"key": "val"})
+        assert ctx.evaluate_condition("${gate.output}") is True
+
+    def test_step_output_truthiness_empty_dict(self):
+        ctx = _ctx_with_results(gate={})
+        assert ctx.evaluate_condition("${gate.output}") is False
+
+    def test_step_output_nested_dict_in_condition(self):
+        ctx = _ctx_with_results(fetch={"response": {"code": 200, "ok": True}})
+        assert ctx.evaluate_condition("${fetch.output.response.code} == 200") is True
+
+    def test_step_output_list_index_in_condition(self):
+        ctx = _ctx_with_results(scan={"hosts": ["alpha", "beta", "gamma"]})
+        assert ctx.evaluate_condition("${scan.output.hosts.0} == alpha") is True
+
+    def test_step_output_list_index_mismatch(self):
+        ctx = _ctx_with_results(scan={"hosts": ["alpha", "beta"]})
+        assert ctx.evaluate_condition("${scan.output.hosts.1} == alpha") is False
+
+    def test_step_output_implicit_output_in_condition(self):
+        """${step.key} implicitly resolves through .output."""
+        ctx = _ctx_with_results(check="go")
+        assert ctx.evaluate_condition("${check.output} == go") is True
+
+    def test_step_output_inequality_in_condition(self):
+        ctx = _ctx_with_results(env_check="staging")
+        assert ctx.evaluate_condition("${env_check.output} != prod") is True
+
+    def test_dollar_brace_steps_prefix(self):
+        """${steps.step_name.output} should work the same as {steps.step_name.output}."""
+        ctx = _ctx_with_results(check="go")
+        assert ctx.evaluate_condition("${steps.check.output} == go") is True
+
+    def test_dollar_brace_steps_prefix_truthiness(self):
+        ctx = _ctx_with_results(gate=True)
+        assert ctx.evaluate_condition("${steps.gate.output}") is True
+
+    def test_dollar_brace_steps_prefix_nested(self):
+        ctx = _ctx_with_results(fetch={"data": {"ready": True}})
+        assert ctx.evaluate_condition("${steps.fetch.output.data.ready}") is True
+
+    def test_bare_brace_steps_in_condition(self):
+        ctx = _ctx_with_results(check="go")
+        assert ctx.evaluate_condition("{steps.check.output} == go") is True
+
+    def test_bare_brace_steps_nested_in_condition(self):
+        ctx = _ctx_with_results(api={"result": {"count": 5}})
+        assert ctx.evaluate_condition("{steps.api.output.result.count} == 5") is True
+
+    def test_step_output_none_is_falsy(self):
+        ctx = _ctx_with_results(check=None)
+        assert ctx.evaluate_condition("${check.output}") is False
+
+    def test_step_output_zero_is_falsy(self):
+        ctx = _ctx_with_results(check=0)
+        assert ctx.evaluate_condition("${check.output}") is False
+
+    def test_step_output_empty_list_is_falsy(self):
+        ctx = _ctx_with_results(check=[])
+        assert ctx.evaluate_condition("${check.output}") is False

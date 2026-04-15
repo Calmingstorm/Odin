@@ -135,6 +135,8 @@ class ExecutionContext:
         parts = path_str.split(".")
         if parts[0] == "inputs":
             return self._lookup_input(".".join(parts[1:]))
+        if parts[0] == "steps":
+            return self._lookup_step(".".join(parts[1:]))
         return self._lookup_step(path_str)
 
     def _lookup_step(self, path_str: str) -> Any:

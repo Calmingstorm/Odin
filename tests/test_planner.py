@@ -308,3 +308,136 @@ class TestConditionalExecution:
         # Override: enabled
         r = p.execute(plan, inputs={"enabled": True})
         assert r.steps["a"].status == StepStatus.SUCCESS
+
+    # -- branching on prior step outputs ------------------------------------
+
+    def test_when_step_output_nested_path(self, ts_registry):
+        """Condition can reference nested dict paths in prior step output."""
+        plan = PlanSpec(
+            name="nested_branch",
+            steps=(
+                StepSpec(id="check", tool="echo",
+                         params={"message": {"env": "prod", "ready": True}}),
+                StepSpec(id="deploy", tool="echo",
+                         params={"message": "deployed"},
+                         depends_on=("check",),
+                         when="${check.output.env} == prod"),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["deploy"].status == StepStatus.SUCCESS
+
+    def test_when_step_output_nested_mismatch_skips(self, ts_registry):
+        plan = PlanSpec(
+            name="nested_skip",
+            steps=(
+                StepSpec(id="check", tool="echo",
+                         params={"message": {"env": "staging"}}),
+                StepSpec(id="deploy", tool="echo",
+                         params={"message": "deployed"},
+                         depends_on=("check",),
+                         when="${check.output.env} == prod"),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["deploy"].status == StepStatus.SKIPPED
+
+    def test_when_step_output_truthiness(self, ts_registry):
+        """Condition on step output truthy value (non-string)."""
+        plan = PlanSpec(
+            name="truthy_branch",
+            steps=(
+                StepSpec(id="gate", tool="echo",
+                         params={"message": {"items": [1, 2, 3]}}),
+                StepSpec(id="process", tool="echo",
+                         params={"message": "processing"},
+                         depends_on=("gate",),
+                         when="${gate.output.items}"),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["process"].status == StepStatus.SUCCESS
+
+    def test_when_step_output_falsy_skips(self, ts_registry):
+        """Empty list output should cause condition to skip."""
+        plan = PlanSpec(
+            name="falsy_branch",
+            steps=(
+                StepSpec(id="gate", tool="echo",
+                         params={"message": {"items": []}}),
+                StepSpec(id="process", tool="echo",
+                         params={"message": "processing"},
+                         depends_on=("gate",),
+                         when="${gate.output.items}"),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["process"].status == StepStatus.SKIPPED
+
+    def test_when_dollar_brace_steps_prefix(self, ts_registry):
+        """${steps.X.output} form works in when conditions."""
+        plan = PlanSpec(
+            name="steps_prefix",
+            steps=(
+                StepSpec(id="check", tool="echo", params={"message": "go"}),
+                StepSpec(id="act", tool="echo", params={"message": "acted"},
+                         depends_on=("check",),
+                         when="${steps.check.output} == go"),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["act"].status == StepStatus.SUCCESS
+
+    def test_when_bare_brace_steps_prefix(self, ts_registry):
+        """{steps.X.output} form works in when conditions."""
+        plan = PlanSpec(
+            name="bare_steps",
+            steps=(
+                StepSpec(id="check", tool="echo", params={"message": "go"}),
+                StepSpec(id="act", tool="echo", params={"message": "acted"},
+                         depends_on=("check",),
+                         when="{steps.check.output} == go"),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["act"].status == StepStatus.SUCCESS
+
+    def test_when_multi_step_chain_branching(self, ts_registry):
+        """Three-step chain: A produces data, B branches on A, C branches on B."""
+        plan = PlanSpec(
+            name="chain_branch",
+            steps=(
+                StepSpec(id="a", tool="echo", params={"message": "ready"}),
+                StepSpec(id="b", tool="echo", params={"message": "processed"},
+                         depends_on=("a",),
+                         when="${a.output} == ready"),
+                StepSpec(id="c", tool="echo", params={"message": "final"},
+                         depends_on=("b",),
+                         when="${b.output} == processed"),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["a"].status == StepStatus.SUCCESS
+        assert r.steps["b"].status == StepStatus.SUCCESS
+        assert r.steps["c"].status == StepStatus.SUCCESS
+
+    def test_when_step_output_inequality(self, ts_registry):
+        plan = PlanSpec(
+            name="neq_step",
+            steps=(
+                StepSpec(id="check", tool="echo", params={"message": "staging"}),
+                StepSpec(id="warn", tool="echo", params={"message": "not prod!"},
+                         depends_on=("check",),
+                         when="${check.output} != prod"),
+            ),
+        )
+        p = Planner(ts_registry)
+        r = p.execute(plan)
+        assert r.steps["warn"].status == StepStatus.SUCCESS
