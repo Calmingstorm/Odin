@@ -37,6 +37,7 @@ class AuditLogger:
         result_summary: str,
         execution_time_ms: int,
         error: str | None = None,
+        diff: str | None = None,
     ) -> None:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -50,6 +51,8 @@ class AuditLogger:
             "execution_time_ms": execution_time_ms,
             "error": error,
         }
+        if diff:
+            entry["diff"] = diff
         line = json.dumps(entry, default=str) + "\n"
         try:
             async with aiofiles.open(self.path, "a") as f:
@@ -72,6 +75,7 @@ class AuditLogger:
         status: int,
         ip: str = "",
         execution_time_ms: int = 0,
+        diff: str | None = None,
     ) -> None:
         """Log a web UI API action (state-changing requests)."""
         entry = {
@@ -83,6 +87,8 @@ class AuditLogger:
             "ip": ip,
             "execution_time_ms": execution_time_ms,
         }
+        if diff:
+            entry["diff"] = diff
         line = json.dumps(entry, default=str) + "\n"
         try:
             async with aiofiles.open(self.path, "a") as f:
@@ -276,3 +282,49 @@ class AuditLogger:
             "tools": sorted(tools),
             "web_actions": web_actions,
         }
+
+    async def search_diffs(
+        self,
+        *,
+        tool_name: str | None = None,
+        user: str | None = None,
+        date: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Return audit entries that contain a diff, most recent first."""
+        if not self.path.exists():
+            return []
+
+        try:
+            async with aiofiles.open(self.path, "r") as f:
+                lines = await f.readlines()
+        except Exception as e:
+            log.error("Failed to read audit log for diffs: %s", e)
+            return []
+
+        results: list[dict] = []
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if not entry.get("diff"):
+                continue
+            if tool_name and entry.get("tool_name") != tool_name:
+                continue
+            if user and user.lower() not in (
+                entry.get("user_name", "").lower() + entry.get("user_id", "")
+            ):
+                continue
+            if date and not entry.get("timestamp", "").startswith(date):
+                continue
+
+            results.append(entry)
+            if len(results) >= limit:
+                break
+
+        return results

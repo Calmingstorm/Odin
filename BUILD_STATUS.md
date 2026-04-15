@@ -139,7 +139,7 @@ tightening of prior work.
 ### Phase 6 — Policy, audit, safety (rounds 26–30)
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
-| 26 | Action diffs: for file / config changes, audit log records before→after diff | pending | |
+| 26 | Action diffs: for file / config changes, audit log records before→after diff | done | DiffTracker module, compute_unified_diff/compute_dict_diff, AuditLogger diff field, background task integration, config update diff via web API, /api/audit/diffs endpoint, +82 tests |
 | 27 | Audit log signing: append-only with HMAC chain for tamper detection | pending | |
 | 28 | Dangerous-command risk classifier: tag commands by risk before execution (observability only, NO blocking) | pending | |
 | 29 | Tool RBAC: honor `PermissionsConfig.tiers` on tool calls (not auth only) | pending | |
@@ -3103,4 +3103,141 @@ New endpoint `POST /api/knowledge/import`:
 - REST API endpoint count is now 100 (was 99 after Round 24, +1 new: `POST /api/knowledge/import`).
 - The `_html_to_text` function is imported from `src/tools/web.py` inside the `import_web_url` method (lazy import to avoid circular deps). If `web.py` changes its internal API, the importer would need updating.
 - `DIR_ALLOWED_EXTENSIONS` controls which file types are ingested from directories. Adding new text formats is safe; adding binary formats would be dangerous.
+- All five subsystem wiring tasks remain open from prior rounds.
+
+## Round 26 — Action diffs: for file/config changes, audit log records before→after diff
+**Focus**: Add before→after diff tracking to the audit log for file-modifying tools (`write_file`) and config changes via the web API. Operators can now see exactly what changed, not just that a tool ran.
+**Baseline pytest**: 2605 passed, 0 failed
+**Post-round pytest**: 2687 passed, 0 failed (+82 new tests)
+
+### Validated from prior rounds
+- Round 25 (Knowledge import): all 82 tests pass, BulkImporter and REST endpoint work correctly.
+- Round 25 noted "Round 26 has no dependencies on Round 25" — confirmed.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. DiffTracker module: `src/audit/diff_tracker.py` (new, ~115 lines)
+
+New module with diff computation utilities and a stateful tracker:
+
+- **`compute_unified_diff(before, after, label, max_chars)`** (lines 24-46): Generates a unified diff string using `difflib.unified_diff`. Truncates to `MAX_DIFF_CHARS` (4000) with a `[diff truncated]` notice. Returns empty string when content is identical.
+
+- **`compute_dict_diff(before, after, label, max_chars)`** (lines 49-58): Serialises two dicts to sorted JSON, then delegates to `compute_unified_diff`. Used for config change diffs where the before/after are dictionaries.
+
+- **`extract_file_target(tool_name, tool_input)`** (lines 61-68): Returns `(host, path)` for tools with a known file target. Currently supports `write_file` only. Returns `None` for all other tools. Both `host` and `path` must be non-empty strings.
+
+- **`DIFF_TOOLS`** (line 21): `frozenset({"write_file"})` — tools that produce trackable file diffs. Future rounds can add more tools here (e.g. if a `patch_file` tool is added).
+
+- **`MAX_DIFF_CHARS`** (line 19): 4000 — maximum characters for a diff string before truncation. Keeps audit log entries reasonable.
+
+- **`DiffTracker`** class (lines 71-113):
+  - `capture_before(tool_name, tool_input, executor)`: Reads the current file via `executor._run_on_host()` before a write. Stores the content keyed by `"host:path"`. Handles errors gracefully (unknown host → empty string, SSH failure → empty string). Returns the snapshot key or `None` for non-diff tools. Uses `shlex.quote` on the path to prevent injection.
+  - `compute_diff(tool_name, tool_input, snapshot_key)`: Pops the before-snapshot and computes a unified diff against the known "after" content (from `tool_input["content"]` for `write_file`). Returns `None` if no change or if the tool isn't a diff-tracked type.
+  - `clear()`: Removes all snapshots (cleanup utility).
+
+#### 2. AuditLogger updated: `src/audit/logger.py` (lines 28-55, 69-100, 285-330)
+
+- **`log_execution()`**: New optional `diff: str | None = None` parameter. When truthy, adds a `"diff"` field to the audit JSONL entry. When `None` or empty string, the field is omitted entirely to avoid bloating non-diff entries.
+
+- **`log_web_action()`**: Same treatment — new optional `diff` parameter, included in the entry only when truthy.
+
+- **`search_diffs()`** (new method, lines 285-330): Searches the audit log for entries that contain a `"diff"` field. Supports filters: `tool_name`, `user`, `date`, `limit`. Returns most-recent-first. Works for both tool execution entries and web action entries.
+
+#### 3. Background task integration: `src/discord/background_task.py` (lines 19, 94, 147-180)
+
+- Imports `DIFF_TOOLS` and `DiffTracker` from the new module.
+- Creates a `DiffTracker` instance at the start of `run_background_task()`.
+- Before executing any tool in `DIFF_TOOLS`, calls `diff_tracker.capture_before()` to snapshot the current file content via the executor.
+- After successful execution, calls `diff_tracker.compute_diff()` to get the unified diff.
+- Passes the diff to `audit_logger.log_execution()` via the new `diff` kwarg.
+- All diff operations are wrapped in try/except to never interfere with tool execution — diff capture is observability-only, never blocks.
+
+#### 4. Config diff via web API: `src/web/api.py` (lines 365-408) + `src/health/server.py` (lines 294-306)
+
+- **PUT /api/config**: Before applying the config update, snapshots the current (redacted) config. After applying, computes a dict diff via `compute_dict_diff()`. Stores the diff on `request["_config_diff"]`.
+
+- **Audit middleware** (`src/health/server.py`): Reads `request.get("_config_diff")` and passes it to `log_web_action(diff=...)`. This means every config update via the web UI gets a diff in the audit log showing exactly which fields changed (with sensitive fields redacted).
+
+#### 5. REST API endpoint: `src/web/api.py` (lines 1823-1836)
+
+New endpoint `GET /api/audit/diffs`:
+- Query parameters: `tool` (filter by tool name), `user`, `date` (ISO prefix), `limit` (default 20, max 100)
+- Returns `{"entries": [...], "count": N}` — only audit entries that contain a diff
+- 400 on invalid limit
+
+#### 6. Tests: `tests/test_action_diffs.py` — 82 tests across 14 test classes
+
+**compute_unified_diff** (11):
+- `TestComputeUnifiedDiff` (11): identical, simple change, new file, deleted file, multiline, truncation, default label, empty both, no trailing newline, unicode, binary-like content.
+
+**compute_dict_diff** (7):
+- `TestComputeDictDiff` (7): identical, changed value, added key, removed key, nested change, truncation, sorts keys.
+
+**extract_file_target** (8):
+- `TestExtractFileTarget` (8): write_file, missing host, missing path, non-diff tool, read_file, empty inputs, empty host, empty path.
+
+**DIFF_TOOLS constant** (4):
+- `TestDiffToolsConstant` (4): contains write_file, is frozenset, excludes read_file, excludes run_command.
+
+**MAX_DIFF_CHARS constant** (2):
+- `TestMaxDiffChars` (2): reasonable size, is int.
+
+**DiffTracker** (13):
+- `TestDiffTracker` (13): capture write_file, capture non-diff tool, host error, exception, compute diff, no change, new file, none key, missing snapshot, cleanup after compute, clear, non-write tool, path as label.
+
+**AuditLogger diff field** (6):
+- `TestAuditLoggerDiffField` (6): log_execution with diff, without diff, none omitted, empty string omitted, log_web_action with diff, log_web_action without diff.
+
+**search_diffs** (10):
+- `TestSearchDiffs` (10): returns only diff entries, empty log, no diffs, filter by tool, filter by user, filter by date, limit, most recent first, nonexistent file, web action diffs.
+
+**Background task integration** (4):
+- `TestBackgroundTaskDiffIntegration` (4): DIFF_TOOLS re-exported, DiffTracker importable, write_file diff passed to audit, run_command no diff.
+
+**REST API /api/audit/diffs** (4):
+- `TestAuditDiffsAPI` (4): empty results, returns diff entries, filter by tool, limit, invalid limit.
+
+**Config diff integration** (2):
+- `TestConfigDiffIntegration` (2): config diff computed, no diff when unchanged.
+
+**Module imports** (4):
+- `TestModuleImports` (4): DiffTracker, compute functions, extract_file_target, constants.
+
+**Edge cases** (7):
+- `TestEdgeCases` (7): binary-like content, large identical, multiple independent writes, callback receives diff, extra fields ignored, non-serializable datetime, path quoting.
+
+### Design decisions
+
+1. **Observability-only, never blocking**: All diff operations are wrapped in try/except. If capturing the before state fails (SSH timeout, unknown host, etc.), tool execution proceeds normally with no diff in the audit entry. Diff tracking is purely additive observability.
+
+2. **Known-target-only approach**: Only tools with a known file target (`write_file`) get diffs. For `run_command`/`run_script`, we can't predict what files they'll change, so we don't try. This avoids expensive filesystem scanning and keeps the feature reliable.
+
+3. **Content from tool_input for "after"**: For `write_file`, the "after" state is taken directly from `tool_input["content"]` rather than re-reading the file after writing. This is faster (no extra SSH round-trip) and more reliable (no race conditions).
+
+4. **Diff truncation at 4000 chars**: Large file rewrites could produce enormous diffs. The 4000-char limit keeps audit entries manageable while still showing meaningful context for most changes.
+
+5. **Config diffs use redacted config**: The web API config diff compares redacted configs (sensitive fields masked), so tokens and secrets never appear in audit diffs.
+
+6. **Request-level diff passing**: The config diff is stored on `request["_config_diff"]` and picked up by the audit middleware. This keeps the middleware generic — it doesn't need to know about config-specific logic.
+
+7. **Frozenset for DIFF_TOOLS**: Immutable and O(1) lookup. Future rounds can add more tools by extending this set.
+
+8. **No new dependencies**: Uses stdlib `difflib` and `json` for all diff computation. No external packages.
+
+### Files changed
+- `src/audit/diff_tracker.py` (new, ~115 lines): DiffTracker class, compute_unified_diff, compute_dict_diff, extract_file_target, DIFF_TOOLS, MAX_DIFF_CHARS.
+- `src/audit/logger.py` (lines 28-55, 69-100, 285-330): Optional `diff` parameter on `log_execution` and `log_web_action`; new `search_diffs()` method.
+- `src/discord/background_task.py` (lines 19, 94, 147-180): DiffTracker integration — capture before, compute after, pass to audit.
+- `src/web/api.py` (lines 365-408, 1823-1836): Config diff capture on PUT /api/config; new GET /api/audit/diffs endpoint.
+- `src/health/server.py` (lines 294-306): Audit middleware passes `_config_diff` from request to `log_web_action`.
+- `tests/test_action_diffs.py` (new, 82 tests): Complete test coverage across 14 test classes.
+
+### Next round watch for
+- Round 27 (Audit log signing) builds directly on this round's audit logger changes. The `diff` field is part of the audit entry and should be included in any HMAC chain computation.
+- REST API endpoint count is now 101 (was 100 after Round 25, +1 new: `GET /api/audit/diffs`).
+- `DIFF_TOOLS` currently only contains `write_file`. If future rounds add file-modifying tools (e.g. `patch_file`, `edit_file`), they should be added to this frozenset.
+- The `DiffTracker.capture_before()` method calls `executor._run_on_host()` which is a private method. If the executor API changes, this will need updating.
+- The config diff in the web API uses `_redact_config()` for both before and after states, so sensitive fields appear as `"***"` in both sides of the diff (not leaked).
+- The `request["_config_diff"]` mechanism relies on the audit middleware running after the handler. This is guaranteed by aiohttp's middleware ordering.
 - All five subsystem wiring tasks remain open from prior rounds.

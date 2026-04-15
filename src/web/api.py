@@ -378,6 +378,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 {"error": "Cannot update sensitive fields via API"}, status=403
             )
 
+        # Snapshot before state for diff
+        before_config = _redact_config(bot.config.model_dump())
+
         # Deep merge updates into current config
         current = bot.config.model_dump()
         _deep_merge(current, updates)
@@ -399,7 +402,18 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             except Exception:
                 log.warning("Config applied in memory but failed to persist to %s", config_path, exc_info=True)
 
-        return web.json_response(_redact_config(new_config.model_dump()))
+        # Compute config diff and record in audit log
+        after_config = _redact_config(new_config.model_dump())
+        try:
+            from ..audit.diff_tracker import compute_dict_diff
+            config_diff = compute_dict_diff(before_config, after_config, label="config.yml")
+        except Exception:
+            config_diff = None
+
+        # Store diff on request for the audit middleware
+        request["_config_diff"] = config_diff
+
+        return web.json_response(after_config)
 
     # ------------------------------------------------------------------
     # Quick actions
@@ -1819,6 +1833,20 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if error_only:
             results = [r for r in results if r.get("error")]
         return web.json_response(results)
+
+    @routes.get("/api/audit/diffs")
+    async def search_audit_diffs(request: web.Request) -> web.Response:
+        tool_name = request.query.get("tool") or None
+        user = request.query.get("user") or None
+        date = request.query.get("date") or None
+        try:
+            limit = min(int(request.query.get("limit", "20")), 100)
+        except ValueError:
+            return web.json_response({"error": "limit must be an integer"}, status=400)
+        results = await bot.audit.search_diffs(
+            tool_name=tool_name, user=user, date=date, limit=limit,
+        )
+        return web.json_response({"entries": results, "count": len(results)})
 
     # ------------------------------------------------------------------
     # Log search (server-side filtered log queries)

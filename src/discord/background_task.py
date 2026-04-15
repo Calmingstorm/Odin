@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from ..audit.diff_tracker import DIFF_TOOLS, DiffTracker
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 
@@ -92,6 +93,7 @@ async def run_background_task(
     variables: dict[str, str] = {}
     prev_output = ""
     last_update = time.monotonic()
+    diff_tracker = DiffTracker()
 
     for i, step in enumerate(task.steps):
         # Check cancellation
@@ -141,6 +143,14 @@ async def run_background_task(
                 break
             continue
 
+        # Capture before-state for diff-tracked tools
+        snapshot_key: str | None = None
+        if tool_name in DIFF_TOOLS:
+            try:
+                snapshot_key = await diff_tracker.capture_before(tool_name, tool_input, executor)
+            except Exception:
+                pass
+
         # Execute the tool
         t0 = time.monotonic()
         try:
@@ -155,6 +165,14 @@ async def run_background_task(
 
             if store_as:
                 variables[store_as] = output
+
+            # Compute diff for file-modifying tools
+            action_diff: str | None = None
+            if snapshot_key is not None:
+                try:
+                    action_diff = diff_tracker.compute_diff(tool_name, tool_input, snapshot_key)
+                except Exception:
+                    pass
 
             # Detect error strings returned by executor (not raised as exceptions)
             is_error = _is_error_output(output)
@@ -175,6 +193,8 @@ async def run_background_task(
                     )
                     if is_error:
                         log_kwargs["error"] = output[:500]
+                    if action_diff:
+                        log_kwargs["diff"] = action_diff
                     await audit_logger.log_execution(**log_kwargs)
                 except Exception:
                     log.warning("Failed to audit log step %d of task %s", i, task.task_id)

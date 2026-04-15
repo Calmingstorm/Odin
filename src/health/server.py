@@ -295,12 +295,14 @@ def _make_web_audit_middleware() -> web.middleware:
         audit = request.app.get("audit_logger")
         if audit:
             try:
+                config_diff = request.get("_config_diff")
                 await audit.log_web_action(
                     method=request.method,
                     path=request.path,
                     status=response.status,
                     ip=request.remote or "",
                     execution_time_ms=elapsed_ms,
+                    diff=config_diff,
                 )
             except Exception:
                 pass  # Never block the response for audit failures
