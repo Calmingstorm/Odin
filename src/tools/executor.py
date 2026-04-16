@@ -329,10 +329,13 @@ class ToolExecutor:
         command = inp["command"]
         host = inp["host"]
 
+        governor_note = ""
         if self.command_governor:
             check = self.command_governor.check(command)
             if not check.allowed:
                 return check.denial_message()
+            if check.risk.value in ("high", "critical"):
+                governor_note = f"[governor: allowed — {check.risk.value} risk, {check.reason}]\n"
 
         # Stream output if enabled for this tool
         on_output = None
@@ -358,7 +361,7 @@ class ToolExecutor:
         output = _truncate_lines(output)
         if self._branch_freshness_enabled and is_test_command(command) and is_test_failure(output):
             output = await self._annotate_with_freshness(output, host, "run_command", command)
-        return output
+        return f"{governor_note}{output}" if governor_note else output
 
     async def _handle_run_script(self, inp: dict) -> str:
         """Write a script to a temp file, execute it, and clean up."""
@@ -366,10 +369,13 @@ class ToolExecutor:
         script = inp["script"]
         interpreter = inp.get("interpreter", "bash")
 
+        governor_note = ""
         if self.command_governor:
             check = self.command_governor.check(script)
             if not check.allowed:
                 return check.denial_message()
+            if check.risk.value in ("high", "critical"):
+                governor_note = f"[governor: allowed — {check.risk.value} risk, {check.reason}]\n"
 
         # Map interpreter to file extension
         ext_map = {
@@ -419,8 +425,9 @@ class ToolExecutor:
             result = f"Script failed (exit {code}):\n{_truncate_lines(output)}"
             if self._branch_freshness_enabled and is_test_command(script) and is_test_failure(result):
                 result = await self._annotate_with_freshness(result, host, "run_script", script[:120])
-            return result
-        return _truncate_lines(output)
+            return f"{governor_note}{result}" if governor_note else result
+        output = _truncate_lines(output)
+        return f"{governor_note}{output}" if governor_note else output
 
     async def _handle_read_file(self, inp: dict) -> str:
         path = inp["path"]
