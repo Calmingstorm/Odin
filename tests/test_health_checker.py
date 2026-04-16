@@ -463,11 +463,14 @@ class TestCheckBrowser:
         assert result.status == "ok"
 
     def test_not_connected(self):
+        # Playwright opens lazily on the first browser_* tool call. If the
+        # browser_manager is configured but no browser is attached yet, that's
+        # the healthy "will connect on first use" state — not "degraded".
         bot = MagicMock()
         bot.tool_executor._browser_manager._browser = None
         result = check_browser(bot)
-        assert result.status == "degraded"
-        assert "lazy init" in result.detail
+        assert result.status == "ok"
+        assert "lazy" in result.detail.lower()
 
     def test_unconfigured(self):
         bot = MagicMock()

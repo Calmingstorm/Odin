@@ -869,9 +869,19 @@ class OdinBot(commands.Bot):
     def codex(self):
         return self.codex_client
 
+    @codex.setter
+    def codex(self, value) -> None:
+        """Allow tests and reloads to swap the Codex client via the public name."""
+        self.codex_client = value
+
     @property
     def knowledge(self):
         return self._knowledge_store
+
+    @knowledge.setter
+    def knowledge(self, value) -> None:
+        """Allow tests and reloads to swap the knowledge store via the public name."""
+        self._knowledge_store = value
 
     def _init_allowed_webhook_ids(self) -> None:
         """Populate _ALLOWED_WEBHOOK_IDS from ALLOWED_WEBHOOK_IDS env var."""
