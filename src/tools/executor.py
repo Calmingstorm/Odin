@@ -226,7 +226,8 @@ class ToolExecutor:
             status = await check_branch_freshness(
                 self._exec_command, address, ssh_user,
             )
-        except Exception:
+        except Exception as e:
+            log.warning("Branch freshness check failed: %s", e)
             return result
 
         if status.fetch_failed:
