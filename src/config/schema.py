@@ -208,6 +208,12 @@ class PermissionsConfig(BaseModel):
     overrides_path: str = "./data/permissions.json"
 
 
+class GracefulDegradationConfig(BaseModel):
+    enabled: bool = True
+    degraded_threshold: int = 3  # consecutive failures before DEGRADED
+    unavailable_threshold: int = 10  # consecutive failures before UNAVAILABLE
+
+
 class AuditConfig(BaseModel):
     hmac_key: str = ""  # Empty = signing disabled
 
@@ -355,6 +361,7 @@ class Config(BaseModel):
     audit: AuditConfig = AuditConfig()
     agents: AgentsConfig = AgentsConfig()
     grafana_alerts: GrafanaAlertConfig = GrafanaAlertConfig()
+    graceful_degradation: GracefulDegradationConfig = GracefulDegradationConfig()
 
 
 def _substitute_env_vars(text: str) -> str:

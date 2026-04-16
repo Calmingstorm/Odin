@@ -445,3 +445,38 @@ def check_all(bot: OdinBot) -> dict[str, Any]:
         "total": len(results),
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def sync_guard_from_health(
+    health_results: dict[str, Any],
+    guard: object,
+) -> None:
+    """Bridge health check results into a SubsystemGuard.
+
+    Reads the ``components`` list from *health_results* and calls
+    ``record_failure`` / ``record_success`` on the guard for each
+    component that is registered with it.  Components in "unconfigured"
+    status are ignored (they were never meant to run).
+
+    *guard* is typed as ``object`` to avoid circular imports — at
+    runtime it must be a ``SubsystemGuard`` instance.
+    """
+    components = health_results.get("components", [])
+    for comp in components:
+        name = comp.get("name", "")
+        status_label = comp.get("status", "")
+        detail = comp.get("detail", "")
+
+        # Only touch subsystems the guard already tracks
+        if not hasattr(guard, "get_state") or guard.get_state(name) is None:
+            continue
+
+        if status_label == "unconfigured":
+            continue
+
+        if status_label == "down":
+            guard.record_failure(name, detail)
+        elif status_label == "degraded":
+            guard.record_failure(name, detail)
+        elif status_label == "ok":
+            guard.record_success(name)

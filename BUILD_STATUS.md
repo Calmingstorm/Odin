@@ -176,7 +176,7 @@ tightening of prior work.
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
 | 46 | Startup diagnostics: boot-time checks for Codex auth, SSH hosts, DB, knowledge store, with helpful errors | done | DiagnosticResult/StartupReport dataclasses, 8 check functions (discord_token, codex_credentials, codex_model, ssh_hosts, sessions_directory, knowledge_db, config_consistency, data_directories), run_startup_diagnostics orchestrator, /api/startup/diagnostics endpoint, +77 tests |
-| 47 | Graceful degradation: one failing subsystem (knowledge / voice / browser) must not take the whole bot down | pending | |
+| 47 | Graceful degradation: one failing subsystem (knowledge / voice / browser) must not take the whole bot down | done | SubsystemGuard module (SubsystemState enum, SubsystemInfo, DegradationStats, threshold-based transitions AVAILABLE→DEGRADED→UNAVAILABLE, auto-recovery on success), GracefulDegradationConfig, sync_guard_from_health bridge, /api/subsystems/status endpoint, +108 tests |
 | 48 | Outbound webhooks: Odin pushes structured events to registered URLs (Jenkins-style triggers) | pending | |
 | 49 | Coverage boost: push test coverage on features added in rounds 1–48 above their baseline | pending | |
 | 50 | REVIEWER + WRAP: final end-to-end validation; `run_bot` smoke test; summary of shipped features appended to this file | pending | |
@@ -6104,3 +6104,174 @@ REST API endpoint count is now **127** (was 126).
 - The `check_data_directories()` function uses relative paths (`data/`, `data/sessions/`, etc.) from CWD. This matches the existing convention in `config.yml` where paths default to `./data/...`. If the bot is run from a different CWD, these paths would be relative to that CWD.
 - The `check_sessions_directory` function wraps `Path.is_dir()` in a try/except to handle `PermissionError` from restricted parent directories. This was caught during testing and fixed.
 - All subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, model_router, context_compressor, stuck_loop_detector, startup_diagnostics).
+
+## Round 47 — Graceful degradation: subsystem availability guard
+**Focus**: Implement graceful degradation so that one failing subsystem (knowledge, voice, browser, MCP, monitoring, sessions, scheduler) does not take the whole bot down. Build a `SubsystemGuard` that tracks subsystem state, auto-transitions on failure thresholds, auto-recovers on success, and provides tool-handler-friendly error messages.
+**Baseline pytest**: 4646 passed, 0 failed
+**Post-round pytest**: 4754 passed, 0 failed (+108 new tests)
+
+### Prior round review
+- Round 46 notes said "Round 47 (graceful degradation) has no dependencies on Round 46, but may benefit from calling `run_startup_diagnostics()` as part of its subsystem isolation work." Confirmed — no issues to fix from prior rounds.
+- Checked rounds 44–46 "watch for" items: context compressor not yet wired into tool loop (round 44), model router not yet wired into runtime (round 45), startup diagnostics not yet wired into runtime (round 46). None required fixes for this round's scope. All are deferred wiring tasks.
+
+### Design overview
+
+The bot has ~11 subsystems (knowledge, voice, browser, MCP, monitoring, sessions, scheduler, loops, agents, codex, SSH). Currently, if a subsystem fails at runtime (e.g. knowledge DB becomes inaccessible), tool handlers that call into it either crash or return cryptic errors. The bot itself continues (tool exceptions are caught in `_try_tool`), but the LLM receives unhelpful error strings and may retry fruitlessly.
+
+**SubsystemGuard** provides:
+1. **Centralized state tracking**: Each registered subsystem has a state (AVAILABLE, DEGRADED, UNAVAILABLE) tracked via consecutive failure/success counting.
+2. **Automatic threshold-based transitions**: After N consecutive failures, a subsystem transitions AVAILABLE→DEGRADED (still usable) or DEGRADED→UNAVAILABLE (blocked). Thresholds are configurable.
+3. **Auto-recovery**: A single success resets the failure counter and transitions back to AVAILABLE.
+4. **Tool-handler integration point**: `guard.check(name)` returns `None` (proceed) or a user-friendly error message (blocked). Tool handlers call this before touching the subsystem.
+5. **Health checker bridge**: `sync_guard_from_health()` reads health check results and feeds them into the guard as success/failure events, enabling continuous monitoring to drive degradation state.
+6. **Observability**: Full status via `get_status()` for the REST API, plus `DegradationStats` tracking all checks, blocks, and state transitions.
+
+**Key design principle: fail-open.** Unregistered subsystems are assumed available. The guard never blocks the bot from starting. It only blocks individual tool calls to subsystems that have demonstrated repeated failures.
+
+### Work done
+
+#### 1. New module: `src/health/subsystem_guard.py` (305 lines)
+
+**`SubsystemState`** (line 29, `str, Enum`): Three-value enum: AVAILABLE, DEGRADED, UNAVAILABLE. Extends `str` for JSON serialization.
+
+**`SubsystemInfo`** (line 36, `@dataclass(slots=True)`):
+- `name: str` — subsystem identifier
+- `state: SubsystemState` — current availability
+- `consecutive_failures: int` — counter reset on success
+- `total_failures / total_successes: int` — lifetime counters
+- `last_failure_reason: str` — most recent error description
+- `last_failure_at / last_success_at: float` — monotonic timestamps
+- `registered_at: float` — when first registered
+- `to_dict()` — JSON-serializable snapshot (omits empty optional fields)
+
+**`DegradationStats`** (line 68, `@dataclass`):
+- Counters: `total_checks`, `total_blocked`, `total_transitions`
+- `transition_log: list[dict]` — capped at 200 entries, each records subsystem/from/to/reason/timestamp
+- `record_check(blocked)`, `record_transition(name, from, to, reason)`
+- `as_dict()` — JSON snapshot with last 20 transitions
+
+**Default degradation messages** (line 103, `_DEFAULT_MESSAGES` dict): Human-readable messages for 7 known subsystems (knowledge, voice, browser, mcp, monitoring, sessions, scheduler). Each explains what's offline and reassures that other tools remain functional. Unknown subsystems use `_FALLBACK_MESSAGE` template.
+
+**`SubsystemGuard`** (line 140, class with `__slots__`):
+- `__init__(*, degraded_threshold, unavailable_threshold, stats)` — configurable thresholds with sensible defaults (3, 10). `degraded_threshold` clamped to ≥1, `unavailable_threshold` clamped to ≥ degraded+1.
+- `register(name, *, initial_state)` — idempotent registration
+- `get_state(name) -> SubsystemState | None` — None for unregistered
+- `is_available(name) -> bool` — True only if AVAILABLE (unregistered = True)
+- `is_usable(name) -> bool` — True if AVAILABLE or DEGRADED (unregistered = True)
+- `check(name) -> str | None` — main integration point: returns error message if UNAVAILABLE, None otherwise. Updates stats.
+- `mark_available(name)` / `mark_degraded(name, reason)` / `mark_unavailable(name, reason)` — explicit state transitions (e.g. manual recovery via API)
+- `record_failure(name, reason) -> SubsystemState` — increments consecutive_failures, auto-transitions when thresholds crossed
+- `record_success(name) -> SubsystemState` — resets consecutive_failures, auto-recovers to AVAILABLE
+- `get_subsystem(name) -> SubsystemInfo | None` — raw info access
+- `get_status() -> dict` — full snapshot with overall status, per-subsystem dicts, counts, thresholds, stats
+- `get_unavailable_names() -> list[str]` — for system prompt hints
+- `get_degraded_names() -> list[str]`
+
+#### 2. Config: `src/config/schema.py` (line 211)
+
+**`GracefulDegradationConfig(BaseModel)`**:
+- `enabled: bool = True`
+- `degraded_threshold: int = 3`
+- `unavailable_threshold: int = 10`
+
+Added as `graceful_degradation` field on `Config` (line 359).
+
+#### 3. Health checker bridge: `src/health/checker.py` (line 449)
+
+**`sync_guard_from_health(health_results, guard)`**: Reads the `components` list from a `check_all()` result and calls `record_failure` / `record_success` on the guard for each registered subsystem. Skips "unconfigured" components. Typed as `object` to avoid circular imports.
+
+#### 4. REST API: `src/web/api.py` (line 2236)
+
+**`GET /api/subsystems/status`**: Returns `SubsystemGuard.get_status()` — live subsystem availability, thresholds, and degradation stats.
+
+REST API endpoint count is now **128** (was 127).
+
+#### 5. CLAUDE.md updates
+
+- Added `src/health/subsystem_guard.py` to project structure docs (line 53).
+- Updated REST API endpoint count from 127 to 128.
+
+### Tests: `tests/test_subsystem_guard.py` — 108 tests across 17 test classes
+
+**TestSubsystemState** (3): Values, count, str inheritance.
+
+**TestSubsystemInfo** (5): Defaults, to_dict minimal, to_dict with failure, to_dict with success, slots.
+
+**TestDegradationStats** (8): Initial zeros, record check not blocked, record check blocked, record transition, transition log capped at 200, as_dict keys, as_dict recent transitions capped at 20, JSON serializable.
+
+**TestGuardRegistration** (4): Register, idempotent, custom initial state, order preserved.
+
+**TestGuardStateQueries** (11): get_state registered, get_state unregistered, is_available true/false for degraded/unavailable/unregistered, is_usable for available/degraded/unavailable/unregistered.
+
+**TestGuardCheck** (8): Available returns None, degraded returns None, unavailable returns message, unregistered returns None, uses default message for all known subsystems, uses fallback message for unknown, updates stats blocked/not blocked.
+
+**TestGuardExplicitTransitions** (9): mark_available, mark_available resets failures, mark_available noop if already available, mark_available unregistered noop, mark_degraded, mark_degraded noop, mark_unavailable, mark_unavailable noop, mark_unavailable unregistered noop.
+
+**TestGuardRecordFailure** (8): First failure stays available, threshold to degraded, threshold to unavailable, records timestamp, records reason, unregistered returns available, consecutive failures accumulate, empty reason.
+
+**TestGuardRecordSuccess** (6): Resets consecutive failures, recovers from degraded, recovers from unavailable, records timestamp, no transition on already-available, unregistered returns available.
+
+**TestGuardObservability** (12): get_subsystem, get_subsystem unknown, get_status empty, get_status all available, get_status with degraded, get_status with unavailable, get_status thresholds, get_status includes stats, get_status JSON serializable, get_unavailable_names, get_unavailable_names empty, get_degraded_names.
+
+**TestGuardThresholdConfig** (4): Default thresholds, custom thresholds, degraded threshold minimum 1, unavailable threshold above degraded.
+
+**TestGuardLifecycle** (4): Failure-recovery cycle (full trip through all states), intermittent failures don't escalate, multiple subsystems independent, stats track full lifecycle.
+
+**TestDefaultMessages** (4): All known subsystems have messages, all mention "unavailable", all mention "Other tools remain functional", fallback message template.
+
+**TestGracefulDegradationConfig** (4): Defaults, custom values, in main config, from dict.
+
+**TestSyncGuardFromHealth** (9): Down records failure, ok records success, degraded records failure, unconfigured ignored, skips unregistered, empty components, missing components key, multiple subsystems, repeated sync drives to unavailable.
+
+**TestImports** (2): All public symbols, checker bridge importable.
+
+**TestAPIEndpoint** (2): get_status dict keys, subsystem dict keys.
+
+**TestEdgeCases** (6): Shared stats object, failure-success-failure cycle, mark_degraded then success, mark_unavailable then success, concurrent failure and success tracking, get_status overall priority.
+
+### Files changed
+- `src/health/subsystem_guard.py` (new, 305 lines): `SubsystemState`, `SubsystemInfo`, `DegradationStats`, `SubsystemGuard`, `_DEFAULT_MESSAGES`, `_FALLBACK_MESSAGE`.
+- `src/config/schema.py` (line 211): `GracefulDegradationConfig` class; (line 359) added to `Config`.
+- `src/health/checker.py` (line 449): `sync_guard_from_health` bridge function.
+- `src/web/api.py` (line 2236): `GET /api/subsystems/status` endpoint.
+- `CLAUDE.md` (line 53, 68, 113, 193): Added `subsystem_guard.py` to project structure, updated endpoint count to 128.
+- `tests/test_subsystem_guard.py` (new, 108 tests): 17 test classes.
+
+### Design decisions
+
+1. **Three-state model, not binary**: AVAILABLE/DEGRADED/UNAVAILABLE gives nuance. DEGRADED means "still usable but flaky" — tools proceed but may warn. UNAVAILABLE means "don't even try" — tools return a clear message. This matches the health checker's existing "ok"/"degraded"/"down" taxonomy.
+
+2. **Threshold-based automatic transitions**: Rather than requiring manual state management, the guard transitions automatically based on consecutive failure counts. This handles the common case (DB goes down, tools fail 10 times, guard marks it unavailable, later DB recovers, first success restores it). Manual overrides (`mark_available`, etc.) exist for operators.
+
+3. **Single success restores AVAILABLE**: Aggressive auto-recovery. If a subsystem returns one good result after being UNAVAILABLE, it's immediately restored. This is intentional — we'd rather have a brief retry on a flaky subsystem than require manual intervention. The consecutive-failure counter protects against false positives.
+
+4. **Fail-open for unregistered subsystems**: `is_available("unknown")` returns True. If a subsystem isn't registered with the guard, it's not tracked, and the guard doesn't interfere. This means the guard can be incrementally adopted — register subsystems one at a time without breaking existing flows.
+
+5. **User-friendly default messages**: When `check()` blocks a tool call, it returns a message explaining what's offline, what's affected, and that other tools remain functional. This gives the LLM enough context to work around the unavailability (e.g. skip knowledge search and use tool output directly).
+
+6. **Health checker bridge as separate function**: `sync_guard_from_health` lives in `checker.py` rather than on the guard, keeping the guard independent of the health checker. The bridge can be called periodically (e.g. every health check cycle) to update guard state from continuous monitoring.
+
+7. **NOT wired into runtime**: Following the pattern of prior rounds (39, 42, 44, 45, 46), the module is a standalone library with full tests. Wiring requires:
+   - (a) Instantiate `SubsystemGuard` on bot init with config thresholds
+   - (b) Register subsystems: `guard.register("knowledge")`, etc.
+   - (c) In tool handlers, call `err = guard.check("knowledge"); if err: return err`
+   - (d) After subsystem calls, call `guard.record_success("knowledge")` or `guard.record_failure("knowledge", str(e))`
+   - (e) Periodically call `sync_guard_from_health(check_all(bot), guard)` to keep state fresh
+   - (f) Store `bot.subsystem_guard` for the REST API endpoint
+
+8. **Config field on main Config, not per-subsystem**: `GracefulDegradationConfig` lives at the top level (`config.graceful_degradation`) rather than nested in each subsystem. Thresholds apply globally — individual subsystem tuning can be added later if needed.
+
+### Next round watch for
+- Round 48 (outbound webhooks) has no dependencies on Round 47.
+- REST API endpoint count is now 128 (was 127). One new endpoint: `/api/subsystems/status`.
+- The `SubsystemGuard` is NOT yet called anywhere in runtime code. Wiring requires:
+  - (a) Instantiate `SubsystemGuard` in bot setup with `config.graceful_degradation` thresholds.
+  - (b) Register all subsystems that should be tracked: knowledge, voice, browser, mcp, monitoring, sessions, scheduler.
+  - (c) Add `err = guard.check("subsystem_name")` calls in relevant tool handlers.
+  - (d) Call `guard.record_success()` / `guard.record_failure()` after subsystem interactions.
+  - (e) Call `sync_guard_from_health(check_all(bot), guard)` periodically (e.g. in health check interval timer).
+  - (f) Store as `bot.subsystem_guard` for the REST API endpoint.
+- The `check()` method only blocks when a subsystem is UNAVAILABLE, not DEGRADED. DEGRADED subsystems are still usable — this is intentional for partial functionality scenarios (e.g. knowledge search is slow but still returns results).
+- The `sync_guard_from_health` bridge treats both "down" and "degraded" health status as failures. This means health-checker-reported degradation (e.g. sessions over budget) will increment the guard's failure counter. Multiple consecutive "degraded" health reports could push a subsystem to UNAVAILABLE — operators can tune `unavailable_threshold` if this is too aggressive.
+- Existing patterns in the codebase that already handle subsystem unavailability (browser checks in executor.py lines 472–499, issue tracker check in executor.py line 1264) are complementary to the guard, not replaced by it. The guard provides centralized tracking; existing per-handler checks remain as defense-in-depth.
+- All subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, model_router, context_compressor, stuck_loop_detector, startup_diagnostics, subsystem_guard).

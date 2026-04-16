@@ -2233,6 +2233,17 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response(report.to_dict())
 
     # ------------------------------------------------------------------
+    # Subsystem degradation status
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/subsystems/status")
+    async def subsystem_status(_request: web.Request) -> web.Response:
+        guard = getattr(bot, "subsystem_guard", None)
+        if guard is None:
+            return web.json_response({"error": "subsystem guard not available"}, status=503)
+        return web.json_response(guard.get_status())
+
+    # ------------------------------------------------------------------
     # Agent trajectories
     # ------------------------------------------------------------------
 
