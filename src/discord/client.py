@@ -2952,7 +2952,13 @@ class OdinBot(commands.Bot):
             return f"Failed to post file: {e}"
 
     async def _handle_post_file(self, message: discord.Message, inp: dict) -> str:
-        """Fetch a file from a remote host via SSH and post it to Discord."""
+        """Fetch a file from a host and post it to Discord.
+
+        For localhost this reads directly from the local filesystem; for any
+        other host it falls back to SSH + base64 stream (handles binary safely).
+        Bypassing SSH for localhost avoids the host-key / ssh_key_path gauntlet
+        when Odin wants to post its own files.
+        """
         host_alias = inp.get("host")
         path = inp.get("path")
         caption = inp.get("caption", "")
@@ -2965,33 +2971,46 @@ class OdinBot(commands.Bot):
             return f"Unknown or disallowed host: {host_alias}"
         address, ssh_user, _os = resolved
 
-        # Fetch file as base64 via SSH (handles binary safely)
-        import shlex
-        safe_path = shlex.quote(path)
-        ssh_args = [
-            "ssh",
-            "-i", self.config.tools.ssh_key_path,
-            "-o", f"UserKnownHostsFile={self.config.tools.ssh_known_hosts_path}",
-            "-o", "StrictHostKeyChecking=yes",
-            "-o", "ConnectTimeout=10",
-            "-o", "BatchMode=yes",
-            f"{ssh_user}@{address}",
-            f"base64 {safe_path}",
-        ]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *ssh_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-            if proc.returncode != 0:
-                return f"Failed to fetch file: {stderr.decode('utf-8', errors='replace').strip()}"
-            file_bytes = base64.b64decode(stdout)
-        except asyncio.TimeoutError:
-            return "File fetch timed out (30s)."
-        except Exception as e:
-            return f"Failed to fetch file: {e}"
+        # Local fast path — no SSH gymnastics needed.
+        from ..tools.ssh import is_local_address
+        if is_local_address(address):
+            try:
+                with open(path, "rb") as f:
+                    file_bytes = f.read()
+            except FileNotFoundError:
+                return f"File not found: {path}"
+            except PermissionError:
+                return f"Permission denied reading file: {path}"
+            except OSError as exc:
+                return f"Failed to read file: {exc}"
+        else:
+            # Fetch file as base64 via SSH (handles binary safely)
+            import shlex
+            safe_path = shlex.quote(path)
+            ssh_args = [
+                "ssh",
+                "-i", self.config.tools.ssh_key_path,
+                "-o", f"UserKnownHostsFile={self.config.tools.ssh_known_hosts_path}",
+                "-o", "StrictHostKeyChecking=yes",
+                "-o", "ConnectTimeout=10",
+                "-o", "BatchMode=yes",
+                f"{ssh_user}@{address}",
+                f"base64 {safe_path}",
+            ]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *ssh_args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                if proc.returncode != 0:
+                    return f"Failed to fetch file: {stderr.decode('utf-8', errors='replace').strip()}"
+                file_bytes = base64.b64decode(stdout)
+            except asyncio.TimeoutError:
+                return "File fetch timed out (30s)."
+            except Exception as e:
+                return f"Failed to fetch file: {e}"
 
         if not file_bytes:
             return f"File not found or empty: {path}"
