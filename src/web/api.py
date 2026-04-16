@@ -1672,7 +1672,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not channel:
             return web.json_response({"error": "channel not found"}, status=404)
 
-        requester_id = data.get("requester_id", "web-api")
+        requester_id = "web-api"
 
         # Build iteration callback (same pattern as _handle_start_loop)
         async def _iteration_cb(
@@ -1686,7 +1686,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             goal=goal,
             channel=channel,
             requester_id=requester_id,
-            requester_name=data.get("requester_name", "Web API"),
+            requester_name="Web API",
             iteration_callback=_iteration_cb,
             interval_seconds=data.get("interval_seconds", 60),
             mode=data.get("mode", "notify"),

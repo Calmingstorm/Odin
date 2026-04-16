@@ -133,8 +133,8 @@ class WebSocketManager:
             return
 
         channel_id = data.get("channel_id") or "web-default"
-        user_id = data.get("user_id") or "web-user"
-        username = data.get("username") or "WebUser"
+        user_id = "web-user"
+        username = "WebUser"
 
         log.info("WebSocket chat from %s: %s", username, content[:80])
         try:
