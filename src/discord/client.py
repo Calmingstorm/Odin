@@ -1276,21 +1276,43 @@ class OdinBot(commands.Bot):
         base = ["!"]  # OdinBot's default prefix; can be made config-driven later
         return commands.when_mentioned_or(*base)(bot, message)
 
-    async def _codex_call(self, *, messages: list, system: str, tools: list, **kwargs):
-        """Wrap Codex chat_with_tools with cost tracking + subsystem health.
+    async def _codex_call(
+        self, *, messages: list, system: str, tools: list,
+        user_message: str = "", **kwargs,
+    ):
+        """Wrap Codex chat_with_tools with cost / subsystem / routing wiring.
 
+        - subsystem_guard.check() short-circuits if codex is UNAVAILABLE
+        - model_router (when enabled and user_message given) picks cheap vs
+          strong model; cheap path uses auxiliary_llm_client when available
         - cost_tracker.record() captures token usage on every successful call
-        - subsystem_guard.record_success/failure tracks Codex availability
-        - subsystem_guard.check() short-circuits with a clear error when Codex
-          has been classified UNAVAILABLE so we don't pile failures on a dead
-          subsystem
+        - subsystem_guard.record_success / record_failure tracks codex health
         """
         if self.subsystem_guard is not None:
             err = self.subsystem_guard.check("codex")
             if err:
                 raise RuntimeError(f"Codex subsystem unavailable: {err}")
+
+        # Pick which client to use. Default = strong primary client.
+        client = self.codex_client
+        if (
+            user_message
+            and self.model_router is not None
+            and self.auxiliary_llm_client is not None
+        ):
+            try:
+                decision = await self.model_router.route(user_message)
+                if not decision.use_strong:
+                    client = self.auxiliary_llm_client
+                    log.debug(
+                        "model_router: routing to cheap model (intent=%s, conf=%.2f)",
+                        decision.intent.value, decision.confidence,
+                    )
+            except Exception:
+                log.exception("model_router.route failed; using strong model (non-fatal)")
+
         try:
-            resp = await self.codex_client.chat_with_tools(
+            resp = await client.chat_with_tools(
                 messages=messages, system=system, tools=tools, **kwargs,
             )
         except Exception as exc:
@@ -2353,11 +2375,29 @@ class OdinBot(commands.Bot):
         )
 
         for iteration in range(chat_cap):
+            # Context auto-compression — when accumulated tool iterations push
+            # the message list over the configured budget, summarise older
+            # iterations into a single text message and keep the most recent N
+            # iterations intact.
+            if self.context_compressor is not None and iteration > 0:
+                try:
+                    from ..llm.context_compressor import compress_tool_context, estimate_message_chars
+                    if estimate_message_chars(messages) > self.context_compressor.max_context_chars:
+                        messages, _saved = compress_tool_context(
+                            messages,
+                            max_context_chars=self.context_compressor.max_context_chars,
+                            keep_recent=self.context_compressor.keep_recent_iterations,
+                        )
+                        log.info("context_compressor: trimmed %d chars", _saved)
+                except Exception:
+                    log.exception("context_compressor failed (non-fatal); continuing with full context")
+
             # Show typing indicator while waiting for LLM response
             try:
                 async with message.channel.typing():
                     llm_resp = await self._codex_call(
                         messages=messages, system=system_prompt, tools=tools or [],
+                        user_message=getattr(message, "content", "") or "",
                     )
             except CircuitOpenError as coe:
                 # Circuit breaker open — wait for recovery, then retry once
