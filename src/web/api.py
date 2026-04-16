@@ -2297,6 +2297,100 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         entries = await saver.read_file(filename, limit=limit)
         return web.json_response({"entries": entries, "count": len(entries)})
 
+    # ------------------------------------------------------------------
+    # Outbound webhooks (CRUD + test + stats)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/outbound-webhooks")
+    async def list_outbound_webhooks(_request: web.Request) -> web.Response:
+        dispatcher = getattr(bot, "outbound_webhook_dispatcher", None)
+        if dispatcher is None:
+            return web.json_response({"error": "outbound webhooks not available"}, status=503)
+        return web.json_response(dispatcher.get_status())
+
+    @routes.post("/api/outbound-webhooks")
+    async def create_outbound_webhook(request: web.Request) -> web.Response:
+        dispatcher = getattr(bot, "outbound_webhook_dispatcher", None)
+        if dispatcher is None:
+            return web.json_response({"error": "outbound webhooks not available"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        url = body.get("url", "")
+        name = body.get("name", "")
+        if err := _validate_string(name, "name", 128):
+            return web.json_response({"error": err}, status=400)
+        try:
+            target = dispatcher.register(
+                name=name,
+                url=url,
+                secret=body.get("secret", ""),
+                events=body.get("events"),
+                enabled=body.get("enabled", True),
+                scrub_secrets=body.get("scrub_secrets", True),
+                verify_ssl=body.get("verify_ssl", True),
+            )
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response(target.to_dict(), status=201)
+
+    @routes.put("/api/outbound-webhooks/{webhook_id}")
+    async def update_outbound_webhook(request: web.Request) -> web.Response:
+        dispatcher = getattr(bot, "outbound_webhook_dispatcher", None)
+        if dispatcher is None:
+            return web.json_response({"error": "outbound webhooks not available"}, status=503)
+        webhook_id = request.match_info["webhook_id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        try:
+            target = dispatcher.update(
+                webhook_id,
+                name=body.get("name"),
+                url=body.get("url"),
+                secret=body.get("secret"),
+                events=body.get("events"),
+                enabled=body.get("enabled"),
+                scrub_secrets=body.get("scrub_secrets"),
+                verify_ssl=body.get("verify_ssl"),
+            )
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        if target is None:
+            return web.json_response({"error": "webhook not found"}, status=404)
+        return web.json_response(target.to_dict())
+
+    @routes.delete("/api/outbound-webhooks/{webhook_id}")
+    async def delete_outbound_webhook(request: web.Request) -> web.Response:
+        dispatcher = getattr(bot, "outbound_webhook_dispatcher", None)
+        if dispatcher is None:
+            return web.json_response({"error": "outbound webhooks not available"}, status=503)
+        webhook_id = request.match_info["webhook_id"]
+        removed = dispatcher.unregister(webhook_id)
+        if not removed:
+            return web.json_response({"error": "webhook not found"}, status=404)
+        return web.json_response({"status": "deleted", "webhook_id": webhook_id})
+
+    @routes.post("/api/outbound-webhooks/{webhook_id}/test")
+    async def test_outbound_webhook(request: web.Request) -> web.Response:
+        dispatcher = getattr(bot, "outbound_webhook_dispatcher", None)
+        if dispatcher is None:
+            return web.json_response({"error": "outbound webhooks not available"}, status=503)
+        webhook_id = request.match_info["webhook_id"]
+        result = await dispatcher.send_test_event(webhook_id)
+        if result is None:
+            return web.json_response({"error": "webhook not found"}, status=404)
+        return web.json_response(result.to_dict())
+
+    @routes.get("/api/outbound-webhooks/stats")
+    async def outbound_webhook_stats(_request: web.Request) -> web.Response:
+        dispatcher = getattr(bot, "outbound_webhook_dispatcher", None)
+        if dispatcher is None:
+            return web.json_response({"error": "outbound webhooks not available"}, status=503)
+        return web.json_response(dispatcher.stats.as_dict())
+
     return routes
 
 

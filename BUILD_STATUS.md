@@ -177,7 +177,7 @@ tightening of prior work.
 |---|-------|--------|---------|
 | 46 | Startup diagnostics: boot-time checks for Codex auth, SSH hosts, DB, knowledge store, with helpful errors | done | DiagnosticResult/StartupReport dataclasses, 8 check functions (discord_token, codex_credentials, codex_model, ssh_hosts, sessions_directory, knowledge_db, config_consistency, data_directories), run_startup_diagnostics orchestrator, /api/startup/diagnostics endpoint, +77 tests |
 | 47 | Graceful degradation: one failing subsystem (knowledge / voice / browser) must not take the whole bot down | done | SubsystemGuard module (SubsystemState enum, SubsystemInfo, DegradationStats, threshold-based transitions AVAILABLE→DEGRADED→UNAVAILABLE, auto-recovery on success), GracefulDegradationConfig, sync_guard_from_health bridge, /api/subsystems/status endpoint, +108 tests |
-| 48 | Outbound webhooks: Odin pushes structured events to registered URLs (Jenkins-style triggers) | pending | |
+| 48 | Outbound webhooks: Odin pushes structured events to registered URLs (Jenkins-style triggers) | done | OutboundWebhookDispatcher module (EventType enum, WebhookTarget, DeliveryResult, WebhookStats), HMAC-SHA256 signing, retries, rate limiting, secret scrubbing, OutboundWebhooksConfig, 6 REST API endpoints, +110 tests |
 | 49 | Coverage boost: push test coverage on features added in rounds 1–48 above their baseline | pending | |
 | 50 | REVIEWER + WRAP: final end-to-end validation; `run_bot` smoke test; summary of shipped features appended to this file | pending | |
 
@@ -6275,3 +6275,240 @@ REST API endpoint count is now **128** (was 127).
 - The `sync_guard_from_health` bridge treats both "down" and "degraded" health status as failures. This means health-checker-reported degradation (e.g. sessions over budget) will increment the guard's failure counter. Multiple consecutive "degraded" health reports could push a subsystem to UNAVAILABLE — operators can tune `unavailable_threshold` if this is too aggressive.
 - Existing patterns in the codebase that already handle subsystem unavailability (browser checks in executor.py lines 472–499, issue tracker check in executor.py line 1264) are complementary to the guard, not replaced by it. The guard provides centralized tracking; existing per-handler checks remain as defense-in-depth.
 - All subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, model_router, context_compressor, stuck_loop_detector, startup_diagnostics, subsystem_guard).
+
+## Round 48 — Outbound webhooks: push structured events to registered URLs
+**Focus**: Implement outbound webhook dispatcher — Odin pushes structured JSON event payloads to registered HTTP endpoints (Jenkins-style triggers) when events occur. HMAC-SHA256 signed, with retries, rate limiting, secret scrubbing, and full CRUD REST API.
+**Baseline pytest**: 4754 passed, 0 failed
+**Post-round pytest**: 4864 passed, 0 failed (+110 new tests)
+
+### Prior round review
+- Round 47 notes said "Round 48 (outbound webhooks) has no dependencies on Round 47." Confirmed — no issues to fix from prior rounds.
+- Checked rounds 45–47 "watch for" items: model router not yet wired into runtime (round 45), startup diagnostics not yet wired into runtime (round 46), subsystem guard not yet wired into runtime (round 47). None required fixes for this round's scope. All are deferred wiring tasks.
+
+### Design overview
+
+Outbound webhooks allow Odin to push structured event notifications to external HTTP endpoints when internal events occur. This is the complement to the existing incoming webhook receiver (`src/health/server.py`) — while incoming webhooks receive events from external systems (Gitea, GitHub, Grafana), outbound webhooks send events to external systems (Jenkins, PagerDuty, Slack, custom automation).
+
+**Event types** (8 categories): `tool_execution`, `alert`, `schedule`, `agent`, `loop`, `health`, `web_action`, `custom`. Each webhook target subscribes to specific event types or all events.
+
+**Delivery guarantees**:
+- Fire-and-forget mode for audit callbacks (non-blocking)
+- Synchronous dispatch with results for explicit sends
+- Up to 3 attempts per delivery (1 initial + 2 retries with exponential backoff)
+- Rate limiting per webhook (configurable, default 0.5s)
+- Per-webhook SSL verification toggle
+
+**Security**:
+- HMAC-SHA256 signing with per-webhook secrets (`X-Webhook-Signature: sha256=<hex>`)
+- Consistent with incoming webhook verification format
+- Secret scrubbing on payloads (per-webhook toggle)
+- Secrets never exposed in status/API responses (`has_secret: true/false` only)
+
+### Work done
+
+#### 1. New module: `src/notifications/outbound_webhooks.py` (350 lines)
+
+**`EventType`** (line 40, `str, Enum`): 8 event categories: TOOL_EXECUTION, ALERT, SCHEDULE, AGENT, LOOP, HEALTH, WEB_ACTION, CUSTOM. Extends `str` for JSON serialization.
+
+**`ALL_EVENT_TYPES`** (line 52, `frozenset[str]`): Frozen set of all valid event type values.
+
+**`WebhookTarget`** (line 55, `@dataclass(slots=True)`):
+- `id: str` — unique webhook identifier (auto-generated or custom)
+- `name: str` — human-readable name
+- `url: str` — HTTP(S) endpoint URL
+- `secret: str` — HMAC-SHA256 signing key (empty = unsigned)
+- `events: list[str]` — subscribed event types (empty = all)
+- `enabled: bool` — whether the webhook is active
+- `scrub_secrets: bool` — whether to scrub secrets from payloads
+- `verify_ssl: bool` — whether to verify SSL certificates
+- `created_at: str` — ISO-8601 creation timestamp
+- `accepts_event(event_type) -> bool` — check event subscription
+- `to_dict() -> dict` — JSON-safe representation (secret NOT exposed, only `has_secret` bool)
+
+**`DeliveryResult`** (line 89, `@dataclass(slots=True)`):
+- `webhook_id`, `webhook_name`, `event_type` — target identification
+- `status_code: int` — HTTP status (0 if connection failed)
+- `success: bool`, `error: str` — outcome
+- `attempt: int` — which attempt succeeded (1-3)
+- `latency_ms: float`, `timestamp: str` — timing
+
+**`WebhookStats`** (line 116, `@dataclass`):
+- Counters: `total_dispatched`, `total_delivered`, `total_failed`, `total_retries`
+- `recent_deliveries: list[dict]` — capped at 200, last 20 in API response
+- `record(result)`, `as_dict()`
+
+**`sign_payload(body, secret) -> str`** (line 139): HMAC-SHA256 hex digest, matching incoming webhook verification format.
+
+**`build_event_payload(event_type, data, *, event_id, source) -> dict`** (line 144): Standard envelope: `event_id` (auto-UUID if not provided), `event_type`, `timestamp` (ISO-8601), `source` (default "odin"), `data` (the event payload).
+
+**`_truncate_payload(payload) -> str`** (line 157): Caps payload at 64K chars with `_truncated: true` indicator.
+
+**`OutboundWebhookDispatcher`** (line 164, class with `__slots__`):
+
+CRUD:
+- `register(*, name, url, secret, events, enabled, ...)` — create webhook, validates URL scheme/length, name/secret length, deduplicates IDs, filters invalid event types, caps at 50 webhooks
+- `unregister(webhook_id) -> bool` — remove by ID
+- `get(webhook_id) -> WebhookTarget | None`
+- `list_webhooks() -> list[WebhookTarget]`
+- `update(webhook_id, *, name, url, ...) -> WebhookTarget | None` — partial update with validation
+
+Delivery:
+- `dispatch(event_type, data, *, event_id, source) -> list[DeliveryResult]` — send to all matching enabled webhooks, builds payload envelope, applies scrubbing, signs, retries
+- `dispatch_fire_and_forget(event_type, data, ...)` — wraps dispatch in exception handler for non-blocking use
+- `send_test_event(webhook_id) -> DeliveryResult | None` — send a test ping
+
+Internal:
+- `_deliver_one(target, payload_body, event_type)` — HTTP POST with retries (1s, 2s exponential backoff), 10s timeout, HMAC signature header, SSL toggle
+- `_check_rate_limit(webhook_id) -> bool` — per-webhook rate limiting
+- `_get_session() -> aiohttp.ClientSession` — lazy session with reuse
+
+Observability:
+- `get_status() -> dict` — webhook count, enabled count, per-webhook config (no secrets), stats
+
+Lifecycle:
+- `close()` — close aiohttp session
+
+#### 2. Config: `src/config/schema.py` (lines 211–227)
+
+**`OutboundWebhookTarget(BaseModel)`** (line 211):
+- `name: str = ""`
+- `url: str = ""`
+- `secret: str = ""` — HMAC-SHA256 signing key
+- `events: list[str] = []` — subscribed event types
+- `enabled: bool = True`
+- `scrub_secrets: bool = True`
+- `verify_ssl: bool = True`
+
+**`OutboundWebhooksConfig(BaseModel)`** (line 220):
+- `enabled: bool = False` — opt-in, disabled by default
+- `scrub_secrets: bool = True`
+- `rate_limit_seconds: float = 0.5`
+- `targets: list[OutboundWebhookTarget] = []` — pre-configured targets from config.yml
+
+Added as `outbound_webhooks` field on `Config` (line 366).
+
+#### 3. REST API: `src/web/api.py` (6 new endpoints)
+
+- **`GET /api/outbound-webhooks`**: List all webhooks with full status and stats
+- **`POST /api/outbound-webhooks`**: Register a new webhook (name, url, secret, events, enabled, scrub_secrets, verify_ssl)
+- **`PUT /api/outbound-webhooks/{webhook_id}`**: Update fields on existing webhook
+- **`DELETE /api/outbound-webhooks/{webhook_id}`**: Remove a webhook
+- **`POST /api/outbound-webhooks/{webhook_id}/test`**: Send a test event to a specific webhook
+- **`GET /api/outbound-webhooks/stats`**: Delivery statistics (dispatched/delivered/failed/retries, recent deliveries)
+
+REST API endpoint count is now **134** (was 128).
+
+#### 4. Module exports: `src/notifications/__init__.py`
+
+Added `OutboundWebhookDispatcher` to `__all__`.
+
+#### 5. CLAUDE.md updates
+
+- Added `src/notifications/outbound_webhooks.py` to project structure docs.
+- Updated REST API endpoint count from 128 to 134.
+
+### Tests: `tests/test_outbound_webhooks.py` — 110 tests across 22 test classes
+
+**TestEventType** (4): Values, count, str inheritance, ALL_EVENT_TYPES set.
+
+**TestWebhookTarget** (6): Defaults, accepts_event empty list (all), accepts_event filtered, to_dict with secret (has_secret only), to_dict no secret, slots.
+
+**TestDeliveryResult** (4): Defaults, to_dict minimal (error omitted), to_dict with error, slots.
+
+**TestWebhookStats** (8): Initial zeros, record success, record failure, record retry, recent deliveries capped at 200, as_dict keys, as_dict recent capped at 20, JSON serializable.
+
+**TestSignPayload** (3): HMAC matches manual computation, different secrets differ, different bodies differ.
+
+**TestBuildEventPayload** (4): Standard fields, custom event_id, custom source, JSON serializable.
+
+**TestTruncatePayload** (2): Short unchanged, long truncated with marker.
+
+**TestDispatcherRegister** (11): Basic, all fields, filters invalid events, no URL, bad scheme, URL too long, name too long, secret too long, duplicate ID, max webhooks, empty name uses URL.
+
+**TestDispatcherUnregister** (2): Existing, nonexistent.
+
+**TestDispatcherGet** (2): Existing, nonexistent.
+
+**TestDispatcherList** (2): Empty, multiple.
+
+**TestDispatcherUpdate** (13): Name, URL, events (filters invalid), enabled, secret, nonexistent, invalid URL, bad scheme, URL too long, name too long, secret too long, verify_ssl, scrub_secrets.
+
+**TestDispatchDelivery** (7): No targets, no enabled targets, event filter skips, success (200), failure (500), timeout, connection error, multiple targets.
+
+**TestDispatchSigning** (2): Signed payload (signature verified), unsigned (no header).
+
+**TestDispatchRateLimiting** (2): Rate-limited skipped, no rate limit.
+
+**TestDispatchSecretScrubbing** (2): Scrubs secrets (password= pattern redacted), no scrub when per-webhook disabled.
+
+**TestDispatchRetries** (2): Retries on failure (attempts counted), all retries fail (3 attempts).
+
+**TestFireAndForget** (2): No error on empty, swallows exceptions.
+
+**TestSendTestEvent** (2): Nonexistent webhook, successful test delivery.
+
+**TestGetStatus** (4): Empty, with webhooks, JSON serializable, no secret leak.
+
+**TestLifecycle** (3): Close no session, close with session, close already closed.
+
+**TestOutboundWebhookTargetConfig** (2): Defaults, custom values.
+
+**TestOutboundWebhooksConfig** (4): Defaults, custom values, in main config, from dict.
+
+**TestSSLVerification** (2): verify_ssl=True (ssl=None), verify_ssl=False (ssl=False).
+
+**TestImports** (2): Public symbols, from package.
+
+**TestEdgeCases** (7): Shared stats, dispatch empty data, negative rate limit clamped, custom event_id and source in payload, event payload envelope structure, get_session creates/reuses/recreates.
+
+**TestRealWorldScenarios** (3): Jenkins-style trigger, PagerDuty-style alert, multi-webhook fanout (3 webhooks, event-based routing).
+
+**TestContentTypeHeader** (1): JSON Content-Type header sent.
+
+### Files changed
+- `src/notifications/outbound_webhooks.py` (new, 350 lines): `EventType`, `WebhookTarget`, `DeliveryResult`, `WebhookStats`, `OutboundWebhookDispatcher`, `sign_payload`, `build_event_payload`.
+- `src/notifications/__init__.py` (line 3): Added `OutboundWebhookDispatcher` export.
+- `src/config/schema.py` (lines 211–227, 366): `OutboundWebhookTarget`, `OutboundWebhooksConfig` classes; added to `Config`.
+- `src/web/api.py` (lines 2300–2396): 6 new REST API endpoints for outbound webhook CRUD + test + stats.
+- `CLAUDE.md` (line 68–69): Added `outbound_webhooks.py` to project structure, updated endpoint count to 134.
+- `tests/test_outbound_webhooks.py` (new, 110 tests): 22 test classes.
+
+### Design decisions
+
+1. **Consistent with incoming webhook format**: The HMAC-SHA256 signature is sent as `X-Webhook-Signature: sha256=<hex>`, matching the `sha256=` prefix format used by GitHub (`X-Hub-Signature-256`) and verified by `_verify_hmac_sha256()` in `server.py`. Receivers can use the exact same verification logic.
+
+2. **Standard event envelope**: Every outbound payload has a fixed structure: `{event_id, event_type, timestamp, source, data}`. The `event_id` is a UUID by default (can be overridden for correlation). The `data` field contains the actual event-specific payload. This matches common webhook patterns (GitHub, Stripe, PagerDuty).
+
+3. **Event type subscription**: Webhooks subscribe to specific event types via the `events` list. An empty list means "all events". This allows operators to register a CI webhook that only fires on `tool_execution` events, while a monitoring webhook receives only `alert` and `health` events.
+
+4. **Per-webhook scrub control**: Each webhook has its own `scrub_secrets` flag. Internal webhooks (same network) might not need scrubbing, while external ones should always scrub. The dispatcher-level `scrub_secrets` flag is ANDed with the per-webhook flag.
+
+5. **Rate limiting per webhook**: Each registered webhook has its own rate limit tracker. This prevents a burst of events from overwhelming a slow endpoint. Default is 0.5s between deliveries to the same webhook.
+
+6. **Retries with exponential backoff**: Failed deliveries retry up to 2 times (3 total attempts) with 1s, 2s delays. This matches the existing retry pattern in the codebase (`RetryConfig` with exponential backoff).
+
+7. **Fire-and-forget mode**: `dispatch_fire_and_forget()` wraps `dispatch()` in a try/except, making it suitable for use as an audit logger callback. The audit system should never be blocked by a slow webhook endpoint.
+
+8. **Secrets never exposed in API**: `WebhookTarget.to_dict()` returns `has_secret: bool` instead of the actual secret value. The `get_status()` response never contains secret material.
+
+9. **Config supports pre-configured targets**: `OutboundWebhooksConfig.targets` allows defining webhook targets in `config.yml` at deploy time, in addition to dynamic registration via the REST API.
+
+10. **NOT wired into runtime**: Following the pattern of prior rounds (39, 42, 44–47), the module is a standalone library with full tests. Wiring requires:
+    - (a) Instantiate `OutboundWebhookDispatcher` on bot init from `config.outbound_webhooks`
+    - (b) Register config-defined targets: iterate `config.outbound_webhooks.targets` and call `dispatcher.register()`
+    - (c) Set as audit logger event callback: `audit.set_event_callback(dispatcher.dispatch_fire_and_forget)` (or chain with existing WebSocket callback)
+    - (d) Store as `bot.outbound_webhook_dispatcher` for REST API endpoints
+    - (e) Call `dispatcher.close()` on bot shutdown
+
+### Next round watch for
+- Round 49 (coverage boost) has no dependencies on Round 48.
+- REST API endpoint count is now 134 (was 128). Six new endpoints: `/api/outbound-webhooks` (GET, POST), `/api/outbound-webhooks/{id}` (PUT, DELETE), `/api/outbound-webhooks/{id}/test` (POST), `/api/outbound-webhooks/stats` (GET).
+- The `OutboundWebhookDispatcher` is NOT yet called anywhere in runtime code. Wiring requires:
+  - (a) Instantiate in bot setup from `config.outbound_webhooks` settings.
+  - (b) Register targets from config: `for t in config.outbound_webhooks.targets: dispatcher.register(name=t.name, url=t.url, ...)`.
+  - (c) Wire as audit event callback (chain with existing WebSocket broadcast, or add a second callback).
+  - (d) Store as `bot.outbound_webhook_dispatcher` for REST API.
+  - (e) Close on shutdown.
+- The `dispatch_fire_and_forget` method is designed for the audit callback path — it catches all exceptions so webhook failures never block audit logging.
+- The signing format (`sha256=<hex>` in `X-Webhook-Signature` header) is consistent with the incoming webhook `_verify_hmac_sha256()` format, so receivers can use the same verification code.
+- All subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, model_router, context_compressor, stuck_loop_detector, startup_diagnostics, subsystem_guard, outbound_webhook_dispatcher).

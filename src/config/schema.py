@@ -208,6 +208,23 @@ class PermissionsConfig(BaseModel):
     overrides_path: str = "./data/permissions.json"
 
 
+class OutboundWebhookTarget(BaseModel):
+    name: str = ""
+    url: str = ""
+    secret: str = ""  # HMAC-SHA256 signing key; empty = unsigned
+    events: list[str] = Field(default_factory=list)  # empty = all events
+    enabled: bool = True
+    scrub_secrets: bool = True
+    verify_ssl: bool = True
+
+
+class OutboundWebhooksConfig(BaseModel):
+    enabled: bool = False
+    scrub_secrets: bool = True
+    rate_limit_seconds: float = 0.5
+    targets: list[OutboundWebhookTarget] = Field(default_factory=list)
+
+
 class GracefulDegradationConfig(BaseModel):
     enabled: bool = True
     degraded_threshold: int = 3  # consecutive failures before DEGRADED
@@ -361,6 +378,7 @@ class Config(BaseModel):
     audit: AuditConfig = AuditConfig()
     agents: AgentsConfig = AgentsConfig()
     grafana_alerts: GrafanaAlertConfig = GrafanaAlertConfig()
+    outbound_webhooks: OutboundWebhooksConfig = OutboundWebhooksConfig()
     graceful_degradation: GracefulDegradationConfig = GracefulDegradationConfig()
 
 

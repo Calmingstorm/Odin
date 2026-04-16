@@ -65,7 +65,8 @@ You are running as part of an automated build loop. Each session, you:
   - `src/tools/comfyui.py` — ComfyUI image generation client
   - `src/tools/autonomous_loop.py` — autonomous loop system (LLM-driven recurring tasks)
   - `src/search/sqlite_vec.py` — SQLite vector search helpers (sqlite-vec extension)
-  - `src/web/api.py` — REST API for web management UI (128 endpoints)
+  - `src/notifications/outbound_webhooks.py` — outbound webhook dispatcher: push structured events (tool_execution, alert, schedule, agent, loop, health, web_action, custom) to registered HTTP endpoints with HMAC-SHA256 signing, retries, rate limiting, secret scrubbing
+  - `src/web/api.py` — REST API for web management UI (134 endpoints)
   - `src/web/websocket.py` — WebSocket handler for live updates (logs, events)
   - `src/web/chat.py` — chat backend for web UI and WebSocket chat
   - `src/agents/manager.py` — multi-agent orchestration with lifecycle state machine (AgentState enum, AgentStateMachine, typed transitions, per-iteration recovery)
