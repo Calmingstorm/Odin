@@ -75,8 +75,12 @@ async def _read_lines_with_callback(
                 try:
                     await on_output(line)
                 except Exception:
-                    pass
-            await proc.wait()
+                    log.debug("on_output callback error", exc_info=True)
+        # Wait for process exit with a bounded timeout to avoid indefinite hang
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=min(timeout, 10))
+        except asyncio.TimeoutError:
+            proc.kill()
     except (asyncio.TimeoutError, TimeoutError):
         proc.kill()
         return 1, f"Command timed out after {timeout} seconds"

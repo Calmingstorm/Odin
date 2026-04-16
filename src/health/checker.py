@@ -125,7 +125,7 @@ def check_sessions(bot: OdinBot) -> ComponentStatus:
 
         if over_budget > 0:
             return ComponentStatus(
-                name="sessions", healthy=True, status="degraded",
+                name="sessions", healthy=False, status="degraded",
                 detail=f"{count} active, {over_budget} over token budget",
                 metadata={"count": count, "total_tokens": total_tokens, "over_budget": over_budget},
             )

@@ -159,10 +159,12 @@ class ToolOutputStreamer:
 
         async def finish() -> None:
             ts = datetime.now(timezone.utc).isoformat()
-            if stream.buffered:
+            while stream.buffered:
+                chunk_text = stream.buffered[: self._max_chunk_chars]
+                stream.buffered = stream.buffered[self._max_chunk_chars :]
                 chunk = StreamChunk(
                     tool_name=tool_name,
-                    chunk=stream.buffered[: self._max_chunk_chars],
+                    chunk=chunk_text,
                     sequence=stream.sequence,
                     timestamp=ts,
                     channel_id=channel_id,

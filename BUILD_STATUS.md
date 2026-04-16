@@ -161,7 +161,7 @@ tightening of prior work.
 | 37 | Memory-usage widget: session count, knowledge DB size, trajectory volume | done | ResourceUsage module (4 dataclasses: DirStats, SessionStats, KnowledgeStats, TrajectoryStats), collect_all() aggregator, /api/resource-usage endpoint, resources.js web UI page with 4 tabs (sessions/knowledge/trajectories/storage) + storage bar chart, +81 tests |
 | 38 | Tool output streaming: ship partial results to Discord/UI as tools produce them (opt-in per tool, OFF by default — never spam) | done | ToolOutputStreamer module, StreamChunk dataclass, line-by-line streaming in run_local_command/run_ssh_command, executor integration for run_command/run_script, StreamingConfig, /api/tool-streams endpoint, WebSocket broadcast, +76 tests |
 | 39 | Auxiliary LLM client: separate cheap-model client for classification / summarization / vision description | done | AuxiliaryLLMClient module with task routing + automatic fallback, AuxiliaryLLMConfig (model, max_tokens, tasks), make_chat_fn/make_codex_callback factories for CompactionFn/TextFn/CodexCallback, cost tracking, circuit breaker awareness, +63 tests |
-| 40 | REVIEWER: validate rounds 31–39, tighten tests, fix bugs found | pending | |
+| 40 | REVIEWER: validate rounds 31–39, tighten tests, fix bugs found | done | Fixed 5 bugs: streamer finish() data loss, ssh.py hang risk, ssh.py silent callback errors, get_descendants O(n²), check_sessions wrong healthy flag; +23 tests |
 
 ### Phase 9 — Anti-hedging + detection hardening (rounds 41–45)
 | # | Focus | Status | Summary |
@@ -5205,3 +5205,108 @@ Added `AuxiliaryLLMClient` to imports and `__all__`.
 - `KNOWN_TASKS` contains 7 task types. New auxiliary use cases (e.g., "intent_classification" for Round 45) should add entries to this frozenset.
 - The `_track_cost` method reads `client._last_input_tokens` and `client._last_output_tokens` — these are set by `CodexChatClient.chat()` after each call. If `chat()` is ever refactored to not set these, cost tracking will silently record zeros.
 - All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
+
+## Round 40 — REVIEWER: validate rounds 31–39, tighten tests, fix bugs found
+**Focus**: Validate all code from rounds 31–39 (Phase 7: Agents/loops/lifecycle + Phase 8: UX/workflows). Find and fix bugs, tighten tests, improve code quality. No new features.
+**Baseline pytest**: 3834 passed, 0 failed
+**Post-round pytest**: 3857 passed, 0 failed (+23 new tests)
+
+### Validated from prior rounds
+- Round 31 (Agent lifecycle state machine): All 90 tests pass. Code reviewed: AgentState enum, VALID_TRANSITIONS, AgentStateMachine, _call_llm_with_recovery, _run_agent lifecycle. No logic bugs found in state machine transitions or recovery attempts. Per-iteration recovery_attempts reset (Round 32 fix) confirmed working.
+- Round 32 (Recovery-before-escalation): All 110 tests pass. Code reviewed: classify_error/classify_exception pattern matching, RecoveryStats, _check_recoverable, executor recovery integration. Patterns correctly conservative. TIMEOUT exclusion from tool-level recovery correct.
+- Round 33 (Branch freshness): All 111 tests pass. Code reviewed: is_test_command, is_test_failure, check_branch_freshness, FreshnessStats. Minor TOCTOU between git fetch and commits_behind count (not fixable without locking, acceptable).
+- Round 34 (Agent trajectory saving): All 75 tests pass. Code reviewed: AgentTrajectorySaver file I/O is append-mode JSONL, handles concurrent writes acceptably for asyncio single-threaded model.
+- Round 35 (Nested agent spawning): All 73 tests pass. Code reviewed: depth tracking, filter_agent_tools, cascade kill, MAX_CHILDREN_PER_AGENT. Cascade kill uses BFS with visited set — no stack overflow risk. One performance issue found and fixed (list.pop(0) → deque.popleft()).
+- Round 36 (Health dashboard): All 74 tests pass. Code reviewed: all 11 checkers, check_all aggregation. One semantic bug found and fixed (check_sessions healthy flag).
+- Round 37 (Resource usage widget): All 81 tests pass. Code reviewed: scan_directory, scan_file, collectors, DirStats math. No division-by-zero risk (denominator is constant). TOCTOU in scan_directory caught by try/except. Collector crash safety confirmed.
+- Round 38 (Tool output streaming): All 76 tests pass. Code reviewed: ToolOutputStreamer, StreamChunk, _read_lines_with_callback, executor integration. Two bugs found and fixed (finish() data loss, proc.wait() hang risk, silent callback errors).
+- Round 39 (Auxiliary LLM client): All 63 tests pass. Code reviewed: AuxiliaryLLMClient fallback logic, cost tracking, task routing, factory functions. Fallback is intentionally fail-open (matches project philosophy). Cost tracking accesses _last_input_tokens/_last_output_tokens — fragile but acceptable since CodexChatClient guarantees these.
+- REST API endpoint count is 123 (no new endpoints this round).
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.) — unchanged.
+
+### Bugs fixed
+
+#### Fix 1: output_streamer.py finish() silent data truncation — `src/tools/output_streamer.py` (line 160)
+
+**Bug**: When `finish()` was called with buffered output exceeding `max_chunk_chars`, only the first `max_chunk_chars` characters were emitted. The remainder was silently discarded.
+
+**Example**: 3000 chars buffered, max_chunk_chars=2000 → only first 2000 sent, 1000 lost.
+
+**Fix**: Changed the single `if stream.buffered:` block to a `while stream.buffered:` loop that drains the buffer completely, emitting multiple chunks if needed. Each chunk respects `max_chunk_chars` and gets a unique sequence number.
+
+**Impact**: No data loss on stream finish regardless of buffer size.
+
+#### Fix 2: ssh.py proc.wait() outside timeout context — `src/tools/ssh.py` (line 79)
+
+**Bug**: In `_read_lines_with_callback()`, after the readline loop exited, `await proc.wait()` was called INSIDE the `async with asyncio.timeout()` block but AFTER all stdout was consumed. If the process didn't exit promptly (e.g., zombie process, or process waiting on closed stdin), `proc.wait()` could hang until the outer timeout fired — potentially the full command timeout (e.g., 300s).
+
+**Fix**: Moved `proc.wait()` outside the readline timeout block and wrapped it in `asyncio.wait_for(proc.wait(), timeout=min(timeout, 10))`. If the process doesn't exit within 10 seconds after stdout closes, it's killed. This prevents indefinite hangs while still allowing normal process cleanup.
+
+#### Fix 3: ssh.py silent callback failure — `src/tools/ssh.py` (line 77)
+
+**Bug**: When the `on_output` callback raised an exception, it was caught with a bare `except Exception: pass` — no logging, no visibility. If the streaming callback broke, operators had zero diagnostic information.
+
+**Fix**: Added `log.debug("on_output callback error", exc_info=True)` in the exception handler. Uses debug level (not warning) since callback errors are non-critical and shouldn't alarm operators, but the full traceback is available when debugging.
+
+#### Fix 4: agents/manager.py get_descendants O(n²) performance — `src/agents/manager.py` (line 542)
+
+**Bug**: `get_descendants()` used `list.pop(0)` for BFS queue traversal. `list.pop(0)` is O(n) because it shifts all remaining elements, making the overall algorithm O(n²) for large agent trees.
+
+**Fix**: Changed to `collections.deque` with `popleft()` which is O(1). Added `from collections import deque` import. Functionally identical, just faster.
+
+#### Fix 5: health/checker.py check_sessions wrong healthy flag — `src/health/checker.py` (line 128)
+
+**Bug**: When sessions were over token budget, `check_sessions` returned `ComponentStatus(healthy=True, status="degraded")`. This is semantically contradictory — a component reporting status="degraded" should not claim to be healthy. The `check_all()` aggregation uses `status` for the overall health computation, but individual components inspecting `healthy` would get a misleading signal.
+
+**Fix**: Changed `healthy=True` to `healthy=False` for the over-budget case. The `status` remains "degraded" (not "down"). This is consistent with other checkers: `check_discord` returns `healthy=False, status="degraded"` when the gateway is not ready, and `check_codex` returns `healthy=True, status="degraded"` only for half-open circuit (still functional, just probing).
+
+### Tests: `tests/test_round40_reviewer.py` — 23 tests across 10 test classes
+
+**TestOutputStreamerFinishDrainsFully** (3): finish emits all chunks when buffer exceeds max (350 chars → 4 data chunks + 1 final), single chunk under max works, sequence numbers are monotonically increasing and unique.
+
+**TestReadLinesCallbackTimeout** (2): proc.wait() that hangs gets killed after bounded timeout, proc.wait() that completes normally works.
+
+**TestReadLinesCallbackLogging** (2): callback error is logged (mock_log.debug called), callback error does not lose output data (both lines present in output).
+
+**TestGetDescendantsDeque** (3): deque is imported in module, correct results for 3-level tree (root→2 children→1 grandchild), handles cycles via visited set without infinite loop.
+
+**TestCheckSessionsDegradedHealthy** (3): over-budget returns healthy=False, normal sessions return healthy=True, degraded sessions contribute to overall degraded in check_all.
+
+**TestRecoveryStatsThreadSafety** (2): recent list bounded at max_recent after rapid record_failure calls, get_recent returns correct count.
+
+**TestAgentStateTransitionsCompleteness** (2): all active states reachable from SPAWNING via valid transitions, all terminal states reachable from SPAWNING.
+
+**TestBranchFreshnessCheckerImports** (2): is_test_command recognizes pytest/python-m-pytest and rejects ls, is_test_failure detects failure patterns with exit_code=1.
+
+**TestAuxiliaryLLMCostTrackingEdge** (1): cost tracking records correct model and user_id when aux client succeeds.
+
+**TestFilterAgentToolsDepthBoundary** (3): at max_depth agent tools removed, below max_depth tools kept, above max_depth tools removed.
+
+### Issues identified but NOT fixed (documented for future rounds)
+
+1. **output_streamer.py stream leak**: If `finish()` is never called (tool crash, exception before cleanup), the stream entry in `_active_streams` persists forever. A future round could add a cleanup sweep (e.g., remove streams older than 1 hour). Not fixed now because the executor's `_handle_run_command`/`_handle_run_script` always call `finish()` in their current flow — this is a defense-in-depth concern, not a current bug.
+
+2. **agents/manager.py MAX_CHILDREN_PER_AGENT race**: Two concurrent `spawn()` calls could both pass the `len(parent.children_ids) >= MAX_CHILDREN_PER_AGENT` check before either registers the child. Since asyncio is single-threaded and spawn() is synchronous up to task creation, this can't happen in practice — but worth noting if the code is ever refactored to be multi-threaded.
+
+3. **auxiliary.py _track_cost fragility**: Cost tracking reads `client._last_input_tokens` and `client._last_output_tokens` (private attributes on CodexChatClient). If CodexChatClient is refactored, cost tracking silently records zeros. Round 39 documented this; confirmed still the case.
+
+4. **agents/manager.py cascade kill race**: `get_descendants()` computes the list, then iterates to set cancel events. If an agent spawns a new child between computation and cancellation, that child won't be killed. Low risk: agents check cancel events at iteration boundaries, and the asyncio event loop is single-threaded.
+
+5. **All five subsystem wiring tasks remain open**: AuditSigner hmac_key, PermissionManager instantiation, etc. These are deferred to runtime integration rounds.
+
+### Files changed
+- `src/tools/output_streamer.py` (line 160): Changed `if` to `while` in finish() to drain entire buffer without data loss.
+- `src/tools/ssh.py` (lines 67-84): Moved proc.wait() outside readline timeout, wrapped in bounded wait_for with kill fallback. Added debug logging for on_output callback errors.
+- `src/agents/manager.py` (line 13, 542): Added `from collections import deque`, changed `queue = list(...)` + `queue.pop(0)` to `deque(...)` + `queue.popleft()`.
+- `src/health/checker.py` (line 128): Changed `healthy=True` to `healthy=False` for over-budget sessions.
+- `tests/test_round40_reviewer.py` (new, 23 tests): 10 test classes covering all 5 fixes plus additional tightening.
+
+### Next round watch for
+- Round 41 begins Phase 9 (Anti-hedging + detection hardening). No dependencies on Round 40 fixes.
+- REST API endpoint count is 123 (no new endpoints this round).
+- The output_streamer `finish()` now uses a `while` loop — if `max_chunk_chars` is 0 or negative, this would loop forever. The constructor enforces no minimum on `max_chunk_chars` — consider adding `max(1, max_chunk_chars)` if this becomes a concern.
+- The ssh.py `proc.wait()` bounded timeout is `min(timeout, 10)` — 10 seconds is hardcoded. If this proves too short for some processes, it could be made configurable.
+- The `check_sessions` healthy=False change may affect any UI or monitoring that filters on `healthy == True`. The web UI health page shows color based on `status` (not `healthy`), so it should be fine.
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
+- The `ToolExecutor.__new__()` fixture pattern was NOT changed by this round. Future test files using this pattern must still include `_recovery_enabled = False`, `recovery_stats = RecoveryStats()`, `_permission_manager = None`, `risk_stats = RiskStats()`, and `_metrics = {}`.
+

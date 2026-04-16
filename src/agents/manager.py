@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -536,10 +537,10 @@ class AgentManager:
         if not agent:
             return []
         descendants: list[str] = []
-        queue = list(agent.children_ids)
+        queue = deque(agent.children_ids)
         visited: set[str] = set()
         while queue:
-            child_id = queue.pop(0)
+            child_id = queue.popleft()
             if child_id in visited:
                 continue
             visited.add(child_id)
