@@ -22,12 +22,17 @@ function sparklineSVG(values, width, height, color) {
 
 /** Category mapping for tools — groups tools by functional area */
 const TOOL_CATEGORIES = [
-  { id: 'system', label: 'System & Commands', icon: '\u{1F5A5}', match: n => /^(run_command|run_script|read_file|write_file|list_directory|search_files|manage_process|file_)/.test(n) },
+  { id: 'system', label: 'System & Commands', icon: '\u{1F5A5}', match: n => /^(run_command|run_script|read_file|write_file|list_directory|search_files|manage_process|file_|post_file)/.test(n) },
+  { id: 'devops', label: 'DevOps & Infrastructure', icon: '\u{1F6E0}', match: n => /^(git_ops|docker_ops|kubectl|terraform_ops|http_probe)/.test(n) },
+  { id: 'agents', label: 'Agents & Orchestration', icon: '\u{1F916}', match: n => /^(spawn_agent|send_to_agent|wait_for_agents|get_agent_results|kill_agent|list_agents|spawn_loop_agents|collect_loop_agents)/.test(n) },
+  { id: 'workflow', label: 'Workflows & Tasks', icon: '\u{1F4CB}', match: n => /^(delegate_task|execute_plan|cancel_task|list_tasks|schedule_|start_loop|stop_loop|list_loops|delete_schedule|list_schedules|update_schedule|parse_time|create_digest)/.test(n) },
   { id: 'network', label: 'Network & Web', icon: '\u{1F310}', match: n => /^(web_|browser_|search_web|fetch_url|http_)/.test(n) },
-  { id: 'knowledge', label: 'Knowledge & Search', icon: '\u{1F4DA}', match: n => /^(search_knowledge|ingest_|knowledge_)/.test(n) },
-  { id: 'discord', label: 'Discord', icon: '\u{1F4AC}', match: n => /^(send_|post_|add_reaction|create_poll|purge_|discord_|embed_)/.test(n) },
+  { id: 'knowledge', label: 'Knowledge & Search', icon: '\u{1F4DA}', match: n => /^(search_knowledge|ingest_|knowledge_|search_history|search_audit|bulk_ingest)/.test(n) },
+  { id: 'discord', label: 'Discord', icon: '\u{1F4AC}', match: n => /^(send_|add_reaction|create_poll|purge_|discord_|embed_|read_channel)/.test(n) },
+  { id: 'skills', label: 'Skills', icon: '\u{1F9E9}', match: n => /^(create_skill|edit_skill|delete_skill|enable_skill|disable_skill|install_skill|export_skill|skill_status|invoke_skill|list_skills)/.test(n) },
+  { id: 'memory', label: 'Memory & State', icon: '\u{1F9E0}', match: n => /^(memory_manage|list_manage)/.test(n) },
   { id: 'ai', label: 'AI & Generation', icon: '\u2728', match: n => /^(generate_|analyze_|claude_|vision_|comfyui_)/.test(n) },
-  { id: 'automation', label: 'Automation', icon: '\u{1F504}', match: n => /^(schedule_|start_loop|stop_loop|list_loops|cron_)/.test(n) },
+  { id: 'integrations', label: 'Integrations', icon: '\u{1F517}', match: n => /^(issue_tracker|slack_|grafana_|mcp_)/.test(n) },
   { id: 'other', label: 'Other Tools', icon: '\u{1F527}', match: () => true },
 ];
 
