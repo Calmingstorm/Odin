@@ -46,8 +46,8 @@ class BrowserManager:
         self,
         cdp_url: str = "",
         default_timeout_ms: int = 30000,
-        viewport_width: int = 1280,
-        viewport_height: int = 720,
+        viewport_width: int = 1920,
+        viewport_height: int = 1080,
     ) -> None:
         self._cdp_url = cdp_url
         self._default_timeout_ms = default_timeout_ms

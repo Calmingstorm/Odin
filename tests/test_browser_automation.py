@@ -89,7 +89,7 @@ class TestBrowserManagerInit:
         assert mgr._cdp_url == ""
         assert mgr._native is True
         assert mgr._default_timeout_ms == 30000
-        assert mgr._viewport == {"width": 1280, "height": 720}
+        assert mgr._viewport == {"width": 1920, "height": 1080}
         assert mgr._browser is None
         assert mgr._playwright is None
 

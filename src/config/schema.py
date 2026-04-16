@@ -212,8 +212,8 @@ class BrowserConfig(BaseModel):
     enabled: bool = False
     cdp_url: str = ""  # Empty = native Playwright launch; set ws:// URL for remote CDP
     default_timeout_ms: int = 30000
-    viewport_width: int = 1280
-    viewport_height: int = 720
+    viewport_width: int = 1920
+    viewport_height: int = 1080
 
 
 class PermissionsConfig(BaseModel):
