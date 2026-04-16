@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from collections import deque
 
 from ..llm.secret_scrubber import scrub_output_secrets
 
@@ -432,6 +435,188 @@ def detect_premature_failure(text: str, tools_used: list[str]) -> bool:
 _FAILURE_RETRY_MSG = {
     "role": "developer",
     "content": "Try alternative approaches before reporting failure.",
+}
+
+
+# ---------------------------------------------------------------------------
+# Stuck loop detection — catches agents/loops repeating the same tool calls
+# across consecutive iterations without making progress.
+# ---------------------------------------------------------------------------
+
+def _fingerprint_tool_calls(
+    tool_calls: list[dict],
+    *,
+    names_only: bool = False,
+) -> str:
+    """Create a deterministic string fingerprint of a tool call sequence.
+
+    Args:
+        tool_calls: List of tool call dicts with "name" and "input"/"arguments".
+        names_only: If True, ignore arguments (match on tool names + order only).
+
+    Returns a string that is identical iff the tool call sequences are identical.
+    Empty tool_calls returns the empty string.
+    """
+    if not tool_calls:
+        return ""
+    parts: list[str] = []
+    for tc in tool_calls:
+        name = tc.get("name", "")
+        if names_only:
+            parts.append(name)
+        else:
+            args = tc.get("input", tc.get("arguments", {}))
+            if not isinstance(args, dict):
+                args = {}
+            args_json = json.dumps(args, sort_keys=True, default=str)
+            args_hash = hashlib.sha256(args_json.encode()).hexdigest()[:16]
+            parts.append(f"{name}:{args_hash}")
+    return "|".join(parts)
+
+
+def _detect_stuck_from_fingerprints(
+    fingerprints: list[str],
+    min_repeats: int = 3,
+    max_cycle_length: int = 3,
+) -> tuple[bool, int]:
+    """Core stuck detection on pre-computed fingerprints.
+
+    Returns (is_stuck, cycle_length). cycle_length is 0 if not stuck.
+    """
+    n = len(fingerprints)
+    if n < min_repeats:
+        return False, 0
+
+    for cycle_len in range(1, max_cycle_length + 1):
+        needed = min_repeats * cycle_len
+        if n < needed:
+            continue
+        tail = fingerprints[-needed:]
+        cycle = tail[:cycle_len]
+        if not any(cycle):
+            continue
+        match = True
+        for i in range(cycle_len, needed):
+            if tail[i] != cycle[i % cycle_len]:
+                match = False
+                break
+        if match:
+            return True, cycle_len
+
+    return False, 0
+
+
+def detect_stuck_loop(
+    recent_iterations: list[list[dict]],
+    min_repeats: int = 3,
+    max_cycle_length: int = 3,
+    *,
+    names_only: bool = False,
+) -> bool:
+    """Detect when iterations repeat the same tool call pattern.
+
+    Args:
+        recent_iterations: List of tool_call lists from recent iterations.
+            Each inner list contains dicts with "name" and "input"/"arguments".
+        min_repeats: Consecutive identical iterations required to trigger.
+        max_cycle_length: Maximum cycle length to check (e.g., 2 = A,B,A,B,A,B).
+        names_only: If True, compare tool names only (ignore arguments).
+
+    Returns True if the last iterations form a repeating pattern of length
+    1..max_cycle_length repeated at least min_repeats times.
+    """
+    if len(recent_iterations) < min_repeats:
+        return False
+    fingerprints = [
+        _fingerprint_tool_calls(calls, names_only=names_only)
+        for calls in recent_iterations
+    ]
+    stuck, _ = _detect_stuck_from_fingerprints(
+        fingerprints, min_repeats, max_cycle_length
+    )
+    return stuck
+
+
+class StuckLoopTracker:
+    """Stateful tracker that records iteration tool calls and detects stuck patterns.
+
+    Usage in an agent/loop iteration::
+
+        tracker = StuckLoopTracker()
+        for iteration in agent_loop:
+            tool_calls = run_iteration()
+            tracker.record(tool_calls)
+            if tracker.check():
+                if tracker.warned:
+                    terminate()  # stuck after warning
+                else:
+                    inject_message(_STUCK_LOOP_RETRY_MSG)
+                    tracker.warned = True
+    """
+
+    __slots__ = (
+        "_fingerprints",
+        "_window_size",
+        "_min_repeats",
+        "_max_cycle_length",
+        "_names_only",
+        "warned",
+    )
+
+    def __init__(
+        self,
+        *,
+        window_size: int = 12,
+        min_repeats: int = 3,
+        max_cycle_length: int = 3,
+        names_only: bool = False,
+    ) -> None:
+        self._fingerprints: deque[str] = deque(maxlen=window_size)
+        self._window_size = window_size
+        self._min_repeats = min_repeats
+        self._max_cycle_length = max_cycle_length
+        self._names_only = names_only
+        self.warned: bool = False
+
+    def record(self, tool_calls: list[dict]) -> None:
+        """Record one iteration's tool calls."""
+        fp = _fingerprint_tool_calls(tool_calls, names_only=self._names_only)
+        self._fingerprints.append(fp)
+
+    def check(self) -> bool:
+        """Return True if recent iterations form a stuck pattern."""
+        fps = list(self._fingerprints)
+        stuck, _ = _detect_stuck_from_fingerprints(
+            fps, self._min_repeats, self._max_cycle_length
+        )
+        return stuck
+
+    def check_detailed(self) -> tuple[bool, int]:
+        """Return (is_stuck, cycle_length). cycle_length is 0 if not stuck."""
+        fps = list(self._fingerprints)
+        return _detect_stuck_from_fingerprints(
+            fps, self._min_repeats, self._max_cycle_length
+        )
+
+    @property
+    def iteration_count(self) -> int:
+        """Number of iterations recorded so far."""
+        return len(self._fingerprints)
+
+    def reset(self) -> None:
+        """Clear all recorded iterations and the warned flag."""
+        self._fingerprints.clear()
+        self.warned = False
+
+
+_STUCK_LOOP_RETRY_MSG = {
+    "role": "developer",
+    "content": (
+        "You are stuck in a loop — your last several iterations made the "
+        "exact same tool calls with the same arguments. This is not making "
+        "progress. Try a DIFFERENT approach: use different tools, different "
+        "arguments, or report your current findings and stop."
+    ),
 }
 
 

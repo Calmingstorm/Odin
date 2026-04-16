@@ -153,6 +153,7 @@ No classifier. No approval prompts. No keyword routing. One path: Codex with too
 3. **Abbreviated task history**: `get_task_history()` returns a windowed subset (not full history). Keeps context focused on recent activity.
 4. **Compaction error omission**: When sessions are compacted (>40 messages), the compaction prompt instructs Codex to OMIT errors, failures, and "I can't" statements, but PRESERVE outcomes and decisions. Compaction also triggers reflection via the learning reflector.
 5. **Fabrication + hedging + premature failure detection**: `detect_fabrication()` catches LLM-invented command output. `detect_hedging()` catches "shall I?" hesitation for bot-to-bot messages. `detect_premature_failure()` catches giving up after first error. Each fires once per request (flag-based), enabling cascading detection across retry iterations.
+6. **Stuck loop detection**: `detect_stuck_loop()` catches agents/loops repeating the same tool call sequence across iterations (simple repetition and cyclic patterns). `StuckLoopTracker` provides stateful tracking with warn-then-terminate lifecycle.
 
 ### Bot Interop
 - Bot messages are buffered (`combine_bot_messages`) — waits for multi-message bursts to complete before processing.

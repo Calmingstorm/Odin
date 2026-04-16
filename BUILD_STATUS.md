@@ -167,7 +167,7 @@ tightening of prior work.
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
 | 41 | Expand detect_hedging pattern corpus + add regression test suite | done | 6 new pattern groups, 4 exemptions, 213 regression tests |
-| 42 | New detector: `detect_stuck_loop` — catches agents iterating without new output (identical tool call chain) | pending | |
+| 42 | New detector: `detect_stuck_loop` — catches agents iterating without new output (identical tool call chain) | done | `detect_stuck_loop` function + `StuckLoopTracker` class in response_guards.py; fingerprint-based detection of simple repetition and cyclic patterns (up to configurable cycle length); names-only mode; warn-then-terminate lifecycle; +107 tests |
 | 43 | Tool result schema enforcement: validate each tool's result shape before feeding back to LLM | pending | |
 | 44 | Context auto-compression with prompt caching (Anthropic-style static prefix caching) | pending | |
 | 45 | Smart model routing: cheap model for intent classification, strong model for execution | pending | |
@@ -5388,4 +5388,137 @@ The exemption check runs BEFORE pattern matching in `detect_hedging()` (line 345
 - The removal of `I can(?:'t| not) directly` from Group 3 means this phrase is now caught by the inability exemption and returns False. This is correct: "I can't directly" is an inability statement, not a hedging prompt. The phrase was previously caught by both Group 3 and nothing exempted it — it would have been a true positive in hedging but a false negative in inability detection.
 - REST API endpoint count is 123 (no new endpoints this round).
 - All five subsystem wiring tasks remain open from prior rounds.
+
+## Round 42 — New detector: `detect_stuck_loop` — stuck iteration detection for agents/loops
+**Focus**: Implement `detect_stuck_loop` — a detector that catches agents and autonomous loops repeating the same tool call sequence across consecutive iterations without making progress.
+**Baseline pytest**: 4070 passed, 0 failed
+**Post-round pytest**: 4177 passed, 0 failed (+107 new tests)
+
+### Prior round review
+- Round 41 notes said "Round 42 continues Phase 9 (detect_fabrication hardening)". The actual plan table assigns Round 42 as `detect_stuck_loop`, which is confirmed at line 170 of BUILD_STATUS.md. Proceeded with the plan table assignment.
+- No bugs or watch-for items from rounds 39–41 required fixing this round. All prior code validated clean.
+
+### Design overview
+
+Unlike the existing text-based detectors in `response_guards.py` (which analyze a single LLM response), `detect_stuck_loop` operates across multiple iterations — it compares tool call sequences from consecutive iterations to detect repetition. The design provides:
+
+1. **Fingerprinting**: Deterministic hashing of tool call sequences (tool names + SHA256 of sorted JSON arguments) for fast comparison.
+2. **Simple repetition**: Detects N consecutive identical iterations (same tools, same args).
+3. **Cyclic repetition**: Detects repeating cycles of length 2..K (e.g., A→B→A→B→A→B is a 2-cycle).
+4. **Names-only mode**: Optional mode that ignores arguments, catching agents stuck calling the same tools with slightly varying inputs.
+5. **Stateful tracker**: `StuckLoopTracker` class with record/check/warned/reset lifecycle for integration into agent/loop iteration loops.
+
+### Work done
+
+#### 1. New imports: `src/discord/response_guards.py` (lines 3-5)
+
+Added `hashlib`, `json`, `deque` imports needed by the fingerprinting and tracker.
+
+#### 2. Fingerprinting function: `src/discord/response_guards.py` (line 440)
+
+**`_fingerprint_tool_calls(tool_calls, *, names_only=False) -> str`**:
+- Produces a deterministic string fingerprint of a tool call sequence.
+- Each tool call becomes `"name:hash16"` (exact mode) or just `"name"` (names_only mode).
+- Hash is SHA256 of `json.dumps(args, sort_keys=True, default=str)` truncated to 16 hex chars.
+- Handles both `"input"` and `"arguments"` keys (for compatibility with both internal and OpenAI tool call formats).
+- Non-dict args treated as empty dict. Missing keys handled gracefully.
+- Empty tool_calls returns empty string.
+
+#### 3. Core detection: `src/discord/response_guards.py` (line 469)
+
+**`_detect_stuck_from_fingerprints(fingerprints, min_repeats=3, max_cycle_length=3) -> tuple[bool, int]`**:
+- Operates on pre-computed fingerprint strings for efficiency (StuckLoopTracker stores fingerprints, not raw dicts).
+- Checks cycle lengths 1 through `max_cycle_length` in order.
+- For each cycle length L, checks if the last `min_repeats * L` fingerprints form a repeating cycle.
+- Empty-only cycles (all fingerprints are `""`) are skipped — iterations with no tool calls aren't "stuck", the agent should complete naturally.
+- Returns `(is_stuck, cycle_length)` — cycle_length is 0 when not stuck.
+
+#### 4. Public API: `src/discord/response_guards.py` (line 492)
+
+**`detect_stuck_loop(recent_iterations, min_repeats=3, max_cycle_length=3, *, names_only=False) -> bool`**:
+- Takes raw `list[list[dict]]` — list of tool_call lists from recent iterations.
+- Fingerprints all iterations then delegates to `_detect_stuck_from_fingerprints`.
+- Returns simple bool like other detectors.
+
+#### 5. Stateful tracker: `src/discord/response_guards.py` (line 517)
+
+**`StuckLoopTracker`** class with `__slots__`:
+- `__init__(*, window_size=12, min_repeats=3, max_cycle_length=3, names_only=False)`: Configurable detection parameters. Window size bounds memory (deque maxlen).
+- `record(tool_calls)`: Fingerprints and stores one iteration's tool calls.
+- `check() -> bool`: Returns True if recent iterations form a stuck pattern.
+- `check_detailed() -> tuple[bool, int]`: Returns `(is_stuck, cycle_length)`.
+- `iteration_count -> int`: Property returning number of recorded iterations.
+- `warned: bool`: Flag for warn-then-terminate lifecycle (set by caller after first detection).
+- `reset()`: Clears all state including warned flag.
+
+#### 6. Retry message: `src/discord/response_guards.py` (line 574)
+
+**`_STUCK_LOOP_RETRY_MSG`**: Developer-role message telling the LLM it's stuck and must try a different approach. Follows the same `{"role": "developer", "content": ...}` pattern as other retry messages.
+
+#### 7. CLAUDE.md update
+
+Added stuck loop detection as layer 6 of session defense documentation.
+
+### Tests: `tests/test_stuck_loop.py` — 107 tests across 17 test classes
+
+**TestFingerprintBasics** (12): Empty returns empty, single tool format, same calls same fingerprint, different args differ, different tools differ, order matters, pipe-separated multiple tools, empty args consistent, non-dict args treated as empty, "arguments" key fallback, missing name, missing input.
+
+**TestFingerprintNamesOnly** (5): Ignores args, different tools differ, order preserved, format is name|name, empty returns empty.
+
+**TestFingerprintDeterminism** (4): Dict key order irrelevant, nested dict deterministic, list order preserved, special types use default=str.
+
+**TestDetectStuckFromFingerprints** (16): Too few fingerprints, simple repetition (3x, 5x), cycle length 2, cycle length 3, not enough repeats, no repetition, broken cycle, empty fingerprints, mixed empty/non-empty, trailing repetition, custom min_repeats, max_cycle_length=1, leading noise before cycle, empty list.
+
+**TestDetectStuckLoop** (15): Identical iterations, different iterations, too few, cycle of two, empty iterations, single tool repeat, same tools different args (not stuck), names_only mode, custom min_repeats, custom max_cycle_length, mixed tool counts, different tool counts, real-world status check loop, real-world deploy retry loop, real-world search refine (not stuck).
+
+**TestDetectStuckLoopEdgeCases** (10): Single iteration, empty input, min_repeats=1, min_repeats=1 with empty, very long history, repetition at end only, repetition at start not end, no name key, no input key, cycle length equals history.
+
+**TestStuckLoopTrackerInit** (3): Default construction, custom params, slots defined.
+
+**TestStuckLoopTrackerRecord** (4): Increments count, empty tool calls, window size enforced, does not modify input.
+
+**TestStuckLoopTrackerCheck** (9): Not stuck initially, insufficient history, stuck after repetition, cycle detection, varied iterations, stuck after initial varied work, empty iterations, names_only mode, exact mode different args.
+
+**TestStuckLoopTrackerCheckDetailed** (4): Not stuck returns 0, simple repetition returns 1, cycle 2 returns 2, cycle 3 returns 3.
+
+**TestStuckLoopTrackerWarned** (4): Default false, set warned, reset clears warned, warned survives record.
+
+**TestStuckLoopTrackerReset** (4): Clears iterations, clears warned, not stuck after reset, can record after reset.
+
+**TestStuckLoopTrackerWorkflow** (3): Warn then break out, warn then still stuck, full lifecycle (varied → stuck → warned → break out → new stuck).
+
+**TestStuckLoopRetryMsg** (5): Is dict, role is developer, has content, mentions stuck, mentions different approach.
+
+**TestNamesOnlyMode** (5): names_only True catches same-tool, False does not, names_only cycle, different tool sequences, tracker integration.
+
+**TestImports** (5): All 5 public symbols importable from response_guards.
+
+### Files changed
+- `src/discord/response_guards.py` (lines 3-5, 440-583): Added hashlib/json/deque imports, `_fingerprint_tool_calls`, `_detect_stuck_from_fingerprints`, `detect_stuck_loop`, `StuckLoopTracker`, `_STUCK_LOOP_RETRY_MSG`.
+- `tests/test_stuck_loop.py` (new, 107 tests): 17 test classes.
+- `CLAUDE.md` (line 156): Added stuck loop detection as layer 6 of session defense.
+
+### Design decisions
+
+1. **Fingerprint-based comparison**: Tool calls are hashed to short strings rather than compared as dicts. This makes window tracking cheap (store strings in a deque, not full dicts) and comparison fast (string equality, not deep dict comparison).
+
+2. **SHA256 truncated to 16 hex chars**: 64 bits of entropy is sufficient for collision avoidance within a window of ~12 iterations. Full SHA256 would waste memory.
+
+3. **Empty iterations are NOT "stuck"**: If all iterations in the window have no tool calls (empty fingerprint), the detector returns False. This is correct: an agent with no tool calls should terminate via the normal "no more tool calls → COMPLETED" path, not via stuck detection.
+
+4. **Cycle detection with `any(cycle)`**: A cycle must contain at least one non-empty fingerprint. This prevents false positives on agents that alternate between tool-using and text-only iterations (the text-only iterations get empty fingerprints).
+
+5. **`StuckLoopTracker` uses deque**: The `maxlen` parameter on deque automatically evicts old entries, bounding memory. The window default of 12 allows detecting cycles up to length 3 repeated 3 times (3*3=9) with some headroom.
+
+6. **Warn-then-terminate pattern**: The `warned` flag is set by the caller, not by the tracker. This keeps the tracker purely a detection mechanism — the caller decides the intervention policy. The intended pattern: first detection → inject `_STUCK_LOOP_RETRY_MSG` + set `warned=True`; second detection with `warned=True` → terminate.
+
+7. **NOT wired into agent/loop runtime**: Following the pattern of prior rounds (e.g., Round 39 auxiliary client), the detector is implemented as a standalone module with full tests. Wiring into `_run_agent` and `_run_loop` iteration loops is deferred — the agent manager would instantiate a `StuckLoopTracker` per agent and call `record()` + `check()` each iteration.
+
+### Next round watch for
+- Round 43 (tool result schema enforcement) has no dependencies on Round 42.
+- The `detect_stuck_loop` function is NOT yet called anywhere in runtime code. Wiring into `agents/manager.py` `_run_agent()` requires: (a) instantiate `StuckLoopTracker` at agent spawn, (b) call `tracker.record(tool_calls)` after each iteration's LLM response, (c) on `tracker.check()`, inject `_STUCK_LOOP_RETRY_MSG` or terminate agent. Wiring into `autonomous_loop.py` `_run_loop()` requires the iteration callback to return structured tool call data (currently returns only text).
+- The `_fingerprint_tool_calls` function handles both `"input"` and `"arguments"` key names (line 454). OpenAI tool calls use `"arguments"` (JSON string), while internal tool calls use `"input"` (dict). The function expects dicts — if `"arguments"` is a JSON string, it would be treated as a non-dict and default to `{}`. Callers should ensure arguments are parsed before passing.
+- The `names_only=True` mode is intentionally more aggressive — it catches agents calling the same tool with different args. This is useful for detecting "polling loops" (e.g., repeatedly checking status with slightly different timestamps). However, it could false-positive on legitimate sequential operations (e.g., reading multiple files). Use with higher `min_repeats` values.
+- REST API endpoint count is 123 (no new endpoints this round).
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
 
