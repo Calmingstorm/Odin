@@ -28,6 +28,7 @@ from .recovery import (
     get_retry_delay as _get_retry_delay,
 )
 from .risk_classifier import RiskStats, classify_tool
+from .output_streamer import ToolOutputStreamer
 from .ssh import is_local_address, run_local_command, run_ssh_command
 from .ssh_pool import SSHConnectionPool
 
@@ -74,11 +75,13 @@ class ToolExecutor:
         self, config: ToolsConfig | None = None, memory_path: str | None = None,
         browser_manager: object | None = None,
         permission_manager: PermissionManager | None = None,
+        output_streamer: ToolOutputStreamer | None = None,
     ) -> None:
         self.config = config or ToolsConfig()
         self._memory_path = Path(memory_path) if memory_path else None
         self._browser_manager = browser_manager
         self._permission_manager = permission_manager
+        self.output_streamer = output_streamer
         self._metrics: dict[str, dict[str, int]] = {}
         self.risk_stats = RiskStats()
         self.recovery_stats = RecoveryStats()
@@ -257,6 +260,7 @@ class ToolExecutor:
         command: str,
         ssh_user: str = "root",
         timeout: int | None = None,
+        on_output: object | None = None,
     ) -> tuple[int, str]:
         """Execute a command locally or via SSH depending on host address.
 
@@ -266,6 +270,9 @@ class ToolExecutor:
         Both paths are wrapped in bulkhead semaphores so that a flood of
         SSH commands cannot exhaust subprocess/FD resources needed by
         local commands (and vice versa).
+
+        When *on_output* is provided, stdout lines are streamed to the
+        callback as they arrive (in addition to being collected).
         """
         if timeout is None:
             timeout = self.config.command_timeout_seconds
@@ -274,10 +281,10 @@ class ToolExecutor:
             if bh:
                 try:
                     async with bh.acquire():
-                        return await run_local_command(command, timeout=timeout)
+                        return await run_local_command(command, timeout=timeout, on_output=on_output)
                 except BulkheadFullError:
                     return 1, "Error: subprocess bulkhead full — too many concurrent local commands"
-            return await run_local_command(command, timeout=timeout)
+            return await run_local_command(command, timeout=timeout, on_output=on_output)
         ssh_retry = self.config.ssh_retry
         ssh_kwargs = dict(
             host=address,
@@ -290,6 +297,7 @@ class ToolExecutor:
             retry_base_delay=ssh_retry.base_delay,
             retry_max_delay=ssh_retry.max_delay,
             pool=self.ssh_pool,
+            on_output=on_output,
         )
         bh = self.bulkheads.get("ssh")
         if bh:
@@ -312,10 +320,32 @@ class ToolExecutor:
 
     async def _handle_run_command(self, inp: dict) -> str:
         command = inp["command"]
-        output = await self._run_on_host(inp["host"], command)
+        host = inp["host"]
+
+        # Stream output if enabled for this tool
+        on_output = None
+        finish_cb = None
+        if self.output_streamer and self.output_streamer.is_enabled("run_command"):
+            _, on_output, finish_cb = self.output_streamer.create_callback(
+                "run_command", channel_id=host,
+            )
+
+        resolved = self._resolve_host(host)
+        if not resolved:
+            if finish_cb:
+                await finish_cb()
+            return f"Unknown or disallowed host: {host}"
+        address, ssh_user, _os = resolved
+        code, output = await self._exec_command(
+            address, command, ssh_user, on_output=on_output,
+        )
+        if finish_cb:
+            await finish_cb()
+        if code != 0:
+            output = f"Command failed (exit {code}):\n{output}"
         output = _truncate_lines(output)
         if self._branch_freshness_enabled and is_test_command(command) and is_test_failure(output):
-            output = await self._annotate_with_freshness(output, inp["host"], "run_command", command)
+            output = await self._annotate_with_freshness(output, host, "run_command", command)
         return output
 
     async def _handle_run_script(self, inp: dict) -> str:
@@ -355,7 +385,19 @@ class ToolExecutor:
             f"rm -f \"$TMPF\"; exit $EXIT"
         )
 
-        code, output = await self._exec_command(address, cmd, ssh_user)
+        # Stream output if enabled for this tool
+        on_output = None
+        finish_cb = None
+        if self.output_streamer and self.output_streamer.is_enabled("run_script"):
+            _, on_output, finish_cb = self.output_streamer.create_callback(
+                "run_script", channel_id=host,
+            )
+
+        code, output = await self._exec_command(
+            address, cmd, ssh_user, on_output=on_output,
+        )
+        if finish_cb:
+            await finish_cb()
         if code != 0:
             result = f"Script failed (exit {code}):\n{_truncate_lines(output)}"
             if self._branch_freshness_enabled and is_test_command(script) and is_test_failure(result):

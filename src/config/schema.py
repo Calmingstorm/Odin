@@ -61,6 +61,13 @@ class BranchFreshnessConfig(BaseModel):
     enabled: bool = True
 
 
+class StreamingConfig(BaseModel):
+    enabled: bool = False
+    tools: list[str] = Field(default_factory=list)
+    chunk_interval_seconds: float = 1.0
+    max_chunk_chars: int = 2000
+
+
 class AgentsConfig(BaseModel):
     max_nesting_depth: int = 2
     max_children_per_agent: int = 3
@@ -93,6 +100,7 @@ class ToolsConfig(BaseModel):
     ssh_pool: SSHPoolConfig = SSHPoolConfig()
     recovery: RecoveryConfig = RecoveryConfig()
     branch_freshness: BranchFreshnessConfig = BranchFreshnessConfig()
+    streaming: StreamingConfig = StreamingConfig()
 
     def get_tool_timeout(self, tool_name: str) -> int:
         return self.tool_timeouts.get(tool_name, self.command_timeout_seconds)

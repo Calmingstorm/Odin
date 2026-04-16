@@ -159,7 +159,7 @@ tightening of prior work.
 |---|-------|--------|---------|
 | 36 | Health dashboard page: all component health at a glance (Codex, SSH hosts, DB, knowledge store, voice) | done | HealthChecker module (11 components: Discord, Codex, sessions, knowledge, SSH hosts, voice, monitoring, browser, scheduler, loops, agents), /api/health/components endpoint, health.js web UI page with auto-refresh, +74 tests |
 | 37 | Memory-usage widget: session count, knowledge DB size, trajectory volume | done | ResourceUsage module (4 dataclasses: DirStats, SessionStats, KnowledgeStats, TrajectoryStats), collect_all() aggregator, /api/resource-usage endpoint, resources.js web UI page with 4 tabs (sessions/knowledge/trajectories/storage) + storage bar chart, +81 tests |
-| 38 | Tool output streaming: ship partial results to Discord/UI as tools produce them (opt-in per tool, OFF by default — never spam) | pending | |
+| 38 | Tool output streaming: ship partial results to Discord/UI as tools produce them (opt-in per tool, OFF by default — never spam) | done | ToolOutputStreamer module, StreamChunk dataclass, line-by-line streaming in run_local_command/run_ssh_command, executor integration for run_command/run_script, StreamingConfig, /api/tool-streams endpoint, WebSocket broadcast, +76 tests |
 | 39 | Auxiliary LLM client: separate cheap-model client for classification / summarization / vision description | pending | |
 | 40 | REVIEWER: validate rounds 31–39, tighten tests, fix bugs found | pending | |
 
@@ -4914,3 +4914,171 @@ New styles under `/* RESOURCE USAGE */` section:
 - The `scan_directory` function only counts top-level files, not recursively. Session persist directories with `archive/` subdirectories will NOT count archived files.
 - All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
 - The `ToolExecutor.__new__()` fixture pattern was NOT changed by this round.
+
+## Round 38 — Tool output streaming: partial results to WebSocket as tools produce them
+**Focus**: Implement opt-in tool output streaming — ship partial stdout/stderr to WebSocket subscribers as `run_command` and `run_script` tools produce output. OFF by default, opt-in per tool via config. Rate-limited to avoid spamming.
+**Baseline pytest**: 3695 passed, 0 failed
+**Post-round pytest**: 3771 passed, 0 failed (+76 new tests)
+
+### Validated from prior rounds
+- Round 37 (Resource usage widget): All 81 tests pass. No changes needed.
+- Round 36 (Health dashboard): All 74 tests pass. No changes needed.
+- Round 37 noted "Round 38 has no dependencies on Round 37" — confirmed, clean start.
+- Round 37 noted REST API endpoint count was 122 — confirmed, now 123 (+1 new: `/api/tool-streams`).
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.) — unchanged.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Fixes for prior round issues
+- **Branch freshness tests**: Updated 6 tests in `tests/test_branch_freshness.py` that mocked `_run_on_host` and `_exec_command`. The `_handle_run_command` refactor (to support streaming) inlines host resolution instead of calling `_run_on_host`, so these tests needed their mocks updated to route the main command through `mock_exec_command` with the test command returning `(1, "3 failed, ...")` instead of using a separate `mock_run_on_host`. Also added `on_output=None` parameter to all `mock_exec_command` signatures.
+
+### Work done
+
+#### 1. Tool output streamer module: `src/tools/output_streamer.py` (new, ~155 lines)
+
+**StreamChunk dataclass** (slots=True):
+- Fields: `tool_name`, `chunk` (the text), `sequence` (counter), `timestamp` (ISO 8601), `channel_id`, `finished` (bool, default False).
+- `to_dict()`: Returns JSON-serializable dict with all 6 fields.
+
+**_ActiveStream dataclass**:
+- Internal tracking for one in-flight tool invocation. Fields: `tool_name`, `channel_id`, `started_at`, `sequence`, `last_emit`, `buffered`, `total_chars`.
+
+**ToolOutputStreamer class**:
+- `__init__(enabled_tools, chunk_interval, max_chunk_chars)`: Configures which tools stream, minimum interval between emits (default 1.0s), and max chars per chunk (default 2000).
+- `is_enabled(tool_name)`: Returns True if tool is in the opt-in set.
+- `add_listener(callback)` / `remove_listener(callback)`: Register/remove async callbacks that receive `StreamChunk` objects. Deduplicates listeners.
+- `create_callback(tool_name, channel_id)`: Returns `(stream_id, on_output, finish)` tuple. `on_output(text)` is called by command runners for each line. `finish()` flushes remaining buffer and emits a final `finished=True` chunk.
+- Rate limiting: Chunks are buffered and only emitted when `chunk_interval` seconds have passed since the last emit. The `last_emit` is initialized to `time.monotonic()` at stream creation, so the first chunk is also rate-limited (no immediate flood).
+- `get_active_streams()`: Returns list of dicts with stream_id, tool_name, channel_id, total_chars, chunks_sent, elapsed_seconds.
+- `_emit(chunk)`: Calls all listeners with try/except per listener (crash-safe).
+
+#### 2. Streaming in run_local_command: `src/tools/ssh.py` (lines 57-86)
+
+New helper function `_read_lines_with_callback(proc, timeout, on_output)`:
+- Reads `proc.stdout` line-by-line via `readline()` instead of `communicate()`.
+- Calls `await on_output(line)` for each decoded line. Callback exceptions are silently caught.
+- Uses `asyncio.timeout()` context manager for proper timeout handling.
+- Returns same `(exit_code, output)` tuple as the original code.
+
+`run_local_command(command, timeout, on_output=None)`:
+- When `on_output` is provided, delegates to `_read_lines_with_callback`.
+- When `on_output` is None (default), uses the original `communicate()` path.
+- No behavior change for existing callers.
+
+New `OutputCallback` type alias for the async callback signature.
+
+#### 3. Streaming in run_ssh_command: `src/tools/ssh.py` (line 108)
+
+Added `on_output: OutputCallback | None = None` parameter. When provided, uses `_read_lines_with_callback` instead of `communicate()` for reading SSH process output. Same path switching logic as `run_local_command`.
+
+#### 4. Executor integration: `src/tools/executor.py`
+
+**ToolExecutor.__init__** (line 78): New `output_streamer: ToolOutputStreamer | None = None` parameter, stored as `self.output_streamer`.
+
+**_exec_command** (line 262): New `on_output` parameter passed through to `run_local_command` and `run_ssh_command`.
+
+**_handle_run_command** (lines 321-347): Refactored to inline host resolution (previously delegated to `_run_on_host`). When `output_streamer.is_enabled("run_command")`, creates a streaming callback via `create_callback()`, passes `on_output` to `_exec_command`, and calls `finish()` when done. Also calls `finish()` on unknown-host early return.
+
+**_handle_run_script** (lines 389-400): Similar streaming integration. Creates callback when `output_streamer.is_enabled("run_script")`, passes to `_exec_command`, calls `finish()` on completion.
+
+#### 5. Config: `src/config/schema.py` (lines 65-70)
+
+New **StreamingConfig** Pydantic model:
+- `enabled: bool = False` — master switch (OFF by default)
+- `tools: list[str] = []` — tool names to stream (empty = none)
+- `chunk_interval_seconds: float = 1.0` — min interval between emits
+- `max_chunk_chars: int = 2000` — max chars per chunk
+
+Added `streaming: StreamingConfig = StreamingConfig()` to **ToolsConfig** (line 96).
+
+#### 6. REST API endpoint: `src/web/api.py` (lines 378-387)
+
+New endpoint:
+- `GET /api/tool-streams`: Returns streaming status. If no streamer configured, returns `{"enabled": false, "streams": []}`. Otherwise returns `{"enabled": true, "enabled_tools": [...], "active_streams": [...]}`.
+- Accesses streamer via `bot.tool_executor.output_streamer` (safe `getattr` chain).
+
+#### 7. WebSocket broadcast: `src/health/server.py` (lines 472-477)
+
+In `set_bot()`, after WebSocket manager setup: if executor has an `output_streamer`, registers a listener that broadcasts `{"type": "tool_stream", ...chunk.to_dict()}` events to all WebSocket event subscribers.
+
+#### 8. Exports: `src/tools/__init__.py`
+
+Updated to export `StreamChunk` and `ToolOutputStreamer`.
+
+#### 9. CLAUDE.md updates
+
+- Added `src/tools/output_streamer.py` to project structure.
+- Updated endpoint count from 122 to 123 across all 3 references.
+
+### Tests: `tests/test_output_streamer.py` — 76 tests across 16 test classes
+
+**StreamChunk** (5): basic fields, finished flag, to_dict, to_dict finished, to_dict all keys.
+
+**_ActiveStream** (2): default values, mutable fields.
+
+**StreamerInit** (5): default construction, custom enabled_tools, custom chunk_interval, chunk_interval minimum (0.1), enabled_tools returns copy.
+
+**IsEnabled** (4): enabled tool, disabled tool, empty set, None set.
+
+**Listeners** (7): add, no duplicates, remove, remove nonexistent, emit calls all, emit ignores errors, emit no listeners.
+
+**CreateCallback** (10): returns three-tuple, active stream registered, finish removes stream, buffers text, emits after interval, finish flushes buffer, finish empty buffer, total chars tracked, max chunk chars truncation, channel_id passed through, sequence increments.
+
+**GetActiveStreams** (4): empty, with stream, after finish removed, multiple streams.
+
+**RunLocalCommandStreaming** (8): no callback normal, callback receives lines, output matches return, callback with stderr, failing command, timeout, exception ignored, multiline.
+
+**RunSSHCommandStreaming** (2): on_output parameter accepted (mocked), without on_output uses communicate.
+
+**ExecCommandStreaming** (3): local passes on_output, SSH passes on_output, no on_output default.
+
+**HandleRunCommandStreaming** (4): streaming enabled creates callback, streaming disabled no callback, no streamer works, unknown host calls finish.
+
+**HandleRunScriptStreaming** (2): streaming enabled, streaming disabled.
+
+**StreamingConfig** (4): default values, custom values, tools_config has streaming, tools_config streaming custom.
+
+**APIEndpoint** (3): no executor, with streamer, with active stream.
+
+**Exports** (3): tools init exports, output_streamer module imports, ssh OutputCallback type.
+
+**EdgeCases** (11): concurrent streams, finish called twice safe, empty string, rate limiting prevents flood, streamer from config, _read_lines_with_callback helper, executor init with streamer, executor init without streamer, chunk timestamp is ISO.
+
+### Design decisions
+
+1. **OFF by default, opt-in per tool**: The `StreamingConfig.enabled` defaults to `False` and `tools` defaults to empty list. Zero behavior change for existing deployments. Users must explicitly enable streaming for specific tools.
+
+2. **Rate-limited, never spam**: Output is buffered and only emitted when `chunk_interval` seconds have passed. Default 1.0s means at most 1 chunk/second per active tool. The `last_emit` is initialized to creation time (not 0), so even the first chunk respects the interval.
+
+3. **WebSocket-only delivery**: Tool stream events go to WebSocket event subscribers. No Discord message editing — that would hit rate limits and spam channels. The web UI is the right consumer for live streaming output.
+
+4. **Line-by-line reading**: When streaming is enabled, `run_local_command`/`run_ssh_command` use `readline()` instead of `communicate()`. This gives natural line-boundary chunks. The full output is still collected and returned as before.
+
+5. **Callback exceptions silently caught**: Both the `on_output` callback in ssh.py and the listener callbacks in the streamer catch and ignore exceptions. A broken listener cannot break tool execution.
+
+6. **Finish callback always called**: Even on early returns (unknown host), the `finish()` callback is called to clean up the active stream tracking.
+
+7. **No _run_on_host for streamed tools**: `_handle_run_command` now inlines host resolution to pass `on_output` through to `_exec_command`. This is functionally equivalent to the old `_run_on_host` path but allows the streaming callback to be threaded through.
+
+8. **StreamChunk as dataclass**: Lightweight slots=True dataclass with `to_dict()` for JSON serialization. The `finished` flag on the last chunk lets clients know the stream is complete.
+
+### Files changed
+- `src/tools/output_streamer.py` (new, ~155 lines): StreamChunk, _ActiveStream, ToolOutputStreamer.
+- `src/tools/ssh.py` (modified): OutputCallback type, _read_lines_with_callback helper, on_output param on run_local_command and run_ssh_command.
+- `src/tools/executor.py` (modified): output_streamer param on ToolExecutor, on_output param on _exec_command, streaming in _handle_run_command and _handle_run_script.
+- `src/config/schema.py` (modified): StreamingConfig model, streaming field on ToolsConfig.
+- `src/web/api.py` (modified): GET /api/tool-streams endpoint.
+- `src/health/server.py` (modified): WebSocket listener wiring for tool stream events.
+- `src/tools/__init__.py` (modified): Export StreamChunk and ToolOutputStreamer.
+- `CLAUDE.md` (modified): Added output_streamer to project structure, updated endpoint count 122→123.
+- `tests/test_output_streamer.py` (new, 76 tests): 16 test classes.
+- `tests/test_branch_freshness.py` (modified): Updated 6 mock_exec_command signatures and test setups for _handle_run_command refactor.
+
+### Next round watch for
+- Round 39 (Auxiliary LLM client) has no dependencies on Round 38.
+- REST API endpoint count is now 123 (was 122, +1 new: `/api/tool-streams`).
+- The `_handle_run_command` method no longer calls `_run_on_host` — it inlines host resolution. Any test or code that mocks `_run_on_host` for run_command behavior should be updated to mock `_exec_command` instead.
+- The streaming callback is only created for `run_command` and `run_script`. Other command-executing tools (run_command_multi, claude_code, etc.) do NOT stream yet. Future rounds could extend streaming to those tools.
+- The `_read_lines_with_callback` function uses `proc.stdout.readline()` which blocks until a full line arrives. Tools that produce output without newlines (e.g., progress bars) may not stream until the line completes.
+- WebSocket `tool_stream` events are broadcast to ALL event subscribers. There's no per-channel filtering yet. The web UI should filter by channel_id client-side if needed.
+- The `ToolExecutor.__new__()` fixture pattern in tests needs `output_streamer` set (or set to None). Tests that use `ToolExecutor.__new__()` and call `_handle_run_command` must set `executor.output_streamer = None`.
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).

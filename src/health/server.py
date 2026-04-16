@@ -469,6 +469,16 @@ class HealthServer:
         # Wire audit events to WebSocket for live dashboard/log updates
         ws_mgr = self._ws_manager
         bot.audit.set_event_callback(ws_mgr.broadcast_event)
+        # Wire tool output streaming to WebSocket (if enabled)
+        executor = getattr(bot, "tool_executor", None)
+        streamer = getattr(executor, "output_streamer", None) if executor else None
+        if streamer is not None:
+            async def _stream_to_ws(chunk: object) -> None:
+                await ws_mgr.broadcast_event({
+                    "type": "tool_stream",
+                    **chunk.to_dict(),
+                })
+            streamer.add_listener(_stream_to_ws)
         # Store audit logger on app for the web audit middleware
         self._app["audit_logger"] = bot.audit
         log.info("Web management API enabled")

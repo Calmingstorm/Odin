@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from ..llm.backoff import compute_backoff
@@ -8,6 +9,9 @@ from ..odin_log import get_logger
 
 if TYPE_CHECKING:
     from .ssh_pool import SSHConnectionPool
+
+# Optional async callback that receives each line of output as it arrives.
+OutputCallback = Callable[[str], Awaitable[None]]
 
 log = get_logger("ssh")
 
@@ -52,13 +56,44 @@ def _is_ssh_transient_failure(exit_code: int, output: str) -> bool:
     return False
 
 
+async def _read_lines_with_callback(
+    proc: asyncio.subprocess.Process,
+    timeout: int,
+    on_output: OutputCallback,
+) -> tuple[int, str]:
+    """Read stdout line by line, calling *on_output* for each line."""
+    lines: list[str] = []
+    try:
+        async with asyncio.timeout(timeout):
+            assert proc.stdout is not None
+            while True:
+                raw = await proc.stdout.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace")
+                lines.append(line)
+                try:
+                    await on_output(line)
+                except Exception:
+                    pass
+            await proc.wait()
+    except (asyncio.TimeoutError, TimeoutError):
+        proc.kill()
+        return 1, f"Command timed out after {timeout} seconds"
+    output = "".join(lines)
+    return proc.returncode or 0, _truncate_output(output)
+
+
 async def run_local_command(
     command: str,
     timeout: int = 30,
+    on_output: OutputCallback | None = None,
 ) -> tuple[int, str]:
     """Run a command locally via subprocess. Returns (exit_code, output).
 
     Used for localhost hosts — no SSH overhead, no key needed.
+    When *on_output* is provided, stdout is streamed line-by-line to the
+    callback in addition to being collected for the return value.
     """
     log.info("Local exec: %s", command)
 
@@ -68,6 +103,8 @@ async def run_local_command(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
+        if on_output is not None:
+            return await _read_lines_with_callback(proc, timeout, on_output)
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = stdout.decode("utf-8", errors="replace")
         return proc.returncode or 0, _truncate_output(output)
@@ -91,6 +128,7 @@ async def run_ssh_command(
     retry_base_delay: float = 0.5,
     retry_max_delay: float = 10.0,
     pool: SSHConnectionPool | None = None,
+    on_output: OutputCallback | None = None,
 ) -> tuple[int, str]:
     """Run a command on a remote host via SSH. Returns (exit_code, output).
 
@@ -128,9 +166,14 @@ async def run_ssh_command(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            output = stdout.decode("utf-8", errors="replace")
-            exit_code = proc.returncode or 0
+            if on_output is not None:
+                exit_code, output = await _read_lines_with_callback(
+                    proc, timeout, on_output,
+                )
+            else:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                output = stdout.decode("utf-8", errors="replace")
+                exit_code = proc.returncode or 0
 
             if exit_code == 0 or not _is_ssh_transient_failure(exit_code, output):
                 return exit_code, _truncate_output(output)

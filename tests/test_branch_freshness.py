@@ -551,10 +551,9 @@ class TestExecutorFreshnessIntegration:
     @pytest.mark.asyncio
     async def test_annotates_stale_branch_on_test_failure(self, executor):
         """Test failure on stale branch gets a staleness warning appended."""
-        async def mock_run_on_host(alias, command):
-            return "Command failed (exit 1):\n3 failed, 10 passed"
-
-        async def mock_exec_command(address, command, ssh_user, timeout=None):
+        async def mock_exec_command(address, command, ssh_user, timeout=None, on_output=None):
+            if "pytest" in command:
+                return (1, "3 failed, 10 passed")
             if "rev-parse" in command:
                 return (0, "master\n")
             if "fetch" in command:
@@ -563,7 +562,6 @@ class TestExecutorFreshnessIntegration:
                 return (0, "5\n")
             return (0, "")
 
-        executor._run_on_host = mock_run_on_host
         executor._exec_command = mock_exec_command
         executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
@@ -576,10 +574,9 @@ class TestExecutorFreshnessIntegration:
     @pytest.mark.asyncio
     async def test_no_annotation_on_fresh_branch(self, executor):
         """Test failure on fresh branch gets no warning."""
-        async def mock_run_on_host(alias, command):
-            return "Command failed (exit 1):\n3 failed, 10 passed"
-
-        async def mock_exec_command(address, command, ssh_user, timeout=None):
+        async def mock_exec_command(address, command, ssh_user, timeout=None, on_output=None):
+            if "pytest" in command:
+                return (1, "3 failed, 10 passed")
             if "rev-parse" in command:
                 return (0, "master\n")
             if "fetch" in command:
@@ -588,7 +585,6 @@ class TestExecutorFreshnessIntegration:
                 return (0, "0\n")
             return (0, "")
 
-        executor._run_on_host = mock_run_on_host
         executor._exec_command = mock_exec_command
         executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
@@ -638,11 +634,13 @@ class TestExecutorFreshnessIntegration:
     @pytest.mark.asyncio
     async def test_freshness_check_exception_is_safe(self, executor):
         """If freshness check crashes, the original result is returned."""
-        async def mock_run_on_host(alias, command):
-            return "Command failed (exit 1):\n3 failed, 10 passed"
+        async def mock_exec_command(address, command, ssh_user, timeout=None, on_output=None):
+            if "pytest" in command:
+                return (1, "3 failed, 10 passed")
+            raise RuntimeError("freshness check boom")
 
-        executor._run_on_host = mock_run_on_host
-        executor._resolve_host = lambda alias: None  # will cause early return
+        executor._exec_command = mock_exec_command
+        executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
         result = await executor._handle_run_command({"host": "local", "command": "pytest tests/"})
         assert "3 failed" in result
@@ -651,10 +649,9 @@ class TestExecutorFreshnessIntegration:
     @pytest.mark.asyncio
     async def test_fetch_failure_tracked(self, executor):
         """Fetch failures are counted in stats."""
-        async def mock_run_on_host(alias, command):
-            return "Command failed (exit 1):\n3 failed"
-
-        async def mock_exec_command(address, command, ssh_user, timeout=None):
+        async def mock_exec_command(address, command, ssh_user, timeout=None, on_output=None):
+            if "pytest" in command:
+                return (1, "3 failed")
             if "rev-parse" in command:
                 return (0, "master\n")
             if "fetch" in command:
@@ -663,7 +660,6 @@ class TestExecutorFreshnessIntegration:
                 return (0, "0\n")
             return (0, "")
 
-        executor._run_on_host = mock_run_on_host
         executor._exec_command = mock_exec_command
         executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
@@ -682,7 +678,7 @@ class TestExecutorRunScriptFreshness:
     @pytest.mark.asyncio
     async def test_script_with_test_annotated(self, executor):
         """run_script with test commands gets freshness annotation."""
-        async def mock_exec_command(address, command, ssh_user, timeout=None):
+        async def mock_exec_command(address, command, ssh_user, timeout=None, on_output=None):
             if "rev-parse" in command:
                 return (0, "master\n")
             if "fetch" in command:
@@ -707,7 +703,7 @@ class TestExecutorRunScriptFreshness:
     @pytest.mark.asyncio
     async def test_script_non_test_not_annotated(self, executor):
         """run_script without test commands doesn't get freshness annotation."""
-        async def mock_exec_command(address, command, ssh_user, timeout=None):
+        async def mock_exec_command(address, command, ssh_user, timeout=None, on_output=None):
             return (1, "file not found")
 
         executor._exec_command = mock_exec_command

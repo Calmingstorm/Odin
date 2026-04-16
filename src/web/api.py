@@ -378,6 +378,18 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         from ..monitoring.resource_usage import collect_all
         return web.json_response(collect_all(bot))
 
+    @routes.get("/api/tool-streams")
+    async def get_tool_streams(_request: web.Request) -> web.Response:
+        executor = getattr(bot, "tool_executor", None)
+        streamer = getattr(executor, "output_streamer", None) if executor else None
+        if streamer is None:
+            return web.json_response({"enabled": False, "streams": []})
+        return web.json_response({
+            "enabled": True,
+            "enabled_tools": sorted(streamer.enabled_tools),
+            "active_streams": streamer.get_active_streams(),
+        })
+
     @routes.get("/api/config")
     async def get_config(_request: web.Request) -> web.Response:
         raw = bot.config.model_dump()

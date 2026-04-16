@@ -56,11 +56,12 @@ You are running as part of an automated build loop. Each session, you:
   - `src/tools/risk_classifier.py` — command/tool risk classification (observability only, no blocking)
   - `src/tools/recovery.py` — recovery-before-escalation: transient tool failure auto-retry (single retry, per-category delays)
   - `src/tools/branch_freshness.py` — branch freshness checker: detects stale branches on test failure, annotates results for LLM/loop awareness
+  - `src/tools/output_streamer.py` — tool output streaming: ships partial results to WebSocket as tools produce them (opt-in per tool, OFF by default)
   - `src/permissions/manager.py` — per-user permission tiers (admin/user/guest) with tool RBAC enforcement
   - `src/tools/comfyui.py` — ComfyUI image generation client
   - `src/tools/autonomous_loop.py` — autonomous loop system (LLM-driven recurring tasks)
   - `src/search/sqlite_vec.py` — SQLite vector search helpers (sqlite-vec extension)
-  - `src/web/api.py` — REST API for web management UI (122 endpoints)
+  - `src/web/api.py` — REST API for web management UI (123 endpoints)
   - `src/web/websocket.py` — WebSocket handler for live updates (logs, events)
   - `src/web/chat.py` — chat backend for web UI and WebSocket chat
   - `src/agents/manager.py` — multi-agent orchestration with lifecycle state machine (AgentState enum, AgentStateMachine, typed transitions, per-iteration recovery)
@@ -105,7 +106,7 @@ Background services:
 
 Web management UI:
   http://host:3939/ui/ → Vue 3 SPA (CDN, no build step)
-  /api/*               → REST API (122 endpoints, Bearer token auth)
+  /api/*               → REST API (123 endpoints, Bearer token auth)
   /api/ws              → WebSocket (live logs + events)
 ```
 
@@ -184,7 +185,7 @@ No classifier. No approval prompts. No keyword routing. One path: Codex with too
 - **create_poll**: Create native Discord polls (max 10 options, up to 7 days).
 
 ### Web Management UI
-- **Backend**: aiohttp REST API (122 endpoints) + WebSocket, mounted on the health server (port 3939)
+- **Backend**: aiohttp REST API (123 endpoints) + WebSocket, mounted on the health server (port 3939)
 - **Frontend**: Vue 3 + Tailwind CSS + Vue Router (all CDN, no build step), served as static files
 - **Auth**: Bearer token via `web.api_token` config (empty = no auth, dev mode)
 - **Security**: rate limiting (120 req/60s per IP), security headers (nosniff, frame deny), input validation
