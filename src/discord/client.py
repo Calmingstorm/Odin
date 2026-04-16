@@ -2636,11 +2636,11 @@ class OdinBot(commands.Bot):
                     elif tool_name == "post_file":
                         result = await self._handle_post_file(message, tool_input)
                     elif tool_name == "schedule_task":
-                        result = self._handle_schedule_task(message, tool_input)
+                        result = await self._handle_schedule_task(message, tool_input)
                     elif tool_name == "list_schedules":
                         result = self._handle_list_schedules()
                     elif tool_name == "delete_schedule":
-                        result = self._handle_delete_schedule(tool_input)
+                        result = await self._handle_delete_schedule(tool_input)
                     elif tool_name == "parse_time":
                         result = self._handle_parse_time(tool_input)
                     elif tool_name == "search_history":
@@ -2672,7 +2672,7 @@ class OdinBot(commands.Bot):
                     elif tool_name == "search_audit":
                         result = await self._handle_search_audit(tool_input)
                     elif tool_name == "create_digest":
-                        result = self._handle_create_digest(message, tool_input)
+                        result = await self._handle_create_digest(message, tool_input)
                     elif tool_name == "create_skill":
                         result = await asyncio.to_thread(
                             self.skill_manager.create_skill, tool_input["name"], tool_input["code"],
@@ -3008,10 +3008,10 @@ class OdinBot(commands.Bot):
         except discord.HTTPException as e:
             return f"Failed to upload to Discord: {e}"
 
-    def _handle_schedule_task(self, message: discord.Message, inp: dict) -> str:
+    async def _handle_schedule_task(self, message: discord.Message, inp: dict) -> str:
         """Create a scheduled task."""
         try:
-            schedule = self.scheduler.add(
+            schedule = await self.scheduler.add(
                 description=inp.get("description", "Unnamed task"),
                 action=inp.get("action", "reminder"),
                 channel_id=str(message.channel.id),
@@ -3066,10 +3066,10 @@ class OdinBot(commands.Bot):
             )
         return f"**Scheduled tasks ({len(schedules)}):**\n" + "\n".join(lines)
 
-    def _handle_delete_schedule(self, inp: dict) -> str:
+    async def _handle_delete_schedule(self, inp: dict) -> str:
         """Delete a scheduled task."""
         schedule_id = inp.get("schedule_id", "")
-        if self.scheduler.delete(schedule_id):
+        if await self.scheduler.delete(schedule_id):
             return f"Deleted schedule {schedule_id}."
         return f"Schedule {schedule_id} not found."
 
@@ -3219,12 +3219,12 @@ class OdinBot(commands.Bot):
             )
         return f"**Audit log ({len(results)} entries):**\n" + "\n".join(lines)
 
-    def _handle_create_digest(self, message: discord.Message, inp: dict) -> str:
+    async def _handle_create_digest(self, message: discord.Message, inp: dict) -> str:
         """Create a scheduled daily digest."""
         cron = inp.get("cron", "0 8 * * *")
         description = inp.get("description", "Daily Infrastructure Digest")
         try:
-            schedule = self.scheduler.add(
+            schedule = await self.scheduler.add(
                 description=description,
                 action="digest",
                 channel_id=str(message.channel.id),
@@ -3988,7 +3988,7 @@ class OdinBot(commands.Bot):
         if tool_name == "post_file":
             return await self._handle_post_file(msg_proxy, tool_input)
         if tool_name == "schedule_task":
-            return self._handle_schedule_task(msg_proxy, tool_input)
+            return await self._handle_schedule_task(msg_proxy, tool_input)
         if tool_name == "delegate_task":
             return await self._handle_delegate_task(msg_proxy, tool_input)
         if tool_name == "start_loop":
@@ -4004,13 +4004,13 @@ class OdinBot(commands.Bot):
         if tool_name == "generate_image":
             return await self._handle_generate_image(msg_proxy, tool_input)
         if tool_name == "create_digest":
-            return self._handle_create_digest(msg_proxy, tool_input)
+            return await self._handle_create_digest(msg_proxy, tool_input)
 
         # --- Discord-native tools (input only) ---
         if tool_name == "list_schedules":
             return self._handle_list_schedules()
         if tool_name == "delete_schedule":
-            return self._handle_delete_schedule(tool_input)
+            return await self._handle_delete_schedule(tool_input)
         if tool_name == "parse_time":
             return self._handle_parse_time(tool_input)
         if tool_name == "search_history":
