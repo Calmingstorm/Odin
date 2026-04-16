@@ -1276,6 +1276,77 @@ class OdinBot(commands.Bot):
         base = ["!"]  # OdinBot's default prefix; can be made config-driven later
         return commands.when_mentioned_or(*base)(bot, message)
 
+    async def _codex_call(self, *, messages: list, system: str, tools: list, **kwargs):
+        """Wrap Codex chat_with_tools with cost tracking + subsystem health.
+
+        - cost_tracker.record() captures token usage on every successful call
+        - subsystem_guard.record_success/failure tracks Codex availability
+        - subsystem_guard.check() short-circuits with a clear error when Codex
+          has been classified UNAVAILABLE so we don't pile failures on a dead
+          subsystem
+        """
+        if self.subsystem_guard is not None:
+            err = self.subsystem_guard.check("codex")
+            if err:
+                raise RuntimeError(f"Codex subsystem unavailable: {err}")
+        try:
+            resp = await self.codex_client.chat_with_tools(
+                messages=messages, system=system, tools=tools, **kwargs,
+            )
+        except Exception as exc:
+            if self.subsystem_guard is not None:
+                self.subsystem_guard.record_failure("codex", str(exc))
+            raise
+        if self.subsystem_guard is not None:
+            self.subsystem_guard.record_success("codex")
+        if self.cost_tracker is not None:
+            try:
+                self.cost_tracker.record(
+                    int(getattr(resp, "input_tokens", 0) or 0),
+                    int(getattr(resp, "output_tokens", 0) or 0),
+                    model=getattr(self.config.openai_codex, "model", ""),
+                )
+            except Exception:
+                log.exception("CostTracker.record failed (non-fatal)")
+        return resp
+
+    async def _save_turn_trajectory(
+        self, trajectory, *, error: str = "", final_response: str = "",
+        tools_used: list[str] | None = None,
+    ) -> None:
+        """Persist the turn trajectory as JSONL. Non-fatal on error."""
+        if self.trajectory_saver is None:
+            return
+        try:
+            from datetime import datetime, timezone
+            trajectory.timestamp = datetime.now(timezone.utc).isoformat()
+            if error:
+                trajectory.is_error = True
+                trajectory.final_response = error
+            elif final_response:
+                trajectory.final_response = final_response
+            if tools_used is not None:
+                trajectory.tools_used = list(tools_used)
+            # Aggregate token counts from iterations
+            trajectory.total_input_tokens = sum(it.input_tokens for it in trajectory.iterations)
+            trajectory.total_output_tokens = sum(it.output_tokens for it in trajectory.iterations)
+            await self.trajectory_saver.save(trajectory)
+        except Exception:
+            log.exception("TrajectorySaver.save failed (non-fatal)")
+
+    async def _emit_lifecycle_event(self, event_type: str, payload: dict) -> None:
+        """Emit a lifecycle event to registered outbound webhooks (no-op if disabled)."""
+        if self.outbound_webhook_dispatcher is None:
+            return
+        try:
+            from ..notifications.outbound_webhooks import build_event_payload
+            full_payload = build_event_payload(event_type=event_type, data=payload)
+            await self.outbound_webhook_dispatcher.dispatch_fire_and_forget(
+                event_type=event_type, payload=full_payload,
+            )
+        except Exception:
+            log.exception("Outbound webhook dispatch failed (non-fatal)")
+
     async def setup_hook(self) -> None:
         """Called once before connecting to the gateway.
 
@@ -2268,14 +2339,25 @@ class OdinBot(commands.Bot):
         log.info("Tool loop starting: %d tools available, %d messages in history, cap=%d",
                  len(tools) if tools else 0, len(messages), chat_cap)
 
+        # Per-turn StuckLoopTracker — detects repeating tool-call sequences and
+        # nudges the LLM out of cycles before the iteration cap forces an exit.
+        stuck_tracker = self.stuck_loop_tracker_cls()
+
+        # Per-turn trajectory accumulator — populated each iteration, saved at end.
+        from ..trajectories.saver import TrajectoryTurn, ToolIteration
+        _trajectory = TrajectoryTurn(
+            message_id=str(getattr(message, "id", "")),
+            channel_id=str(getattr(message.channel, "id", "")),
+            user_id=user_id,
+            user_name=str(getattr(message.author, "display_name", "")),
+        )
+
         for iteration in range(chat_cap):
             # Show typing indicator while waiting for LLM response
             try:
                 async with message.channel.typing():
-                    llm_resp = await self.codex_client.chat_with_tools(
-                        messages=messages,
-                        system=system_prompt,
-                        tools=tools or [],
+                    llm_resp = await self._codex_call(
+                        messages=messages, system=system_prompt, tools=tools or [],
                     )
             except CircuitOpenError as coe:
                 # Circuit breaker open — wait for recovery, then retry once
@@ -2284,15 +2366,53 @@ class OdinBot(commands.Bot):
                 await asyncio.sleep(wait_secs)
                 try:
                     async with message.channel.typing():
-                        llm_resp = await self.codex_client.chat_with_tools(
-                            messages=messages,
-                            system=system_prompt,
-                            tools=tools or [],
+                        llm_resp = await self._codex_call(
+                            messages=messages, system=system_prompt, tools=tools or [],
                         )
                 except Exception as retry_err:
+                    await self._save_turn_trajectory(_trajectory, error=str(retry_err))
                     return f"LLM API error (circuit breaker recovery failed): {retry_err}", False, True, tools_used_in_loop, False
             except Exception as api_err:
+                await self._save_turn_trajectory(_trajectory, error=str(api_err))
                 return f"LLM API error: {api_err}", False, True, tools_used_in_loop, False
+
+            # Record this iteration's tool calls + LLM text into the trajectory and stuck tracker
+            iter_tool_calls = [
+                {"id": tc.id, "name": tc.name, "input": tc.input}
+                for tc in (llm_resp.tool_calls or [])
+            ]
+            _trajectory.iterations.append(ToolIteration(
+                iteration=iteration,
+                tool_calls=iter_tool_calls,
+                llm_text=llm_resp.text or "",
+                input_tokens=llm_resp.input_tokens,
+                output_tokens=llm_resp.output_tokens,
+            ))
+            stuck_tracker.record(iter_tool_calls)
+            if stuck_tracker.check():
+                if stuck_tracker.warned:
+                    log.warning("Stuck loop confirmed after warning — terminating tool loop")
+                    await self._save_turn_trajectory(_trajectory)
+                    await self._emit_lifecycle_event("loop.stuck", {
+                        "channel_id": str(message.channel.id),
+                        "iteration": iteration,
+                        "tools_used": tools_used_in_loop,
+                    })
+                    return (
+                        f"Detected a stuck tool-call cycle after {iteration + 1} iterations. "
+                        f"Stopping to avoid burning the iteration budget on a repeat pattern."
+                    ), False, True, tools_used_in_loop, False
+                else:
+                    stuck_tracker.warned = True
+                    log.info("Stuck pattern detected — injecting nudge")
+                    messages.append({
+                        "role": "developer",
+                        "content": (
+                            "You appear to be repeating the same tool-call sequence. "
+                            "Try a different approach or summarise progress and stop."
+                        ),
+                    })
+                    continue
             if not llm_resp.is_tool_use:
                 # Fabrication detection: if no tools were called and the
                 # response looks like it fabricated results, retry once.
@@ -2400,7 +2520,11 @@ class OdinBot(commands.Bot):
                         continuation_count += 1
                         continue
 
-                return llm_resp.text or _EMPTY_RESPONSE_FALLBACK, False, False, tools_used_in_loop, False
+                _final = llm_resp.text or _EMPTY_RESPONSE_FALLBACK
+                await self._save_turn_trajectory(
+                    _trajectory, final_response=_final, tools_used=tools_used_in_loop,
+                )
+                return _final, False, False, tools_used_in_loop, False
 
             # Build internal-format assistant content from LLMResponse
             assistant_content: list[dict] = []
@@ -2687,12 +2811,16 @@ class OdinBot(commands.Bot):
             "Chat tool-iteration cap hit (%d) after %d tool calls; exiting loop",
             chat_cap, len(tools_used_in_loop),
         )
-        return (
+        _cap_msg = (
             f"Hit the chat tool-iteration cap ({chat_cap}) after "
             f"{len(tools_used_in_loop)} tool calls. Task may be partially "
             f"complete. Raise `tools.max_tool_iterations_chat` in config "
             f"(or via the web UI) if this happens often."
-        ), False, True, tools_used_in_loop, False
+        )
+        await self._save_turn_trajectory(
+            _trajectory, final_response=_cap_msg, tools_used=tools_used_in_loop,
+        )
+        return _cap_msg, False, True, tools_used_in_loop, False
 
     @staticmethod
     def _detect_image_type(data: bytes) -> str | None:
@@ -3309,6 +3437,13 @@ class OdinBot(commands.Bot):
         # If result is a loop ID (short hex), format success message
         if result.startswith("Error"):
             return result
+        # Lifecycle webhook: loop.started
+        asyncio.create_task(self._emit_lifecycle_event("loop.started", {
+            "loop_id": result, "goal": goal[:200], "interval_seconds": interval,
+            "mode": mode, "max_iterations": max_iterations,
+            "channel_id": str(getattr(message.channel, "id", "")),
+            "requester_id": str(message.author.id),
+        }))
         return (
             f"Loop started (ID: `{result}`): **{goal[:100]}** "
             f"(every {max(10, interval)}s, mode={mode}, max {max_iterations} iterations)"
@@ -3319,7 +3454,12 @@ class OdinBot(commands.Bot):
         loop_id = inp.get("loop_id", "")
         if not loop_id:
             return "A 'loop_id' is required."
-        return self.loop_manager.stop_loop(loop_id)
+        result = self.loop_manager.stop_loop(loop_id)
+        # Lifecycle webhook: loop.stopped
+        asyncio.create_task(self._emit_lifecycle_event("loop.stopped", {
+            "loop_id": loop_id, "result": result,
+        }))
+        return result
 
     def _handle_list_loops(self) -> str:
         """List all autonomous loops."""

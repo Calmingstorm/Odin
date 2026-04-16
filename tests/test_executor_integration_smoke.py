@@ -351,3 +351,188 @@ class TestProcessWithToolsEndToEnd:
         assert is_error is False
         # The response includes the second-iteration text
         assert "42%" in text or "All clear" in text or "Disk" in text
+
+
+# ---------------------------------------------------------------------------
+# 8. Build-loop module call-site wirings (the deferred-list resolution)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildLoopModuleWirings:
+    """Each previously-deferred build-loop module is reachable from the bot."""
+
+    def test_cost_tracker_attached(self):
+        bot = _make_bot()
+        from src.llm.cost_tracker import CostTracker
+        assert isinstance(bot.cost_tracker, CostTracker)
+
+    def test_subsystem_guard_attached_with_subsystems(self):
+        bot = _make_bot()
+        from src.health.subsystem_guard import SubsystemGuard
+        assert isinstance(bot.subsystem_guard, SubsystemGuard)
+        registered = set(bot.subsystem_guard.registered)
+        # Bot pre-registers six subsystems
+        for name in ("codex", "ssh", "knowledge", "voice", "browser", "comfyui"):
+            assert name in registered, f"subsystem {name} not registered"
+
+    def test_trajectory_saver_attached(self):
+        bot = _make_bot()
+        from src.trajectories.saver import TrajectorySaver
+        assert isinstance(bot.trajectory_saver, TrajectorySaver)
+
+    def test_agent_trajectory_saver_attached(self):
+        bot = _make_bot()
+        from src.agents.trajectory import AgentTrajectorySaver
+        assert isinstance(bot.agent_trajectory_saver, AgentTrajectorySaver)
+
+    def test_diff_tracker_attached(self):
+        bot = _make_bot()
+        from src.audit.diff_tracker import DiffTracker
+        assert isinstance(bot.diff_tracker, DiffTracker)
+
+    def test_risk_classifier_callable(self):
+        bot = _make_bot()
+        assert callable(bot.classify_command_risk)
+        assert callable(bot.classify_tool_risk)
+        rl = bot.classify_command_risk("rm -rf /")
+        assert rl.level.value == "critical"  # smoke test the function
+
+    def test_stuck_loop_tracker_class_attached(self):
+        bot = _make_bot()
+        # Class is exposed for per-turn instantiation in _process_with_tools
+        from src.discord.response_guards import StuckLoopTracker
+        assert bot.stuck_loop_tracker_cls is StuckLoopTracker
+
+    def test_audit_signer_wired_when_key_set(self):
+        from src.config.schema import Config
+        from src.audit.signer import AuditSigner
+        cfg = Config(discord={"token": "x"}, audit={"hmac_key": "k" * 16})
+        bot = OdinBot(cfg)
+        assert isinstance(bot.audit_signer, AuditSigner)
+        # AuditLogger uses it internally — shared reference
+        assert bot.audit._signer is bot.audit_signer
+
+    def test_audit_signer_none_when_key_unset(self):
+        bot = _make_bot()
+        assert bot.audit_signer is None
+        assert bot.audit._signer is None
+
+    def test_outbound_webhook_dispatcher_wired_when_enabled(self):
+        from src.config.schema import Config
+        from src.notifications.outbound_webhooks import OutboundWebhookDispatcher
+        cfg = Config(
+            discord={"token": "x"},
+            outbound_webhooks={"enabled": True},
+        )
+        bot = OdinBot(cfg)
+        assert isinstance(bot.outbound_webhook_dispatcher, OutboundWebhookDispatcher)
+
+    def test_model_router_wired_when_enabled(self):
+        from src.config.schema import Config
+        from src.llm.model_router import ModelRouter
+        cfg = Config(
+            discord={"token": "x"},
+            openai_codex={"model_routing": {"enabled": True}},
+        )
+        bot = OdinBot(cfg)
+        assert isinstance(bot.model_router, ModelRouter)
+
+    def test_context_compressor_wired_when_enabled(self):
+        from src.config.schema import Config
+        from src.llm.context_compressor import PrefixTracker
+        cfg = Config(
+            discord={"token": "x"},
+            openai_codex={"context_compression": {"enabled": True}},
+        )
+        bot = OdinBot(cfg)
+        assert isinstance(bot.prefix_tracker, PrefixTracker)
+
+
+# ---------------------------------------------------------------------------
+# 9. Helper methods that wire components into the call path
+# ---------------------------------------------------------------------------
+
+
+class TestExecutorHelpers:
+    """The wrapper methods that connect modules to the tool loop."""
+
+    def test_codex_call_helper_exists(self):
+        bot = _make_bot()
+        assert callable(bot._codex_call)
+
+    def test_save_turn_trajectory_helper_exists(self):
+        bot = _make_bot()
+        assert callable(bot._save_turn_trajectory)
+
+    def test_emit_lifecycle_event_helper_exists(self):
+        bot = _make_bot()
+        assert callable(bot._emit_lifecycle_event)
+
+    @pytest.mark.asyncio
+    async def test_codex_call_records_cost_and_subsystem(self):
+        from src.llm.types import LLMResponse
+        bot = _make_bot()
+        bot.codex_client = MagicMock()
+
+        async def fake_chat(messages, system, tools, **kw):
+            return LLMResponse(
+                text="ok", tool_calls=[], stop_reason="stop",
+                input_tokens=100, output_tokens=50,
+            )
+        bot.codex_client.chat_with_tools = fake_chat
+
+        before_in = bot.cost_tracker._total_input_tokens
+        before_out = bot.cost_tracker._total_output_tokens
+        resp = await bot._codex_call(messages=[], system="s", tools=[])
+        assert resp.text == "ok"
+        assert bot.cost_tracker._total_input_tokens == before_in + 100
+        assert bot.cost_tracker._total_output_tokens == before_out + 50
+
+    @pytest.mark.asyncio
+    async def test_codex_call_records_subsystem_failure_on_exception(self):
+        bot = _make_bot()
+        bot.codex_client = MagicMock()
+
+        async def fake_chat(messages, system, tools, **kw):
+            raise RuntimeError("boom")
+        bot.codex_client.chat_with_tools = fake_chat
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await bot._codex_call(messages=[], system="s", tools=[])
+        # Failure was recorded against the codex subsystem
+        info = bot.subsystem_guard._subsystems["codex"]
+        assert info.consecutive_failures >= 1
+
+    @pytest.mark.asyncio
+    async def test_emit_lifecycle_event_noop_when_dispatcher_disabled(self):
+        bot = _make_bot()
+        # dispatcher is None when outbound_webhooks.enabled is False
+        assert bot.outbound_webhook_dispatcher is None
+        # Must not raise
+        await bot._emit_lifecycle_event("test.event", {"foo": "bar"})
+
+
+# ---------------------------------------------------------------------------
+# 10. Setup hook runs startup diagnostics
+# ---------------------------------------------------------------------------
+
+
+class TestSetupHookDiagnostics:
+    """setup_hook invokes the build-loop's startup_diagnostics function."""
+
+    @pytest.mark.asyncio
+    async def test_setup_hook_calls_startup_diagnostics(self):
+        bot = _make_bot()
+        called = []
+
+        def fake_diag(*, yaml_config=None, **_):
+            called.append(yaml_config)
+            from src.health.startup import StartupReport
+            return StartupReport(results=[])
+
+        bot._run_startup_diagnostics = fake_diag
+        # load_extension would try to import real cogs — patch it out
+        with patch.object(bot, "load_extension", new_callable=AsyncMock):
+            await bot.setup_hook()
+        assert len(called) == 1, "startup diagnostics must be called on setup_hook"
+        assert called[0] is bot.config
