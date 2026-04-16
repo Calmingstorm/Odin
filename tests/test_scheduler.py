@@ -1001,3 +1001,40 @@ class TestSchedulerWebhookAction:
             "timeout": 5,
             "expected_status_codes": [202],
         }
+
+
+class TestSchedulerAdaptiveTickDelay:
+    """Regression for the class of bug Odin hit: scheduler slept 60s flat,
+    so a one-off run_at due in 2s missed by up to 58s."""
+
+    def test_compute_tick_delay_empty_schedules(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        assert s._compute_tick_delay() == 60.0
+
+    async def test_compute_tick_delay_picks_soonest(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        soon = (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
+        later = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        await s.add("soon", "reminder", "c", run_at=soon, message="x")
+        await s.add("later", "reminder", "c", run_at=later, message="x")
+        delay = s._compute_tick_delay()
+        assert 1.0 <= delay <= 11.0, f"expected ~10s, got {delay}"
+
+    async def test_add_wakes_loop(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        assert not s._wake.is_set()
+        soon = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
+        await s.add("wake-me", "reminder", "c", run_at=soon, message="x")
+        assert s._wake.is_set(), "adding a schedule must set _wake for the loop"
+
+    def test_compute_tick_delay_caps_at_60(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        far_future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+        s._schedules.append({"next_run": far_future, "id": "x", "action": "reminder"})
+        assert s._compute_tick_delay() == 60.0
+
+    def test_compute_tick_delay_floors_at_1(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        s._schedules.append({"next_run": past, "id": "x", "action": "reminder"})
+        assert s._compute_tick_delay() == 1.0

@@ -49,6 +49,7 @@ class Scheduler:
         self._callback: Callable[[dict], Awaitable[None]] | None = None
         self._failure_callback: Callable[[dict, int], Awaitable[None]] | None = None
         self._lock = asyncio.Lock()
+        self._wake = asyncio.Event()
         # Execution history
         _hist_path = history_path or str(self.data_path.parent / "schedule_history.jsonl")
         self.history = ScheduleHistory(_hist_path)
@@ -167,6 +168,7 @@ class Scheduler:
         async with self._lock:
             self._schedules.append(schedule)
             await asyncio.to_thread(self._save)
+        self._wake.set()
         log_next = schedule.get("next_run", "on trigger")
         log.info("Added schedule %s: %s (next: %s)", schedule["id"], description, log_next)
         return schedule
@@ -542,12 +544,47 @@ class Scheduler:
     async def _loop(self) -> None:
         while True:
             try:
-                await asyncio.sleep(60)
+                delay = self._compute_tick_delay()
+                try:
+                    await asyncio.wait_for(self._wake.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+                self._wake.clear()
                 await self._tick()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log.error("Scheduler tick error: %s", e, exc_info=True)
+
+    def _compute_tick_delay(self) -> float:
+        """Sleep until the next schedule is due, capped at 60s.
+
+        Hardcoded 60s ticks meant a one-off scheduled 2s from now could
+        miss its run_at by up to 58s. Now we peek at the earliest pending
+        next_run and sleep that long (min 1s, max 60s)."""
+        try:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            soonest: datetime | None = None
+            for schedule in self._schedules:
+                if schedule.get("paused"):
+                    continue
+                nxt = schedule.get("next_run")
+                if not nxt:
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(nxt)
+                    if parsed.tzinfo is not None:
+                        parsed = parsed.replace(tzinfo=None)
+                except Exception:
+                    continue
+                if soonest is None or parsed < soonest:
+                    soonest = parsed
+            if soonest is None:
+                return 60.0
+            delta = (soonest - now).total_seconds()
+            return max(1.0, min(60.0, delta))
+        except Exception:
+            return 60.0
 
     def _compute_retry_at(self, schedule: dict) -> str:
         """Compute the next retry time using exponential backoff."""
