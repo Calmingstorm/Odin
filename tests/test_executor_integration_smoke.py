@@ -618,3 +618,24 @@ class TestInvokeSkillTool:
             user_id="u1",
         )
         assert "not found or disabled" in out
+
+    @pytest.mark.asyncio
+    async def test_dispatch_loop_tool_invoke_skill_missing_required_field(self):
+        bot = _make_bot()
+        bot.skill_manager.has_skill = MagicMock(return_value=True)
+        bot.skill_manager.execute = AsyncMock(return_value="should-not-run")
+        fake_skill = MagicMock()
+        fake_skill.definition = {
+            "input_schema": {"type": "object", "required": ["msg"], "properties": {"msg": {"type": "string"}}},
+        }
+        bot.skill_manager._skills = {"echo_test": fake_skill}
+        msg_proxy = MagicMock()
+        out = await bot._dispatch_loop_tool(
+            "invoke_skill",
+            {"name": "echo_test"},
+            msg_proxy,
+            user_id="u1",
+        )
+        assert "missing required fields" in out
+        assert "msg" in out
+        bot.skill_manager.execute.assert_not_called()

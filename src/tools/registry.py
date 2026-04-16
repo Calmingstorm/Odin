@@ -602,7 +602,9 @@ TOOLS: list[dict] = [
         "description": (
             "Executes a skill by name, passing the given input dict. Use this to run a skill you just created "
             "or edited without waiting for tool-registry cache refresh. Returns the skill's string result. "
-            "Equivalent to the skill appearing as a direct tool call, but works the same turn it's created."
+            "Equivalent to the skill appearing as a direct tool call, but works the same turn it's created. "
+            "ALWAYS pass the skill's parameters via the 'input' object — top-level fields other than 'name' "
+            "are ignored. If the skill declares required fields, omitting them will return an error."
         ),
         "input_schema": {
             "type": "object",

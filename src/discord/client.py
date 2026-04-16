@@ -959,6 +959,23 @@ class OdinBot(commands.Bot):
         self._memory_cache.clear()
         self._reflector_cache.clear()
 
+    def _invoke_skill_missing_required(self, name: str, payload: dict) -> list[str]:
+        """Return required input fields the payload omits, or [] if complete.
+
+        Used by invoke_skill to fail loudly when the LLM omits the input
+        object — otherwise the skill silently runs with empty params and
+        returns a degenerate result that looks like a tool bug.
+        """
+        try:
+            skill = self.skill_manager._skills.get(name)
+            if skill is None:
+                return []
+            schema = skill.definition.get("input_schema") or {}
+            required = schema.get("required") or []
+            return [f for f in required if f not in payload]
+        except Exception:
+            return []
+
     def _build_system_prompt(
         self, channel: discord.abc.GuildChannel | None = None,
         user_id: str | None = None,
@@ -2806,16 +2823,23 @@ class OdinBot(commands.Bot):
                             if not isinstance(skill_input, dict):
                                 result = "Error: invoke_skill 'input' must be an object."
                             else:
-                                async def _skill_msg(text: str) -> None:
-                                    await message.channel.send(scrub_response_secrets(text))
-                                async def _skill_file(data: bytes, filename: str, caption: str = "") -> None:
-                                    channel_id_key = str(message.channel.id)
-                                    self._pending_files.setdefault(channel_id_key, []).append((data, filename))
-                                result = await self.skill_manager.execute(
-                                    target_name, skill_input,
-                                    message_callback=_skill_msg,
-                                    file_callback=_skill_file,
-                                )
+                                missing = self._invoke_skill_missing_required(target_name, skill_input)
+                                if missing:
+                                    result = (
+                                        f"Error: invoke_skill for '{target_name}' is missing required fields: {missing}. "
+                                        f"Pass them via the 'input' object, e.g. invoke_skill(name='{target_name}', input={{...}})."
+                                    )
+                                else:
+                                    async def _skill_msg(text: str) -> None:
+                                        await message.channel.send(scrub_response_secrets(text))
+                                    async def _skill_file(data: bytes, filename: str, caption: str = "") -> None:
+                                        channel_id_key = str(message.channel.id)
+                                        self._pending_files.setdefault(channel_id_key, []).append((data, filename))
+                                    result = await self.skill_manager.execute(
+                                        target_name, skill_input,
+                                        message_callback=_skill_msg,
+                                        file_callback=_skill_file,
+                                    )
                     elif self.skill_manager.has_skill(tool_name):
                         async def _skill_msg(text: str) -> None:
                             await message.channel.send(scrub_response_secrets(text))
@@ -4215,6 +4239,12 @@ class OdinBot(commands.Bot):
             skill_input = tool_input.get("input") or {}
             if not isinstance(skill_input, dict):
                 return "Error: invoke_skill 'input' must be an object."
+            missing = self._invoke_skill_missing_required(target_name, skill_input)
+            if missing:
+                return (
+                    f"Error: invoke_skill for '{target_name}' is missing required fields: {missing}. "
+                    f"Pass them via the 'input' object, e.g. invoke_skill(name='{target_name}', input={{...}})."
+                )
             ch = msg_proxy.channel
 
             async def _skill_msg(text: str) -> None:
