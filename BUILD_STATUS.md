@@ -166,7 +166,7 @@ tightening of prior work.
 ### Phase 9 — Anti-hedging + detection hardening (rounds 41–45)
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
-| 41 | Expand detect_hedging pattern corpus + add regression test suite | pending | |
+| 41 | Expand detect_hedging pattern corpus + add regression test suite | done | 6 new pattern groups, 4 exemptions, 213 regression tests |
 | 42 | New detector: `detect_stuck_loop` — catches agents iterating without new output (identical tool call chain) | pending | |
 | 43 | Tool result schema enforcement: validate each tool's result shape before feeding back to LLM | pending | |
 | 44 | Context auto-compression with prompt caching (Anthropic-style static prefix caching) | pending | |
@@ -5309,4 +5309,83 @@ Added `AuxiliaryLLMClient` to imports and `__all__`.
 - The `check_sessions` healthy=False change may affect any UI or monitoring that filters on `healthy == True`. The web UI health page shows color based on `status` (not `healthy`), so it should be fine.
 - All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
 - The `ToolExecutor.__new__()` fixture pattern was NOT changed by this round. Future test files using this pattern must still include `_recovery_enabled = False`, `recovery_stats = RecoveryStats()`, `_permission_manager = None`, `risk_stats = RiskStats()`, and `_metrics = {}`.
+
+## Round 41 — Expand detect_hedging pattern corpus + regression test suite
+**Focus**: Expand the hedging detection pattern corpus from 4 groups to 10, add 4 exemption patterns to prevent false positives on legitimate responses, and build a comprehensive 213-test regression suite.
+**Baseline pytest**: 3857 passed, 0 failed
+**Post-round pytest**: 4070 passed, 0 failed (+213 new tests)
+
+### Changes to `src/discord/response_guards.py`
+
+#### Pattern corpus expansion (4 → 10 groups)
+Existing groups 1–4 were preserved unchanged except for two fixes:
+- **Group 3** (`^Plan:` and `I'm going to`): Added `re.MULTILINE` flag so `^Plan:` matches on any line, not just the first. Removed `I can(?:'t| not) directly` — this case is now handled by the inability exemption to avoid conflicting detection.
+- **Group 5** (conditional hedges): Fixed `if that works for you` — old pattern required `works (?:good|right|...)` but real LLM output says "if that works for you". Fixed `give (?:the|me) go-ahead` → `give (?:me )?(?:the )?go-ahead` to handle "give me the go-ahead".
+
+Six new pattern groups added:
+- **Group 5** (line 264): Conditional hedges — "if that's okay", "if that sounds good", "if you're okay with that", "if you agree", "if you give me the green light".
+- **Group 6** (line 274): Deferring / false politeness — "whenever you're ready", "at your convenience", "feel free to", "I'd be happy to", "no rush", "take your time", "just let me know".
+- **Group 7** (line 283): Soft suggestions — "perhaps I could", "maybe we should", "it might be worth", "you might want to consider".
+- **Group 8** (line 291): Consensus / confirmation-seeking — "does that sound right", "what do you think", "how should we proceed", "is that okay".
+- **Group 9** (line 299): Listing steps/approaches without execution — "the steps would be", "here's what I'd do", "one option would be", "we could either", "there are several approaches".
+- **Group 10** (line 307): Disclaimers / excessive caution — "just to be safe", "could you confirm", "I need to verify", "before doing anything", "I don't want to ... without your".
+
+#### Exemption system (new: `_HEDGING_EXEMPTIONS`)
+Added `_HEDGING_EXEMPTIONS` (line 318) — 4 patterns that suppress hedging detection when the response is actually:
+1. **Completed actions**: "I've done X", "done.", "task complete", "completed successfully"
+2. **Reporting results**: "the result is", "the output shows", "here are the results"
+3. **Inability/refusal**: "I can't", "I cannot", "I won't", "I am unable to" — these overlap with hedging patterns but are handled by `detect_tool_unavailable` and `detect_promise_without_action`, not hedging
+4. **Failure explanation**: "the error is", "failed because" — handled by `detect_premature_failure`
+
+The exemption check runs BEFORE pattern matching in `detect_hedging()` (line 345). If any exemption matches, hedging returns False immediately.
+
+### Tests: `tests/test_round41_hedging_regression.py` — 213 tests across 17 test classes
+
+**TestHedgingStructure** (7): Pattern/exemption list integrity, compiled regex type checks, empty/None/short text, tools_used bypass.
+
+**TestGroup1PermissionAsking** (21): "Shall I", "should I", "would you like me to", "if you'd like", "I can do that for you", "just say the word", "let me know", "want me to", etc.
+
+**TestGroup2WaitingForApproval** (18): "Here's a plan", "I'd suggest", "before I proceed", "I'll wait for your go-ahead", "awaiting your confirmation", "once you confirm", "your call", "up to you".
+
+**TestGroup3AnnouncingIntent** (6+2): "Plan:", "I need to ... first", "I'm going to", "I'm about to". Plus 2 tests verifying "I can't directly" / "I cannot directly" are correctly exempted by the inability exemption.
+
+**TestGroup4OfferingOptions** (11): "Pick one", "option 1", "tell me what you want", "which would you prefer".
+
+**TestGroup5ConditionalHedges** (13): "if that's okay", "if that sounds good", "if that works for you", "if you're comfortable", "if you agree", "give me the green light".
+
+**TestGroup6Deferring** (15): "whenever you're ready", "at your convenience", "feel free to", "I'd be happy to", "no rush", "take your time", "just let me know".
+
+**TestGroup7SoftSuggestions** (14): "perhaps I could", "maybe we should", "it might be worth", "it could be better", "you might want to consider".
+
+**TestGroup8ConsensusSeeking** (17): "does that sound right", "what do you think", "how would you like me to proceed", "do you agree", "is that okay", "is that what you mean".
+
+**TestGroup9ListingSteps** (16): "the steps would be", "my plan would be", "here's what I'd do", "one option would be", "we could either", "there are several approaches".
+
+**TestGroup10Disclaimers** (17): "just to be safe", "just to confirm", "could you confirm", "I need to clarify", "before doing anything", "I don't want to ... without your".
+
+**TestExemptionCompletedActions** (8): "I've done", "I've completed", "done.", "task complete", "completed successfully".
+
+**TestExemptionReportingResults** (5): "the result is", "the output shows", "here are the results".
+
+**TestExemptionInability** (5): "I can't", "I cannot", "I won't", "I will not", "I am unable to".
+
+**TestExemptionFailureExplanation** (5): "the error is", "the issue was", "failed because".
+
+**TestFalsePositives** (17): Factual statements, status reports, greetings, questions about facts, error messages.
+
+**TestFalsePositiveToolsUsed** (6): Hedging text must not trigger when tools were used.
+
+**TestEdgeCases** (10): Mixed hedging+exemption favors exemption, case insensitivity, hedging embedded in long text, multiple patterns, Plan: on non-first line, multiline text, boundary at 15 chars, empty tools list, tools list not mutated.
+
+### Files changed
+- `src/discord/response_guards.py` (lines 230–347): Expanded `_HEDGING_PATTERNS` from 4 to 10 groups, added `_HEDGING_EXEMPTIONS` (4 patterns), updated `detect_hedging()` to check exemptions before patterns. Fixed Group 3 MULTILINE flag and Group 5 conditional pattern coverage.
+- `tests/test_round41_hedging_regression.py` (new, 213 tests): 17 test classes covering all 10 pattern groups, all 4 exemptions, false positives, tools_used bypass, and edge cases.
+
+### Next round watch for
+- Round 42 continues Phase 9 (detect_fabrication hardening). No dependencies on Round 41.
+- The `_HEDGING_EXEMPTIONS` are checked before `_HEDGING_PATTERNS`. If a response contains both an exemption phrase AND hedging language, the exemption wins. This is intentional — e.g., "I've completed the deploy. Shall I also check the logs?" is treated as non-hedging because the completion exemption fires. If this turns out to be too lenient for bot-to-bot, the exemption check could be scoped to only the first sentence.
+- `_HEDGING_PATTERNS` Group 3 now has `re.MULTILINE` — this means `^Plan:` matches at any line start, which is more correct but could theoretically match inside embedded text. In practice, `Plan:` at line start is always hedging.
+- The removal of `I can(?:'t| not) directly` from Group 3 means this phrase is now caught by the inability exemption and returns False. This is correct: "I can't directly" is an inability statement, not a hedging prompt. The phrase was previously caught by both Group 3 and nothing exempted it — it would have been a true positive in hedging but a false negative in inability detection.
+- REST API endpoint count is 123 (no new endpoints this round).
+- All five subsystem wiring tasks remain open from prior rounds.
 

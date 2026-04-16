@@ -228,6 +228,7 @@ _TOOL_UNAVAIL_RETRY_MSG = {
 # ---------------------------------------------------------------------------
 
 _HEDGING_PATTERNS: list[re.Pattern[str]] = [
+    # --- Group 1: Permission-asking / deference ---
     re.compile(
         r"(?i)\b(?:if you(?:'d| would)? (?:like|want|prefer)|"
         r"shall I|should I|would you like(?: me to)?|"
@@ -236,6 +237,7 @@ _HEDGING_PATTERNS: list[re.Pattern[str]] = [
         r"just (?:say|tell) (?:the word|me when|me if)|"
         r"want me to)\b"
     ),
+    # --- Group 2: Waiting for approval / consensus-seeking ---
     re.compile(
         r"(?i)\b(?:here(?:'s| is) (?:a |the )?plan|"
         r"I(?:'d| would) (?:suggest|recommend)|"
@@ -245,19 +247,88 @@ _HEDGING_PATTERNS: list[re.Pattern[str]] = [
         r"once you (?:confirm|approve|give the go[- ]ahead)|"
         r"(?:your call|up to you|your decision))\b"
     ),
+    # --- Group 3: Announcing intent without acting ---
     re.compile(
         r"(?i)^Plan:|"
-        r"I can(?:'t| not) directly|"
         r"I (?:need|have) to .{0,30} (?:first|before)|"
-        r"I'm (?:going to|about to|proceeding to)"
+        r"I'm (?:going to|about to|proceeding to)",
+        re.MULTILINE,
     ),
-    # Offering numbered options instead of executing
+    # --- Group 4: Offering numbered options instead of executing ---
     re.compile(
         r"(?i)(?:pick (?:one|an option)|choose (?:one|from)|"
         r"(?:option|choice) \d|"
         r"tell me (?:what you (?:want|need|prefer)|which)|"
         r"which (?:would you|do you|one))\b"
     ),
+    # --- Group 5: Conditional hedges ("if that's okay", "if that works") ---
+    re.compile(
+        r"(?i)\b(?:if (?:that(?:'s| is) )?(?:okay|ok|alright|fine|acceptable|good)"
+        r"(?: with you)?|"
+        r"if that (?:sounds|works|looks) (?:good|right|fine|okay|ok)"
+        r"(?: (?:to|for) you)?|"
+        r"if that works for you|"
+        r"if you(?:'re| are) (?:okay|ok|comfortable|fine|happy) with (?:that|this|it)|"
+        r"if you (?:agree|don't mind|give (?:me )?(?:the )?(?:go[- ]ahead|green light)))\b"
+    ),
+    # --- Group 6: Deferring / softening with false politeness ---
+    re.compile(
+        r"(?i)\b(?:whenever you(?:'re| are) ready|"
+        r"at your (?:convenience|discretion|leisure)|"
+        r"feel free to (?:let me know|tell me|decide)|"
+        r"I(?:'d| would) be happy to (?:help|do|run|handle|take care of)|"
+        r"no rush|no pressure|take your time|"
+        r"just let me know)\b"
+    ),
+    # --- Group 7: Soft suggestions instead of acting ---
+    re.compile(
+        r"(?i)\b(?:perhaps (?:I |we )?(?:could|should|might)|"
+        r"maybe (?:I |we )?(?:could|should|might)|"
+        r"it might be (?:worth|better|good|best)(?: to)?|"
+        r"it (?:may|could) be (?:worth|better|good|best)(?: to)?|"
+        r"you (?:might|may|could) (?:want|prefer|consider))\b"
+    ),
+    # --- Group 8: Consensus / confirmation-seeking questions ---
+    re.compile(
+        r"(?i)\b(?:does that (?:sound|look|seem) (?:right|good|okay|ok|fine|reasonable)|"
+        r"(?:what|how) (?:do|would) you (?:think|prefer|suggest)|"
+        r"how (?:would|should|shall) (?:I|we) (?:proceed|handle|approach)|"
+        r"(?:do|would) you (?:agree|prefer|mind)|"
+        r"is that (?:okay|ok|alright|fine|acceptable|what you (?:want|need|mean)))\b"
+    ),
+    # --- Group 9: Listing steps/approaches without execution ---
+    re.compile(
+        r"(?i)\b(?:(?:the |my )?(?:steps|approach|plan|strategy) (?:would|could|will) be|"
+        r"here(?:'s| is) (?:what|how) I(?:'d| would)|"
+        r"(?:one|another) (?:option|approach|way|alternative) (?:would be|is to)|"
+        r"we could (?:either|also|try)|"
+        r"there are (?:a few|several|multiple|some) (?:options|approaches|ways))\b"
+    ),
+    # --- Group 10: Disclaimers / excessive caution ---
+    re.compile(
+        r"(?i)\b(?:just to (?:be safe|confirm|clarify|double[- ]check|make sure)|"
+        r"(?:could|can) you (?:confirm|clarify|verify|double[- ]check)|"
+        r"I (?:want|need) to (?:confirm|clarify|verify|check|make sure)|"
+        r"before (?:doing anything|making any changes|I do anything)|"
+        r"I (?:don't|do not) want to .{0,30} without (?:your|checking))\b"
+    ),
+]
+
+
+# Phrases that indicate genuine reporting or status, not hedging.
+# If any of these appear, the hedging detector should NOT fire.
+_HEDGING_EXEMPTIONS: list[re.Pattern[str]] = [
+    # Completed actions — "I've done X", "I did X", "done."
+    re.compile(r"(?i)\b(?:I(?:'ve| have) (?:done|completed|finished|executed|run)|"
+               r"done\.|task complete|completed successfully)\b"),
+    # Reporting results — "the result is", "output shows"
+    re.compile(r"(?i)\b(?:the (?:result|output|response) (?:is|was|shows)|"
+               r"here (?:is|are) the (?:results?|output))\b"),
+    # Inability / refusal (handled by other detectors)
+    re.compile(r"(?i)\bI (?:can't|cannot|won't|will not|am unable to)\b"),
+    # Explaining why something failed (not hedging, premature_failure covers this)
+    re.compile(r"(?i)\b(?:the (?:error|issue|problem) (?:is|was)|"
+               r"(?:failed|error) because)\b"),
 ]
 
 
@@ -270,6 +341,8 @@ def detect_hedging(text: str, tools_used: list[str]) -> bool:
     if tools_used:
         return False
     if not text or len(text) < 15:
+        return False
+    if any(p.search(text) for p in _HEDGING_EXEMPTIONS):
         return False
     return any(p.search(text) for p in _HEDGING_PATTERNS)
 
