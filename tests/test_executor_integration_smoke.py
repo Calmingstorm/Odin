@@ -189,6 +189,23 @@ class TestOnMessageWiring:
             "on_message must call self.process_commands(message) to keep cogs working"
         )
 
+    def test_on_message_secret_scrub_runs_before_process_commands(self):
+        """Secret detection + delete must happen before cog commands see the message.
+
+        Regression guard: an earlier revision called process_commands at the top
+        of on_message, which meant cog prefix handlers could see secrets before
+        they were scrubbed. Fix moves the secret-scrub block above
+        process_commands. This test locks the ordering in.
+        """
+        import inspect
+        from src.discord.client import OdinBot
+        src = inspect.getsource(OdinBot.on_message)
+        scrub_pos = src.find("_check_for_secrets")
+        pc_pos = src.find("process_commands")
+        assert 0 <= scrub_pos < pc_pos, (
+            "secret scrub block must appear before process_commands in on_message"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 5. Web chat endpoint contract still satisfied

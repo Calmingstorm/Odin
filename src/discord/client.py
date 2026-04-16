@@ -1551,13 +1551,40 @@ class OdinBot(commands.Bot):
         # Passive channel log — every guild message, including our own, before any filtering
         self.channel_logger.log_message(message)
 
-        # Let cog-registered commands process the message in parallel with the executor flow.
-        # Without this, prefix commands defined in cogs (moderation, fun, utility, etc.) would never fire.
-        await self.process_commands(message)
-
         # Never respond to our own messages
         if message.author == self.user:
             return
+
+        # Secret scrubbing runs BEFORE anything that inspects the message
+        # content (cog prefix commands, executor flow). If a user posts a
+        # credential, we delete + scrub first so nothing else sees it.
+        pre_content = (message.content or "").strip()
+        if pre_content and self._check_for_secrets(pre_content):
+            try:
+                self.sessions.scrub_secrets(str(message.channel.id), pre_content)
+            except Exception:
+                log.exception("scrub_secrets failed in early pre-filter")
+            try:
+                await message.delete()
+                await message.channel.send(
+                    f"{message.author.mention} I detected a secret/credential in your "
+                    "message. I've deleted it and scrubbed it from my history."
+                )
+            except discord.Forbidden:
+                await message.channel.send(
+                    f"{message.author.mention} I detected a secret/credential in your "
+                    "message. I've scrubbed it from my history. "
+                    "I couldn't delete the message — please delete it manually."
+                )
+            return
+
+        # Cog-registered prefix commands (moderation, fun, utility, etc.) handle
+        # their own auth via cog decorators (is_moderator, is_admin, …) and are
+        # orthogonal to the executor's allowed_users / channels gates. Running
+        # process_commands here (after secret scrubbing, before executor gates)
+        # lets cogs work regardless of executor allowlist without exposing
+        # secrets to command handlers.
+        await self.process_commands(message)
 
         if message.author.bot:
             # Ignore specific bot IDs unless they explicitly @mention us in message text
