@@ -631,6 +631,20 @@ class TestInvokeSkillTool:
         assert err is not None
         assert "tool_input" in err
 
+    def test_validate_schedule_extracts_tool_input_from_steps(self):
+        """gpt-5.4 puts params in steps but omits top-level tool_input.
+        Graceful fallback extracts from steps for action=check."""
+        bot = _make_bot()
+        inp = {
+            "description": "x",
+            "action": "check",
+            "tool_name": "run_command",
+            "steps": [{"tool_name": "run_command", "tool_input": {"host": "localhost", "command": "uname"}}],
+        }
+        err = bot._validate_schedule_payload(inp)
+        assert err is None
+        assert inp["tool_input"] == {"host": "localhost", "command": "uname"}
+
     def test_validate_schedule_rejects_workflow_step_missing_tool_input(self):
         bot = _make_bot()
         err = bot._validate_schedule_payload({

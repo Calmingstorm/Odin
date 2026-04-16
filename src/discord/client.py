@@ -995,11 +995,15 @@ class OdinBot(commands.Bot):
                 return "action=check requires 'tool_name'."
             tool_input = inp.get("tool_input")
             if tool_input is None or (isinstance(tool_input, dict) and not tool_input):
-                return (
-                    f"action=check with tool_name='{tool_name}' requires 'tool_input' "
-                    f"populated with the parameters that tool expects "
-                    f"(e.g. {{'host': 'localhost', 'command': 'uname -r'}} for run_command)."
-                )
+                tool_input = self._extract_tool_input_from_steps(inp)
+                if tool_input:
+                    inp["tool_input"] = tool_input
+                else:
+                    return (
+                        f"action=check with tool_name='{tool_name}' requires 'tool_input' "
+                        f"populated with the parameters that tool expects "
+                        f"(e.g. {{'host': 'localhost', 'command': 'uname -r'}} for run_command)."
+                    )
         elif action == "workflow":
             steps = inp.get("steps")
             if not steps or not isinstance(steps, list):
@@ -1017,6 +1021,19 @@ class OdinBot(commands.Bot):
                             f"'tool_input' dict — for run_command include 'command', "
                             f"for run_script include 'script'."
                         )
+        return None
+
+    @staticmethod
+    def _extract_tool_input_from_steps(inp: dict) -> dict | None:
+        """Graceful fallback: gpt-5.4 consistently puts command params in
+        steps[].tool_input but omits top-level tool_input for action=check.
+        If steps has exactly one entry with a populated tool_input, use it."""
+        steps = inp.get("steps")
+        if not steps or not isinstance(steps, list):
+            return None
+        populated = [s for s in steps if isinstance(s, dict) and isinstance(s.get("tool_input"), dict) and s["tool_input"]]
+        if len(populated) == 1:
+            return populated[0]["tool_input"]
         return None
 
     def _build_system_prompt(
