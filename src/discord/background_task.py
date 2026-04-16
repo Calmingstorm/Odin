@@ -343,6 +343,16 @@ async def _execute_tool(
         return "\n".join(lines)
 
     # Skills
+    if tool_name == "invoke_skill":
+        target_name = tool_input.get("name")
+        if not target_name:
+            return "Error: invoke_skill requires 'name'."
+        if not skill_manager.has_skill(target_name):
+            return f"Error: skill '{target_name}' not found or disabled."
+        skill_input = tool_input.get("input") or {}
+        if not isinstance(skill_input, dict):
+            return "Error: invoke_skill 'input' must be an object."
+        return await skill_manager.execute(target_name, skill_input)
     if skill_manager.has_skill(tool_name):
         return await skill_manager.execute(tool_name, tool_input)
 

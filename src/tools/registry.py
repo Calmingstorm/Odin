@@ -597,6 +597,28 @@ TOOLS: list[dict] = [
             "required": ["name"],
         },
     },
+    {
+        "name": "invoke_skill",
+        "description": (
+            "Executes a skill by name, passing the given input dict. Use this to run a skill you just created "
+            "or edited without waiting for tool-registry cache refresh. Returns the skill's string result. "
+            "Equivalent to the skill appearing as a direct tool call, but works the same turn it's created."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Skill name to invoke (must already be created and enabled)",
+                },
+                "input": {
+                    "type": "object",
+                    "description": "Input dict passed to the skill's execute() — matches the skill's declared input_schema",
+                },
+            },
+            "required": ["name"],
+        },
+    },
     # --- Background task delegation ---
     {
         "name": "delegate_task",

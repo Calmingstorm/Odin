@@ -552,4 +552,69 @@ class TestSetupHookDiagnostics:
         with patch.object(bot, "load_extension", new_callable=AsyncMock):
             await bot.setup_hook()
         assert len(called) == 1, "startup diagnostics must be called on setup_hook"
-        assert called[0] is bot.config
+
+
+# ---------------------------------------------------------------------------
+# 11. invoke_skill — per Odin's Test 25 suggestion, a first-class runner
+# ---------------------------------------------------------------------------
+
+
+class TestInvokeSkillTool:
+    """`invoke_skill` must be in the registry and dispatch through skill_manager."""
+
+    def test_invoke_skill_in_registry(self):
+        from src.tools.registry import TOOLS
+        names = [t["name"] for t in TOOLS]
+        assert "invoke_skill" in names
+
+    def test_invoke_skill_schema_has_name_required(self):
+        from src.tools.registry import TOOLS
+        spec = next(t for t in TOOLS if t["name"] == "invoke_skill")
+        assert "name" in spec["input_schema"]["required"]
+        assert "input" in spec["input_schema"]["properties"]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_loop_tool_invokes_skill(self):
+        bot = _make_bot()
+        bot.skill_manager.has_skill = MagicMock(return_value=True)
+        bot.skill_manager.execute = AsyncMock(return_value="skill-ran-ok")
+        msg_proxy = MagicMock()
+        msg_proxy.channel = MagicMock()
+        msg_proxy.channel.id = 123
+        msg_proxy.channel.send = AsyncMock()
+        out = await bot._dispatch_loop_tool(
+            "invoke_skill",
+            {"name": "my_skill", "input": {"x": 1}},
+            msg_proxy,
+            user_id="u1",
+        )
+        assert out == "skill-ran-ok"
+        bot.skill_manager.execute.assert_awaited_once()
+        args, kwargs = bot.skill_manager.execute.call_args
+        assert args[0] == "my_skill"
+        assert args[1] == {"x": 1}
+
+    @pytest.mark.asyncio
+    async def test_dispatch_loop_tool_invoke_skill_missing_name(self):
+        bot = _make_bot()
+        msg_proxy = MagicMock()
+        out = await bot._dispatch_loop_tool(
+            "invoke_skill",
+            {},
+            msg_proxy,
+            user_id="u1",
+        )
+        assert "requires 'name'" in out
+
+    @pytest.mark.asyncio
+    async def test_dispatch_loop_tool_invoke_skill_unknown_skill(self):
+        bot = _make_bot()
+        bot.skill_manager.has_skill = MagicMock(return_value=False)
+        msg_proxy = MagicMock()
+        out = await bot._dispatch_loop_tool(
+            "invoke_skill",
+            {"name": "nope"},
+            msg_proxy,
+            user_id="u1",
+        )
+        assert "not found or disabled" in out

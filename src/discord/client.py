@@ -2795,6 +2795,27 @@ class OdinBot(commands.Bot):
                             for s in skills:
                                 lines.append(f"**{s['name']}**: {s['description']}")
                             result = f"**User-created skills ({len(skills)}):**\n" + "\n".join(lines)
+                    elif tool_name == "invoke_skill":
+                        target_name = tool_input.get("name")
+                        if not target_name:
+                            result = "Error: invoke_skill requires 'name'."
+                        elif not self.skill_manager.has_skill(target_name):
+                            result = f"Error: skill '{target_name}' not found or disabled. Use list_skills to see available skills."
+                        else:
+                            skill_input = tool_input.get("input") or {}
+                            if not isinstance(skill_input, dict):
+                                result = "Error: invoke_skill 'input' must be an object."
+                            else:
+                                async def _skill_msg(text: str) -> None:
+                                    await message.channel.send(scrub_response_secrets(text))
+                                async def _skill_file(data: bytes, filename: str, caption: str = "") -> None:
+                                    channel_id_key = str(message.channel.id)
+                                    self._pending_files.setdefault(channel_id_key, []).append((data, filename))
+                                result = await self.skill_manager.execute(
+                                    target_name, skill_input,
+                                    message_callback=_skill_msg,
+                                    file_callback=_skill_file,
+                                )
                     elif self.skill_manager.has_skill(tool_name):
                         async def _skill_msg(text: str) -> None:
                             await message.channel.send(scrub_response_secrets(text))
@@ -4185,6 +4206,30 @@ class OdinBot(commands.Bot):
             lines = [f"**{s['name']}**: {s['description']}" for s in skills]
             return f"**User-created skills ({len(skills)}):**\n" + "\n".join(lines)
 
+        if tool_name == "invoke_skill":
+            target_name = tool_input.get("name")
+            if not target_name:
+                return "Error: invoke_skill requires 'name'."
+            if not self.skill_manager.has_skill(target_name):
+                return f"Error: skill '{target_name}' not found or disabled. Use list_skills to see available skills."
+            skill_input = tool_input.get("input") or {}
+            if not isinstance(skill_input, dict):
+                return "Error: invoke_skill 'input' must be an object."
+            ch = msg_proxy.channel
+
+            async def _skill_msg(text: str) -> None:
+                await ch.send(scrub_response_secrets(text))
+
+            async def _skill_file(data: bytes, filename: str, caption: str = "") -> None:
+                ch_id_key = str(getattr(ch, "id", ""))
+                self._pending_files.setdefault(ch_id_key, []).append((data, filename))
+
+            return await self.skill_manager.execute(
+                target_name, skill_input,
+                message_callback=_skill_msg,
+                file_callback=_skill_file,
+            )
+
         # --- User-created skills ---
         if self.skill_manager.has_skill(tool_name):
             ch = msg_proxy.channel
@@ -4474,7 +4519,16 @@ class OdinBot(commands.Bot):
 
             try:
                 # Check if this is a skill or built-in tool
-                if self.skill_manager.has_skill(tool_name):
+                if tool_name == "invoke_skill":
+                    target_name = tool_input.get("name")
+                    skill_input = tool_input.get("input") or {}
+                    if not target_name or not self.skill_manager.has_skill(target_name):
+                        output = f"Error: skill '{target_name}' not found or disabled."
+                    elif not isinstance(skill_input, dict):
+                        output = "Error: invoke_skill 'input' must be an object."
+                    else:
+                        output = await self.skill_manager.execute(target_name, skill_input)
+                elif self.skill_manager.has_skill(tool_name):
                     output = await self.skill_manager.execute(tool_name, tool_input)
                 else:
                     output = await self.tool_executor.execute(tool_name, tool_input)
