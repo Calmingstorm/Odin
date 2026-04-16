@@ -12,8 +12,9 @@ discord:
 
 openai_codex:
   enabled: true
-  # Customize model name as needed (e.g., gpt-4o, gpt-4-turbo)
-  model: gpt-4o
+  # ChatGPT-account Codex backend only supports the GPT-5 family
+  # (gpt-4o et al return "model not supported" via this auth path).
+  model: gpt-5.4
   max_tokens: 4096
   credentials_path: ./data/codex_auth.json
 
