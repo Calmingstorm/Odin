@@ -178,7 +178,7 @@ tightening of prior work.
 | 46 | Startup diagnostics: boot-time checks for Codex auth, SSH hosts, DB, knowledge store, with helpful errors | done | DiagnosticResult/StartupReport dataclasses, 8 check functions (discord_token, codex_credentials, codex_model, ssh_hosts, sessions_directory, knowledge_db, config_consistency, data_directories), run_startup_diagnostics orchestrator, /api/startup/diagnostics endpoint, +77 tests |
 | 47 | Graceful degradation: one failing subsystem (knowledge / voice / browser) must not take the whole bot down | done | SubsystemGuard module (SubsystemState enum, SubsystemInfo, DegradationStats, threshold-based transitions AVAILABLE→DEGRADED→UNAVAILABLE, auto-recovery on success), GracefulDegradationConfig, sync_guard_from_health bridge, /api/subsystems/status endpoint, +108 tests |
 | 48 | Outbound webhooks: Odin pushes structured events to registered URLs (Jenkins-style triggers) | done | OutboundWebhookDispatcher module (EventType enum, WebhookTarget, DeliveryResult, WebhookStats), HMAC-SHA256 signing, retries, rate limiting, secret scrubbing, OutboundWebhooksConfig, 6 REST API endpoints, +110 tests |
-| 49 | Coverage boost: push test coverage on features added in rounds 1–48 above their baseline | pending | |
+| 49 | Coverage boost: push test coverage on features added in rounds 1–48 above their baseline | done | +289 tests across 10 new test files covering hybrid search, FTS5, sqlite_vec, tool memory, process manager, circuit breaker, websocket, web chat, ComfyUI, browser |
 | 50 | REVIEWER + WRAP: final end-to-end validation; `run_bot` smoke test; summary of shipped features appended to this file | pending | |
 
 ---
@@ -6511,4 +6511,150 @@ Added `OutboundWebhookDispatcher` to `__all__`.
   - (e) Close on shutdown.
 - The `dispatch_fire_and_forget` method is designed for the audit callback path — it catches all exceptions so webhook failures never block audit logging.
 - The signing format (`sha256=<hex>` in `X-Webhook-Signature` header) is consistent with the incoming webhook `_verify_hmac_sha256()` format, so receivers can use the same verification code.
+- All subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, model_router, context_compressor, stuck_loop_detector, startup_diagnostics, subsystem_guard, outbound_webhook_dispatcher).
+
+## Round 49 — Coverage boost: +289 tests across 10 modules
+**Focus**: Push test coverage on features added in rounds 1–48. Write dedicated test files for 10 source modules that previously had zero dedicated test coverage.
+**Baseline pytest**: 4864 passed, 0 failed
+**Post-round pytest**: 5153 passed, 0 failed (+289 new tests)
+
+### Prior round review
+- Round 48 notes said "Round 49 (coverage boost) has no dependencies on Round 48." Confirmed — no issues to fix from prior rounds.
+- Checked rounds 46–48 "watch for" items: startup diagnostics not yet wired (round 46), subsystem guard not yet wired (round 47), outbound webhooks not yet wired (round 48). None required fixes for this round's scope. All are deferred wiring tasks.
+
+### Work done
+
+#### 1. `tests/test_hybrid_search.py` — 24 tests (covers `src/search/hybrid.py`, 36 lines)
+
+**TestBasicMerge** (5): empty input, single empty list, multiple empty lists, single list passthrough, single item.
+**TestScoring** (5): positive score, rank ordering, default k=60, custom k, multi-list accumulation.
+**TestDeduplication** (2): keeps highest-ranked version, no duplicate entries.
+**TestLimit** (3): default limit 10, custom limit, limit larger than items.
+**TestCustomIdKey** (2): custom id_key, missing id_key uses rank index.
+**TestMultipleListsFusion** (2): three overlapping lists, disjoint lists (equal scores).
+**TestEdgeCases** (5): original dicts not mutated, score rounding, result is new dict, large input (1000 items), numeric doc_id coerced.
+
+#### 2. `tests/test_sqlite_vec_helpers.py` — 14 tests (covers `src/search/sqlite_vec.py`, 24 lines)
+
+**TestSerializeVector** (5): basic, empty, single element, known values, 384-dim.
+**TestDeserializeVector** (3): basic, empty, single element.
+**TestRoundtrip** (3): basic 5-dim, 384-dim (project embedding size), negative values.
+**TestLoadExtension** (3): success (mocked sqlite_vec), import error, runtime error.
+
+#### 3. `tests/test_circuit_breaker.py` — 23 tests (covers `src/llm/circuit_breaker.py`, 99 lines)
+
+**TestCircuitOpenError** (3): attributes, message formatting, is Exception.
+**TestInit** (2): default params, custom params.
+**TestClosedState** (4): starts closed, check passes, failures below threshold, success resets count.
+**TestOpenState** (3): opens at threshold, check raises CircuitOpenError, more failures stay open.
+**TestHalfOpenState** (4): transitions after timeout, check allows probe, success closes, failure reopens.
+**TestRecoveryCycles** (2): multiple open/close cycles, retry_after decreases over time.
+**TestEdgeCases** (5): zero recovery timeout, threshold one, success on fresh, non-negative retry, large threshold.
+
+#### 4. `tests/test_fts_search.py` — 52 tests (covers `src/search/fts.py`, 327 lines)
+
+**TestPrepareQuery** (14): empty, whitespace, simple terms, special chars quoting, IP addresses, paths, internal quotes escaping, reserved keywords (AND, OR, NOT, NEAR, TO), mixed terms, case-insensitive keywords, frozenset type.
+**TestFullTextIndexInit** (4): in-memory, file creation, bad path, unavailable returns empty.
+**TestSessionIndex** (11): index and search, snippet return, no match, channel filter, limit, upsert replaces, has_session, index returns true, timestamp, rank.
+**TestKnowledgeIndex** (8): index and search, no match, limit, upsert, has_knowledge_chunk, delete by source, delete nonexistent, chunk_index.
+**TestChannelLogIndex** (8): index and search, batch insert, empty content skipped, no messages, channel filter, clear logs, limit, missing fields handled.
+**TestUnavailableIndex** (7): session index/has, knowledge index/has/delete, channel clear/index all return failure values.
+
+#### 5. `tests/test_tool_memory.py` — 50 tests (covers `src/tools/tool_memory.py`, 251 lines)
+
+**TestExtractKeywords** (8): basic, stop words removed, short words removed, lowercased, empty, only stop words, underscore words, numbers.
+**TestJaccard** (5): identical, disjoint, partial overlap, empty sets, subset.
+**TestCosine** (6): identical, orthogonal, opposite, different lengths, zero vector, known value.
+**TestToolMemoryBasic** (7): init no path, nonexistent path, record basic, no tools skipped, no keywords skipped, truncates query, success flag.
+**TestToolMemoryFindPatterns** (8): no entries, matching, skips failed, skips single tool, respects allowed_tools, limit, deduplicates sequences, no matching keywords.
+**TestToolMemoryFormatHints** (4): empty, with patterns, cached, cache eviction.
+**TestToolMemoryPersistence** (3): save and load, corrupted file, non-list JSON.
+**TestToolMemoryLimits** (2): max entries cap, expiry removes old.
+**TestToolMemoryEmbeddings** (3): record with embedder, semantic match, low cosine falls to jaccard.
+**TestConstants** (4): MAX_ENTRIES, EXPIRY_DAYS, MIN_SEMANTIC_SCORE, MIN_JACCARD_SCORE.
+
+#### 6. `tests/test_process_manager.py` — 30 tests (covers `src/tools/process_manager.py`, 228 lines)
+
+**TestProcessInfo** (2): defaults, output buffer max len.
+**TestProcessRegistryStart** (4): start process, tracks process, failed command, concurrency limit.
+**TestProcessRegistryPoll** (5): nonexistent, running no output, with output, shows exit code, shows uptime.
+**TestProcessRegistryWrite** (4): nonexistent, not running, no stdin, success.
+**TestProcessRegistryKill** (3): nonexistent, already completed, running.
+**TestProcessRegistryList** (3): empty, with processes, uptime formats (s/m/h).
+**TestProcessRegistryShutdown** (3): empty, kills running, skips completed.
+**TestProcessRegistryCleanup** (3): removes old dead, keeps running, keeps recent dead.
+**TestConstants** (3): MAX_CONCURRENT, MAX_LIFETIME_SECONDS, OUTPUT_BUFFER_LINES.
+
+#### 7. `tests/test_web_chat.py` — 26 tests (covers `src/web/chat.py`, 219 lines)
+
+**TestNoOpContextManager** (2): enter/exit, multiple uses.
+**TestWebSentMessage** (1): edit is noop.
+**TestWebChannel** (9): attributes, typing returns ctx manager, send returns message, captures file (with base64 encoding), multiple files, content type detection (10 types), empty file skipped, fetch raises, history empty.
+**TestWebAuthor** (2): attributes, str.
+**TestWebMessage** (5): basic creation, unique IDs, default content, channel type, author type.
+**TestProcessWebChat** (6): no codex client, successful chat, no tools no save, error response, exception handling, files returned.
+**TestConstants** (1): MAX_CHAT_CONTENT_LEN.
+
+#### 8. `tests/test_websocket_handler.py` — 17 tests (covers `src/web/websocket.py`, 227 lines)
+
+**TestWebSocketManagerInit** (2): defaults, with token.
+**TestClientCount** (2): empty, with clients.
+**TestBroadcastEvent** (4): no subscribers, to subscribers (verifies payload), removes dead client (ConnectionError), runtime error cleanup.
+**TestHandleChat** (6): empty content, content too long, successful chat, chat with files, exception handling, default channel.
+**TestSetupWebsocket** (2): registers route at /api/ws, returns manager.
+**TestConstants** (1): _LOG_TAIL_LINES.
+
+#### 9. `tests/test_comfyui_client.py` — 23 tests (covers `src/tools/comfyui.py`, 197 lines)
+
+**TestComfyUIClientInit** (2): trailing slash stripped, no trailing slash.
+**TestDefaultWorkflow** (4): required nodes present, KSampler class type, default dimensions, default steps.
+**TestResolveCheckpoint** (5): preferred available, preferred not found uses first, no checkpoints available, API error returns preferred, connection error returns preferred.
+**TestPollHistory** (2): finds image filename, no outputs yet (retries).
+**TestGenerate** (8): no checkpoint, prompt failure, no prompt_id, suspicious prompt_id (path traversal rejected), timeout, connection error, custom dimensions, prompt text set.
+**TestEdgeCases** (2): default workflow not mutated, generic exception.
+
+#### 10. `tests/test_browser_automation.py` — 30 tests (covers `src/tools/browser.py`, 374 lines)
+
+**TestValidateUrl** (9): http, https, ftp rejected, file rejected, javascript rejected, data rejected, case insensitive, empty string, no scheme.
+**TestConstants** (3): ALLOWED_SCHEMES, DEFAULT_USER_AGENT, _CONNECTION_ERROR_PATTERNS.
+**TestBrowserManagerInit** (2): default params, custom params.
+**TestIsConnectionError** (8): connection closed, target closed, browser closed, websocket closed, not connected, connection refused, random error not matched, empty message.
+**TestOnBrowserDisconnected** (1): clears browser reference.
+**TestEnsureConnected** (3): already connected, playwright not installed raises, connection failure raises.
+**TestShutdown** (3): no browser, with browser, handles exception.
+**TestForceReconnect** (1): clears and reconnects.
+
+### Files changed
+- `tests/test_hybrid_search.py` (new, 24 tests): covers `src/search/hybrid.py` — RRF merging, scoring, dedup, limits, edge cases.
+- `tests/test_sqlite_vec_helpers.py` (new, 14 tests): covers `src/search/sqlite_vec.py` — serialize/deserialize roundtrip, load_extension.
+- `tests/test_circuit_breaker.py` (new, 23 tests): covers `src/llm/circuit_breaker.py` — state transitions, CircuitOpenError, recovery cycles.
+- `tests/test_fts_search.py` (new, 52 tests): covers `src/search/fts.py` — FTS5 query preparation, session/knowledge/channel-log indexing and search.
+- `tests/test_tool_memory.py` (new, 50 tests): covers `src/tools/tool_memory.py` — keyword extraction, similarity functions, pattern recording/finding/formatting, persistence, caching.
+- `tests/test_process_manager.py` (new, 30 tests): covers `src/tools/process_manager.py` — ProcessInfo, ProcessRegistry start/poll/write/kill/list/shutdown/cleanup.
+- `tests/test_web_chat.py` (new, 26 tests): covers `src/web/chat.py` — WebMessage, _WebChannel file capture, _WebAuthor, process_web_chat.
+- `tests/test_websocket_handler.py` (new, 17 tests): covers `src/web/websocket.py` — WebSocketManager, event broadcasting, chat handling, setup_websocket.
+- `tests/test_comfyui_client.py` (new, 23 tests): covers `src/tools/comfyui.py` — ComfyUIClient, checkpoint resolution, history polling, generate flow, security checks.
+- `tests/test_browser_automation.py` (new, 30 tests): covers `src/tools/browser.py` — URL validation, BrowserManager lifecycle, connection error detection, shutdown.
+- `BUILD_STATUS.md`: Updated Round 49 plan row to done; appended round notes.
+
+### Design decisions
+
+1. **Target selection**: Chose 10 modules that were added in rounds 1–48 and had zero dedicated test files. Prioritized self-contained, testable modules over those deeply coupled to Discord/Playwright runtime. The selected modules span all major subsystems: search (3), tools (4), web (2), LLM (1).
+
+2. **In-memory SQLite for FTS tests**: The `FullTextIndex` accepts a db_path, so tests use `:memory:` for fast, isolated FTS5 testing without filesystem overhead. This exercises the real FTS5 engine, not mocks.
+
+3. **Real subprocess for ProcessRegistry start tests**: `ProcessRegistry.start` creates real subprocess (`echo hello`), which completes near-instantly. Tests call `shutdown()` to clean up. Mocks used only for poll/write/kill where subprocess interaction isn't the point.
+
+4. **Mock structure for ComfyUI**: ComfyUI tests mock `aiohttp.ClientSession` with context manager wrappers to simulate HTTP responses. Tests cover the security-critical prompt_id validation (path traversal rejection) and error handling paths.
+
+5. **Browser tests without Playwright**: Since Playwright isn't installed in the test environment, browser tests focus on the URL validation, state management, and connection error classification that don't require a real browser. The `_ensure_connected` test verifies the "playwright not installed" error path directly.
+
+6. **WebMessage virtual layer**: Web chat tests exercise the virtual Discord message objects (_WebChannel, _WebAuthor, WebMessage) directly, verifying file capture with base64 encoding, content type detection for 10 file types, and the process_web_chat function with mocked bot dependencies.
+
+7. **Semantic similarity testing for tool memory**: Tests cover both the Jaccard fallback and the cosine similarity path for tool pattern matching, including the threshold fallthrough behavior (low cosine → Jaccard).
+
+### Next round watch for
+- Round 50 (final REVIEWER round) should validate all 289 new tests pass reliably across runs.
+- The 3 RuntimeWarnings in the test output are from mock coroutines not being awaited — benign, not test failures. Two in `test_comfyui_client.py` (capture_post coroutine), one in `test_process_manager.py` (stdin.write mock).
+- Modules that still have zero dedicated tests: `src/tools/skill_manager.py` (1068 lines), `src/tools/skill_context.py` (435 lines), `src/discord/background_task.py` (561 lines), `src/discord/voice.py` (489 lines), `src/web/api.py` (2401 lines). These are deeply coupled to Discord/runtime state and harder to test in isolation.
 - All subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, model_router, context_compressor, stuck_loop_detector, startup_diagnostics, subsystem_guard, outbound_webhook_dispatcher).
