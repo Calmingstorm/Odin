@@ -1245,6 +1245,13 @@ class OdinBot(commands.Bot):
             if now - v[0] < ttl
         }
 
+        # Clean up _pending_files for channels no longer active
+        stale_files = [cid for cid in self._pending_files if cid not in active_channels]
+        for cid in stale_files:
+            leaked = self._pending_files.pop(cid, [])
+            if leaked:
+                log.warning("Evicted %d stale pending file(s) for channel %s", len(leaked), cid)
+
         # Agent lifecycle: kill stuck agents, log stale ones
         if hasattr(self, "agent_manager"):
             self.agent_manager.check_health()
@@ -2237,6 +2244,9 @@ class OdinBot(commands.Bot):
                         already_sent = False
         except Exception as e:
             log.error("Error processing message: %s", e, exc_info=True)
+            leaked = self._pending_files.pop(channel_id, None)
+            if leaked:
+                log.warning("Cleaned %d leaked pending file(s) for channel %s", len(leaked), channel_id)
             await self._send_with_retry(message, scrub_response_secrets(f"Something went wrong: {e}"))
             self.sessions.remove_last_message(channel_id, "user")
             return
