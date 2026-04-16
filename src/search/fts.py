@@ -310,9 +310,8 @@ def _prepare_query(raw: str) -> str:
     raw = raw.strip()
     if not raw:
         return ""
-    # If query contains special chars or looks like an IP/path, quote it for literal match
-    if _FTS5_SPECIAL.search(raw) or "." in raw or "/" in raw:
-        # Escape any internal double quotes
+    # If query contains special chars, hyphens, or looks like an IP/path, quote for literal match
+    if _FTS5_SPECIAL.search(raw) or "." in raw or "/" in raw or "-" in raw:
         escaped = raw.replace('"', '""')
         return f'"{escaped}"'
     # Quote individual terms that are FTS5 reserved keywords to prevent
