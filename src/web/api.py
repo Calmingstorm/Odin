@@ -491,8 +491,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             )
 
         channel_id = data.get("channel_id") or "web-default"
-        user_id = data.get("user_id") or "web-user"
-        username = data.get("username") or "WebUser"
+        user_id = "web-user"
+        username = "WebUser"
 
         result = await process_web_chat(
             bot, content, channel_id,
