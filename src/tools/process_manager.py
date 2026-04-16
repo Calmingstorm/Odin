@@ -47,7 +47,14 @@ class ProcessRegistry:
     # ------------------------------------------------------------------
 
     async def start(self, host: str, command: str, timeout: int = 300) -> str:
-        """Start a background process. Returns confirmation with PID."""
+        """Start a background process locally. Returns confirmation with PID."""
+        from ..tools.ssh import is_local_address
+        if not is_local_address(host):
+            return (
+                f"manage_process only supports local execution. "
+                f"Host '{host}' is remote — use run_command or run_script for remote hosts."
+            )
+
         # Enforce concurrency limit (only count running)
         running = sum(1 for p in self._processes.values() if p.status == "running")
         if running >= MAX_CONCURRENT:

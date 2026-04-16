@@ -640,6 +640,10 @@ class ToolExecutor:
                 return "command is required for start action."
             if not host:
                 return "host is required for start action."
+            if self.command_governor:
+                check = self.command_governor.check(command)
+                if not check.allowed:
+                    return check.denial_message()
             # Validate host against configured hosts
             resolved = self._resolve_host(host)
             if not resolved:
