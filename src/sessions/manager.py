@@ -822,12 +822,12 @@ class SessionManager:
         session.messages = session.messages[-keep:]
 
         # Build a deterministic summary from discarded messages
-        users = set()
+        user_ids = set()
         tools_mentioned = set()
         snippets = []
         for msg in discarded:
-            if hasattr(msg, "user_name") and msg.user_name:
-                users.add(msg.user_name)
+            if msg.user_id:
+                user_ids.add(msg.user_id)
             content = getattr(msg, "content", "") or ""
             first_line = content.split("\n", 1)[0][:120]
             if first_line:
@@ -842,8 +842,8 @@ class SessionManager:
         if session.summary:
             parts.append(session.summary)
         parts.append(f"[compaction fallback: {len(discarded)} messages trimmed]")
-        if users:
-            parts.append(f"Participants: {', '.join(sorted(users))}")
+        if user_ids:
+            parts.append(f"Participants: {', '.join(sorted(user_ids))}")
         if tools_mentioned:
             parts.append(f"Tools used: {', '.join(sorted(tools_mentioned))}")
         if snippets:
