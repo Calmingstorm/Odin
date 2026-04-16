@@ -18,10 +18,12 @@ class TestOdinBot:
         assert "src.discord.cogs.utility" in INITIAL_EXTENSIONS
 
     def test_bot_creation(self, odin_config):
-        """Bot can be instantiated with config."""
+        """Bot can be instantiated with the executor-shape pydantic Config."""
         bot = OdinBot(odin_config)
         assert bot.config is odin_config
-        assert bot.config.prefix == "!"
+        # Prefix is resolved at runtime via _resolve_prefix (Heimdall pattern),
+        # not as a top-level Config field.
+        assert callable(bot._resolve_prefix)
 
     def test_bot_has_intents(self, odin_config):
         """Bot configures message_content and members intents."""

@@ -25,12 +25,14 @@ class TestEntryPoint:
 
     def test_client_module_imports(self):
         mod = importlib.import_module("src.discord.client")
-        assert hasattr(mod, "run_bot")
+        # OdinBot is the public class. The runtime entry point lives in
+        # src.__main__ (orchestration: load config, start health server,
+        # signal handlers) rather than in client.py itself.
         assert hasattr(mod, "OdinBot")
 
-    def test_run_bot_is_callable(self):
-        from src.discord.client import run_bot
-        assert callable(run_bot)
+    def test_main_entry_is_callable(self):
+        from src.__main__ import main
+        assert callable(main)
 
 
 # ---------------------------------------------------------------------------
@@ -65,12 +67,15 @@ class TestOdinConfig:
 
 class TestOdinBotInit:
     def test_instantiate_bot(self):
-        from src.config import OdinConfig
+        # OdinBot now uses the pydantic Config (full executor schema), not the
+        # legacy OdinConfig dataclass. OdinConfig stays around for env-only
+        # bootstrap helpers and is exercised in TestOdinConfig above.
+        from src.config.schema import Config
         from src.discord.client import OdinBot
-        cfg = OdinConfig(token="fake-token")
+        cfg = Config(discord={"token": "fake-token"})
         bot = OdinBot(cfg)
         assert bot.config is cfg
-        assert bot.config.token == "fake-token"
+        assert bot.config.discord.token == "fake-token"
 
     def test_bot_has_cog_list(self):
         from src.discord.client import INITIAL_EXTENSIONS

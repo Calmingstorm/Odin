@@ -83,15 +83,16 @@ def mock_member():
 
 @pytest.fixture
 def odin_config():
-    """A test OdinConfig."""
-    from src.config import OdinConfig
+    """A test pydantic Config (executor-shape).
 
-    return OdinConfig(
-        token="test-token-not-real",
-        prefix="!",
-        log_level="DEBUG",
-        web_secret="test-secret",
-    )
+    OdinBot now uses the full pydantic Config from src.config.schema, not the
+    legacy OdinConfig dataclass. Tests that just need a constructable bot
+    config should use this fixture. Tests that explicitly want the legacy
+    dataclass should import OdinConfig from src.config directly.
+    """
+    from src.config.schema import Config
+
+    return Config(discord={"token": "test-token-not-real"})
 
 # ── Planner / DAG execution test support ──────────────────────
 

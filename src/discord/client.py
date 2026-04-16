@@ -1,29 +1,50 @@
-"""OdinBot — main Discord bot client.
-
-This module defines the core bot class and the ``run_bot`` entry point.
-All command logic lives in cogs under ``src.discord.cogs``; helper utilities
-live under ``src.discord.helpers``.
-"""
-
 from __future__ import annotations
 
-import logging
-import sys
-from typing import TYPE_CHECKING
+import asyncio
+import base64
+import collections
+import hashlib
+import io
+import os
+import re
+import time
+from collections.abc import Callable
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
-from src.config import OdinConfig
-from src.constants import BOT_NAME, COLOR_PRIMARY
+from ..audit import AuditLogger
+from ..config.schema import Config
+from ..context import ContextLoader
+from ..knowledge import KnowledgeStore
+from ..monitoring import InfraWatcher
+from .background_task import (
+    BackgroundTask, run_background_task, create_task_id, MAX_STEPS,
+)
+from ..agents import AgentManager, LoopAgentBridge
+from ..agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
+from ..tools.autonomous_loop import LoopManager
+from ..learning import ConversationReflector
+from ..llm import CircuitOpenError, CodexAuth, CodexChatClient
+from ..llm.codex_auth import CodexAuthPool
+from ..llm.secret_scrubber import scrub_output_secrets
+from ..llm.system_prompt import build_system_prompt, build_chat_system_prompt
+from ..odin_log import get_logger
+from ..scheduler import Scheduler
+from ..sessions import SessionManager
+from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
+from ..tools import ToolExecutor, SkillManager, get_tool_definitions
+from ..tools.tool_memory import ToolMemory
+from ..search import LocalEmbedder, SessionVectorStore
+from ..permissions import PermissionManager
+from .channel_logger import ChannelLogger
+from .voice import VoiceManager, VoiceMessageProxy
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+log = get_logger("discord")
 
-logger = logging.getLogger("odin.discord")
-
-# Cog extensions to load on startup (dotted module paths)
-INITIAL_EXTENSIONS: Sequence[str] = (
+# Cog extensions to load on startup (carried over from the prior moderation-bot OdinBot).
+INITIAL_EXTENSIONS: tuple[str, ...] = (
     "src.discord.cogs.moderation",
     "src.discord.cogs.administration",
     "src.discord.cogs.utility",
@@ -36,185 +57,4120 @@ INITIAL_EXTENSIONS: Sequence[str] = (
 )
 
 
-class OdinBot(commands.Bot):
-    """Core Odin bot client.
+# Friendly fallback when Codex returns an empty response after retries
+_EMPTY_RESPONSE_FALLBACK = "I couldn't generate a response. Please try again."
 
-    Responsibilities are intentionally narrow:
-    * configure intents and prefix
-    * load cog extensions
-    * handle lifecycle events (ready, shutdown)
-    * expose shared state (config, db pool) to cogs
+# Webhook IDs allowed to bypass the bot-author check.
+# Populated from ALLOWED_WEBHOOK_IDS env var (comma-separated) at startup.
+_ALLOWED_WEBHOOK_IDS: set[str] = set()
+
+# Patterns that might indicate a secret was pasted
+SECRET_SCRUB_PATTERNS = [
+    re.compile(r"sk-[a-zA-Z0-9]{20,}"),
+    re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*\S{8,}"),
+    re.compile(r"xox[boaprs]-[a-zA-Z0-9-]+"),
+    # Natural language: "my password is ...", "password for gmail is ..."
+    re.compile(r"(?i)(?:my\s+)?(?:password|passwd|pwd)\s+(?:\S+\s+){0,4}(?:is|was)\s+\S{6,}"),
+]
+
+DISCORD_MAX_LEN = 2000
+# Tool-iteration caps are now configurable per path (chat vs loop) via
+# config.tools.max_tool_iterations_chat / _loop. Read fresh each request so
+# config updates via /api/config PUT take effect on the next message/iteration.
+TOOL_OUTPUT_MAX_CHARS = 12000  # ~3000 tokens; cap tool results to prevent context bloat
+_LONG_TIMEOUT_TOOL_SET = frozenset({"claude_code"})  # Tools that get extended timeout (3660s vs config default)
+SEND_MAX_RETRIES = 3
+
+# Pre-compiled regex for merging adjacent code blocks in combine_bot_messages
+_ADJACENT_FENCE_RE = re.compile(r"\n```[ \t]*\n\n```(\w*)[ \t]*\n")
+
+
+class _LoopMessageProxy:
+    """Lightweight proxy providing a discord.Message-like interface for loop iterations.
+
+    Allows Discord-native tool handlers to be called from autonomous loop
+    iterations without a real Discord message object.
     """
 
-    config: OdinConfig
+    def __init__(self, channel: object, user_id: str, user_name: str = "loop") -> None:
+        self.channel = channel
+        self.id = 0  # No triggering message
+        self.webhook_id = None
+        self.author = _LoopAuthorProxy(user_id, user_name)
 
-    def __init__(self, config: OdinConfig) -> None:
-        self.config = config
 
+class _LoopAuthorProxy:
+    """Lightweight proxy for message.author in loop context."""
+
+    def __init__(self, user_id: str, name: str) -> None:
+        self.id = int(user_id) if user_id.isdigit() else 0
+        self.bot = False
+        self._name = name
+
+    def __str__(self) -> str:
+        return self._name
+
+
+# Additional patterns for scrubbing LLM responses before Discord delivery.
+# These extend OUTPUT_SECRET_PATTERNS (applied via scrub_output_secrets) with
+# patterns more likely to appear in natural-language LLM output.
+_RESPONSE_EXTRA_PATTERNS = [
+    re.compile(r"xox[boaprs]-[a-zA-Z0-9-]+"),  # Slack tokens
+    # Natural language: "the password is ...", "my password is hunter2"
+    re.compile(r"(?i)(?:my\s+)?(?:password|passwd|pwd)\s+(?:\S+\s+){0,4}(?:is|was)\s+\S{6,}"),
+]
+
+
+def scrub_response_secrets(text: str) -> str:
+    """Scrub potential secrets from LLM responses before sending to Discord.
+
+    Applies the tool-output patterns (passwords, API keys, private keys,
+    database URLs) plus additional patterns for secrets that LLMs might
+    express in natural language.
+    """
+    text = scrub_output_secrets(text)
+    for pattern in _RESPONSE_EXTRA_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+    return text
+
+
+# Patterns that suggest fabricated tool output when no tools were actually called.
+# Each is (compiled_regex, description) for testability.
+_FABRICATION_PATTERNS: list[re.Pattern[str]] = [
+    # Claims of running/executing/investigating commands
+    re.compile(
+        r"(?i)\b(?:I\s+(?:ran|executed|checked|performed|ran\s+a|"
+        r"looked\s+at|reviewed|inspected|examined|verified|confirmed|"
+        r"tested|scanned|monitored|queried)|"
+        r"running|executing|here(?:'s| is) the (?:output|result)|"
+        r"the (?:command|output|result) (?:returned|shows?|is)|"
+        r"I (?:can see|found) (?:that )?(?:the |your )?)"
+    ),
+    # Fake command output patterns (``` followed by lines that look like terminal output)
+    re.compile(
+        r"```(?:bash|shell|console|text|output)?\s*\n"
+        r"(?:[\$#>].*\n|(?:total |drwx|Filesystem|CONTAINER|NAME |PID |USER ))",
+    ),
+    # Claims of completed actions without tool calls (generated, posted, created, saved, etc.)
+    re.compile(
+        r"(?i)\b(?:generated|posted|created|saved|uploaded|deployed|installed|"
+        r"started|stopped|deleted|removed|wrote|written|sent|fetched|downloaded)"
+        r"(?:\s+(?:and\s+)?(?:posted|uploaded|saved|sent|attached|delivered))?"
+        r"\b.{0,40}\b(?:image|file|script|server|container|process|document|skill)"
+    ),
+    # Claims referencing data sources without having checked them
+    re.compile(
+        r"(?i)\b(?:according to (?:the )?(?:logs?|output|results?|data|metrics|dashboard)|"
+        r"based on (?:the )?(?:output|logs?|results?|metrics))\b"
+    ),
+]
+
+
+_PROMISE_PATTERNS: list[re.Pattern[str]] = [
+    # "I'll <verb>" — any verb after I'll/I will (not just a fixed list)
+    re.compile(
+        r"(?i)\bI'(?:ll|m going to)\s+\w+"
+    ),
+    # "I'm <gerund>" — any -ing verb after I'm
+    re.compile(
+        r"(?i)\bI'm\s+\w+ing\b"
+    ),
+    # "I will <verb>"
+    re.compile(
+        r"(?i)\bI will\s+\w+"
+    ),
+    # "I can <verb> it/that/this immediately/now/right now"
+    re.compile(
+        r"(?i)\bI can\s+\w+\s+(?:it|that|this|right now|now|immediately)\b"
+    ),
+    # Action openers without subject — gerund-initial promises
+    re.compile(
+        r"(?i)^(?:On it|Working on|Spawning|Spinning up|Starting|Kicking off|"
+        r"Setting up|Pulling|Generating|Building|Deploying|Running|"
+        r"Creating|Launching|Firing up|Booting|Preparing|Fetching)\b",
+        re.MULTILINE,
+    ),
+    # "Plan:" or "Plan in" followed by description
+    re.compile(
+        r"(?i)^Plan(?::|(?:\s+in\s+))\s*.{10,}",
+        re.MULTILINE,
+    ),
+]
+
+# Phrases that indicate genuine chat, not a promise to act.
+# If any of these appear, the promise detector should NOT fire.
+_PROMISE_CHAT_EXEMPTIONS: list[re.Pattern[str]] = [
+    # Opinions/thoughts — "I'm thinking", "I'm not sure", "I'm guessing"
+    re.compile(r"(?i)\bI'm\s+(?:thinking|not sure|unsure|guessing|wondering|curious)"),
+    # Statements about state — "I'm aware", "I'm online", "I'm Odin"
+    re.compile(r"(?i)\bI'm\s+(?:aware|online|here|ready|Odin|a |the |not )"),
+    # Refusals — "I can't", "I won't"
+    re.compile(r"(?i)\bI\s+(?:can't|won't|cannot|will not)\b"),
+    # Past tense reports — "I'll note that", "I'm reporting"
+    re.compile(r"(?i)\bI'll\s+(?:note|say|add|mention|point out)\b"),
+]
+
+
+def detect_promise_without_action(text: str, tools_used: list[str]) -> bool:
+    """Detect if a response promises action but includes no tool calls.
+
+    Catches patterns like "I'll do X now" or "I'm executing that" when
+    no tools were actually called — the LLM described doing work without
+    doing it.
+    """
+    if tools_used:
+        return False
+    if not text or len(text) < 15:
+        return False
+    # Check exemptions first — genuine chat shouldn't trigger
+    if any(p.search(text) for p in _PROMISE_CHAT_EXEMPTIONS):
+        return False
+    return any(p.search(text) for p in _PROMISE_PATTERNS)
+
+
+_PROMISE_RETRY_MSG = {
+    "role": "developer",
+    "content": "Execute the action with tool calls now.",
+}
+
+
+# ---------------------------------------------------------------------------
+# Continuation message — injected when the classifier determines the
+# response is incomplete and the model should keep working.
+# ---------------------------------------------------------------------------
+
+_CONTINUATION_MSG = {
+    "role": "developer",
+    "content": (
+        "Continue executing the remaining steps with tool calls."
+    ),
+}
+
+
+
+def detect_fabrication(text: str, tools_used: list[str]) -> bool:
+    """Detect if a text-only response fabricates tool results.
+
+    Returns True if the response contains patterns suggesting the LLM claimed
+    to run commands or check systems without actually calling any tools.
+
+    Only meaningful when tools_used is empty — if tools were called, the
+    response is based on real results.
+    """
+    if tools_used:
+        return False
+    if not text or len(text) < 20:
+        return False
+    return any(p.search(text) for p in _FABRICATION_PATTERNS)
+
+
+# Developer message injected when fabrication is detected, prompting a retry.
+_FABRICATION_RETRY_MSG = {
+    "role": "developer",
+    "content": "That was a fabrication. Call the appropriate tool to get real results.",
+}
+
+
+# ---------------------------------------------------------------------------
+# Tool-unavailability fabrication — catches Codex claiming tools are disabled
+# without actually trying them. Only fires when no tools were called.
+# ---------------------------------------------------------------------------
+
+_TOOL_UNAVAIL_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        r"(?i)\b(?:not (?:enabled|available|configured)|"
+        r"is(?:n't| not) (?:enabled|available|configured|supported)|"
+        r"is disabled|cannot be used)\b"
+    ),
+    re.compile(
+        r"(?i)\bcan(?:'t|not)\b.{0,30}\b(?:generate|create|produce|render)\b.{0,20}"
+        r"\b(?:image|photo|picture|screenshot)"
+    ),
+    re.compile(
+        r"(?i)\b(?:image|photo) generation.{0,20}\b(?:not|isn't|unavailable|disabled)\b"
+    ),
+    # Claims of lacking access or capability
+    re.compile(
+        r"(?i)\b(?:(?:don't|do not) have (?:access|the ability) to|"
+        r"no (?:tool|way) (?:to |for )(?:do )?(?:that|this)|"
+        r"that(?:'s| is) not something I can)\b"
+    ),
+]
+
+
+def detect_tool_unavailable(text: str, tools_used: list[str]) -> bool:
+    """Detect if a response falsely claims a tool is unavailable.
+
+    Returns True if the response claims a tool is not enabled/available/etc.
+    without actually trying to call it.  Only meaningful when tools_used is
+    empty — if tools were called and returned a real error, that's legitimate.
+    """
+    if tools_used:
+        return False
+    if not text or len(text) < 15:
+        return False
+    return any(p.search(text) for p in _TOOL_UNAVAIL_PATTERNS)
+
+
+_TOOL_UNAVAIL_RETRY_MSG = {
+    "role": "developer",
+    "content": "The tool is available. Try calling it.",
+}
+
+
+# ---------------------------------------------------------------------------
+# Hedging detection — catches "shall I", "if you want", etc.
+# Used for bot-to-bot interactions where hedging is never appropriate.
+# ---------------------------------------------------------------------------
+
+_HEDGING_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        r"(?i)\b(?:if you(?:'d| would)? (?:like|want|prefer)|"
+        r"shall I|should I|would you like(?: me to)?|"
+        r"ready (?:when|on) you|let me know (?:if|when)|"
+        r"I can (?:do|help|run|execute|set up) (?:that|this|it) (?:for you|if)|"
+        r"just (?:say|tell) (?:the word|me when|me if)|"
+        r"want me to)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:here(?:'s| is) (?:a |the )?plan|"
+        r"I(?:'d| would) (?:suggest|recommend)|"
+        r"before (?:I |we )(?:proceed|go ahead|start)|"
+        r"I'll wait for (?:your|the) (?:go[- ]ahead|confirmation|approval)|"
+        r"awaiting (?:your|the) (?:confirmation|input|response|approval|go[- ]ahead)|"
+        r"once you (?:confirm|approve|give the go[- ]ahead)|"
+        r"(?:your call|up to you|your decision))\b"
+    ),
+    re.compile(
+        r"(?i)^Plan:|"
+        r"I can(?:'t| not) directly|"
+        r"I (?:need|have) to .{0,30} (?:first|before)|"
+        r"I'm (?:going to|about to|proceeding to)"
+    ),
+    # Offering numbered options instead of executing
+    re.compile(
+        r"(?i)(?:pick (?:one|an option)|choose (?:one|from)|"
+        r"(?:option|choice) \d|"
+        r"tell me (?:what you (?:want|need|prefer)|which)|"
+        r"which (?:would you|do you|one))\b"
+    ),
+]
+
+
+def detect_hedging(text: str, tools_used: list[str]) -> bool:
+    """Detect if a response hedges instead of executing.
+
+    Returns True if the response contains hedging language and no tools
+    were called — meaning the LLM asked for permission instead of acting.
+    """
+    if tools_used:
+        return False
+    if not text or len(text) < 15:
+        return False
+    return any(p.search(text) for p in _HEDGING_PATTERNS)
+
+
+# Developer message injected when hedging is detected on a bot message.
+_HEDGING_RETRY_MSG = {
+    "role": "developer",
+    "content": "This is another bot. Do not say 'shall I' or 'if you want'. Execute immediately with tool calls.",
+}
+
+
+# ---------------------------------------------------------------------------
+# Code-block hedging — catches Codex showing a bash/shell command instead
+# of executing it via run_command.  Only fires when no tools were called.
+# ---------------------------------------------------------------------------
+
+_CODE_BLOCK_HEDGING_PATTERN: re.Pattern[str] = re.compile(
+    r"```(?:bash|sh|shell|zsh)\s*\n",
+)
+
+
+def detect_code_hedging(text: str, tools_used: list[str]) -> bool:
+    """Detect if a response shows a bash code block instead of executing it.
+
+    Returns True if the response contains a bash/sh code block but no tools
+    were called — meaning the LLM showed what it should have run.
+    """
+    if tools_used:
+        return False
+    if not text or len(text) < 15:
+        return False
+    return bool(_CODE_BLOCK_HEDGING_PATTERN.search(text))
+
+
+_CODE_HEDGING_RETRY_MSG = {
+    "role": "developer",
+    "content": (
+        "Execute the command using run_command instead of showing it. "
+        "You are an executor, not a manual."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Premature failure detection — catches when Codex gives up too early
+# instead of exhausting fallback chains.
+# ---------------------------------------------------------------------------
+
+_FAILURE_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        r"(?i)(?:couldn'?t (?:get|resolve|find|fetch|retrieve|determine|complete|"
+        r"access|connect)|"
+        r"(?:failed|unable) to (?:get|resolve|find|fetch|retrieve|connect|access)|"
+        r"(?:no|zero) (?:results?|matches?|data) (?:found|returned|available)|"
+        r"(?:is|was|currently) (?:blocked|unavailable|down|broken|failing)|"
+        r"(?:error|Error):)"
+    ),
+    re.compile(
+        r"(?i)(?:workaround|fallback|alternative|try (?:this|these|instead)|"
+        r"use this .{0,20} instead|if you want .{0,30} workaround)"
+    ),
+    # Connection/execution failure patterns
+    re.compile(
+        r"(?i)(?:timed?\s*out|connection (?:refused|failed|reset|closed)|"
+        r"(?:doesn't|does not|isn't|is not) (?:seem to be )?(?:work(?:ing)?|respond(?:ing)?))"
+    ),
+]
+
+
+def detect_premature_failure(text: str, tools_used: list[str]) -> bool:
+    """Detect if a response reports failure without exhausting alternatives.
+
+    Returns True if the response describes a failure/error AND tools were
+    called (partial execution) — meaning the LLM tried something, hit an
+    error, and gave up instead of trying a different approach.
+
+    Only fires when tools WERE used (partial attempt). Pure fabrication
+    (no tools) is handled by detect_fabrication instead.
+    """
+    if not tools_used:
+        return False  # No tools called — fabrication detector handles this
+    if not text or len(text) < 30:
+        return False
+    return any(p.search(text) for p in _FAILURE_PATTERNS)
+
+
+_FAILURE_RETRY_MSG = {
+    "role": "developer",
+    "content": "Try alternative approaches before reporting failure.",
+}
+
+
+def truncate_tool_output(text: str, max_chars: int = TOOL_OUTPUT_MAX_CHARS) -> str:
+    """Truncate large tool output, preserving the start and end for context.
+
+    Tool results stay in the messages list and are re-sent as input tokens
+    on every subsequent iteration of the tool loop.  Capping output prevents
+    a single large result (Prometheus JSON, file contents, long command output)
+    from ballooning costs across iterations.
+    """
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    omitted = len(text) - max_chars
+    return (
+        text[:half]
+        + f"\n\n[... {omitted} characters omitted ...]\n\n"
+        + text[-half:]
+    )
+
+
+def combine_bot_messages(parts: list[str]) -> str:
+    """Combine buffered bot messages, intelligently merging code blocks.
+
+    Handles:
+    - Split code blocks (open in one message, close in later one) — joined
+      with a single newline so no extra blank lines appear inside the block.
+    - Adjacent code blocks (close fence then immediately open fence) — merged
+      into one continuous block by removing the redundant fence pair.
+    - Regular text between code blocks — joined with double newline as usual.
+    """
+    if len(parts) <= 1:
+        return parts[0] if parts else ""
+
+    # Join parts, using \n (not \n\n) when the previous part has an unclosed
+    # code block — meaning the next part is a continuation of the same block.
+    # Track fence count incrementally to avoid O(n²) rescanning.
+    result = parts[0]
+    fence_count = result.count("```")
+    for i in range(1, len(parts)):
+        if fence_count % 2 == 1:
+            # Inside an unclosed code block — continuation, single newline
+            result += "\n" + parts[i]
+        else:
+            result += "\n\n" + parts[i]
+        fence_count += parts[i].count("```")
+
+    # Merge adjacent code blocks: \n```<ws>\n\n```<lang>\n → \n
+    # This collapses e.g. "\n```\n\n```bash\n" into a single block.
+    result = _ADJACENT_FENCE_RE.sub("\n", result)
+
+    return result
+
+
+class OdinBot(commands.Bot):
+    def __init__(self, config: Config) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.reactions = True
         intents.members = True
-
+        intents.voice_states = True
         super().__init__(
             command_prefix=self._resolve_prefix,
             intents=intents,
             help_command=commands.DefaultHelpCommand(no_category="General"),
-            activity=discord.Activity(
-                type=discord.ActivityType.watching,
-                name=f"{config.prefix}help | {BOT_NAME}",
-            ),
         )
 
+        self.config = config
+        # commands.Bot already initializes self.tree (app_commands.CommandTree); do not overwrite
+        self._start_time = time.monotonic()
+
+        # Configure timezone for time parser module
+        from ..tools.time_parser import set_default_timezone
+        set_default_timezone(config.timezone)
+
+        # Per-channel lock to prevent concurrent processing of the same message
+        self._channel_locks: dict[str, asyncio.Lock] = {}
+        # Pending file attachments from skills — per-channel to avoid cross-channel leaks
+        self._pending_files: dict[str, list[tuple[bytes, str]]] = {}
+        # Track recently processed message IDs to prevent duplicate handling
+        self._processed_messages: collections.OrderedDict[int, None] = collections.OrderedDict()
+        self._processed_messages_max = 100
+        # Bot message buffer: accumulate rapid-fire bot messages before processing
+        # Key: (channel_id, author_id) → list of content strings
+        self._bot_msg_buffer: dict[tuple[str, str], list[str]] = {}
+        self._bot_msg_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._bot_msg_buffer_delay: float = 2.0  # seconds to wait for more bot messages
+        self._bot_msg_buffer_max: int = 20  # max messages to buffer per bot+channel
+        # Recent tool executions for conversational context (injected into system prompt)
+        # Per-channel: {channel_id: [(timestamp, entry_text), ...]}
+        self._recent_actions: dict[str, list[tuple[float, str]]] = {}
+        self._recent_actions_max = 10
+        self._recent_actions_expiry = 3600  # seconds (1 hour)
+        # Background task tracking
+        self._background_tasks: dict[str, BackgroundTask] = {}
+        self._background_tasks_max = 20
+        # Multi-agent orchestration
+        self.agent_manager = AgentManager()
+        # Autonomous loop manager (agent-aware)
+        self.loop_manager = LoopManager(agents_enabled=True)
+        # Loop-agent bridge for spawning agents from loop iterations
+        self.loop_agent_bridge = LoopAgentBridge(self.agent_manager)
+        # Cached merged tool definitions — invalidated on skill create/edit/delete
+        self._cached_merged_tools: list[dict] | None = None
+        # Cached host string dict — invalidated on context reload
+        self._cached_hosts: dict[str, str] | None = None
+        # Cached skills list text — invalidated on skill create/edit/delete
+        self._cached_skills_text: str | None = None
+        # TTL cache for per-user memory (avoids file I/O per message)
+        self._memory_cache: dict[str | None, tuple[float, dict[str, str]]] = {}
+        self._memory_cache_ttl: float = 60.0  # seconds
+        # TTL cache for reflector prompt section (avoids file I/O per message)
+        self._reflector_cache: dict[str | None, tuple[float, str]] = {}
+        self._reflector_cache_ttl: float = 60.0  # seconds
+        # Throttled cache cleanup
+        self._last_cache_cleanup: float = 0.0
+        self._cache_cleanup_interval: float = 300.0  # every 5 minutes
+
+        self.context_loader = ContextLoader(config.context.directory)
+        self.context_loader.load()
+
+        self.reflector = ConversationReflector(
+            learned_path="./data/learned.json",
+            max_entries=config.learning.max_entries,
+            consolidation_target=config.learning.consolidation_target,
+            enabled=config.learning.enabled,
+        )
+
+        # Semantic search + FTS5 components
+        self._vector_store: SessionVectorStore | None = None
+        self._embedder: LocalEmbedder | None = None
+        self._knowledge_store: KnowledgeStore | None = None
+        self._fts_index: FullTextIndex | None = None
+        if config.search.enabled:
+            self._embedder = LocalEmbedder()
+            # Initialize FTS5 index (SQLite, no external deps)
+            from pathlib import Path
+            search_db_path = config.search.search_db_path
+            fts_db_path = str(Path(search_db_path).parent / "fts.db")
+            from ..search.fts import FullTextIndex
+            self._fts_index = FullTextIndex(fts_db_path)
+            if not self._fts_index.available:
+                self._fts_index = None
+
+            # Always initialize stores — they work in FTS-only mode even without
+            # sqlite-vec or embedder. Don't null them out on vec init failure.
+            session_db = str(Path(search_db_path) / "sessions.db") if Path(search_db_path).is_dir() else search_db_path + "_sessions.db"
+            knowledge_db = str(Path(search_db_path) / "knowledge.db") if Path(search_db_path).is_dir() else search_db_path + "_knowledge.db"
+            # Ensure the directory exists
+            Path(search_db_path).mkdir(parents=True, exist_ok=True)
+            session_db = str(Path(search_db_path) / "sessions.db")
+            knowledge_db = str(Path(search_db_path) / "knowledge.db")
+
+            self._vector_store = SessionVectorStore(
+                session_db, fts_index=self._fts_index,
+            )
+            if not self._vector_store.available:
+                self._vector_store = None
+            self._knowledge_store = KnowledgeStore(
+                knowledge_db, fts_index=self._fts_index,
+            )
+            if not self._knowledge_store.available:
+                self._knowledge_store = None
+
+        self.sessions = SessionManager(
+            max_history=config.sessions.max_history,
+            max_age_hours=config.sessions.max_age_hours,
+            persist_dir=config.sessions.persist_directory,
+            reflector=self.reflector,
+            vector_store=self._vector_store,
+            embedder=self._embedder,
+        )
+        self.sessions.load()
+
+        self._memory_path = "./data/memory.json"
+
+        # Passive channel logger — writes ALL guild messages to JSONL (zero LLM tokens)
+        self.channel_logger = ChannelLogger("./data/channel_logs")
+        self.sessions.set_channel_search(self.channel_logger, self._fts_index)
+
+        # Browser automation
+        self.browser_manager = None
+        if config.browser.enabled:
+            from ..tools.browser import BrowserManager
+            self.browser_manager = BrowserManager(
+                cdp_url=config.browser.cdp_url,
+                default_timeout_ms=config.browser.default_timeout_ms,
+                viewport_width=config.browser.viewport_width,
+                viewport_height=config.browser.viewport_height,
+            )
+
+        self.tool_executor = ToolExecutor(
+            config.tools, memory_path=self._memory_path,
+            browser_manager=self.browser_manager,
+        )
+        self.skill_manager = SkillManager(
+            skills_dir="./data/skills",
+            tool_executor=self.tool_executor,
+            memory_path=self._memory_path,
+        )
+
+        # Apply skill URL allowlist from config
+        if config.tools.skill_allowed_urls:
+            from ..tools.skill_context import set_skill_allowed_urls
+            set_skill_allowed_urls(config.tools.skill_allowed_urls)
+
+        # Initialize Codex client if configured
+        self.codex_client: CodexChatClient | None = None
+        if config.openai_codex.enabled:
+            codex_auth = CodexAuthPool(config.openai_codex.credentials_path)
+            if codex_auth.is_configured():
+                self.codex_client = CodexChatClient(
+                    auth=codex_auth,
+                    model=config.openai_codex.model,
+                    max_tokens=config.openai_codex.max_tokens,
+                )
+                log.info("Codex backend enabled (model: %s)", config.openai_codex.model)
+
+                # Use Codex for session compaction
+                async def _codex_compaction(messages: list[dict], system: str) -> str:
+                    return await self.codex_client.chat(
+                        messages=messages, system=system, max_tokens=300,
+                    )
+                self.sessions.set_compaction_fn(_codex_compaction)
+
+                # Use Codex for learning reflection
+                async def _codex_reflection(messages: list[dict], system: str) -> str:
+                    return await self.codex_client.chat(
+                        messages=messages, system=system, max_tokens=500,
+                    )
+                self.reflector.set_text_fn(_codex_reflection)
+            else:
+                log.warning("Codex enabled in config but no credentials found. Run scripts/codex_login.py")
+
+        self.scheduler = Scheduler(data_path="./data/schedules.json")
+        self.audit = AuditLogger(path="./data/audit.jsonl")
+        self.permissions = PermissionManager(
+            config_tiers=config.permissions.tiers,
+            default_tier=config.permissions.default_tier,
+            overrides_path=config.permissions.overrides_path,
+        )
+
+        self.tool_memory = ToolMemory("./data/tool_memory.json")
+
+        # Wire optional services into skill manager for expanded skill context
+        self.skill_manager.set_services(
+            knowledge_store=self._knowledge_store,
+            embedder=self._embedder,
+            session_manager=self.sessions,
+            scheduler=self.scheduler,
+        )
+
+        # Voice support
+        self.voice_manager: VoiceManager | None = None
+        if config.voice.enabled:
+            self.voice_manager = VoiceManager(config.voice, self)
+            self.voice_manager.on_transcription = self._on_voice_transcription
+
+        # Proactive infrastructure monitoring
+        self.infra_watcher: InfraWatcher | None = None
+        if config.monitoring.enabled and config.monitoring.checks:
+            self.infra_watcher = InfraWatcher(
+                config=config.monitoring,
+                executor=self.tool_executor,
+                alert_callback=self._on_monitor_alert,
+            )
+
+        self._system_prompt = self._build_system_prompt()
+        self._register_commands()
+        self._init_allowed_webhook_ids()
+        self._log_startup_config()
+
+    def _init_allowed_webhook_ids(self) -> None:
+        """Populate _ALLOWED_WEBHOOK_IDS from ALLOWED_WEBHOOK_IDS env var."""
+        global _ALLOWED_WEBHOOK_IDS
+        raw = os.environ.get("ALLOWED_WEBHOOK_IDS", "")
+        if raw:
+            _ALLOWED_WEBHOOK_IDS = {wid.strip() for wid in raw.split(",") if wid.strip()}
+
+    def _log_startup_config(self) -> None:
+        """Log configuration summary at startup to help users verify setup."""
+        cfg = self.config
+        if not cfg.tools.hosts:
+            log.warning("No hosts configured — SSH tools will not work until hosts are added to config.yml")
+        else:
+            log.info("Configured hosts: %s", ", ".join(cfg.tools.hosts.keys()))
+        if not cfg.tools.claude_code_host:
+            log.info("claude_code_host not set — claude -p code generation requires a configured host")
+        if cfg.openai_codex.enabled and not self.codex_client:
+            log.warning("Codex enabled but not configured — session compaction and learning reflection disabled")
+        if cfg.discord.respond_to_bots:
+            log.info("Bot interaction enabled — will respond to other bots")
+        if cfg.discord.require_mention:
+            log.info("Mention-only mode — will only respond when @mentioned")
+
+    def _get_cached_hosts(self) -> dict[str, str]:
+        """Return cached host string dict. Rebuilt on config reload."""
+        if self._cached_hosts is None:
+            self._cached_hosts = {
+                alias: f"{h.ssh_user}@{h.address}"
+                for alias, h in self.config.tools.hosts.items()
+            }
+        return self._cached_hosts
+
+    def _get_cached_skills_text(self) -> str:
+        """Return cached skills list text. Invalidated on skill create/edit/delete."""
+        if self._cached_skills_text is None:
+            if hasattr(self, "skill_manager"):
+                skills = self.skill_manager.list_skills()
+                if skills:
+                    self._cached_skills_text = "\n".join(
+                        f"- `{s['name']}`: {s['description']}" for s in skills
+                    )
+                else:
+                    self._cached_skills_text = ""
+            else:
+                self._cached_skills_text = ""
+        return self._cached_skills_text
+
+    def _get_cached_memory(self, user_id: str | None) -> dict[str, str]:
+        """Return cached per-user memory with TTL to avoid file I/O per message."""
+        now = time.time()
+        cached = self._memory_cache.get(user_id)
+        if cached and now - cached[0] < self._memory_cache_ttl:
+            return cached[1]
+        memory = self.tool_executor._load_memory_for_user(user_id)
+        self._memory_cache[user_id] = (now, memory)
+        return memory
+
+    def _get_cached_reflector(self, user_id: str | None) -> str:
+        """Return cached reflector prompt section with TTL to avoid file I/O per message."""
+        if not hasattr(self, "reflector"):
+            return ""
+        now = time.time()
+        cached = self._reflector_cache.get(user_id)
+        if cached and now - cached[0] < self._reflector_cache_ttl:
+            return cached[1]
+        learned = self.reflector.get_prompt_section(user_id=user_id)
+        self._reflector_cache[user_id] = (now, learned)
+        return learned
+
+    def _invalidate_prompt_caches(self) -> None:
+        """Invalidate all prompt-related caches. Called on config/context reload."""
+        self._cached_hosts = None
+        self._cached_skills_text = None
+        self._memory_cache.clear()
+        self._reflector_cache.clear()
+
+    def _build_system_prompt(
+        self, channel: discord.abc.GuildChannel | None = None,
+        user_id: str | None = None,
+        query: str | None = None,
+    ) -> str:
+        voice_info = "Voice support is not enabled."
+        if self.voice_manager:
+            if self.voice_manager.is_connected:
+                ch = self.voice_manager.current_channel
+                ch_name = ch.name if ch else "unknown"
+                voice_info = (
+                    f"You are currently in voice channel **{ch_name}**. "
+                    "You can hear users via speech-to-text and respond via text-to-speech. "
+                    "Transcribed voice input appears as regular messages. Your text responses "
+                    "are spoken aloud in the voice channel AND posted as text. "
+                    "Keep voice responses concise and conversational — they will be spoken."
+                )
+            else:
+                voice_info = (
+                    "Voice support is enabled but you are not in a voice channel. "
+                    "Users can ask you to join with '/voice join' or 'join voice'."
+                )
+
+        prompt = build_system_prompt(
+            context=self.context_loader.context,
+            hosts=self._get_cached_hosts(),
+            voice_info=voice_info,
+            tz=self.config.timezone,
+            claude_code_dir=self.config.tools.claude_code_dir,
+        )
+
+        # Inject persistent memory into the system prompt (per-user + global)
+        memory = self._get_cached_memory(user_id)
+        if memory:
+            memory_text = "\n".join(f"- **{k}**: {v}" for k, v in memory.items())
+            prompt += f"\n\n## Persistent Memory\n{memory_text}"
+
+        # Inject learned context from cross-conversation reflection (per-user filtered)
+        learned = self._get_cached_reflector(user_id)
+        if learned:
+            prompt += f"\n\n{learned}"
+
+        # Inject user-created skills list (cached, invalidated on skill CRUD)
+        skills_text = self._get_cached_skills_text()
+        if skills_text:
+            prompt += f"\n\n## User-Created Skills\n{skills_text}"
+
+        # Inject recent tool executions for this channel only
+        if channel is not None:
+            channel_id = str(channel.id)
+            now = time.time()
+            expiry = getattr(self, "_recent_actions_expiry", 3600)
+            channel_actions = [
+                entry for ts, entry in self._recent_actions.get(channel_id, [])
+                if now - ts < expiry
+            ]
+            if channel_actions:
+                actions_text = "\n".join(channel_actions[-10:])
+                prompt += f"\n\n## Recent Actions\n{actions_text}"
+
+        # Tool use pattern hints injected separately via _inject_tool_hints()
+        # because format_hints is async (needs embedder).
+
+        # Channel-based personality: if the channel has a topic/description set,
+        # inject it as a personality directive. All other rules still apply.
+        if channel is not None:
+            topic = getattr(channel, "topic", None)
+            if topic and topic.strip():
+                prompt += (
+                    f"\n\n## Channel Personality\n"
+                    f"For this channel, adopt the following personality while keeping all other rules intact:\n"
+                    f"{topic.strip()}"
+                )
+
+        return prompt
+
+    async def _inject_tool_hints(self, system_prompt: str, query: str, user_id: str | None = None) -> str:
+        """Return system_prompt with tool use pattern hints appended (async, needs embedder).
+
+        Returns the original prompt unchanged if hints are unavailable or an error occurs.
+        """
+        try:
+            tm = getattr(self, "tool_memory", None)
+            if not tm or not hasattr(tm, "format_hints"):
+                return system_prompt
+            perms = getattr(self, "permissions", None)
+            allowed = perms.allowed_tool_names(user_id) if perms and user_id else None
+            embedder = getattr(self, "_embedder", None)
+            hints = await tm.format_hints(
+                query, allowed_tools=allowed, embedder=embedder,
+            )
+            if hints:
+                return system_prompt + f"\n\n{hints}"
+        except Exception:
+            pass  # Non-critical — hints are optional optimization
+        return system_prompt
+
+    def _build_chat_system_prompt(
+        self, channel: discord.abc.GuildChannel | None = None,
+        user_id: str | None = None,
+    ) -> str:
+        """Build a lightweight system prompt for chat-routed messages.
+
+        Includes identity, rules, memory, and personality but omits
+        infrastructure details, tool docs, host lists, and PromQL to
+        save input tokens on casual conversation.
+        """
+        voice_info = "Voice support is not enabled."
+        if self.voice_manager:
+            if self.voice_manager.is_connected:
+                ch = self.voice_manager.current_channel
+                ch_name = ch.name if ch else "unknown"
+                voice_info = (
+                    f"You are currently in voice channel **{ch_name}**. "
+                    "Transcribed voice input appears as regular messages. Your text responses "
+                    "are spoken aloud. Keep voice responses concise and conversational."
+                )
+
+        prompt = build_chat_system_prompt(voice_info=voice_info, tz=self.config.timezone)
+
+        # Inject persistent memory (per-user + global, personalization matters for chat)
+        memory = self._get_cached_memory(user_id)
+        if memory:
+            memory_text = "\n".join(f"- **{k}**: {v}" for k, v in memory.items())
+            prompt += f"\n\n## Persistent Memory\n{memory_text}"
+
+        # Inject learned context (per-user filtered, personality from past conversations)
+        learned = self._get_cached_reflector(user_id)
+        if learned:
+            prompt += f"\n\n{learned}"
+
+        # Channel personality
+        if channel is not None:
+            topic = getattr(channel, "topic", None)
+            if topic and topic.strip():
+                prompt += (
+                    f"\n\n## Channel Personality\n"
+                    f"For this channel, adopt the following personality while keeping all other rules intact:\n"
+                    f"{topic.strip()}"
+                )
+
+        return prompt
+
+    def _merged_tool_definitions(self) -> list[dict]:
+        """Merge built-in and skill tool definitions, deduplicating by name.
+
+        Built-in tools take priority over skills with the same name.
+        Tools requiring unconfigured backends are excluded (e.g. claude_code
+        without claude_code_host). Cached — invalidated on skill create/edit/delete.
+        """
+        if self._cached_merged_tools is not None:
+            return self._cached_merged_tools
+        builtin = get_tool_definitions()
+        # Filter out tools that require unconfigured backends
+        if not self.config.tools.claude_code_host:
+            builtin = [t for t in builtin if t["name"] != "claude_code"]
+        builtin_names = {t["name"] for t in builtin}
+        skill_defs = [
+            t for t in self.skill_manager.get_tool_definitions()
+            if t["name"] not in builtin_names
+        ]
+        self._cached_merged_tools = builtin + skill_defs
+        return self._cached_merged_tools
+
+    def _cleanup_stale_caches(self) -> None:
+        """Remove stale entries from per-channel caches to prevent memory leaks.
+
+        Called periodically (every _cache_cleanup_interval seconds) after session prune.
+        Removes expired entries from _recent_actions and _channel_locks for
+        channels that no longer have active sessions.
+        """
+        now = time.time()
+        # Clean up _recent_actions: remove channels with all expired entries
+        expired_channels = []
+        for channel_id, actions in self._recent_actions.items():
+            actions[:] = [(ts, entry) for ts, entry in actions if now - ts < self._recent_actions_expiry]
+            if not actions:
+                expired_channels.append(channel_id)
+        for channel_id in expired_channels:
+            del self._recent_actions[channel_id]
+
+        # Clean up _channel_locks for channels no longer in active sessions
+        active_channels = set(self.sessions._sessions.keys())
+        stale_locks = [cid for cid in self._channel_locks if cid not in active_channels]
+        for cid in stale_locks:
+            del self._channel_locks[cid]
+
+        # Clean up expired TTL cache entries for memory and reflector
+        ttl = getattr(self, "_memory_cache_ttl", 60.0)
+        self._memory_cache = {
+            k: v for k, v in getattr(self, "_memory_cache", {}).items()
+            if now - v[0] < ttl
+        }
+        ttl = getattr(self, "_reflector_cache_ttl", 60.0)
+        self._reflector_cache = {
+            k: v for k, v in getattr(self, "_reflector_cache", {}).items()
+            if now - v[0] < ttl
+        }
+
+        # Agent lifecycle: kill stuck agents, log stale ones
+        if hasattr(self, "agent_manager"):
+            self.agent_manager.check_health()
+
+        # Clean up loop-agent bridge records for finished loops
+        if hasattr(self, "loop_agent_bridge"):
+            for loop_id in list(self.loop_agent_bridge._loop_agents):
+                loop_info = self.loop_manager._loops.get(loop_id)
+                if not loop_info or loop_info.status != "running":
+                    self.loop_agent_bridge.cleanup_loop(loop_id)
+
+        # Batch-index channel logs into FTS (runs every ~5 min with cache cleanup)
+        if self._fts_index and hasattr(self, "channel_logger"):
+            try:
+                self.channel_logger.index_to_fts(self._fts_index)
+            except Exception:
+                pass
+
+    def _maybe_cleanup_caches(self) -> None:
+        """Run cache cleanup if enough time has passed since the last run."""
+        try:
+            now = time.time()
+            interval = getattr(self, "_cache_cleanup_interval", 300.0)
+            last = getattr(self, "_last_cache_cleanup", 0.0)
+            if now - last > interval:
+                self._cleanup_stale_caches()
+                self._last_cache_cleanup = now
+        except Exception:
+            pass  # Non-critical — don't break message processing
+
+    def _track_recent_action(
+        self, tool_name: str, tool_input: dict, result_preview: str,
+        elapsed_ms: int, channel_id: str | None = None,
+    ) -> None:
+        """Record a tool execution for conversational context injection.
+
+        Actions are stored per-channel so that channel A's tool results
+        don't leak into channel B's system prompt.  Each entry carries a
+        real timestamp for time-based expiry (1 hour).
+        """
+        if not channel_id:
+            return  # No channel context — nothing to inject later
+
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M")
+        inp_summary = ", ".join(f"{k}={v}" for k, v in tool_input.items() if isinstance(v, str))
+        if len(inp_summary) > 100:
+            inp_summary = inp_summary[:100] + "..."
+        status = "OK" if "error" not in result_preview.lower()[:50] else "ERROR"
+        entry = f"- [{ts}] `{tool_name}`({inp_summary}) → {status} ({elapsed_ms}ms)"
+
+        actions = self._recent_actions.setdefault(channel_id, [])
+        actions.append((time.time(), entry))
+        # Cap per-channel list
+        if len(actions) > self._recent_actions_max:
+            self._recent_actions[channel_id] = actions[-self._recent_actions_max:]
+
+    def _register_commands(self) -> None:
+        @self.tree.command(name="status", description="Show Odin bot status")
+        async def cmd_status(interaction: discord.Interaction) -> None:
+            if not self._is_allowed_user(interaction.user):
+                await interaction.response.send_message("Access denied.", ephemeral=True)
+                return
+            voice_status = ""
+            if self.voice_manager:
+                if self.voice_manager.is_connected:
+                    ch = self.voice_manager.current_channel
+                    voice_status = f"\nVoice: Connected to **{ch.name}**" if ch else "\nVoice: Connected"
+                else:
+                    voice_status = "\nVoice: Not connected"
+            codex_status = "Codex: " + ("enabled" if self.codex_client else "not configured")
+            await interaction.response.send_message(
+                f"**Odin Status**\n"
+                f"{codex_status}"
+                f"{voice_status}"
+            )
+
+        @self.tree.command(name="reset", description="Reset conversation history")
+        async def cmd_reset(interaction: discord.Interaction) -> None:
+            if not self._is_allowed_user(interaction.user):
+                await interaction.response.send_message("Access denied.", ephemeral=True)
+                return
+            self.sessions.reset(str(interaction.channel_id))
+            await interaction.response.send_message("Conversation history cleared.")
+
+        @self.tree.command(name="reload", description="Reload context files")
+        async def cmd_reload(interaction: discord.Interaction) -> None:
+            if not self._is_allowed_user(interaction.user):
+                await interaction.response.send_message("Access denied.", ephemeral=True)
+                return
+            self.context_loader.reload()
+            self._invalidate_prompt_caches()
+            self._system_prompt = self._build_system_prompt()
+            await interaction.response.send_message("Context files reloaded.")
+
+        @self.tree.command(name="purge", description="Delete recent messages in this channel")
+        @app_commands.describe(count="Number of messages to delete (default 100, max 500)")
+        async def cmd_purge(interaction: discord.Interaction, count: int = 100) -> None:
+            if not self._is_allowed_user(interaction.user):
+                await interaction.response.send_message("Access denied.", ephemeral=True)
+                return
+            count = min(count, 500)
+            await interaction.response.defer(ephemeral=True)
+            deleted = await interaction.channel.purge(limit=count)
+            self.sessions.reset(str(interaction.channel_id))
+            await interaction.followup.send(
+                f"Deleted {len(deleted)} messages and reset conversation history.",
+                ephemeral=True,
+            )
+
+        @self.tree.command(name="usage", description="Show token usage details")
+        async def cmd_usage(interaction: discord.Interaction) -> None:
+            if not self._is_allowed_user(interaction.user):
+                await interaction.response.send_message("Access denied.", ephemeral=True)
+                return
+            await interaction.response.send_message(
+                "**Usage**\n"
+                "All backends are subscription-based (free).\n"
+                "Codex: ChatGPT subscription\n"
+                "Claude Code: Max subscription"
+            )
+
+
+    def _is_allowed_user(self, user: discord.User | discord.Member) -> bool:
+        if not self.config.discord.allowed_users:
+            return True
+        return str(user.id) in self.config.discord.allowed_users
+
+    def _is_allowed_channel(self, channel_id: int) -> bool:
+        if not self.config.discord.channels:
+            return True
+        return str(channel_id) in self.config.discord.channels
+
+    def _check_for_secrets(self, content: str) -> bool:
+        return any(p.search(content) for p in SECRET_SCRUB_PATTERNS)
+
     # ------------------------------------------------------------------
-    # Prefix resolution
+    # commands.Bot lifecycle hooks (cog loading + prefix)
     # ------------------------------------------------------------------
 
     async def _resolve_prefix(
         self, bot: commands.Bot, message: discord.Message
     ) -> list[str]:
-        """Return applicable prefixes for *message*.
-
-        Currently returns the global prefix; guild-specific overrides can be
-        added here via the database layer.
-        """
-        base = [self.config.prefix]
-        # Always allow mention as prefix
+        """Return applicable prefixes; mention also accepted."""
+        base = ["!"]  # OdinBot's default prefix; can be made config-driven later
         return commands.when_mentioned_or(*base)(bot, message)
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
     async def setup_hook(self) -> None:
-        """Called once before the bot connects to the gateway."""
+        """Called once before connecting to the gateway. Load all moderation cogs."""
         for ext in INITIAL_EXTENSIONS:
             try:
                 await self.load_extension(ext)
-                logger.info("Loaded extension %s", ext)
+                log.info("Loaded extension %s", ext)
             except commands.ExtensionError:
-                logger.exception("Failed to load extension %s", ext)
-
-    async def on_ready(self) -> None:
-        """Fired when the bot has connected and the cache is ready."""
-        assert self.user is not None
-        logger.info(
-            "%s is online — %s guilds, %s users",
-            self.user,
-            len(self.guilds),
-            sum(g.member_count or 0 for g in self.guilds),
-        )
-
-    async def on_guild_join(self, guild: discord.Guild) -> None:
-        """Handle joining a new guild."""
-        logger.info("Joined guild %s (id=%s, members=%s)", guild.name, guild.id, guild.member_count)
-
-    async def on_guild_remove(self, guild: discord.Guild) -> None:
-        """Handle being removed from a guild."""
-        logger.info("Removed from guild %s (id=%s)", guild.name, guild.id)
+                log.exception("Failed to load extension %s", ext)
 
     async def close(self) -> None:
         """Graceful shutdown: stop services, persist state, then disconnect.
 
-        Components are dynamically attached at runtime so we use ``getattr``
-        to probe for them safely.  The shutdown order matters:
-
-        1. Autonomous loops (stop generating new work)
-        2. Scheduler (stop firing new tasks)
-        3. Infrastructure watcher (stop monitoring checks)
-        4. Health server (stop accepting HTTP/WS connections)
-        5. Process registry (terminate managed subprocesses)
-        6. Knowledge store (close SQLite connection)
-        7. Session manager (persist dirty sessions to disk)
-        8. Discord gateway (super().close())
+        Component attributes are looked up via getattr because they may not be
+        present (some are config-gated). Order matters: stop work-producers
+        before consumers, and persist user-visible state (sessions) last.
         """
-        logger.info("Shutting down %s …", BOT_NAME)
+        log.info("Shutting down OdinBot…")
 
-        # 1. Stop autonomous loops
         loop_manager = getattr(self, "loop_manager", None)
         if loop_manager is not None:
             try:
                 loop_manager.stop_loop("all")
-                logger.info("Autonomous loops stopped")
             except Exception:
-                logger.exception("Error stopping autonomous loops")
+                log.exception("Error stopping loop_manager")
 
-        # 2. Stop scheduler
         scheduler = getattr(self, "scheduler", None)
         if scheduler is not None:
             try:
                 await scheduler.stop()
-                logger.info("Scheduler stopped")
             except Exception:
-                logger.exception("Error stopping scheduler")
+                log.exception("Error stopping scheduler")
 
-        # 3. Stop infra watcher
         watcher = getattr(self, "watcher", None)
         if watcher is not None:
             try:
                 await watcher.stop()
-                logger.info("Infrastructure watcher stopped")
             except Exception:
-                logger.exception("Error stopping watcher")
+                log.exception("Error stopping watcher")
 
-        # 4. Stop health/web server
         health_server = getattr(self, "health_server", None)
         if health_server is not None:
             try:
                 await health_server.stop()
-                logger.info("Health server stopped")
             except Exception:
-                logger.exception("Error stopping health server")
+                log.exception("Error stopping health_server")
 
-        # 5. Terminate managed processes
         process_registry = getattr(self, "process_registry", None)
         if process_registry is not None:
             try:
                 await process_registry.shutdown()
-                logger.info("Process registry shut down")
             except Exception:
-                logger.exception("Error shutting down process registry")
+                log.exception("Error shutting down process_registry")
 
-        # 6. Close knowledge store (SQLite connection)
         knowledge = getattr(self, "knowledge", None)
         if knowledge is not None:
             try:
                 knowledge.close()
-                logger.info("Knowledge store closed")
             except Exception:
-                logger.exception("Error closing knowledge store")
+                log.exception("Error closing knowledge")
 
-        # 7. Persist session state
         sessions = getattr(self, "sessions", None)
         if sessions is not None:
             try:
                 sessions.save_all()
-                logger.info("Sessions persisted to disk")
             except Exception:
-                logger.exception("Error saving sessions")
+                log.exception("Error saving sessions")
 
         await super().close()
-        logger.info("%s shutdown complete", BOT_NAME)
+        log.info("OdinBot shutdown complete")
 
+    async def on_ready(self) -> None:
+        log.info("Logged in as %s (ID: %s)", self.user, self.user.id)
+        log.info("Tools loaded: %d definitions", len(get_tool_definitions()))
+        # Prune stale sessions loaded from disk.  load() reads ALL persisted
+        # session files regardless of age; pruning here removes expired ones
+        # immediately instead of waiting for the first user message.
+        pruned = self.sessions.prune()
+        if pruned:
+            log.info("Startup: pruned %d stale sessions", pruned)
+        # Sync commands to each guild (instant) instead of global (up to 1hr)
+        for guild in self.guilds:
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            log.info("Slash commands synced to guild: %s", guild.name)
+        self.scheduler.start(self._on_scheduled_task)
+        if self._vector_store:
+            asyncio.create_task(self._backfill_archives())
+        # Start proactive monitoring if configured
+        if hasattr(self, "infra_watcher") and self.infra_watcher:
+            self.infra_watcher.start()
 
-# ------------------------------------------------------------------
-# Entry point
-# ------------------------------------------------------------------
+    async def _backfill_archives(self) -> None:
+        """Backfill semantic search index and FTS5 with existing archive files."""
+        try:
+            archive_dir = self.sessions.persist_dir / "archive"
+            count = await self._vector_store.backfill(archive_dir, self._embedder)
+            if count:
+                log.info("Backfilled %d archive sessions into vector store", count)
+            else:
+                log.info("Vector store up to date")
+            # Backfill knowledge FTS from existing data
+            if self._knowledge_store and self._fts_index:
+                kb_count = await asyncio.to_thread(self._knowledge_store.backfill_fts)
+                if kb_count:
+                    log.info("Backfilled %d knowledge chunks into FTS index", kb_count)
+        except Exception as e:
+            log.error("Archive backfill failed: %s", e)
 
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        """Auto-join voice channel when an allowed user joins."""
+        if not self.voice_manager or not self.config.voice.auto_join:
+            return
+        if member.bot:
+            return
+        if not self._is_allowed_user(member):
+            return
+        # User joined a voice channel (was not in one before)
+        if before.channel is None and after.channel is not None:
+            if not self.voice_manager.is_connected:
+                log.info("Auto-joining voice channel %s (user: %s)", after.channel.name, member)
+                await self.voice_manager.join_channel(after.channel)
+        # User left — if we're in that channel and it's now empty (minus bot), leave
+        elif before.channel is not None and after.channel is None:
+            if self.voice_manager.is_connected and self.voice_manager.current_channel == before.channel:
+                humans = [m for m in before.channel.members if not m.bot]
+                if not humans:
+                    log.info("All users left voice channel, disconnecting")
+                    await self.voice_manager.leave_channel()
 
-def run_bot() -> None:
-    """Load config, create the bot, and run it."""
-    config = OdinConfig.from_env()
-    errors = config.validate()
-    if errors:
-        for err in errors:
-            print(f"Config error: {err}", file=sys.stderr)
-        if not config.token:
-            sys.exit(1)
+    async def on_message(self, message: discord.Message) -> None:
+        # Passive channel log — every guild message, including our own, before any filtering
+        self.channel_logger.log_message(message)
 
-    logging.basicConfig(
-        level=getattr(logging, config.log_level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        # Let cog-registered commands process the message in parallel with the executor flow.
+        # Without this, prefix commands defined in cogs (moderation, fun, utility, etc.) would never fire.
+        await self.process_commands(message)
+
+        # Never respond to our own messages
+        if message.author == self.user:
+            return
+
+        if message.author.bot:
+            # Ignore specific bot IDs unless they explicitly @mention us in message text
+            if str(message.author.id) in self.config.discord.ignore_bot_ids:
+                mention_str = f"<@{self.user.id}>" if self.user else ""
+                if mention_str not in (message.content or ""):
+                    return
+            # Allow specific webhooks (via ALLOWED_WEBHOOK_IDS env var)
+            is_allowed_webhook = message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
+            if not is_allowed_webhook and not self.config.discord.respond_to_bots:
+                return
+
+        is_test_webhook = message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
+        if not is_test_webhook and not self._is_allowed_user(message.author):
+            return
+        if not self._is_allowed_channel(message.channel.id):
+            return
+
+        # require_mention: only respond when the bot is @mentioned (or in DMs)
+        # Bot messages skip this gate — they go into the buffer and the mention
+        # check happens after all segments are collected (so multi-message bot
+        # responses where only the first part has the @mention still get through).
+        if self.config.discord.require_mention:
+            is_dm = not hasattr(message.channel, "guild") or message.channel.guild is None
+            is_bot_buffered = message.author.bot and self.config.discord.respond_to_bots
+            if not is_dm and not is_bot_buffered:
+                is_mentioned = self.user and (
+                    self.user.mentioned_in(message)
+                    or f"<@{self.user.id}>" in (message.content or "")
+                )
+                if not is_mentioned:
+                    return
+
+        log.info(
+            "on_message fired: msg_id=%s channel=%s content=%r",
+            message.id, message.channel.id, message.content[:80],
+        )
+
+        # Dedup: skip if we've already processed this exact message
+        if message.id in self._processed_messages:
+            log.warning("Duplicate on_message for msg_id=%s, skipping", message.id)
+            return
+        self._processed_messages[message.id] = None
+        # Keep bounded — remove oldest entries (OrderedDict preserves insertion order)
+        while len(self._processed_messages) > self._processed_messages_max:
+            self._processed_messages.popitem(last=False)
+
+        # Buffer rapid-fire bot messages (e.g. code blocks split across messages)
+        # Wait 2s after each bot message to see if more follow, then process all at once
+        if message.author.bot and self.config.discord.respond_to_bots:
+            buf_key = (str(message.channel.id), str(message.author.id))
+            if buf_key not in self._bot_msg_buffer:
+                self._bot_msg_buffer[buf_key] = []
+            buf = self._bot_msg_buffer[buf_key]
+            if len(buf) >= self._bot_msg_buffer_max:
+                log.warning("Bot buffer full (%d msgs) for %s, dropping oldest", len(buf), buf_key)
+                buf.pop(0)
+            buf.append(message.content)
+
+            # Cancel previous timer for this bot+channel
+            if buf_key in self._bot_msg_tasks:
+                self._bot_msg_tasks[buf_key].cancel()
+
+            # Set new timer — process after delay of silence
+            async def _flush_bot_buffer(key, orig_msg):
+                await asyncio.sleep(self._bot_msg_buffer_delay)
+                parts = self._bot_msg_buffer.pop(key, [])
+                self._bot_msg_tasks.pop(key, None)
+                if not parts:
+                    return
+                combined = combine_bot_messages(parts)
+                log.info("Bot buffer flushed: %d messages from %s combined", len(parts), orig_msg.author)
+                # require_mention for bots: check if ANY buffered part mentions us
+                if self.config.discord.require_mention and self.user:
+                    mention_str = f"<@{self.user.id}>"
+                    mention_nick = f"<@!{self.user.id}>"
+                    if not any(mention_str in p or mention_nick in p for p in parts):
+                        log.info("Bot buffer discarded: no mention found in %d messages from %s", len(parts), orig_msg.author)
+                        return
+                # Strip mention from combined content
+                if self.user:
+                    combined = combined.replace(f"<@{self.user.id}>", "").strip()
+                    combined = combined.replace(f"<@!{self.user.id}>", "").strip()
+                if combined:
+                    await self._handle_message(orig_msg, combined, image_blocks=[])
+
+            self._bot_msg_tasks[buf_key] = asyncio.create_task(
+                _flush_bot_buffer(buf_key, message)
+            )
+            return
+
+        content = message.content
+        # Strip the bot mention from the message if present
+        if self.user and self.user.mentioned_in(message):
+            content = content.replace(f"<@{self.user.id}>", "").strip()
+            content = content.replace(f"<@!{self.user.id}>", "").strip()
+
+        # Handle file attachments — append file contents to the message
+        attachment_text, image_blocks = await self._process_attachments(message)
+        if attachment_text:
+            content = f"{content}\n\n{attachment_text}" if content else attachment_text
+
+        if not content and not image_blocks:
+            return
+
+        if not content:
+            content = "(see attached image)"
+
+        # Check for secrets, scrub from history and delete the message
+        if self._check_for_secrets(content):
+            self.sessions.scrub_secrets(str(message.channel.id), content)
+            try:
+                await message.delete()
+                await message.channel.send(
+                    f"{message.author.mention} I detected a secret/credential in your message. "
+                    "I've deleted it and scrubbed it from my history."
+                )
+            except discord.Forbidden:
+                await message.channel.send(
+                    f"{message.author.mention} I detected a secret/credential in your message. "
+                    "I've scrubbed it from my history. "
+                    "I couldn't delete the message — please delete it manually."
+                )
+            return
+
+        # Voice commands via natural language (short, direct commands only)
+        if self.voice_manager:
+            _voice_lower = content.lower().strip()
+            _voice_words = _voice_lower.split()
+            # Only treat short messages (≤8 words) as voice commands to avoid
+            # false positives on pasted changelogs or longer messages
+            if len(_voice_words) <= 8:
+                _join_words = {"join", "hop", "get in", "come to", "connect", "enter", "hop in", "come in"}
+                _leave_words = {"leave", "disconnect", "get out", "exit", "go away", "hop out"}
+                _voice_context = {"voice", "vc", "channel", "call", "chat"}
+                _has_voice_context = any(w in _voice_lower for w in _voice_context)
+
+                if _has_voice_context and any(w in _voice_lower for w in _join_words):
+                    if isinstance(message.author, discord.Member) and message.author.voice:
+                        result = await self.voice_manager.join_channel(message.author.voice.channel)
+                        await message.reply(result)
+                    else:
+                        await message.reply("You need to be in a voice channel first.")
+                    return
+                if _has_voice_context and any(w in _voice_lower for w in _leave_words):
+                    result = await self.voice_manager.leave_channel()
+                    await message.reply(result)
+                    return
+
+        # If bot is in a voice channel, auto-attach voice callback for TTS
+        vc_callback = None
+        if self.voice_manager and self.voice_manager.is_connected:
+            async def vc_callback(response: str) -> None:
+                await self.voice_manager.speak(response)
+
+        await self._handle_message(message, content, image_blocks=image_blocks, voice_callback=vc_callback)
+
+    async def _process_attachments(self, message: discord.Message) -> tuple[str, list[dict]]:
+        """Download attachments and return (text_parts, image_blocks).
+
+        Text files are returned as formatted strings.
+        Images are returned as image content blocks (base64).
+        """
+        text_parts = []
+        image_blocks = []
+
+        _image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+        _image_media_types = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+
+        for att in message.attachments:
+            ext = "." + att.filename.rsplit(".", 1)[-1].lower() if "." in att.filename else ""
+
+            # Image attachments — send to Claude as vision content blocks
+            is_image = ext in _image_extensions or (att.content_type and att.content_type in _image_media_types)
+            if is_image:
+                # Image size limit: 5MB per image (base64-encoded)
+                if att.size > 5 * 1024 * 1024:
+                    text_parts.append(f"[Image: {att.filename} ({att.size / 1024 / 1024:.1f} MB, exceeds 5 MB limit)]")
+                    continue
+                try:
+                    data = await att.read()
+                    b64 = base64.b64encode(data).decode("ascii")
+                    # Detect actual media type from file magic bytes, don't trust Discord's content_type
+                    media_type = self._detect_image_type(data) or att.content_type or f"image/{ext.lstrip('.')}"
+                    if media_type == "image/jpg":
+                        media_type = "image/jpeg"
+                    image_blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": b64,
+                        },
+                    })
+                    text_parts.append(f"[User shared image: {att.filename}]")
+                    log.info("Processed image attachment: %s (%d KB)", att.filename, att.size // 1024)
+                except Exception as e:
+                    text_parts.append(f"[Image: {att.filename} (failed to read: {e})]")
+                continue
+
+            # PDF attachments — extract text inline
+            if ext == ".pdf":
+                if att.size > 25 * 1024 * 1024:
+                    text_parts.append(f"[PDF: {att.filename} ({att.size / 1024 / 1024:.1f} MB, exceeds 25 MB limit)]")
+                    continue
+                try:
+                    import fitz
+                    data = await att.read()
+                    doc = fitz.open(stream=data, filetype="pdf")
+                    try:
+                        pages_text = []
+                        for i, page in enumerate(doc):
+                            pages_text.append(f"Page {i + 1}: {page.get_text()}")
+                        full_text = "\n".join(pages_text)
+                        if len(full_text) > 8000:
+                            full_text = full_text[:8000] + "\n[... truncated ...]"
+                        text_parts.append(
+                            f"**Attached PDF: {att.filename}** ({doc.page_count} pages)\n```\n{full_text}\n```\n"
+                            f"[This is a PDF. Text has been extracted. For detailed analysis, use analyze_pdf tool.]"
+                        )
+                    finally:
+                        doc.close()
+                except Exception as e:
+                    text_parts.append(f"[PDF: {att.filename} (failed to extract text: {e})]")
+                continue
+
+            # Text files — read and inline
+            text_extensions = {
+                ".txt", ".md", ".yml", ".yaml", ".json", ".toml", ".ini",
+                ".cfg", ".conf", ".py", ".sh", ".bash", ".js", ".ts",
+                ".html", ".css", ".xml", ".csv", ".log", ".env",
+                ".service", ".timer", ".sql", ".php", ".rb", ".go",
+                ".rs", ".java", ".c", ".h", ".cpp", ".hpp",
+            }
+
+            is_text = ext in text_extensions or (att.content_type and "text" in att.content_type)
+
+            # Large text files (>100KB) — preview + suggest knowledge base ingestion
+            if att.size > 100_000 and is_text:
+                try:
+                    data = await att.read()
+                    text = data.decode("utf-8", errors="replace")
+                    preview = text[:2000]
+                    text_parts.append(
+                        f"**Attached file: {att.filename}** ({att.size:,} bytes — too large to fully inline, showing first 2KB)\n"
+                        f"```\n{preview}\n```\n"
+                        f"[This file is {att.size:,} bytes. You should offer to ingest it into the knowledge base "
+                        f"using the ingest_document tool so it can be searched later.]"
+                    )
+                except Exception as e:
+                    text_parts.append(f"[Attachment: {att.filename} (failed to read: {e})]")
+                continue
+
+            if att.size > 100_000:
+                text_parts.append(f"[Attachment: {att.filename} ({att.size} bytes, too large to read)]")
+                continue
+
+            if is_text:
+                try:
+                    data = await att.read()
+                    text = data.decode("utf-8", errors="replace")
+                    text_parts.append(f"**Attached file: {att.filename}**\n```\n{text}\n```")
+                    # Append smart context hints based on file type and size
+                    hint = self._get_attachment_hint(att.filename, ext, att.size)
+                    if hint:
+                        text_parts.append(hint)
+                except Exception as e:
+                    text_parts.append(f"[Attachment: {att.filename} (failed to read: {e})]")
+            else:
+                text_parts.append(f"[Attachment: {att.filename} ({att.content_type or 'binary'}, {att.size} bytes)]")
+
+        return "\n\n".join(text_parts) if text_parts else "", image_blocks
+
+    @staticmethod
+    def _get_attachment_hint(filename: str, ext: str, size: int) -> str:
+        """Return a context hint for the LLM based on file type and size.
+
+        Hints guide the LLM to suggest appropriate actions (ingest, create skill, deploy).
+        Returns empty string if no special hint applies.
+        """
+        hints = []
+
+        # Python files — suggest creating as a skill
+        if ext == ".py":
+            hints.append(
+                "[This is a Python file. If it looks like a bot skill/tool "
+                "(has SKILL_DEFINITION and execute function), offer to create it as a skill "
+                "using the create_skill tool. Otherwise, offer to ingest it as documentation.]"
+            )
+
+        # YAML/JSON config files — suggest deploying or ingesting
+        elif ext in {".yml", ".yaml", ".json", ".toml", ".ini", ".cfg", ".conf"}:
+            hints.append(
+                "[This is a configuration file. You can offer to: "
+                "(1) deploy it to a host using write_file, "
+                "(2) ingest it into the knowledge base as documentation using ingest_document, "
+                "or (3) analyze it and suggest improvements.]"
+            )
+
+        # Shell scripts — suggest deploying or reviewing
+        elif ext in {".sh", ".bash"}:
+            hints.append(
+                "[This is a shell script. You can offer to: "
+                "(1) deploy it to a host using write_file, "
+                "(2) review it for issues, or "
+                "(3) run it on a specific host using run_command.]"
+            )
+
+        # Systemd units — suggest deploying
+        elif ext in {".service", ".timer"}:
+            hints.append(
+                "[This is a systemd unit file. You can offer to deploy it to a host "
+                "using write_file (to /etc/systemd/system/) and enable it.]"
+            )
+
+        # Documentation files — suggest knowledge base ingestion
+        elif ext in {".md", ".txt"}:
+            hints.append(
+                "[This is a documentation file. You can offer to ingest it into the "
+                "knowledge base using the ingest_document tool so it can be searched later.]"
+            )
+
+        # Large files (>50KB) — always suggest knowledge base ingestion
+        if size > 50_000:
+            hints.append(
+                "[This file is large. You should offer to ingest it into the knowledge base "
+                "using the ingest_document tool for future reference.]"
+            )
+
+        return "\n".join(hints)
+
+    async def _on_voice_transcription(
+        self, text: str, member: discord.Member, transcript_channel: discord.TextChannel,
+    ) -> None:
+        """Handle transcribed voice input — route through message pipeline."""
+        log.info("Voice transcription from %s: %r", member, text[:80])
+
+        # Post the transcription to the transcript channel
+        await transcript_channel.send(f"**{member.display_name}** (voice): {text}")
+
+        # Create a proxy message for the pipeline
+        proxy = VoiceMessageProxy(
+            author=member,
+            channel=transcript_channel,
+            id=int(time.time() * 1000),
+            guild=member.guild,
+        )
+
+        # Define voice callback for dual output (speak + text)
+        async def voice_callback(response: str) -> None:
+            if self.voice_manager:
+                await self.voice_manager.speak(response)
+
+        await self._handle_message(
+            proxy, text,
+            voice_callback=voice_callback,
+        )
+
+    async def _handle_message(
+        self, message: discord.Message, content: str, *, image_blocks: list[dict] | None = None,
+        voice_callback: Callable | None = None,
+    ) -> None:
+        channel_id = str(message.channel.id)
+
+        # Acquire per-channel lock — messages queue naturally via the lock
+        lock = self._channel_locks.setdefault(channel_id, asyncio.Lock())
+
+        async with lock:
+            # Thread context inheritance: if this is a thread with no session yet,
+            # seed it with the parent channel's summary so context carries over.
+            # Must be inside the lock to prevent two concurrent messages from
+            # both seeding the thread and to safely access parent session state.
+            if isinstance(message.channel, discord.Thread) and message.channel.parent:
+                parent_id = str(message.channel.parent.id)
+                parent_name = getattr(message.channel.parent, "name", parent_id)
+                thread_session = self.sessions.get_or_create(channel_id)
+                if not thread_session.messages:
+                    parent_session = self.sessions.get_or_create(parent_id)
+                    if parent_session.messages or parent_session.summary:
+                        # Copy the parent's summary and last few messages for context
+                        # Mark as inherited so the LLM distinguishes thread-native
+                        # context from parent-channel context
+                        _inherited_tag = f"[INHERITED FROM #{parent_name}]"
+                        if parent_session.summary:
+                            thread_session.summary = f"{_inherited_tag} {parent_session.summary}"
+                        else:
+                            thread_session.summary = ""
+                        # Include recent parent messages as additional context
+                        recent = parent_session.messages[-6:]
+                        if recent:
+                            parent_context = "\n".join(
+                                f"{m.role}: {m.content[:300]}" for m in recent
+                            )
+                            _ctx_block = f"{_inherited_tag} Parent channel context:\n{parent_context}"
+                            if thread_session.summary:
+                                thread_session.summary += f"\n{_ctx_block}"
+                            else:
+                                thread_session.summary = _ctx_block
+                        log.info("Thread %s inherited context from parent #%s (%s)", channel_id, parent_name, parent_id)
+
+            await self._handle_message_inner(
+                message, content, channel_id,
+                image_blocks=image_blocks or [],
+                voice_callback=voice_callback,
+            )
+
+    async def _handle_message_inner(
+        self, message: discord.Message, content: str, channel_id: str,
+        *, image_blocks: list[dict] | None = None,
+        voice_callback: Callable | None = None,
+    ) -> None:
+        user_id = str(message.author.id)
+        # Prefix with display name so the LLM knows who's talking
+        display_name = message.author.display_name or message.author.name
+        tagged_content = f"[{display_name}]: {content}"
+        self.sessions.add_message(channel_id, "user", tagged_content, user_id=user_id)
+
+        try:
+            is_guest = self.permissions.is_guest(str(message.author.id))
+            already_sent = False
+            is_error = False
+            tools_used: list[str] = []
+            handoff = False
+
+            if is_guest:
+                # Guest tier: chat only, no tools
+                log.info("Guest tier user %s, chat route (no tools)", message.author.id)
+                # Guests use full history (with compaction)
+                history = await self.sessions.get_history_with_compaction(channel_id)
+                if image_blocks:
+                    history = list(history)
+                    if history and history[-1]["role"] == "user":
+                        last_msg = history[-1]
+                        text_content = last_msg["content"] if isinstance(last_msg["content"], str) else str(last_msg["content"])
+                        history[-1] = {
+                            "role": "user",
+                            "content": image_blocks + [{"type": "text", "text": text_content}],
+                        }
+                    log.info("Attached %d image(s) to message for Claude vision", len(image_blocks))
+                if self.codex_client:
+                    chat_prompt = self._build_chat_system_prompt(channel=message.channel, user_id=user_id)
+                    try:
+                        response = await self.codex_client.chat(
+                            messages=history,
+                            system=chat_prompt,
+                        )
+                        if not response:
+                            response = _EMPTY_RESPONSE_FALLBACK
+                        log.info("Codex response: %r", response[:200])
+                    except Exception as e:
+                        log.warning("Codex chat failed: %s", e)
+                        response = "Chat is temporarily unavailable. Please try again in a moment."
+                        is_error = True
+                else:
+                    log.info("No chat backend configured for guest user")
+                    response = "Chat backend is not configured."
+                    is_error = True
+            else:
+                # Everyone else: Codex with ALL tools
+                if not self.codex_client:
+                    await self._send_with_retry(
+                        message,
+                        "No tool backend available. Please try again later.",
+                    )
+                    self.sessions.remove_last_message(channel_id, "user")
+                    return
+                _sp = self._build_system_prompt(channel=message.channel, user_id=user_id, query=content)
+                _sp = await self._inject_tool_hints(_sp, content, user_id)
+                log.info("Routing to Codex with tools")
+                # Detect topic change before fetching history
+                topic_info = self.sessions.detect_topic_change(channel_id, content)
+                # Use abbreviated history to reduce poisoning from stale responses
+                # (get_task_history handles compaction internally)
+                # Pass current message content for relevance scoring —
+                # older messages unrelated to the current query are dropped
+                task_history = await self.sessions.get_task_history(
+                    channel_id, max_messages=20, current_query=content,
+                    topic_change=topic_info["is_topic_change"],
+                )
+                if image_blocks and task_history and task_history[-1]["role"] == "user":
+                    last = task_history[-1]
+                    text = last["content"] if isinstance(last["content"], str) else str(last["content"])
+                    task_history[-1] = {
+                        "role": "user",
+                        "content": image_blocks + [{"type": "text", "text": text}],
+                    }
+                    log.info("Attached %d image(s) to message for Claude vision", len(image_blocks))
+                try:
+                    response, already_sent, is_error, tools_used, handoff = await self._process_with_tools(
+                        message, task_history, system_prompt_override=_sp,
+                        topic_change=topic_info["is_topic_change"],
+                    )
+                except Exception as codex_err:
+                    log.warning("Codex tool loop failed: %s", codex_err)
+                    response = f"Tool execution failed: {codex_err}"
+                    is_error = True
+                    handoff = False
+                # Skill requested Codex handoff — route skill result to Codex for response
+                if handoff and self.codex_client and not is_error:
+                    log.info("Skill handoff to Codex for response")
+                    _skill_response = response  # Save before overwriting
+                    chat_prompt = self._build_chat_system_prompt(channel=message.channel, user_id=user_id)
+                    # Fetch full history for handoff (compaction already ran in get_task_history)
+                    history = self.sessions.get_history(channel_id)
+                    codex_messages = list(history) + [
+                        {"role": "assistant", "content": f"[Tool result: {response}]"},
+                        {"role": "user", "content": "Respond to the user based on the tool result above. Be conversational and helpful."},
+                    ]
+                    try:
+                        response = await self.codex_client.chat(
+                            messages=codex_messages,
+                            system=chat_prompt,
+                        )
+                        if not response:
+                            log.warning("Codex handoff returned empty, using skill result directly")
+                            response = _skill_response
+                        already_sent = False
+                    except Exception as e:
+                        log.warning("Codex handoff failed, using skill result directly: %s", e)
+                        response = _skill_response
+                        already_sent = False
+        except Exception as e:
+            log.error("Error processing message: %s", e, exc_info=True)
+            await self._send_with_retry(message, scrub_response_secrets(f"Something went wrong: {e}"))
+            self.sessions.remove_last_message(channel_id, "user")
+            return
+
+        # Scrub secrets from LLM response before logging, saving, or sending.
+        # Tool output is already scrubbed (scrub_output_secrets in _run_tool),
+        # but the LLM may echo, reconstruct, or hallucinate secrets in its
+        # natural-language response text.
+        response = scrub_response_secrets(response)
+
+        log.info("Final response to send: %r", response[:200])
+        if not is_error:
+            if tools_used:
+                # Summarize verbose tool-loop responses before persisting
+                # to prevent long multi-tool outputs from dominating history
+                history_response = summarize_tool_response(response, tools_used)
+            else:
+                # Save text-only (chat) responses too — the LLM needs to
+                # remember what it said.  Truncate to keep history lean.
+                history_response = response[:CHAT_RESPONSE_MAX_CHARS] if len(response) > CHAT_RESPONSE_MAX_CHARS else response
+            self.sessions.add_message(channel_id, "assistant", history_response)
+            self.sessions.prune()
+            self._maybe_cleanup_caches()
+            try:
+                await asyncio.to_thread(self.sessions.save)
+            except Exception as save_err:
+                log.warning("Session save failed: %s", save_err)
+
+            # Record tool use pattern for future hints
+            if tools_used:
+                try:
+                    await self.tool_memory.record(
+                        content, tools_used, success=True, embedder=self._embedder,
+                    )
+                except Exception:
+                    pass  # Non-critical
+        else:
+            # Save a sanitized error marker instead of the full error response.
+            # The user sees the full error on Discord, but raw refusals and
+            # fabrications are NOT persisted to prevent context poisoning.
+            if tools_used:
+                sanitized = (
+                    f"[Previous request used tools ({', '.join(tools_used[:5])}) "
+                    f"but encountered an error. The user may ask to retry.]"
+                )
+            else:
+                sanitized = "[Previous request encountered an error before tool execution.]"
+            self.sessions.add_message(channel_id, "assistant", sanitized)
+            self.sessions.prune()
+            try:
+                await asyncio.to_thread(self.sessions.save)
+            except Exception as save_err:
+                log.warning("Session save failed: %s", save_err)
+
+        if voice_callback:
+            await voice_callback(response)
+        if not already_sent:
+            # _send_chunked picks up pending files and attaches them to the
+            # first message — text + file arrive as one Discord message.
+            await self._send_chunked(message, response)
+        else:
+            # Streamed response already on Discord — post pending files separately
+            pending = self._pending_files.pop(channel_id, [])
+            if pending:
+                discord_files = [
+                    discord.File(io.BytesIO(data), filename=fname)
+                    for data, fname in pending
+                ]
+                try:
+                    await message.channel.send(files=discord_files)
+                except Exception as e:
+                    log.warning("Failed to send pending skill files: %s", e)
+
+    _CLASSIFIER_SYSTEM_PROMPT = (
+        "You are a completion judge. A user asked an AI assistant to do something. "
+        "The assistant called some tools, then wrote a response. Your job: decide "
+        "if the user's requested outcome was actually achieved.\n\n"
+        "COMPLETE means:\n"
+        "- The user's full request was addressed (not just part of it)\n"
+        "- The assistant is not promising to do more work\n"
+        "- A failure report after genuinely trying counts as COMPLETE\n\n"
+        "INCOMPLETE means:\n"
+        "- The assistant only did part of what was asked (e.g., built but didn't deploy)\n"
+        "- The assistant is describing work it still plans to do\n"
+        "- The assistant is reporting partial progress with more steps remaining\n\n"
+        'If INCOMPLETE, briefly state what\'s missing after a colon.\n'
+        'Examples: "INCOMPLETE: deployment not performed" or "INCOMPLETE: verification step missing"\n'
+        'If COMPLETE, just say: "COMPLETE"'
     )
 
-    bot = OdinBot(config)
-    bot.run(config.token, log_handler=None)
+    async def _classify_completion(
+        self,
+        user_message: str,
+        response_text: str,
+        tools_used: list[str],
+    ) -> tuple[bool, str]:
+        """Judge whether the assistant's response fully addresses the user's request.
+
+        Uses the same CodexClient (same OAuth, same API) to make a lightweight
+        classifier call.  Fail-open: any error/timeout/ambiguity → COMPLETE.
+
+        Short-circuit: if ``start_loop`` was called, the user's request was to
+        *schedule* recurring work, not to complete it now.  The loop runs
+        asynchronously in the background, so treat the scheduling itself as
+        completion.  Without this, the classifier reads the user's goal (e.g.
+        "run 50 iterations") and keeps flagging the response INCOMPLETE,
+        forcing redundant in-band execution of the loop's body.
+
+        Returns (is_complete, reason).  reason is non-empty only for INCOMPLETE.
+        """
+        if not self.codex_client:
+            return True, ""
+
+        if "start_loop" in tools_used:
+            log.info(
+                "Completion classifier: start_loop called — loop runs in "
+                "background, treating as COMPLETE"
+            )
+            return True, ""
+
+        classifier_user_msg = (
+            f"User's task: {user_message}\n\n"
+            f"Tools called: {', '.join(tools_used)}\n\n"
+            f"Assistant's response: {response_text}"
+        )
+
+        try:
+            raw = await asyncio.wait_for(
+                self.codex_client.chat(
+                    messages=[{"role": "user", "content": classifier_user_msg}],
+                    system=self._CLASSIFIER_SYSTEM_PROMPT,
+                ),
+                timeout=10,
+            )
+        except Exception:
+            log.info("Completion classifier: error/timeout — treating as COMPLETE")
+            return True, ""
+
+        return self._parse_classifier_response(raw)
+
+    @staticmethod
+    def _parse_classifier_response(raw: str) -> tuple[bool, str]:
+        """Parse the classifier's raw text into (is_complete, reason).
+
+        Checks INCOMPLETE first (more specific), then COMPLETE, else fail-open.
+        """
+        stripped = (raw or "").strip()
+        upper = stripped.upper()
+
+        if upper.startswith("INCOMPLETE"):
+            # Extract reason after first colon, dash, or em-dash
+            reason = ""
+            for sep in (":", " - ", " — ", "—"):
+                idx = stripped.find(sep)
+                if idx != -1:
+                    reason = stripped[idx + len(sep):].strip()
+                    break
+            log.info(
+                "Completion classifier: INCOMPLETE reason=%r (raw: %r)",
+                reason, stripped[:80],
+            )
+            return False, reason
+
+        if upper.startswith("COMPLETE"):
+            log.info("Completion classifier: COMPLETE (raw: %r)", stripped[:80])
+            return True, ""
+
+        # Ambiguous / gibberish → fail-open
+        log.info(
+            "Completion classifier: ambiguous response, treating as COMPLETE (raw: %r)",
+            stripped[:80],
+        )
+        return True, ""
+
+    async def _process_with_tools(
+        self,
+        message: discord.Message,
+        history: list[dict],
+        system_prompt_override: str | None = None,
+        topic_change: bool = False,
+    ) -> tuple[str, bool, bool, list[str], bool]:
+        """Process a message with Codex tool loop.
+
+        Returns (text, already_sent, is_error, tools_used, handoff):
+        - text: the response text
+        - already_sent: True if the response was streamed to Discord already
+        - is_error: True if an error occurred (API failed, max iterations,
+          circuit breaker). Error responses are saved to history for
+          continuation ("keep going"). Tool memory is not recorded.
+        - tools_used: list of tool names called during this loop
+        - handoff: True if the response should be handed off to another handler
+        """
+        system_prompt = system_prompt_override or self._system_prompt
+        tools = self._merged_tool_definitions() if self.config.tools.enabled else None
+        messages = list(history)
+
+        # Insert context separator between history and the current user request
+        # so Codex evaluates tools fresh instead of repeating patterns from history
+        is_bot_message = getattr(message.author, "bot", False) and self.config.discord.respond_to_bots
+        # Always inject message ID so the LLM can reference it (e.g. add_reaction)
+        msg_id_note = f"Current message ID: {message.id}"
+        # Generate request hash + metadata for disambiguation
+        _content_str = message.content if isinstance(message.content, str) else str(message.id)
+        req_hash = hashlib.sha256(_content_str.encode()).hexdigest()[:8]
+        req_time = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        user_display = getattr(message.author, "display_name", str(message.author))
+        # Build channel context line for spatial awareness
+        _ch = message.channel
+        _ch_name = getattr(_ch, "name", None) or str(_ch.id)
+        _is_thread = isinstance(_ch, discord.Thread)
+        if _is_thread and getattr(_ch, "parent", None):
+            channel_ctx = f"Channel: #{_ch.parent.name} → thread: {_ch_name}"
+        else:
+            channel_ctx = f"Channel: #{_ch_name}"
+        if len(messages) > 1:
+            sep_text = (
+                f"=== CURRENT REQUEST [req-{req_hash}] ===\n"
+                f"Time: {req_time}\n"
+                f"From: {user_display} (ID: {message.author.id})\n"
+                f"{channel_ctx}\n"
+                f"{msg_id_note}\n"
+                "--- HISTORY ABOVE | REQUEST BELOW ---\n"
+                "Messages above are HISTORY — context for understanding what happened. "
+                "History is NOT a task queue. Each message above was a SEPARATE request. "
+                "Act ONLY on the new message below — do not replay other requests from history. "
+                "If asked to 'redo' or 'do what was asked', identify the ONE specific task "
+                "being referenced — do not sweep through history re-executing everything. "
+                "Evaluate tools fresh. Do not repeat prior refusals."
+            )
+            if topic_change:
+                sep_text += (
+                    "\n\nTOPIC CHANGE DETECTED. The user has switched to a new subject. "
+                    "History above is from a DIFFERENT topic — do NOT carry over "
+                    "assumptions, hosts, files, or context from the previous topic. "
+                    "Treat this as a fresh request."
+                )
+            if is_bot_message:
+                sep_text += (
+                    "\n\nIMPORTANT: This message is from ANOTHER BOT. "
+                    "Bots cannot confirm, choose, or approve. "
+                    "EXECUTE immediately — never hedge, ask permission, or say "
+                    "'if you want' / 'shall I' / 'would you like'. "
+                    "If the message contains code, use run_script to execute it. "
+                    "If it asks for output, call the tool and paste raw results."
+                )
+            separator = {"role": "developer", "content": sep_text}
+            messages.insert(-1, separator)
+        else:
+            # No history — still provide message ID + channel context
+            messages.insert(0, {"role": "developer", "content": f"{channel_ctx}\n{msg_id_note}"})
+
+        # Track which tools are used during this loop for tool memory
+        # Local variable (not instance attr) to avoid cross-channel contamination
+        tools_used_in_loop: list[str] = []
+
+        # Continuation tracking: how many times we've injected continuation prompts
+        # Allow up to 3 continuations to support multi-step tasks
+        continuation_count = 0
+        max_continuations = 3
+
+        # Each first-response detector gets one retry via a flag.
+        # Using flags instead of iteration==0 allows cascading detection:
+        # if fabrication fires on iter 0 and hedging fires on iter 1,
+        # both get caught.  The `not tools_used_in_loop` guard already
+        # ensures these only fire before any tools have been called.
+        fabrication_retried = False
+        promise_retried = False
+        unavail_retried = False
+        hedging_retried = False
+        code_hedging_retried = False
+        premature_failure_retried = False
+
+        user_id = str(message.author.id)
+
+        # Filter tools based on user permission tier (skip for test webhooks)
+        is_test_wh = message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
+        if tools is not None and not is_test_wh:
+            tools = self.permissions.filter_tools(user_id, tools)
+            # Normalize empty tool list to None
+            if tools is not None and not tools:
+                tools = None
+
+        # Collect image blocks from analyze_image calls for vision injection
+        pending_image_blocks: list[dict] = []
+
+        chat_cap = self.config.tools.max_tool_iterations_chat
+        log.info("Tool loop starting: %d tools available, %d messages in history, cap=%d",
+                 len(tools) if tools else 0, len(messages), chat_cap)
+
+        for iteration in range(chat_cap):
+            # Show typing indicator while waiting for LLM response
+            try:
+                async with message.channel.typing():
+                    llm_resp = await self.codex_client.chat_with_tools(
+                        messages=messages,
+                        system=system_prompt,
+                        tools=tools or [],
+                    )
+            except CircuitOpenError as coe:
+                # Circuit breaker open — wait for recovery, then retry once
+                wait_secs = min(coe.retry_after, 90.0)
+                log.info("Circuit breaker open for %s, waiting %.0fs for recovery", coe.provider, wait_secs)
+                await asyncio.sleep(wait_secs)
+                try:
+                    async with message.channel.typing():
+                        llm_resp = await self.codex_client.chat_with_tools(
+                            messages=messages,
+                            system=system_prompt,
+                            tools=tools or [],
+                        )
+                except Exception as retry_err:
+                    return f"LLM API error (circuit breaker recovery failed): {retry_err}", False, True, tools_used_in_loop, False
+            except Exception as api_err:
+                return f"LLM API error: {api_err}", False, True, tools_used_in_loop, False
+            if not llm_resp.is_tool_use:
+                # Fabrication detection: if no tools were called and the
+                # response looks like it fabricated results, retry once.
+                if (
+                    not fabrication_retried
+                    and not tools_used_in_loop
+                    and detect_fabrication(llm_resp.text or "", tools_used_in_loop)
+                ):
+                    log.warning(
+                        "Fabrication detected — retrying with correction"
+                    )
+                    fabrication_retried = True
+                    messages.append(_FABRICATION_RETRY_MSG)
+                    continue
+
+                if (
+                    not promise_retried
+                    and not tools_used_in_loop
+                    and detect_promise_without_action(llm_resp.text or "", tools_used_in_loop)
+                ):
+                    log.warning(
+                        "Promise without action detected — retrying"
+                    )
+                    promise_retried = True
+                    messages.append(_PROMISE_RETRY_MSG)
+                    continue
+
+                if (
+                    not unavail_retried
+                    and not tools_used_in_loop
+                    and detect_tool_unavailable(llm_resp.text or "", tools_used_in_loop)
+                ):
+                    log.warning(
+                        "Tool-unavailability fabrication detected — retrying"
+                    )
+                    unavail_retried = True
+                    messages.append(_TOOL_UNAVAIL_RETRY_MSG)
+                    continue
+
+                # Hedging detection: fires for ALL messages — Odin is an
+                # executor, not a menu system.
+                if (
+                    not hedging_retried
+                    and not tools_used_in_loop
+                    and detect_hedging(llm_resp.text or "", tools_used_in_loop)
+                ):
+                    log.warning(
+                        "Hedging detected — retrying"
+                    )
+                    hedging_retried = True
+                    messages.append(_HEDGING_RETRY_MSG)
+                    continue
+
+                if (
+                    not code_hedging_retried
+                    and not tools_used_in_loop
+                    and detect_code_hedging(llm_resp.text or "", tools_used_in_loop)
+                ):
+                    log.warning(
+                        "Code-block hedging detected — retrying"
+                    )
+                    code_hedging_retried = True
+                    messages.append(_CODE_HEDGING_RETRY_MSG)
+                    continue
+
+                # Premature failure: tools were called but gave up after one error
+                if (
+                    not premature_failure_retried
+                    and tools_used_in_loop
+                    and detect_premature_failure(llm_resp.text or "", tools_used_in_loop)
+                ):
+                    log.warning(
+                        "Premature failure detected — retrying"
+                    )
+                    premature_failure_retried = True
+                    messages.append(_FAILURE_RETRY_MSG)
+                    continue
+
+                # Tier 3: Completion classifier — uses LLM to judge whether
+                # the user's request was fully addressed.
+                if (
+                    tools_used_in_loop
+                    and continuation_count < max_continuations
+                ):
+                    is_complete, reason = await self._classify_completion(
+                        message.content, llm_resp.text or "", tools_used_in_loop,
+                    )
+                    if not is_complete:
+                        log.info(
+                            "Completion classifier: INCOMPLETE (%d/%d) "
+                            "after %d tool calls — injecting continuation",
+                            continuation_count + 1, max_continuations,
+                            len(tools_used_in_loop),
+                        )
+                        # Do NOT append the incomplete response as an assistant
+                        # message — inject the continuation nudge alone so
+                        # the model responds fresh with tool calls.
+                        if reason:
+                            messages.append({
+                                "role": "developer",
+                                "content": f"You are not done. {reason}. Continue with tool calls now.",
+                            })
+                        else:
+                            messages.append(_CONTINUATION_MSG)
+                        continuation_count += 1
+                        continue
+
+                return llm_resp.text or _EMPTY_RESPONSE_FALLBACK, False, False, tools_used_in_loop, False
+
+            # Build internal-format assistant content from LLMResponse
+            assistant_content: list[dict] = []
+            if llm_resp.text:
+                assistant_content.append({"type": "text", "text": llm_resp.text})
+            for tc in llm_resp.tool_calls:
+                assistant_content.append({
+                    "type": "tool_use", "id": tc.id,
+                    "name": tc.name, "input": tc.input,
+                })
+            messages.append({"role": "assistant", "content": assistant_content})
+
+            tool_calls = llm_resp.tool_calls
+            tools_used_in_loop.extend(t.name for t in tool_calls)
+
+            # Execute tools in parallel
+            async def _run_tool(block):
+                nonlocal system_prompt, pending_image_blocks
+                tool_name = block.name
+                tool_input = block.input
+                log.info("Tool call: %s(%s)", tool_name, tool_input)
+
+                t0 = time.monotonic()
+                error = None
+                # Handle Discord-native tools
+                try:
+                    if tool_name == "purge_messages":
+                        result = await self._handle_purge(message, tool_input)
+                    elif tool_name == "browser_screenshot":
+                        result = await self._handle_browser_screenshot(message, tool_input)
+                    elif tool_name == "generate_file":
+                        result = await self._handle_generate_file(message, tool_input)
+                    elif tool_name == "post_file":
+                        result = await self._handle_post_file(message, tool_input)
+                    elif tool_name == "schedule_task":
+                        result = self._handle_schedule_task(message, tool_input)
+                    elif tool_name == "list_schedules":
+                        result = self._handle_list_schedules()
+                    elif tool_name == "delete_schedule":
+                        result = self._handle_delete_schedule(tool_input)
+                    elif tool_name == "parse_time":
+                        result = self._handle_parse_time(tool_input)
+                    elif tool_name == "search_history":
+                        result = await self._handle_search_history(tool_input)
+                    elif tool_name == "delegate_task":
+                        result = await self._handle_delegate_task(message, tool_input)
+                    elif tool_name == "list_tasks":
+                        result = self._handle_list_tasks(tool_input)
+                    elif tool_name == "cancel_task":
+                        result = self._handle_cancel_task(tool_input)
+                    elif tool_name == "start_loop":
+                        result = self._handle_start_loop(message, tool_input)
+                    elif tool_name == "stop_loop":
+                        result = self._handle_stop_loop(tool_input)
+                    elif tool_name == "list_loops":
+                        result = self._handle_list_loops()
+                    elif tool_name == "search_knowledge":
+                        result = await self._handle_search_knowledge(tool_input)
+                    elif tool_name == "ingest_document":
+                        result = await self._handle_ingest_document(tool_input, str(message.author))
+                    elif tool_name == "list_knowledge":
+                        result = self._handle_list_knowledge()
+                    elif tool_name == "delete_knowledge":
+                        result = self._handle_delete_knowledge(tool_input)
+                    elif tool_name == "set_permission":
+                        result = self._handle_set_permission(
+                            str(message.author.id), tool_input,
+                        )
+                    elif tool_name == "search_audit":
+                        result = await self._handle_search_audit(tool_input)
+                    elif tool_name == "create_digest":
+                        result = self._handle_create_digest(message, tool_input)
+                    elif tool_name == "create_skill":
+                        result = await asyncio.to_thread(
+                            self.skill_manager.create_skill, tool_input["name"], tool_input["code"],
+                        )
+                        self._cached_merged_tools = None  # invalidate tool cache
+                        self._cached_skills_text = None  # invalidate skills text cache
+                        system_prompt = self._build_system_prompt(channel=message.channel, user_id=user_id)
+                    elif tool_name == "edit_skill":
+                        result = await asyncio.to_thread(
+                            self.skill_manager.edit_skill, tool_input["name"], tool_input["code"],
+                        )
+                        self._cached_merged_tools = None  # invalidate tool cache
+                        self._cached_skills_text = None  # invalidate skills text cache
+                        system_prompt = self._build_system_prompt(channel=message.channel, user_id=user_id)
+                    elif tool_name == "delete_skill":
+                        result = await asyncio.to_thread(
+                            self.skill_manager.delete_skill, tool_input["name"],
+                        )
+                        self._cached_merged_tools = None  # invalidate tool cache
+                        self._cached_skills_text = None  # invalidate skills text cache
+                        system_prompt = self._build_system_prompt(channel=message.channel, user_id=user_id)
+                    elif tool_name == "enable_skill":
+                        result = self.skill_manager.enable_skill(tool_input["name"])
+                        self._cached_merged_tools = None
+                        self._cached_skills_text = None
+                        system_prompt = self._build_system_prompt(channel=message.channel, user_id=user_id)
+                    elif tool_name == "disable_skill":
+                        result = self.skill_manager.disable_skill(tool_input["name"])
+                        self._cached_merged_tools = None
+                        self._cached_skills_text = None
+                        system_prompt = self._build_system_prompt(channel=message.channel, user_id=user_id)
+                    elif tool_name == "install_skill":
+                        result = await self.skill_manager.install_from_url(tool_input["url"])
+                        self._cached_merged_tools = None
+                        self._cached_skills_text = None
+                        system_prompt = self._build_system_prompt(channel=message.channel, user_id=user_id)
+                    elif tool_name == "export_skill":
+                        export_result = self.skill_manager.export_skill(tool_input["name"])
+                        if isinstance(export_result, str):
+                            result = export_result
+                        else:
+                            file_bytes, filename = export_result
+                            channel_id_key = str(message.channel.id)
+                            self._pending_files.setdefault(channel_id_key, []).append((file_bytes, filename))
+                            result = f"Skill '{tool_input['name']}' exported as {filename}."
+                    elif tool_name == "skill_status":
+                        result = self.skill_manager.skill_status(tool_input["name"])
+                    elif tool_name == "read_channel":
+                        result = await self._handle_read_channel(message, tool_input)
+                    elif tool_name == "add_reaction":
+                        result = await self._handle_add_reaction(message, tool_input)
+                    elif tool_name == "create_poll":
+                        result = await self._handle_create_poll(message, tool_input)
+                    elif tool_name == "analyze_image":
+                        result = await self._handle_analyze_image(message, tool_input)
+                    elif tool_name == "generate_image":
+                        result = await self._handle_generate_image(message, tool_input)
+                    elif tool_name == "spawn_agent":
+                        result = await self._handle_spawn_agent(message, tool_input)
+                    elif tool_name == "send_to_agent":
+                        result = self._handle_send_to_agent(tool_input)
+                    elif tool_name == "list_agents":
+                        result = self._handle_list_agents(message)
+                    elif tool_name == "kill_agent":
+                        result = self._handle_kill_agent(tool_input)
+                    elif tool_name == "get_agent_results":
+                        result = self._handle_get_agent_results(tool_input)
+                    elif tool_name == "wait_for_agents":
+                        result = await self._handle_wait_for_agents(tool_input)
+                    elif tool_name == "spawn_loop_agents":
+                        result = await self._handle_spawn_loop_agents(message, tool_input)
+                    elif tool_name == "collect_loop_agents":
+                        result = await self._handle_collect_loop_agents(tool_input)
+                    elif tool_name == "list_skills":
+                        skills = self.skill_manager.list_skills()
+                        if not skills:
+                            result = "No user-created skills."
+                        else:
+                            lines = []
+                            for s in skills:
+                                lines.append(f"**{s['name']}**: {s['description']}")
+                            result = f"**User-created skills ({len(skills)}):**\n" + "\n".join(lines)
+                    elif self.skill_manager.has_skill(tool_name):
+                        async def _skill_msg(text: str) -> None:
+                            await message.channel.send(scrub_response_secrets(text))
+                        async def _skill_file(data: bytes, filename: str, caption: str = "") -> None:
+                            channel_id_key = str(message.channel.id)
+                            self._pending_files.setdefault(channel_id_key, []).append((data, filename))
+                        result = await self.skill_manager.execute(
+                            tool_name, tool_input,
+                            message_callback=_skill_msg,
+                            file_callback=_skill_file,
+                        )
+                    else:
+                        result = await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+                except Exception as e:
+                    error = str(e)
+                    result = f"Error executing {tool_name}: {e}"
+
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+                # Handle special image block return from analyze_image
+                if isinstance(result, dict) and "__image_block__" in result:
+                    pending_image_blocks.append(result["__image_block__"])
+                    result = f"[Image loaded. Analyze it with this instruction: {result['__prompt__']}]"
+
+                # Scrub secrets from tool output
+                result = scrub_output_secrets(result)
+
+                # Audit log — never crash tool execution on audit failure
+                try:
+                    await self.audit.log_execution(
+                        user_id=str(message.author.id),
+                        user_name=str(message.author),
+                        channel_id=str(message.channel.id),
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        approved=True,
+                        result_summary=result,
+                        execution_time_ms=elapsed_ms,
+                        error=error,
+                    )
+                except Exception as audit_err:
+                    log.warning("Audit log failed for %s: %s", tool_name, audit_err)
+
+                # Track for conversational context
+                try:
+                    self._track_recent_action(
+                        tool_name, tool_input, result[:200], elapsed_ms,
+                        channel_id=str(message.channel.id),
+                    )
+                except Exception:
+                    pass  # Non-critical tracking
+
+                # Truncate large outputs before sending back to the LLM.
+                # Tool results stay in messages and are re-sent every iteration,
+                # so capping here prevents a single large result from ballooning
+                # input token costs across the tool loop.
+                tool_content = truncate_tool_output(result)
+
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": tool_content,
+                }
+
+            # Run all tool calls concurrently with per-tool timeout
+            tool_timeout = self.config.tools.tool_timeout_seconds
+
+            async def _run_tool_with_timeout(block):
+                t = 3660 if block.name in _LONG_TIMEOUT_TOOL_SET else tool_timeout
+                try:
+                    return await asyncio.wait_for(
+                        _run_tool(block), timeout=t,
+                    )
+                except asyncio.TimeoutError:
+                    error_msg = (
+                        f"Tool '{block.name}' timed out after {t}s"
+                    )
+                    try:
+                        await self.audit.log_execution(
+                            user_id=str(message.author.id),
+                            user_name=str(message.author),
+                            channel_id=str(message.channel.id),
+                            tool_name=block.name,
+                            tool_input=block.input,
+                            approved=True,
+                            result_summary=error_msg,
+                            execution_time_ms=int(tool_timeout * 1000),
+                            error=error_msg,
+                        )
+                    except Exception:
+                        pass
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": error_msg,
+                    }
+
+            async with message.channel.typing():
+                tool_results = await asyncio.gather(
+                    *[_run_tool_with_timeout(b) for b in tool_calls],
+                )
+            messages.append({"role": "user", "content": list(tool_results)})
+
+            # Inject pending image blocks as vision content for the next LLM call.
+            # This reuses the same base64 image block format as _process_attachments.
+            if pending_image_blocks:
+                vision_content: list[dict] = list(pending_image_blocks)
+                vision_content.append({
+                    "type": "text",
+                    "text": "The image(s) above were fetched by analyze_image. Describe and analyze them.",
+                })
+                messages.append({"role": "user", "content": vision_content})
+                log.info("Injected %d image block(s) into tool loop messages", len(pending_image_blocks))
+                pending_image_blocks.clear()
+
+            # Check if all tool calls in this iteration are skills that want
+            # Codex to handle the response instead of another tool-loop iteration.
+            tool_names_this_round = [b.name for b in tool_calls]
+            if (
+                self.codex_client
+                and all(self.skill_manager.should_handoff_to_codex(n) is True for n in tool_names_this_round)
+            ):
+                # Collect skill results as context for Codex
+                skill_output = "\n".join(
+                    r["content"] for r in tool_results if isinstance(r, dict)
+                )
+                return skill_output, False, False, tools_used_in_loop, True  # handoff=True
+
+        log.warning(
+            "Chat tool-iteration cap hit (%d) after %d tool calls; exiting loop",
+            chat_cap, len(tools_used_in_loop),
+        )
+        return (
+            f"Hit the chat tool-iteration cap ({chat_cap}) after "
+            f"{len(tools_used_in_loop)} tool calls. Task may be partially "
+            f"complete. Raise `tools.max_tool_iterations_chat` in config "
+            f"(or via the web UI) if this happens often."
+        ), False, True, tools_used_in_loop, False
+
+    @staticmethod
+    def _detect_image_type(data: bytes) -> str | None:
+        """Detect image media type from file magic bytes."""
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return "image/png"
+        if data[:2] == b"\xff\xd8":
+            return "image/jpeg"
+        if data[:4] == b"GIF8":
+            return "image/gif"
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return "image/webp"
+        return None
+
+    async def _handle_purge(self, message: discord.Message, inp: dict) -> str:
+        """Delete recent messages in the channel."""
+        count = min(inp.get("count", 100), 500)
+        try:
+            deleted = await message.channel.purge(limit=count)
+            self.sessions.reset(str(message.channel.id))
+            return f"Deleted {len(deleted)} messages and reset conversation history."
+        except discord.Forbidden:
+            return "I don't have permission to delete messages in this channel."
+        except Exception as e:
+            return f"Failed to purge messages: {e}"
+
+    async def _handle_browser_screenshot(self, message: discord.Message, inp: dict) -> str:
+        """Take a browser screenshot and post it as a Discord image."""
+        if not self.browser_manager:
+            return "Browser automation is not enabled. Set browser.enabled=true in config."
+        from ..tools.browser import handle_browser_screenshot
+        try:
+            text, screenshot_bytes = await handle_browser_screenshot(self.browser_manager, inp)
+            if screenshot_bytes:
+                discord_file = discord.File(io.BytesIO(screenshot_bytes), filename="screenshot.png")
+                await message.channel.send(file=discord_file)
+            return text
+        except Exception as e:
+            return f"Browser screenshot failed: {e}"
+
+    async def _handle_generate_file(self, message: discord.Message, inp: dict) -> str:
+        """Generate a file from content and post it as a Discord attachment."""
+        filename = inp.get("filename", "output.txt")
+        content = inp.get("content", "")
+        caption = inp.get("caption", "")
+
+        file_bytes = content.encode("utf-8")
+        discord_file = discord.File(io.BytesIO(file_bytes), filename=filename)
+        try:
+            await message.channel.send(content=caption or None, file=discord_file)
+            return f"File `{filename}` ({len(file_bytes)} bytes) attached to channel."
+        except Exception as e:
+            return f"Failed to post file: {e}"
+
+    async def _handle_post_file(self, message: discord.Message, inp: dict) -> str:
+        """Fetch a file from a remote host via SSH and post it to Discord."""
+        host_alias = inp.get("host")
+        path = inp.get("path")
+        caption = inp.get("caption", "")
+
+        if not host_alias or not path:
+            return "Both 'host' and 'path' are required."
+
+        resolved = self.tool_executor._resolve_host(host_alias)
+        if not resolved:
+            return f"Unknown or disallowed host: {host_alias}"
+        address, ssh_user, _os = resolved
+
+        # Fetch file as base64 via SSH (handles binary safely)
+        import shlex
+        safe_path = shlex.quote(path)
+        ssh_args = [
+            "ssh",
+            "-i", self.config.tools.ssh_key_path,
+            "-o", f"UserKnownHostsFile={self.config.tools.ssh_known_hosts_path}",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", "ConnectTimeout=10",
+            "-o", "BatchMode=yes",
+            f"{ssh_user}@{address}",
+            f"base64 {safe_path}",
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            if proc.returncode != 0:
+                return f"Failed to fetch file: {stderr.decode('utf-8', errors='replace').strip()}"
+            file_bytes = base64.b64decode(stdout)
+        except asyncio.TimeoutError:
+            return "File fetch timed out (30s)."
+        except Exception as e:
+            return f"Failed to fetch file: {e}"
+
+        if not file_bytes:
+            return f"File not found or empty: {path}"
+
+        # Size check (Discord limit: 25MB for non-boosted servers)
+        if len(file_bytes) > 25 * 1024 * 1024:
+            return f"File too large to post ({len(file_bytes) / 1024 / 1024:.1f} MB). Discord limit is 25 MB."
+
+        filename = os.path.basename(path)
+        try:
+            file = discord.File(io.BytesIO(file_bytes), filename=filename)
+            await message.channel.send(content=caption or None, file=file)
+            return f"Posted `{filename}` ({len(file_bytes) / 1024:.1f} KB) to channel."
+        except discord.HTTPException as e:
+            return f"Failed to upload to Discord: {e}"
+
+    def _handle_schedule_task(self, message: discord.Message, inp: dict) -> str:
+        """Create a scheduled task."""
+        try:
+            schedule = self.scheduler.add(
+                description=inp.get("description", "Unnamed task"),
+                action=inp.get("action", "reminder"),
+                channel_id=str(message.channel.id),
+                cron=inp.get("cron"),
+                run_at=inp.get("run_at"),
+                message=inp.get("message"),
+                tool_name=inp.get("tool_name"),
+                tool_input=inp.get("tool_input"),
+                steps=inp.get("steps"),
+                trigger=inp.get("trigger"),
+            )
+            if schedule.get("trigger"):
+                trigger_desc = ", ".join(
+                    f"{k}={v}" for k, v in schedule["trigger"].items()
+                )
+                return (
+                    f"Scheduled webhook-triggered task (ID: {schedule['id']}): "
+                    f"{schedule['description']}. Trigger: {trigger_desc}"
+                )
+            next_run = schedule.get("next_run", "unknown")
+            stype = "recurring" if schedule.get("cron") else "one-time"
+            return (
+                f"Scheduled {stype} task (ID: {schedule['id']}): "
+                f"{schedule['description']}. Next run: {next_run}"
+            )
+        except ValueError as e:
+            return f"Failed to create schedule: {e}"
+        except Exception as e:
+            return f"Error creating schedule: {e}"
+
+    def _handle_list_schedules(self) -> str:
+        """List all scheduled tasks."""
+        schedules = self.scheduler.list_all()
+        if not schedules:
+            return "No scheduled tasks."
+        lines = []
+        for s in schedules:
+            if s.get("trigger"):
+                trigger_desc = ", ".join(
+                    f"{k}={v}" for k, v in s["trigger"].items()
+                )
+                stype = f"trigger: {trigger_desc}"
+            elif s.get("cron"):
+                stype = f"cron `{s['cron']}`"
+            else:
+                stype = "one-time"
+            next_run = s.get("next_run", "on trigger" if s.get("trigger") else "N/A")
+            last_run = s.get("last_run", "never")
+            lines.append(
+                f"- **{s['id']}**: {s['description']} ({stype}) "
+                f"| next: {next_run} | last: {last_run}"
+            )
+        return f"**Scheduled tasks ({len(schedules)}):**\n" + "\n".join(lines)
+
+    def _handle_delete_schedule(self, inp: dict) -> str:
+        """Delete a scheduled task."""
+        schedule_id = inp.get("schedule_id", "")
+        if self.scheduler.delete(schedule_id):
+            return f"Deleted schedule {schedule_id}."
+        return f"Schedule {schedule_id} not found."
+
+    def _handle_parse_time(self, inp: dict) -> str:
+        """Parse a natural language time expression to ISO datetime."""
+        expression = inp.get("expression", "")
+        if not expression:
+            return "Error: 'expression' is required (e.g. 'in 2 hours', 'tomorrow at 9am')"
+        from ..tools.time_parser import parse_time
+
+        try:
+            result = parse_time(expression)
+            return f"Parsed '{expression}' → {result}"
+        except ValueError as e:
+            return f"Error: {e}"
+
+    async def _handle_search_history(self, inp: dict) -> str:
+        """Search past conversation history."""
+        query = inp.get("query", "")
+        limit = min(inp.get("limit", 10), 20)
+        if not query:
+            return "A search query is required."
+
+        results = await self.sessions.search_history(query, limit=limit)
+        if not results:
+            return f"No past conversations found matching '{query}'."
+
+        lines = []
+        for r in results:
+            from datetime import datetime
+            ts = datetime.fromtimestamp(r["timestamp"]).strftime("%Y-%m-%d %H:%M")
+            role = r["type"]
+            content = r["content"].replace("\n", " ")[:300]
+            lines.append(f"[{ts}] ({role}): {content}")
+
+        return f"**Found {len(results)} result(s) for '{query}':**\n" + "\n".join(lines)
+
+    async def _handle_search_knowledge(self, inp: dict) -> str:
+        """Semantic + FTS search over the knowledge base."""
+        if not self._knowledge_store:
+            return "Knowledge base is not available (search not enabled or not initialized)."
+
+        query = inp.get("query", "")
+        limit = min(inp.get("limit", 5), 10)
+        if not query:
+            return "A search query is required."
+
+        results = await self._knowledge_store.search_hybrid(query, self._embedder, limit=limit)
+        if not results:
+            return f"No knowledge base results for '{query}'. Try web_search for external information."
+
+        lines = []
+        for r in results:
+            source = r["source"]
+            score = r.get("score", r.get("rrf_score", r.get("rank", 0)))
+            content = scrub_output_secrets(r["content"].replace("\n", " ")[:500])
+            lines.append(f"**[{source}]** (score: {score})\n{content}")
+
+        return f"**Found {len(results)} result(s) for '{query}':**\n\n" + "\n\n".join(lines)
+
+    async def _handle_ingest_document(self, inp: dict, uploader: str) -> str:
+        """Ingest a document into the knowledge base."""
+        if not self._knowledge_store:
+            return "Knowledge base is not available (search not enabled or not initialized)."
+
+        source = inp.get("source", "")
+        content = inp.get("content", "")
+        if not source or not content:
+            return "Both 'source' and 'content' are required."
+
+        count = await self._knowledge_store.ingest(
+            content=content,
+            source=source,
+            embedder=self._embedder,
+            uploader=uploader,
+        )
+        if count == 0:
+            return f"Failed to ingest '{source}' — no chunks could be indexed."
+        return f"Ingested '{source}' into knowledge base ({count} chunks indexed)."
+
+    def _handle_list_knowledge(self) -> str:
+        """List all documents in the knowledge base."""
+        if not self._knowledge_store:
+            return "Knowledge base is not available."
+
+        sources = self._knowledge_store.list_sources()
+        if not sources:
+            return "Knowledge base is empty. Use ingest_document to add documents."
+
+        lines = []
+        for s in sources:
+            lines.append(f"- **{s['source']}** ({s['chunks']} chunks, by {s['uploader']}, {s['ingested_at'][:10]})")
+        total = sum(s["chunks"] for s in sources)
+        return f"**Knowledge base: {len(sources)} document(s), {total} total chunks**\n" + "\n".join(lines)
+
+    def _handle_delete_knowledge(self, inp: dict) -> str:
+        """Delete a document from the knowledge base."""
+        if not self._knowledge_store:
+            return "Knowledge base is not available."
+
+        source = inp.get("source", "")
+        if not source:
+            return "'source' is required."
+
+        count = self._knowledge_store.delete_source(source)
+        if count == 0:
+            return f"No document found with source '{source}'."
+        return f"Deleted '{source}' from knowledge base ({count} chunks removed)."
+
+    def _handle_set_permission(self, caller_id: str, inp: dict) -> str:
+        """Set a user's permission tier. Only admins can call this."""
+        if not self.permissions.is_admin(caller_id):
+            return "Permission denied. Only admins can change permission tiers."
+        target_user_id = inp["user_id"]
+        tier = inp["tier"]
+        try:
+            self.permissions.set_tier(target_user_id, tier)
+        except ValueError as e:
+            return str(e)
+        return f"Permission tier for user {target_user_id} set to **{tier}**."
+
+    async def _handle_search_audit(self, inp: dict) -> str:
+        """Search the audit log."""
+        results = await self.audit.search(
+            tool_name=inp.get("tool_name"),
+            user=inp.get("user"),
+            host=inp.get("host"),
+            keyword=inp.get("keyword"),
+            date=inp.get("date"),
+            limit=min(inp.get("limit", 20), 50),
+        )
+        if not results:
+            return "No audit log entries found matching the criteria."
+
+        lines = []
+        for entry in results:
+            ts = entry.get("timestamp", "?")[:19]
+            tool = entry.get("tool_name", "?")
+            user = entry.get("user_name", "?")
+            approved = "approved" if entry.get("approved") else "denied"
+            elapsed = entry.get("execution_time_ms", 0)
+            summary = entry.get("result_summary", "")[:200]
+            err = entry.get("error")
+            status = f"ERROR: {err}" if err else summary
+            lines.append(
+                f"[{ts}] **{tool}** by {user} ({approved}, {elapsed}ms)\n  {status}"
+            )
+        return f"**Audit log ({len(results)} entries):**\n" + "\n".join(lines)
+
+    def _handle_create_digest(self, message: discord.Message, inp: dict) -> str:
+        """Create a scheduled daily digest."""
+        cron = inp.get("cron", "0 8 * * *")
+        description = inp.get("description", "Daily Infrastructure Digest")
+        try:
+            schedule = self.scheduler.add(
+                description=description,
+                action="digest",
+                channel_id=str(message.channel.id),
+                cron=cron,
+            )
+            return (
+                f"Created digest schedule (ID: {schedule['id']}): {description}\n"
+                f"Cron: `{cron}` | Next run: {schedule['next_run']}"
+            )
+        except ValueError as e:
+            return f"Failed to create digest: {e}"
+
+    async def _on_scheduled_digest(self, schedule: dict) -> None:
+        """Run the daily infrastructure digest and post results."""
+        channel_id = schedule.get("channel_id")
+        if not channel_id:
+            log.warning("Digest has no channel_id: %s", schedule["id"])
+            return
+
+        channel = self.get_channel(int(channel_id))
+        if not channel:
+            log.warning("Digest channel %s not found", channel_id)
+            return
+
+        log.info("Running daily digest for channel %s", channel_id)
+        try:
+            raw = await self._format_digest_raw()
+        except Exception as e:
+            log.error("Digest data collection failed: %s", e)
+            await channel.send(scrub_response_secrets(f"**Daily Infrastructure Digest**\n\nFailed to collect data: {e}"))
+            return
+
+        # Summarize the digest — prefer Codex (free), fall back to raw truncation
+        digest_messages = [{"role": "user", "content": f"Summarize this infrastructure status report concisely. Highlight any issues, warnings, or anomalies. If everything looks healthy, say so briefly.\n\n{raw}"}]
+        digest_system = "You are a concise infrastructure report summarizer. Output a short summary with key findings."
+        try:
+            if self.codex_client:
+                summary = await self.codex_client.chat(
+                    messages=digest_messages, system=digest_system, max_tokens=500,
+                )
+            else:
+                log.warning("No Codex client for digest summary, using raw")
+                summary = raw[:3000]
+        except Exception as e:
+            log.warning("Digest summary failed, using raw: %s", e)
+            summary = raw[:3000]
+
+        await channel.send(scrub_response_secrets(f"**Daily Infrastructure Digest**\n\n{summary}"))
+
+        # Audit log the digest
+        await self.audit.log_execution(
+            user_id="system",
+            user_name="scheduler",
+            channel_id=channel_id,
+            tool_name="digest",
+            tool_input={"schedule_id": schedule.get("id")},
+            approved=True,
+            result_summary=summary[:500],
+            execution_time_ms=0,
+        )
+
+    async def _format_digest_raw(self) -> str:
+        """Collect raw infrastructure data for the digest."""
+        tasks = []
+        labels = []
+
+        # Disk + memory checks on all hosts via run_command
+        for host_alias in self.config.tools.hosts:
+            tasks.append(self.tool_executor.execute(
+                "run_command", {"host": host_alias, "command": "df -h --exclude-type=tmpfs --exclude-type=devtmpfs"},
+            ))
+            labels.append(f"Disk ({host_alias})")
+            tasks.append(self.tool_executor.execute(
+                "run_command", {"host": host_alias, "command": "free -h"},
+            ))
+            labels.append(f"Memory ({host_alias})")
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        sections = []
+        for label, result in zip(labels, results):
+            if isinstance(result, Exception):
+                sections.append(f"### {label}\nERROR: {result}")
+            else:
+                sections.append(f"### {label}\n{result[:800]}")
+
+        return "\n\n".join(sections)
+
+    def _resolve_mentions(self, text: str) -> str:
+        """Replace @username with proper Discord <@ID> mentions."""
+        def _replace(match: re.Match) -> str:
+            name = match.group(1).lower()
+            for guild in self.guilds:
+                for member in guild.members:
+                    if member.name.lower() == name or (member.nick and member.nick.lower() == name):
+                        return f"<@{member.id}>"
+            return match.group(0)  # leave unchanged if not found
+        return re.sub(r"@(\w+)", _replace, text)
+
+    async def _on_monitor_alert(self, message: str) -> None:
+        """Callback fired by the infrastructure watcher when a threshold is crossed."""
+        channel_id = self.config.monitoring.alert_channel_id
+        if not channel_id:
+            # Fall back to first configured channel
+            if self.config.discord.channels:
+                channel_id = self.config.discord.channels[0]
+            else:
+                log.warning("Monitor alert has no channel to send to: %s", message[:100])
+                return
+
+        channel = self.get_channel(int(channel_id))
+        if not channel:
+            log.warning("Monitor alert channel %s not found", channel_id)
+            return
+
+        try:
+            await channel.send(scrub_response_secrets(message))
+            log.info("Sent monitor alert to channel %s", channel_id)
+        except Exception as e:
+            log.error("Failed to send monitor alert: %s", e)
+
+    # --- Background task delegation ---
+
+    async def _handle_delegate_task(self, message: discord.Message, inp: dict) -> str:
+        """Create and start a background task."""
+        description = inp.get("description", "Background task")
+        steps = inp.get("steps", [])
+
+        if not steps or not isinstance(steps, list):
+            return "No steps provided."
+        if len(steps) > MAX_STEPS:
+            return f"Too many steps ({len(steps)}). Maximum is {MAX_STEPS}."
+
+        # Validate all steps have tool_name and required tool_input fields
+        _REQUIRED_FIELDS = {
+            "run_command": "command",
+            "run_script": "script",
+        }
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict) or "tool_name" not in step:
+                return f"Step {i}: must have 'tool_name'."
+            tn = step["tool_name"]
+            req = _REQUIRED_FIELDS.get(tn)
+            if req:
+                tool_input = step.get("tool_input", {})
+                if req not in tool_input:
+                    return (
+                        f"Step {i + 1} ({tn}): missing '{req}' in tool_input. "
+                        f"Each {tn} step MUST include tool_input with "
+                        f"'{req}': 'your_shell_command'. "
+                        f"Rebuild the steps with proper tool_input and retry."
+                    )
+
+        task = BackgroundTask(
+            task_id=create_task_id(),
+            description=description,
+            steps=steps,
+            channel=message.channel,
+            requester=str(message.author),
+            requester_id=str(message.author.id),
+        )
+
+        # Prune old completed tasks
+        completed = [
+            tid for tid, t in self._background_tasks.items()
+            if t.status in ("completed", "failed", "cancelled")
+        ]
+        while len(completed) > self._background_tasks_max:
+            old = completed.pop(0)
+            del self._background_tasks[old]
+
+        self._background_tasks[task.task_id] = task
+
+        # Build Codex callback for conversational follow-up
+        codex_cb = None
+        if self.codex_client:
+            async def _codex_followup(messages: list[dict], system: str, max_tokens: int) -> str:
+                return await self.codex_client.chat(
+                    messages=messages, system=system, max_tokens=max_tokens,
+                )
+            codex_cb = _codex_followup
+
+        # Launch in background
+        async def _run():
+            try:
+                await run_background_task(
+                    task, self.tool_executor, self.skill_manager,
+                    knowledge_store=self._knowledge_store,
+                    embedder=self._embedder,
+                    audit_logger=self.audit,
+                    codex_callback=codex_cb,
+                )
+            except Exception as e:
+                log.error("Background task %s crashed: %s", task.task_id, e, exc_info=True)
+                task.status = "failed"
+
+        task._asyncio_task = asyncio.create_task(_run())
+
+        return (
+            f"Background task started (ID: `{task.task_id}`): **{description}** "
+            f"({len(steps)} steps). Progress will be posted to this channel."
+        )
+
+    def _handle_list_tasks(self, inp: dict | None = None) -> str:
+        """List background tasks, or get detailed results for a specific task."""
+        if not self._background_tasks:
+            return "No background tasks."
+
+        task_id = (inp or {}).get("task_id")
+
+        # Detailed view for a specific task
+        if task_id:
+            task = self._background_tasks.get(task_id)
+            if not task:
+                return f"No task found with ID `{task_id}`."
+            lines = [
+                f"**{task.description}** [{task.status}]",
+                f"ID: `{task.task_id}` | {len(task.results)}/{len(task.steps)} steps",
+                "",
+            ]
+            for r in task.results:
+                icon = {"ok": "+", "error": "!", "skipped": "-", "cancelled": "x"}.get(r.status, "?")
+                lines.append(f"[{icon}] **Step {r.index + 1} ({r.description})** ({r.elapsed_ms}ms):")
+                lines.append(r.output if r.output else "(no output)")
+                lines.append("")
+            text = "\n".join(lines)
+            if len(text) > 3800:
+                text = text[:3800] + "\n... (truncated, full results were posted in the progress message)"
+            return text
+
+        # Overview of all tasks
+        lines = []
+        for tid, t in self._background_tasks.items():
+            done = len(t.results)
+            total = len(t.steps)
+            ok = sum(1 for r in t.results if r.status == "ok")
+            errors = sum(1 for r in t.results if r.status == "error")
+            lines.append(
+                f"- `{tid}` [{t.status}] **{t.description}** "
+                f"({done}/{total} steps, {ok} ok, {errors} errors)"
+            )
+        return "\n".join(lines)
+
+    def _handle_cancel_task(self, inp: dict) -> str:
+        """Cancel a running background task."""
+        task_id = inp.get("task_id", "")
+        task = self._background_tasks.get(task_id)
+        if not task:
+            return f"No task found with ID `{task_id}`."
+        if task.status != "running":
+            return f"Task `{task_id}` is not running (status: {task.status})."
+        task.cancel()
+        return f"Cancellation requested for task `{task_id}`."
+
+    def _handle_start_loop(self, message: discord.Message, inp: dict) -> str:
+        """Start an autonomous loop."""
+        goal = inp.get("goal", "")
+        if not goal:
+            return "A 'goal' is required to start a loop."
+
+        interval = inp.get("interval_seconds", 60)
+        mode = inp.get("mode", "notify")
+        stop_condition = inp.get("stop_condition")
+        max_iterations = inp.get("max_iterations", 50)
+
+        # Build iteration callback that runs through Codex with tools
+        async def _iteration_cb(
+            prompt: str, channel: object, prev_context: str | None,
+        ) -> str:
+            return await self._run_loop_iteration(
+                prompt, channel, prev_context, str(message.author.id),
+            )
+
+        result = self.loop_manager.start_loop(
+            goal=goal,
+            channel=message.channel,
+            requester_id=str(message.author.id),
+            requester_name=str(message.author),
+            iteration_callback=_iteration_cb,
+            interval_seconds=interval,
+            mode=mode,
+            stop_condition=stop_condition,
+            max_iterations=max_iterations,
+        )
+
+        # If result is a loop ID (short hex), format success message
+        if result.startswith("Error"):
+            return result
+        return (
+            f"Loop started (ID: `{result}`): **{goal[:100]}** "
+            f"(every {max(10, interval)}s, mode={mode}, max {max_iterations} iterations)"
+        )
+
+    def _handle_stop_loop(self, inp: dict) -> str:
+        """Stop an autonomous loop."""
+        loop_id = inp.get("loop_id", "")
+        if not loop_id:
+            return "A 'loop_id' is required."
+        return self.loop_manager.stop_loop(loop_id)
+
+    def _handle_list_loops(self) -> str:
+        """List all autonomous loops."""
+        return self.loop_manager.list_loops()
+
+    # --- Agent tool handlers ---
+
+    async def _handle_spawn_agent(self, message: object, inp: dict) -> str:
+        """Spawn an autonomous agent for a sub-task."""
+        label = inp.get("label", "")
+        goal = inp.get("goal", "")
+        if not label or not goal:
+            return "Both 'label' and 'goal' are required."
+
+        if not self.codex_client:
+            return "Error: Codex client not available."
+
+        channel = getattr(message, "channel", message)
+        channel_id = str(getattr(channel, "id", "0"))
+        author = getattr(message, "author", None)
+        user_id = str(getattr(author, "id", "0"))
+        user_name = str(author) if author else "agent"
+
+        # Build system prompt and tools for the agent
+        # Filter out agent-management tools to prevent nesting
+        system_prompt = self._build_system_prompt(channel=channel, user_id=user_id)
+        all_tools = self._merged_tool_definitions() if self.config.tools.enabled else []
+        tools = filter_agent_tools(all_tools)
+
+        # Iteration callback — wraps Codex chat_with_tools, returns dict
+        async def _iteration_cb(
+            messages: list[dict], sys_prompt: str, tool_defs: list[dict],
+        ) -> dict:
+            resp = await self.codex_client.chat_with_tools(
+                messages=messages, system=sys_prompt, tools=tool_defs,
+            )
+            return {
+                "text": resp.text,
+                "tool_calls": [
+                    {"name": tc.name, "input": tc.input}
+                    for tc in resp.tool_calls
+                ],
+                "stop_reason": resp.stop_reason,
+            }
+
+        # Tool executor callback — dispatches through the same tool routing
+        msg_proxy = _LoopMessageProxy(channel, user_id, user_name)
+
+        async def _tool_exec_cb(tool_name: str, tool_input: dict) -> str:
+            # Reject agent tools to enforce flat depth model (no nesting)
+            if tool_name in AGENT_BLOCKED_TOOLS:
+                return f"Error: Tool '{tool_name}' is not available inside agents."
+            result = await self._dispatch_loop_tool(
+                tool_name, tool_input, msg_proxy, user_id,
+            )
+            return str(result) if result is not None else ""
+
+        agent_id = self.agent_manager.spawn(
+            label=label,
+            goal=goal,
+            channel_id=str(getattr(channel, "id", "0")),
+            requester_id=user_id,
+            requester_name=user_name,
+            iteration_callback=_iteration_cb,
+            tool_executor_callback=_tool_exec_cb,
+            tools=tools,
+            system_prompt=system_prompt,
+        )
+
+        if agent_id.startswith("Error"):
+            return agent_id
+        return (
+            f"Agent '{label}' spawned (ID: `{agent_id}`). "
+            f"Working on: {goal[:100]}"
+        )
+
+    def _handle_send_to_agent(self, inp: dict) -> str:
+        """Send a message to a running agent."""
+        agent_id = inp.get("agent_id", "")
+        message = inp.get("message", "")
+        if not agent_id:
+            return "'agent_id' is required."
+        if not message:
+            return "'message' is required."
+        return self.agent_manager.send(agent_id, message)
+
+    def _handle_list_agents(self, message: object) -> str:
+        """List all agents, optionally filtered by channel."""
+        channel = getattr(message, "channel", message)
+        channel_id = str(getattr(channel, "id", "0"))
+        agents = self.agent_manager.list(channel_id)
+        if not agents:
+            return "No agents running."
+        lines = []
+        for a in agents:
+            lines.append(
+                f"`{a['id']}` | **{a['label']}** | {a['status']} | "
+                f"{a['iteration_count']} iters | {a['runtime_seconds']}s"
+            )
+        return f"**Agents ({len(agents)}):**\n" + "\n".join(lines)
+
+    def _handle_kill_agent(self, inp: dict) -> str:
+        """Kill a running agent."""
+        agent_id = inp.get("agent_id", "")
+        if not agent_id:
+            return "'agent_id' is required."
+        return self.agent_manager.kill(agent_id)
+
+    def _handle_get_agent_results(self, inp: dict) -> str:
+        """Get results of a completed agent."""
+        agent_id = inp.get("agent_id", "")
+        if not agent_id:
+            return "'agent_id' is required."
+        results = self.agent_manager.get_results(agent_id)
+        if results is None:
+            return f"Agent '{agent_id}' not found."
+        if results["status"] == "running":
+            return (
+                f"Agent '{results['label']}' is still running "
+                f"({results['iteration_count']} iterations, "
+                f"{results['runtime_seconds']}s elapsed)."
+            )
+        parts = [
+            f"**Agent: {results['label']}** ({results['status']})",
+            f"Runtime: {results['runtime_seconds']}s, "
+            f"Iterations: {results['iteration_count']}",
+        ]
+        if results["tools_used"]:
+            parts.append(f"Tools: {', '.join(results['tools_used'])}")
+        if results["result"]:
+            result_text = results["result"]
+            if len(result_text) > 1500:
+                result_text = result_text[:1500] + "..."
+            parts.append(f"Result:\n{result_text}")
+        if results["error"]:
+            parts.append(f"Error: {results['error']}")
+        return "\n".join(parts)
+
+    async def _handle_wait_for_agents(self, inp: dict) -> str:
+        """Wait for agents to complete and return collected results."""
+        agent_ids = inp.get("agent_ids", [])
+        timeout = inp.get("timeout", 300)
+        if not agent_ids:
+            return "'agent_ids' list is required."
+        if not isinstance(agent_ids, list):
+            return "'agent_ids' must be a list of agent ID strings."
+
+        results = await self.agent_manager.wait_for_agents(
+            agent_ids, timeout=float(timeout),
+        )
+
+        lines: list[str] = []
+        for aid in agent_ids:
+            r = results.get(aid, {})
+            status = r.get("status", "unknown")
+            label = r.get("label", aid)
+            result_text = r.get("result", "")
+            error_text = r.get("error", "")
+            content = result_text or error_text or "(no output)"
+            if len(content) > 800:
+                content = content[:800] + "..."
+            lines.append(f"**{label}** (`{aid}`): {status}\n{content}")
+
+        return "\n\n".join(lines) if lines else "No results."
+
+    # --- Loop-Agent bridge tool handlers ---
+
+    async def _handle_spawn_loop_agents(self, message: object, inp: dict) -> str:
+        """Spawn agents from within a loop iteration via the loop-agent bridge."""
+        loop_id = inp.get("loop_id", "")
+        tasks = inp.get("tasks", [])
+        if not loop_id:
+            return "A 'loop_id' is required."
+        if not tasks:
+            return "A 'tasks' list is required."
+
+        # Validate the loop exists
+        loop_info = self.loop_manager._loops.get(loop_id)
+        if not loop_info:
+            return f"Error: Loop '{loop_id}' not found."
+        if loop_info.status != "running":
+            return f"Error: Loop '{loop_id}' is not running (status: {loop_info.status})."
+
+        if not self.codex_client:
+            return "Error: Codex client not available."
+
+        channel = getattr(message, "channel", message)
+        channel_id = str(getattr(channel, "id", "0"))
+
+        # Build system prompt and tools for the agents (no agent tools — prevents nesting)
+        system_prompt = self._build_system_prompt(
+            channel=channel, user_id=loop_info.requester_id,
+        )
+        all_tools = self._merged_tool_definitions() if self.config.tools.enabled else []
+        tools = filter_agent_tools(all_tools)
+
+        # Build iteration/tool callbacks (same pattern as _handle_spawn_agent)
+        async def _iteration_cb(messages, sys, tool_defs):
+            resp = await self.codex_client.chat_with_tools(
+                messages=messages, system=sys, tools=tool_defs,
+            )
+            return {
+                "text": resp.text or "",
+                "tool_calls": [
+                    {"name": tc.name, "input": tc.input}
+                    for tc in (resp.tool_calls or [])
+                ],
+                "stop_reason": resp.stop_reason or "end_turn",
+            }
+
+        async def _tool_cb(tool_name, tool_input):
+            return await self._dispatch_loop_tool(
+                tool_name, tool_input,
+                _LoopMessageProxy(channel, loop_info.requester_id, loop_info.requester_name),
+                loop_info.requester_id,
+            )
+
+        agent_ids = self.loop_agent_bridge.spawn_agents_for_loop(
+            loop_id=loop_id,
+            iteration=loop_info.iteration_count,
+            loop_goal=loop_info.goal,
+            tasks=tasks,
+            channel_id=channel_id,
+            requester_id=loop_info.requester_id,
+            requester_name=loop_info.requester_name,
+            iteration_callback=_iteration_cb,
+            tool_executor_callback=_tool_cb,
+            tools=tools,
+            system_prompt=system_prompt,
+        )
+
+        # Format response
+        errors = [a for a in agent_ids if a.startswith("Error")]
+        successes = [a for a in agent_ids if not a.startswith("Error")]
+
+        parts = []
+        if successes:
+            parts.append(f"Spawned {len(successes)} agent(s): {', '.join(successes)}")
+        if errors:
+            parts.append(f"Errors: {'; '.join(errors)}")
+        return "\n".join(parts) or "No agents spawned."
+
+    async def _handle_collect_loop_agents(self, inp: dict) -> str:
+        """Collect results from agents spawned by a loop."""
+        loop_id = inp.get("loop_id", "")
+        agent_ids = inp.get("agent_ids", None)
+        timeout = inp.get("timeout", 300)
+        if not loop_id:
+            return "A 'loop_id' is required."
+
+        # Validate the loop exists
+        if loop_id not in self.loop_manager._loops:
+            return f"Error: Loop '{loop_id}' not found."
+
+        results = await self.loop_agent_bridge.wait_and_collect(
+            loop_id=loop_id,
+            agent_ids=agent_ids if isinstance(agent_ids, list) else None,
+            timeout=float(timeout),
+        )
+
+        if not results:
+            return "No agents to collect for this loop."
+
+        return self.loop_agent_bridge.format_agent_results_for_context(results)
+
+    async def _run_loop_iteration(
+        self,
+        prompt: str,
+        channel: object,
+        prev_context: str | None,
+        user_id: str,
+    ) -> str:
+        """Run a single loop iteration through Codex with full tool access.
+
+        Simplified version of _process_with_tools for autonomous loops:
+        same Codex + tool execution pipeline but without detection retries.
+        """
+        if not self.codex_client:
+            return "Codex client not available."
+
+        # Resolve requester name for audit logging and message proxy
+        requester_name = "loop"
+        for loop_info in self.loop_manager._loops.values():
+            if loop_info.requester_id == user_id:
+                requester_name = loop_info.requester_name
+                break
+        msg_proxy = _LoopMessageProxy(channel, user_id, requester_name)
+
+        # Build messages for the iteration
+        messages: list[dict] = []
+        if prev_context:
+            messages.append({
+                "role": "user",
+                "content": f"Previous iteration results:\n{prev_context}",
+            })
+            messages.append({
+                "role": "assistant",
+                "content": "Understood, I have the context from previous iterations.",
+            })
+        messages.append({"role": "user", "content": prompt})
+
+        # Build system prompt and tool definitions
+        system_prompt = self._build_system_prompt(channel=channel, user_id=user_id)
+        tools = self._merged_tool_definitions() if self.config.tools.enabled else None
+
+        final_text = ""
+        tool_timeout = self.config.tools.tool_timeout_seconds
+        channel_id_str = str(getattr(channel, "id", ""))
+        loop_cap = self.config.tools.max_tool_iterations_loop
+        tool_calls_made = 0
+
+        for _iteration in range(loop_cap):
+            try:
+                response = await self.codex_client.chat_with_tools(
+                    messages=messages, system=system_prompt, tools=tools or [],
+                )
+            except Exception as e:
+                log.warning("Loop iteration Codex call failed: %s", e)
+                return f"LLM call failed: {e}"
+
+            if response.text:
+                final_text = response.text
+
+            if not response.tool_calls:
+                break
+
+            tool_calls_made += len(response.tool_calls)
+
+            # Build assistant content with tool_use blocks (matches _process_with_tools format)
+            assistant_content: list[dict] = []
+            if response.text:
+                assistant_content.append({"type": "text", "text": response.text})
+            for tc in response.tool_calls:
+                assistant_content.append({
+                    "type": "tool_use", "id": tc.id,
+                    "name": tc.name, "input": tc.input,
+                })
+            messages.append({"role": "assistant", "content": assistant_content})
+
+            # Execute tools concurrently with per-tool timeout
+            async def _run_loop_tool(block):
+                nonlocal system_prompt
+                tool_name = block.name
+                tool_input = block.input
+                log.info("Loop tool call: %s(%s)", tool_name, tool_input)
+
+                t0 = time.monotonic()
+                error = None
+                try:
+                    _t = 3660 if tool_name in _LONG_TIMEOUT_TOOL_SET else tool_timeout
+                    raw = await asyncio.wait_for(
+                        self._dispatch_loop_tool(
+                            tool_name, tool_input, msg_proxy, user_id,
+                        ),
+                        timeout=_t,
+                    )
+                    # Skill CRUD invalidates caches
+                    if tool_name in ("create_skill", "edit_skill", "delete_skill", "enable_skill", "disable_skill", "install_skill"):
+                        self._cached_merged_tools = None
+                        self._cached_skills_text = None
+                        system_prompt = self._build_system_prompt(
+                            channel=channel, user_id=user_id,
+                        )
+                except asyncio.TimeoutError:
+                    error = f"Tool '{tool_name}' timed out after {_t}s"
+                    raw = error
+                except Exception as e:
+                    error = str(e)
+                    raw = f"Error executing {tool_name}: {e}"
+
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+                # Handle image block returns from analyze_image
+                if isinstance(raw, dict) and "__image_block__" in raw:
+                    raw = f"[Image loaded: {raw.get('__prompt__', '')}]"
+
+                result = truncate_tool_output(scrub_output_secrets(str(raw)))
+
+                # Audit log
+                try:
+                    await self.audit.log_execution(
+                        user_id=user_id,
+                        user_name=requester_name,
+                        channel_id=channel_id_str,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        approved=True,
+                        result_summary=result,
+                        execution_time_ms=elapsed_ms,
+                        error=error,
+                    )
+                except Exception:
+                    pass
+
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                }
+
+            tool_results = await asyncio.gather(
+                *[_run_loop_tool(tc) for tc in response.tool_calls],
+            )
+            messages.append({"role": "user", "content": list(tool_results)})
+
+        # Scrub final text; posting is handled by _post_response in LoopManager
+        if final_text:
+            final_text = scrub_output_secrets(final_text)
+            if len(final_text) > DISCORD_MAX_LEN:
+                final_text = final_text[:DISCORD_MAX_LEN - 50] + "\n... (truncated)"
+            return final_text
+
+        # No final text produced. If we exhausted the cap without Codex ever
+        # returning a tool-free response, say so — the previous "(no response)"
+        # silently hid the fact that the loop did real work but ran out of
+        # budget. Tell the operator what happened and how to tune it.
+        if tool_calls_made >= loop_cap:
+            log.warning(
+                "Loop tool-iteration cap hit (%d) after %d tool calls; no final summary from Codex",
+                loop_cap, tool_calls_made,
+            )
+            return (
+                f"Iteration hit the loop tool-iteration cap ({loop_cap}) "
+                f"after {tool_calls_made} tool calls. No final summary was "
+                f"produced by Codex. Raise `tools.max_tool_iterations_loop` "
+                f"in config (or via the web UI) if this happens repeatedly."
+            )
+
+        return "(no response)"
+
+    async def _dispatch_loop_tool(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        msg_proxy: _LoopMessageProxy,
+        user_id: str,
+    ) -> str | dict:
+        """Dispatch a tool call to the correct handler within a loop iteration.
+
+        Mirrors the Discord-native tool dispatch in _process_with_tools, using
+        a lightweight message proxy instead of a real Discord message.
+        """
+        # --- Discord-native tools (message + input) ---
+        if tool_name == "purge_messages":
+            return await self._handle_purge(msg_proxy, tool_input)
+        if tool_name == "browser_screenshot":
+            return await self._handle_browser_screenshot(msg_proxy, tool_input)
+        if tool_name == "generate_file":
+            return await self._handle_generate_file(msg_proxy, tool_input)
+        if tool_name == "post_file":
+            return await self._handle_post_file(msg_proxy, tool_input)
+        if tool_name == "schedule_task":
+            return self._handle_schedule_task(msg_proxy, tool_input)
+        if tool_name == "delegate_task":
+            return await self._handle_delegate_task(msg_proxy, tool_input)
+        if tool_name == "start_loop":
+            return self._handle_start_loop(msg_proxy, tool_input)
+        if tool_name == "read_channel":
+            return await self._handle_read_channel(msg_proxy, tool_input)
+        if tool_name == "add_reaction":
+            return await self._handle_add_reaction(msg_proxy, tool_input)
+        if tool_name == "create_poll":
+            return await self._handle_create_poll(msg_proxy, tool_input)
+        if tool_name == "analyze_image":
+            return await self._handle_analyze_image(msg_proxy, tool_input)
+        if tool_name == "generate_image":
+            return await self._handle_generate_image(msg_proxy, tool_input)
+        if tool_name == "create_digest":
+            return self._handle_create_digest(msg_proxy, tool_input)
+
+        # --- Discord-native tools (input only) ---
+        if tool_name == "list_schedules":
+            return self._handle_list_schedules()
+        if tool_name == "delete_schedule":
+            return self._handle_delete_schedule(tool_input)
+        if tool_name == "parse_time":
+            return self._handle_parse_time(tool_input)
+        if tool_name == "search_history":
+            return await self._handle_search_history(tool_input)
+        if tool_name == "list_tasks":
+            return self._handle_list_tasks(tool_input)
+        if tool_name == "cancel_task":
+            return self._handle_cancel_task(tool_input)
+        if tool_name == "stop_loop":
+            return self._handle_stop_loop(tool_input)
+        if tool_name == "list_loops":
+            return self._handle_list_loops()
+        if tool_name == "search_knowledge":
+            return await self._handle_search_knowledge(tool_input)
+        if tool_name == "ingest_document":
+            return await self._handle_ingest_document(tool_input, str(msg_proxy.author))
+        if tool_name == "list_knowledge":
+            return self._handle_list_knowledge()
+        if tool_name == "delete_knowledge":
+            return self._handle_delete_knowledge(tool_input)
+        if tool_name == "set_permission":
+            return self._handle_set_permission(user_id, tool_input)
+        if tool_name == "search_audit":
+            return await self._handle_search_audit(tool_input)
+
+        # --- Agent tools ---
+        if tool_name == "spawn_agent":
+            return await self._handle_spawn_agent(msg_proxy, tool_input)
+        if tool_name == "send_to_agent":
+            return self._handle_send_to_agent(tool_input)
+        if tool_name == "list_agents":
+            return self._handle_list_agents(msg_proxy)
+        if tool_name == "kill_agent":
+            return self._handle_kill_agent(tool_input)
+        if tool_name == "get_agent_results":
+            return self._handle_get_agent_results(tool_input)
+        if tool_name == "wait_for_agents":
+            return await self._handle_wait_for_agents(tool_input)
+
+        # --- Loop-Agent bridge ---
+        if tool_name == "spawn_loop_agents":
+            return await self._handle_spawn_loop_agents(msg_proxy, tool_input)
+        if tool_name == "collect_loop_agents":
+            return await self._handle_collect_loop_agents(tool_input)
+
+        # --- Skill CRUD ---
+        if tool_name == "create_skill":
+            return await asyncio.to_thread(
+                self.skill_manager.create_skill, tool_input["name"], tool_input["code"],
+            )
+        if tool_name == "edit_skill":
+            return await asyncio.to_thread(
+                self.skill_manager.edit_skill, tool_input["name"], tool_input["code"],
+            )
+        if tool_name == "delete_skill":
+            return await asyncio.to_thread(
+                self.skill_manager.delete_skill, tool_input["name"],
+            )
+        if tool_name == "enable_skill":
+            return self.skill_manager.enable_skill(tool_input["name"])
+        if tool_name == "disable_skill":
+            return self.skill_manager.disable_skill(tool_input["name"])
+        if tool_name == "install_skill":
+            return await self.skill_manager.install_from_url(tool_input["url"])
+        if tool_name == "export_skill":
+            export_result = self.skill_manager.export_skill(tool_input["name"])
+            if isinstance(export_result, str):
+                return export_result
+            file_bytes, filename = export_result
+            ch_id_key = str(getattr(msg_proxy.channel, "id", ""))
+            self._pending_files.setdefault(ch_id_key, []).append((file_bytes, filename))
+            return f"Skill '{tool_input['name']}' exported as {filename}."
+        if tool_name == "skill_status":
+            return self.skill_manager.skill_status(tool_input["name"])
+        if tool_name == "list_skills":
+            skills = self.skill_manager.list_skills()
+            if not skills:
+                return "No user-created skills."
+            lines = [f"**{s['name']}**: {s['description']}" for s in skills]
+            return f"**User-created skills ({len(skills)}):**\n" + "\n".join(lines)
+
+        # --- User-created skills ---
+        if self.skill_manager.has_skill(tool_name):
+            ch = msg_proxy.channel
+
+            async def _skill_msg(text: str) -> None:
+                await ch.send(scrub_response_secrets(text))
+
+            async def _skill_file(data: bytes, filename: str, caption: str = "") -> None:
+                ch_id_key = str(getattr(ch, "id", ""))
+                self._pending_files.setdefault(ch_id_key, []).append((data, filename))
+
+            return await self.skill_manager.execute(
+                tool_name, tool_input,
+                message_callback=_skill_msg,
+                file_callback=_skill_file,
+            )
+
+        # --- Executor-routed tools (run_command, run_script, SSH, etc.) ---
+        return await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+
+    async def _handle_read_channel(self, message: discord.Message, inp: dict) -> str:
+        """Read recent messages from a Discord channel.
+
+        Returns formatted channel history including messages from all users
+        and bots — not just the bot's own session history.
+        """
+        limit = min(int(inp.get("limit", 10)), 100)
+        channel_id = inp.get("channel_id")
+
+        # Resolve channel — fall back to current if channel_id is missing or non-numeric
+        if channel_id and channel_id.isdigit():
+            channel = self.get_channel(int(channel_id))
+            if not channel:
+                return f"Channel {channel_id} not found or not accessible."
+        else:
+            channel = getattr(message, "channel", None)
+            if not channel:
+                return "No channel context available."
+
+        try:
+            messages = []
+            async for msg in channel.history(limit=limit):
+                parts = []
+                # Timestamp
+                ts = msg.created_at.strftime("%H:%M:%S")
+                # Author
+                author = msg.author.display_name if hasattr(msg.author, "display_name") else str(msg.author)
+                is_bot = getattr(msg.author, "bot", False)
+                bot_tag = " [BOT]" if is_bot else ""
+                # Content
+                content = msg.content or ""
+                if content:
+                    parts.append(content)
+                # Attachments
+                for att in msg.attachments:
+                    parts.append(f"[attachment: {att.filename}]")
+                # Embeds
+                for embed in msg.embeds:
+                    embed_parts = []
+                    if embed.title:
+                        embed_parts.append(f"title: {embed.title}")
+                    if embed.description:
+                        desc = embed.description[:200]
+                        embed_parts.append(desc)
+                    if embed_parts:
+                        parts.append(f"[embed: {'; '.join(embed_parts)}]")
+
+                body = " ".join(parts) if parts else "(empty message)"
+                messages.append(f"[{ts}] {author}{bot_tag}: {body}")
+
+            if not messages:
+                return "No messages found in channel."
+
+            # Reverse so oldest is first (channel.history returns newest first)
+            messages.reverse()
+            result = "\n".join(messages)
+
+            # Scrub secrets
+            result = scrub_output_secrets(result)
+
+            # Prefix with instruction — these messages are context, not output
+            return (
+                f"[Channel history: {len(messages)} messages read. "
+                "This is context for YOU — do not paste or echo these messages. "
+                "Respond with your own summary, analysis, or action.]\n"
+                + result
+            )
+
+        except discord.Forbidden:
+            return "Permission denied — cannot read this channel."
+        except Exception as e:
+            return f"Failed to read channel: {e}"
+
+    async def _handle_add_reaction(self, message: discord.Message, inp: dict) -> str:
+        """Add an emoji reaction to a message."""
+        message_id = inp.get("message_id")
+        emoji = inp.get("emoji")
+        if not emoji:
+            return "'emoji' is required."
+        # Resolve "this"/"current"/empty to the triggering message
+        if not message_id or str(message_id).lower() in ("this", "current", "self"):
+            message_id = str(message.id)
+        try:
+            msg = await message.channel.fetch_message(int(message_id))
+            await msg.add_reaction(emoji)
+            return "Reaction added."
+        except discord.NotFound:
+            return f"Message {message_id} not found in this channel."
+        except discord.Forbidden:
+            return "Permission denied to add reaction."
+        except Exception as e:
+            return f"Failed to add reaction: {e}"
+
+    async def _handle_create_poll(self, message: discord.Message, inp: dict) -> str:
+        """Create a Discord native poll in the current channel."""
+        from datetime import timedelta
+
+        question = inp.get("question")
+        options = inp.get("options", [])
+        if not question or not options:
+            return "Both 'question' and 'options' are required."
+        if len(options) > 10:
+            return "Discord polls support a maximum of 10 options."
+        # Scrub secrets from poll content before sending to Discord
+        question = scrub_response_secrets(str(question))
+        options = [scrub_response_secrets(str(opt)) for opt in options]
+        duration_hours = min(inp.get("duration_hours", 24), 168)
+        multiple = inp.get("multiple", False)
+        try:
+            poll = discord.Poll(
+                question=question,
+                duration=timedelta(hours=duration_hours),
+                multiple=multiple,
+            )
+            for opt in options:
+                poll.add_answer(text=opt)
+            await message.channel.send(poll=poll)
+            return "Poll created."
+        except Exception as e:
+            return f"Failed to create poll: {e}"
+
+    async def _handle_analyze_image(self, message: discord.Message, inp: dict) -> str | dict:
+        """Fetch an image and return a vision block for the LLM to analyze.
+
+        Returns either an error string or a dict with ``__image_block__`` key
+        that the tool loop injects as a vision content block.
+        """
+        import aiohttp
+
+        url = inp.get("url")
+        host = inp.get("host")
+        path = inp.get("path")
+        prompt = inp.get("prompt", "Describe this image in detail.")
+
+        image_bytes: bytes | None = None
+
+        if url:
+            # Validate URL scheme to prevent SSRF via file://, ftp://, etc.
+            if not url.startswith(("http://", "https://")):
+                return "Only http:// and https:// URLs are supported."
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        if resp.status != 200:
+                            return f"Failed to fetch image from URL (HTTP {resp.status})"
+                        ct = resp.headers.get("Content-Type", "")
+                        if not ct.startswith("image/"):
+                            return f"URL does not point to an image (Content-Type: {ct})"
+                        image_bytes = await resp.read()
+            except Exception as e:
+                return f"Failed to fetch image from URL: {e}"
+        elif host and path:
+            # Use executor to fetch from host via base64
+            import shlex
+            resolved = self.tool_executor._resolve_host(host)
+            if not resolved:
+                return f"Unknown or disallowed host: {host}"
+            address, ssh_user, _os = resolved
+            safe_path = shlex.quote(path)
+            code, output = await self.tool_executor._exec_command(
+                address, f"base64 -w0 {safe_path}", ssh_user,
+            )
+            if code != 0:
+                return f"Failed to read image from host: {output}"
+            try:
+                image_bytes = base64.b64decode(output.strip())
+            except Exception as e:
+                return f"Failed to decode image data: {e}"
+        else:
+            return "Provide either 'url' or both 'host' and 'path'."
+
+        if not image_bytes:
+            return "No image data retrieved."
+
+        # Enforce 5MB limit (same as Discord attachment limit)
+        if len(image_bytes) > 5 * 1024 * 1024:
+            return "Image exceeds 5MB size limit."
+
+        media_type = self._detect_image_type(image_bytes)
+        if not media_type:
+            return "Unsupported image format. Supported: PNG, JPEG, GIF, WEBP."
+
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+
+        # Return a special marker dict that the tool loop will inject as a
+        # vision content block.  The tool result text sent to the LLM will be
+        # the prompt, while the image block gets appended to the next user
+        # message so Codex can see it.
+        return {
+            "__image_block__": {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": b64,
+                },
+            },
+            "__prompt__": prompt,
+        }
+
+    async def _handle_generate_image(self, message: discord.Message, inp: dict) -> str:
+        """Generate an image via ComfyUI and post as Discord attachment."""
+        if not self.config.comfyui.enabled:
+            return "Image generation is disabled. Enable ComfyUI in config to use this tool."
+
+        prompt_text = inp.get("prompt", "")
+        if not prompt_text:
+            return "A 'prompt' describing the image is required."
+
+        negative = inp.get("negative", "")
+        width = inp.get("width", 1024)
+        height = inp.get("height", 1024)
+        model = inp.get("model", "")
+
+        # Clamp dimensions to reasonable range
+        width = max(64, min(2048, width))
+        height = max(64, min(2048, height))
+
+        from ..tools.comfyui import ComfyUIClient
+
+        client = ComfyUIClient(self.config.comfyui.url)
+        image_bytes = await client.generate(
+            prompt=prompt_text,
+            negative=negative,
+            width=width,
+            height=height,
+            model=model,
+        )
+
+        if not image_bytes:
+            return "Image generation failed. ComfyUI may be unavailable or the request timed out."
+
+        try:
+            file = discord.File(io.BytesIO(image_bytes), filename="generated.png")
+            await message.channel.send(file=file)
+            return f"Image generated and posted ({len(image_bytes) / 1024:.1f} KB)."
+        except discord.HTTPException as e:
+            return f"Failed to upload generated image to Discord: {e}"
+
+    async def _run_scheduled_workflow(
+        self, channel: discord.abc.Messageable, schedule: dict,
+    ) -> None:
+        """Execute a multi-step workflow from a scheduled task."""
+        steps = schedule.get("steps", [])
+        desc = schedule.get("description", "Workflow")
+        results: list[str] = []
+        prev_output = ""
+
+        for i, step in enumerate(steps):
+            tool_name = step["tool_name"]
+            tool_input = step.get("tool_input", {})
+            condition = step.get("condition")
+            step_desc = step.get("description", tool_name)
+
+            # Evaluate condition against previous step's output
+            if condition and prev_output:
+                if condition.startswith("!"):
+                    # Negated condition: skip if substring IS present
+                    if condition[1:].lower() in prev_output.lower():
+                        results.append(f"**Step {i+1}** (`{step_desc}`): skipped (condition `{condition}` met)")
+                        continue
+                else:
+                    # Normal condition: skip if substring is NOT present
+                    if condition.lower() not in prev_output.lower():
+                        results.append(f"**Step {i+1}** (`{step_desc}`): skipped (condition `{condition}` not met)")
+                        continue
+
+            try:
+                # Check if this is a skill or built-in tool
+                if self.skill_manager.has_skill(tool_name):
+                    output = await self.skill_manager.execute(tool_name, tool_input)
+                else:
+                    output = await self.tool_executor.execute(tool_name, tool_input)
+                prev_output = output
+                results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{output[:400]}\n```")
+            except Exception as e:
+                results.append(f"**Step {i+1}** (`{step_desc}`): FAILED — {e}")
+                on_failure = step.get("on_failure", "abort")
+                if on_failure == "abort":
+                    results.append("Workflow aborted due to step failure.")
+                    break
+                # "continue" keeps going
+
+        summary = "\n".join(results)
+        text = f"**Workflow: {desc}**\n{summary}"
+        # Truncate if needed
+        if len(text) > 1900:
+            text = text[:1900] + "\n... (truncated)"
+
+        try:
+            await channel.send(scrub_response_secrets(text))
+        except Exception as e:
+            log.error("Failed to post workflow results: %s", e)
+
+    async def _on_scheduled_task(self, schedule: dict) -> None:
+        """Callback fired by the scheduler when a task is due."""
+        channel_id = schedule.get("channel_id")
+        if not channel_id:
+            log.warning("Scheduled task has no channel_id: %s", schedule["id"])
+            return
+
+        channel = self.get_channel(int(channel_id))
+        if not channel:
+            log.warning("Scheduled task channel %s not found", channel_id)
+            return
+
+        if schedule["action"] == "digest":
+            await self._on_scheduled_digest(schedule)
+            return
+
+        if schedule["action"] == "reminder":
+            msg = schedule.get("message", schedule["description"])
+            # Resolve @username mentions to proper Discord <@ID> mentions
+            msg = self._resolve_mentions(msg)
+            try:
+                await channel.send(f"**Scheduled reminder:** {msg}")
+            except Exception as e:
+                log.warning("Failed to send scheduled reminder: %s", e)
+
+        elif schedule["action"] == "check":
+            tool_name = schedule.get("tool_name")
+            tool_input = schedule.get("tool_input", {})
+            try:
+                result = await self.tool_executor.execute(tool_name, tool_input)
+                text = f"**Scheduled: {schedule['description']}**\n```\n{result[:1800]}\n```"
+                await channel.send(scrub_response_secrets(text))
+            except Exception as e:
+                await channel.send(
+                    scrub_response_secrets(f"**Scheduled task failed:** {schedule['description']}\nError: {e}")
+                )
+
+        elif schedule["action"] == "workflow":
+            await self._run_scheduled_workflow(channel, schedule)
+
+        else:
+            log.warning("Unknown scheduled action type: %s (schedule %s)", schedule["action"], schedule.get("id"))
+
+    async def _send_with_retry(
+        self,
+        message: discord.Message,
+        text: str,
+        as_reply: bool = True,
+        files: list[discord.File] | None = None,
+    ) -> discord.Message | None:
+        """Send a message with retry on failure. Optionally attach files."""
+        for attempt in range(SEND_MAX_RETRIES):
+            try:
+                log.info("Sending message (attempt %d, reply=%s): %r", attempt + 1, as_reply, text[:100])
+                kwargs: dict = {}
+                if files:
+                    kwargs["files"] = files
+                if as_reply:
+                    sent = await message.reply(text, **kwargs)
+                else:
+                    sent = await message.channel.send(text, **kwargs)
+                log.info("Message sent successfully: msg_id=%s", sent.id if sent else "None")
+                return sent
+            except (discord.HTTPException, ConnectionError, OSError) as e:
+                if attempt < SEND_MAX_RETRIES - 1:
+                    log.warning("Discord send failed (attempt %d): %s", attempt + 1, e)
+                    await asyncio.sleep(1 + attempt)
+                else:
+                    log.error("Discord send failed after %d retries: %s", SEND_MAX_RETRIES, e)
+        return None
+
+    async def _send_chunked(self, message: discord.Message, text: str) -> None:
+        """Send a response, splitting into chunks if it exceeds Discord's limit.
+        If the response is very long, send as a file attachment instead.
+        Attaches any pending skill files to the first message."""
+        # Collect pending file attachments from skills (per-channel)
+        pending = self._pending_files.pop(str(message.channel.id), [])
+
+        discord_files = [
+            discord.File(io.BytesIO(data), filename=fname)
+            for data, fname in pending
+        ]
+
+        # If the response is extremely long, send as file
+        if len(text) > DISCORD_MAX_LEN * 4:
+            text_file = discord.File(
+                io.BytesIO(text.encode("utf-8")),
+                filename="response.md",
+            )
+            discord_files.append(text_file)
+            await self._send_with_retry(message, "Response too long for chat, attached as file:", files=discord_files)
+            return
+
+        if len(text) <= DISCORD_MAX_LEN:
+            if discord_files:
+                await self._send_with_retry(message, text, files=discord_files)
+            else:
+                await self._send_with_retry(message, text)
+            return
+
+        chunks: list[str] = []
+        current = ""
+        in_code_block = False
+        code_block_lang = ""
+
+        # Pre-split any lines longer than the chunk limit so the chunker
+        # never encounters a single line that can't fit in one chunk.
+        max_line_len = DISCORD_MAX_LEN - 20
+        lines: list[str] = []
+        for raw_line in text.split("\n"):
+            while len(raw_line) > max_line_len:
+                lines.append(raw_line[:max_line_len])
+                raw_line = raw_line[max_line_len:]
+            lines.append(raw_line)
+
+        for line in lines:
+            # Track code block state (toggle on ``` lines)
+            if line.startswith("```"):
+                if in_code_block:
+                    in_code_block = False
+                    code_block_lang = ""
+                else:
+                    in_code_block = True
+                    code_block_lang = line[3:].strip()
+
+            if len(current) + len(line) + 1 > DISCORD_MAX_LEN - 10:
+                if in_code_block:
+                    current += "\n```"
+                if current.strip():
+                    chunks.append(current)
+                current = ""
+                if in_code_block:
+                    current = f"```{code_block_lang}\n"
+            current += line + "\n"
+
+        if current.strip():
+            chunks.append(current)
+
+        for i, chunk in enumerate(chunks):
+            if i == 0 and discord_files:
+                await self._send_with_retry(message, chunk, files=discord_files)
+            elif i == 0:
+                await self._send_with_retry(message, chunk)
+            else:
+                await self._send_with_retry(message, chunk, as_reply=False)

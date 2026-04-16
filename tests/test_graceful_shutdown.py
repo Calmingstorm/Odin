@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 import pytest
 
 from src.discord.client import OdinBot
-from src.config import OdinConfig
+from src.config.schema import Config
 from src.knowledge.store import KnowledgeStore
 from src.tools.process_manager import ProcessRegistry
 
@@ -23,8 +23,8 @@ from src.tools.process_manager import ProcessRegistry
 
 
 def _make_bot() -> OdinBot:
-    """Create an OdinBot with mocked super().close() and common components."""
-    config = OdinConfig(token="test-token", prefix="!", log_level="DEBUG")
+    """Create an OdinBot with the executor-shape pydantic Config."""
+    config = Config(discord={"token": "test-token"})
     bot = OdinBot(config)
     return bot
 

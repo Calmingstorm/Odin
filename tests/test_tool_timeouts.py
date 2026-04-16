@@ -28,9 +28,17 @@ class TestToolsConfigToolTimeouts:
         config = ToolsConfig(tool_timeouts={"claude_code": 600, "read_file": 30})
         assert config.tool_timeouts == {"claude_code": 600, "read_file": 30}
 
-    def test_old_tool_timeout_seconds_removed(self):
-        config = ToolsConfig()
-        assert not hasattr(config, "tool_timeout_seconds")
+    def test_tool_timeout_seconds_aliases_command_timeout_seconds(self):
+        """tool_timeout_seconds is preserved as a Heimdall-compat property.
+
+        Round 7 renamed the field to ``command_timeout_seconds`` and added the
+        ``tool_timeouts`` dict for per-tool overrides. The executor-shape
+        OdinBot (Heimdall pattern) reads ``tool_timeout_seconds`` directly, so
+        it stays available as a read-only property pointing at the new field.
+        """
+        config = ToolsConfig(command_timeout_seconds=42)
+        assert config.tool_timeout_seconds == 42
+        assert config.tool_timeout_seconds == config.command_timeout_seconds
 
     def test_from_dict(self):
         data = {"tool_timeouts": {"run_command": 120}}
