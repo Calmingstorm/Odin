@@ -1496,6 +1496,7 @@ class OdinBot(commands.Bot):
         # Startup diagnostics — never blocks startup, just logs what we found.
         try:
             report = self._run_startup_diagnostics(yaml_config=self.config)
+            self.startup_report = report
             for r in report.results:
                 level = log.warning if not r.passed else log.info
                 msg = f"startup diagnostic [{r.name}]: {r.detail}"

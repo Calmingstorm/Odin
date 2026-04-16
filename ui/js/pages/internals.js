@@ -31,13 +31,17 @@ export default {
         <section class="hm-card" style="padding:1.25rem;">
           <h2 style="font-size:1.1rem;font-weight:600;margin-bottom:0.75rem;">Startup Diagnostics</h2>
           <div v-if="startup.results && startup.results.length" class="space-y-1">
+            <div style="margin-bottom:0.5rem;font-size:0.8rem;color:#888;">
+              {{ startup.passed_count || 0 }}/{{ startup.total_checks || 0 }} passed
+              <span v-if="startup.duration_ms"> ({{ startup.duration_ms }}ms)</span>
+            </div>
             <div v-for="d in startup.results" :key="d.name"
                  style="display:flex;align-items:center;gap:0.5rem;padding:0.25rem 0;">
-              <span :class="statusColor(d.status)" style="font-size:0.9rem;width:1.5rem;text-align:center;">
-                {{ d.status === 'pass' ? '\u2714' : d.status === 'fail' ? '\u2716' : '\u2014' }}
+              <span :class="d.passed ? 'text-green-400' : 'text-red-400'" style="font-size:0.9rem;width:1.5rem;text-align:center;">
+                {{ d.passed ? '\u2714' : '\u2716' }}
               </span>
               <span class="text-sm" style="flex:1;">{{ d.name }}</span>
-              <span class="text-xs text-gray-500" style="max-width:50%;text-align:right;">{{ d.message || '' }}</span>
+              <span class="text-xs text-gray-500" style="max-width:50%;text-align:right;">{{ d.detail || '' }}</span>
             </div>
           </div>
           <p v-else class="text-sm text-gray-500">No diagnostics available</p>
@@ -49,14 +53,14 @@ export default {
           <div v-if="subsystems.length" class="grid grid-cols-2 md:grid-cols-3 gap-2">
             <div v-for="s in subsystems" :key="s.name" class="hm-card" style="padding:0.75rem;">
               <div style="display:flex;align-items:center;gap:0.5rem;">
-                <span :class="statusColor(s.status)" style="font-size:1.1rem;">
-                  {{ s.status === 'ok' ? '\u2714' : s.status === 'degraded' ? '\u26A0' : '\u2716' }}
+                <span :class="statusColor(s.state === 'available' ? 'ok' : s.state === 'degraded' ? 'degraded' : 'down')" style="font-size:1.1rem;">
+                  {{ s.state === 'available' ? '\u2714' : s.state === 'degraded' ? '\u26A0' : '\u2716' }}
                 </span>
                 <span class="text-sm font-medium">{{ s.name }}</span>
               </div>
               <div class="text-xs text-gray-500 mt-1">
-                {{ s.success_count || 0 }} ok / {{ s.failure_count || 0 }} fail
-                <span v-if="s.last_failure"> &mdash; last fail: {{ shortTime(s.last_failure) }}</span>
+                {{ s.total_successes || 0 }} ok / {{ s.total_failures || 0 }} fail
+                <span v-if="s.last_failure_at"> &mdash; last fail: {{ shortTime(s.last_failure_at) }}</span>
               </div>
             </div>
           </div>
