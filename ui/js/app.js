@@ -21,6 +21,7 @@ import UsagePage from './pages/usage.js';
 import TracesPage from './pages/traces.js';
 import HealthPage from './pages/health.js';
 import ResourcesPage from './pages/resources.js';
+import InternalsPage from './pages/internals.js';
 
 const { createApp, ref, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
 const { createRouter, createWebHashHistory } = VueRouter;
@@ -50,6 +51,7 @@ const routes = [
   { path: '/traces',     component: TracesPage,     meta: { label: 'Traces',     icon: '\u{1F50D}' } },
   { path: '/health',     component: HealthPage,     meta: { label: 'Health',     icon: '\u{1FA7A}' } },
   { path: '/resources',  component: ResourcesPage,  meta: { label: 'Resources',  icon: '\u{1F4E6}' } },
+  { path: '/internals',  component: InternalsPage,  meta: { label: 'Internals',  icon: '\u{1F50C}' } },
 ];
 
 const router = createRouter({
