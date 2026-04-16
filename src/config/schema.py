@@ -84,6 +84,12 @@ class ConnectionPoolConfig(BaseModel):
     keepalive_timeout: int = 30
 
 
+class ContextCompressionConfig(BaseModel):
+    enabled: bool = True
+    max_context_chars: int = 48_000
+    keep_recent_iterations: int = 3
+
+
 class ToolsConfig(BaseModel):
     enabled: bool = True
     ssh_key_path: str = "/app/.ssh/id_ed25519"
@@ -143,6 +149,7 @@ class OpenAICodexConfig(BaseModel):
     retry: RetryConfig = RetryConfig()
     connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()
     auxiliary: AuxiliaryLLMConfig = AuxiliaryLLMConfig()
+    context_compression: ContextCompressionConfig = ContextCompressionConfig()
 
 
 class WebhookConfig(BaseModel):

@@ -2200,6 +2200,17 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response(executor.validation_stats.as_dict())
 
     # ------------------------------------------------------------------
+    # Context compression stats (observability)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/compression/stats")
+    async def compression_stats(_request: web.Request) -> web.Response:
+        tracker = getattr(bot, "compression_stats", None)
+        if tracker is None:
+            return web.json_response({"error": "compression stats not available"}, status=503)
+        return web.json_response(tracker.as_dict())
+
+    # ------------------------------------------------------------------
     # Agent trajectories
     # ------------------------------------------------------------------
 
