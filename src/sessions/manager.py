@@ -805,11 +805,57 @@ class SessionManager:
                 task.add_done_callback(self._reflection_tasks.discard)
         except Exception as e:
             log.error("Failed to compact session: %s", e)
-            # Fallback: just trim without LLM summary.  Preserve the
-            # existing summary — it describes older context that is still
-            # relevant even though the detailed messages are gone.
-            session.messages = session.messages[-self.max_history:]
-            self._dirty.add(session.channel_id)
+            self._fallback_compact(session)
+
+    def _fallback_compact(self, session) -> None:
+        """Deterministic local compaction when LLM summarization fails.
+
+        Instead of blindly truncating and losing context, build a simple
+        extractive summary from the discarded messages: who spoke, what
+        tools were used, and the first line of each message. Preserves
+        existing summary and appends the new extract.
+        """
+        keep = self.max_history
+        if len(session.messages) <= keep:
+            return
+        discarded = session.messages[:-keep]
+        session.messages = session.messages[-keep:]
+
+        # Build a deterministic summary from discarded messages
+        users = set()
+        tools_mentioned = set()
+        snippets = []
+        for msg in discarded:
+            if hasattr(msg, "user_name") and msg.user_name:
+                users.add(msg.user_name)
+            content = getattr(msg, "content", "") or ""
+            first_line = content.split("\n", 1)[0][:120]
+            if first_line:
+                snippets.append(first_line)
+            for marker in ("Tool call:", "tool_name", "run_command", "claude_code",
+                           "browser_", "schedule_", "spawn_agent"):
+                if marker in content:
+                    tools_mentioned.add(marker.rstrip("_"))
+                    break
+
+        parts = []
+        if session.summary:
+            parts.append(session.summary)
+        parts.append(f"[compaction fallback: {len(discarded)} messages trimmed]")
+        if users:
+            parts.append(f"Participants: {', '.join(sorted(users))}")
+        if tools_mentioned:
+            parts.append(f"Tools used: {', '.join(sorted(tools_mentioned))}")
+        if snippets:
+            sample = snippets[:5]
+            parts.append("Recent topics: " + " | ".join(sample))
+
+        session.summary = "\n".join(parts)[-1200:]
+        self._dirty.add(session.channel_id)
+        log.warning(
+            "Fallback compaction for %s: trimmed %d messages, built extractive summary (%d chars)",
+            session.channel_id, len(discarded), len(session.summary),
+        )
 
     def reset(self, channel_id: str) -> None:
         self._sessions.pop(channel_id, None)
@@ -834,6 +880,9 @@ class SessionManager:
             log.info("Pruned and archived %d expired sessions", len(expired))
         return len(expired)
 
+    ARCHIVE_MAX_AGE_SECONDS = 7 * 86400  # 7 days
+    ARCHIVE_MAX_FILES = 500
+
     def _archive_session(self, channel_id: str) -> None:
         """Save a session to the archive before pruning."""
         session = self._sessions.get(channel_id)
@@ -846,6 +895,7 @@ class SessionManager:
         data = asdict(session)
         path.write_text(json.dumps(data, indent=2))
         log.info("Archived session %s (%d messages)", channel_id, len(session.messages))
+        self._prune_old_archives(archive_dir)
 
         # Trigger full reflection on the completed session
         if self._reflector and len(session.messages) >= 3:
@@ -865,6 +915,29 @@ class SessionManager:
             task = asyncio.create_task(self._safe_index(path))
             self._indexing_tasks.add(task)
             task.add_done_callback(self._indexing_tasks.discard)
+
+    def _prune_old_archives(self, archive_dir: Path) -> None:
+        """Remove archives older than ARCHIVE_MAX_AGE_SECONDS and enforce ARCHIVE_MAX_FILES."""
+        try:
+            now = time.time()
+            files = sorted(archive_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+            pruned = 0
+            for f in files:
+                age = now - f.stat().st_mtime
+                if age > self.ARCHIVE_MAX_AGE_SECONDS:
+                    f.unlink()
+                    pruned += 1
+            remaining = list(archive_dir.glob("*.json"))
+            if len(remaining) > self.ARCHIVE_MAX_FILES:
+                by_mtime = sorted(remaining, key=lambda p: p.stat().st_mtime)
+                excess = len(remaining) - self.ARCHIVE_MAX_FILES
+                for f in by_mtime[:excess]:
+                    f.unlink()
+                    pruned += 1
+            if pruned:
+                log.info("Pruned %d old archive(s) from %s", pruned, archive_dir)
+        except Exception as e:
+            log.warning("Archive pruning failed: %s", e)
 
     async def _safe_index(self, archive_path: Path) -> None:
         """Index an archived session for semantic search, catching all errors."""
