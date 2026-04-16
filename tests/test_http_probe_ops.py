@@ -638,6 +638,8 @@ class TestHandleHttpProbe:
         exec_inst.risk_stats = RiskStats()
         from src.tools.recovery import RecoveryStats
         exec_inst.recovery_stats = RecoveryStats()
+        from src.tools.result_validator import ResultValidationStats
+        exec_inst.validation_stats = ResultValidationStats()
         from src.tools.branch_freshness import FreshnessStats
         exec_inst.freshness_stats = FreshnessStats()
         exec_inst._exec_command = AsyncMock(return_value=(0, "HTTP/1.1 200 OK\n\nOK"))

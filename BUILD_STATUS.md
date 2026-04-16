@@ -168,7 +168,7 @@ tightening of prior work.
 |---|-------|--------|---------|
 | 41 | Expand detect_hedging pattern corpus + add regression test suite | done | 6 new pattern groups, 4 exemptions, 213 regression tests |
 | 42 | New detector: `detect_stuck_loop` — catches agents iterating without new output (identical tool call chain) | done | `detect_stuck_loop` function + `StuckLoopTracker` class in response_guards.py; fingerprint-based detection of simple repetition and cyclic patterns (up to configurable cycle length); names-only mode; warn-then-terminate lifecycle; +107 tests |
-| 43 | Tool result schema enforcement: validate each tool's result shape before feeding back to LLM | pending | |
+| 43 | Tool result schema enforcement: validate each tool's result shape before feeding back to LLM | done | ToolResultSchema + validate_tool_result in result_validator.py; type coercion, empty replacement, truncation, JSON validation; per-tool schemas; ResultValidationStats; executor integration; /api/validation/stats endpoint; +97 tests |
 | 44 | Context auto-compression with prompt caching (Anthropic-style static prefix caching) | pending | |
 | 45 | Smart model routing: cheap model for intent classification, strong model for execution | pending | |
 
@@ -5521,4 +5521,133 @@ Added stuck loop detection as layer 6 of session defense documentation.
 - The `names_only=True` mode is intentionally more aggressive — it catches agents calling the same tool with different args. This is useful for detecting "polling loops" (e.g., repeatedly checking status with slightly different timestamps). However, it could false-positive on legitimate sequential operations (e.g., reading multiple files). Use with higher `min_repeats` values.
 - REST API endpoint count is 123 (no new endpoints this round).
 - All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
+
+## Round 43 — Tool result schema enforcement: validate each tool's result shape before feeding back to LLM
+**Focus**: Implement tool result schema enforcement — validate and normalise every tool result before it is fed back to the LLM, ensuring consistent shape, bounded size, and observable quality.
+**Baseline pytest**: 4177 passed, 0 failed
+**Post-round pytest**: 4274 passed, 0 failed (+97 new tests)
+
+### Prior round review
+- Round 42 notes said "Round 43 (tool result schema enforcement) has no dependencies on Round 42." Confirmed — no issues to fix from prior rounds.
+- Checked rounds 40-42 "watch for" items: output_streamer finish() while loop safety (round 40), hedging exemption precedence (round 41), and stuck loop detector not yet wired into runtime (round 42). None required fixes for this round's scope.
+
+### Design overview
+
+Tool results flow from handlers through `executor.execute()` (or Discord-native handlers in `background_task.py`) to the LLM. Previously, results were returned as raw strings with no validation. Handlers could theoretically return `None`, non-strings, empty strings, or oversized output without detection. The new system adds a validation layer that runs on every tool result before it reaches the LLM.
+
+The validator is **fail-open**: it normalises invalid results (coerces types, replaces empties, truncates) and logs violations, but never blocks a result from reaching the LLM. This matches the project's philosophy of observability over friction.
+
+### Work done
+
+#### 1. New module: `src/tools/result_validator.py` (157 lines)
+
+**`ToolResultSchema`** (line 39, `@dataclass(slots=True)`):
+- `max_chars: int = 12000` — maximum result length before truncation
+- `allow_empty: bool = False` — whether empty/blank results are acceptable
+- `expect_json: bool = False` — whether result should be valid JSON (soft check)
+
+**`_EMPTY_OK_TOOLS`** (line 48, `frozenset`): Tools that legitimately return empty strings — `write_file`, `browser_click`, `browser_fill`, `add_reaction`, `memory_manage`, `manage_list`, `delete_schedule`, `update_schedule`, `stop_loop`, `kill_agent`.
+
+**`_JSON_TOOLS`** (line 60, `frozenset`): Tools expected to return JSON — `manage_process`.
+
+**`TOOL_SCHEMAS`** (line 62, `dict[str, ToolResultSchema]`): Pre-built per-tool schemas derived from the two frozensets above. Unknown tools fall back to `DEFAULT_SCHEMA`.
+
+**`ValidationOutcome`** (line 72, `@dataclass(slots=True)`):
+- `valid: bool` — True if no violations found
+- `original: str` — pre-normalisation value
+- `normalized: str` — post-normalisation value (safe to feed to LLM)
+- `violations: list[str]` — human-readable violation tags
+
+**`ResultValidationStats`** (line 80, `@dataclass`):
+- Counters: `coerced_type`, `replaced_empty`, `truncated`, `invalid_json`, `total_validated`
+- `as_dict()` method for REST API serialisation
+
+**`_is_error_result(text)`** (line 95): Checks if text starts with any of 8 known error prefixes (matching the `_is_error_output` in `background_task.py` plus additional executor error formats). Used to skip empty-replacement and JSON-validation on error results.
+
+**`_truncate_smart(text, max_chars)`** (line 100): Identical logic to `truncate_tool_output` in `response_guards.py` — preserves first half + last half with omission notice. Kept as a local copy to avoid circular imports between tools and discord packages.
+
+**`validate_tool_result(tool_name, result, *, schema, stats)`** (line 110): The main entry point. Five validation steps in order:
+1. **Type coercion**: `None` → `""`, non-str → `str(x)`. Violation: `result_was_none` or `coerced_{type}_to_str`.
+2. **Whitespace normalisation**: `text.strip()` — removes leading/trailing whitespace and newlines.
+3. **Empty check**: If `text` is empty and `allow_empty=False` and not an error result, replace with `"(no output)"`. Violation: `empty_result_replaced`.
+4. **Truncation**: If `len(text) > max_chars`, apply smart truncation. Violation: `truncated`.
+5. **JSON check (soft)**: If `expect_json=True` and text is non-empty and not an error, attempt `json.loads()`. Violation: `invalid_json` (result is NOT modified — the LLM still sees the raw text, the violation is just logged).
+
+#### 2. Executor integration: `src/tools/executor.py` (lines 31, 89, 168-170)
+
+- Added `from .result_validator import ResultValidationStats, validate_tool_result` (line 31).
+- Added `self.validation_stats = ResultValidationStats()` to `__init__` (line 89).
+- Replaced the three direct `return result`/`return retry_result` paths in `execute()` with a single exit point:
+  ```python
+  outcome = validate_tool_result(tool_name, result, stats=self.validation_stats)
+  return outcome.normalized
+  ```
+  This ensures every tool result (normal, recovered, and retried) is validated.
+
+**Refactored return paths**: The recovery branch previously had two `return retry_result` exits. These are now `result = retry_result` assignments that flow to the single validation call at the end. The early returns for "Unknown tool" and "Permission denied" are NOT validated (they are generated by the executor itself, not by tool handlers).
+
+#### 3. REST API endpoint: `src/web/api.py` (line 2193)
+
+**`GET /api/validation/stats`**: Returns `ResultValidationStats.as_dict()` — live counters of validation violations for observability. Follows the same pattern as `/api/recovery/stats` and `/api/freshness/stats`.
+
+REST API endpoint count is now **124** (was 123).
+
+#### 4. Test fixture fixes
+
+**`tests/test_http_probe_ops.py`** (line 641): Added `validation_stats = ResultValidationStats()` to the `ToolExecutor.__new__()` fixture. The test calls `executor.execute()` which now requires `validation_stats`.
+
+**`tests/test_recovery.py`** (line 1012): Updated `test_recovery_handles_non_string_result` from `assert result == 42` to `assert result == "42"`. The handler returns `42` (int), but the validator now coerces it to `"42"` (str) — this is exactly the intended behavior of type coercion.
+
+### Tests: `tests/test_result_validator.py` — 97 tests across 14 test classes
+
+**TestToolResultSchemaDefaults** (4): Default values for max_chars, allow_empty, expect_json, custom construction.
+
+**TestToolSchemasRegistry** (5): _EMPTY_OK_TOOLS mapped to allow_empty=True, _JSON_TOOLS mapped to expect_json=True, unknown tools not in registry, write_file/manage_process specific checks.
+
+**TestIsErrorResult** (4): All 8 error prefixes detected, normal output rejected, empty string rejected, error not at start rejected.
+
+**TestTruncateSmart** (5): No truncation under/at limit, truncation over limit preserves start+end, result shorter than input, omission count accurate.
+
+**TestValidateTypeCoercion** (6): None coerced (with violation tag), string passthrough, int/list/dict/bool coerced.
+
+**TestValidateEmptyHandling** (5 + parametrized): Empty string replaced, whitespace-only replaced, empty allowed for write_file and browser_click, parametrized test for all _EMPTY_OK_TOOLS, schema override.
+
+**TestValidateTruncation** (4): Long result truncated, under limit not truncated, custom max_chars, exactly at limit.
+
+**TestValidateJSON** (7): Valid JSON passes, invalid JSON flagged, error result skips JSON check, empty result skips, JSON array/string valid, manage_process schema expects JSON.
+
+**TestValidateWhitespace** (3): Leading/trailing stripped, trailing newlines stripped, internal whitespace preserved.
+
+**TestValidationOutcome** (4): Valid outcome has no violations, invalid has violations, original preserved, None original is empty.
+
+**TestResultValidationStats** (8): Initial zeros, coerced_type counted, replaced_empty counted, truncated counted, invalid_json counted, cumulative counting, as_dict keys, no stats object works.
+
+**TestMultipleViolations** (3): None triggers both coercion and empty replacement, coerced+truncated, stats count all violations.
+
+**TestErrorResults** (5): Error strings pass through unchanged — error executing, command failed, unknown tool, permission denied, timeout.
+
+**TestSchemaOverride** (4): Override max_chars, allow_empty, expect_json, explicit schema overrides registry.
+
+**TestExecutorIntegration** (4): Unknown tool not affected, validation_stats increment, None result normalised, empty result normalised.
+
+**TestEdgeCases** (9): Very long error truncated, unicode preserved, multiline preserved, newlines-only replaced, bytes coerced, exception object coerced, placeholder value check, slots on schema and outcome.
+
+### Files changed
+- `src/tools/result_validator.py` (new, 157 lines): `ToolResultSchema`, `ValidationOutcome`, `ResultValidationStats`, `validate_tool_result`, per-tool schema registry.
+- `src/tools/executor.py` (lines 31, 89, 150-170): Import validator, add `validation_stats` attribute, single-exit validation call.
+- `src/web/api.py` (line 2193): `GET /api/validation/stats` endpoint.
+- `tests/test_result_validator.py` (new, 97 tests): 14 test classes.
+- `tests/test_http_probe_ops.py` (line 641): Added `validation_stats` to fixture.
+- `tests/test_recovery.py` (line 1012): Updated assertion from `== 42` to `== "42"`.
+
+### Next round watch for
+- Round 44 (context auto-compression with prompt caching) has no dependencies on Round 43.
+- REST API endpoint count is now 124 (was 123). One new endpoint: `/api/validation/stats`.
+- The validator has its own `_truncate_smart` which duplicates logic from `truncate_tool_output` in `response_guards.py`. This is intentional to avoid circular imports (`tools` → `discord` would be backwards). If the truncation logic changes in `response_guards.py`, it should also be updated in `result_validator.py`.
+- `_EMPTY_OK_TOOLS` and `_JSON_TOOLS` are hardcoded frozensets. When new tools are added, their expected output behavior should be classified and added to the appropriate set.
+- The JSON validation in step 5 is **soft** — it logs the violation but does NOT modify the result. The LLM still sees the raw (possibly non-JSON) text. This is intentional: the LLM can often work with malformed JSON, and blocking it would be counter to fail-open.
+- `validate_tool_result` is currently only integrated into `executor.execute()`. Discord-native tools in `background_task.py` and skill/MCP tools are NOT validated. Future rounds could add validation at those call sites too — the function is a standalone call with no side effects.
+- The `execute()` method now has a single exit point for validation (line 170). The early returns for "Unknown tool" (line 132) and "Permission denied" (line 139) are NOT validated — these are generated by the executor itself and are always well-formed strings. This is intentional.
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
+- The `ToolExecutor.__new__()` fixture pattern now requires `validation_stats = ResultValidationStats()` in addition to the existing attributes. Future test files using this pattern must include it.
 

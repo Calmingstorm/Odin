@@ -2189,6 +2189,17 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response({"entries": executor.freshness_stats.get_recent(limit)})
 
     # ------------------------------------------------------------------
+    # Tool result validation stats (observability)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/validation/stats")
+    async def validation_stats(_request: web.Request) -> web.Response:
+        executor = getattr(bot, "tool_executor", None)
+        if not executor:
+            return web.json_response({"error": "executor not available"}, status=503)
+        return web.json_response(executor.validation_stats.as_dict())
+
+    # ------------------------------------------------------------------
     # Agent trajectories
     # ------------------------------------------------------------------
 

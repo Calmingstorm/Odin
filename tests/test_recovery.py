@@ -1000,7 +1000,7 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_recovery_handles_non_string_result(self):
-        """If a handler somehow returns a non-string, no crash."""
+        """If a handler somehow returns a non-string, validation coerces to str."""
         from src.tools.executor import ToolExecutor
         executor = ToolExecutor()
 
@@ -1009,4 +1009,4 @@ class TestEdgeCases:
 
         executor._handle_weird_tool = _handler
         result = await executor.execute("weird_tool", {})
-        assert result == 42
+        assert result == "42"

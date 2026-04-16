@@ -27,6 +27,7 @@ from .recovery import (
     classify_exception as _classify_exception,
     get_retry_delay as _get_retry_delay,
 )
+from .result_validator import ResultValidationStats, validate_tool_result
 from .risk_classifier import RiskStats, classify_tool
 from .output_streamer import ToolOutputStreamer
 from .ssh import is_local_address, run_local_command, run_ssh_command
@@ -85,6 +86,7 @@ class ToolExecutor:
         self._metrics: dict[str, dict[str, int]] = {}
         self.risk_stats = RiskStats()
         self.recovery_stats = RecoveryStats()
+        self.validation_stats = ResultValidationStats()
         self._recovery_enabled = self.config.recovery.enabled
         self.freshness_stats = FreshnessStats()
         self._branch_freshness_enabled = self.config.branch_freshness.enabled
@@ -160,11 +162,13 @@ class ToolExecutor:
                 retry_cat = self._check_recoverable(retry_result)
                 if retry_cat is not None:
                     self.recovery_stats.record_failure(tool_name, category, snippet)
-                    return retry_result
-                self.recovery_stats.record_success(tool_name, category, snippet)
-                return retry_result
+                    result = retry_result
+                else:
+                    self.recovery_stats.record_success(tool_name, category, snippet)
+                    result = retry_result
 
-        return result
+        outcome = validate_tool_result(tool_name, result, stats=self.validation_stats)
+        return outcome.normalized
 
     async def _try_tool(
         self, tool_name: str, handler, tool_input: dict,
