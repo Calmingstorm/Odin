@@ -848,16 +848,30 @@ class OdinBot(commands.Bot):
         from ..health.startup import run_startup_diagnostics
         self._run_startup_diagnostics = run_startup_diagnostics
 
-        # Public aliases for the health checker / web UI (which uses Odin
-        # naming that diverges from Heimdall's internal names): map the
-        # Heimdall-style attributes onto the names the build-loop UI expects.
-        self.codex = self.codex_client
-        self.knowledge = self._knowledge_store
+        # Public `codex` / `knowledge` attributes are exposed as dynamic
+        # properties defined below on the class — see the @property blocks.
+        # Using properties (instead of one-time aliases) means the web UI /
+        # health checker always reads the live value, even if the underlying
+        # attribute gets reassigned during a reload or reinit.
 
         self._system_prompt = self._build_system_prompt()
         self._register_commands()
         self._init_allowed_webhook_ids()
         self._log_startup_config()
+
+    # ---------- Live aliases expected by the health checker / web UI -------
+    # These forward to the Heimdall-style internal names. Keeping them as
+    # @property (not as one-time assignments in __init__) ensures that if
+    # self.codex_client or self._knowledge_store is ever reassigned after
+    # boot (reloads, reinit flows), health reports stay accurate.
+
+    @property
+    def codex(self):
+        return self.codex_client
+
+    @property
+    def knowledge(self):
+        return self._knowledge_store
 
     def _init_allowed_webhook_ids(self) -> None:
         """Populate _ALLOWED_WEBHOOK_IDS from ALLOWED_WEBHOOK_IDS env var."""
@@ -1566,16 +1580,32 @@ class OdinBot(commands.Bot):
                 log.exception("scrub_secrets failed in early pre-filter")
             try:
                 await message.delete()
-                await message.channel.send(
-                    f"{message.author.mention} I detected a secret/credential in your "
-                    "message. I've deleted it and scrubbed it from my history."
-                )
+                deleted = True
+            except discord.NotFound:
+                # Message already gone (user deleted it, auto-mod beat us, …).
+                # Not a failure — just skip the delete and still warn the author.
+                deleted = True
             except discord.Forbidden:
-                await message.channel.send(
-                    f"{message.author.mention} I detected a secret/credential in your "
-                    "message. I've scrubbed it from my history. "
-                    "I couldn't delete the message — please delete it manually."
-                )
+                deleted = False
+            except discord.HTTPException:
+                # Rate limits, network glitches — treat as "could not delete"
+                # so the user sees the fallback notice and we don't crash
+                # on_message and skip the notification.
+                deleted = False
+            try:
+                if deleted:
+                    await message.channel.send(
+                        f"{message.author.mention} I detected a secret/credential in "
+                        "your message. I've deleted it and scrubbed it from my history."
+                    )
+                else:
+                    await message.channel.send(
+                        f"{message.author.mention} I detected a secret/credential in "
+                        "your message. I've scrubbed it from my history. "
+                        "I couldn't delete the message — please delete it manually."
+                    )
+            except Exception:
+                log.exception("Failed to send secret-scrub notice (non-fatal)")
             return
 
         # Cog-registered prefix commands (moderation, fun, utility, etc.) handle
