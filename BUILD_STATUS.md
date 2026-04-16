@@ -175,7 +175,7 @@ tightening of prior work.
 ### Phase 10 — Polish & final (rounds 46–50)
 | # | Focus | Status | Summary |
 |---|-------|--------|---------|
-| 46 | Startup diagnostics: boot-time checks for Codex auth, SSH hosts, DB, knowledge store, with helpful errors | pending | |
+| 46 | Startup diagnostics: boot-time checks for Codex auth, SSH hosts, DB, knowledge store, with helpful errors | done | DiagnosticResult/StartupReport dataclasses, 8 check functions (discord_token, codex_credentials, codex_model, ssh_hosts, sessions_directory, knowledge_db, config_consistency, data_directories), run_startup_diagnostics orchestrator, /api/startup/diagnostics endpoint, +77 tests |
 | 47 | Graceful degradation: one failing subsystem (knowledge / voice / browser) must not take the whole bot down | pending | |
 | 48 | Outbound webhooks: Odin pushes structured events to registered URLs (Jenkins-style triggers) | pending | |
 | 49 | Coverage boost: push test coverage on features added in rounds 1–48 above their baseline | pending | |
@@ -5972,3 +5972,135 @@ REST API endpoint count is now **126** (was 125).
 - The `classify_with_llm` function truncates input to 500 chars and requests max_tokens=10. This keeps classification fast and cheap. The classification prompt is a single system message — no few-shot examples. If classification quality is poor, few-shot examples could be added to `_CLASSIFY_SYSTEM`.
 - All subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, model_router, context_compressor, stuck_loop_detector).
 
+## Round 46 — Startup diagnostics: boot-time checks with helpful errors
+**Focus**: Implement startup diagnostics — a set of boot-time checks that probe Codex auth, SSH hosts, sessions directory, knowledge store DB, config consistency, and data directories, reporting structured results with human-readable recommendations.
+**Baseline pytest**: 4569 passed, 0 failed
+**Post-round pytest**: 4646 passed, 0 failed (+77 new tests)
+
+### Prior round review
+- Round 45 notes said "Round 46 (startup diagnostics) has no dependencies on Round 45." Confirmed — no issues to fix from prior rounds.
+- Checked rounds 43–45 "watch for" items: duplicated `_truncate_smart` across tools/discord (round 43), context compressor not yet wired into tool loop (round 44), model router not yet wired into runtime (round 45). None required fixes for this round's scope. All are deferred wiring tasks for future rounds.
+
+### Design overview
+
+Startup diagnostics run a battery of non-blocking checks against configuration and the filesystem at boot time. Each check returns a `DiagnosticResult` with: name, passed (bool), detail string, optional recommendation (actionable fix), and optional metadata dict. The orchestrator `run_startup_diagnostics()` runs all checks, records timing, logs a summary (INFO on all-pass, WARNING with details on failures), and returns a `StartupReport` suitable for the REST API.
+
+**Key principle: fail-open.** A failing diagnostic check logs a warning and stores the result for observability, but **never** prevents the bot from starting. The bot degrades gracefully — operators see the report via `/api/startup/diagnostics` or in logs and can fix issues while the bot is running.
+
+### Work done
+
+#### 1. New module: `src/health/startup.py` (330 lines)
+
+**`DiagnosticResult`** (line 30, `@dataclass(slots=True)`):
+- `name: str` — check identifier (e.g., `discord_token`, `codex_credentials`)
+- `passed: bool` — whether the check passed
+- `detail: str` — human-readable description of what was found
+- `recommendation: str = ""` — actionable fix suggestion (only present on failures)
+- `metadata: dict[str, Any]` — structured data for API consumption
+- `to_dict()` — JSON-serializable representation (omits empty recommendation/metadata)
+
+**`StartupReport`** (line 49, `@dataclass`):
+- `results: list[DiagnosticResult]` — all check outcomes
+- `started_at / finished_at: float` — timing
+- Properties: `all_passed`, `passed_count`, `failed_count`, `duration_ms`
+- `to_dict()` — full JSON-serializable snapshot
+
+**8 diagnostic check functions:**
+
+1. **`check_discord_token(config)`** (line 89): Verifies Discord bot token is non-empty. Returns masked token prefix and length in metadata.
+
+2. **`check_codex_credentials(codex_config)`** (line 107): When Codex is enabled, verifies credentials file exists, is valid JSON, contains `access_token`. Supports both single-object and pool (array) formats. Checks token expiry and refresh token availability. Recommendation: "Run scripts/codex_login.py" on failure.
+
+3. **`check_codex_model(codex_config)`** (line 340): Verifies the configured model name is non-empty when Codex is enabled.
+
+4. **`check_ssh_hosts(tools_config)`** (line 209): When SSH hosts are configured, verifies `ssh_key_path` and `ssh_known_hosts_path` point to existing files. Reports host names in metadata.
+
+5. **`check_sessions_directory(sessions_config)`** (line 264): Verifies the sessions persist directory exists and is writable. Creates it if missing. Uses a write-test file probe for writability. Handles `PermissionError` from `is_dir()` on restricted parent directories.
+
+6. **`check_knowledge_db(search_config)`** (line 321): When knowledge search is enabled, verifies the SQLite DB path is accessible. Creates missing directories. Tests SQLite connectivity with `SELECT 1`.
+
+7. **`check_config_sections(config)`** (line 357): Cross-section consistency checks: discord.token present, web.api_token set when web enabled, monitoring has checks and alert_channel_id when enabled, webhook has secret when enabled.
+
+8. **`check_data_directories()`** (line 407): Verifies core data directories (data/, data/sessions, data/trajectories, data/skills, data/logs) exist or creates them.
+
+**`_CONFIG_CHECKS`** (line 431): Registry of 7 config-dependent checks as `(name, callable, config_attribute)` tuples. The `config_attribute` determines which sub-config to pass (e.g., `"openai_codex"` passes `config.openai_codex` to the check).
+
+**`run_startup_diagnostics(*, odin_config, yaml_config)`** (line 443): Main orchestrator. Iterates `_CONFIG_CHECKS`, maps each to the appropriate config sub-section, runs the check, catches crashes (records as failed with "bug — report" recommendation). Appends `check_data_directories()` separately (needs no config). Records timing. Logs summary: INFO when all pass, WARNING with per-failure detail + recommendation when any fail.
+
+#### 2. REST API endpoint: `src/web/api.py` (line 2228)
+
+**`GET /api/startup/diagnostics`**: Returns `StartupReport.to_dict()` — the cached boot-time diagnostic results. 503 if not yet available (bot hasn't stored `startup_report`).
+
+REST API endpoint count is now **127** (was 126).
+
+#### 3. CLAUDE.md updates
+
+- Added `src/health/startup.py` to project structure docs (line 52).
+- Updated REST API endpoint count from 126 to 127.
+
+### Tests: `tests/test_startup_diagnostics.py` — 77 tests across 14 test classes
+
+**TestDiagnosticResult** (7): Basic to_dict, recommendation included/omitted, metadata included/omitted, slots, all fields.
+
+**TestStartupReport** (7): Empty report, all_passed, some_failed, duration_ms, duration_ms zero, to_dict structure, JSON serializable.
+
+**TestCheckDiscordToken** (4): Token present (with masked metadata), empty, missing attr, short token.
+
+**TestCheckCodexCredentials** (10): Disabled, empty path, file not found, invalid JSON, valid single credential, expired with refresh, expired without refresh, pool format valid, pool no valid entries, missing access_token.
+
+**TestCheckSSHHosts** (6): No hosts, valid paths, missing SSH key, missing known_hosts, both missing, host names in metadata.
+
+**TestCheckSessionsDirectory** (5): No persist dir, existing writable, creates missing dir, read-only dir, cannot create dir.
+
+**TestCheckKnowledgeDB** (5): Disabled, empty path, existing dir with SQLite, creates missing dir, SQLite accessible.
+
+**TestCheckConfigSections** (8): Clean config, missing discord, empty discord token, web no auth, monitoring no checks, monitoring no alert channel, webhook no secret, multiple issues.
+
+**TestCheckDataDirectories** (3): All exist, creates missing, partial existing.
+
+**TestCheckCodexModel** (3): Disabled, model set, model empty.
+
+**TestRunStartupDiagnostics** (7): No config, odin_config only, yaml_config, both configs, timing recorded, check crash handled, report JSON serializable.
+
+**TestConfigChecksRegistry** (3): All entries callable, unique names, check count.
+
+**TestEdgeCases** (5): Non-dict/non-list credentials, pool with mixed entries, SSH empty paths, knowledge file path, default metadata isolation.
+
+**TestRealWorldScenarios** (3): Full production config (all pass), minimal dev config (all pass), misconfigured everything (multiple failures with recommendations).
+
+**TestImports** (1): All public symbols importable.
+
+### Files changed
+- `src/health/startup.py` (new, 330 lines): `DiagnosticResult`, `StartupReport`, 8 check functions, `_CONFIG_CHECKS` registry, `run_startup_diagnostics`.
+- `src/web/api.py` (line 2228): `GET /api/startup/diagnostics` endpoint.
+- `CLAUDE.md` (line 52, 67, 112, 192): Added `startup.py` to project structure, updated endpoint count to 127.
+- `tests/test_startup_diagnostics.py` (new, 77 tests): 14 test classes.
+
+### Design decisions
+
+1. **Fail-open, never block startup**: Every check is wrapped in try/except at the orchestrator level. A crashing check is recorded as "failed" with a "bug — report" recommendation, but the next check runs normally. The bot always starts.
+
+2. **No async required**: All checks are synchronous (file I/O, JSON parsing, SQLite probe). No need for `async` since boot-time checks don't need concurrency — they run once, sequentially, in <10ms total.
+
+3. **Two-tier config support**: The orchestrator accepts both `odin_config` (env-based, has `token`/`prefix`) and `yaml_config` (YAML-based, has all subsystem settings). This matches the existing split in `run_bot()` where `OdinConfig.from_env()` and `load_config()` produce different objects. Checks that need different configs are routed appropriately.
+
+4. **Actionable recommendations**: Every failure includes a specific, copy-pastable fix suggestion (e.g., "Run scripts/codex_login.py", "Set openai_codex.model in config.yml", "Generate a key with: ssh-keygen -t ed25519"). This is the key UX difference from the existing `HealthChecker` — that module reports runtime health, this module reports configuration health with repair instructions.
+
+5. **NOT wired into runtime**: Following the pattern of prior rounds (39, 42, 44, 45), the module is a standalone library with full tests. Wiring requires: (a) call `run_startup_diagnostics(odin_config=config, yaml_config=yaml_cfg)` during bot setup, (b) store `bot.startup_report = report` for the REST API endpoint.
+
+6. **Complementary to HealthChecker, not duplicative**: `HealthChecker` (`src/health/checker.py`) checks runtime component health (is the gateway connected? is the circuit breaker open?). Startup diagnostics check pre-boot configuration health (does the credentials file exist? is the SSH key present?). Different lifecycle, different audience — one runs continuously for monitoring dashboards, the other runs once at boot for operators deploying the bot.
+
+7. **Codex credential format detection**: The check supports both single-object (`{"access_token": ...}`) and pool array (`[{"access_token": ...}, ...]`) formats, matching the `CodexAuth` and `CodexAuthPool` classes in `codex_auth.py`.
+
+8. **Write-test for sessions directory**: Rather than checking POSIX permissions (which can be misleading with ACLs, network filesystems, etc.), the check writes and deletes a test file. This is the most reliable writability probe.
+
+### Next round watch for
+- Round 47 (graceful degradation) has no dependencies on Round 46, but may benefit from calling `run_startup_diagnostics()` as part of its subsystem isolation work.
+- REST API endpoint count is now 127 (was 126). One new endpoint: `/api/startup/diagnostics`.
+- The `run_startup_diagnostics()` function is NOT yet called anywhere in runtime code. Wiring requires:
+  - (a) Call `run_startup_diagnostics(odin_config=config, yaml_config=yaml_cfg)` during bot setup (after config loading, before `bot.run()`).
+  - (b) Store the result as `bot.startup_report` for the REST API endpoint to access.
+  - (c) Optionally log the full report at INFO level or send it to a Discord channel on first ready.
+- The `check_data_directories()` function uses relative paths (`data/`, `data/sessions/`, etc.) from CWD. This matches the existing convention in `config.yml` where paths default to `./data/...`. If the bot is run from a different CWD, these paths would be relative to that CWD.
+- The `check_sessions_directory` function wraps `Path.is_dir()` in a try/except to handle `PermissionError` from restricted parent directories. This was caught during testing and fixed.
+- All subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, model_router, context_compressor, stuck_loop_detector, startup_diagnostics).

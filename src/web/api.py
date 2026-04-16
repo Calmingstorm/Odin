@@ -2222,6 +2222,17 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response(router.get_metrics())
 
     # ------------------------------------------------------------------
+    # Startup diagnostics (boot-time checks)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/startup/diagnostics")
+    async def startup_diagnostics(_request: web.Request) -> web.Response:
+        report = getattr(bot, "startup_report", None)
+        if report is None:
+            return web.json_response({"error": "startup diagnostics not available"}, status=503)
+        return web.json_response(report.to_dict())
+
+    # ------------------------------------------------------------------
     # Agent trajectories
     # ------------------------------------------------------------------
 
