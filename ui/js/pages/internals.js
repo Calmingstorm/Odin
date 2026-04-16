@@ -90,6 +90,25 @@ export default {
           </div>
         </section>
 
+        <!-- Command Governor -->
+        <section class="hm-card" style="padding:1.25rem;">
+          <h2 style="font-size:1.1rem;font-weight:600;margin-bottom:0.75rem;">Command Governor</h2>
+          <div v-if="governorStats" class="space-y-2">
+            <div style="display:flex;gap:2rem;font-size:0.85rem;">
+              <span>Blocked: <span class="text-red-400 font-medium">{{ governorStats.blocked || 0 }}</span></span>
+              <span>High-risk allowed: <span class="text-yellow-400 font-medium">{{ governorStats.allowed_high_risk || 0 }}</span></span>
+            </div>
+            <div v-if="governorStats.recent_blocks && governorStats.recent_blocks.length" class="mt-2">
+              <div class="text-xs text-gray-500 mb-1">Recent blocks:</div>
+              <div v-for="(b, i) in governorStats.recent_blocks" :key="i"
+                   class="text-xs text-red-400" style="padding:0.15rem 0;">
+                [{{ b.risk }}] {{ b.reason }} &mdash; <code class="text-gray-500">{{ b.command }}</code>
+              </div>
+            </div>
+          </div>
+          <p v-else class="text-sm text-gray-500">No governor data</p>
+        </section>
+
         <!-- Stats Row -->
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
 
@@ -166,6 +185,7 @@ export default {
     const compressionStats = ref(null);
     const routingStats = ref(null);
     const freshnessStats = ref(null);
+    const governorStats = ref(null);
     let timer = null;
 
     function shortTime(iso) {
@@ -184,6 +204,7 @@ export default {
         api.get('/api/compression/stats'),
         api.get('/api/routing/stats'),
         api.get('/api/freshness/stats'),
+        api.get('/api/governor/stats'),
       ]);
       const val = (i) => results[i].status === 'fulfilled' ? results[i].value : null;
       startup.value = val(0) || {};
@@ -196,6 +217,7 @@ export default {
       compressionStats.value = val(6);
       routingStats.value = val(7);
       freshnessStats.value = val(8);
+      governorStats.value = val(9);
       loading.value = false;
     }
 
@@ -208,7 +230,7 @@ export default {
     return {
       loading, startup, subsystems, sshPool, httpPool,
       riskStats, recoveryStats, compressionStats, routingStats, freshnessStats,
-      statusColor, shortTime,
+      governorStats, statusColor, shortTime,
     };
   },
 };

@@ -2072,6 +2072,13 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "limit must be an integer"}, status=400)
         return web.json_response({"entries": executor.risk_stats.get_recent(limit)})
 
+    @routes.get("/api/governor/stats")
+    async def governor_stats(_request: web.Request) -> web.Response:
+        executor = getattr(bot, "tool_executor", None)
+        if not executor or not getattr(executor, "command_governor", None):
+            return web.json_response({"error": "command governor not available"}, status=503)
+        return web.json_response(executor.command_governor.stats.get_summary())
+
     @routes.get("/api/audit/risk")
     async def audit_by_risk(request: web.Request) -> web.Response:
         risk_level = request.query.get("level") or None
