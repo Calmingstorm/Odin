@@ -90,6 +90,15 @@ class ContextCompressionConfig(BaseModel):
     keep_recent_iterations: int = 3
 
 
+class ModelRoutingConfig(BaseModel):
+    enabled: bool = False
+    confidence_threshold: float = 0.6
+    max_cheap_length: int = 200
+    strong_intents: list[str] = Field(
+        default_factory=lambda: ["task", "complex"],
+    )
+
+
 class ToolsConfig(BaseModel):
     enabled: bool = True
     ssh_key_path: str = "/app/.ssh/id_ed25519"
@@ -150,6 +159,7 @@ class OpenAICodexConfig(BaseModel):
     connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()
     auxiliary: AuxiliaryLLMConfig = AuxiliaryLLMConfig()
     context_compression: ContextCompressionConfig = ContextCompressionConfig()
+    model_routing: ModelRoutingConfig = ModelRoutingConfig()
 
 
 class WebhookConfig(BaseModel):

@@ -170,7 +170,7 @@ tightening of prior work.
 | 42 | New detector: `detect_stuck_loop` — catches agents iterating without new output (identical tool call chain) | done | `detect_stuck_loop` function + `StuckLoopTracker` class in response_guards.py; fingerprint-based detection of simple repetition and cyclic patterns (up to configurable cycle length); names-only mode; warn-then-terminate lifecycle; +107 tests |
 | 43 | Tool result schema enforcement: validate each tool's result shape before feeding back to LLM | done | ToolResultSchema + validate_tool_result in result_validator.py; type coercion, empty replacement, truncation, JSON validation; per-tool schemas; ResultValidationStats; executor integration; /api/validation/stats endpoint; +97 tests |
 | 44 | Context auto-compression with prompt caching (Anthropic-style static prefix caching) | done | ContextCompressor module (PrefixTracker, compress_tool_context, split_prefix_and_iterations), CompressionStats, ContextCompressionConfig, /api/compression/stats endpoint, +98 tests |
-| 45 | Smart model routing: cheap model for intent classification, strong model for execution | pending | |
+| 45 | Smart model routing: cheap model for intent classification, strong model for execution | done | MessageIntent enum (4 intents), heuristic classifier (21 patterns), LLM fallback, ModelRouter with RoutingStats, ModelRoutingConfig, /api/routing/stats endpoint, +197 tests |
 
 ### Phase 10 — Polish & final (rounds 46–50)
 | # | Focus | Status | Summary |
@@ -5802,4 +5802,173 @@ REST API endpoint count is now **125** (was 124).
 - The `split_prefix_and_iterations` function treats any message with `tool_use` blocks as the start of a new iteration. If the message format changes (e.g., tool_use and text in the same message), the splitting logic may need adjustment.
 - `_ERROR_PREFIXES` is a local tuple in context_compressor.py. Similar prefix lists exist in `result_validator.py` (`_ERROR_PREFIXES`) and `background_task.py` (`_is_error_output`). These are intentionally separate to avoid cross-package imports, but should stay in sync if error format conventions change.
 - All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
+
+## Round 45 — Smart model routing: heuristic intent classification + LLM fallback
+**Focus**: Implement smart model routing — classify message intent to decide whether to use the cheap model (chat, queries) or the strong model (tasks, complex work), with heuristic-first classification and optional LLM fallback.
+**Baseline pytest**: 4372 passed, 0 failed
+**Post-round pytest**: 4569 passed, 0 failed (+197 new tests)
+
+### Prior round review
+- Round 44 notes said "Round 45 (smart model routing) has no dependencies on Round 44." Confirmed — no issues to fix from prior rounds.
+- Checked rounds 42–44 "watch for" items: stuck loop detector not yet wired into runtime (round 42), duplicated `_truncate_smart` across tools/discord (round 43), context compressor not yet wired into tool loop (round 44). None required fixes for this round's scope.
+
+### Design overview
+
+The model router sits between incoming messages and LLM invocations, deciding which model tier to use based on classified intent. The design follows a **heuristic-first, fail-open-to-strong** philosophy:
+
+1. **Heuristic classification**: 21 regex patterns across 4 intent categories score each message. Tiebreaking favors the more conservative (expensive) model: complex > task > query > chat.
+2. **LLM fallback**: When heuristic confidence is below a configurable threshold and an `AuxiliaryLLMClient` is available, the cheap model classifies the intent. Falls back to strong model on any LLM error.
+3. **Fail-open**: When unsure, always route to the strong model. Quality over cost.
+
+**Intent taxonomy:**
+- `CHAT` — greetings, social, jokes, acknowledgments → cheap model
+- `QUERY` — information questions, status checks → cheap model
+- `TASK` — commands, file ops, deployments, tool-requiring work → strong model
+- `COMPLEX` — multi-step analysis, debugging, architecture, migrations → strong model
+
+### Work done
+
+#### 1. New module: `src/llm/model_router.py` (425 lines)
+
+**`MessageIntent`** (line 30, `str, Enum`): Four-value intent taxonomy: CHAT, QUERY, TASK, COMPLEX. Extends `str` for easy JSON serialization and comparison.
+
+**`STRONG_MODEL_INTENTS`** (line 38, `frozenset`): `{"task", "complex"}` — intents that should use the strong model.
+
+**`CHEAP_MODEL_INTENTS`** (line 41, `frozenset`): `{"chat", "query"}` — intents routable to the cheap model.
+
+**`RoutingDecision`** (line 49, `@dataclass(slots=True)`):
+- `intent: MessageIntent` — classified intent
+- `use_strong: bool` — whether to use the strong model
+- `confidence: float` — 0.0–1.0 confidence in classification
+- `reason: str` — human-readable explanation
+- `classified_by: str` — "heuristic" or "llm"
+- `latency_ms: float` — time spent on LLM classification (0 for heuristic)
+
+**`RoutingStats`** (line 63, `@dataclass`):
+- Counters: `total_routed`, `routed_strong`, `routed_cheap`, `heuristic_decisions`, `llm_decisions`, `llm_fallback_errors`
+- `intent_counts: dict[str, int]` — per-intent histogram
+- `record(decision)` — update all counters from a RoutingDecision
+- `as_dict()` — JSON-serializable snapshot for REST API
+
+**Heuristic pattern groups** (lines 97–144):
+- `_CHAT_PATTERNS` (5 patterns): greetings, gratitude/reactions, farewells, identity questions, entertainment requests
+- `_QUERY_PATTERNS` (4 patterns): wh-questions with `?`, yes/no questions with `?`, status/uptime/version/info keywords, show/list commands
+- `_TASK_PATTERNS` (7 patterns): action verbs (run/deploy/restart/etc. in imperative position), file operations, CLI tools (ssh/docker/git/etc.), debug/fix verbs, infrastructure checks, setup/configure, code blocks
+- `_COMPLEX_PATTERNS` (6 patterns): analysis/review/audit verbs, root-cause questions, step-by-step/walk-through requests, migration/upgrade, system-building (implement/build a), multi-target operations
+
+**`classify_heuristic(text) -> RoutingDecision`** (line 174): Scores message against all 4 pattern groups. Applies length-based adjustments (short messages → chat boost, very long → complex boost). Question marks boost query when no task patterns fired. When both chat and task/complex patterns fire, suppresses chat (the message requires tools regardless of greeting). Tiebreaker: complex > task > query > chat. Messages exceeding `_CHEAP_MAX_LENGTH` (200 chars) are forced to strong model. Returns RoutingDecision with computed confidence.
+
+**`classify_with_llm(text, aux_client) -> RoutingDecision`** (line 247): Sends the message (truncated to 500 chars) to the cheap model with a classification-specific system prompt. Parses the response as one of CHAT/QUERY/TASK/COMPLEX. Falls back to TASK/strong on unrecognised labels or errors. Tracks latency.
+
+**`ModelRouter`** (line 290, class with `__slots__`):
+- `__init__(*, enabled, confidence_threshold, strong_intents, max_cheap_length, aux_client, stats)`: All optional with sensible defaults.
+- `route(message) -> RoutingDecision`: Main entry point. When disabled, always returns strong. Uses heuristic first. If confidence < threshold and aux_client available, tries LLM classification. Enforces strong_intents as final gate. Records stats.
+- `get_metrics() -> dict`: Returns full configuration + stats for observability.
+
+#### 2. Config: `src/config/schema.py` (line 93)
+
+**`ModelRoutingConfig(BaseModel)`**:
+- `enabled: bool = False` — opt-in, disabled by default
+- `confidence_threshold: float = 0.6` — below this, use LLM classification
+- `max_cheap_length: int = 200` — messages longer than this always use strong
+- `strong_intents: list[str] = ["task", "complex"]` — intents that force strong model
+
+Added as `model_routing` field on `OpenAICodexConfig` (line 154).
+
+#### 3. REST API: `src/web/api.py` (line 2213)
+
+**`GET /api/routing/stats`**: Returns `ModelRouter.get_metrics()` — live routing configuration and decision counters.
+
+REST API endpoint count is now **126** (was 125).
+
+#### 4. CLAUDE.md updates
+
+- Added `src/llm/model_router.py` to project structure docs
+- Updated REST API endpoint count from 123 to 126 (rounds 43–45 each added one)
+
+### Tests: `tests/test_model_router.py` — 197 tests across 21 test classes
+
+**TestMessageIntent** (3): Enum values, count, str inheritance.
+
+**TestIntentConstants** (4): STRONG/CHEAP sets correct, no overlap, union covers all intents.
+
+**TestRoutingDecision** (3): Creation with defaults, custom classified_by/latency_ms, slots.
+
+**TestRoutingStats** (8): Initial zeros, initial intent counts, record strong/cheap/llm, cumulative counting, as_dict keys, JSON serializable.
+
+**TestChatPatterns** (parametrized): Greetings (13 phrases), gratitude/reactions (13), farewells (6), identity questions (4), entertainment (3), empty/whitespace (2).
+
+**TestQueryPatterns** (parametrized): Wh-questions (6), yes/no questions (5), show commands (4), status keyword (1).
+
+**TestTaskPatterns** (parametrized): Action commands (6), file operations (4), CLI tools (5), debug commands (3), infra checks (3), code block (1).
+
+**TestComplexPatterns** (parametrized): Analysis tasks (5), root cause (2), explanations (3), migrations (3), build systems (3), multi-target (2).
+
+**TestClassifyHeuristicEdgeCases** (10): Short unknown → chat, long unknown → task, short message boosts chat, long message forces strong, question mark boosts query, mixed signals (chat+task → task), confidence range, reason not empty, classified_by heuristic, use_strong matches intent.
+
+**TestBuildReason** (2): With scores, no scores.
+
+**TestClassifyWithLLM** (12): Valid labels (CHAT/QUERY/TASK/COMPLEX), whitespace, case insensitive, partial match, unrecognised label, error fallback, timeout fallback, latency tracked, message truncated, system prompt used, classification task/max_tokens, use_strong based on intent.
+
+**TestModelRouterInit** (3): Default construction, custom params, slots.
+
+**TestModelRouterRouteHeuristic** (6): Chat→cheap, task→strong, complex→strong, query→cheap, stats updated, disabled→always strong.
+
+**TestModelRouterRouteLLM** (4): LLM used for low confidence, not used for high confidence, LLM error still routes, LLM improves decision.
+
+**TestModelRouterStrongEnforcement** (3): All intents forced strong, custom strong intents, empty strong intents.
+
+**TestModelRouterMetrics** (5): Keys present, has_llm_fallback true/false, metrics after routing, JSON serializable.
+
+**TestModelRoutingConfig** (4): Defaults, custom values, in codex config, full config parse.
+
+**TestPatternIntegrity** (5): Chat/query/task/complex patterns non-empty, all patterns compile.
+
+**TestRealWorldScenarios** (10): Greeting, status check, deployment, debug session, architecture review, file read, docker command, joke request, multi-server operation, git operation.
+
+**TestImports** (3): Public symbols, constants, config.
+
+**TestConcurrentRouting** (2): Concurrent routes, stats counting under concurrency.
+
+**TestConfidenceThreshold** (3): High threshold triggers LLM, zero threshold never triggers, without aux_client no LLM.
+
+**TestEdgeCases** (8): Unicode, emoji, very long message, newlines, only punctuation, numbers only, case sensitivity, repeated routing (100x).
+
+### Files changed
+- `src/llm/model_router.py` (new, 425 lines): `MessageIntent`, `RoutingDecision`, `RoutingStats`, `classify_heuristic`, `classify_with_llm`, `ModelRouter`, 21 regex patterns across 4 intent categories.
+- `src/config/schema.py` (lines 93–98, 154): `ModelRoutingConfig` class, added to `OpenAICodexConfig`.
+- `src/web/api.py` (lines 2213–2222): `GET /api/routing/stats` endpoint.
+- `CLAUDE.md` (line 33, 66, 111, 191): Added model_router.py to project structure, updated endpoint count.
+- `tests/test_model_router.py` (new, 1041 lines, 197 tests): 21 test classes.
+
+### Design decisions
+
+1. **Heuristic-first, not LLM-first**: Every message gets heuristic classification (sub-millisecond, zero cost). The cheap LLM is only consulted when confidence is below the threshold AND an AuxiliaryLLMClient is available. Most messages have clear intent from patterns alone — greetings and deployment commands don't need LLM classification.
+
+2. **Fail-open to strong model**: On any uncertainty — low confidence, LLM error, unrecognised label, timeout — the router defaults to the strong model. This is quality-over-cost: it's better to waste tokens on a greeting than to send a complex task to the cheap model.
+
+3. **Tiebreaking favors conservative**: When multiple intents score equally (e.g., "deploy" triggers both task and complex), the tiebreaker picks the more expensive model tier: complex > task > query > chat. This prevents under-routing.
+
+4. **Chat suppression on tool co-occurrence**: When both chat patterns (e.g., "hello") and task/complex patterns fire on the same message (e.g., "hello, deploy the app"), chat scores are suppressed by 70%. The message requires tools regardless of the greeting.
+
+5. **Short message heuristic**: Messages under 20 chars get a chat boost (0.3 with pattern matches, 0.5 without). This correctly routes "ok", "sure", "yes" to the cheap model without needing explicit patterns for every acknowledgment word.
+
+6. **Task verb position sensitivity**: Action verbs (run, deploy, restart, etc.) only match in imperative position — at sentence start or after conjunctions/polite prefixes ("can you", "please"). This prevents "when was the last deploy?" from being classified as a task.
+
+7. **Disabled by default**: `ModelRoutingConfig.enabled` defaults to `False`. Operators must opt-in after configuring the auxiliary model. This matches the existing pattern where `AuxiliaryLLMConfig.enabled` also defaults to `False`.
+
+8. **NOT wired into runtime**: Following the pattern of prior rounds (39, 42, 44), the router is a standalone module with full tests. Wiring requires: (a) instantiate `ModelRouter` on bot init with config values, (b) call `router.route(message.content)` before choosing which LLM client to use, (c) pass the `RoutingDecision.use_strong` flag to select between `aux_client` and `primary_client`.
+
+### Next round watch for
+- Round 46 (startup diagnostics) has no dependencies on Round 45.
+- REST API endpoint count is now 126 (was 125). One new endpoint: `/api/routing/stats`.
+- The `ModelRouter` is NOT yet called anywhere in runtime code. Wiring into message processing requires:
+  - (a) Instantiate `ModelRouter` in bot setup with `config.codex.model_routing` values and `aux_client` if available.
+  - (b) Call `await router.route(message.content)` before the LLM call.
+  - (c) Use `decision.use_strong` to select between primary and auxiliary clients.
+  - (d) Store `bot.model_router` for the REST API endpoint to access.
+- The heuristic patterns are intentionally conservative — they err on the side of routing to the strong model. False positives (cheap-model-capable messages sent to strong) waste some cost; false negatives (complex messages sent to cheap) degrade quality. The patterns can be tuned over time using the `/api/routing/stats` observability.
+- The task verb pattern uses imperative position matching (`^` or after conjunction) to avoid false positives on nouns. This means "deploy to production" (imperative) → task, but "when was the last deploy?" (noun) → query. If verb forms are added, check they don't break noun usage.
+- The `classify_with_llm` function truncates input to 500 chars and requests max_tokens=10. This keeps classification fast and cheap. The classification prompt is a single system message — no few-shot examples. If classification quality is poor, few-shot examples could be added to `_CLASSIFY_SYSTEM`.
+- All subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, model_router, context_compressor, stuck_loop_detector).
 

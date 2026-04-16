@@ -30,6 +30,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/llm/secret_scrubber.py` — Secret detection and redaction
   - `src/llm/circuit_breaker.py` — Circuit breaker for LLM backend health
   - `src/llm/auxiliary.py` — Auxiliary LLM client: cheap-model wrapper with fallback for classification/summarization/vision
+  - `src/llm/model_router.py` — Smart model routing: heuristic intent classification (chat/query/task/complex) with optional LLM fallback; routes cheap vs strong model
   - `src/tools/registry.py` — tool definitions (66 tools as dicts)
   - `src/tools/executor.py` — tool execution (local subprocess, SSH, Prometheus, Incus, etc.)
   - `src/tools/ssh.py` — SSH + local subprocess dispatch (is_local_address, run_local_command, run_ssh_command)
@@ -62,7 +63,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/tools/comfyui.py` — ComfyUI image generation client
   - `src/tools/autonomous_loop.py` — autonomous loop system (LLM-driven recurring tasks)
   - `src/search/sqlite_vec.py` — SQLite vector search helpers (sqlite-vec extension)
-  - `src/web/api.py` — REST API for web management UI (123 endpoints)
+  - `src/web/api.py` — REST API for web management UI (126 endpoints)
   - `src/web/websocket.py` — WebSocket handler for live updates (logs, events)
   - `src/web/chat.py` — chat backend for web UI and WebSocket chat
   - `src/agents/manager.py` — multi-agent orchestration with lifecycle state machine (AgentState enum, AgentStateMachine, typed transitions, per-iteration recovery)
@@ -107,7 +108,7 @@ Background services:
 
 Web management UI:
   http://host:3939/ui/ → Vue 3 SPA (CDN, no build step)
-  /api/*               → REST API (123 endpoints, Bearer token auth)
+  /api/*               → REST API (126 endpoints, Bearer token auth)
   /api/ws              → WebSocket (live logs + events)
 ```
 
@@ -187,7 +188,7 @@ No classifier. No approval prompts. No keyword routing. One path: Codex with too
 - **create_poll**: Create native Discord polls (max 10 options, up to 7 days).
 
 ### Web Management UI
-- **Backend**: aiohttp REST API (123 endpoints) + WebSocket, mounted on the health server (port 3939)
+- **Backend**: aiohttp REST API (126 endpoints) + WebSocket, mounted on the health server (port 3939)
 - **Frontend**: Vue 3 + Tailwind CSS + Vue Router (all CDN, no build step), served as static files
 - **Auth**: Bearer token via `web.api_token` config (empty = no auth, dev mode)
 - **Security**: rate limiting (120 req/60s per IP), security headers (nosniff, frame deny), input validation
