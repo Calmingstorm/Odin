@@ -161,6 +161,10 @@ class AuxiliaryLLMConfig(BaseModel):
 
 
 class OpenAICodexConfig(BaseModel):
+    # ``model`` and ``model_routing`` collide with pydantic v2's protected
+    # ``model_*`` namespace by default. Disable the guard.
+    model_config = ConfigDict(protected_namespaces=())
+
     enabled: bool = False
     model: str = "gpt-4o"
     max_tokens: int = 4096
@@ -363,6 +367,10 @@ class MCPConfig(BaseModel):
 
 
 class Config(BaseModel):
+    # ``model_routing`` and ``model_router`` would otherwise collide with
+    # pydantic v2's protected ``model_*`` namespace. Disable the guard.
+    model_config = ConfigDict(protected_namespaces=())
+
     timezone: str = "UTC"
     discord: DiscordConfig
     openai_codex: OpenAICodexConfig = OpenAICodexConfig()

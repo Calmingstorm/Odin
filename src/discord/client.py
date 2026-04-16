@@ -691,7 +691,9 @@ class OdinBot(commands.Bot):
                 log.warning("Codex enabled in config but no credentials found. Run scripts/codex_login.py")
 
         self.scheduler = Scheduler(data_path="./data/schedules.json")
-        self.audit = AuditLogger(path="./data/audit.jsonl")
+        # Audit logger — HMAC chain signing is on iff config.audit.hmac_key is set
+        _audit_key = config.audit.hmac_key if getattr(config, "audit", None) else ""
+        self.audit = AuditLogger(path="./data/audit.jsonl", hmac_key=_audit_key)
         self.permissions = PermissionManager(
             config_tiers=config.permissions.tiers,
             default_tier=config.permissions.default_tier,
@@ -722,6 +724,130 @@ class OdinBot(commands.Bot):
                 executor=self.tool_executor,
                 alert_callback=self._on_monitor_alert,
             )
+
+        # ------------------------------------------------------------------
+        # Build-loop additions — instantiate every module the 50-round build
+        # loop produced, so each is reachable from the running bot rather than
+        # sitting as standalone code in src/. Each is config-gated where it
+        # makes sense so default behavior matches Heimdall.
+        # ------------------------------------------------------------------
+
+        # Cost tracking — always on, near-zero overhead.
+        from ..llm.cost_tracker import CostTracker
+        self.cost_tracker = CostTracker()
+
+        # Trajectory savers — message-level + agent-level. Always on; writes
+        # to date-partitioned JSONL under data/trajectories/.
+        from ..trajectories.saver import TrajectorySaver
+        from ..agents.trajectory import AgentTrajectorySaver
+        self.trajectory_saver = TrajectorySaver()
+        self.agent_trajectory_saver = AgentTrajectorySaver()
+
+        # Stuck-loop tracker — instantiated per-iteration in the tool loop, but
+        # store the class on the bot for tests and external introspection.
+        from ..discord.response_guards import StuckLoopTracker
+        self.stuck_loop_tracker_cls = StuckLoopTracker
+
+        # Subsystem guard — tracks per-subsystem health (Codex/SSH/knowledge/
+        # voice/browser/comfyui). Always on; subsystems call record_success/
+        # record_failure as they operate.
+        from ..health.subsystem_guard import SubsystemGuard
+        self.subsystem_guard = SubsystemGuard()
+        for _name in ("codex", "ssh", "knowledge", "voice", "browser", "comfyui"):
+            self.subsystem_guard.register(_name)
+
+        # Audit signer — exposed as bot.audit_signer for tests/introspection.
+        # The actual chain signing is wired into AuditLogger via the hmac_key
+        # constructor arg above; signing happens automatically inside log_execution.
+        self.audit_signer = self.audit._signer
+
+        # Action diff tracker — records before→after diffs for file/config
+        # changes when audit logging picks them up. Always on.
+        from ..audit.diff_tracker import DiffTracker
+        self.diff_tracker = DiffTracker()
+
+        # Risk classifier — observability only, never blocks. The classify
+        # functions are stateless module-level; expose them as bot methods so
+        # callers can use them through the bot.
+        from ..tools.risk_classifier import classify_command, classify_tool
+        self.classify_command_risk = classify_command
+        self.classify_tool_risk = classify_tool
+
+        # Model router — heuristic-first, LLM fallback to pick cheap vs strong
+        # model per intent. Off by default; enable via openai_codex.model_routing.
+        self.model_router = None
+        _routing = getattr(config.openai_codex, "model_routing", None)
+        if _routing and _routing.enabled:
+            from ..llm.model_router import ModelRouter
+            self.model_router = ModelRouter(
+                enabled=True,
+                confidence_threshold=_routing.confidence_threshold,
+                max_cheap_length=_routing.max_cheap_length,
+                strong_intents=frozenset(_routing.strong_intents),
+            )
+
+        # Context compressor — summarizes prior tool iterations when context
+        # grows. On by default; tune via openai_codex.context_compression.
+        self.context_compressor = None
+        self.prefix_tracker = None
+        _compress = getattr(config.openai_codex, "context_compression", None)
+        if _compress and _compress.enabled:
+            from ..llm.context_compressor import PrefixTracker
+            self.prefix_tracker = PrefixTracker()
+            self.context_compressor = _compress  # config object itself acts as the on/off + thresholds
+
+        # Auxiliary LLM client — cheap-model wrapper for classification /
+        # summarization tasks. Off unless openai_codex.auxiliary.enabled.
+        self.auxiliary_llm_client = None
+        _aux = getattr(config.openai_codex, "auxiliary", None)
+        if _aux and _aux.enabled and self.codex_client:
+            try:
+                from ..llm.auxiliary import AuxiliaryLLMClient
+                from ..llm.codex_auth import CodexAuthPool
+                aux_creds = _aux.credentials_path or config.openai_codex.credentials_path
+                aux_auth = CodexAuthPool(aux_creds)
+                if aux_auth.is_configured():
+                    aux_client = CodexChatClient(
+                        auth=aux_auth,
+                        model=_aux.model,
+                        max_tokens=_aux.max_tokens,
+                    )
+                    self.auxiliary_llm_client = AuxiliaryLLMClient(
+                        aux_client=aux_client,
+                        primary_client=self.codex_client,
+                        cost_tracker=self.cost_tracker,
+                    )
+                    log.info(
+                        "Auxiliary LLM client enabled (model: %s)", _aux.model,
+                    )
+            except Exception:
+                log.exception("Failed to initialize auxiliary LLM client")
+
+        # Outbound webhook dispatcher — lifecycle event push to registered
+        # external URLs. Off unless outbound_webhooks.enabled. Targets
+        # populated from config.
+        self.outbound_webhook_dispatcher = None
+        if getattr(config, "outbound_webhooks", None) and config.outbound_webhooks.enabled:
+            from ..notifications.outbound_webhooks import OutboundWebhookDispatcher
+            self.outbound_webhook_dispatcher = OutboundWebhookDispatcher(
+                scrub_secrets=config.outbound_webhooks.scrub_secrets,
+                rate_limit_seconds=config.outbound_webhooks.rate_limit_seconds,
+            )
+            for tgt in getattr(config.outbound_webhooks, "targets", []) or []:
+                try:
+                    self.outbound_webhook_dispatcher.register(
+                        name=tgt.name,
+                        url=tgt.url,
+                        secret=tgt.secret,
+                        events=tgt.events or None,
+                        enabled=tgt.enabled,
+                    )
+                except Exception:
+                    log.exception("Failed to register outbound webhook target")
+
+        # Startup diagnostics — function reference; called from setup_hook.
+        from ..health.startup import run_startup_diagnostics
+        self._run_startup_diagnostics = run_startup_diagnostics
 
         self._system_prompt = self._build_system_prompt()
         self._register_commands()
@@ -1151,7 +1277,34 @@ class OdinBot(commands.Bot):
         return commands.when_mentioned_or(*base)(bot, message)
 
     async def setup_hook(self) -> None:
-        """Called once before connecting to the gateway. Load all moderation cogs."""
+        """Called once before connecting to the gateway.
+
+        Runs startup diagnostics first so any critical config error surfaces
+        BEFORE we try to connect, then loads moderation cogs, then resumes
+        the audit log HMAC chain (if signing is enabled), then sets the bot
+        ready bit on the dispatcher (if registered).
+        """
+        # Startup diagnostics — never blocks startup, just logs what we found.
+        try:
+            report = self._run_startup_diagnostics(yaml_config=self.config)
+            for r in report.results:
+                level = log.error if r.severity == "critical" else (log.warning if r.severity == "warning" else log.info)
+                level("startup diagnostic [%s]: %s — %s", r.severity, r.name, r.message)
+            if report.critical_count:
+                log.warning(
+                    "%d critical startup issue(s) detected — see preceding diagnostic lines",
+                    report.critical_count,
+                )
+        except Exception:
+            log.exception("Startup diagnostics failed unexpectedly (non-fatal)")
+
+        # Resume HMAC chain so signing picks up after a restart
+        if self.audit_signer is not None:
+            try:
+                await self.audit.initialize_chain()
+            except Exception:
+                log.exception("Failed to initialize audit HMAC chain")
+
         for ext in INITIAL_EXTENSIONS:
             try:
                 await self.load_extension(ext)
@@ -1216,6 +1369,14 @@ class OdinBot(commands.Bot):
                 sessions.save_all()
             except Exception:
                 log.exception("Error saving sessions")
+
+        # Outbound webhook session cleanup (lazily created; only present after first dispatch)
+        dispatcher = getattr(self, "outbound_webhook_dispatcher", None)
+        if dispatcher is not None:
+            try:
+                await dispatcher.close()
+            except Exception:
+                log.exception("Error closing outbound_webhook_dispatcher")
 
         await super().close()
         log.info("OdinBot shutdown complete")
