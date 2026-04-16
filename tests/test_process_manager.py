@@ -167,7 +167,9 @@ class TestProcessRegistryWrite:
     @pytest.mark.asyncio
     async def test_write_success(self):
         reg = ProcessRegistry()
-        mock_stdin = AsyncMock()
+        mock_stdin = MagicMock()
+        mock_stdin.write = MagicMock()  # StreamWriter.write() is synchronous
+        mock_stdin.drain = AsyncMock()  # StreamWriter.drain() is async
         mock_proc = MagicMock()
         mock_proc.stdin = mock_stdin
         info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time(), process=mock_proc)
@@ -175,6 +177,8 @@ class TestProcessRegistryWrite:
         result = await reg.write(1, "hello")
         assert "Wrote" in result
         assert "5 bytes" in result
+        mock_stdin.write.assert_called_once_with(b"hello")
+        mock_stdin.drain.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

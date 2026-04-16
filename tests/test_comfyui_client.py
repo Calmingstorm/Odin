@@ -304,7 +304,7 @@ class TestGenerate:
         client = ComfyUIClient("http://localhost:8188")
         captured_payload = {}
 
-        async def capture_post(url, json=None):
+        def capture_post(url, json=None):
             captured_payload.update(json or {})
             return _MockContextManager(_mock_response(json_data={"prompt_id": "test123"}))
 
@@ -319,10 +319,9 @@ class TestGenerate:
 
                     await client.generate("a cat", width=512, height=768)
 
-        if captured_payload:
-            workflow = captured_payload.get("prompt", {})
-            assert workflow.get("5", {}).get("inputs", {}).get("width") == 512
-            assert workflow.get("5", {}).get("inputs", {}).get("height") == 768
+        workflow = captured_payload.get("prompt", {})
+        assert workflow["5"]["inputs"]["width"] == 512
+        assert workflow["5"]["inputs"]["height"] == 768
 
     @pytest.mark.asyncio
     async def test_generate_sets_prompt_text(self):
@@ -330,7 +329,7 @@ class TestGenerate:
         client = ComfyUIClient("http://localhost:8188")
         captured_payload = {}
 
-        async def capture_post(url, json=None):
+        def capture_post(url, json=None):
             captured_payload.update(json or {})
             return _MockContextManager(_mock_response(json_data={"prompt_id": "test123"}))
 
@@ -345,10 +344,9 @@ class TestGenerate:
 
                     await client.generate("beautiful sunset", negative="ugly")
 
-        if captured_payload:
-            workflow = captured_payload.get("prompt", {})
-            assert workflow.get("6", {}).get("inputs", {}).get("text") == "beautiful sunset"
-            assert workflow.get("7", {}).get("inputs", {}).get("text") == "ugly"
+        workflow = captured_payload.get("prompt", {})
+        assert workflow["6"]["inputs"]["text"] == "beautiful sunset"
+        assert workflow["7"]["inputs"]["text"] == "ugly"
 
 
 # ---------------------------------------------------------------------------
