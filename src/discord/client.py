@@ -1770,7 +1770,7 @@ class OdinBot(commands.Bot):
             if len(buf) >= self._bot_msg_buffer_max:
                 log.warning("Bot buffer full (%d msgs) for %s, dropping oldest", len(buf), buf_key)
                 buf.pop(0)
-            buf.append(message.content)
+            buf.append(scrub_output_secrets(message.content))
 
             # Cancel previous timer for this bot+channel
             if buf_key in self._bot_msg_tasks:
@@ -1813,6 +1813,7 @@ class OdinBot(commands.Bot):
         # Handle file attachments — append file contents to the message
         attachment_text, image_blocks = await self._process_attachments(message)
         if attachment_text:
+            attachment_text = scrub_output_secrets(attachment_text)
             content = f"{content}\n\n{attachment_text}" if content else attachment_text
 
         if not content and not image_blocks:
@@ -2940,12 +2941,16 @@ class OdinBot(commands.Bot):
 
                 # Audit log — never crash tool execution on audit failure
                 try:
+                    scrubbed_input = {
+                        k: scrub_output_secrets(str(v)) if isinstance(v, str) else v
+                        for k, v in (tool_input or {}).items()
+                    }
                     await self.audit.log_execution(
                         user_id=str(message.author.id),
                         user_name=str(message.author),
                         channel_id=str(message.channel.id),
                         tool_name=tool_name,
-                        tool_input=tool_input,
+                        tool_input=scrubbed_input,
                         approved=True,
                         result_summary=result,
                         execution_time_ms=elapsed_ms,
