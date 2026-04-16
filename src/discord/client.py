@@ -1139,8 +1139,8 @@ class OdinBot(commands.Bot):
             )
             if hints:
                 return system_prompt + f"\n\n{hints}"
-        except Exception:
-            pass  # Non-critical — hints are optional optimization
+        except Exception as e:
+            log.warning("Tool selection hints failed: %s", e)
         return system_prompt
 
     def _build_chat_system_prompt(
@@ -2369,9 +2369,9 @@ class OdinBot(commands.Bot):
                 ),
                 timeout=10,
             )
-        except Exception:
-            log.info("Completion classifier: error/timeout — treating as COMPLETE")
-            return True, ""
+        except Exception as e:
+            log.warning("Completion classifier: error/timeout (%s) — treating as INCOMPLETE to avoid premature stop", e)
+            return False, ""
 
         return self._parse_classifier_response(raw)
 
