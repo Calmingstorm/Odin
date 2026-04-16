@@ -84,13 +84,19 @@ class TestConstants:
 # ---------------------------------------------------------------------------
 
 class TestBrowserManagerInit:
-    def test_default_params(self):
+    def test_default_params_native_mode(self):
         mgr = BrowserManager()
-        assert mgr._cdp_url == "ws://odin-browser:3000?token=odin-internal"
+        assert mgr._cdp_url == ""
+        assert mgr._native is True
         assert mgr._default_timeout_ms == 30000
         assert mgr._viewport == {"width": 1280, "height": 720}
         assert mgr._browser is None
         assert mgr._playwright is None
+
+    def test_cdp_url_sets_remote_mode(self):
+        mgr = BrowserManager(cdp_url="ws://custom:9222")
+        assert mgr._native is False
+        assert mgr._cdp_url == "ws://custom:9222"
 
     def test_custom_params(self):
         mgr = BrowserManager(
@@ -171,19 +177,33 @@ class TestEnsureConnected:
             await mgr._ensure_connected()
 
     @pytest.mark.asyncio
-    async def test_connection_failure_raises(self):
+    async def test_native_launch_failure_raises(self):
         mgr = BrowserManager()
         mock_pw = AsyncMock()
-        mock_pw.chromium.connect_over_cdp = AsyncMock(side_effect=Exception("refused"))
-
-        # Pre-set _playwright so _ensure_connected skips the import
+        mock_pw.chromium.launch = AsyncMock(side_effect=Exception("no chromium"))
         mgr._playwright = mock_pw
 
-        # Mock the import so it doesn't fail
         import sys
         mock_module = MagicMock()
-        mock_async_playwright = MagicMock(return_value=mock_pw)
-        mock_module.async_playwright = mock_async_playwright
+        mock_module.async_playwright = MagicMock(return_value=mock_pw)
+
+        with patch.dict(sys.modules, {
+            "playwright": MagicMock(),
+            "playwright.async_api": mock_module,
+        }):
+            with pytest.raises(RuntimeError, match="Failed to launch Chromium"):
+                await mgr._ensure_connected()
+
+    @pytest.mark.asyncio
+    async def test_remote_cdp_failure_raises(self):
+        mgr = BrowserManager(cdp_url="ws://bad:9222")
+        mock_pw = AsyncMock()
+        mock_pw.chromium.connect_over_cdp = AsyncMock(side_effect=Exception("refused"))
+        mgr._playwright = mock_pw
+
+        import sys
+        mock_module = MagicMock()
+        mock_module.async_playwright = MagicMock(return_value=mock_pw)
 
         with patch.dict(sys.modules, {
             "playwright": MagicMock(),

@@ -1,8 +1,8 @@
-"""Browser automation via Playwright connecting to a Browserless Chromium sidecar.
+"""Browser automation via native Playwright (no external Browserless sidecar).
 
-Provides headless browser capabilities: screenshots, page reading, table extraction,
-clicking, form filling, and JavaScript evaluation. All operations use isolated
-browser contexts (incognito) that are cleaned up after each call.
+Launches a local headless Chromium on first use and reuses it across calls.
+All operations use isolated browser contexts (incognito) that are cleaned up
+after each call. Falls back to a remote CDP URL if configured.
 """
 from __future__ import annotations
 
@@ -40,11 +40,11 @@ def _validate_url(url: str) -> None:
 
 
 class BrowserManager:
-    """Manages Playwright connection to a Browserless Chromium container via CDP."""
+    """Manages a Playwright Chromium browser — native launch or remote CDP."""
 
     def __init__(
         self,
-        cdp_url: str = "ws://odin-browser:3000?token=odin-internal",
+        cdp_url: str = "",
         default_timeout_ms: int = 30000,
         viewport_width: int = 1280,
         viewport_height: int = 720,
@@ -55,6 +55,7 @@ class BrowserManager:
         self._playwright = None
         self._browser = None
         self._lock = asyncio.Lock()
+        self._native = not bool(cdp_url)
 
     @staticmethod
     def _is_connection_error(exc: Exception) -> bool:
@@ -64,7 +65,7 @@ class BrowserManager:
 
     def _on_browser_disconnected(self) -> None:
         """Callback when the browser fires a 'disconnected' event."""
-        log.warning("Browser disconnected (container may have restarted)")
+        log.warning("Browser disconnected")
         self._browser = None
 
     async def _force_reconnect(self) -> None:
@@ -79,7 +80,7 @@ class BrowserManager:
         await self._ensure_connected()
 
     async def _ensure_connected(self) -> None:
-        """Lazy-connect to the browser, reconnecting if the connection dropped."""
+        """Lazy-launch or lazy-connect the browser."""
         async with self._lock:
             if self._browser and self._browser.is_connected():
                 return
@@ -88,19 +89,36 @@ class BrowserManager:
             except ImportError:
                 raise RuntimeError(
                     "playwright is not installed. "
-                    "Add 'playwright' to pyproject.toml dependencies."
+                    "Run: pip install playwright && playwright install chromium"
                 )
             if not self._playwright:
                 self._playwright = await async_playwright().start()
             try:
-                self._browser = await self._playwright.chromium.connect_over_cdp(
-                    self._cdp_url
-                )
+                if self._native:
+                    self._browser = await self._playwright.chromium.launch(
+                        headless=True,
+                        args=[
+                            "--no-sandbox",
+                            "--disable-setuid-sandbox",
+                            "--disable-dev-shm-usage",
+                            "--disable-gpu",
+                        ],
+                    )
+                    log.info("Launched native headless Chromium")
+                else:
+                    self._browser = await self._playwright.chromium.connect_over_cdp(
+                        self._cdp_url
+                    )
+                    log.info("Connected to remote browser at %s", self._cdp_url.split("?")[0])
                 self._browser.on("disconnected", self._on_browser_disconnected)
-                log.info("Connected to browser at %s", self._cdp_url.split("?")[0])
             except Exception as e:
+                if self._native:
+                    raise RuntimeError(
+                        f"Failed to launch Chromium. Run 'playwright install chromium' "
+                        f"to install browser binaries. ({e})"
+                    )
                 raise RuntimeError(
-                    f"Browser service unavailable. Is the odin-browser container running? ({e})"
+                    f"Browser service unavailable at {self._cdp_url.split('?')[0]}. ({e})"
                 )
 
     async def _create_page(self, timeout_ms: int | None = None):
@@ -111,30 +129,33 @@ class BrowserManager:
         )
         context.set_default_timeout(timeout_ms or self._default_timeout_ms)
         page = await context.new_page()
-        # CDP connections may ignore context viewport — force it via CDP protocol
-        cdp = await page.context.new_cdp_session(page)
-        await cdp.send("Emulation.setDeviceMetricsOverride", {
-            "width": self._viewport["width"],
-            "height": self._viewport["height"],
-            "deviceScaleFactor": 1,
-            "mobile": False,
-        })
+        if not self._native:
+            try:
+                cdp = await page.context.new_cdp_session(page)
+                await cdp.send("Emulation.setDeviceMetricsOverride", {
+                    "width": self._viewport["width"],
+                    "height": self._viewport["height"],
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                })
+            except Exception:
+                pass
         return context, page
 
     @asynccontextmanager
     async def new_page(self, timeout_ms: int | None = None) -> AsyncIterator:
         """Yield a fresh page in an isolated context. Auto-cleans up.
 
-        Self-heals stale CDP connections: if the browser container restarted,
-        the first page creation attempt will fail. We catch connection errors,
-        force a reconnect, and retry once.
+        Self-heals crashed browsers: if the browser process died, the first
+        page creation attempt will fail. We catch the error, relaunch, and
+        retry once.
         """
         await self._ensure_connected()
         try:
             context, page = await self._create_page(timeout_ms)
         except Exception as e:
             if self._is_connection_error(e):
-                log.warning("Stale CDP connection, reconnecting: %s", e)
+                log.warning("Browser connection lost, relaunching: %s", e)
                 await self._force_reconnect()
                 context, page = await self._create_page(timeout_ms)
             else:
@@ -145,10 +166,10 @@ class BrowserManager:
             try:
                 await context.close()
             except Exception:
-                pass  # Context may already be closed if browser disconnected
+                pass
 
     async def shutdown(self) -> None:
-        """Clean disconnect from the browser."""
+        """Clean shutdown of the browser."""
         try:
             if self._browser:
                 await self._browser.close()

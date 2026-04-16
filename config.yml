@@ -79,8 +79,10 @@ voice:
 
 browser:
   enabled: true
-  # Customize CDP WebSocket URL to match your browser service
-  cdp_url: ws://odin-browser:3000?token=odin-internal
+  # Leave empty for native Playwright (launches local Chromium — no sidecar needed).
+  # Set a ws:// URL to connect to a remote CDP browser instead.
+  # cdp_url: ws://some-browserless-host:3000?token=secret
+  cdp_url: ""
 
 permissions:
   default_tier: admin
