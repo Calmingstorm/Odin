@@ -29,6 +29,7 @@ You are running as part of an automated build loop. Each session, you:
   - `src/llm/types.py` — Backend-agnostic LLMResponse and ToolCall types
   - `src/llm/secret_scrubber.py` — Secret detection and redaction
   - `src/llm/circuit_breaker.py` — Circuit breaker for LLM backend health
+  - `src/llm/auxiliary.py` — Auxiliary LLM client: cheap-model wrapper with fallback for classification/summarization/vision
   - `src/tools/registry.py` — tool definitions (66 tools as dicts)
   - `src/tools/executor.py` — tool execution (local subprocess, SSH, Prometheus, Incus, etc.)
   - `src/tools/ssh.py` — SSH + local subprocess dispatch (is_local_address, run_local_command, run_ssh_command)

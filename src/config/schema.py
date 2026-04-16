@@ -125,6 +125,16 @@ class UsageConfig(BaseModel):
     directory: str = "./data/usage"
 
 
+class AuxiliaryLLMConfig(BaseModel):
+    enabled: bool = False
+    model: str = "gpt-4o-mini"
+    max_tokens: int = 2048
+    credentials_path: str = ""  # Empty = share main codex credentials
+    tasks: list[str] = Field(
+        default_factory=lambda: ["compaction", "reflection", "consolidation", "background_followup"],
+    )
+
+
 class OpenAICodexConfig(BaseModel):
     enabled: bool = False
     model: str = "gpt-4o"
@@ -132,6 +142,7 @@ class OpenAICodexConfig(BaseModel):
     credentials_path: str = "./data/codex_auth.json"
     retry: RetryConfig = RetryConfig()
     connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()
+    auxiliary: AuxiliaryLLMConfig = AuxiliaryLLMConfig()
 
 
 class WebhookConfig(BaseModel):

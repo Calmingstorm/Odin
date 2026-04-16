@@ -160,7 +160,7 @@ tightening of prior work.
 | 36 | Health dashboard page: all component health at a glance (Codex, SSH hosts, DB, knowledge store, voice) | done | HealthChecker module (11 components: Discord, Codex, sessions, knowledge, SSH hosts, voice, monitoring, browser, scheduler, loops, agents), /api/health/components endpoint, health.js web UI page with auto-refresh, +74 tests |
 | 37 | Memory-usage widget: session count, knowledge DB size, trajectory volume | done | ResourceUsage module (4 dataclasses: DirStats, SessionStats, KnowledgeStats, TrajectoryStats), collect_all() aggregator, /api/resource-usage endpoint, resources.js web UI page with 4 tabs (sessions/knowledge/trajectories/storage) + storage bar chart, +81 tests |
 | 38 | Tool output streaming: ship partial results to Discord/UI as tools produce them (opt-in per tool, OFF by default — never spam) | done | ToolOutputStreamer module, StreamChunk dataclass, line-by-line streaming in run_local_command/run_ssh_command, executor integration for run_command/run_script, StreamingConfig, /api/tool-streams endpoint, WebSocket broadcast, +76 tests |
-| 39 | Auxiliary LLM client: separate cheap-model client for classification / summarization / vision description | pending | |
+| 39 | Auxiliary LLM client: separate cheap-model client for classification / summarization / vision description | done | AuxiliaryLLMClient module with task routing + automatic fallback, AuxiliaryLLMConfig (model, max_tokens, tasks), make_chat_fn/make_codex_callback factories for CompactionFn/TextFn/CodexCallback, cost tracking, circuit breaker awareness, +63 tests |
 | 40 | REVIEWER: validate rounds 31–39, tighten tests, fix bugs found | pending | |
 
 ### Phase 9 — Anti-hedging + detection hardening (rounds 41–45)
@@ -5081,4 +5081,127 @@ Updated to export `StreamChunk` and `ToolOutputStreamer`.
 - The `_read_lines_with_callback` function uses `proc.stdout.readline()` which blocks until a full line arrives. Tools that produce output without newlines (e.g., progress bars) may not stream until the line completes.
 - WebSocket `tool_stream` events are broadcast to ALL event subscribers. There's no per-channel filtering yet. The web UI should filter by channel_id client-side if needed.
 - The `ToolExecutor.__new__()` fixture pattern in tests needs `output_streamer` set (or set to None). Tests that use `ToolExecutor.__new__()` and call `_handle_run_command` must set `executor.output_streamer = None`.
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
+
+## Round 39 — Auxiliary LLM client: cheap-model wrapper for classification/summarization/vision
+**Focus**: Build a separate LLM client configured with a cheaper/faster model (e.g. gpt-4o-mini) for auxiliary tasks — session compaction, learning reflection, consolidation, background task follow-up, vision description, and classification. Automatic fallback to the primary model on failure.
+**Baseline pytest**: 3771 passed, 0 failed
+**Post-round pytest**: 3834 passed, 0 failed (+63 new tests)
+
+### Validated from prior rounds
+- Round 38 (Tool output streaming): All 76 tests pass. No changes needed.
+- Round 37 (Resource usage widget): All 81 tests pass. No changes needed.
+- Round 38 noted "Round 39 has no dependencies on Round 38" — confirmed, clean start.
+- Round 38 noted REST API endpoint count was 123 — unchanged (no new endpoints this round).
+- Round 38 noted `ToolExecutor.__new__()` fixture pattern needs `output_streamer` — unchanged.
+- All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.) — unchanged.
+- No bugs or watch-for items from prior rounds needed fixing.
+
+### Work done
+
+#### 1. Auxiliary LLM config: `src/config/schema.py` (lines 128-137)
+
+New **AuxiliaryLLMConfig** Pydantic model:
+- `enabled: bool = False` — master switch (OFF by default)
+- `model: str = "gpt-4o-mini"` — cheap model for auxiliary tasks
+- `max_tokens: int = 2048` — lower token limit for auxiliary tasks
+- `credentials_path: str = ""` — empty = share main codex credentials
+- `tasks: list[str]` — task names to route to auxiliary model, defaults to `["compaction", "reflection", "consolidation", "background_followup"]`
+
+Added `auxiliary: AuxiliaryLLMConfig = AuxiliaryLLMConfig()` to **OpenAICodexConfig** (line 146).
+
+#### 2. Auxiliary LLM client module: `src/llm/auxiliary.py` (new, ~160 lines)
+
+**KNOWN_TASKS** frozenset (7 tasks):
+- `compaction`, `reflection`, `consolidation`, `background_followup`, `vision_description`, `classification`, `summarization`
+
+**AuxiliaryLLMClient** class:
+- `__init__(aux_client, primary_client, enabled_tasks, cost_tracker)`: Stores both clients, enabled task set, optional cost tracker. When `enabled_tasks` is None, defaults to all `KNOWN_TASKS`.
+- `is_enabled(task)`: Returns True if task should use the auxiliary model.
+- `chat(messages, system, *, task, max_tokens)`: Routes to auxiliary or primary client based on task enablement. On auxiliary failure (empty response, CircuitOpenError, any exception), falls back to primary transparently. Increments `_aux_calls`, `_fallback_calls`, or `_primary_direct_calls` counters.
+- `chat_with_tools(messages, system, tools, *, task)`: Same routing/fallback logic for tool-calling requests. Falls back if auxiliary returns empty text AND no tool_calls.
+- `make_chat_fn(task)`: Returns an `async (messages, system) -> str` callable matching the `CompactionFn` / `TextFn` signatures used by `SessionManager` and `ConversationReflector`.
+- `make_codex_callback(task)`: Returns an `async (messages, system, max_tokens) -> str` callable matching the `CodexCallback` signature used by `background_task._send_conversational_followup`.
+- `get_metrics()`: Returns dict with aux_model, primary_model, enabled_tasks, call counters, and aux circuit breaker state.
+- `close()`: Closes the auxiliary client's HTTP session.
+- `_track_cost(task, is_fallback)`: Records usage to CostTracker with `user_id="auxiliary:{task}"` and `channel_id="system"`.
+
+**Fallback behavior** (fail-open):
+- Empty/None response from auxiliary → log warning, fall back to primary
+- `CircuitOpenError` from auxiliary → log warning, fall back to primary
+- Any other exception from auxiliary → log warning, fall back to primary
+- If primary also fails → exception propagates to caller (no double-fallback)
+
+#### 3. LLM package exports: `src/llm/__init__.py`
+
+Added `AuxiliaryLLMClient` to imports and `__all__`.
+
+#### 4. CLAUDE.md updates
+
+- Added `src/llm/auxiliary.py` to project structure section.
+
+### Tests: `tests/test_auxiliary_llm.py` — 63 tests across 15 test classes
+
+**AuxiliaryLLMConfig** (5): defaults, custom values, nested in OpenAICodexConfig, custom nested, default tasks list.
+
+**KNOWN_TASKS** (4): is frozenset, contains core tasks, contains extended tasks, count is 7.
+
+**Init** (5): basic construction, default enabled tasks, custom enabled tasks, initial counters, cost tracker stored.
+
+**is_enabled** (4): enabled task, disabled task, unknown task, all known enabled by default.
+
+**ChatRouting** (4): enabled task uses aux, disabled task uses primary, max_tokens forwarded to aux, max_tokens forwarded to primary.
+
+**ChatFallback** (5): empty response, circuit open, runtime error, connection error, no fallback on success.
+
+**ChatCounters** (3): aux call increments, fallback call increments, primary direct increments.
+
+**ChatWithToolsRouting** (2): enabled task uses aux, disabled task uses primary.
+
+**ChatWithToolsFallback** (4): empty response, circuit open, exception, no fallback with tool_calls.
+
+**MakeChatFn** (4): returns callable, callable routes correctly, matches CompactionFn signature, different tasks route differently.
+
+**MakeCodexCallback** (4): returns callable, callback signature, max_tokens passed through, custom task.
+
+**GetMetrics** (4): metrics structure, metrics values, metrics after calls, enabled_tasks sorted.
+
+**Close** (1): close calls aux close.
+
+**CostTracking** (5): aux call tracks cost, fallback tracks primary cost, no tracker no error, cost user_id includes task, cost channel_id is system.
+
+**EdgeCases** (6): empty enabled tasks, concurrent calls, primary fallback also fails, None response treated as empty, chat_with_tools counter for direct, chat_with_tools counter for aux.
+
+**Imports** (3): auxiliary module imports, llm init exports, config exports.
+
+### Design decisions
+
+1. **Separate client, shared auth**: The auxiliary client is a separate `CodexChatClient` instance with a different model (e.g. gpt-4o-mini) but shares the same `CodexAuth`/`CodexAuthPool` credentials. Same ChatGPT subscription, different model selection.
+
+2. **Task-based routing**: Each call specifies a `task` parameter. Tasks not in the `enabled_tasks` set go directly to the primary client — zero overhead. This allows gradual adoption: enable auxiliary for compaction first, add reflection later, etc.
+
+3. **Fail-open fallback**: Any auxiliary failure falls back to the primary client transparently. The caller never sees auxiliary failures. This matches the project's fail-open philosophy (e.g., completion classifier fail-open behavior).
+
+4. **Factory functions for existing signatures**: `make_chat_fn()` returns a callable matching `CompactionFn`/`TextFn` (async (messages, system) → str). `make_codex_callback()` returns a callable matching `CodexCallback` (async (messages, system, max_tokens) → str). These are drop-in replacements — existing call sites need zero changes.
+
+5. **Cost tracking with task attribution**: Auxiliary calls are tracked with `user_id="auxiliary:{task}"` so operators can see exactly how much each auxiliary task costs. The `channel_id="system"` distinguishes system-initiated calls from user-initiated ones.
+
+6. **OFF by default**: `AuxiliaryLLMConfig.enabled` defaults to False. Zero behavior change for existing deployments. The config nests under `openai_codex.auxiliary` to keep related settings grouped.
+
+7. **No new REST API endpoint**: The auxiliary client's metrics are available via `get_metrics()` but not exposed as a dedicated endpoint yet. Round 40 (REVIEWER) or a future round can add an endpoint if needed. The health checker could also be extended to report auxiliary client status.
+
+### Files changed
+- `src/config/schema.py` (modified): AuxiliaryLLMConfig model, auxiliary field on OpenAICodexConfig.
+- `src/llm/auxiliary.py` (new, ~160 lines): AuxiliaryLLMClient, KNOWN_TASKS.
+- `src/llm/__init__.py` (modified): Export AuxiliaryLLMClient.
+- `CLAUDE.md` (modified): Added auxiliary.py to project structure.
+- `tests/test_auxiliary_llm.py` (new, 63 tests): 15 test classes.
+
+### Next round watch for
+- Round 40 (REVIEWER) should validate that the auxiliary client's fallback behavior is correct and that cost tracking works end-to-end.
+- REST API endpoint count is still 123 (no new endpoints this round).
+- The auxiliary client is NOT yet wired into the bot's runtime — it provides the building blocks (`AuxiliaryLLMClient`, config, factory functions) but does not modify `client.py` or `SessionManager`/`ConversationReflector` call sites. Wiring it in requires instantiating the aux `CodexChatClient` at bot startup and calling `sessions.set_compaction_fn(aux.make_chat_fn("compaction"))` etc. This is intentionally deferred — Round 45 ("Smart model routing") is the natural place to wire it in, or the REVIEWER round can do it.
+- The `AuxiliaryLLMConfig.tasks` field controls which tasks the config *intends* to enable, while `AuxiliaryLLMClient.enabled_tasks` is the runtime set. When wiring, the startup code should map config tasks to the runtime set.
+- `KNOWN_TASKS` contains 7 task types. New auxiliary use cases (e.g., "intent_classification" for Round 45) should add entries to this frozenset.
+- The `_track_cost` method reads `client._last_input_tokens` and `client._last_output_tokens` — these are set by `CodexChatClient.chat()` after each call. If `chat()` is ever refactored to not set these, cost tracking will silently record zeros.
 - All five subsystem wiring tasks remain open from prior rounds (AuditSigner hmac_key, PermissionManager instantiation, etc.).
