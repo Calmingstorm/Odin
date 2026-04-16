@@ -87,6 +87,8 @@ class ToolExecutor:
         self.risk_stats = RiskStats()
         self.recovery_stats = RecoveryStats()
         self.validation_stats = ResultValidationStats()
+        from .risk_classifier import CommandGovernor
+        self.command_governor = CommandGovernor()
         self._recovery_enabled = self.config.recovery.enabled
         self.freshness_stats = FreshnessStats()
         self._branch_freshness_enabled = self.config.branch_freshness.enabled
@@ -327,6 +329,11 @@ class ToolExecutor:
         command = inp["command"]
         host = inp["host"]
 
+        if self.command_governor:
+            check = self.command_governor.check(command)
+            if not check.allowed:
+                return check.denial_message()
+
         # Stream output if enabled for this tool
         on_output = None
         finish_cb = None
@@ -358,6 +365,11 @@ class ToolExecutor:
         host = inp["host"]
         script = inp["script"]
         interpreter = inp.get("interpreter", "bash")
+
+        if self.command_governor:
+            check = self.command_governor.check(script)
+            if not check.allowed:
+                return check.denial_message()
 
         # Map interpreter to file extension
         ext_map = {
