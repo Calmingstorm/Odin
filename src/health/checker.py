@@ -75,18 +75,24 @@ def check_codex(bot: OdinBot) -> ComponentStatus:
         breaker_state = breaker.state if breaker else "unknown"
         pool_metrics = codex.get_pool_metrics()
         session = getattr(codex, "_session", None)
-        session_ok = session is not None and not session.closed
+        # The aiohttp session is created lazily on first request. None (or a
+        # not-yet-opened session) is healthy — only an EXPLICITLY closed
+        # session indicates a problem.
+        session_closed = session is not None and getattr(session, "closed", False)
 
-        healthy = breaker_state in ("closed", "half_open") and session_ok
+        healthy = breaker_state in ("closed", "half_open") and not session_closed
         if breaker_state == "open":
             status_label = "down"
             detail = "Circuit breaker OPEN — API failures detected"
         elif breaker_state == "half_open":
             status_label = "degraded"
             detail = "Circuit breaker half-open — probing recovery"
-        elif not session_ok:
+        elif session_closed:
             status_label = "degraded"
-            detail = "HTTP session closed or missing"
+            detail = "HTTP session was closed unexpectedly"
+        elif session is None:
+            status_label = "ok"
+            detail = "Initialised — HTTP session will open on first request (lazy)"
         else:
             status_label = "ok"
             detail = f"Healthy — {pool_metrics.get('http_pool_total_requests', 0)} total requests"
@@ -305,9 +311,11 @@ def check_browser(bot: OdinBot) -> ComponentStatus:
                 name="browser", healthy=True, status="ok",
                 detail="Playwright browser connected",
             )
+        # Browser hasn't been used yet — Playwright opens lazily on the first
+        # browser_screenshot/browser_goto call. Treat as ok rather than degraded.
         return ComponentStatus(
-            name="browser", healthy=True, status="degraded",
-            detail="Browser configured but not connected (lazy init)",
+            name="browser", healthy=True, status="ok",
+            detail="Browser configured — will connect on first use (lazy)",
         )
     except Exception as exc:
         return ComponentStatus(

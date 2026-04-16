@@ -848,6 +848,12 @@ class OdinBot(commands.Bot):
         from ..health.startup import run_startup_diagnostics
         self._run_startup_diagnostics = run_startup_diagnostics
 
+        # Public aliases for the health checker / web UI (which uses Odin
+        # naming that diverges from Heimdall's internal names): map the
+        # Heimdall-style attributes onto the names the build-loop UI expects.
+        self.codex = self.codex_client
+        self.knowledge = self._knowledge_store
+
         self._system_prompt = self._build_system_prompt()
         self._register_commands()
         self._init_allowed_webhook_ids()
