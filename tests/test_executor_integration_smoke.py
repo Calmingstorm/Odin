@@ -620,6 +620,57 @@ class TestInvokeSkillTool:
         assert "not found or disabled" in out
 
     @pytest.mark.asyncio
+    async def test_memory_manage_get_action(self, tmp_path):
+        """memory_manage supports 'get' action — a single-key lookup."""
+        from src.tools.executor import ToolExecutor
+        from src.config.schema import ToolsConfig
+        from src.tools.recovery import RecoveryStats
+        from src.tools.risk_classifier import RiskStats
+        from src.tools.bulkhead import BulkheadRegistry
+        from src.tools.result_validator import ResultValidationStats
+
+        exe = ToolExecutor.__new__(ToolExecutor)
+        exe.config = ToolsConfig()
+        exe._memory_path = tmp_path / "memory.json"
+        exe._browser_manager = None
+        exe._permission_manager = None
+        exe.output_streamer = None
+        exe._metrics = {}
+        exe.risk_stats = RiskStats()
+        exe.recovery_stats = RecoveryStats()
+        exe.validation_stats = ResultValidationStats()
+        exe._recovery_enabled = False
+        exe._branch_freshness_enabled = False
+        exe._last_risk_assessment = None
+        exe.bulkheads = BulkheadRegistry()
+        exe.freshness_stats = None
+        exe.ssh_pool = None
+
+        save_res = await exe._handle_memory_manage(
+            {"action": "save", "key": "k1", "value": "v1", "scope": "personal"},
+            user_id="u123",
+        )
+        assert "Saved" in save_res
+
+        get_res = await exe._handle_memory_manage(
+            {"action": "get", "key": "k1"},
+            user_id="u123",
+        )
+        assert "v1" in get_res
+
+        recall_res = await exe._handle_memory_manage(
+            {"action": "recall", "key": "k1"},
+            user_id="u123",
+        )
+        assert "v1" in recall_res
+
+        miss_res = await exe._handle_memory_manage(
+            {"action": "get", "key": "nonexistent"},
+            user_id="u123",
+        )
+        assert "No note found" in miss_res
+
+    @pytest.mark.asyncio
     async def test_dispatch_loop_tool_invoke_skill_missing_required_field(self):
         bot = _make_bot()
         bot.skill_manager.has_skill = MagicMock(return_value=True)

@@ -824,10 +824,22 @@ class ToolExecutor:
         if not action:
             return (
                 "memory_manage requires an 'action' field. "
-                "Valid actions: list, save, forget, recall. "
-                "Example: {'action': 'forget', 'key': 'foo'}."
+                "Valid actions: list, save, get, delete. "
+                "Example: {'action': 'get', 'key': 'foo'}."
             )
         scope = inp.get("scope", "personal")
+
+        if action in ("get", "recall", "read"):
+            key = inp.get("key")
+            if not key:
+                return "'key' is required for get."
+            all_mem = await asyncio.to_thread(self._load_all_memory)
+            user_key = f"user_{user_id}" if user_id else None
+            if user_key and key in all_mem.get(user_key, {}):
+                return f"**{key}** (personal): {all_mem[user_key][key]}"
+            if key in all_mem.get("global", {}):
+                return f"**{key}** (global): {all_mem['global'][key]}"
+            return f"No note found with key '{key}'."
 
         if action == "list":
             all_mem = await asyncio.to_thread(self._load_all_memory)

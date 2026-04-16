@@ -381,18 +381,18 @@ TOOLS: list[dict] = [
     },
     {
         "name": "memory_manage",
-        "description": "Persistent memory that survives across conversations. 'save'/'list'/'delete' notes. 'personal' = per-user, 'global' = shared with everyone.",
+        "description": "Persistent memory that survives across conversations. 'save'/'get'/'list'/'delete' notes. 'personal' = per-user, 'global' = shared with everyone.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["save", "list", "delete"],
-                    "description": "'save' a note, 'list' all notes, or 'delete' a note",
+                    "enum": ["save", "get", "list", "delete"],
+                    "description": "'save' a note, 'get' a single note by key, 'list' all notes, or 'delete' a note",
                 },
                 "key": {
                     "type": "string",
-                    "description": "Short identifier for the note (required for save/delete)",
+                    "description": "Short identifier for the note (required for save/get/delete)",
                 },
                 "value": {
                     "type": "string",
