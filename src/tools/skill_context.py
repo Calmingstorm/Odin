@@ -139,6 +139,7 @@ SKILL_SAFE_TOOLS: frozenset[str] = frozenset({
     "parse_time",
     "web_search",
     "fetch_url",
+    "http_probe",
     "browser_screenshot",
     "browser_read_page",
     "browser_read_table",
