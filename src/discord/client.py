@@ -992,18 +992,28 @@ class OdinBot(commands.Bot):
         elif action == "check":
             tool_name = inp.get("tool_name")
             if not tool_name:
-                return "action=check requires 'tool_name'."
+                if inp.get("command"):
+                    inp["tool_name"] = "run_command"
+                    tool_name = "run_command"
+                else:
+                    return "action=check requires 'tool_name'."
             tool_input = inp.get("tool_input")
             if tool_input is None or (isinstance(tool_input, dict) and not tool_input):
-                tool_input = self._extract_tool_input_from_steps(inp)
-                if tool_input:
+                shortcut_cmd = inp.get("command")
+                if shortcut_cmd and tool_name == "run_command":
+                    tool_input = {"host": inp.get("host", "localhost"), "command": shortcut_cmd}
                     inp["tool_input"] = tool_input
                 else:
-                    return (
-                        f"action=check with tool_name='{tool_name}' requires 'tool_input' "
-                        f"populated with the parameters that tool expects "
-                        f"(e.g. {{'host': 'localhost', 'command': 'uname -r'}} for run_command)."
-                    )
+                    tool_input = self._extract_tool_input_from_steps(inp)
+                    if tool_input:
+                        inp["tool_input"] = tool_input
+                    else:
+                        return (
+                            f"action=check with tool_name='{tool_name}' requires 'tool_input' "
+                            f"populated with the parameters that tool expects, OR use the "
+                            f"'command' shortcut field directly "
+                            f"(e.g. schedule_task(action='check', command='uname -r'))."
+                        )
         elif action == "workflow":
             steps = inp.get("steps")
             if not steps or not isinstance(steps, list):

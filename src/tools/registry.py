@@ -236,7 +236,15 @@ TOOLS: list[dict] = [
                 },
                 "tool_input": {
                     "type": "object",
-                    "description": "REQUIRED for action='check'. Must contain the tool's parameters, e.g. {'host': 'localhost', 'command': 'uname -r'} for run_command. Empty/missing will cause the fired schedule to error.",
+                    "description": "Parameters for the tool (for action='check'). Alternatively use the 'command' and 'host' shortcuts below for run_command.",
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Shortcut: shell command to run (auto-builds tool_input for run_command). Use this instead of nesting inside tool_input.",
+                },
+                "host": {
+                    "type": "string",
+                    "description": "Shortcut: target host (default 'localhost'). Paired with 'command' for run_command checks.",
                 },
                 "steps": {
                     "type": "array",

@@ -645,6 +645,31 @@ class TestInvokeSkillTool:
         assert err is None
         assert inp["tool_input"] == {"host": "localhost", "command": "uname"}
 
+    def test_validate_schedule_command_shortcut(self):
+        """Flat 'command' field auto-builds tool_input for run_command."""
+        bot = _make_bot()
+        inp = {
+            "description": "x",
+            "action": "check",
+            "command": "uname -r",
+        }
+        err = bot._validate_schedule_payload(inp)
+        assert err is None
+        assert inp["tool_name"] == "run_command"
+        assert inp["tool_input"] == {"host": "localhost", "command": "uname -r"}
+
+    def test_validate_schedule_command_with_host(self):
+        bot = _make_bot()
+        inp = {
+            "description": "x",
+            "action": "check",
+            "command": "uname",
+            "host": "myhost",
+        }
+        err = bot._validate_schedule_payload(inp)
+        assert err is None
+        assert inp["tool_input"]["host"] == "myhost"
+
     def test_validate_schedule_rejects_workflow_step_missing_tool_input(self):
         bot = _make_bot()
         err = bot._validate_schedule_payload({
