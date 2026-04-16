@@ -1,21 +1,38 @@
 [project]
 name = "odin-bot"
-version = "2.0.0"
-description = "Odin — Discord moderation and utility bot with web dashboard"
+version = "3.0.0"
+description = "Odin — autonomous executor Discord bot, Heimdall-pattern with extended capability surface"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
     "discord.py>=2.3,<3",
     "aiohttp>=3.9",
+    "aiofiles>=24.0",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
     "python-dotenv>=1.0",
     "jinja2>=3.1",
     "pyyaml>=6.0",
     "pydantic>=2.0",
+    "croniter>=2.0.0",
+    "fastembed>=0.8.0",
+    "sqlite-vec>=0.1.0",
 ]
 
 [project.optional-dependencies]
+# PDF text extraction (analyze_pdf tool)
+pdf = ["PyMuPDF>=1.24.0"]
+# Browser automation (browser_screenshot, browser_click, etc.)
+browser = ["playwright>=1.40.0"]
+# Voice channel support (STT/TTS)
+voice = [
+    "discord.py[voice]>=2.3",
+    "davey>=0.1.4",
+    "discord-ext-voice-recv>=0.5.0a0",
+    "websockets>=12.0",
+]
+# All optional executor features
+all = ["odin-bot[pdf,browser,voice]"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

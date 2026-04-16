@@ -803,7 +803,6 @@ class OdinBot(commands.Bot):
         if _aux and _aux.enabled and self.codex_client:
             try:
                 from ..llm.auxiliary import AuxiliaryLLMClient
-                from ..llm.codex_auth import CodexAuthPool
                 aux_creds = _aux.credentials_path or config.openai_codex.credentials_path
                 aux_auth = CodexAuthPool(aux_creds)
                 if aux_auth.is_configured():
@@ -1381,12 +1380,16 @@ class OdinBot(commands.Bot):
         try:
             report = self._run_startup_diagnostics(yaml_config=self.config)
             for r in report.results:
-                level = log.error if r.severity == "critical" else (log.warning if r.severity == "warning" else log.info)
-                level("startup diagnostic [%s]: %s — %s", r.severity, r.name, r.message)
-            if report.critical_count:
+                level = log.warning if not r.passed else log.info
+                msg = f"startup diagnostic [{r.name}]: {r.detail}"
+                if r.recommendation:
+                    msg += f" → {r.recommendation}"
+                level(msg)
+            failed = sum(1 for r in report.results if not r.passed)
+            if failed:
                 log.warning(
-                    "%d critical startup issue(s) detected — see preceding diagnostic lines",
-                    report.critical_count,
+                    "%d/%d startup diagnostic(s) failed — see preceding lines",
+                    failed, len(report.results),
                 )
         except Exception:
             log.exception("Startup diagnostics failed unexpectedly (non-fatal)")
