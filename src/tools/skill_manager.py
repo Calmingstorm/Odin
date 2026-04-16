@@ -791,22 +791,32 @@ class SkillManager:
                 "metadata": None, "definition_keys": [],
             }
 
-        # 2. Execute in a temporary namespace to inspect exports
-        ns: dict[str, Any] = {}
-        try:
-            exec(code, ns)  # noqa: S102 — skill validation needs exec
-        except Exception as e:
-            errors.append(f"Execution error: {e}")
-            return {
-                "valid": False, "errors": errors, "warnings": warnings,
-                "metadata": None, "definition_keys": [],
-            }
+        # 2. Static analysis — extract SKILL_DEFINITION from AST without exec
+        import ast as _ast
+        tree = _ast.parse(code, filename)
 
-        # 3. Check SKILL_DEFINITION
-        definition = ns.get("SKILL_DEFINITION")
-        if not isinstance(definition, dict):
+        has_execute = any(
+            isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+            and node.name == "execute"
+            for node in _ast.walk(tree)
+        )
+        if not has_execute:
+            errors.append("Missing 'execute' function (async def execute(inp, context)).")
+
+        definition = None
+        definition_keys: list[str] = []
+        for node in _ast.iter_child_nodes(tree):
+            if isinstance(node, _ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, _ast.Name) and target.id == "SKILL_DEFINITION":
+                        try:
+                            definition = _ast.literal_eval(node.value)
+                        except Exception:
+                            warnings.append("SKILL_DEFINITION is not a static literal — will be validated at load time.")
+
+        if definition is None and not any("SKILL_DEFINITION" in e for e in errors):
             errors.append("Missing or invalid SKILL_DEFINITION dict.")
-        else:
+        elif isinstance(definition, dict):
             definition_keys = list(definition.keys())
             for key in ("name", "description", "input_schema"):
                 if key not in definition:
@@ -832,11 +842,12 @@ class SkillManager:
             for d in diags:
                 warnings.append(d.message)
 
-        # 4. Check execute function
-        execute_fn = ns.get("execute")
-        if not callable(execute_fn):
-            errors.append("Missing execute() function.")
-        elif not asyncio.iscoroutinefunction(execute_fn):
+        # 4. Check execute function (AST-based — already checked above)
+        execute_is_async = any(
+            isinstance(node, _ast.AsyncFunctionDef) and node.name == "execute"
+            for node in _ast.walk(tree)
+        )
+        if has_execute and not execute_is_async:
             warnings.append("execute() is not async. It should be 'async def execute(inp, context)'.")
 
         return {
