@@ -37,7 +37,10 @@ tools:
   #   my-host:
   #     address: 1.2.3.4
   #     ssh_user: root
-  hosts: {}
+  hosts:
+    localhost:
+      address: 127.0.0.1
+      ssh_user: root
   command_timeout_seconds: 300
   skill_allowed_urls:
     - "http://localhost:8188"

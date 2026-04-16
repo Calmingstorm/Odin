@@ -64,3 +64,7 @@ logs/
 build-loop.sh
 build_log.txt
 build_log_*.txt
+
+# Runtime state (credentials, sessions, knowledge DB, trajectories, logs)
+data/
+scripts/data/
