@@ -976,6 +976,49 @@ class OdinBot(commands.Bot):
         except Exception:
             return []
 
+    def _validate_schedule_payload(self, inp: dict) -> str | None:
+        """Validate schedule_task input at creation time, not fire time.
+
+        Catches the class of LLM mistake where a 'check' action is queued
+        with no tool_input, or a 'workflow' step is missing tool_input —
+        those errors used to surface only at fire time as a crashing
+        coroutine, hours or days later. Returning a specific message
+        at creation makes the LLM retry with a complete payload.
+        """
+        action = inp.get("action", "reminder")
+        if action == "reminder":
+            if not inp.get("message"):
+                return "action=reminder requires a non-empty 'message'."
+        elif action == "check":
+            tool_name = inp.get("tool_name")
+            if not tool_name:
+                return "action=check requires 'tool_name'."
+            tool_input = inp.get("tool_input")
+            if tool_input is None or (isinstance(tool_input, dict) and not tool_input):
+                return (
+                    f"action=check with tool_name='{tool_name}' requires 'tool_input' "
+                    f"populated with the parameters that tool expects "
+                    f"(e.g. {{'host': 'localhost', 'command': 'uname -r'}} for run_command)."
+                )
+        elif action == "workflow":
+            steps = inp.get("steps")
+            if not steps or not isinstance(steps, list):
+                return "action=workflow requires a non-empty 'steps' array."
+            for i, step in enumerate(steps, 1):
+                if not isinstance(step, dict):
+                    return f"workflow step {i} must be an object."
+                if not step.get("tool_name"):
+                    return f"workflow step {i} is missing 'tool_name'."
+                step_input = step.get("tool_input")
+                if step.get("tool_name") in ("run_command", "run_script"):
+                    if not isinstance(step_input, dict) or not step_input:
+                        return (
+                            f"workflow step {i} ({step['tool_name']}) requires a non-empty "
+                            f"'tool_input' dict — for run_command include 'command', "
+                            f"for run_script include 'script'."
+                        )
+        return None
+
     def _build_system_prompt(
         self, channel: discord.abc.GuildChannel | None = None,
         user_id: str | None = None,
@@ -3114,6 +3157,9 @@ class OdinBot(commands.Bot):
 
     async def _handle_schedule_task(self, message: discord.Message, inp: dict) -> str:
         """Create a scheduled task."""
+        validation_error = self._validate_schedule_payload(inp)
+        if validation_error:
+            return f"Failed to create schedule: {validation_error}"
         try:
             schedule = await self.scheduler.add(
                 description=inp.get("description", "Unnamed task"),

@@ -232,25 +232,25 @@ TOOLS: list[dict] = [
                 },
                 "tool_name": {
                     "type": "string",
-                    "description": "Tool to run for 'check' action",
+                    "description": "Tool to run for 'check' action (e.g. 'run_command')",
                 },
                 "tool_input": {
                     "type": "object",
-                    "description": "Input parameters for the tool",
+                    "description": "REQUIRED for action='check'. Must contain the tool's parameters, e.g. {'host': 'localhost', 'command': 'uname -r'} for run_command. Empty/missing will cause the fired schedule to error.",
                 },
                 "steps": {
                     "type": "array",
-                    "description": "Workflow steps (sequential)",
+                    "description": "Workflow steps (sequential). Each step MUST include tool_input populated with that tool's parameters.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "tool_name": {"type": "string", "description": "Tool to run"},
-                            "tool_input": {"type": "object", "description": "Input parameters"},
+                            "tool_input": {"type": "object", "description": "REQUIRED — parameters for tool_name, e.g. {'host':'localhost','command':'ls'} for run_command"},
                             "description": {"type": "string", "description": "Step description"},
                             "condition": {"type": "string", "description": "Run if previous output contains this (! to negate)"},
                             "on_failure": {"type": "string", "enum": ["abort", "continue"], "description": "Default: abort"},
                         },
-                        "required": ["tool_name"],
+                        "required": ["tool_name", "tool_input"],
                     },
                 },
             },

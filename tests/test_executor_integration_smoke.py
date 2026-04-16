@@ -619,6 +619,45 @@ class TestInvokeSkillTool:
         )
         assert "not found or disabled" in out
 
+    def test_validate_schedule_rejects_check_without_tool_input(self):
+        """Odin queued a check-action schedule without tool_input; it fired 90s
+        later and crashed. Validation now rejects at creation time."""
+        bot = _make_bot()
+        err = bot._validate_schedule_payload({
+            "description": "x",
+            "action": "check",
+            "tool_name": "run_command",
+        })
+        assert err is not None
+        assert "tool_input" in err
+
+    def test_validate_schedule_rejects_workflow_step_missing_tool_input(self):
+        bot = _make_bot()
+        err = bot._validate_schedule_payload({
+            "description": "x",
+            "action": "workflow",
+            "steps": [{"tool_name": "run_command", "description": "doit"}],
+        })
+        assert err is not None
+        assert "tool_input" in err
+
+    def test_validate_schedule_accepts_complete_check(self):
+        bot = _make_bot()
+        err = bot._validate_schedule_payload({
+            "description": "x",
+            "action": "check",
+            "tool_name": "run_command",
+            "tool_input": {"host": "localhost", "command": "uname -r"},
+        })
+        assert err is None
+
+    def test_validate_schedule_reminder_needs_message(self):
+        bot = _make_bot()
+        assert bot._validate_schedule_payload({"description": "x", "action": "reminder"}) is not None
+        assert bot._validate_schedule_payload(
+            {"description": "x", "action": "reminder", "message": "hi"}
+        ) is None
+
     @pytest.mark.asyncio
     async def test_memory_manage_get_action(self, tmp_path):
         """memory_manage supports 'get' action — a single-key lookup."""
