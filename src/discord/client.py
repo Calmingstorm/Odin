@@ -3563,9 +3563,18 @@ class OdinBot(commands.Bot):
     # --- Agent tool handlers ---
 
     async def _handle_spawn_agent(self, message: object, inp: dict) -> str:
-        """Spawn an autonomous agent for a sub-task."""
+        """Spawn an autonomous agent for a sub-task.
+
+        Supports nested spawning up to ``AgentsConfig.max_nesting_depth``
+        (default 2). The caller can pass ``parent_id`` in ``inp`` to nest
+        under a parent; child agents inherit an elevated depth via
+        AgentManager.spawn(). Each spawned agent's tool_executor_callback
+        captures the agent's own id, so if the child itself calls spawn_agent
+        the grandchild is correctly nested.
+        """
         label = inp.get("label", "")
         goal = inp.get("goal", "")
+        parent_id_arg = inp.get("parent_id")
         if not label or not goal:
             return "Both 'label' and 'goal' are required."
 
@@ -3578,11 +3587,20 @@ class OdinBot(commands.Bot):
         user_id = str(getattr(author, "id", "0"))
         user_name = str(author) if author else "agent"
 
-        # Build system prompt and tools for the agent
-        # Filter out agent-management tools to prevent nesting
         system_prompt = self._build_system_prompt(channel=channel, user_id=user_id)
         all_tools = self._merged_tool_definitions() if self.config.tools.enabled else []
-        tools = filter_agent_tools(all_tools)
+        # Depth-aware filter: root spawn uses depth 0; nested spawns compute
+        # the expected child depth from the parent so terminal children don't
+        # even see spawn_agent in their tool list.
+        parent_depth = 0
+        if parent_id_arg:
+            parent = self.agent_manager._agents.get(parent_id_arg)
+            if parent is not None:
+                parent_depth = parent.depth + 1
+        max_depth = getattr(
+            getattr(self.config, "agents", None), "max_nesting_depth", 2,
+        )
+        tools = filter_agent_tools(all_tools, depth=parent_depth, max_depth=max_depth)
 
         # Iteration callback — wraps Codex chat_with_tools, returns dict
         async def _iteration_cb(
@@ -3600,13 +3618,25 @@ class OdinBot(commands.Bot):
                 "stop_reason": resp.stop_reason,
             }
 
-        # Tool executor callback — dispatches through the same tool routing
         msg_proxy = _LoopMessageProxy(channel, user_id, user_name)
 
+        # Mutable container so the callback can learn its own agent_id
+        # AFTER agent_manager.spawn() returns and use it as parent_id when
+        # this agent itself calls spawn_agent.
+        _self_id: dict[str, str | None] = {"id": None}
+
         async def _tool_exec_cb(tool_name: str, tool_input: dict) -> str:
-            # Reject agent tools to enforce flat depth model (no nesting)
-            if tool_name in AGENT_BLOCKED_TOOLS:
-                return f"Error: Tool '{tool_name}' is not available inside agents."
+            if tool_name == "spawn_agent":
+                # Nested spawn — forward this agent's id so AgentManager.spawn
+                # enforces max_nesting_depth and children linkage.
+                if _self_id["id"] and not tool_input.get("parent_id"):
+                    tool_input = {**tool_input, "parent_id": _self_id["id"]}
+            elif tool_name in AGENT_BLOCKED_TOOLS:
+                # Other agent-management tools (kill/send_to/wait_for/get_results/
+                # list) remain available from within a parent, because they
+                # operate on already-spawned agents and aren't the same as
+                # spawning new ones.
+                pass
             result = await self._dispatch_loop_tool(
                 tool_name, tool_input, msg_proxy, user_id,
             )
@@ -3622,12 +3652,16 @@ class OdinBot(commands.Bot):
             tool_executor_callback=_tool_exec_cb,
             tools=tools,
             system_prompt=system_prompt,
+            parent_id=parent_id_arg,
+            max_depth=max_depth,
         )
 
         if agent_id.startswith("Error"):
             return agent_id
+        _self_id["id"] = agent_id
+        depth_note = f" (depth {parent_depth})" if parent_id_arg else ""
         return (
-            f"Agent '{label}' spawned (ID: `{agent_id}`). "
+            f"Agent '{label}' spawned (ID: `{agent_id}`){depth_note}. "
             f"Working on: {goal[:100]}"
         )
 

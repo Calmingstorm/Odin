@@ -820,7 +820,13 @@ class ToolExecutor:
         return merged
 
     async def _handle_memory_manage(self, inp: dict, *, user_id: str | None = None) -> str:
-        action = inp["action"]
+        action = inp.get("action")
+        if not action:
+            return (
+                "memory_manage requires an 'action' field. "
+                "Valid actions: list, save, forget, recall. "
+                "Example: {'action': 'forget', 'key': 'foo'}."
+            )
         scope = inp.get("scope", "personal")
 
         if action == "list":
