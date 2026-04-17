@@ -27,20 +27,24 @@ mkdir -p "$DATA_DIR"/{sessions,context,skills,search,knowledge,trajectories}
 mkdir -p "$LOG_DIR"
 
 # Install config templates (preserve existing on upgrade)
+FRESH_INSTALL=false
 if [ ! -f "$CONFIG_DIR/config.yml" ]; then
     if [ -f "$APP_DIR/config.yml.default" ]; then
         cp "$APP_DIR/config.yml.default" "$CONFIG_DIR/config.yml"
     fi
-    echo "  Fresh install: edit $CONFIG_DIR/config.yml before starting"
+    FRESH_INSTALL=true
 fi
 
 if [ ! -f "$CONFIG_DIR/.env" ]; then
     if [ -f "$APP_DIR/.env.example" ]; then
         cp "$APP_DIR/.env.example" "$CONFIG_DIR/.env"
     else
-        echo "DISCORD_TOKEN=" > "$CONFIG_DIR/.env"
+        cat > "$CONFIG_DIR/.env" << 'ENVEOF'
+# Odin environment — set your Discord bot token here
+DISCORD_TOKEN=
+ENVEOF
     fi
-    echo "  Fresh install: set DISCORD_TOKEN in $CONFIG_DIR/.env"
+    FRESH_INSTALL=true
 fi
 
 # Create symlinks so the app sees config/data in its working directory
@@ -58,9 +62,10 @@ fi
 
 # Install Python dependencies from pyproject.toml
 echo "  Installing Python dependencies..."
-"$APP_DIR/.venv/bin/pip" install --quiet -e "$APP_DIR" 2>/dev/null || \
+if [ -f "$APP_DIR/pyproject.toml" ]; then
     "$APP_DIR/.venv/bin/pip" install --quiet "$APP_DIR" 2>/dev/null || \
-    echo "  Warning: pip install failed — install dependencies manually"
+        echo "  Warning: pip install from pyproject.toml failed — install dependencies manually"
+fi
 
 # Install Playwright browsers for native browser support
 "$APP_DIR/.venv/bin/playwright" install chromium 2>/dev/null || \
@@ -68,8 +73,9 @@ echo "  Installing Python dependencies..."
 
 # Set ownership and permissions
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR" "$DATA_DIR" "$LOG_DIR"
-chown -R root:root /usr/lib/systemd/system/odin.service
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR"
 chmod 600 "$CONFIG_DIR/.env"
+chown root:root /usr/lib/systemd/system/odin.service
 
 # Enable systemd service
 systemctl daemon-reload
@@ -77,12 +83,14 @@ systemctl enable odin.service
 
 echo ""
 echo "Odin installed successfully."
-if [ ! -s "$CONFIG_DIR/.env" ] || ! grep -q 'DISCORD_TOKEN=.' "$CONFIG_DIR/.env"; then
+if [ "$FRESH_INSTALL" = true ]; then
     echo ""
     echo "Next steps:"
-    echo "  1. Set your Discord token: edit $CONFIG_DIR/.env"
-    echo "  2. Configure settings:     edit $CONFIG_DIR/config.yml"
-    echo "  3. Start the service:      sudo systemctl start odin"
+    echo "  1. Set your Discord token:  sudo editor $CONFIG_DIR/.env"
+    echo "     (config.yml uses \${DISCORD_TOKEN} from this file)"
+    echo "  2. Review settings:         sudo editor $CONFIG_DIR/config.yml"
+    echo "  3. Start the service:       sudo systemctl start odin"
+    echo "  4. Check logs:              sudo journalctl -u odin -f"
 else
     echo "Existing config preserved. Restart with: sudo systemctl restart odin"
 fi
