@@ -60,6 +60,7 @@ class WebSocketManager:
         ws = web.WebSocketResponse(heartbeat=30.0)
         await ws.prepare(request)
         self._clients.add(ws)
+        ws._odin_session_id = getattr(request, "_session_id", None) or "ws-anon"
         log.info("WebSocket client connected (%d total)", len(self._clients))
 
         log_task: asyncio.Task | None = None
@@ -132,7 +133,7 @@ class WebSocketManager:
             })
             return
 
-        ws_session_id = getattr(self, "_session_id", "ws-anon")
+        ws_session_id = getattr(ws, "_odin_session_id", "ws-anon")
         channel_id = f"ws-{ws_session_id[:16]}"
         user_id = "web-user"
         username = "WebUser"
