@@ -2242,8 +2242,16 @@ class OdinBot(commands.Bot):
                         log.warning("Codex handoff failed, using skill result directly: %s", e)
                         response = _skill_response
                         already_sent = False
+        except (discord.HTTPException, discord.Forbidden, asyncio.TimeoutError) as e:
+            log.error("Discord/network error processing message: %s", e, exc_info=True)
+            leaked = self._pending_files.pop(channel_id, None)
+            if leaked:
+                log.warning("Cleaned %d leaked pending file(s) for channel %s", len(leaked), channel_id)
+            await self._send_with_retry(message, scrub_response_secrets(f"Something went wrong: {e}"))
+            self.sessions.remove_last_message(channel_id, "user")
+            return
         except Exception as e:
-            log.error("Error processing message: %s", e, exc_info=True)
+            log.error("Unexpected error processing message: %s", e, exc_info=True)
             leaked = self._pending_files.pop(channel_id, None)
             if leaked:
                 log.warning("Cleaned %d leaked pending file(s) for channel %s", len(leaked), channel_id)
@@ -4154,8 +4162,10 @@ class OdinBot(commands.Bot):
                         execution_time_ms=elapsed_ms,
                         error=error,
                     )
-                except Exception:
-                    pass
+                except (OSError, IOError) as audit_err:
+                    log.warning("Audit write failed (I/O): %s", audit_err)
+                except Exception as audit_err:
+                    log.warning("Audit write failed: %s", audit_err)
 
                 return {
                     "type": "tool_result",
@@ -4704,10 +4714,22 @@ class OdinBot(commands.Bot):
                 result = await self.tool_executor.execute(tool_name, tool_input)
                 text = f"**Scheduled: {schedule['description']}**\n```\n{result[:1800]}\n```"
                 await channel.send(scrub_response_secrets(text))
+            except (discord.HTTPException, discord.Forbidden, discord.NotFound) as e:
+                log.warning("Scheduled task Discord error: %s", e)
+                try:
+                    await channel.send(
+                        scrub_response_secrets(f"**Scheduled task failed:** {schedule['description']}\nError: {e}")
+                    )
+                except Exception:
+                    pass
             except Exception as e:
-                await channel.send(
-                    scrub_response_secrets(f"**Scheduled task failed:** {schedule['description']}\nError: {e}")
-                )
+                log.error("Scheduled task unexpected error: %s", e, exc_info=True)
+                try:
+                    await channel.send(
+                        scrub_response_secrets(f"**Scheduled task failed:** {schedule['description']}\nError: {e}")
+                    )
+                except Exception:
+                    pass
 
         elif schedule["action"] == "workflow":
             await self._run_scheduled_workflow(channel, schedule)
