@@ -164,7 +164,14 @@ class AgentTrajectorySaver:
         )
 
     async def read_file(self, filename: str, limit: int = 100) -> list[dict]:
-        filepath = self.directory / filename
+        # Reject absolute paths and path-traversal components
+        if filename != Path(filename).name or ".." in filename:
+            log.warning("Rejected path-traversal attempt in trajectory read: %s", filename)
+            return []
+        filepath = (self.directory / filename).resolve()
+        if not filepath.is_relative_to(self.directory.resolve()):
+            log.warning("Rejected path-traversal attempt in trajectory read: %s", filename)
+            return []
         if not filepath.exists():
             return []
         results: list[dict] = []

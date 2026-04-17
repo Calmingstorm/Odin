@@ -148,6 +148,7 @@ def _make_auth_middleware(
         auth_header = request.headers.get("Authorization", "")
         expected_bearer = f"Bearer {token}"
         if hmac.compare_digest(auth_header, expected_bearer):
+            request._session_id = "admin-token"
             return await handler(request)
         # Check session tokens (Bearer <session_id>)
         bearer_prefix = "Bearer "
@@ -161,8 +162,10 @@ def _make_auth_middleware(
         query_token = request.query.get("token", "")
         if query_token:
             if hmac.compare_digest(query_token, token):
+                request._session_id = "admin-token"
                 return await handler(request)
             if session_manager.validate(query_token):
+                request._session_id = query_token
                 return await handler(request)
 
         return web.json_response({"error": "unauthorized"}, status=401)

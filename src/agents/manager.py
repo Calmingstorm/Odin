@@ -261,9 +261,16 @@ class AgentInfo:
     parent_id: str | None = None
     children_ids: list[str] = field(default_factory=list)
     _task: asyncio.Task | None = field(default=None, repr=False)
-    _cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
-    _inbox: asyncio.Queue = field(default_factory=asyncio.Queue)
+    _cancel_event: asyncio.Event | None = field(default=None, repr=False)
+    _inbox: asyncio.Queue | None = field(default=None, repr=False)
     _sm: AgentStateMachine = field(default_factory=AgentStateMachine)
+
+    def __post_init__(self) -> None:
+        """Create event-loop-bound primitives at runtime, not at class-def time."""
+        if self._cancel_event is None:
+            self._cancel_event = asyncio.Event()
+        if self._inbox is None:
+            self._inbox = asyncio.Queue()
 
     @property
     def status(self) -> str:

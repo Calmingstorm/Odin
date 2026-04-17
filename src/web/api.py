@@ -491,9 +491,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             )
 
         # Derive channel_id from the authenticated session to isolate web users.
-        # Each session gets its own conversation history.
-        session_id = getattr(request, "_session_id", None) or "web-default"
-        channel_id = data.get("channel_id") or f"web-{session_id[:12]}"
+        # Ignore caller-supplied channel_id — identity must come from server side.
+        session_id = getattr(request, "_session_id", None) or "web-anon"
+        channel_id = f"web-{session_id[:16]}"
         user_id = "web-user"
         username = "WebUser"
 

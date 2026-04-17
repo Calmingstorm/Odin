@@ -360,13 +360,14 @@ class Scheduler:
         """Check all trigger-based schedules against an incoming webhook event.
 
         Returns the number of triggers that fired.
-        Holds _lock to prevent concurrent mutation with _tick().
+        Collects matches under lock, executes callbacks outside it
+        (same pattern as _tick) to prevent deadlock.
         """
         if not self._callback:
             return 0
 
+        matched: list[dict] = []
         async with self._lock:
-            fired = 0
             now = datetime.now(timezone.utc)
             for schedule in self._schedules:
                 trigger = schedule.get("trigger")
@@ -380,13 +381,17 @@ class Scheduler:
                     schedule["id"], schedule["description"], source,
                 )
                 schedule["last_run"] = now.isoformat()
-                fired += 1
+                matched.append(schedule)
 
-                await self._execute_and_record(schedule)
+            if matched:
+                try:
+                    await asyncio.to_thread(self._save)
+                except Exception as e:
+                    log.error("Schedule save failed after trigger fire: %s", e)
 
-            if fired:
-                await asyncio.to_thread(self._save)
-            return fired
+        for schedule in matched:
+            await self._execute_and_record(schedule)
+        return len(matched)
 
     def list_all(self) -> list[dict]:
         return list(self._schedules)

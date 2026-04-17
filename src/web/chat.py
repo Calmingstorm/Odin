@@ -7,6 +7,7 @@ same Codex tool loop used by Discord messages.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 from typing import TYPE_CHECKING
 
@@ -18,8 +19,8 @@ if TYPE_CHECKING:
 
 log = get_logger("web.chat")
 
-# Monotonic counter for virtual message IDs
-_next_msg_id = int(time.time() * 1000)
+# Atomic monotonic counter for virtual message IDs (thread-safe via C impl)
+_msg_id_counter = itertools.count(int(time.time() * 1000))
 
 # Max content length for a single chat message
 MAX_CHAT_CONTENT_LEN = 4000
@@ -124,9 +125,7 @@ class WebMessage:
     """
 
     def __init__(self, channel_id: str, user_id: str, username: str, content: str = ""):
-        global _next_msg_id
-        _next_msg_id += 1
-        self.id = _next_msg_id
+        self.id = next(_msg_id_counter)
         self.content = content
         self.channel = _WebChannel(channel_id)
         self.author = _WebAuthor(user_id, username)

@@ -447,25 +447,37 @@ class ToolExecutor:
         return f"{governor_note}{output}" if governor_note else output
 
     async def _handle_read_file(self, inp: dict) -> str:
-        path = inp["path"]
+        path = inp.get("path")
+        host = inp.get("host")
+        if not path:
+            return "Error: 'path' is required for read_file."
+        if not host:
+            return "Error: 'host' is required for read_file."
         try:
             lines = min(int(inp.get("lines", 200)), 1000)
         except (TypeError, ValueError):
             lines = 200
         safe_path = shlex.quote(path)
         return await self._run_on_host(
-            inp["host"],
+            host,
             f"head -n {lines} {safe_path}",
         )
 
     async def _handle_write_file(self, inp: dict) -> str:
-        path = inp["path"]
-        content = inp["content"]
+        path = inp.get("path")
+        content = inp.get("content")
+        host = inp.get("host")
+        if not path:
+            return "Error: 'path' is required for write_file."
+        if content is None:
+            return "Error: 'content' is required for write_file."
+        if not host:
+            return "Error: 'host' is required for write_file."
         safe_path = shlex.quote(path)
         # Base64-encode content to avoid shell injection via heredoc delimiter
         encoded = base64.b64encode(content.encode()).decode()
         cmd = f"mkdir -p $(dirname {safe_path}) && echo '{encoded}' | base64 -d > {safe_path}"
-        return await self._run_on_host(inp["host"], cmd)
+        return await self._run_on_host(host, cmd)
 
     # --- Multi-host tools ---
 
