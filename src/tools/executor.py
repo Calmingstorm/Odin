@@ -330,7 +330,7 @@ class ToolExecutor:
         host = inp["host"]
 
         governor_note = ""
-        if self.command_governor:
+        if getattr(self, "command_governor", None):
             check = self.command_governor.check(command)
             if not check.allowed:
                 return check.denial_message()
@@ -370,7 +370,7 @@ class ToolExecutor:
         interpreter = inp.get("interpreter", "bash")
 
         governor_note = ""
-        if self.command_governor:
+        if getattr(self, "command_governor", None):
             check = self.command_governor.check(script)
             if not check.allowed:
                 return check.denial_message()
@@ -640,7 +640,7 @@ class ToolExecutor:
                 return "command is required for start action."
             if not host:
                 return "host is required for start action."
-            if self.command_governor:
+            if getattr(self, "command_governor", None):
                 check = self.command_governor.check(command)
                 if not check.allowed:
                     return check.denial_message()
