@@ -35,9 +35,10 @@ _LOG_POLL_INTERVAL = 1.0
 class WebSocketManager:
     """Manages WebSocket connections and broadcasts events."""
 
-    def __init__(self, bot: OdinBot, *, api_token: str = "") -> None:
+    def __init__(self, bot: OdinBot, *, api_token: str = "", session_manager=None) -> None:
         self._bot = bot
         self._api_token = api_token
+        self._session_manager = session_manager
         self._clients: set[web.WebSocketResponse] = set()
         self._log_subscribers: set[web.WebSocketResponse] = set()
         self._event_subscribers: set[web.WebSocketResponse] = set()
@@ -51,7 +52,10 @@ class WebSocketManager:
         # Authenticate via query param token (if configured)
         if self._api_token:
             token = request.query.get("token", "")
-            if not hmac.compare_digest(token, self._api_token):
+            valid = hmac.compare_digest(token, self._api_token)
+            if not valid and self._session_manager:
+                valid = self._session_manager.validate(token)
+            if not valid:
                 ws = web.WebSocketResponse()
                 await ws.prepare(request)
                 await ws.close(code=4001, message=b"unauthorized")
@@ -223,7 +227,8 @@ def setup_websocket(
     app: web.Application, bot: OdinBot, *, api_token: str = "",
 ) -> WebSocketManager:
     """Register the WebSocket endpoint and return the manager."""
-    manager = WebSocketManager(bot, api_token=api_token)
+    session_manager = app.get("session_manager")
+    manager = WebSocketManager(bot, api_token=api_token, session_manager=session_manager)
     app.router.add_get("/api/ws", manager.handle)
     log.info("WebSocket endpoint registered at /api/ws")
     return manager
