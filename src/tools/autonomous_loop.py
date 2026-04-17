@@ -196,34 +196,6 @@ class LoopManager:
                         pass
                     break
 
-                # Calculate wait time: normal interval + exponential backoff on errors
-                wait_seconds = info.interval_seconds
-                if consecutive_errors > 0:
-                    backoff = min(
-                        info.interval_seconds * (2 ** consecutive_errors),
-                        MAX_BACKOFF_SECONDS,
-                    )
-                    wait_seconds = backoff
-                    log.info(
-                        "Loop %s: backing off %ds after %d consecutive errors",
-                        info.id, wait_seconds, consecutive_errors,
-                    )
-
-                # Wait for interval (interruptible by cancel)
-                try:
-                    await asyncio.wait_for(
-                        info._cancel_event.wait(),
-                        timeout=wait_seconds,
-                    )
-                    # If we get here, cancel was set during the wait
-                    break
-                except asyncio.TimeoutError:
-                    pass  # Normal — interval elapsed, proceed with iteration
-
-                # Check cancellation again after wait
-                if info._cancel_event.is_set():
-                    break
-
                 info.iteration_count += 1
                 info.last_trigger = time.monotonic()
 
@@ -307,6 +279,28 @@ class LoopManager:
                 # Post response to channel based on mode
                 if response and info.status == "running":
                     await self._post_response(info, channel, response)
+
+                # Wait for interval before next iteration (interruptible by cancel).
+                # Placed AFTER iteration so the first run executes immediately.
+                wait_seconds = info.interval_seconds
+                if consecutive_errors > 0:
+                    backoff = min(
+                        info.interval_seconds * (2 ** consecutive_errors),
+                        MAX_BACKOFF_SECONDS,
+                    )
+                    wait_seconds = backoff
+                    log.info(
+                        "Loop %s: backing off %ds after %d consecutive errors",
+                        info.id, wait_seconds, consecutive_errors,
+                    )
+                try:
+                    await asyncio.wait_for(
+                        info._cancel_event.wait(),
+                        timeout=wait_seconds,
+                    )
+                    break  # Cancel was set during the wait
+                except asyncio.TimeoutError:
+                    pass  # Normal — interval elapsed, proceed with next iteration
 
             # Loop ended normally (max iterations reached)
             if info.status == "running":
