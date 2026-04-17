@@ -15,6 +15,18 @@ from ..odin_log import get_logger
 
 log = get_logger("codex_auth")
 
+
+def _atomic_write_secure(path: Path, content: str) -> None:
+    """Write content to a file atomically with 0600 permissions."""
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, content.encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    tmp.rename(path)
+
 # OAuth constants for OpenAI Codex CLI
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 AUTH_URL = "https://auth.openai.com/oauth/authorize"
@@ -79,7 +91,7 @@ class CodexAuth:
 
     def _save(self, creds: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(creds, indent=2))
+        _atomic_write_secure(self._path, json.dumps(creds, indent=2))
         self._credentials = creds
 
     async def get_access_token(self) -> str:
@@ -114,7 +126,7 @@ class CodexAuth:
         if not refresh_token:
             raise RuntimeError("No refresh token available. Run scripts/codex_login.py again.")
 
-        async with aiohttp.ClientSession(auto_decompress=False) as session:
+        async with aiohttp.ClientSession(auto_decompress=False, timeout=aiohttp.ClientTimeout(total=30)) as session:
             async with session.post(
                 TOKEN_URL,
                 data={
@@ -189,7 +201,7 @@ class CodexAuth:
     @staticmethod
     async def exchange_code(code: str, code_verifier: str) -> dict:
         """Exchange authorization code for tokens."""
-        async with aiohttp.ClientSession(auto_decompress=False) as session:
+        async with aiohttp.ClientSession(auto_decompress=False, timeout=aiohttp.ClientTimeout(total=30)) as session:
             async with session.post(
                 TOKEN_URL,
                 data={
@@ -257,7 +269,8 @@ class CodexAuthPool:
                 if not isinstance(creds, dict) or not creds.get("access_token"):
                     continue
                 individual_path = self._path.parent / f"codex_auth_{i}.json"
-                individual_path.write_text(json.dumps(creds, indent=2))
+                if not individual_path.exists():
+                    _atomic_write_secure(individual_path, json.dumps(creds, indent=2))
                 auth = CodexAuth(str(individual_path))
                 self._accounts.append(auth)
             log.info("Codex auth pool: %d account(s) loaded", len(self._accounts))
