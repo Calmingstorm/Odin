@@ -92,6 +92,7 @@ class ToolExecutor:
         self._recovery_enabled = self.config.recovery.enabled
         self.freshness_stats = FreshnessStats()
         self._branch_freshness_enabled = self.config.branch_freshness.enabled
+        self._current_tool_timeout: int | None = None
         self.bulkheads = _build_bulkhead_registry(self.config)
         pool_cfg = self.config.ssh_pool
         self.ssh_pool: SSHConnectionPool | None = (
@@ -178,6 +179,7 @@ class ToolExecutor:
     ) -> str:
         """Single attempt at executing a tool handler."""
         try:
+            self._current_tool_timeout = timeout
             if tool_name in ("memory_manage", "manage_list"):
                 coro = handler(tool_input, user_id=user_id)
             else:
@@ -282,7 +284,7 @@ class ToolExecutor:
         callback as they arrive (in addition to being collected).
         """
         if timeout is None:
-            timeout = self.config.command_timeout_seconds
+            timeout = self._current_tool_timeout or self.config.command_timeout_seconds
         if is_local_address(address):
             bh = self.bulkheads.get("subprocess")
             if bh:
