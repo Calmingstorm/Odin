@@ -490,7 +490,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 {"error": f"content exceeds {MAX_CHAT_CONTENT_LEN} chars"}, status=400
             )
 
-        channel_id = data.get("channel_id") or "web-default"
+        # Derive channel_id from the authenticated session to isolate web users.
+        # Each session gets its own conversation history.
+        session_id = getattr(request, "_session_id", None) or "web-default"
+        channel_id = data.get("channel_id") or f"web-{session_id[:12]}"
         user_id = "web-user"
         username = "WebUser"
 

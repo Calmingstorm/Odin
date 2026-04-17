@@ -544,12 +544,12 @@ class Scheduler:
     async def _loop(self) -> None:
         while True:
             try:
+                self._wake.clear()
                 delay = self._compute_tick_delay()
                 try:
                     await asyncio.wait_for(self._wake.wait(), timeout=delay)
                 except asyncio.TimeoutError:
                     pass
-                self._wake.clear()
                 await self._tick()
             except asyncio.CancelledError:
                 break
@@ -709,14 +709,14 @@ class Scheduler:
                 log.error("Failure alert callback error for %s: %s", schedule["id"], alert_err)
 
     async def _tick(self) -> None:
+        to_fire: list[dict] = []
+        to_remove: list[str] = []
+
         async with self._lock:
             now = datetime.now(timezone.utc)
             now_naive = now.replace(tzinfo=None)
-            fired = False
-            to_remove: list[str] = []
 
             for schedule in self._schedules:
-                # Check for pending retries first
                 retry_at_str = schedule.get("retry_at")
                 if retry_at_str:
                     retry_at = datetime.fromisoformat(retry_at_str)
@@ -728,8 +728,7 @@ class Scheduler:
                             schedule["id"], schedule["description"],
                             schedule.get("retry_count", 0),
                         )
-                        fired = True
-                        await self._execute_and_record(schedule)
+                        to_fire.append(schedule)
                     continue
 
                 next_run_str = schedule.get("next_run")
@@ -737,7 +736,6 @@ class Scheduler:
                     continue
 
                 next_run = datetime.fromisoformat(next_run_str)
-                # Strip timezone info so comparison is always naive-vs-naive
                 if next_run.tzinfo is not None:
                     next_run = next_run.replace(tzinfo=None)
                 if now_naive < next_run:
@@ -745,20 +743,36 @@ class Scheduler:
 
                 log.info("Firing schedule %s: %s", schedule["id"], schedule["description"])
                 schedule["last_run"] = now.isoformat()
-                fired = True
+                to_fire.append(schedule)
 
-                await self._execute_and_record(schedule)
-
-                if schedule.get("one_time"):
-                    # Don't remove if retry is pending
-                    if not schedule.get("retry_at"):
-                        to_remove.append(schedule["id"])
-                elif schedule.get("cron"):
+                if schedule.get("cron"):
                     cr = croniter(schedule["cron"], now.replace(tzinfo=None))
                     schedule["next_run"] = cr.get_next(datetime).isoformat()
 
             for sid in to_remove:
                 self._schedules = [s for s in self._schedules if s["id"] != sid]
 
-            if fired or to_remove:
-                await asyncio.to_thread(self._save)
+            if to_fire or to_remove:
+                try:
+                    await asyncio.to_thread(self._save)
+                except Exception as e:
+                    log.error("Schedule save failed (in-memory state may diverge from disk): %s", e)
+
+        # Execute callbacks OUTSIDE the lock so callbacks can safely
+        # call add()/delete()/update() without deadlocking.
+        for schedule in to_fire:
+            await self._execute_and_record(schedule)
+
+        # Remove completed one-time schedules AFTER callbacks have run
+        # (callbacks may set retry_at on failure, deferring removal).
+        one_time_done = [
+            s["id"] for s in to_fire
+            if s.get("one_time") and not s.get("retry_at")
+        ]
+        if one_time_done:
+            async with self._lock:
+                self._schedules = [s for s in self._schedules if s["id"] not in one_time_done]
+                try:
+                    await asyncio.to_thread(self._save)
+                except Exception as e:
+                    log.error("Schedule save failed after one-time cleanup: %s", e)

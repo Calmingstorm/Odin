@@ -132,7 +132,8 @@ class WebSocketManager:
             })
             return
 
-        channel_id = data.get("channel_id") or "web-default"
+        ws_session_id = getattr(self, "_session_id", "ws-default")
+        channel_id = data.get("channel_id") or f"web-{ws_session_id[:12]}"
         user_id = "web-user"
         username = "WebUser"
 

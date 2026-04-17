@@ -739,7 +739,13 @@ async def _run_agent(
 
     def _check_kill() -> bool:
         if agent._cancel_event.is_set():
-            agent.transition(AgentState.KILLED, "cancel signal")
+            if agent._sm.is_terminal:
+                return True
+            try:
+                agent.transition(AgentState.KILLED, "cancel signal")
+            except InvalidStateTransition:
+                log.warning("Agent %s: kill during state %s, forcing terminal", agent.id, agent._sm.state.value)
+                agent._sm._state = AgentState.KILLED
             agent.ended_at = time.time()
             log.info("Agent %s (%s) killed after %ds", agent.id, agent.label, int(time.time() - agent.created_at))
             return True

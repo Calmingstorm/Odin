@@ -66,7 +66,10 @@ class _WebChannel:
             try:
                 fp = file.fp
                 filename = getattr(file, "filename", "file")
-                data = fp.read()
+                data = fp.read(10 * 1024 * 1024 + 1)  # 10MB + 1 byte to detect overflow
+                if len(data) > 10 * 1024 * 1024:
+                    log.warning("Web chat file %s exceeds 10MB, skipping", filename)
+                    data = None
                 if data:
                     # Detect content type from filename
                     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""

@@ -326,8 +326,12 @@ class ToolExecutor:
         return output
 
     async def _handle_run_command(self, inp: dict) -> str:
-        command = inp["command"]
-        host = inp["host"]
+        command = inp.get("command")
+        host = inp.get("host")
+        if not command:
+            return "Error: 'command' is required for run_command."
+        if not host:
+            return "Error: 'host' is required for run_command."
 
         governor_note = ""
         if getattr(self, "command_governor", None):
@@ -348,14 +352,20 @@ class ToolExecutor:
         resolved = self._resolve_host(host)
         if not resolved:
             if finish_cb:
-                await finish_cb()
+                try:
+                    await finish_cb()
+                except Exception:
+                    pass
             return f"Unknown or disallowed host: {host}"
         address, ssh_user, _os = resolved
         code, output = await self._exec_command(
             address, command, ssh_user, on_output=on_output,
         )
         if finish_cb:
-            await finish_cb()
+            try:
+                await finish_cb()
+            except Exception:
+                pass
         if code != 0:
             output = f"Command failed (exit {code}):\n{output}"
         output = _truncate_lines(output)
@@ -365,8 +375,12 @@ class ToolExecutor:
 
     async def _handle_run_script(self, inp: dict) -> str:
         """Write a script to a temp file, execute it, and clean up."""
-        host = inp["host"]
-        script = inp["script"]
+        host = inp.get("host")
+        script = inp.get("script")
+        if not host:
+            return "Error: 'host' is required for run_script."
+        if not script:
+            return "Error: 'script' is required for run_script."
         interpreter = inp.get("interpreter", "bash")
 
         governor_note = ""
@@ -420,7 +434,10 @@ class ToolExecutor:
             address, cmd, ssh_user, on_output=on_output,
         )
         if finish_cb:
-            await finish_cb()
+            try:
+                await finish_cb()
+            except Exception:
+                pass
         if code != 0:
             result = f"Script failed (exit {code}):\n{_truncate_lines(output)}"
             if self._branch_freshness_enabled and is_test_command(script) and is_test_failure(result):

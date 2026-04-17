@@ -154,6 +154,7 @@ def _make_auth_middleware(
         if auth_header.startswith(bearer_prefix):
             bearer_value = auth_header[len(bearer_prefix):]
             if session_manager.validate(bearer_value):
+                request._session_id = bearer_value
                 return await handler(request)
 
         # Check query param token (for downloads, WebSocket)
