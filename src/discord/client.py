@@ -2213,8 +2213,12 @@ class OdinBot(commands.Bot):
                         message, task_history, system_prompt_override=_sp,
                         topic_change=topic_info["is_topic_change"],
                     )
+                except asyncio.TimeoutError as codex_err:
+                    log.warning("Codex tool loop timed out: %s", codex_err)
+                    response = f"Tool execution timed out: {codex_err}"
+                    is_error = True
                 except Exception as codex_err:
-                    log.warning("Codex tool loop failed: %s", codex_err)
+                    log.error("Codex tool loop unexpected error: %s", codex_err, exc_info=True)
                     response = f"Tool execution failed: {codex_err}"
                     is_error = True
                     handoff = False
@@ -2943,9 +2947,17 @@ class OdinBot(commands.Bot):
                         )
                     else:
                         result = await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+                except asyncio.TimeoutError as e:
+                    error = str(e)
+                    result = f"Tool {tool_name} timed out: {e}"
+                    log.warning("Tool %s timed out after %.1fs", tool_name, time.monotonic() - t0)
+                except (ValueError, KeyError, TypeError) as e:
+                    error = str(e)
+                    result = f"Tool {tool_name} input error: {e}"
                 except Exception as e:
                     error = str(e)
                     result = f"Error executing {tool_name}: {e}"
+                    log.warning("Unexpected tool error for %s: %s", tool_name, e)
 
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
 
@@ -4137,9 +4149,13 @@ class OdinBot(commands.Bot):
                 except asyncio.TimeoutError:
                     error = f"Tool '{tool_name}' timed out after {_t}s"
                     raw = error
+                except (ValueError, KeyError, TypeError) as e:
+                    error = str(e)
+                    raw = f"Tool {tool_name} input error: {e}"
                 except Exception as e:
                     error = str(e)
                     raw = f"Error executing {tool_name}: {e}"
+                    log.warning("Unexpected loop tool error for %s: %s", tool_name, e)
 
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
 
