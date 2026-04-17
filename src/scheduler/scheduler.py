@@ -60,9 +60,38 @@ class Scheduler:
             try:
                 self._schedules = json.loads(self.data_path.read_text())
                 log.info("Loaded %d schedule(s)", len(self._schedules))
+                self._advance_stale_cron()
             except Exception as e:
                 log.error("Failed to load schedules: %s", e)
                 self._schedules = []
+
+    def _advance_stale_cron(self) -> None:
+        """Advance cron schedules whose next_run is in the past.
+
+        After downtime, a cron schedule's persisted next_run may be hours or
+        days old. Instead of firing immediately for a stale time, advance
+        next_run to the next future occurrence so the schedule resumes on
+        its normal cadence.
+        """
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        advanced = 0
+        for schedule in self._schedules:
+            cron_expr = schedule.get("cron")
+            next_run_str = schedule.get("next_run")
+            if not cron_expr or not next_run_str:
+                continue
+            try:
+                next_run = datetime.fromisoformat(next_run_str)
+                if next_run.tzinfo is not None:
+                    next_run = next_run.replace(tzinfo=None)
+                if next_run < now:
+                    cr = croniter(cron_expr, now)
+                    schedule["next_run"] = cr.get_next(datetime).isoformat()
+                    advanced += 1
+            except Exception:
+                continue
+        if advanced:
+            log.info("Advanced %d stale cron schedule(s) to next future run", advanced)
 
     def _save(self) -> None:
         self.data_path.write_text(json.dumps(self._schedules, indent=2))

@@ -3,7 +3,7 @@
 Endpoint: /api/ws
 - Client sends: {"subscribe": "logs"} or {"subscribe": "events"}
 - Server sends: {"type": "log", "line": "..."} or {"type": "event", ...}
-- Client sends: {"type": "chat", "content": "...", "channel_id": "web-default"}
+- Client sends: {"type": "chat", "content": "..."}
 - Server sends: {"type": "chat_response", "content": "...", "tool_calls": [...]}
 """
 from __future__ import annotations
