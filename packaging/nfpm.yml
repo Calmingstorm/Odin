@@ -1,0 +1,64 @@
+name: odin
+arch: amd64
+platform: linux
+version: ${VERSION}
+version_schema: semver
+
+section: admin
+priority: optional
+maintainer: Odin Maintainers <odin@localhost>
+description: |
+  Odin — autonomous execution agent on Discord.
+  71 tools, shell access, browser automation, scheduled tasks,
+  sub-agents, knowledge base, and a 19-page web management UI.
+vendor: Odin
+homepage: https://github.com/Calmingstorm/Odin
+license: MIT
+
+depends:
+  - python3 (>= 3.11)
+  - python3-venv
+  - openssh-client
+
+recommends:
+  - python3-pip
+
+contents:
+  - src: ./src
+    dst: /opt/odin/src
+    type: tree
+
+  - src: ./ui
+    dst: /opt/odin/ui
+    type: tree
+
+  - src: ./pyproject.toml
+    dst: /opt/odin/pyproject.toml
+
+  - src: ./config.yml
+    dst: /opt/odin/config.yml.default
+
+  - src: ./.env.example
+    dst: /opt/odin/.env.example
+
+  - src: ./packaging/odin.service
+    dst: /usr/lib/systemd/system/odin.service
+
+  - dst: /etc/odin/
+    type: dir
+    file_info:
+      mode: 0755
+
+  - dst: /var/lib/odin/
+    type: dir
+    file_info:
+      mode: 0755
+
+  - dst: /var/log/odin/
+    type: dir
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: ./packaging/postinstall.sh
+  preremove: ./packaging/preremove.sh

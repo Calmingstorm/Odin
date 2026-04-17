@@ -1,0 +1,25 @@
+[Unit]
+Description=Odin Discord Bot — Autonomous Execution Agent
+Documentation=https://github.com/Calmingstorm/Odin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=odin
+Group=odin
+WorkingDirectory=/opt/odin
+ExecStart=/opt/odin/.venv/bin/python -m src
+EnvironmentFile=/etc/odin/.env
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/odin /var/log/odin
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
