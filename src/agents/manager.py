@@ -654,25 +654,27 @@ class AgentManager:
                 if agent.ended_at and (now - agent.ended_at) > CLEANUP_DELAY:
                     to_remove.append(agent_id)
 
-        for agent_id in to_remove:
-            del self._agents[agent_id]
-            # Cancel cleanup task if one exists
-            ct = self._cleanup_tasks.pop(agent_id, None)
-            if ct and not ct.done():
-                ct.cancel()
+        removed = sum(1 for aid in to_remove if self._remove_agent(aid, source="periodic_cleanup"))
+        if removed:
+            log.info("Cleaned up %d finished agents", removed)
+        return removed
 
-        if to_remove:
-            log.info("Cleaned up %d finished agents", len(to_remove))
-        return len(to_remove)
+    def _remove_agent(self, agent_id: str, source: str = "") -> bool:
+        """Single removal point for agents. Returns True if actually removed."""
+        agent = self._agents.pop(agent_id, None)
+        ct = self._cleanup_tasks.pop(agent_id, None)
+        if ct and not ct.done():
+            ct.cancel()
+        if agent:
+            log.debug("Removed agent %s (%s) via %s", agent_id, agent.label, source or "cleanup")
+            return True
+        return False
 
     def _schedule_cleanup(self, agent_id: str) -> None:
         """Schedule cleanup of an agent after CLEANUP_DELAY."""
         async def _delayed_cleanup():
             await asyncio.sleep(CLEANUP_DELAY)
-            agent = self._agents.pop(agent_id, None)
-            self._cleanup_tasks.pop(agent_id, None)
-            if agent:
-                log.debug("Auto-cleaned agent %s (%s)", agent_id, agent.label)
+            self._remove_agent(agent_id, source="delayed_cleanup")
 
         task = asyncio.ensure_future(_delayed_cleanup())
         self._cleanup_tasks[agent_id] = task
