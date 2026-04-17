@@ -84,6 +84,7 @@ class ToolExecutor:
         self._permission_manager = permission_manager
         self.output_streamer = output_streamer
         self._metrics: dict[str, dict[str, int]] = {}
+        self._memory_lock = asyncio.Lock()
         self.risk_stats = RiskStats()
         self.recovery_stats = RecoveryStats()
         self.validation_stats = ResultValidationStats()
@@ -884,66 +885,66 @@ class ToolExecutor:
             )
         scope = inp.get("scope", "personal")
 
-        if action in ("get", "recall", "read"):
-            key = inp.get("key")
-            if not key:
-                return "'key' is required for get."
-            all_mem = await asyncio.to_thread(self._load_all_memory)
-            user_key = f"user_{user_id}" if user_id else None
-            if user_key and key in all_mem.get(user_key, {}):
-                return f"**{key}** (personal): {all_mem[user_key][key]}"
-            if key in all_mem.get("global", {}):
-                return f"**{key}** (global): {all_mem['global'][key]}"
-            return f"No note found with key '{key}'."
+        async with self._memory_lock:
+            if action in ("get", "recall", "read"):
+                key = inp.get("key")
+                if not key:
+                    return "'key' is required for get."
+                all_mem = await asyncio.to_thread(self._load_all_memory)
+                user_key = f"user_{user_id}" if user_id else None
+                if user_key and key in all_mem.get(user_key, {}):
+                    return f"**{key}** (personal): {all_mem[user_key][key]}"
+                if key in all_mem.get("global", {}):
+                    return f"**{key}** (global): {all_mem['global'][key]}"
+                return f"No note found with key '{key}'."
 
-        if action == "list":
-            all_mem = await asyncio.to_thread(self._load_all_memory)
-            global_mem = all_mem.get("global", {})
-            user_mem = all_mem.get(f"user_{user_id}", {}) if user_id else {}
-            lines = []
-            if global_mem:
-                lines.append("**Global notes:**")
-                lines.extend(f"- **{k}**: {v}" for k, v in global_mem.items())
-            if user_mem:
-                lines.append("**Your personal notes:**")
-                lines.extend(f"- **{k}**: {v}" for k, v in user_mem.items())
-            return "\n".join(lines) if lines else "No notes saved yet."
+            if action == "list":
+                all_mem = await asyncio.to_thread(self._load_all_memory)
+                global_mem = all_mem.get("global", {})
+                user_mem = all_mem.get(f"user_{user_id}", {}) if user_id else {}
+                lines = []
+                if global_mem:
+                    lines.append("**Global notes:**")
+                    lines.extend(f"- **{k}**: {v}" for k, v in global_mem.items())
+                if user_mem:
+                    lines.append("**Your personal notes:**")
+                    lines.extend(f"- **{k}**: {v}" for k, v in user_mem.items())
+                return "\n".join(lines) if lines else "No notes saved yet."
 
-        elif action == "save":
-            key = inp.get("key")
-            value = inp.get("value")
-            if not key or not value:
-                return "Both 'key' and 'value' are required for save."
-            all_mem = await asyncio.to_thread(self._load_all_memory)
-            if scope == "global":
-                section = "global"
-            elif user_id:
-                section = f"user_{user_id}"
-            else:
-                section = "global"
-            if section not in all_mem:
-                all_mem[section] = {}
-            all_mem[section][key] = value
-            await asyncio.to_thread(self._save_all_memory, all_mem)
-            scope_label = "global" if section == "global" else "personal"
-            return f"Saved {scope_label} note '{key}'."
-
-        elif action == "delete":
-            key = inp.get("key")
-            if not key:
-                return "'key' is required for delete."
-            all_mem = await asyncio.to_thread(self._load_all_memory)
-            # Try user section first, then global
-            user_key = f"user_{user_id}" if user_id else None
-            if user_key and key in all_mem.get(user_key, {}):
-                del all_mem[user_key][key]
+            elif action == "save":
+                key = inp.get("key")
+                value = inp.get("value")
+                if not key or not value:
+                    return "Both 'key' and 'value' are required for save."
+                all_mem = await asyncio.to_thread(self._load_all_memory)
+                if scope == "global":
+                    section = "global"
+                elif user_id:
+                    section = f"user_{user_id}"
+                else:
+                    section = "global"
+                if section not in all_mem:
+                    all_mem[section] = {}
+                all_mem[section][key] = value
                 await asyncio.to_thread(self._save_all_memory, all_mem)
-                return f"Deleted personal note '{key}'."
-            elif key in all_mem.get("global", {}):
-                del all_mem["global"][key]
-                await asyncio.to_thread(self._save_all_memory, all_mem)
-                return f"Deleted global note '{key}'."
-            return f"No note found with key '{key}'."
+                scope_label = "global" if section == "global" else "personal"
+                return f"Saved {scope_label} note '{key}'."
+
+            elif action == "delete":
+                key = inp.get("key")
+                if not key:
+                    return "'key' is required for delete."
+                all_mem = await asyncio.to_thread(self._load_all_memory)
+                user_key = f"user_{user_id}" if user_id else None
+                if user_key and key in all_mem.get(user_key, {}):
+                    del all_mem[user_key][key]
+                    await asyncio.to_thread(self._save_all_memory, all_mem)
+                    return f"Deleted personal note '{key}'."
+                elif key in all_mem.get("global", {}):
+                    del all_mem["global"][key]
+                    await asyncio.to_thread(self._save_all_memory, all_mem)
+                    return f"Deleted global note '{key}'."
+                return f"No note found with key '{key}'."
 
         return f"Unknown memory action: {action}"
 

@@ -747,6 +747,7 @@ class TestInvokeSkillTool:
         exe._permission_manager = None
         exe.output_streamer = None
         exe._metrics = {}
+        exe._memory_lock = asyncio.Lock()
         exe.risk_stats = RiskStats()
         exe.recovery_stats = RecoveryStats()
         exe.validation_stats = ResultValidationStats()
