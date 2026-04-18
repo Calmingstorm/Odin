@@ -2143,7 +2143,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not tier or not isinstance(tier, str):
             return web.json_response({"error": "tier is required"}, status=400)
         try:
-            await pm.set_tier(uid, tier)
+            await pm.async_set_tier(uid, tier)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
         return web.json_response({"user_id": uid, "tier": tier, "status": "updated"})
@@ -2154,7 +2154,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not pm:
             return web.json_response({"error": "permission manager not available"}, status=503)
         uid = request.match_info["user_id"]
-        if await pm.delete_tier(uid):
+        if await pm.async_delete_tier(uid):
             return web.json_response({"user_id": uid, "status": "override_removed"})
         return web.json_response({"error": "no override found for user"}, status=404)
 

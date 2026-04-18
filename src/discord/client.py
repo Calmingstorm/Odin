@@ -3415,7 +3415,7 @@ class OdinBot(commands.Bot):
         target_user_id = inp["user_id"]
         tier = inp["tier"]
         try:
-            await self.permissions.set_tier(target_user_id, tier)
+            await self.permissions.async_set_tier(target_user_id, tier)
         except ValueError as e:
             return str(e)
         return f"Permission tier for user {target_user_id} set to **{tier}**."
@@ -4029,6 +4029,7 @@ class OdinBot(commands.Bot):
             tool_executor_callback=_tool_cb,
             tools=tools,
             system_prompt=system_prompt,
+            tool_timeouts=self.config.tools.tool_timeouts,
         )
 
         # Format response

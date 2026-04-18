@@ -66,17 +66,21 @@ class PermissionManager:
             return self._overrides[user_id]
         return self._config_tiers.get(user_id, self._default_tier)
 
-    async def set_tier(self, user_id: str, tier: str) -> None:
+    def set_tier(self, user_id: str, tier: str) -> None:
         """Set a user's permission tier (persisted as runtime override)."""
         if tier not in VALID_TIERS:
             raise ValueError(f"Invalid tier '{tier}'. Must be one of: {', '.join(VALID_TIERS)}")
-        async with self._lock:
-            self._overrides[user_id] = tier
-            self._save_overrides()
+        self._overrides[user_id] = tier
+        self._save_overrides()
         log.info("Permission tier for user %s set to %s", user_id, tier)
 
-    async def delete_tier(self, user_id: str) -> bool:
-        """Remove a user's permission override. Returns True if it existed."""
+    async def async_set_tier(self, user_id: str, tier: str) -> None:
+        """Async-safe version of set_tier with locking."""
+        async with self._lock:
+            self.set_tier(user_id, tier)
+
+    async def async_delete_tier(self, user_id: str) -> bool:
+        """Remove a user's permission override with locking. Returns True if it existed."""
         async with self._lock:
             if user_id in self._overrides:
                 del self._overrides[user_id]
