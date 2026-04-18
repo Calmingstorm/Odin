@@ -1123,16 +1123,19 @@ class SessionManager:
         return results
 
     def scrub_secrets(self, channel_id: str, content: str) -> bool:
-        """Remove a message containing secrets from history."""
+        """Remove a message containing secrets from history.
+
+        Safe to call outside the per-channel lock — builds a new list
+        and atomically replaces session.messages.
+        """
         session = self._sessions.get(channel_id)
         if not session:
             return False
-        before = len(session.messages)
-        session.messages = [
-            m for m in session.messages if content not in m.content
-        ]
-        removed = before - len(session.messages)
+        original = session.messages
+        filtered = [m for m in original if content not in m.content]
+        removed = len(original) - len(filtered)
         if removed:
+            session.messages = filtered
             self._dirty.add(channel_id)
             log.warning(
                 "Scrubbed %d message(s) containing secrets from channel %s",
@@ -1167,21 +1170,26 @@ class SessionManager:
 
     def save(self) -> None:
         """Persist only sessions that changed since the last save."""
-        for cid in self._dirty:
+        to_save = set(self._dirty)
+        self._dirty -= to_save
+        for cid in to_save:
             session = self._sessions.get(cid)
             if session is None:
                 continue
             path = self.persist_dir / f"{cid}.json"
             data = asdict(session)
-            path.write_text(json.dumps(data, indent=2))
-        self._dirty.clear()
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2))
+            tmp.replace(path)
 
     def save_all(self) -> None:
         """Persist every session (used during shutdown)."""
-        for cid, session in self._sessions.items():
+        for cid, session in list(self._sessions.items()):
             path = self.persist_dir / f"{cid}.json"
             data = asdict(session)
-            path.write_text(json.dumps(data, indent=2))
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2))
+            tmp.replace(path)
         self._dirty.clear()
 
     def load(self) -> None:

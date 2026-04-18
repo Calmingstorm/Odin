@@ -252,6 +252,7 @@ class CodexAuthPool:
         self._path = Path(credentials_path)
         self._accounts: list[CodexAuth] = []
         self._current_index = 0
+        self._pool_lock = asyncio.Lock()
         self._init_accounts()
 
     def _init_accounts(self) -> None:
@@ -296,38 +297,38 @@ class CodexAuthPool:
         """Get a token from the current account, rotating if rate-limited."""
         if not self._accounts:
             raise RuntimeError("No Codex credentials configured.")
-        # Try current first, then rotate through others
-        for _ in range(len(self._accounts)):
-            auth = self._accounts[self._current_index]
-            if not auth.is_rate_limited():
-                return await auth.get_access_token()
-            self._rotate()
-        # All limited — use current anyway
-        log.warning("All %d Codex accounts rate-limited, using current", len(self._accounts))
-        return await self._accounts[self._current_index].get_access_token()
+        async with self._pool_lock:
+            for _ in range(len(self._accounts)):
+                auth = self._accounts[self._current_index]
+                if not auth.is_rate_limited():
+                    return await auth.get_access_token()
+                self._rotate()
+            log.warning("All %d Codex accounts rate-limited, using current", len(self._accounts))
+            return await self._accounts[self._current_index].get_access_token()
 
     def get_account_id(self) -> str | None:
         if not self._accounts:
             return None
         return self.current.get_account_id()
 
-    def mark_current_limited(self) -> None:
+    async def mark_current_limited(self) -> None:
         """Mark the current account as rate-limited and rotate to the next."""
         if not self._accounts:
             return
-        current = self._accounts[self._current_index]
-        current.mark_rate_limited()
-        try:
-            email = current._load().get("email", f"account {self._current_index}")
-        except Exception:
-            email = f"account {self._current_index}"
+        async with self._pool_lock:
+            current = self._accounts[self._current_index]
+            current.mark_rate_limited()
+            try:
+                email = current._load().get("email", f"account {self._current_index}")
+            except Exception:
+                email = f"account {self._current_index}"
 
-        if len(self._accounts) > 1:
-            self._rotate()
-            log.warning("Codex %s hit rate limit, rotated to account %d/%d",
-                        email, self._current_index + 1, len(self._accounts))
-        else:
-            log.warning("Codex %s hit rate limit (only account, no rotation)", email)
+            if len(self._accounts) > 1:
+                self._rotate()
+                log.warning("Codex %s hit rate limit, rotated to account %d/%d",
+                            email, self._current_index + 1, len(self._accounts))
+            else:
+                log.warning("Codex %s hit rate limit (only account, no rotation)", email)
 
     def _rotate(self) -> None:
         self._current_index = (self._current_index + 1) % len(self._accounts)
