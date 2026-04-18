@@ -204,7 +204,7 @@ TOOLS: list[dict] = [
                     "properties": {
                         "source": {
                             "type": "string",
-                            "enum": ["gitea", "grafana", "generic", "github"],
+                            "enum": ["gitea", "grafana", "generic", "github", "gitlab", "discord_reaction", "discord_message"],
                             "description": "Webhook source to match",
                         },
                         "event": {
@@ -868,7 +868,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "browser_click",
-        "description": "Navigates to a URL and clicks an element by CSS selector. Returns visible page text after clicking. To fill forms, use browser_fill.",
+        "description": "Navigates to a URL and clicks an element by CSS selector. Returns a confirmation summary after clicking. To fill forms, use browser_fill. To read page content after clicking, follow up with browser_read_page.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1126,10 +1126,6 @@ TOOLS: list[dict] = [
                     "type": "string",
                     "description": "Text to send to stdin (required for write)",
                 },
-                "timeout": {
-                    "type": "integer",
-                    "description": "Max lifetime in seconds (default 300, max 3600)",
-                },
             },
             "required": ["action"],
         },
@@ -1276,6 +1272,7 @@ TOOLS: list[dict] = [
             "properties": {
                 "label": {"type": "string", "description": "Short name (e.g. 'disk-audit')"},
                 "goal": {"type": "string", "description": "Full task description for the agent"},
+                "parent_id": {"type": "string", "description": "Parent agent ID for nested spawns (optional, set automatically when spawning from within an agent)"},
             },
             "required": ["label", "goal"],
         },

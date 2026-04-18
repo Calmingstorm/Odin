@@ -2806,6 +2806,8 @@ class OdinBot(commands.Bot):
                         result = await self._handle_schedule_task(message, tool_input)
                     elif tool_name == "list_schedules":
                         result = self._handle_list_schedules()
+                    elif tool_name == "update_schedule":
+                        result = await self._handle_update_schedule(tool_input)
                     elif tool_name == "delete_schedule":
                         result = await self._handle_delete_schedule(tool_input)
                     elif tool_name == "parse_time":
@@ -2828,6 +2830,8 @@ class OdinBot(commands.Bot):
                         result = await self._handle_search_knowledge(tool_input)
                     elif tool_name == "ingest_document":
                         result = await self._handle_ingest_document(tool_input, str(message.author))
+                    elif tool_name == "bulk_ingest_knowledge":
+                        result = await self._handle_bulk_ingest(tool_input, str(message.author))
                     elif tool_name == "list_knowledge":
                         result = self._handle_list_knowledge()
                     elif tool_name == "delete_knowledge":
@@ -3295,6 +3299,29 @@ class OdinBot(commands.Bot):
             )
         return f"**Scheduled tasks ({len(schedules)}):**\n" + "\n".join(lines)
 
+    async def _handle_update_schedule(self, inp: dict) -> str:
+        """Update an existing schedule."""
+        schedule_id = inp.get("schedule_id", "")
+        if not schedule_id:
+            return "Error: 'schedule_id' is required."
+        kwargs = {}
+        for key in ("description", "cron", "run_at", "message", "tool_name",
+                     "tool_input", "steps", "channel_id"):
+            if key in inp:
+                kwargs[key] = inp[key]
+        trigger = inp.get("trigger")
+        if trigger is not None:
+            kwargs["trigger"] = trigger
+        if not kwargs:
+            return "Error: no fields to update."
+        try:
+            result = await self.scheduler.update(schedule_id, **kwargs)
+        except ValueError as e:
+            return f"Error: {e}"
+        if result is None:
+            return f"Schedule {schedule_id} not found."
+        return f"Updated schedule {schedule_id}."
+
     async def _handle_delete_schedule(self, inp: dict) -> str:
         """Delete a scheduled task."""
         schedule_id = inp.get("schedule_id", "")
@@ -3378,6 +3405,24 @@ class OdinBot(commands.Bot):
         if count == 0:
             return f"Failed to ingest '{source}' — no chunks could be indexed."
         return f"Ingested '{source}' into knowledge base ({count} chunks indexed)."
+
+    async def _handle_bulk_ingest(self, inp: dict, uploader: str) -> str:
+        """Bulk-import documents into the knowledge base."""
+        if not self._knowledge_store:
+            return "Knowledge base is not available."
+        items = inp.get("items")
+        if not items or not isinstance(items, list):
+            return "Error: 'items' (array) is required."
+        from ..knowledge.importer import BulkImporter
+        importer = BulkImporter(self._knowledge_store, self._embedder)
+        batch = await importer.import_batch(items, uploader=uploader)
+        lines = [f"Bulk import: {batch.succeeded} succeeded, {batch.failed} failed, {batch.skipped} skipped"]
+        for r in batch.results:
+            tag = r["status"].upper()
+            detail = f" ({r['chunks']} chunks)" if r["chunks"] else ""
+            err = f" — {r['error']}" if r["error"] else ""
+            lines.append(f"  [{tag}] {r['source']}{detail}{err}")
+        return "\n".join(lines)
 
     def _handle_list_knowledge(self) -> str:
         """List all documents in the knowledge base."""
@@ -4280,6 +4325,8 @@ class OdinBot(commands.Bot):
         # --- Discord-native tools (input only) ---
         if tool_name == "list_schedules":
             return self._handle_list_schedules()
+        if tool_name == "update_schedule":
+            return await self._handle_update_schedule(tool_input)
         if tool_name == "delete_schedule":
             return await self._handle_delete_schedule(tool_input)
         if tool_name == "parse_time":
@@ -4298,6 +4345,8 @@ class OdinBot(commands.Bot):
             return await self._handle_search_knowledge(tool_input)
         if tool_name == "ingest_document":
             return await self._handle_ingest_document(tool_input, str(msg_proxy.author))
+        if tool_name == "bulk_ingest_knowledge":
+            return await self._handle_bulk_ingest(tool_input, str(msg_proxy.author))
         if tool_name == "list_knowledge":
             return self._handle_list_knowledge()
         if tool_name == "delete_knowledge":
