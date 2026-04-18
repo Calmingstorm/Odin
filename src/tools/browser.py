@@ -14,7 +14,7 @@ from ..odin_log import get_logger
 
 log = get_logger("browser")
 
-ALLOWED_SCHEMES = ("http://", "https://")
+ALLOWED_SCHEMES = ("http://", "https://")  # re-exported for tests
 _CONNECTION_ERROR_PATTERNS = (
     "connection closed",
     "target closed",

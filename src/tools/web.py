@@ -65,13 +65,16 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
     Handles HTML (converts to markdown-like text), JSON (returns raw),
     and plain text. Truncates to max_chars.
     """
+    from .url_safety import is_url_blocked
+    if is_url_blocked(url):
+        return "Error: URL targets a blocked address (localhost, private IP, or metadata endpoint)"
     try:
         async with aiohttp.ClientSession(timeout=FETCH_TIMEOUT) as session:
             async with session.get(
                 url,
                 headers={"User-Agent": USER_AGENT},
                 allow_redirects=True,
-                ssl=False,  # Disable SSL verification — internal infra may use self-signed certs
+                ssl=False,
             ) as resp:
                 if resp.status != 200:
                     return f"HTTP {resp.status}: {resp.reason}"
