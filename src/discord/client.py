@@ -1600,11 +1600,15 @@ class OdinBot(commands.Bot):
             except Exception:
                 log.exception("Error closing outbound_webhook_dispatcher")
 
-        # Clean up agent manager — cancel cleanup tasks, remove terminal agents
+        # Kill all active agents and clean up
         agent_mgr = getattr(self, "agent_manager", None)
         if agent_mgr is not None:
             try:
+                active = [a for a in agent_mgr._agents.values() if a._sm.is_active]
+                for agent in active:
+                    agent_mgr.kill(agent.id, cascade=True)
                 await agent_mgr.cleanup()
+                log.info("Shutdown: killed %d active agent(s)", len(active))
             except Exception:
                 log.exception("Error cleaning up agent_manager")
 
@@ -1617,6 +1621,14 @@ class OdinBot(commands.Bot):
                     await pool.close_all()
                 except Exception:
                     log.exception("Error closing SSH pool")
+
+        # Close auxiliary LLM client
+        aux = getattr(self, "auxiliary_llm_client", None)
+        if aux is not None:
+            try:
+                await aux.close()
+            except Exception:
+                log.exception("Error closing auxiliary LLM client")
 
         # Close Codex/LLM HTTP client session
         codex = getattr(self, "codex_client", None)
