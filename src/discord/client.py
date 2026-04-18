@@ -1343,6 +1343,20 @@ class OdinBot(commands.Bot):
         await super().close()
         log.info("OdinBot shutdown complete")
 
+    async def _set_status(self, text: str | None = None) -> None:
+        """Set Discord presence status. None = reset to online/idle."""
+        try:
+            if text:
+                activity = discord.Activity(
+                    type=discord.ActivityType.watching,
+                    name=text,
+                )
+                await self.change_presence(activity=activity, status=discord.Status.online)
+            else:
+                await self.change_presence(activity=None, status=discord.Status.online)
+        except Exception:
+            pass
+
     async def on_ready(self) -> None:
         log.info("Logged in as %s (ID: %s)", self.user, self.user.id)
         log.info("Tools loaded: %d definitions", len(get_tool_definitions()))
@@ -1363,6 +1377,7 @@ class OdinBot(commands.Bot):
         # Start proactive monitoring if configured
         if hasattr(self, "infra_watcher") and self.infra_watcher:
             self.infra_watcher.start()
+        await self._set_status(None)
 
     async def _backfill_archives(self) -> None:
         """Backfill semantic search index and FTS5 with existing archive files."""
@@ -1988,6 +2003,7 @@ class OdinBot(commands.Bot):
                         response = _skill_response
                         already_sent = False
         except (discord.HTTPException, discord.Forbidden, asyncio.TimeoutError) as e:
+            await self._set_status(None)
             log.error("Discord/network error processing message: %s", e, exc_info=True)
             leaked = self._pending_files.pop(channel_id, None)
             if leaked:
@@ -1996,6 +2012,7 @@ class OdinBot(commands.Bot):
             self.sessions.remove_last_message(channel_id, "user")
             return
         except Exception as e:
+            await self._set_status(None)
             log.error("Unexpected error processing message: %s", e, exc_info=True)
             leaked = self._pending_files.pop(channel_id, None)
             if leaked:
@@ -2003,6 +2020,8 @@ class OdinBot(commands.Bot):
             await self._send_with_retry(message, scrub_response_secrets(f"Something went wrong: {e}"))
             self.sessions.remove_last_message(channel_id, "user")
             return
+
+        await self._set_status(None)
 
         # Scrub secrets from LLM response before logging, saving, or sending.
         # Tool output is already scrubbed (scrub_output_secrets in _run_tool),
@@ -2289,6 +2308,8 @@ class OdinBot(commands.Bot):
         log.info("Tool loop starting: %d tools available, %d messages in history, cap=%d",
                  len(tools) if tools else 0, len(messages), chat_cap)
 
+        await self._set_status("Working...")
+
         # Per-turn StuckLoopTracker — detects repeating tool-call sequences and
         # nudges the LLM out of cycles before the iteration cap forces an exit.
         stuck_tracker = self.stuck_loop_tracker_cls()
@@ -2529,6 +2550,7 @@ class OdinBot(commands.Bot):
                 tool_name = block.name
                 tool_input = block.input
                 log.info("Tool call: %s(%s)", tool_name, tool_input)
+                await self._set_status(f"Running: {tool_name}")
 
                 t0 = time.monotonic()
                 error = None
