@@ -576,7 +576,9 @@ class AgentManager:
             all_done = True
             for aid in agent_ids:
                 agent = self._agents.get(aid)
-                if agent and agent._sm.is_active:
+                if agent is None:
+                    continue
+                if agent._sm.is_active:
                     all_done = False
                     break
             if all_done:
@@ -754,11 +756,10 @@ async def _run_agent(
                 return True
             try:
                 agent.transition(AgentState.KILLED, "cancel signal")
+                agent.ended_at = time.time()
+                log.info("Agent %s (%s) killed after %ds", agent.id, agent.label, int(time.time() - agent.created_at))
             except InvalidStateTransition:
-                log.warning("Agent %s: kill during state %s, forcing terminal", agent.id, agent._sm.state.value)
-                agent._sm._state = AgentState.KILLED
-            agent.ended_at = time.time()
-            log.info("Agent %s (%s) killed after %ds", agent.id, agent.label, int(time.time() - agent.created_at))
+                log.info("Agent %s already in terminal state %s when kill arrived", agent.id, agent._sm.state.value)
             return True
         return False
 

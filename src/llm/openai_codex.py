@@ -424,8 +424,9 @@ class CodexChatClient:
                     error_body = (await resp.read()).decode("utf-8", errors="replace")
 
                     if resp.status == 401 and attempt == 0:
-                        log.warning("Codex auth expired, refreshing token...")
-                        await self.auth._refresh(self.auth._load())
+                        log.warning("Codex auth expired, forcing token refresh...")
+                        if hasattr(self.auth, '_credentials'):
+                            self.auth._credentials = None
                         new_token = await self.auth.get_access_token()
                         headers["Authorization"] = f"Bearer {new_token}"
                         account_id = self.auth.get_account_id()
@@ -435,7 +436,7 @@ class CodexChatClient:
 
                     if resp.status == 429:
                         if hasattr(self.auth, "mark_current_limited"):
-                            self.auth.mark_current_limited()
+                            await self.auth.mark_current_limited()
                         self.breaker.record_failure()
                         last_error = f"HTTP 429: {error_body[:200]}"
                         if attempt < self.max_retries - 1:
@@ -655,8 +656,9 @@ class CodexChatClient:
                     error_body = (await resp.read()).decode("utf-8", errors="replace")
 
                     if resp.status == 401 and attempt == 0:
-                        log.warning("Codex auth expired, refreshing token...")
-                        await self.auth._refresh(self.auth._load())
+                        log.warning("Codex auth expired, forcing token refresh...")
+                        if hasattr(self.auth, '_credentials'):
+                            self.auth._credentials = None
                         new_token = await self.auth.get_access_token()
                         headers["Authorization"] = f"Bearer {new_token}"
                         account_id = self.auth.get_account_id()
@@ -666,7 +668,7 @@ class CodexChatClient:
 
                     if resp.status == 429:
                         if hasattr(self.auth, "mark_current_limited"):
-                            self.auth.mark_current_limited()
+                            await self.auth.mark_current_limited()
                         self.breaker.record_failure()
                         last_error = f"HTTP 429: {error_body[:200]}"
                         if attempt < self.max_retries - 1:
