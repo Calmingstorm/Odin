@@ -22,6 +22,14 @@ log = get_logger("knowledge.importer")
 
 MAX_BATCH_SIZE = 50
 MAX_FILE_BYTES = 512_000  # 500 KB per file
+
+SAFE_IMPORT_ROOTS = (
+    "/opt/odin",
+    "/opt/heimdall",
+    "/tmp",
+    "/home",
+    "/root",
+)
 MAX_PDF_BYTES = 50_000_000  # 50 MB
 FETCH_TIMEOUT = aiohttp.ClientTimeout(total=30)
 FETCH_MAX_CHARS = 100_000  # larger than tool output — we want full content for ingestion
@@ -59,9 +67,14 @@ class BulkImporter:
         pattern: str = "**/*.md",
         uploader: str = "bulk-import",
     ) -> list[ImportResult]:
-        base = Path(directory)
+        base = Path(directory).resolve()
         if not base.is_dir():
             return [ImportResult(source=directory, status="error", error="directory not found")]
+        if not any(str(base).startswith(root) for root in SAFE_IMPORT_ROOTS):
+            return [ImportResult(
+                source=directory, status="error",
+                error=f"directory not in allowed import roots: {', '.join(SAFE_IMPORT_ROOTS)}",
+            )]
 
         results: list[ImportResult] = []
         resolved_base = base.resolve()
@@ -134,6 +147,9 @@ class BulkImporter:
                 async with session.get(url) as resp:
                     if resp.status != 200:
                         return ImportResult(source=src, status="error", error=f"HTTP {resp.status}")
+                    cl = resp.headers.get("Content-Length")
+                    if cl is not None and int(cl) > MAX_PDF_BYTES:
+                        return ImportResult(source=src, status="error", error=f"PDF too large ({cl} bytes, max {MAX_PDF_BYTES})")
                     pdf_bytes = await resp.read()
                     if len(pdf_bytes) > MAX_PDF_BYTES:
                         return ImportResult(source=src, status="error", error="PDF too large")
@@ -185,7 +201,7 @@ class BulkImporter:
                     url,
                     headers={"User-Agent": "Mozilla/5.0 (compatible; OdinBot/1.0)"},
                     allow_redirects=True,
-                    ssl=False,
+                    ssl=True,
                 ) as resp:
                     if resp.status != 200:
                         return ImportResult(source=src, status="error", error=f"HTTP {resp.status}")
