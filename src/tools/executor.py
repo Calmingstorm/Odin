@@ -215,28 +215,6 @@ class ToolExecutor:
     _SKIP_RECOVERY = frozenset({RecoveryCategory.TIMEOUT})
 
     # Tools that must NEVER be retried regardless of risk classification,
-    # because they are structurally non-idempotent (retrying could cause
-    # duplicate side-effects even when the command itself looks benign).
-    _NEVER_RETRY_TOOLS = frozenset({
-        "run_script",           # arbitrary code execution
-        "claude_code",          # arbitrary code execution
-        "run_command_multi",    # multi-host amplification
-        "manage_process",       # start/kill are non-idempotent
-        "git_ops",              # push, merge are non-idempotent
-        "docker_ops",           # container lifecycle
-        "terraform_ops",        # infrastructure mutations
-        "kubectl",              # cluster state changes
-        "execute_plan",         # DAG plan execution
-        "issue_tracker",        # creates/updates tickets
-        "browser_click",        # UI side-effects
-        "browser_evaluate",     # arbitrary JS execution
-    })
-
-    # Risk levels at or above which recovery retry is skipped.
-    # HIGH covers destructive commands (rm -rf, DROP TABLE, etc.)
-    # detected by classify_command() inside classify_tool().
-    _UNSAFE_RETRY_RISK = frozenset({RiskLevel.HIGH, RiskLevel.CRITICAL})
-
     @staticmethod
     def _check_recoverable(result: str) -> RecoveryCategory | None:
         """Check if a tool result indicates a recoverable failure."""
@@ -250,20 +228,6 @@ class ToolExecutor:
             if cat is not None and cat not in ToolExecutor._SKIP_RECOVERY:
                 return cat
         return None
-
-    @classmethod
-    def _is_safe_to_retry(cls, tool_name: str, assessment) -> bool:
-        """Return True only if the tool call is safe to retry on transient failure.
-
-        Blocks retry when:
-        - The tool is in _NEVER_RETRY_TOOLS (structurally non-idempotent)
-        - The risk assessment is HIGH or CRITICAL (destructive command detected)
-        """
-        if tool_name in cls._NEVER_RETRY_TOOLS:
-            return False
-        if assessment.level in cls._UNSAFE_RETRY_RISK:
-            return False
-        return True
 
     async def _annotate_with_freshness(
         self, result: str, host_alias: str, tool_name: str, command: str,

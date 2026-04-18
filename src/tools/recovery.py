@@ -56,6 +56,11 @@ UNSAFE_TO_RETRY: frozenset[str] = frozenset({
     "manage_list",
     "ingest_document",
     "bulk_ingest_knowledge",
+    "docker_ops",
+    "terraform_ops",
+    "kubectl",
+    "execute_plan",
+    "issue_tracker",
 })
 
 
