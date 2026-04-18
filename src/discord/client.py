@@ -2580,36 +2580,41 @@ class OdinBot(commands.Bot):
                     log.exception("context_compressor failed (non-fatal); continuing with full context")
 
             # Show typing indicator while waiting for LLM response.
-            # Typing is best-effort — Discord 503s on the typing WebSocket
-            # must not abort the tool loop.
-            async def _codex_with_typing():
-                try:
-                    async with message.channel.typing():
-                        return await self._codex_call(
-                            messages=messages, system=system_prompt, tools=tools or [],
-                            user_message=getattr(message, "content", "") or "",
-                        )
-                except (discord.HTTPException, ConnectionError, OSError) as typing_err:
-                    log.warning("Typing indicator failed (non-fatal): %s", typing_err)
-                    return await self._codex_call(
-                        messages=messages, system=system_prompt, tools=tools or [],
-                        user_message=getattr(message, "content", "") or "",
-                    )
+            # Typing is best-effort — isolate typing setup failures from
+            # LLM call failures so we don't misclassify provider errors.
+            typing_cm = None
+            try:
+                typing_cm = message.channel.typing()
+                await typing_cm.__aenter__()
+            except (discord.HTTPException, ConnectionError, OSError) as typing_err:
+                log.warning("Typing indicator failed (non-fatal): %s", typing_err)
+                typing_cm = None
 
             try:
-                llm_resp = await _codex_with_typing()
+                llm_resp = await self._codex_call(
+                    messages=messages, system=system_prompt, tools=tools or [],
+                    user_message=getattr(message, "content", "") or "",
+                )
             except CircuitOpenError as coe:
                 wait_secs = min(coe.retry_after, 90.0)
                 log.info("Circuit breaker open for %s, waiting %.0fs for recovery", coe.provider, wait_secs)
                 await asyncio.sleep(wait_secs)
                 try:
-                    llm_resp = await _codex_with_typing()
+                    llm_resp = await self._codex_call(
+                        messages=messages, system=system_prompt, tools=tools or [],
+                    )
                 except Exception as retry_err:
                     await self._save_turn_trajectory(_trajectory, error=str(retry_err))
                     return f"LLM API error (circuit breaker recovery failed): {retry_err}", False, True, tools_used_in_loop, False
             except Exception as api_err:
                 await self._save_turn_trajectory(_trajectory, error=str(api_err))
                 return f"LLM API error: {api_err}", False, True, tools_used_in_loop, False
+            finally:
+                if typing_cm is not None:
+                    try:
+                        await typing_cm.__aexit__(None, None, None)
+                    except Exception:
+                        pass
 
             # Record this iteration's tool calls + LLM text into the trajectory and stuck tracker
             iter_tool_calls = [
