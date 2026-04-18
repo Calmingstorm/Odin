@@ -789,9 +789,21 @@ class ToolExecutor:
             safe_wd = shlex.quote(working_dir)
             cmd = f"cd {safe_wd} && echo '{encoded_prompt}' | base64 -d | timeout 3600 {claude_cmd}"
 
+        on_output = None
+        finish_cb = None
+        if self.output_streamer and self.output_streamer.is_enabled("claude_code"):
+            _, on_output, finish_cb = self.output_streamer.create_callback(
+                "claude_code", channel_id=host,
+            )
+
         code, output = await self._exec_command(
-            address, cmd, ssh_user, timeout=3660,
+            address, cmd, ssh_user, timeout=3660, on_output=on_output,
         )
+        if finish_cb:
+            try:
+                await finish_cb()
+            except Exception:
+                pass
 
         file_manifest = ""
 
