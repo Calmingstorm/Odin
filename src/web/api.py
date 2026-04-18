@@ -2149,15 +2149,18 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             await pm.async_set_tier(uid, tier)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
-        audit = getattr(bot, "audit", None)
-        if audit:
-            session_id = getattr(request, "_session_id", "web-api")
-            await audit.log_event(
-                event_type="permission_change",
-                action="set_tier",
-                actor=f"web:{session_id}",
-                detail=f"Set user {uid} to tier {tier}",
-            )
+        try:
+            audit = getattr(bot, "audit", None)
+            if audit:
+                session_id = getattr(request, "_session_id", "web-api")
+                await audit.log_event(
+                    event_type="permission_change",
+                    action="set_tier",
+                    actor=f"web:{session_id}",
+                    detail=f"Set user {uid} to tier {tier}",
+                )
+        except Exception:
+            pass
         return web.json_response({"user_id": uid, "tier": tier, "status": "updated"})
 
     @routes.delete("/api/permissions/user/{user_id}")
@@ -2167,6 +2170,18 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "permission manager not available"}, status=503)
         uid = request.match_info["user_id"]
         if await pm.async_delete_tier(uid):
+            try:
+                audit = getattr(bot, "audit", None)
+                if audit:
+                    session_id = getattr(request, "_session_id", "web-api")
+                    await audit.log_event(
+                        event_type="permission_change",
+                        action="delete_tier",
+                        actor=f"web:{session_id}",
+                        detail=f"Removed tier override for user {uid}",
+                    )
+            except Exception:
+                pass
             return web.json_response({"user_id": uid, "status": "override_removed"})
         return web.json_response({"error": "no override found for user"}, status=404)
 
