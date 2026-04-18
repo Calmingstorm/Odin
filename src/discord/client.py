@@ -341,9 +341,21 @@ class OdinBot(commands.Bot):
                 viewport_height=config.browser.viewport_height,
             )
 
+        from ..tools.output_streamer import ToolOutputStreamer
+        streaming_cfg = config.tools.streaming
+        output_streamer = None
+        if streaming_cfg.enabled:
+            enabled_tools = set(streaming_cfg.tools) if streaming_cfg.tools else {"run_command", "run_script", "claude_code"}
+            output_streamer = ToolOutputStreamer(
+                enabled_tools=enabled_tools,
+                chunk_interval=streaming_cfg.chunk_interval_seconds,
+                max_chunk_chars=streaming_cfg.max_chunk_chars,
+            )
+
         self.tool_executor = ToolExecutor(
             config.tools, memory_path=self._memory_path,
             browser_manager=self.browser_manager,
+            output_streamer=output_streamer,
         )
         self.skill_manager = SkillManager(
             skills_dir="./data/skills",
@@ -1343,19 +1355,28 @@ class OdinBot(commands.Bot):
         await super().close()
         log.info("OdinBot shutdown complete")
 
-    async def _set_status(self, text: str | None = None) -> None:
-        """Set Discord presence status. None = reset to online/idle."""
+    _active_tasks: int = 0
+    _last_status_update: float = 0.0
+    _STATUS_DEBOUNCE: float = 5.0
+
+    async def _set_status(self, text: str | None = None, task_start: bool = False, task_end: bool = False) -> None:
+        """Set Discord presence. Tracks active task count to avoid clearing while work remains."""
+        if task_start:
+            self._active_tasks += 1
+        if task_end:
+            self._active_tasks = max(0, self._active_tasks - 1)
+        now = time.monotonic()
+        if now - self._last_status_update < self._STATUS_DEBOUNCE:
+            return
         try:
-            if text:
-                activity = discord.Activity(
-                    type=discord.ActivityType.watching,
-                    name=text,
-                )
+            if self._active_tasks > 0 and text:
+                activity = discord.Activity(type=discord.ActivityType.watching, name=text)
                 await self.change_presence(activity=activity, status=discord.Status.online)
-            else:
+            elif self._active_tasks == 0:
                 await self.change_presence(activity=None, status=discord.Status.online)
+            self._last_status_update = now
         except Exception:
-            pass
+            log.debug("Presence update failed (non-fatal)", exc_info=True)
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (ID: %s)", self.user, self.user.id)
@@ -1377,7 +1398,7 @@ class OdinBot(commands.Bot):
         # Start proactive monitoring if configured
         if hasattr(self, "infra_watcher") and self.infra_watcher:
             self.infra_watcher.start()
-        await self._set_status(None)
+        await self._set_status(None, task_end=True)
 
     async def _backfill_archives(self) -> None:
         """Backfill semantic search index and FTS5 with existing archive files."""
@@ -2003,7 +2024,7 @@ class OdinBot(commands.Bot):
                         response = _skill_response
                         already_sent = False
         except (discord.HTTPException, discord.Forbidden, asyncio.TimeoutError) as e:
-            await self._set_status(None)
+            await self._set_status(None, task_end=True)
             log.error("Discord/network error processing message: %s", e, exc_info=True)
             leaked = self._pending_files.pop(channel_id, None)
             if leaked:
@@ -2012,7 +2033,7 @@ class OdinBot(commands.Bot):
             self.sessions.remove_last_message(channel_id, "user")
             return
         except Exception as e:
-            await self._set_status(None)
+            await self._set_status(None, task_end=True)
             log.error("Unexpected error processing message: %s", e, exc_info=True)
             leaked = self._pending_files.pop(channel_id, None)
             if leaked:
@@ -2021,7 +2042,7 @@ class OdinBot(commands.Bot):
             self.sessions.remove_last_message(channel_id, "user")
             return
 
-        await self._set_status(None)
+        await self._set_status(None, task_end=True)
 
         # Scrub secrets from LLM response before logging, saving, or sending.
         # Tool output is already scrubbed (scrub_output_secrets in _run_tool),
@@ -2308,7 +2329,7 @@ class OdinBot(commands.Bot):
         log.info("Tool loop starting: %d tools available, %d messages in history, cap=%d",
                  len(tools) if tools else 0, len(messages), chat_cap)
 
-        await self._set_status("Working...")
+        await self._set_status("Working...", task_start=True)
 
         # Per-turn StuckLoopTracker — detects repeating tool-call sequences and
         # nudges the LLM out of cycles before the iteration cap forces an exit.
