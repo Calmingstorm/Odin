@@ -486,12 +486,15 @@ class OutboundWebhookDispatcher:
         Suitable for use as an audit event callback where blocking is
         undesirable.
         """
-        try:
-            await self.dispatch(
-                event_type, data, event_id=event_id, source=source,
-            )
-        except Exception as exc:
-            log.warning("Fire-and-forget dispatch error: %s", exc)
+        async def _do_dispatch():
+            try:
+                await self.dispatch(
+                    event_type, data, event_id=event_id, source=source,
+                )
+            except Exception as exc:
+                log.warning("Fire-and-forget dispatch error: %s", exc)
+
+        asyncio.create_task(_do_dispatch())
 
     async def send_test_event(self, webhook_id: str) -> DeliveryResult | None:
         """Send a test event to a specific webhook. Returns None if not found."""
