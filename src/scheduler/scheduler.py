@@ -53,6 +53,7 @@ class Scheduler:
         # Execution history
         _hist_path = history_path or str(self.data_path.parent / "schedule_history.jsonl")
         self.history = ScheduleHistory(_hist_path)
+        self._http_session: aiohttp.ClientSession | None = None
         self._load()
 
     def _load(self) -> None:
@@ -313,29 +314,31 @@ class Scheduler:
         expected_codes = config.get("expected_status_codes")
 
         timeout = aiohttp.ClientTimeout(total=timeout_sec)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            kwargs: dict[str, Any] = {"headers": headers}
-            if body is not None:
-                if isinstance(body, (dict, list)):
-                    kwargs["json"] = body
-                else:
-                    kwargs["data"] = str(body)
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession()
+        session = self._http_session
+        kwargs: dict[str, Any] = {"headers": headers, "timeout": timeout}
+        if body is not None:
+            if isinstance(body, (dict, list)):
+                kwargs["json"] = body
+            else:
+                kwargs["data"] = str(body)
 
-            async with session.request(method, url, **kwargs) as resp:
-                resp_body = await resp.text()
-                result = {
-                    "status_code": resp.status,
-                    "body": resp_body[:4096],
-                    "headers": dict(resp.headers),
-                }
+        async with session.request(method, url, **kwargs) as resp:
+            resp_body = await resp.text()
+            result = {
+                "status_code": resp.status,
+                "body": resp_body[:4096],
+                "headers": dict(resp.headers),
+            }
 
-                if expected_codes and resp.status not in expected_codes:
-                    raise RuntimeError(
-                        f"Webhook returned status {resp.status}, "
-                        f"expected one of {expected_codes}"
-                    )
+            if expected_codes and resp.status not in expected_codes:
+                raise RuntimeError(
+                    f"Webhook returned status {resp.status}, "
+                    f"expected one of {expected_codes}"
+                )
 
-                return result
+            return result
 
     @staticmethod
     def _trigger_matches(trigger: dict, source: str, event_data: dict) -> bool:
@@ -582,7 +585,9 @@ class Scheduler:
                 await self._task
             except asyncio.CancelledError:
                 pass
-            log.info("Scheduler stopped")
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
+        log.info("Scheduler stopped")
 
     async def _loop(self) -> None:
         while True:
