@@ -23,6 +23,7 @@ from .bulkhead import BulkheadFullError, BulkheadRegistry
 from .recovery import (
     RecoveryCategory,
     RecoveryStats,
+    UNSAFE_TO_RETRY,
     classify_error as _classify_error,
     classify_exception as _classify_exception,
     get_retry_delay as _get_retry_delay,
@@ -157,15 +158,15 @@ class ToolExecutor:
         if self._recovery_enabled:
             category = self._check_recoverable(result)
             if category is not None:
-                if not self._is_safe_to_retry(tool_name, assessment):
+                snippet = result[:120] if isinstance(result, str) else ""
+                if tool_name in UNSAFE_TO_RETRY:
                     log.warning(
-                        "Skipping recovery retry for %s (%s): "
-                        "tool is %s risk or structurally non-idempotent",
-                        tool_name, category.value, assessment.level.value,
+                        "Recovery skipped for %s (%s): tool is not safe to retry (may have already executed)",
+                        tool_name, category.value,
                     )
+                    self.recovery_stats.record_failure(tool_name, category, snippet)
                 else:
                     delay = _get_retry_delay(category)
-                    snippet = result[:120] if isinstance(result, str) else ""
                     self.recovery_stats.record_attempt(tool_name, category, snippet)
                     log.info("Recovery for %s (%s): retrying after %.1fs", tool_name, category.value, delay)
                     if delay > 0:

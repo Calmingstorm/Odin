@@ -21,6 +21,22 @@ class RecoveryCategory(str, Enum):
     BULKHEAD_FULL = "bulkhead_full"
 
 
+UNSAFE_TO_RETRY: frozenset[str] = frozenset({
+    "run_command",
+    "run_script",
+    "run_command_multi",
+    "write_file",
+    "git_ops",
+    "manage_process",
+    "delete_knowledge",
+    "delete_schedule",
+    "purge_messages",
+    "create_skill",
+    "edit_skill",
+    "delete_skill",
+})
+
+
 # Substrings that indicate a transient, recoverable failure.
 _RECOVERABLE_PATTERNS: dict[RecoveryCategory, tuple[str, ...]] = {
     RecoveryCategory.SSH_TRANSIENT: (
