@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -39,6 +40,7 @@ class PermissionManager:
         self._default_tier = default_tier if default_tier in VALID_TIERS else "user"
         self._overrides_path = Path(overrides_path)
         self._overrides: dict[str, str] = {}
+        self._lock = asyncio.Lock()
         self._load_overrides()
 
     def _load_overrides(self) -> None:
@@ -54,7 +56,9 @@ class PermissionManager:
 
     def _save_overrides(self) -> None:
         self._overrides_path.parent.mkdir(parents=True, exist_ok=True)
-        self._overrides_path.write_text(json.dumps(self._overrides, indent=2))
+        tmp = self._overrides_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._overrides, indent=2))
+        tmp.replace(self._overrides_path)
 
     def get_tier(self, user_id: str) -> str:
         """Get the permission tier for a user. Runtime overrides take precedence."""
@@ -69,6 +73,20 @@ class PermissionManager:
         self._overrides[user_id] = tier
         self._save_overrides()
         log.info("Permission tier for user %s set to %s", user_id, tier)
+
+    async def async_set_tier(self, user_id: str, tier: str) -> None:
+        """Async-safe version of set_tier with locking."""
+        async with self._lock:
+            self.set_tier(user_id, tier)
+
+    async def async_delete_tier(self, user_id: str) -> bool:
+        """Remove a user's permission override with locking. Returns True if it existed."""
+        async with self._lock:
+            if user_id in self._overrides:
+                del self._overrides[user_id]
+                self._save_overrides()
+                return True
+        return False
 
     def filter_tools(self, user_id: str, tools: list[dict]) -> list[dict] | None:
         """Filter tool list based on user's tier.

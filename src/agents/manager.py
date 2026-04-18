@@ -621,6 +621,7 @@ class AgentManager:
         announce_callback: AnnounceCallback | None = None,
         tools: list[dict] | None = None,
         system_prompt: str = "",
+        tool_timeouts: dict[str, int] | None = None,
     ) -> list[str]:
         """Spawn multiple agents at once. Returns list of agent_ids (or error strings).
 
@@ -641,6 +642,7 @@ class AgentManager:
                 announce_callback=announce_callback,
                 tools=tools,
                 system_prompt=system_prompt,
+                tool_timeouts=tool_timeouts,
             )
             ids.append(aid)
         return ids

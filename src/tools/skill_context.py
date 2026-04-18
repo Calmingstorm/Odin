@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Awaitable, Callable
@@ -171,6 +172,7 @@ class SkillContext:
         self._executor = tool_executor
         self._log = get_logger(f"skills.{skill_name}")
         self._memory_path = Path(memory_path) if memory_path else None
+        self._skill_memory_lock = threading.Lock()
         self._message_callback = message_callback
         self._file_callback = file_callback
         self._knowledge_store = knowledge_store
@@ -236,9 +238,10 @@ class SkillContext:
         """Save a key/value pair to persistent memory."""
         if not self._memory_path:
             return
-        memory = self._load_memory()
-        memory[key] = value
-        self._save_memory(memory)
+        with self._skill_memory_lock:
+            memory = self._load_memory()
+            memory[key] = value
+            self._save_memory(memory)
 
     def recall(self, key: str) -> str | None:
         """Retrieve a value from persistent memory. Returns None if not found."""
@@ -433,4 +436,6 @@ class SkillContext:
         if not self._memory_path:
             return
         self._memory_path.parent.mkdir(parents=True, exist_ok=True)
-        self._memory_path.write_text(json.dumps(data, indent=2))
+        tmp = self._memory_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        tmp.replace(self._memory_path)
