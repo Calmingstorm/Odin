@@ -69,6 +69,7 @@ class LoopAgentBridge:
         announce_callback: object = None,
         tools: list[dict] | None = None,
         system_prompt: str = "",
+        tool_timeouts: dict[str, int] | None = None,
     ) -> list[str]:
         """Spawn agents for a loop iteration.
 
@@ -120,6 +121,7 @@ class LoopAgentBridge:
                 announce_callback=announce_callback,
                 tools=tools,
                 system_prompt=system_prompt,
+                tool_timeouts=tool_timeouts,
             )
 
             if not agent_id.startswith("Error"):

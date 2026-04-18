@@ -655,6 +655,7 @@ class OdinBot(commands.Bot):
             skills_dir="./data/skills",
             tool_executor=self.tool_executor,
             memory_path=self._memory_path,
+            tool_timeouts=config.tools.tool_timeouts,
         )
 
         # Apply skill URL allowlist from config
@@ -2832,7 +2833,7 @@ class OdinBot(commands.Bot):
                     elif tool_name == "delete_knowledge":
                         result = self._handle_delete_knowledge(tool_input)
                     elif tool_name == "set_permission":
-                        result = self._handle_set_permission(
+                        result = await self._handle_set_permission(
                             str(message.author.id), tool_input,
                         )
                     elif tool_name == "search_audit":
@@ -3407,14 +3408,14 @@ class OdinBot(commands.Bot):
             return f"No document found with source '{source}'."
         return f"Deleted '{source}' from knowledge base ({count} chunks removed)."
 
-    def _handle_set_permission(self, caller_id: str, inp: dict) -> str:
+    async def _handle_set_permission(self, caller_id: str, inp: dict) -> str:
         """Set a user's permission tier. Only admins can call this."""
         if not self.permissions.is_admin(caller_id):
             return "Permission denied. Only admins can change permission tiers."
         target_user_id = inp["user_id"]
         tier = inp["tier"]
         try:
-            self.permissions.set_tier(target_user_id, tier)
+            await self.permissions.set_tier(target_user_id, tier)
         except ValueError as e:
             return str(e)
         return f"Permission tier for user {target_user_id} set to **{tier}**."
@@ -3863,6 +3864,7 @@ class OdinBot(commands.Bot):
             system_prompt=system_prompt,
             parent_id=parent_id_arg,
             max_depth=max_depth,
+            tool_timeouts=self.config.tools.tool_timeouts,
         )
 
         if agent_id.startswith("Error"):
@@ -4300,7 +4302,7 @@ class OdinBot(commands.Bot):
         if tool_name == "delete_knowledge":
             return self._handle_delete_knowledge(tool_input)
         if tool_name == "set_permission":
-            return self._handle_set_permission(user_id, tool_input)
+            return await self._handle_set_permission(user_id, tool_input)
         if tool_name == "search_audit":
             return await self._handle_search_audit(tool_input)
 
