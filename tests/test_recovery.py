@@ -1010,3 +1010,274 @@ class TestEdgeCases:
         executor._handle_weird_tool = _handler
         result = await executor.execute("weird_tool", {})
         assert result == "42"
+
+
+# ====================================================================
+# Retry safety classification — destructive tools must NOT be retried
+# ====================================================================
+
+class TestRetrySafetyClassification:
+    """Verify that destructive/non-idempotent tools are excluded from
+    recovery retries, while safe read-only tools still retry normally."""
+
+    @pytest.fixture
+    def executor(self):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+        config = ToolsConfig(command_timeout_seconds=5)
+        return ToolExecutor(config=config)
+
+    # --- _is_safe_to_retry unit tests ---
+
+    def test_safe_to_retry_read_file(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.LOW, "read-only")
+        assert ToolExecutor._is_safe_to_retry("read_file", assessment) is True
+
+    def test_safe_to_retry_low_risk_run_command(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.LOW, "no risky patterns")
+        assert ToolExecutor._is_safe_to_retry("run_command", assessment) is True
+
+    def test_unsafe_to_retry_high_risk_run_command(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.HIGH, "recursive delete")
+        assert ToolExecutor._is_safe_to_retry("run_command", assessment) is False
+
+    def test_unsafe_to_retry_critical_risk(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.CRITICAL, "database drop/truncate")
+        assert ToolExecutor._is_safe_to_retry("run_command", assessment) is False
+
+    def test_unsafe_to_retry_run_script(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        # Even if somehow classified LOW, run_script is in _NEVER_RETRY_TOOLS
+        assessment = RiskAssessment(RiskLevel.LOW, "test")
+        assert ToolExecutor._is_safe_to_retry("run_script", assessment) is False
+
+    def test_unsafe_to_retry_claude_code(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.HIGH, "arbitrary code")
+        assert ToolExecutor._is_safe_to_retry("claude_code", assessment) is False
+
+    def test_unsafe_to_retry_run_command_multi(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.MEDIUM, "multi-host")
+        assert ToolExecutor._is_safe_to_retry("run_command_multi", assessment) is False
+
+    def test_unsafe_to_retry_manage_process(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.MEDIUM, "tool baseline")
+        assert ToolExecutor._is_safe_to_retry("manage_process", assessment) is False
+
+    def test_unsafe_to_retry_git_ops(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.LOW, "tool baseline")
+        assert ToolExecutor._is_safe_to_retry("git_ops", assessment) is False
+
+    def test_unsafe_to_retry_docker_ops(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.LOW, "tool baseline")
+        assert ToolExecutor._is_safe_to_retry("docker_ops", assessment) is False
+
+    def test_unsafe_to_retry_terraform_ops(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.LOW, "tool baseline")
+        assert ToolExecutor._is_safe_to_retry("terraform_ops", assessment) is False
+
+    def test_unsafe_to_retry_kubectl(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.LOW, "tool baseline")
+        assert ToolExecutor._is_safe_to_retry("kubectl", assessment) is False
+
+    def test_unsafe_to_retry_execute_plan(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.LOW, "tool baseline")
+        assert ToolExecutor._is_safe_to_retry("execute_plan", assessment) is False
+
+    def test_unsafe_to_retry_issue_tracker(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.LOW, "tool baseline")
+        assert ToolExecutor._is_safe_to_retry("issue_tracker", assessment) is False
+
+    def test_unsafe_to_retry_browser_click(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.MEDIUM, "tool baseline")
+        assert ToolExecutor._is_safe_to_retry("browser_click", assessment) is False
+
+    def test_unsafe_to_retry_browser_evaluate(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.MEDIUM, "tool baseline")
+        assert ToolExecutor._is_safe_to_retry("browser_evaluate", assessment) is False
+
+    def test_safe_to_retry_medium_write_file(self):
+        """write_file is MEDIUM but idempotent — should still retry."""
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.MEDIUM, "writes data")
+        assert ToolExecutor._is_safe_to_retry("write_file", assessment) is True
+
+    def test_safe_to_retry_web_search(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.LOW, "read-only")
+        assert ToolExecutor._is_safe_to_retry("web_search", assessment) is True
+
+    def test_safe_to_retry_fetch_url(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.LOW, "read-only")
+        assert ToolExecutor._is_safe_to_retry("fetch_url", assessment) is True
+
+    def test_safe_to_retry_http_probe(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskAssessment, RiskLevel
+        assessment = RiskAssessment(RiskLevel.LOW, "read-only")
+        assert ToolExecutor._is_safe_to_retry("http_probe", assessment) is True
+
+    # --- Integration tests: verify execute() actually skips retry ---
+
+    @pytest.mark.asyncio
+    async def test_destructive_run_command_not_retried(self, executor):
+        """run_command with 'rm -rf /' should NOT be retried on transient error."""
+        call_count = 0
+        async def _handler(inp):
+            nonlocal call_count
+            call_count += 1
+            raise ConnectionError("ConnectionResetError: peer closed")
+
+        executor._handle_run_command = _handler
+        result = await executor.execute("run_command", {"command": "rm -rf /data", "host": "test"})
+        assert "ConnectionResetError" in result
+        # Only 1 call — no retry because rm -rf is HIGH risk
+        assert call_count == 1
+        assert executor.recovery_stats.get_summary()["totals"]["attempts"] == 0
+
+    @pytest.mark.asyncio
+    async def test_safe_run_command_still_retried(self, executor):
+        """run_command with 'ls' should still be retried on transient error."""
+        call_count = 0
+        async def _handler(inp):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ConnectionError("ConnectionResetError: peer closed")
+            return "file1.txt  file2.txt"
+
+        executor._handle_run_command = _handler
+        result = await executor.execute("run_command", {"command": "ls /tmp", "host": "test"})
+        assert "file1.txt" in result
+        assert call_count == 2
+        assert executor.recovery_stats.get_summary()["totals"]["successes"] == 1
+
+    @pytest.mark.asyncio
+    async def test_run_script_not_retried(self, executor):
+        """run_script is in _NEVER_RETRY_TOOLS — never retried."""
+        call_count = 0
+        async def _handler(inp):
+            nonlocal call_count
+            call_count += 1
+            raise ConnectionError("ConnectionResetError")
+
+        executor._handle_run_script = _handler
+        result = await executor.execute("run_script", {"script": "echo hello", "host": "test"})
+        assert call_count == 1
+        assert executor.recovery_stats.get_summary()["totals"]["attempts"] == 0
+
+    @pytest.mark.asyncio
+    async def test_git_ops_not_retried(self, executor):
+        """git_ops is in _NEVER_RETRY_TOOLS — never retried."""
+        call_count = 0
+        async def _handler(inp):
+            nonlocal call_count
+            call_count += 1
+            return "Command failed (exit 255):\nConnection refused"
+
+        executor._handle_git_ops = _handler
+        result = await executor.execute("git_ops", {"action": "push", "host": "test"})
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_drop_table_not_retried(self, executor):
+        """run_command with DROP TABLE is CRITICAL — never retried."""
+        call_count = 0
+        async def _handler(inp):
+            nonlocal call_count
+            call_count += 1
+            return "Command failed (exit 255):\nConnection refused"
+
+        executor._handle_run_command = _handler
+        result = await executor.execute(
+            "run_command",
+            {"command": "mysql -e 'DROP TABLE users'", "host": "db"},
+        )
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_systemctl_restart_not_retried(self, executor):
+        """run_command with systemctl restart is HIGH — not retried."""
+        call_count = 0
+        async def _handler(inp):
+            nonlocal call_count
+            call_count += 1
+            raise ConnectionError("ConnectionResetError")
+
+        executor._handle_run_command = _handler
+        result = await executor.execute(
+            "run_command",
+            {"command": "systemctl restart nginx", "host": "web"},
+        )
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_read_file_still_retried(self, executor):
+        """read_file is LOW risk — should still be retried."""
+        call_count = 0
+        async def _handler(inp):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ConnectionError("ConnectionResetError")
+            return "file contents"
+
+        executor._handle_read_file = _handler
+        result = await executor.execute("read_file", {"path": "/etc/hosts", "host": "test"})
+        assert "file contents" in result
+        assert call_count == 2
+
+    # --- Constants coverage ---
+
+    def test_never_retry_tools_complete(self):
+        """All structurally non-idempotent tools are in _NEVER_RETRY_TOOLS."""
+        from src.tools.executor import ToolExecutor
+        expected = {
+            "run_script", "claude_code", "run_command_multi",
+            "manage_process", "git_ops", "docker_ops", "terraform_ops",
+            "kubectl", "execute_plan", "issue_tracker",
+            "browser_click", "browser_evaluate",
+        }
+        assert ToolExecutor._NEVER_RETRY_TOOLS == expected
+
+    def test_unsafe_retry_risk_levels(self):
+        from src.tools.executor import ToolExecutor
+        from src.tools.risk_classifier import RiskLevel
+        assert RiskLevel.HIGH in ToolExecutor._UNSAFE_RETRY_RISK
+        assert RiskLevel.CRITICAL in ToolExecutor._UNSAFE_RETRY_RISK
+        assert RiskLevel.LOW not in ToolExecutor._UNSAFE_RETRY_RISK
+        assert RiskLevel.MEDIUM not in ToolExecutor._UNSAFE_RETRY_RISK

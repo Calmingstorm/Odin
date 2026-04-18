@@ -28,7 +28,7 @@ from .recovery import (
     get_retry_delay as _get_retry_delay,
 )
 from .result_validator import ResultValidationStats, validate_tool_result
-from .risk_classifier import RiskStats, classify_tool
+from .risk_classifier import RiskLevel, RiskStats, classify_tool
 from .output_streamer import ToolOutputStreamer
 from .ssh import is_local_address, run_local_command, run_ssh_command
 from .ssh_pool import SSHConnectionPool
@@ -157,20 +157,27 @@ class ToolExecutor:
         if self._recovery_enabled:
             category = self._check_recoverable(result)
             if category is not None:
-                delay = _get_retry_delay(category)
-                snippet = result[:120] if isinstance(result, str) else ""
-                self.recovery_stats.record_attempt(tool_name, category, snippet)
-                log.info("Recovery for %s (%s): retrying after %.1fs", tool_name, category.value, delay)
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                retry_result = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
-                retry_cat = self._check_recoverable(retry_result)
-                if retry_cat is not None:
-                    self.recovery_stats.record_failure(tool_name, category, snippet)
-                    result = retry_result
+                if not self._is_safe_to_retry(tool_name, assessment):
+                    log.warning(
+                        "Skipping recovery retry for %s (%s): "
+                        "tool is %s risk or structurally non-idempotent",
+                        tool_name, category.value, assessment.level.value,
+                    )
                 else:
-                    self.recovery_stats.record_success(tool_name, category, snippet)
-                    result = retry_result
+                    delay = _get_retry_delay(category)
+                    snippet = result[:120] if isinstance(result, str) else ""
+                    self.recovery_stats.record_attempt(tool_name, category, snippet)
+                    log.info("Recovery for %s (%s): retrying after %.1fs", tool_name, category.value, delay)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    retry_result = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
+                    retry_cat = self._check_recoverable(retry_result)
+                    if retry_cat is not None:
+                        self.recovery_stats.record_failure(tool_name, category, snippet)
+                        result = retry_result
+                    else:
+                        self.recovery_stats.record_success(tool_name, category, snippet)
+                        result = retry_result
 
         outcome = validate_tool_result(tool_name, result, stats=self.validation_stats)
         return outcome.normalized
@@ -206,6 +213,29 @@ class ToolExecutor:
     # retry logic or the cost of retrying exceeds the benefit).
     _SKIP_RECOVERY = frozenset({RecoveryCategory.TIMEOUT})
 
+    # Tools that must NEVER be retried regardless of risk classification,
+    # because they are structurally non-idempotent (retrying could cause
+    # duplicate side-effects even when the command itself looks benign).
+    _NEVER_RETRY_TOOLS = frozenset({
+        "run_script",           # arbitrary code execution
+        "claude_code",          # arbitrary code execution
+        "run_command_multi",    # multi-host amplification
+        "manage_process",       # start/kill are non-idempotent
+        "git_ops",              # push, merge are non-idempotent
+        "docker_ops",           # container lifecycle
+        "terraform_ops",        # infrastructure mutations
+        "kubectl",              # cluster state changes
+        "execute_plan",         # DAG plan execution
+        "issue_tracker",        # creates/updates tickets
+        "browser_click",        # UI side-effects
+        "browser_evaluate",     # arbitrary JS execution
+    })
+
+    # Risk levels at or above which recovery retry is skipped.
+    # HIGH covers destructive commands (rm -rf, DROP TABLE, etc.)
+    # detected by classify_command() inside classify_tool().
+    _UNSAFE_RETRY_RISK = frozenset({RiskLevel.HIGH, RiskLevel.CRITICAL})
+
     @staticmethod
     def _check_recoverable(result: str) -> RecoveryCategory | None:
         """Check if a tool result indicates a recoverable failure."""
@@ -219,6 +249,20 @@ class ToolExecutor:
             if cat is not None and cat not in ToolExecutor._SKIP_RECOVERY:
                 return cat
         return None
+
+    @classmethod
+    def _is_safe_to_retry(cls, tool_name: str, assessment) -> bool:
+        """Return True only if the tool call is safe to retry on transient failure.
+
+        Blocks retry when:
+        - The tool is in _NEVER_RETRY_TOOLS (structurally non-idempotent)
+        - The risk assessment is HIGH or CRITICAL (destructive command detected)
+        """
+        if tool_name in cls._NEVER_RETRY_TOOLS:
+            return False
+        if assessment.level in cls._UNSAFE_RETRY_RISK:
+            return False
+        return True
 
     async def _annotate_with_freshness(
         self, result: str, host_alias: str, tool_name: str, command: str,
