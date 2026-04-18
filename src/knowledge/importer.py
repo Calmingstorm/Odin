@@ -70,7 +70,7 @@ class BulkImporter:
         base = Path(directory).resolve()
         if not base.is_dir():
             return [ImportResult(source=directory, status="error", error="directory not found")]
-        if not any(str(base).startswith(root) for root in SAFE_IMPORT_ROOTS):
+        if not any(base.is_relative_to(root) for root in SAFE_IMPORT_ROOTS):
             return [ImportResult(
                 source=directory, status="error",
                 error=f"directory not in allowed import roots: {', '.join(SAFE_IMPORT_ROOTS)}",
@@ -147,8 +147,11 @@ class BulkImporter:
                 async with session.get(url) as resp:
                     if resp.status != 200:
                         return ImportResult(source=src, status="error", error=f"HTTP {resp.status}")
-                    cl = resp.headers.get("Content-Length")
-                    if cl is not None and int(cl) > MAX_PDF_BYTES:
+                    try:
+                        cl = int(resp.headers.get("Content-Length", 0)) or None
+                    except (ValueError, TypeError):
+                        cl = None
+                    if cl is not None and cl > MAX_PDF_BYTES:
                         return ImportResult(source=src, status="error", error=f"PDF too large ({cl} bytes, max {MAX_PDF_BYTES})")
                     pdf_bytes = await resp.read()
                     if len(pdf_bytes) > MAX_PDF_BYTES:
