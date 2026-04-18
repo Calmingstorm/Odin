@@ -43,6 +43,20 @@ class RetryConfig(BaseModel):
     base_delay: float = 1.0
     max_delay: float = 30.0
 
+    @field_validator("max_retries")
+    @classmethod
+    def _retries_positive(cls, v):
+        if v < 0:
+            raise ValueError("max_retries must be >= 0")
+        return v
+
+    @field_validator("base_delay", "max_delay")
+    @classmethod
+    def _delay_positive(cls, v):
+        if v < 0:
+            raise ValueError("delay must be >= 0")
+        return v
+
 
 class BulkheadConfig(BaseModel):
     ssh_max_concurrent: int = 10
@@ -51,6 +65,20 @@ class BulkheadConfig(BaseModel):
     ssh_max_queued: int = 20
     subprocess_max_queued: int = 40
     browser_max_queued: int = 6
+
+    @field_validator("ssh_max_concurrent", "subprocess_max_concurrent", "browser_max_concurrent")
+    @classmethod
+    def _concurrent_positive(cls, v):
+        if v < 1:
+            raise ValueError("max_concurrent must be >= 1")
+        return v
+
+    @field_validator("ssh_max_queued", "subprocess_max_queued", "browser_max_queued")
+    @classmethod
+    def _queued_positive(cls, v):
+        if v < 0:
+            raise ValueError("max_queued must be >= 0")
+        return v
 
 
 class RecoveryConfig(BaseModel):
@@ -72,6 +100,13 @@ class AgentsConfig(BaseModel):
     max_nesting_depth: int = 2
     max_children_per_agent: int = 3
 
+    @field_validator("max_nesting_depth", "max_children_per_agent")
+    @classmethod
+    def _agents_positive(cls, v):
+        if v < 1:
+            raise ValueError("agent limits must be >= 1")
+        return v
+
 
 class SSHPoolConfig(BaseModel):
     enabled: bool = True
@@ -82,6 +117,20 @@ class SSHPoolConfig(BaseModel):
 class ConnectionPoolConfig(BaseModel):
     max_connections: int = 10
     keepalive_timeout: int = 30
+
+    @field_validator("max_connections")
+    @classmethod
+    def _connections_positive(cls, v):
+        if v < 1:
+            raise ValueError("max_connections must be >= 1")
+        return v
+
+    @field_validator("keepalive_timeout")
+    @classmethod
+    def _keepalive_positive(cls, v):
+        if v < 0:
+            raise ValueError("keepalive_timeout must be >= 0")
+        return v
 
 
 class ContextCompressionConfig(BaseModel):
@@ -121,6 +170,20 @@ class ToolsConfig(BaseModel):
     # Loops typically need more budget for exploration + execution + verify + commit.
     max_tool_iterations_chat: int = 500
     max_tool_iterations_loop: int = 500
+
+    @field_validator("command_timeout_seconds")
+    @classmethod
+    def _timeout_positive(cls, v):
+        if v < 1:
+            raise ValueError("command_timeout_seconds must be >= 1")
+        return v
+
+    @field_validator("max_tool_iterations_chat", "max_tool_iterations_loop")
+    @classmethod
+    def _iterations_positive(cls, v):
+        if v < 1:
+            raise ValueError("tool iteration cap must be >= 1")
+        return v
 
     def get_tool_timeout(self, tool_name: str) -> int:
         return self.tool_timeouts.get(tool_name, self.command_timeout_seconds)
@@ -215,6 +278,13 @@ class BrowserConfig(BaseModel):
     viewport_width: int = 1920
     viewport_height: int = 1080
 
+    @field_validator("default_timeout_ms")
+    @classmethod
+    def _timeout_positive(cls, v):
+        if v < 1000:
+            raise ValueError("default_timeout_ms must be >= 1000")
+        return v
+
 
 class PermissionsConfig(BaseModel):
     tiers: dict[str, str] = Field(default_factory=dict)
@@ -254,6 +324,13 @@ class WebConfig(BaseModel):
     api_token: str = ""  # Empty = no auth required (dev mode)
     session_timeout_minutes: int = 0  # 0 = no timeout (sessions persist until logout)
     port: int = 3000  # HTTP server port for health checks + web UI
+
+    @field_validator("port")
+    @classmethod
+    def _port_range(cls, v):
+        if v < 1 or v > 65535:
+            raise ValueError("port must be between 1 and 65535")
+        return v
 
 
 class ComfyUIConfig(BaseModel):
