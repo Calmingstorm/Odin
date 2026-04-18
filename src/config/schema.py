@@ -119,8 +119,8 @@ class ToolsConfig(BaseModel):
     # Tool-iteration caps per request before the loop force-exits.
     # Chat: normal Discord messages. Loop: autonomous loop iterations.
     # Loops typically need more budget for exploration + execution + verify + commit.
-    max_tool_iterations_chat: int = 30
-    max_tool_iterations_loop: int = 100
+    max_tool_iterations_chat: int = 500
+    max_tool_iterations_loop: int = 500
 
     def get_tool_timeout(self, tool_name: str) -> int:
         return self.tool_timeouts.get(tool_name, self.command_timeout_seconds)
