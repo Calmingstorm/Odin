@@ -2149,6 +2149,15 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             await pm.async_set_tier(uid, tier)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
+        audit = getattr(bot, "audit", None)
+        if audit:
+            session_id = getattr(request, "_session_id", "web-api")
+            await audit.log_event(
+                event_type="permission_change",
+                action="set_tier",
+                actor=f"web:{session_id}",
+                detail=f"Set user {uid} to tier {tier}",
+            )
         return web.json_response({"user_id": uid, "tier": tier, "status": "updated"})
 
     @routes.delete("/api/permissions/user/{user_id}")

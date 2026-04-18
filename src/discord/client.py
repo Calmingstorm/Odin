@@ -816,17 +816,6 @@ class OdinBot(commands.Bot):
         # Tool use pattern hints injected separately via _inject_tool_hints()
         # because format_hints is async (needs embedder).
 
-        # Channel-based personality: if the channel has a topic/description set,
-        # inject it as a personality directive. All other rules still apply.
-        if channel is not None:
-            topic = getattr(channel, "topic", None)
-            if topic and topic.strip():
-                prompt += (
-                    f"\n\n## Channel Personality\n"
-                    f"For this channel, adopt the following personality while keeping all other rules intact:\n"
-                    f"{topic.strip()}"
-                )
-
         return prompt
 
     async def _inject_tool_hints(self, system_prompt: str, query: str, user_id: str | None = None) -> str:
@@ -883,16 +872,6 @@ class OdinBot(commands.Bot):
         learned = self._get_cached_reflector(user_id)
         if learned:
             prompt += f"\n\n{learned}"
-
-        # Channel personality
-        if channel is not None:
-            topic = getattr(channel, "topic", None)
-            if topic and topic.strip():
-                prompt += (
-                    f"\n\n## Channel Personality\n"
-                    f"For this channel, adopt the following personality while keeping all other rules intact:\n"
-                    f"{topic.strip()}"
-                )
 
         return prompt
 
@@ -4077,6 +4056,29 @@ class OdinBot(commands.Bot):
         Mirrors the Discord-native tool dispatch in _process_with_tools, using
         a lightweight message proxy instead of a real Discord message.
         """
+        t0 = time.monotonic()
+        result = await self._dispatch_loop_tool_inner(tool_name, tool_input, msg_proxy, user_id)
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        try:
+            await self.audit.log_event(
+                event_type="loop_tool",
+                action=tool_name,
+                actor=user_id,
+                detail=str(result)[:200] if isinstance(result, str) else "",
+                channel_id=str(getattr(msg_proxy.channel, "id", "")),
+                metadata={"tool_input_keys": list((tool_input or {}).keys()), "elapsed_ms": elapsed_ms},
+            )
+        except Exception:
+            pass
+        return result
+
+    async def _dispatch_loop_tool_inner(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        msg_proxy: _LoopMessageProxy,
+        user_id: str,
+    ) -> str | dict:
         # --- Discord-native tools (message + input) ---
         if tool_name == "purge_messages":
             return await self._handle_purge(msg_proxy, tool_input)
@@ -4550,6 +4552,17 @@ class OdinBot(commands.Bot):
 
     async def _on_scheduled_task(self, schedule: dict) -> None:
         """Callback fired by the scheduler when a task is due."""
+        try:
+            await self.audit.log_event(
+                event_type="schedule_execution",
+                action=schedule.get("action", "unknown"),
+                actor="scheduler",
+                detail=f"Schedule {schedule.get('id', '?')}: {schedule.get('description', '')[:100]}",
+                channel_id=schedule.get("channel_id", ""),
+                metadata={"schedule_id": schedule.get("id"), "action": schedule.get("action")},
+            )
+        except Exception:
+            pass
         channel_id = schedule.get("channel_id")
         if not channel_id:
             log.warning("Scheduled task has no channel_id: %s", schedule["id"])

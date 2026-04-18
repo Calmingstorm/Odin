@@ -76,6 +76,43 @@ class AuditLogger:
             except Exception:
                 pass
 
+    async def log_event(
+        self,
+        *,
+        event_type: str,
+        action: str,
+        actor: str = "",
+        detail: str = "",
+        channel_id: str = "",
+        metadata: dict | None = None,
+    ) -> None:
+        """Log a generic state-changing event (agents, schedules, permissions, etc.)."""
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": event_type,
+            "action": action,
+            "actor": actor,
+            "detail": detail[:500],
+        }
+        if channel_id:
+            entry["channel_id"] = channel_id
+        if metadata:
+            entry["metadata"] = metadata
+        if self._signer:
+            self._signer.sign(entry)
+        line = json.dumps(entry, default=str) + "\n"
+        try:
+            async with aiofiles.open(self.path, "a") as f:
+                await f.write(line)
+        except Exception as e:
+            log.error("Failed to write audit event: %s", e)
+
+        if self._event_callback:
+            try:
+                await self._event_callback(entry)
+            except Exception:
+                pass
+
     async def log_web_action(
         self,
         *,
