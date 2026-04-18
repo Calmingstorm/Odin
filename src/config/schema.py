@@ -86,8 +86,8 @@ class ConnectionPoolConfig(BaseModel):
 
 class ContextCompressionConfig(BaseModel):
     enabled: bool = True
-    max_context_chars: int = 48_000
-    keep_recent_iterations: int = 3
+    max_context_chars: int = 120_000
+    keep_recent_iterations: int = 6
 
 
 class ModelRoutingConfig(BaseModel):
