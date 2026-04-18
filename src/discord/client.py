@@ -1600,6 +1600,40 @@ class OdinBot(commands.Bot):
             except Exception:
                 log.exception("Error closing outbound_webhook_dispatcher")
 
+        # Clean up agent manager — cancel cleanup tasks, remove terminal agents
+        agent_mgr = getattr(self, "agent_manager", None)
+        if agent_mgr is not None:
+            try:
+                await agent_mgr.cleanup()
+            except Exception:
+                log.exception("Error cleaning up agent_manager")
+
+        # Close SSH connection pool — release ControlMaster sockets
+        executor = getattr(self, "tool_executor", None)
+        if executor is not None:
+            pool = getattr(executor, "ssh_pool", None)
+            if pool is not None:
+                try:
+                    await pool.close_all()
+                except Exception:
+                    log.exception("Error closing SSH pool")
+
+        # Close Codex/LLM HTTP client session
+        codex = getattr(self, "codex_client", None)
+        if codex is not None:
+            try:
+                await codex.close()
+            except Exception:
+                log.exception("Error closing Codex client")
+
+        # Shut down Playwright browser
+        browser = getattr(self, "browser_manager", None)
+        if browser is not None:
+            try:
+                await browser.shutdown()
+            except Exception:
+                log.exception("Error shutting down browser_manager")
+
         await super().close()
         log.info("OdinBot shutdown complete")
 
