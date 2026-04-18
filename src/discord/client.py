@@ -2607,8 +2607,10 @@ class OdinBot(commands.Bot):
                     await self._save_turn_trajectory(_trajectory, error=str(retry_err))
                     return f"LLM API error (circuit breaker recovery failed): {retry_err}", False, True, tools_used_in_loop, False
             except Exception as api_err:
-                await self._save_turn_trajectory(_trajectory, error=str(api_err))
-                return f"LLM API error: {api_err}", False, True, tools_used_in_loop, False
+                err_msg = str(api_err) or f"{type(api_err).__name__} (no message)"
+                log.error("LLM API call failed: %s", err_msg, exc_info=True)
+                await self._save_turn_trajectory(_trajectory, error=err_msg)
+                return f"LLM API error: {err_msg}", False, True, tools_used_in_loop, False
             finally:
                 if typing_cm is not None:
                     try:
