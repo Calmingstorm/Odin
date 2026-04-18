@@ -1345,7 +1345,8 @@ class OdinBot(commands.Bot):
         if task_end:
             self._active_tasks = max(0, self._active_tasks - 1)
         now = time.monotonic()
-        if now - self._last_status_update < self._STATUS_DEBOUNCE:
+        is_finish = task_end and self._active_tasks == 0
+        if not is_finish and now - self._last_status_update < self._STATUS_DEBOUNCE:
             return
         try:
             if self._active_tasks > 0 and text:
