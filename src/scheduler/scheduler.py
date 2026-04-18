@@ -222,6 +222,14 @@ class Scheduler:
                 f"Invalid trigger source '{source}'. "
                 f"Valid: {', '.join(sorted(valid_sources))}"
             )
+        regex = trigger.get("content_regex")
+        if regex:
+            if len(regex) > 200:
+                raise ValueError("content_regex must be under 200 characters")
+            try:
+                re.compile(regex)
+            except re.error as e:
+                raise ValueError(f"Invalid content_regex: {e}") from e
         if not trigger:
             raise ValueError("Trigger must have at least one condition")
 
@@ -373,9 +381,10 @@ class Scheduler:
                 return False
         if trigger.get("content_regex"):
             try:
-                if not re.search(trigger["content_regex"], content):
+                if not re.search(trigger["content_regex"], content[:10_000]):
                     return False
             except re.error:
+                log.warning("Regex trigger evaluation failed: %s", trigger["content_regex"][:50])
                 return False
         if trigger.get("starts_with"):
             if not content.startswith(trigger["starts_with"]):
