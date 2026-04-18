@@ -32,11 +32,9 @@ DEFAULT_USER_AGENT = (
 
 
 def _validate_url(url: str) -> None:
-    """Reject dangerous URL schemes."""
-    if not any(url.lower().startswith(s) for s in ALLOWED_SCHEMES):
-        raise ValueError(
-            f"URL must start with http:// or https:// (got: {url[:50]})"
-        )
+    """Reject dangerous URL schemes and SSRF targets."""
+    from .url_safety import validate_url_safe
+    validate_url_safe(url)
 
 
 class BrowserManager:

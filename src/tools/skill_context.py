@@ -91,38 +91,8 @@ def set_skill_allowed_urls(urls: list[str]) -> None:
 
 def is_url_blocked(url: str) -> bool:
     """Return True if a URL targets localhost, private IPs, or metadata endpoints."""
-    try:
-        parsed = urlparse(url)
-        host = parsed.hostname or ""
-    except Exception:
-        return True  # malformed → block
-
-    # Block empty/missing hostname
-    if not host:
-        return True
-
-    # Check operator allowlist — matches if the URL starts with any allowed prefix
-    url_base = f"{parsed.scheme}://{host}:{parsed.port}" if parsed.port else f"{parsed.scheme}://{host}"
-    if any(url_base.rstrip("/") == allowed or url.startswith(allowed) for allowed in _SKILL_ALLOWED_URLS):
-        return False
-
-    # Block common localhost names
-    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
-        return True
-
-    # Block cloud metadata endpoints
-    if host in ("169.254.169.254", "metadata.google.internal"):
-        return True
-
-    # Block private IP ranges
-    try:
-        addr = ipaddress.ip_address(host)
-        if addr.is_private or addr.is_loopback or addr.is_link_local:
-            return True
-    except ValueError:
-        pass  # hostname, not IP — allow
-
-    return False
+    from .url_safety import is_url_blocked as _shared_check
+    return _shared_check(url, allowed_urls=list(_SKILL_ALLOWED_URLS) if _SKILL_ALLOWED_URLS else None)
 
 
 # Tools that skills are allowed to call via execute_tool().

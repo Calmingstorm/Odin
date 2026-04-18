@@ -119,6 +119,10 @@ class BulkImporter:
         if not url.startswith(("http://", "https://")):
             return ImportResult(source=url, status="error", error="only http/https URLs supported")
 
+        from ..tools.url_safety import is_url_blocked
+        if is_url_blocked(url):
+            return ImportResult(source=url, status="error", error="URL targets a blocked address (private IP, localhost, or metadata endpoint)")
+
         try:
             import fitz
         except ImportError:
@@ -167,6 +171,10 @@ class BulkImporter:
     ) -> ImportResult:
         if not url.startswith(("http://", "https://")):
             return ImportResult(source=url, status="error", error="only http/https URLs supported")
+
+        from ..tools.url_safety import is_url_blocked
+        if is_url_blocked(url):
+            return ImportResult(source=url, status="error", error="URL targets a blocked address (private IP, localhost, or metadata endpoint)")
 
         from ..tools.web import _html_to_text
 

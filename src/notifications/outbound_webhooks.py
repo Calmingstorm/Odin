@@ -241,6 +241,9 @@ class OutboundWebhookDispatcher:
             raise ValueError(f"URL must be under {_MAX_URL_LEN} characters")
         if not url.startswith(("http://", "https://")):
             raise ValueError("URL must start with http:// or https://")
+        from ..tools.url_safety import is_url_blocked
+        if is_url_blocked(url):
+            raise ValueError("Webhook URL targets a blocked address (localhost, private IP, or metadata endpoint)")
         if len(name) > _MAX_NAME_LEN:
             raise ValueError(f"Name must be under {_MAX_NAME_LEN} characters")
         if len(secret) > _MAX_SECRET_LEN:

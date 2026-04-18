@@ -818,7 +818,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if saver is None:
             return web.json_response({"error": "trajectory saving not available"}, status=503)
         filename = request.match_info["filename"]
-        if not filename.endswith(".jsonl") or "/" in filename or "\\" in filename:
+        if not filename.endswith(".jsonl") or "/" in filename or "\\" in filename or ".." in filename:
+            return web.json_response({"error": "invalid filename"}, status=400)
+        safe_path = (saver.directory / filename).resolve()
+        if not safe_path.is_relative_to(saver.directory.resolve()):
             return web.json_response({"error": "invalid filename"}, status=400)
         limit = _safe_int_param(request, "limit", 100, hi=500)
         entries = await saver.read_file(filename, limit=limit)
@@ -2299,7 +2302,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if saver is None:
             return web.json_response({"error": "agent trajectory saving not available"}, status=503)
         filename = request.match_info["filename"]
-        if not filename.endswith(".jsonl") or "/" in filename or "\\" in filename:
+        if not filename.endswith(".jsonl") or "/" in filename or "\\" in filename or ".." in filename:
+            return web.json_response({"error": "invalid filename"}, status=400)
+        safe_path = (saver.directory / filename).resolve()
+        if not safe_path.is_relative_to(saver.directory.resolve()):
             return web.json_response({"error": "invalid filename"}, status=400)
         limit = _safe_int_param(request, "limit", 100, hi=500)
         entries = await saver.read_file(filename, limit=limit)
