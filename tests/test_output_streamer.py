@@ -580,6 +580,7 @@ class TestExecCommandStreaming:
         from src.tools.executor import ToolExecutor
 
         executor = ToolExecutor.__new__(ToolExecutor)
+        executor._current_tool_timeout = None
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
         executor.bulkheads = MagicMock()
@@ -599,6 +600,7 @@ class TestExecCommandStreaming:
         from src.tools.executor import ToolExecutor
 
         executor = ToolExecutor.__new__(ToolExecutor)
+        executor._current_tool_timeout = None
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
         executor.config.ssh_key_path = "/key"
@@ -621,6 +623,7 @@ class TestExecCommandStreaming:
         from src.tools.executor import ToolExecutor
 
         executor = ToolExecutor.__new__(ToolExecutor)
+        executor._current_tool_timeout = None
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
         executor.bulkheads = MagicMock()
@@ -644,6 +647,7 @@ class TestHandleRunCommandStreaming:
         from src.tools.executor import ToolExecutor
 
         executor = ToolExecutor.__new__(ToolExecutor)
+        executor._current_tool_timeout = None
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
         executor.config.hosts = {"myhost": MagicMock(address="127.0.0.1", ssh_user="root", os="linux")}
@@ -671,6 +675,7 @@ class TestHandleRunCommandStreaming:
         from src.tools.executor import ToolExecutor
 
         executor = ToolExecutor.__new__(ToolExecutor)
+        executor._current_tool_timeout = None
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
         executor.config.hosts = {"myhost": MagicMock(address="127.0.0.1", ssh_user="root", os="linux")}
@@ -696,6 +701,7 @@ class TestHandleRunCommandStreaming:
         from src.tools.executor import ToolExecutor
 
         executor = ToolExecutor.__new__(ToolExecutor)
+        executor._current_tool_timeout = None
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
         executor.config.hosts = {"myhost": MagicMock(address="127.0.0.1", ssh_user="root", os="linux")}
@@ -715,6 +721,7 @@ class TestHandleRunCommandStreaming:
         from src.tools.executor import ToolExecutor
 
         executor = ToolExecutor.__new__(ToolExecutor)
+        executor._current_tool_timeout = None
         executor.config = MagicMock()
         executor.config.hosts = {}
         executor._branch_freshness_enabled = False
@@ -740,6 +747,7 @@ class TestHandleRunScriptStreaming:
         from src.tools.executor import ToolExecutor
 
         executor = ToolExecutor.__new__(ToolExecutor)
+        executor._current_tool_timeout = None
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
         executor.config.hosts = {"myhost": MagicMock(address="127.0.0.1", ssh_user="root", os="linux")}
@@ -768,6 +776,7 @@ class TestHandleRunScriptStreaming:
         from src.tools.executor import ToolExecutor
 
         executor = ToolExecutor.__new__(ToolExecutor)
+        executor._current_tool_timeout = None
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
         executor.config.hosts = {"myhost": MagicMock(address="127.0.0.1", ssh_user="root", os="linux")}
