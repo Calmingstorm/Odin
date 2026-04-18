@@ -390,7 +390,7 @@ class HealthServer:
             middlewares.append(_make_csrf_middleware())
             middlewares.append(_make_auth_middleware(self._web_config, self._session_manager))
             middlewares.append(_make_web_audit_middleware())
-        self._app = web.Application(middlewares=middlewares)
+        self._app = web.Application(middlewares=middlewares, client_max_size=10 * 1024 * 1024)
         # Store session_manager on app for access by API routes
         self._app["session_manager"] = self._session_manager
         self._app.router.add_get("/health", self._health)

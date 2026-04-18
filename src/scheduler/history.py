@@ -34,6 +34,8 @@ class ScheduleHistory:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._max_per_schedule = max_entries_per_schedule
+        self._records_since_prune = 0
+        self._auto_prune_interval = 100
 
     async def record(
         self,
@@ -66,6 +68,12 @@ class ScheduleHistory:
                 await f.write(line)
         except Exception as e:
             log.error("Failed to write schedule history: %s", e)
+
+        self._records_since_prune += 1
+        if self._records_since_prune >= self._auto_prune_interval:
+            self._records_since_prune = 0
+            await self.prune()
+
         return entry
 
     async def query(
@@ -190,8 +198,10 @@ class ScheduleHistory:
         if removed > 0:
             try:
                 content = "".join(json.dumps(e, default=str) + "\n" for e in kept)
-                async with aiofiles.open(self.path, "w") as f:
+                tmp = self.path.with_suffix(".tmp")
+                async with aiofiles.open(tmp, "w") as f:
                     await f.write(content)
+                tmp.replace(self.path)
                 log.info("Pruned %d history entries", removed)
             except Exception as e:
                 log.error("Failed to write pruned history: %s", e)
