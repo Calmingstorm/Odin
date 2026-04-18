@@ -102,9 +102,9 @@ class AgentsConfig(BaseModel):
 
     @field_validator("max_nesting_depth", "max_children_per_agent")
     @classmethod
-    def _agents_positive(cls, v):
-        if v < 1:
-            raise ValueError("agent limits must be >= 1")
+    def _agents_non_negative(cls, v):
+        if v < 0:
+            raise ValueError("agent limits must be >= 0")
         return v
 
 
@@ -519,4 +519,10 @@ def load_config(path: str | Path = "config.yml") -> Config:
             "It must contain a YAML mapping with at least a 'discord' section.\n"
             "See config.yml comments for examples."
         )
-    return Config(**data)
+    try:
+        return Config(**data)
+    except Exception as exc:
+        raise SystemExit(
+            f"Config validation failed: {exc}\n"
+            "Check config.yml values — numeric fields must be within valid ranges."
+        ) from exc
