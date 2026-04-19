@@ -231,6 +231,9 @@ class OdinWebSocket {
     }
   }
 
+  on(channel, handler) { return this.subscribe(channel, handler); }
+  off(channel, handler) { return this.unsubscribe(channel, handler); }
+
   /** Send a chat message via WebSocket. Returns true if sent. */
   sendChat(content, { channelId, userId, username } = {}) {
     if (!this.connected) return false;
