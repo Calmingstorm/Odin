@@ -1429,15 +1429,22 @@ class TestPatternCoverageGaps:
         result = "Command failed (exit 127):\n/bin/sh: 1: kubectl: not found\n"
         assert classify_error(result) == RecoveryCategory.DEPENDENCY_MISSING
 
-    def test_ubuntu_sh_missing_binary_no_trailing_newline_doesnt_match(self):
-        """Anchored pattern — without trailing newline, no false-positive
-        into DEPENDENCY_MISSING for mid-line prose."""
+    def test_ubuntu_sh_missing_binary_no_newline_still_matches(self):
+        """Odin's PR #15 round-1 note: output truncated mid-line at the
+        MAX_RESULT cap, or emitted without a trailing newline, must still
+        classify. The unanchored ': not found' fallback covers this."""
         from src.tools.recovery import classify_error, RecoveryCategory
-        # Benign mid-line occurrence shouldn't classify as dependency.
+        result = "Command failed (exit 127):\n/bin/sh: 1: kubectl: not found"
+        assert classify_error(result) == RecoveryCategory.DEPENDENCY_MISSING
+
+    def test_mid_line_not_found_routes_to_not_found_not_dependency(self):
+        """Priority ordering check: NOT_FOUND owns 'not found in' and is
+        checked before DEPENDENCY_MISSING, so prose like 'key: not found
+        in map' routes to NOT_FOUND and doesn't miscategorize as a
+        missing dependency despite the fallback pattern."""
+        from src.tools.recovery import classify_error, RecoveryCategory
         result = "Command failed (exit 1):\nerror: config key: not found in map"
-        cat = classify_error(result)
-        # Either None or something else (not DEPENDENCY_MISSING).
-        assert cat != RecoveryCategory.DEPENDENCY_MISSING
+        assert classify_error(result) == RecoveryCategory.NOT_FOUND
 
     def test_fetch_url_404_is_classifiable(self):
         """fetch_url now prefixes non-2xx with 'Error:' so the classifier

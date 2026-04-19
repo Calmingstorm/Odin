@@ -163,9 +163,15 @@ _RECOVERABLE_PATTERNS: dict[RecoveryCategory, tuple[str, ...]] = {
         # Debian/Ubuntu `sh` emits "<cmd>: not found" (no "command"
         # prefix) when a binary isn't on PATH. Typical shape:
         #   /bin/sh: 1: kubectl: not found
-        # Anchored on the trailing newline to avoid false-positives on
-        # mid-line prose like "error: config key: not found in map".
+        # Order matters: the newline-anchored pattern is the clean
+        # match; the second, unanchored pattern is a fallback for
+        # output truncated at MAX_RESULT mid-line or emitted without
+        # a trailing newline. NOT_FOUND owns "not found in" and is
+        # checked first in _CLASSIFICATION_PRIORITY, so mid-line
+        # prose like "error: config key: not found in map" routes
+        # correctly and never reaches this fallback.
         ": not found\n",
+        ": not found",
     ),
     RecoveryCategory.PERMISSION_DENIED: (
         "Permission denied",
