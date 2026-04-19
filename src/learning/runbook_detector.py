@@ -83,6 +83,14 @@ class RunbookSuggestion:
     first_seen: str = ""
     last_seen: str = ""
     sample_inputs: list[dict] = field(default_factory=list)
+    # Session-context enrichment (Odin's Task 1 critique): a pattern is
+    # more useful when we know what user intent produced it and whether
+    # those sessions tended to succeed. These are optional and come from
+    # the trajectory store; patterns detected without a trajectory
+    # index keep the fields empty.
+    user_queries: list[str] = field(default_factory=list)       # first user_content per session, max 5
+    error_session_fraction: float = 0.0                         # 0..1 of linked sessions that ended is_error
+    linked_session_count: int = 0                               # how many sessions had a trajectory match
 
     @property
     def length(self) -> int:
@@ -90,9 +98,23 @@ class RunbookSuggestion:
 
     def score(self, *, now: datetime | None = None) -> float:
         """Higher score = better candidate. Session-presence (not raw n-gram
-        count) drives the frequency term — a sequence that shows up in six
-        distinct sessions beats one that happens eight times inside two
-        sessions. Weighted further by recency and actor concentration."""
+        count) drives the frequency term, then we weight by tool
+        diversity, host diversity, recency, and actor concentration —
+        and heavily damp trivial self-repetition patterns so
+        ``run_command x 5`` can't drown out real diagnostic workflows.
+
+        Formula::
+
+            base = session_count or frequency
+            score = base
+                  * length_bonus
+                  * recency_weight
+                  * concentration_bonus
+                  * diversity_bonus
+                  * host_diversity_bonus
+                  * trivial_repetition_penalty
+
+        Each multiplier is documented inline so tuning stays visible."""
         if not self.sequence:
             return 0.0
         now = now or datetime.now(timezone.utc)
@@ -109,13 +131,177 @@ class RunbookSuggestion:
         length_bonus = 1.0 + 0.2 * (self.length - 1)
         concentration_bonus = 1.0 if len(self.actors) <= 2 else 0.75
         base = self.session_count or self.frequency
-        return base * length_bonus * recency_weight * concentration_bonus
+
+        # Tool-diversity bonus: a mixed-tool sequence (e.g.
+        # search_audit → read_file → http_probe) is a better
+        # candidate than N steps of the same tool. Scales from 1.0
+        # (all steps same tool) up to 1.5 (all steps distinct).
+        distinct_tools = len(set(self.sequence))
+        if self.length >= 1:
+            diversity_fraction = (distinct_tools - 1) / max(1, self.length - 1)
+        else:
+            diversity_fraction = 0.0
+        diversity_bonus = 1.0 + 0.5 * diversity_fraction
+
+        # Host-diversity bonus: a pattern observed on multiple hosts
+        # is more likely to be a real procedure than a single-host
+        # habit. 1.0 for ≤1 host, up to 1.3 for 3+ hosts.
+        host_count = len(self.hosts)
+        host_diversity_bonus = 1.0 + 0.15 * min(2, max(0, host_count - 1))
+
+        # Trivial-repetition penalty: damp sequences dominated by a
+        # single tool. If the most-common tool is >50% of the sequence
+        # we scale the penalty linearly; at 100% dominance (pure
+        # self-repeat like run_command × 5) the score is multiplied by
+        # 0.1 so even a high-frequency habit can't out-rank a real
+        # mixed-tool diagnostic workflow.
+        if self.sequence:
+            most_common_count = max(self.sequence.count(t) for t in set(self.sequence))
+            dominance = most_common_count / self.length
+        else:
+            dominance = 0.0
+        if dominance > 0.5:
+            # Linear falloff from 1.0 at dominance=0.5 to 0.1 at 1.0.
+            trivial_penalty = max(0.1, 1.0 - 1.8 * (dominance - 0.5))
+        else:
+            trivial_penalty = 1.0
+
+        return (
+            base
+            * length_bonus
+            * recency_weight
+            * concentration_bonus
+            * diversity_bonus
+            * host_diversity_bonus
+            * trivial_penalty
+        )
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["length"] = self.length
         d["score"] = round(self.score(), 3)
         return d
+
+
+@dataclass(slots=True)
+class _TrajectoryRecord:
+    """Minimal shape we need from a trajectory JSONL entry to enrich
+    runbook suggestions with session context."""
+    ts_epoch: float
+    channel: str
+    actor: str
+    user_content: str
+    is_error: bool
+
+
+def load_trajectory_index(
+    trajectories_dir: str | Path,
+    *, since_epoch: float | None = None,
+) -> dict[tuple[str, str], list[_TrajectoryRecord]]:
+    """Index trajectory turns by (channel_id, actor) for fast session
+    lookup. Each value is sorted by timestamp ascending.
+
+    Returns an empty dict on missing directory / read failure — callers
+    should fall back to zero-context suggestions rather than raising.
+    """
+    path = Path(trajectories_dir)
+    out: dict[tuple[str, str], list[_TrajectoryRecord]] = defaultdict(list)
+    if not path.exists() or not path.is_dir():
+        return dict(out)
+    try:
+        files = sorted(f for f in path.iterdir() if f.is_file() and f.suffix == ".jsonl")
+    except OSError as e:
+        log.error("Failed to list trajectories dir %s: %s", path, e)
+        return dict(out)
+    for filepath in files:
+        try:
+            with filepath.open("r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    ts = entry.get("timestamp", "")
+                    try:
+                        epoch = datetime.fromisoformat(
+                            ts.replace("Z", "+00:00")
+                        ).timestamp()
+                    except ValueError:
+                        continue
+                    if since_epoch is not None and epoch < since_epoch:
+                        continue
+                    rec = _TrajectoryRecord(
+                        ts_epoch=epoch,
+                        channel=str(entry.get("channel_id", "") or ""),
+                        actor=str(entry.get("user_id", "") or entry.get("user_name", "") or ""),
+                        user_content=str(entry.get("user_content", "") or ""),
+                        is_error=bool(entry.get("is_error")),
+                    )
+                    out[(rec.channel, rec.actor)].append(rec)
+        except OSError as e:
+            log.error("Failed to read trajectory file %s: %s", filepath, e)
+            continue
+    for recs in out.values():
+        recs.sort(key=lambda r: r.ts_epoch)
+    return dict(out)
+
+
+def _match_session_to_trajectory(
+    session: list[AuditEntry],
+    index: dict[tuple[str, str], list[_TrajectoryRecord]],
+    *, max_skew_seconds: int = 900,
+) -> _TrajectoryRecord | None:
+    """Given a session (list of audit entries from the same actor+channel,
+    sorted by time), find the trajectory turn most likely to have
+    produced it.
+
+    **Timestamp semantics (Odin's PR #16 review catch):** trajectories
+    are persisted at END of turn by `TrajectorySaver.save()`, while the
+    audit events that made up the session happen DURING the turn. So
+    the correct trajectory for a session has ``ts_epoch`` *after* the
+    session's first audit entry and typically within a few minutes of
+    the session's last event. An earlier version of this function only
+    scanned trajectories with ``ts_epoch <= first.ts_epoch``, which
+    quietly missed every real match in production.
+
+    Heuristic: consider the session's time-span [first, last]. For each
+    candidate trajectory in the same (channel, actor) bucket, compute
+    the minimum gap to that span — zero if the trajectory save time
+    lands within it, the distance to the nearer endpoint otherwise.
+    Pick the candidate with the smallest gap, and reject if that gap
+    exceeds ``max_skew_seconds``.
+
+    Returns None when there's no credible match — callers use that
+    signal to leave user_queries empty rather than inventing one.
+    """
+    if not session:
+        return None
+    first = session[0]
+    last = session[-1]
+    recs = index.get((first.channel, first.actor)) or []
+    if not recs:
+        return None
+
+    def gap(rec: _TrajectoryRecord) -> float:
+        if rec.ts_epoch < first.ts_epoch:
+            return first.ts_epoch - rec.ts_epoch
+        if rec.ts_epoch > last.ts_epoch:
+            return rec.ts_epoch - last.ts_epoch
+        return 0.0  # trajectory save time falls within the session span
+
+    best: _TrajectoryRecord | None = None
+    best_gap = float("inf")
+    for r in recs:
+        g = gap(r)
+        if g < best_gap:
+            best_gap = g
+            best = r
+    if best is None or best_gap > max_skew_seconds:
+        return None
+    return best
 
 
 def _iter_audit_entries(path: Path, *, since_epoch: float | None) -> Iterable[AuditEntry]:
@@ -204,6 +390,7 @@ def detect_patterns(
     session_gap_seconds: int = DEFAULT_SESSION_GAP_SECONDS,
     ignore_tools: Iterable[str] = (),
     now: datetime | None = None,
+    trajectories_dir: str | Path | None = None,
 ) -> list[RunbookSuggestion]:
     """Scan the audit log and return candidate runbook sequences.
 
@@ -233,6 +420,20 @@ def detect_patterns(
     if not sessions:
         return []
 
+    # Optionally enrich with trajectory-turn context: match each session
+    # to the turn that most likely started it so we can surface the user
+    # query and outcome alongside the tool sequence.
+    trajectory_index: dict[tuple[str, str], list[_TrajectoryRecord]] = {}
+    if trajectories_dir is not None:
+        trajectory_index = load_trajectory_index(
+            trajectories_dir, since_epoch=since_epoch,
+        )
+    session_to_traj: dict[int, _TrajectoryRecord | None] = {}
+    for session_idx, session in enumerate(sessions):
+        session_to_traj[session_idx] = _match_session_to_trajectory(
+            session, trajectory_index,
+        ) if trajectory_index else None
+
     # Collect occurrences of every n-gram across all sessions. Each occurrence
     # is tagged with its session id so we can require distinct-session
     # repetition later (not just within-session bursts).
@@ -261,6 +462,31 @@ def detect_patterns(
         first_seen = min(timestamps) if timestamps else ""
         last_seen = max(timestamps) if timestamps else ""
         sample = _build_sample_inputs(seq_occurrences[0])
+
+        # Session-context enrichment from the trajectory index (if the
+        # caller passed a trajectories_dir). We keep only the first five
+        # distinct user queries so the output doesn't balloon, and
+        # compute error_session_fraction across matched sessions only.
+        linked_trajs: list[_TrajectoryRecord] = []
+        for sid in distinct_sessions:
+            rec = session_to_traj.get(sid)
+            if rec is not None:
+                linked_trajs.append(rec)
+        seen_queries: list[str] = []
+        for rec in linked_trajs:
+            q = (rec.user_content or "").strip()
+            if not q:
+                continue
+            if q in seen_queries:
+                continue
+            seen_queries.append(q)
+            if len(seen_queries) >= 5:
+                break
+        error_fraction = (
+            sum(1 for r in linked_trajs if r.is_error) / len(linked_trajs)
+            if linked_trajs else 0.0
+        )
+
         suggestions.append(RunbookSuggestion(
             sequence=list(seq),
             frequency=freq,
@@ -270,6 +496,9 @@ def detect_patterns(
             first_seen=first_seen,
             last_seen=last_seen,
             sample_inputs=sample,
+            user_queries=[q[:200] for q in seen_queries],
+            error_session_fraction=round(error_fraction, 3),
+            linked_session_count=len(linked_trajs),
         ))
 
     # Suppress a shorter sequence only if a longer sequence whose strict
@@ -345,10 +574,25 @@ def format_suggestions(
     for i, s in enumerate(suggestions[:limit], start=1):
         arrow = " -> ".join(s.sequence)
         hosts = ",".join(s.hosts) if s.hosts else "(no host)"
-        lines.append(
+        header = (
             f"{i:2d}. [{s.frequency}x, score={s.score():.2f}] {arrow} "
             f"on {hosts} (last: {s.last_seen[:19]})"
         )
+        lines.append(header)
+        # Session-context lines only appear when a trajectory index was
+        # supplied at detection time and actually matched something;
+        # otherwise the pattern is still shown but without intent hints.
+        if s.user_queries:
+            err_hint = (
+                f", err_sessions={s.error_session_fraction:.0%}"
+                if s.error_session_fraction > 0 else ""
+            )
+            lines.append(
+                f"      intent ({s.linked_session_count} sessions{err_hint}):"
+            )
+            for q in s.user_queries[:3]:
+                q_trim = q if len(q) <= 100 else q[:97] + "..."
+                lines.append(f"        - {q_trim}")
     return "\n".join(lines)
 
 

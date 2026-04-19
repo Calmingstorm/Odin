@@ -287,6 +287,271 @@ class TestDetectPatterns:
         )
         assert fresh.score(now=now) > stale.score(now=now)
 
+    def test_diverse_sequence_beats_self_repeat(self):
+        """The core operational-value fix: run_command × 5 (high frequency,
+        low value) must score BELOW a 3-tool diagnostic sequence even with
+        lower raw frequency."""
+        now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
+        shallow = RunbookSuggestion(
+            sequence=["run_command", "run_command", "run_command", "run_command", "run_command"],
+            frequency=500, session_count=100,
+            hosts=["hostA"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        diagnostic = RunbookSuggestion(
+            sequence=["search_audit", "read_file", "http_probe"],
+            frequency=20, session_count=10,
+            hosts=["hostA"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        assert diagnostic.score(now=now) > shallow.score(now=now), (
+            f"diagnostic {diagnostic.score(now=now):.2f} should beat "
+            f"shallow {shallow.score(now=now):.2f}"
+        )
+
+    def test_trivial_repetition_penalty(self):
+        """A pure same-tool-N-times pattern gets penalised."""
+        now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
+        pure_repeat = RunbookSuggestion(
+            sequence=["run_command"] * 5,
+            frequency=100, session_count=50,
+            hosts=["h"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        mixed = RunbookSuggestion(
+            sequence=["run_command", "read_file", "run_command", "read_file", "run_command"],
+            frequency=100, session_count=50,
+            hosts=["h"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        # Same everything except sequence composition — mixed should score higher
+        assert mixed.score(now=now) > pure_repeat.score(now=now)
+
+    def test_session_context_user_queries_populated(self, tmp_path):
+        """When trajectories_dir is provided, each suggestion carries the
+        user queries that kicked off the matching sessions.
+
+        Reflects real production timing: TrajectorySaver writes the
+        trajectory at END of turn, AFTER the audit events. The matcher
+        must find the trajectory whose timestamp falls inside or just
+        after the session window (Odin's PR #16 review catch)."""
+        audit = tmp_path / "audit.jsonl"
+        traj_dir = tmp_path / "trajectories"
+        traj_dir.mkdir()
+
+        base = datetime(2026, 4, 18, 10, 0, 0)
+        audit_rows: list[dict] = []
+        traj_rows: list[dict] = []
+        for i in range(3):
+            session_start = base + timedelta(hours=i)
+            audit_rows.append(_entry(session_start, "run_command"))
+            audit_rows.append(_entry(
+                session_start + timedelta(seconds=5), "http_probe",
+            ))
+            # Trajectory saved AFTER the session's last event (end of turn).
+            traj_rows.append({
+                "timestamp": _iso(session_start + timedelta(seconds=10)),
+                "channel_id": "c1",
+                "user_id": "alice",
+                "user_name": "alice",
+                "user_content": f"restart nginx on prod (session {i})",
+                "is_error": False,
+                "iterations": [],
+                "tools_used": ["run_command", "http_probe"],
+            })
+        with audit.open("w") as f:
+            for r in audit_rows:
+                f.write(json.dumps(r) + "\n")
+        with (traj_dir / "2026-04-18.jsonl").open("w") as f:
+            for r in traj_rows:
+                f.write(json.dumps(r) + "\n")
+
+        now = datetime(2026, 4, 18, 15, 0, 0, tzinfo=timezone.utc)
+        suggestions = detect_patterns(
+            audit, min_frequency=3, lookback_days=30,
+            trajectories_dir=traj_dir, now=now,
+        )
+        assert suggestions
+        s = suggestions[0]
+        assert s.user_queries, "expected user queries to be populated from trajectories"
+        assert any("restart nginx on prod" in q for q in s.user_queries)
+        assert s.linked_session_count == 3
+        assert s.error_session_fraction == 0.0
+
+    def test_session_context_reports_error_fraction(self, tmp_path):
+        """A pattern whose sessions ended is_error get a non-zero
+        error_session_fraction."""
+        audit = tmp_path / "audit.jsonl"
+        traj_dir = tmp_path / "trajectories"
+        traj_dir.mkdir()
+        base = datetime(2026, 4, 18, 10, 0, 0)
+        audit_rows: list[dict] = []
+        traj_rows: list[dict] = []
+        for i in range(4):
+            session_start = base + timedelta(hours=i)
+            audit_rows.append(_entry(session_start, "read_file"))
+            audit_rows.append(_entry(
+                session_start + timedelta(seconds=5), "http_probe",
+            ))
+            # Trajectory saved end-of-turn (after the audit events).
+            traj_rows.append({
+                "timestamp": _iso(session_start + timedelta(seconds=10)),
+                "channel_id": "c1",
+                "user_id": "alice",
+                "user_name": "alice",
+                "user_content": f"probe {i}",
+                "is_error": (i < 2),  # first 2 errored, last 2 ok
+                "iterations": [],
+            })
+        with audit.open("w") as f:
+            for r in audit_rows:
+                f.write(json.dumps(r) + "\n")
+        with (traj_dir / "x.jsonl").open("w") as f:
+            for r in traj_rows:
+                f.write(json.dumps(r) + "\n")
+
+        now = datetime(2026, 4, 18, 15, 0, 0, tzinfo=timezone.utc)
+        suggestions = detect_patterns(
+            audit, min_frequency=4, lookback_days=30,
+            trajectories_dir=traj_dir, now=now,
+        )
+        assert suggestions
+        assert suggestions[0].error_session_fraction == 0.5
+        assert suggestions[0].linked_session_count == 4
+
+    def test_matcher_handles_trajectory_saved_after_session(self, tmp_path):
+        """Odin's PR #16 review catch: TrajectorySaver writes at END of
+        turn (after all audit events). The matcher must still find
+        that trajectory even though its save timestamp is AFTER the
+        session's first audit entry."""
+        from src.learning.runbook_detector import (
+            _TrajectoryRecord,
+            _match_session_to_trajectory,
+        )
+        # Build a fake session and a trajectory saved after it.
+        session_start = datetime(2026, 4, 18, 10, 0, 0, tzinfo=timezone.utc)
+        session = [
+            AuditEntry.from_line(json.dumps(_entry(session_start, "read_file"))),
+            AuditEntry.from_line(json.dumps(_entry(
+                session_start + timedelta(seconds=20), "http_probe",
+            ))),
+        ]
+        assert all(s is not None for s in session)
+        # Trajectory record saved 30 seconds AFTER session started (end of turn).
+        traj_time = session_start + timedelta(seconds=30)
+        index = {
+            ("c1", "alice"): [
+                _TrajectoryRecord(
+                    ts_epoch=traj_time.timestamp(),
+                    channel="c1",
+                    actor="alice",
+                    user_content="do the thing",
+                    is_error=False,
+                ),
+            ],
+        }
+        match = _match_session_to_trajectory(session, index, max_skew_seconds=900)
+        assert match is not None
+        assert match.user_content == "do the thing"
+
+    def test_matcher_prefers_closest_when_multiple_candidates(self, tmp_path):
+        """With several trajectories nearby, the matcher picks the one
+        closest in time to the session window."""
+        from src.learning.runbook_detector import (
+            _TrajectoryRecord,
+            _match_session_to_trajectory,
+        )
+        session_start = datetime(2026, 4, 18, 10, 0, 0, tzinfo=timezone.utc)
+        session = [
+            AuditEntry.from_line(json.dumps(_entry(session_start, "read_file"))),
+            AuditEntry.from_line(json.dumps(_entry(
+                session_start + timedelta(seconds=20), "http_probe",
+            ))),
+        ]
+        # 5 minutes before (previous turn), 30 seconds after (this turn),
+        # and 1 hour after (unrelated later turn). Match should pick the 30s-after one.
+        index = {
+            ("c1", "alice"): [
+                _TrajectoryRecord(
+                    ts_epoch=(session_start - timedelta(minutes=5)).timestamp(),
+                    channel="c1", actor="alice",
+                    user_content="previous turn", is_error=False,
+                ),
+                _TrajectoryRecord(
+                    ts_epoch=(session_start + timedelta(seconds=30)).timestamp(),
+                    channel="c1", actor="alice",
+                    user_content="correct turn", is_error=False,
+                ),
+                _TrajectoryRecord(
+                    ts_epoch=(session_start + timedelta(hours=1)).timestamp(),
+                    channel="c1", actor="alice",
+                    user_content="later turn", is_error=False,
+                ),
+            ],
+        }
+        match = _match_session_to_trajectory(session, index, max_skew_seconds=900)
+        assert match is not None
+        assert match.user_content == "correct turn"
+
+    def test_matcher_rejects_beyond_skew_window(self, tmp_path):
+        from src.learning.runbook_detector import (
+            _TrajectoryRecord,
+            _match_session_to_trajectory,
+        )
+        session_start = datetime(2026, 4, 18, 10, 0, 0, tzinfo=timezone.utc)
+        session = [
+            AuditEntry.from_line(json.dumps(_entry(session_start, "read_file"))),
+        ]
+        # Trajectory 2 hours after session — way outside the 15-minute skew.
+        index = {
+            ("c1", "alice"): [
+                _TrajectoryRecord(
+                    ts_epoch=(session_start + timedelta(hours=2)).timestamp(),
+                    channel="c1", actor="alice",
+                    user_content="unrelated later turn", is_error=False,
+                ),
+            ],
+        }
+        match = _match_session_to_trajectory(session, index, max_skew_seconds=900)
+        assert match is None
+
+    def test_session_context_absent_when_no_trajectories_dir(self, tmp_path):
+        """Backward-compat: omitting trajectories_dir leaves the new fields empty."""
+        audit = tmp_path / "audit.jsonl"
+        base = datetime(2026, 4, 18, 10, 0, 0)
+        rows = []
+        for i in range(3):
+            t = base + timedelta(hours=i)
+            rows.append(_entry(t, "read_file"))
+            rows.append(_entry(t + timedelta(seconds=5), "http_probe"))
+        _write_audit(audit, rows)
+        now = datetime(2026, 4, 18, 15, 0, 0, tzinfo=timezone.utc)
+        suggestions = detect_patterns(audit, min_frequency=3, now=now)
+        assert suggestions
+        assert suggestions[0].user_queries == []
+        assert suggestions[0].linked_session_count == 0
+
+    def test_multi_host_scores_higher(self):
+        """A pattern observed across 3 hosts beats the same pattern on 1 host."""
+        now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
+        single_host = RunbookSuggestion(
+            sequence=["a", "b", "c"], frequency=10, session_count=5,
+            hosts=["hostA"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        multi_host = RunbookSuggestion(
+            sequence=["a", "b", "c"], frequency=10, session_count=5,
+            hosts=["hostA", "hostB", "hostC"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        assert multi_host.score(now=now) > single_host.score(now=now)
+
 
 class TestFormatters:
     def test_empty_summary(self):

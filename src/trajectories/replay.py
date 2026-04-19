@@ -147,6 +147,100 @@ def _tool_io_pairs(entry: dict) -> list[tuple[str, Any, str]]:
     return pairs
 
 
+def _tokenize(text: str) -> set[str]:
+    """Cheap tokenization for intent similarity. Lowercase, word-split,
+    drop tokens <3 chars. Good enough for jaccard scoring on user queries.
+    """
+    if not isinstance(text, str):
+        return set()
+    tokens = set()
+    buf: list[str] = []
+    for ch in text.lower():
+        if ch.isalnum() or ch == "_":
+            buf.append(ch)
+        elif buf:
+            tok = "".join(buf)
+            if len(tok) >= 3:
+                tokens.add(tok)
+            buf = []
+    if buf:
+        tok = "".join(buf)
+        if len(tok) >= 3:
+            tokens.add(tok)
+    return tokens
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return inter / union if union else 0.0
+
+
+def find_diff_pair(
+    primary: dict,
+    candidates: list[dict],
+    *,
+    prefer_opposite_outcome: bool = True,
+    min_similarity: float = 0.2,
+    opposite_outcome_boost: float = 0.15,
+    boost_floor: float = 0.35,
+) -> dict | None:
+    """Given a primary trajectory turn, pick the best candidate for a
+    diff pairing.
+
+    "Best" = highest token-jaccard similarity of user_content, with a
+    preference for the OPPOSITE outcome (so a failed turn pairs with a
+    success and vice versa). If nothing clears ``min_similarity`` the
+    caller should report that honestly rather than forcing a junk diff.
+
+    This is the primitive Odin called for in his Task 2 analysis:
+    replay_trajectory's diff mode becomes diagnosis instead of
+    archaeology once the tool can PICK the right comparison target.
+
+    Opposite-outcome boost (Odin's PR #16 review note): the boost only
+    applies when the candidate *already* clears ``boost_floor`` on raw
+    similarity (default 0.35). Below that the boost is zero, so a
+    merely-okay opposite-outcome match can't beat a genuinely-close
+    same-outcome near-clone. Boost itself is 0.15 (tuned down from an
+    earlier 0.25 that could, on short/generic user prompts, let a 0.2
+    similarity with opposite outcome beat a 0.4 same-outcome match).
+    """
+    if not isinstance(primary, dict) or not candidates:
+        return None
+    primary_tokens = _tokenize(primary.get("user_content") or "")
+    primary_err = bool(primary.get("is_error"))
+    primary_id = primary.get("message_id")
+
+    best_score = -1.0
+    best: dict | None = None
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        if cand.get("message_id") == primary_id:
+            continue
+        cand_tokens = _tokenize(cand.get("user_content") or "")
+        sim = _jaccard(primary_tokens, cand_tokens)
+        if sim < min_similarity:
+            continue
+        score = sim
+        # The boost only fires once similarity is already strong enough
+        # that pairing these two turns makes sense on intent. For weaker
+        # matches we stay on raw similarity so a plausible opposite
+        # outcome can't drag a bad pair to the top.
+        if (
+            prefer_opposite_outcome
+            and sim >= boost_floor
+            and bool(cand.get("is_error")) != primary_err
+        ):
+            score = sim + opposite_outcome_boost
+        if score > best_score:
+            best_score = score
+            best = cand
+    return best
+
+
 def diff_turns(a: dict, b: dict) -> str:
     """Side-by-side comparison of two trajectory entries. Intended for the
     case where A and B started from similar inputs but diverged — same
