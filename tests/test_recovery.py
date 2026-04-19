@@ -1466,15 +1466,58 @@ class TestPatternCoverageGaps:
         result = "Error: HTTP 403: Forbidden"
         assert classify_error(result) == RecoveryCategory.AUTH_FAILURE
 
-    def test_fetch_url_client_error_has_error_prefix(self):
-        """Network failures via aiohttp.ClientError now start with Error:
-        so classify_error can see them."""
+    @pytest.mark.asyncio
+    async def test_fetch_url_client_error_has_error_prefix(self):
+        """Odin's PR #15 round-2 non-blocker: replace placeholder with a
+        real mocked test. The specific contract changed by this PR is
+        that aiohttp.ClientError now produces a return string starting
+        with 'Error:' (was 'Fetch error:'), so classify_error can at
+        least see it has the right shape. We don't assert a specific
+        category here — the str form of aiohttp errors varies across
+        versions, and classification of network errors is covered by
+        the broader CONNECTION_ERROR tests using known patterns."""
+        import aiohttp
+        from unittest.mock import AsyncMock, MagicMock, patch
         from src.tools.web import fetch_url
-        # We can't trigger a real client error in a unit test without
-        # mocking aiohttp — the important contract is just the prefix
-        # shape, which we encode directly here.
-        # (Integration validation happens during live testing.)
-        assert True  # placeholder — shape verified by classify tests above
+
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.get = MagicMock(
+            side_effect=aiohttp.ClientConnectionError("connection reset")
+        )
+
+        with patch("src.tools.web.aiohttp.ClientSession", return_value=mock_session):
+            result = await fetch_url("https://example.com/anything")
+
+        assert result.startswith("Error:"), f"expected 'Error:' prefix, got: {result!r}"
+        assert "connection reset" in result
+
+    @pytest.mark.asyncio
+    async def test_fetch_url_404_shape_end_to_end(self):
+        """Round-trip the 404 path: the handler emits 'Error: HTTP 404:
+        Not Found' and classify_error then tags NOT_FOUND. Proves the
+        two PR halves (handler prefix + recovery pattern) compose."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.tools.web import fetch_url
+        from src.tools.recovery import classify_error, RecoveryCategory
+
+        mock_resp = MagicMock()
+        mock_resp.status = 404
+        mock_resp.reason = "Not Found"
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.get = MagicMock(return_value=mock_resp)
+
+        with patch("src.tools.web.aiohttp.ClientSession", return_value=mock_session):
+            result = await fetch_url("https://example.com/missing")
+
+        assert result == "Error: HTTP 404: Not Found"
+        assert classify_error(result) == RecoveryCategory.NOT_FOUND
 
     def test_fetch_url_5xx_classifies_as_error_not_hint(self):
         """5xx errors don't map to any recovery category we define, so
