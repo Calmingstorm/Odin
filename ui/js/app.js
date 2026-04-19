@@ -24,6 +24,25 @@ const routes = [
   { path: '/history',       component: HistoryPage,       meta: { label: 'History',       icon: '\u{1F4DD}' } },
   { path: '/capabilities',  component: CapabilitiesPage,  meta: { label: 'Capabilities',  icon: '\u{1F527}' } },
   { path: '/system',        component: SystemPage,        meta: { label: 'System',        icon: '\u{2699}\u{FE0F}' } },
+  // Redirects from old routes to new grouped locations
+  { path: '/execution',  redirect: { path: '/operations', query: { tab: 'live' } } },
+  { path: '/agents',     redirect: { path: '/operations', query: { tab: 'agents' } } },
+  { path: '/loops',      redirect: { path: '/operations', query: { tab: 'loops' } } },
+  { path: '/processes',  redirect: { path: '/operations', query: { tab: 'processes' } } },
+  { path: '/schedules',  redirect: { path: '/operations', query: { tab: 'schedules' } } },
+  { path: '/audit',      redirect: { path: '/history', query: { tab: 'audit' } } },
+  { path: '/sessions',   redirect: { path: '/history', query: { tab: 'sessions' } } },
+  { path: '/traces',     redirect: { path: '/history', query: { tab: 'traces' } } },
+  { path: '/usage',      redirect: { path: '/history', query: { tab: 'usage' } } },
+  { path: '/tools',      redirect: { path: '/capabilities', query: { tab: 'tools' } } },
+  { path: '/skills',     redirect: { path: '/capabilities', query: { tab: 'skills' } } },
+  { path: '/knowledge',  redirect: { path: '/capabilities', query: { tab: 'knowledge' } } },
+  { path: '/memory',     redirect: { path: '/capabilities', query: { tab: 'memory' } } },
+  { path: '/health',     redirect: { path: '/system', query: { tab: 'health' } } },
+  { path: '/resources',  redirect: { path: '/system', query: { tab: 'resources' } } },
+  { path: '/logs',       redirect: { path: '/system', query: { tab: 'logs' } } },
+  { path: '/config',     redirect: { path: '/system', query: { tab: 'config' } } },
+  { path: '/internals',  redirect: { path: '/system', query: { tab: 'internals' } } },
 ];
 
 const router = createRouter({

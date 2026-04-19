@@ -17,5 +17,5 @@ export default {
     ];
     return { tabs };
   },
-  template: `<tabbed-page :tabs="tabs" default-tab="live" />`,
+  template: `<tabbed-page :tabs="tabs" default-tab="live" group-label="Operations" />`,
 };

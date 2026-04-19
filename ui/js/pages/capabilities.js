@@ -15,5 +15,5 @@ export default {
     ];
     return { tabs };
   },
-  template: `<tabbed-page :tabs="tabs" default-tab="tools" />`,
+  template: `<tabbed-page :tabs="tabs" default-tab="tools" group-label="Capabilities" />`,
 };

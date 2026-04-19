@@ -15,5 +15,5 @@ export default {
     ];
     return { tabs };
   },
-  template: `<tabbed-page :tabs="tabs" default-tab="audit" />`,
+  template: `<tabbed-page :tabs="tabs" default-tab="audit" group-label="History" />`,
 };
