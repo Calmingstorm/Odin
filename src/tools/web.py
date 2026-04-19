@@ -77,7 +77,13 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
                 ssl=False,
             ) as resp:
                 if resp.status != 200:
-                    return f"HTTP {resp.status}: {resp.reason}"
+                    # Prefix with "Error:" so the recovery classifier
+                    # sees a known error shape and can attach a hint
+                    # (e.g. 404 → NOT_FOUND, 401/403 → AUTH_FAILURE).
+                    # Without the prefix, classify_error returns None
+                    # and operators get a bare status line with no
+                    # recovery guidance.
+                    return f"Error: HTTP {resp.status}: {resp.reason}"
 
                 content_type = resp.headers.get("Content-Type", "")
                 body = await resp.text(errors="replace")
@@ -96,7 +102,9 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
                 return result
 
     except aiohttp.ClientError as e:
-        return f"Fetch error: {e}"
+        # Use the standard "Error:" prefix so classify_error can tag
+        # connection/timeout/dns failures into their recovery categories.
+        return f"Error: fetch_url network failure: {e}"
     except Exception as e:
         log.error("fetch_url failed for %s: %s", url, e)
         return f"Error: {e}"
