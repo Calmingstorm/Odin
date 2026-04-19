@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from src.trajectories.replay import (
     diff_turns,
+    find_diff_pair,
     summarize_turn,
 )
 
@@ -121,3 +122,62 @@ class TestDiffTurns:
         b = _sample_turn(message_id="m2", sequence=[("run_command", "h", "ok")])
         out = diff_turns(a, b)
         assert "prefix" in out
+
+
+class TestFindDiffPair:
+    """Odin's Task 2 missing primitive — given a target turn, pick the
+    closest counterpart automatically so diff is diagnosis not archaeology."""
+
+    def _turn(self, mid: str, content: str, err: bool = False) -> dict:
+        return {
+            "message_id": mid,
+            "user_content": content,
+            "is_error": err,
+            "iterations": [],
+            "tools_used": [],
+            "final_response": "",
+        }
+
+    def test_returns_none_when_no_candidates(self):
+        primary = self._turn("m1", "restart nginx on prod")
+        assert find_diff_pair(primary, []) is None
+
+    def test_picks_highest_jaccard_match(self):
+        primary = self._turn("m1", "deploy the staging site to prod")
+        candidates = [
+            self._turn("c1", "check memory usage"),            # low similarity
+            self._turn("c2", "deploy the staging site to qa"), # high similarity
+            self._turn("c3", "totally unrelated request"),
+        ]
+        match = find_diff_pair(primary, candidates)
+        assert match is not None
+        assert match["message_id"] == "c2"
+
+    def test_prefers_opposite_outcome(self):
+        """A slightly-less-similar failed pair beats a more-similar success
+        pair when the primary was successful — that's the diagnostic win."""
+        primary = self._turn("m1", "restart nginx on prod", err=False)
+        candidates = [
+            self._turn("c1", "restart nginx on prod today", err=False),  # sim high, same outcome
+            self._turn("c2", "restart nginx on prod", err=True),          # sim high, opposite outcome
+        ]
+        match = find_diff_pair(primary, candidates)
+        assert match["message_id"] == "c2"
+
+    def test_below_threshold_returns_none(self):
+        primary = self._turn("m1", "restart nginx on prod")
+        candidates = [
+            self._turn("c1", "totally unrelated query about databases"),
+        ]
+        assert find_diff_pair(primary, candidates, min_similarity=0.3) is None
+
+    def test_skips_self(self):
+        primary = self._turn("m1", "deploy staging")
+        candidates = [primary, self._turn("m2", "deploy staging")]
+        match = find_diff_pair(primary, candidates)
+        assert match["message_id"] == "m2"
+
+    def test_invalid_primary_returns_none(self):
+        candidates = [{"message_id": "x", "user_content": "y"}]
+        assert find_diff_pair(None, candidates) is None
+        assert find_diff_pair("not a dict", candidates) is None

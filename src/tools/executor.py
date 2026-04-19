@@ -1485,7 +1485,11 @@ class ToolExecutor:
         return format_report_summary(report)
 
     async def _handle_replay_trajectory(self, inp: dict) -> str:
-        from ..trajectories.replay import diff_turns, summarize_turn
+        from ..trajectories.replay import (
+            diff_turns,
+            find_diff_pair,
+            summarize_turn,
+        )
         from ..trajectories.saver import TrajectorySaver
 
         message_id = str(inp.get("message_id") or "").strip()
@@ -1499,7 +1503,7 @@ class ToolExecutor:
         # saved for turn-starting user messages — not every Discord message
         # becomes one, and Odin-side tool-call arguments that contain a
         # message_id (e.g. add_reaction) are NOT retrievable via this tool.
-        if mode == "list" or not message_id:
+        if mode == "list" or (not message_id and mode != "find_diff_pair"):
             recent = await saver.search(limit=15)
             if not recent:
                 return "No trajectories found. Odin may not have served any messages yet on this host."
@@ -1516,7 +1520,7 @@ class ToolExecutor:
             lines.append("Call with mode='summary' and message_id=<ID above> to replay.")
             return "\n".join(lines)
 
-        primary = await saver.find_by_message_id(message_id)
+        primary = await saver.find_by_message_id(message_id) if message_id else None
         if not primary:
             return (
                 f"Error: no trajectory found for message_id='{message_id}'.\n"
@@ -1526,6 +1530,34 @@ class ToolExecutor:
                 "retrievable here. Call replay_trajectory with mode='list' to see "
                 "recent trajectory-bearing message IDs, or search /api/trajectories."
             )
+
+        if mode == "find_diff_pair":
+            # Odin's Task 2 missing primitive: given a target turn, pick
+            # the closest successful/failed counterpart automatically so
+            # diff becomes diagnosis rather than manual pair-hunting.
+            candidates = await saver.search(limit=100)
+            best = find_diff_pair(primary, candidates)
+            if best is None:
+                primary_err = bool(primary.get("is_error"))
+                return (
+                    f"No diff-pair candidate cleared the similarity threshold for "
+                    f"message_id='{message_id}' (outcome={'ERROR' if primary_err else 'ok'}). "
+                    "Either the user intent hasn't repeated recently, or no turn with the "
+                    "opposite outcome exists in the last 100 trajectories. "
+                    "Use mode='list' to browse manually, or call with a different "
+                    "message_id that represents a recurring operational request."
+                )
+            diff_out = diff_turns(primary, best)
+            header = (
+                f"=== auto-pair (Jaccard-similarity on user_content, "
+                f"outcome-contrast preferred) ===\n"
+                f"primary:   {primary.get('message_id')} outcome={'ERROR' if primary.get('is_error') else 'ok'}\n"
+                f"matched:   {best.get('message_id')} outcome={'ERROR' if best.get('is_error') else 'ok'}\n"
+                f"primary_q: {(primary.get('user_content') or '').strip()[:120]}\n"
+                f"matched_q: {(best.get('user_content') or '').strip()[:120]}\n"
+                f"\n"
+            )
+            return header + diff_out
 
         if mode == "diff":
             if not compare_to:

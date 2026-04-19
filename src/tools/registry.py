@@ -1837,29 +1837,35 @@ TOOLS: list[dict] = [
         "name": "replay_trajectory",
         "description": (
             "Renders a past message turn as a human-readable narrative or diffs two "
-            "turns side-by-side. Mode 'summary' (default) takes a message_id and returns "
-            "user content → tool calls → tool outputs → final response. Mode 'diff' takes "
-            "message_id + compare_to and shows where the two turns diverged. Mode 'list' "
-            "(or any call without message_id) lists recent trajectory-bearing message IDs "
-            "so you can pick a valid one. Read-only — no re-execution, no LLM calls. "
-            "IMPORTANT: trajectories are only saved for TURN-STARTING messages. A Discord "
-            "message_id that appears only as a tool-call argument (e.g. an add_reaction "
-            "target) is NOT retrievable here — call with mode='list' first if unsure."
+            "turns side-by-side. Modes:\n"
+            "  'summary' (default) — takes message_id; returns user content → tool calls "
+            "  → tool outputs → final response.\n"
+            "  'diff' — takes message_id + compare_to; shows where the two turns diverged.\n"
+            "  'find_diff_pair' — takes message_id; auto-picks the closest counterpart "
+            "  turn by user_content similarity (Jaccard) with a bias toward opposite "
+            "  outcome (failed-pairs-with-success), then diffs automatically. Use this "
+            "  when you want diagnosis instead of manual pair-hunting; fails cleanly "
+            "  if no similar turn exists.\n"
+            "  'list' (or any call without message_id) — lists recent trajectory-bearing "
+            "  message IDs so you can pick a valid one.\n"
+            "Read-only — no re-execution, no LLM calls. IMPORTANT: trajectories are only "
+            "saved for TURN-STARTING messages. A message_id that appears only as a "
+            "tool-call argument is NOT retrievable here."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "message_id": {
                     "type": "string",
-                    "description": "ID of the primary trajectory turn to replay. Omit (or use mode='list') to list recent valid IDs.",
+                    "description": "ID of the primary trajectory turn. Omit for mode='list'.",
                 },
                 "mode": {
                     "type": "string",
-                    "description": "'summary' (default), 'diff', or 'list'.",
+                    "description": "'summary' (default) | 'diff' | 'find_diff_pair' | 'list'.",
                 },
                 "compare_to": {
                     "type": "string",
-                    "description": "For mode='diff': message_id of the turn to compare against.",
+                    "description": "For mode='diff': message_id of the turn to compare against. Ignored for other modes.",
                 },
             },
             "required": [],
