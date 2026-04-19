@@ -2111,14 +2111,20 @@ class OdinBot(commands.Bot):
         "if the user's requested outcome was actually achieved.\n\n"
         "COMPLETE means:\n"
         "- The user's full request was addressed (not just part of it)\n"
+        "- The exact artifact asked for was produced, not a plausible-shaped substitute\n"
         "- The assistant is not promising to do more work\n"
         "- A failure report after genuinely trying counts as COMPLETE\n\n"
         "INCOMPLETE means:\n"
         "- The assistant only did part of what was asked (e.g., built but didn't deploy)\n"
         "- The assistant is describing work it still plans to do\n"
-        "- The assistant is reporting partial progress with more steps remaining\n\n"
+        "- The assistant is reporting partial progress with more steps remaining\n"
+        "- The response is shaped like an answer but doesn't contain the specific "
+        "  artifact requested (e.g., asked for the generated code; got a description of it)\n"
+        "- The assistant closes by offering MORE work ('I could also…', 'would you like…') "
+        "  instead of finishing the requested work\n\n"
         'If INCOMPLETE, briefly state what\'s missing after a colon.\n'
-        'Examples: "INCOMPLETE: deployment not performed" or "INCOMPLETE: verification step missing"\n'
+        'Examples: "INCOMPLETE: deployment not performed", "INCOMPLETE: verification step missing", '
+        '"INCOMPLETE: described the synthesized runbook but did not include its source"\n'
         'If COMPLETE, just say: "COMPLETE"'
     )
 
