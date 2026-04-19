@@ -2267,6 +2267,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             synthesize_skill_code,
             synthesize_summary,
         )
+        from ..llm.secret_scrubber import scrub_output_secrets
         try:
             body = await request.json()
         except Exception:
@@ -2304,10 +2305,22 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         source = synthesize_skill_code(
             found, skill_name=skill_name, description_override=description,
         )
+        # Belt and braces: synthesize_skill_code already scrubs the embedded
+        # captured inputs, but run the output through the scrubber one more
+        # time before it leaves the process. Generated skills that leave via
+        # the web API are a natural place to leak anything the detector
+        # pipeline missed.
+        source = scrub_output_secrets(source)
         return web.json_response({
             "source": source,
             "summary": synthesize_summary(source, found),
-            "metadata": found.to_dict(),
+            "metadata": {
+                "sequence": found.sequence,
+                "frequency": found.frequency,
+                "session_count": found.session_count,
+                "hosts": found.hosts,
+                "length": found.length,
+            },
         })
 
     # ------------------------------------------------------------------
@@ -2316,6 +2329,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/trajectories/replay/{message_id}")
     async def trajectory_replay(request: web.Request) -> web.Response:
+        from ..llm.secret_scrubber import scrub_output_secrets
         from ..trajectories.replay import summarize_turn
         from ..trajectories.saver import TrajectorySaver
         mid = request.match_info.get("message_id", "").strip()
@@ -2325,14 +2339,29 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         entry = await saver.find_by_message_id(mid)
         if not entry:
             return web.json_response({"error": f"no trajectory for {mid}"}, status=404)
+        # Scope down the returned entry: never echo the system prompt or
+        # raw history over the API. Return metadata + summary only; the
+        # summary itself is secret-scrubbed before leaving the process.
+        summary = scrub_output_secrets(summarize_turn(entry))
         return web.json_response({
             "message_id": mid,
-            "summary": summarize_turn(entry),
-            "entry": entry,
+            "summary": summary,
+            "metadata": {
+                "timestamp": entry.get("timestamp"),
+                "user_name": entry.get("user_name"),
+                "channel_id": entry.get("channel_id"),
+                "tools_used": entry.get("tools_used") or [],
+                "iteration_count": len(entry.get("iterations") or []),
+                "is_error": bool(entry.get("is_error")),
+                "total_duration_ms": entry.get("total_duration_ms", 0),
+                "total_input_tokens": entry.get("total_input_tokens", 0),
+                "total_output_tokens": entry.get("total_output_tokens", 0),
+            },
         })
 
     @routes.get("/api/trajectories/diff")
     async def trajectory_diff(request: web.Request) -> web.Response:
+        from ..llm.secret_scrubber import scrub_output_secrets
         from ..trajectories.replay import diff_turns
         from ..trajectories.saver import TrajectorySaver
         a = request.query.get("a", "").strip()
@@ -2347,7 +2376,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": f"no trajectory for: {', '.join(missing)}"}, status=404)
         return web.json_response({
             "a": a, "b": b,
-            "diff": diff_turns(ea, eb),
+            "diff": scrub_output_secrets(diff_turns(ea, eb)),
         })
 
     # ------------------------------------------------------------------

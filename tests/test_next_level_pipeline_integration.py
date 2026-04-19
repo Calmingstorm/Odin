@@ -118,6 +118,51 @@ class TestAuditToSkillPipeline:
         assert "sk-ant-api03-LEAKEDLEAKED1234567890abcd" not in source
 
 
+class TestSynthesizedSkillLoadability:
+    """Round 4 review — a synthesized skill must be operationally useful,
+    not just syntactically valid. Verify the generated module exports the
+    keys SkillManager requires (name, description, input_schema, execute)
+    and loads cleanly under the same checks SkillManager runs."""
+
+    def test_synthesized_skill_has_required_exports(self, tmp_path):
+        audit = tmp_path / "audit.jsonl"
+        base = datetime(2026, 4, 18, 10, 0, 0)
+        with audit.open("w") as f:
+            for i in range(3):
+                t = base + timedelta(hours=i)
+                f.write(json.dumps(_fake_audit_entry(t, "http_probe")) + "\n")
+                f.write(json.dumps(_fake_audit_entry(
+                    t + timedelta(seconds=5), "read_file",
+                    cmd="cat /etc/nginx/nginx.conf",
+                )) + "\n")
+
+        now = datetime(2026, 4, 18, 15, 0, 0, tzinfo=timezone.utc)
+        suggestions = detect_patterns(audit, min_frequency=3, now=now)
+        assert suggestions
+        source = synthesize_skill_code(suggestions[0], skill_name="nginx_health")
+
+        # Write + load like SkillManager does.
+        skill_file = tmp_path / "nginx_health.py"
+        skill_file.write_text(source)
+
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "nginx_health_synth", skill_file,
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        # Required exports (matching src/tools/skill_manager.py:_load_skill).
+        assert isinstance(module.SKILL_DEFINITION, dict)
+        for key in ("name", "description", "input_schema"):
+            assert key in module.SKILL_DEFINITION, f"missing {key}"
+        assert callable(module.execute)
+
+        # SKILL_DEFINITION.name must match the filename — SkillManager
+        # enforces this and rejects files that don't comply.
+        assert module.SKILL_DEFINITION["name"] == "nginx_health"
+
+
 class TestValidateActionEndToEnd:
     """run_bundle with a fully mocked exec — exercises the real parse →
     build_command → evaluate → verdict pipeline."""

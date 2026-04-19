@@ -129,6 +129,8 @@ class TestTrajectoryReplayEndpoints:
             "user_name": "alice",
             "timestamp": "2026-04-18T10:00:00Z",
             "user_content": "do the thing",
+            "system_prompt": "SECRET SYSTEM PROMPT DO NOT LEAK",
+            "history": [{"role": "user", "content": "old stuff"}],
             "iterations": [],
             "tools_used": [],
             "is_error": False,
@@ -148,6 +150,15 @@ class TestTrajectoryReplayEndpoints:
                 assert data["message_id"] == "m1"
                 assert "trajectory replay" in data["summary"]
                 assert "do the thing" in data["summary"]
+                # Scoped metadata instead of full entry.
+                assert "metadata" in data
+                assert data["metadata"]["tools_used"] == []
+                assert "system_prompt" not in data
+                assert "history" not in data
+                # And never the system prompt / history even nested.
+                blob = json.dumps(data)
+                assert "SECRET SYSTEM PROMPT DO NOT LEAK" not in blob
+                assert "old stuff" not in blob
 
     @pytest.mark.asyncio
     async def test_diff_requires_both_params(self, tmp_path):

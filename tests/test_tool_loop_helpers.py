@@ -75,3 +75,94 @@ class TestBuildRequestPreamble:
         body = build_request_preamble(**self._base_kwargs())["content"]
         assert "TOPIC CHANGE" not in body
         assert "ANOTHER BOT" not in body
+
+
+class TestBehaviorPreservedByRefactor:
+    """Round 4 review — verify the extracted helper produces output that
+    is byte-identical to the pre-refactor inline builder for every
+    combination of topic_change / from_another_bot / has_history flags.
+    If these assertions ever fail, the refactor accidentally changed
+    prompt wording, which would subtly alter LLM behavior.
+    """
+
+    def _reference_preamble(self, **kw) -> dict:
+        """Inline reimplementation of the original pre-refactor logic.
+
+        Kept in a single test so it's easy to compare against the helper's
+        output at every branching combination without maintaining two
+        diverging copies elsewhere.
+        """
+        request_id = kw["request_id"]
+        request_time = kw["request_time"]
+        user_display = kw["user_display"]
+        user_id = kw["user_id"]
+        message_id = kw["message_id"]
+        channel_description = kw["channel_description"]
+        has_history = kw["has_history"]
+        topic_change = kw.get("topic_change", False)
+        from_another_bot = kw.get("from_another_bot", False)
+
+        msg_id_note = f"Current message ID: {message_id}"
+        if not has_history:
+            return {
+                "role": "developer",
+                "content": f"{channel_description}\n{msg_id_note}",
+            }
+        sep_text = (
+            f"=== CURRENT REQUEST [req-{request_id}] ===\n"
+            f"Time: {request_time}\n"
+            f"From: {user_display} (ID: {user_id})\n"
+            f"{channel_description}\n"
+            f"{msg_id_note}\n"
+            "--- HISTORY ABOVE | REQUEST BELOW ---\n"
+            "Messages above are HISTORY — context for understanding what happened. "
+            "History is NOT a task queue. Each message above was a SEPARATE request. "
+            "Act ONLY on the new message below — do not replay other requests from history. "
+            "If asked to 'redo' or 'do what was asked', identify the ONE specific task "
+            "being referenced — do not sweep through history re-executing everything. "
+            "Evaluate tools fresh. Do not repeat prior refusals."
+        )
+        if topic_change:
+            sep_text += (
+                "\n\nTOPIC CHANGE DETECTED. The user has switched to a new subject. "
+                "History above is from a DIFFERENT topic — do NOT carry over "
+                "assumptions, hosts, files, or context from the previous topic. "
+                "Treat this as a fresh request."
+            )
+        if from_another_bot:
+            sep_text += (
+                "\n\nIMPORTANT: This message is from ANOTHER BOT. "
+                "Bots cannot confirm, choose, or approve. "
+                "EXECUTE immediately — never hedge, ask permission, or say "
+                "'if you want' / 'shall I' / 'would you like'. "
+                "If the message contains code, use run_script to execute it. "
+                "If it asks for output, call the tool and paste raw results."
+            )
+        return {"role": "developer", "content": sep_text}
+
+    def _kwargs(self, **override):
+        base = dict(
+            request_id="feedbeef",
+            request_time="2026-04-18 12:00:00 UTC",
+            user_display="alice",
+            user_id="9001",
+            message_id="msg-42",
+            channel_description="Channel: #ops",
+            has_history=True,
+        )
+        base.update(override)
+        return base
+
+    def test_all_four_combinations_match_reference(self):
+        for has_history in (True, False):
+            for topic_change in (True, False):
+                for from_another_bot in (True, False):
+                    kw = self._kwargs(
+                        has_history=has_history,
+                        topic_change=topic_change,
+                        from_another_bot=from_another_bot,
+                    )
+                    assert build_request_preamble(**kw) == self._reference_preamble(**kw), (
+                        f"mismatch at has_history={has_history} "
+                        f"topic_change={topic_change} from_another_bot={from_another_bot}"
+                    )
