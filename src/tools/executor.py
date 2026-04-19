@@ -1476,6 +1476,30 @@ class ToolExecutor:
             return report_as_json(report)
         return format_report_summary(report)
 
+    async def _handle_replay_trajectory(self, inp: dict) -> str:
+        from ..trajectories.replay import diff_turns, summarize_turn
+        from ..trajectories.saver import TrajectorySaver
+
+        message_id = str(inp.get("message_id") or "").strip()
+        if not message_id:
+            return "Error: 'message_id' is required."
+        mode = str(inp.get("mode") or "summary").strip().lower()
+        compare_to = str(inp.get("compare_to") or "").strip()
+
+        saver = TrajectorySaver()
+        primary = await saver.find_by_message_id(message_id)
+        if not primary:
+            return f"Error: no trajectory found for message_id='{message_id}'."
+
+        if mode == "diff":
+            if not compare_to:
+                return "Error: mode='diff' requires 'compare_to' (another message_id)."
+            other = await saver.find_by_message_id(compare_to)
+            if not other:
+                return f"Error: no trajectory found for compare_to='{compare_to}'."
+            return diff_turns(primary, other)
+        return summarize_turn(primary)
+
     async def _handle_detect_runbooks(self, inp: dict) -> str:
         from ..learning.runbook_detector import (
             detect_patterns,

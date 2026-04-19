@@ -1828,6 +1828,38 @@ TOOLS: list[dict] = [
             "required": ["checks"],
         },
     },
+    # --- Trajectory replay ---
+    {
+        "name": "replay_trajectory",
+        "description": (
+            "Renders a past message turn as a human-readable narrative or diffs two "
+            "turns side-by-side. Mode 'summary' (default) takes a single message_id and "
+            "returns user content → tool calls (with their key inputs) → tool outputs → "
+            "final response. Mode 'diff' takes message_id + compare_to and shows where "
+            "the two turns diverged: tool-sequence differences, output deltas on the "
+            "same tool, and outcome differences. Read-only — no re-execution, no LLM "
+            "calls, purely a view over saved trajectories. Use when debugging a past "
+            "incident or comparing a successful run with a failed one."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "ID of the primary trajectory turn to replay.",
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "'summary' (default) or 'diff'.",
+                },
+                "compare_to": {
+                    "type": "string",
+                    "description": "For mode='diff': message_id of the turn to compare against.",
+                },
+            },
+            "required": ["message_id"],
+        },
+    },
     # --- Operational learning ---
     {
         "name": "detect_runbooks",
