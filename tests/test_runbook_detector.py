@@ -331,6 +331,108 @@ class TestDetectPatterns:
         # Same everything except sequence composition — mixed should score higher
         assert mixed.score(now=now) > pure_repeat.score(now=now)
 
+    def test_session_context_user_queries_populated(self, tmp_path):
+        """When trajectories_dir is provided, each suggestion carries the
+        user queries that kicked off the matching sessions."""
+        audit = tmp_path / "audit.jsonl"
+        traj_dir = tmp_path / "trajectories"
+        traj_dir.mkdir()
+
+        base = datetime(2026, 4, 18, 10, 0, 0)
+        audit_rows: list[dict] = []
+        traj_rows: list[dict] = []
+        for i in range(3):
+            session_start = base + timedelta(hours=i)
+            # One trajectory turn per session, slightly BEFORE the tool calls
+            traj_rows.append({
+                "timestamp": _iso(session_start - timedelta(seconds=1)),
+                "channel_id": "c1",
+                "user_id": "alice",
+                "user_name": "alice",
+                "user_content": f"restart nginx on prod (session {i})",
+                "is_error": False,
+                "iterations": [],
+                "tools_used": ["run_command", "http_probe"],
+            })
+            audit_rows.append(_entry(session_start, "run_command"))
+            audit_rows.append(_entry(
+                session_start + timedelta(seconds=5), "http_probe",
+            ))
+        with audit.open("w") as f:
+            for r in audit_rows:
+                f.write(json.dumps(r) + "\n")
+        with (traj_dir / "2026-04-18.jsonl").open("w") as f:
+            for r in traj_rows:
+                f.write(json.dumps(r) + "\n")
+
+        now = datetime(2026, 4, 18, 15, 0, 0, tzinfo=timezone.utc)
+        suggestions = detect_patterns(
+            audit, min_frequency=3, lookback_days=30,
+            trajectories_dir=traj_dir, now=now,
+        )
+        assert suggestions
+        s = suggestions[0]
+        assert s.user_queries, "expected user queries to be populated from trajectories"
+        assert any("restart nginx on prod" in q for q in s.user_queries)
+        assert s.linked_session_count == 3
+        assert s.error_session_fraction == 0.0
+
+    def test_session_context_reports_error_fraction(self, tmp_path):
+        """A pattern whose sessions ended is_error get a non-zero
+        error_session_fraction."""
+        audit = tmp_path / "audit.jsonl"
+        traj_dir = tmp_path / "trajectories"
+        traj_dir.mkdir()
+        base = datetime(2026, 4, 18, 10, 0, 0)
+        audit_rows: list[dict] = []
+        traj_rows: list[dict] = []
+        for i in range(4):
+            session_start = base + timedelta(hours=i)
+            traj_rows.append({
+                "timestamp": _iso(session_start - timedelta(seconds=1)),
+                "channel_id": "c1",
+                "user_id": "alice",
+                "user_name": "alice",
+                "user_content": f"probe {i}",
+                "is_error": (i < 2),  # first 2 errored, last 2 ok
+                "iterations": [],
+            })
+            audit_rows.append(_entry(session_start, "read_file"))
+            audit_rows.append(_entry(
+                session_start + timedelta(seconds=5), "http_probe",
+            ))
+        with audit.open("w") as f:
+            for r in audit_rows:
+                f.write(json.dumps(r) + "\n")
+        with (traj_dir / "x.jsonl").open("w") as f:
+            for r in traj_rows:
+                f.write(json.dumps(r) + "\n")
+
+        now = datetime(2026, 4, 18, 15, 0, 0, tzinfo=timezone.utc)
+        suggestions = detect_patterns(
+            audit, min_frequency=4, lookback_days=30,
+            trajectories_dir=traj_dir, now=now,
+        )
+        assert suggestions
+        assert suggestions[0].error_session_fraction == 0.5
+        assert suggestions[0].linked_session_count == 4
+
+    def test_session_context_absent_when_no_trajectories_dir(self, tmp_path):
+        """Backward-compat: omitting trajectories_dir leaves the new fields empty."""
+        audit = tmp_path / "audit.jsonl"
+        base = datetime(2026, 4, 18, 10, 0, 0)
+        rows = []
+        for i in range(3):
+            t = base + timedelta(hours=i)
+            rows.append(_entry(t, "read_file"))
+            rows.append(_entry(t + timedelta(seconds=5), "http_probe"))
+        _write_audit(audit, rows)
+        now = datetime(2026, 4, 18, 15, 0, 0, tzinfo=timezone.utc)
+        suggestions = detect_patterns(audit, min_frequency=3, now=now)
+        assert suggestions
+        assert suggestions[0].user_queries == []
+        assert suggestions[0].linked_session_count == 0
+
     def test_multi_host_scores_higher(self):
         """A pattern observed across 3 hosts beats the same pattern on 1 host."""
         now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
