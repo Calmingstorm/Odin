@@ -1891,16 +1891,21 @@ _tool_defs_cache: list[dict] | None = None
 def get_tool_definitions() -> list[dict]:
     """Return tool definitions.
 
+    Each description is decorated with an affordance footer (cost / risk /
+    latency / preconditions) so the LLM can price a call before making it.
+
     Results are cached. Call invalidate_tool_defs_cache()
     if TOOLS list is modified at runtime (e.g. by tests).
     """
+    from .affordances import decorate_description
+
     global _tool_defs_cache
     if _tool_defs_cache is not None:
         return _tool_defs_cache
     _tool_defs_cache = [
         {
             "name": t["name"],
-            "description": t["description"],
+            "description": decorate_description(t["name"], t["description"]),
             "input_schema": t["input_schema"],
         }
         for t in TOOLS
