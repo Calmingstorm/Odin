@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
@@ -114,7 +114,10 @@ class TestTrajectoryReplayEndpoints:
     @pytest.mark.asyncio
     async def test_replay_missing_returns_404(self, tmp_path):
         bot = _make_bot(tmp_path)
-        with patch("src.trajectories.saver.TrajectorySaver.find_by_message_id", return_value=None):
+        with patch(
+            "src.trajectories.saver.TrajectorySaver.find_by_message_id",
+            new_callable=AsyncMock, return_value=None,
+        ):
             async with await _client(bot) as client:
                 resp = await client.get("/api/trajectories/replay/unknown-id")
                 assert resp.status == 404
@@ -141,7 +144,7 @@ class TestTrajectoryReplayEndpoints:
         }
         with patch(
             "src.trajectories.saver.TrajectorySaver.find_by_message_id",
-            return_value=fake_entry,
+            new_callable=AsyncMock, return_value=fake_entry,
         ):
             async with await _client(bot) as client:
                 resp = await client.get("/api/trajectories/replay/m1")
@@ -172,9 +175,13 @@ class TestTrajectoryReplayEndpoints:
         bot = _make_bot(tmp_path)
         e1 = {"message_id": "m1", "user_content": "x", "iterations": [], "is_error": False}
         e2 = {"message_id": "m2", "user_content": "x", "iterations": [], "is_error": False}
+
+        async def _fake_find(_self, mid):
+            return e1 if mid == "m1" else e2
+
         with patch(
             "src.trajectories.saver.TrajectorySaver.find_by_message_id",
-            side_effect=lambda mid: e1 if mid == "m1" else e2,
+            new=_fake_find,
         ):
             async with await _client(bot) as client:
                 resp = await client.get("/api/trajectories/diff?a=m1&b=m2")
