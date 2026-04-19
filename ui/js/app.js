@@ -22,6 +22,7 @@ import TracesPage from './pages/traces.js';
 import HealthPage from './pages/health.js';
 import ResourcesPage from './pages/resources.js';
 import InternalsPage from './pages/internals.js';
+import ExecutionPage from './pages/execution.js';
 
 const { createApp, ref, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
 const { createRouter, createWebHashHistory } = VueRouter;
@@ -34,6 +35,7 @@ const { createRouter, createWebHashHistory } = VueRouter;
 const routes = [
   { path: '/',           redirect: '/dashboard' },
   { path: '/dashboard',  component: DashboardPage,  meta: { label: 'Dashboard',  icon: '\u{1F4CA}' } },
+  { path: '/execution', component: ExecutionPage,  meta: { label: 'Execution',  icon: '\u{1F3AF}' } },
   { path: '/chat',       component: ChatPage,       meta: { label: 'Chat',       icon: '\u{1F4AD}' } },
   { path: '/sessions',   component: SessionsPage,   meta: { label: 'Sessions',   icon: '\u{1F4AC}' } },
   { path: '/tools',      component: ToolsPage,      meta: { label: 'Tools',      icon: '\u{1F527}' } },

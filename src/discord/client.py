@@ -816,6 +816,18 @@ class OdinBot(commands.Bot):
         # Tool use pattern hints injected separately via _inject_tool_hints()
         # because format_hints is async (needs embedder).
 
+        # Surface degradation state so the LLM can adapt
+        degradation_notes = []
+        codex = getattr(self, "codex_client", None)
+        if codex and hasattr(codex, "breaker"):
+            breaker_state = codex.breaker.state
+            if breaker_state == "open":
+                degradation_notes.append("LLM backend circuit breaker is OPEN — API calls will fail. Use cached/local approaches.")
+            elif breaker_state == "half_open":
+                degradation_notes.append("LLM backend circuit breaker is recovering (half-open) — requests may be slow or fail.")
+        if degradation_notes:
+            prompt += "\n\n## System Health Warnings\n" + "\n".join(f"- {n}" for n in degradation_notes)
+
         return prompt
 
     async def _inject_tool_hints(self, system_prompt: str, query: str, user_id: str | None = None) -> str:
@@ -2553,6 +2565,17 @@ class OdinBot(commands.Bot):
                 log.info("Tool call: %s(%s)", tool_name, tool_input)
                 await self._set_status(f"Running: {tool_name}")
 
+                try:
+                    await self.audit.log_event(
+                        event_type="tool_start",
+                        action=tool_name,
+                        actor=str(message.author.id),
+                        channel_id=str(message.channel.id),
+                        metadata={"tool_input_keys": list((tool_input or {}).keys()), "iteration": iteration},
+                    )
+                except Exception:
+                    pass
+
                 t0 = time.monotonic()
                 error = None
                 # Handle Discord-native tools
@@ -2768,6 +2791,14 @@ class OdinBot(commands.Bot):
                         result_summary=result,
                         execution_time_ms=elapsed_ms,
                         error=error,
+                    )
+                    await self.audit.log_event(
+                        event_type="tool_end",
+                        action=tool_name,
+                        actor=str(message.author.id),
+                        channel_id=str(message.channel.id),
+                        detail=result[:150] if isinstance(result, str) else "",
+                        metadata={"elapsed_ms": elapsed_ms, "error": error, "iteration": iteration},
                     )
                 except Exception as audit_err:
                     log.warning("Audit log failed for %s: %s", tool_name, audit_err)
