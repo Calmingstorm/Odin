@@ -23,9 +23,12 @@ from .bulkhead import BulkheadFullError, BulkheadRegistry
 from .recovery import (
     RecoveryCategory,
     RecoveryStats,
+    RecoveryStrategy,
     UNSAFE_TO_RETRY,
     classify_error as _classify_error,
     classify_exception as _classify_exception,
+    decide_recovery_action as _decide_recovery_action,
+    get_policy as _get_recovery_policy,
     get_retry_delay as _get_retry_delay,
 )
 from .result_validator import ResultValidationStats, validate_tool_result
@@ -159,14 +162,26 @@ class ToolExecutor:
             category = self._check_recoverable(result)
             if category is not None:
                 snippet = result[:120] if isinstance(result, str) else ""
-                if tool_name in UNSAFE_TO_RETRY:
-                    log.warning(
-                        "Recovery skipped for %s (%s): tool is not safe to retry (may have already executed)",
+                decision = _decide_recovery_action(tool_name=tool_name, category=category)
+                if decision.action == "hint":
+                    self.recovery_stats.record_failure(tool_name, category, snippet)
+                    log.info(
+                        "Recovery hint for %s (%s): not retrying, annotating result",
                         tool_name, category.value,
                     )
+                    hint = decision.hint_text
+                    if hint and isinstance(result, str) and hint not in result:
+                        result = f"{result}\n\n{hint}"
+                elif decision.action == "skip":
+                    if tool_name in UNSAFE_TO_RETRY:
+                        log.warning(
+                            "Recovery skipped for %s (%s): tool is not safe to retry (may have already executed)",
+                            tool_name, category.value,
+                        )
                     self.recovery_stats.record_failure(tool_name, category, snippet)
                 else:
-                    delay = _get_retry_delay(category)
+                    # decision.action == "retry"
+                    delay = decision.delay_seconds
                     self.recovery_stats.record_attempt(tool_name, category, snippet)
                     log.info("Recovery for %s (%s): retrying after %.1fs", tool_name, category.value, delay)
                     if delay > 0:
@@ -1413,3 +1428,169 @@ class ToolExecutor:
 
         runner = PlanRunner()
         return await runner.run(inp)
+
+    async def _handle_validate_action(self, inp: dict) -> str:
+        from .post_validation import (
+            format_report_summary,
+            report_as_json,
+            run_bundle,
+        )
+
+        raw_checks = inp.get("checks")
+        if not isinstance(raw_checks, list) or not raw_checks:
+            return "Error: 'checks' must be a non-empty list. See tool description for check schema."
+
+        bundle_name = str(inp.get("bundle_name") or "unnamed").strip()[:120]
+        default_host = inp.get("default_host")
+        default_host = str(default_host).strip() if default_host else None
+        grace_seconds = int(inp.get("grace_seconds") or 0)
+        grace_seconds = max(0, min(grace_seconds, 60))
+        max_parallel = int(inp.get("max_parallel") or 12)
+        fmt = str(inp.get("format") or "summary").strip().lower()
+
+        governor = getattr(self, "command_governor", None)
+
+        async def _exec(address: str, command: str, ssh_user: str, *, timeout: int) -> tuple[int, str]:
+            # Never mutate shared state here — concurrent checks would race.
+            # _exec_command accepts a per-call timeout, which is honored
+            # directly by the SSH/local primitives without touching self.
+            if governor is not None:
+                try:
+                    decision = governor.check(command)
+                except Exception as ge:
+                    # Fail-closed on governor exceptions: we advertise
+                    # command-type checks as going through the governor;
+                    # silently bypassing it if the governor blows up would
+                    # be exactly the "safe unless error path" foot-gun
+                    # Odin flagged. Emit the error into the result so the
+                    # operator sees it, and treat the check as errored.
+                    log.exception("governor check raised for validation command")
+                    return 1, f"validate_action: governor check raised {type(ge).__name__}: {ge}"
+                if not decision.allowed:
+                    return 1, f"governor-blocked: {decision.denial_message()}"
+            return await self._exec_command(address, command, ssh_user, timeout=timeout)
+
+        report = await run_bundle(
+            raw_checks,
+            bundle_name=bundle_name,
+            default_host=default_host,
+            resolve_host=self._resolve_host,
+            exec_command=_exec,
+            grace_seconds=grace_seconds,
+            max_parallel=max_parallel,
+        )
+
+        if fmt == "json":
+            return report_as_json(report)
+        return format_report_summary(report)
+
+    async def _handle_replay_trajectory(self, inp: dict) -> str:
+        from ..trajectories.replay import diff_turns, summarize_turn
+        from ..trajectories.saver import TrajectorySaver
+
+        message_id = str(inp.get("message_id") or "").strip()
+        if not message_id:
+            return "Error: 'message_id' is required."
+        mode = str(inp.get("mode") or "summary").strip().lower()
+        compare_to = str(inp.get("compare_to") or "").strip()
+
+        saver = TrajectorySaver()
+        primary = await saver.find_by_message_id(message_id)
+        if not primary:
+            return f"Error: no trajectory found for message_id='{message_id}'."
+
+        if mode == "diff":
+            if not compare_to:
+                return "Error: mode='diff' requires 'compare_to' (another message_id)."
+            other = await saver.find_by_message_id(compare_to)
+            if not other:
+                return f"Error: no trajectory found for compare_to='{compare_to}'."
+            return diff_turns(primary, other)
+        return summarize_turn(primary)
+
+    async def _handle_synthesize_runbook(self, inp: dict) -> str:
+        from ..learning.runbook_detector import RunbookSuggestion, detect_patterns
+        from ..learning.runbook_synthesizer import (
+            synthesize_skill_code,
+            synthesize_summary,
+        )
+
+        sequence = inp.get("sequence")
+        if not isinstance(sequence, list) or not sequence:
+            return "Error: 'sequence' (list of tool names) is required."
+        sequence = [str(s) for s in sequence]
+
+        audit_path = getattr(self.config, "audit_log_path", None) or "./data/audit.jsonl"
+        # Look up the detector's record for this sequence so the generated
+        # skill carries real sample inputs / host / frequency metadata.
+        def _find() -> RunbookSuggestion | None:
+            try:
+                all_suggestions = detect_patterns(
+                    audit_path, min_frequency=1, min_length=len(sequence),
+                    max_length=len(sequence), lookback_days=365,
+                )
+            except Exception:
+                return None
+            target = list(sequence)
+            for s in all_suggestions:
+                if s.sequence == target:
+                    return s
+            return None
+
+        found = await asyncio.to_thread(_find)
+        if found is None:
+            # Not in audit log — still generate a skeleton with empty samples
+            found = RunbookSuggestion(
+                sequence=list(sequence), frequency=0, session_count=0,
+                hosts=[], actors=[],
+                first_seen="", last_seen="",
+                sample_inputs=[{"tool_name": s, "host": None, "input": {}} for s in sequence],
+            )
+
+        skill_name = inp.get("skill_name")
+        desc = inp.get("description_override")
+        source = synthesize_skill_code(
+            found,
+            skill_name=str(skill_name) if skill_name else None,
+            description_override=str(desc) if desc else None,
+        )
+        fmt = str(inp.get("format") or "source").strip().lower()
+        if fmt == "summary":
+            return synthesize_summary(source, found)
+        return source
+
+    async def _handle_detect_runbooks(self, inp: dict) -> str:
+        from ..learning.runbook_detector import (
+            detect_patterns,
+            format_suggestions,
+            suggestions_as_json,
+        )
+
+        audit_path = getattr(self.config, "audit_log_path", None) or "./data/audit.jsonl"
+        min_freq = int(inp.get("min_frequency") or 3)
+        min_len = int(inp.get("min_length") or 2)
+        max_len = int(inp.get("max_length") or 5)
+        lookback = int(inp.get("lookback_days") or 30)
+        gap = int(inp.get("session_gap_seconds") or 300)
+        limit = int(inp.get("limit") or 10)
+        fmt = str(inp.get("format") or "summary").strip().lower()
+        ignore = inp.get("ignore_tools") or []
+        if not isinstance(ignore, list):
+            ignore = []
+
+        # Run the I/O + CPU work off the event loop.
+        def _scan() -> list:
+            return detect_patterns(
+                audit_path,
+                min_frequency=max(1, min_freq),
+                min_length=max(2, min_len),
+                max_length=max(min_len, max_len),
+                lookback_days=max(1, min(lookback, 365)),
+                session_gap_seconds=max(30, min(gap, 7200)),
+                ignore_tools=[str(t) for t in ignore],
+            )
+
+        suggestions = await asyncio.to_thread(_scan)
+        if fmt == "json":
+            return suggestions_as_json(suggestions[:limit])
+        return format_suggestions(suggestions, limit=max(1, min(limit, 50)))

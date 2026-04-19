@@ -1762,6 +1762,194 @@ TOOLS: list[dict] = [
             "required": ["plan"],
         },
     },
+    # --- Post-action validation ---
+    {
+        "name": "validate_action",
+        "description": (
+            "Runs a bundle of validation checks after an operational change (deploy, restart, config "
+            "push, migration) to confirm the system is actually healthy — not just that the preceding "
+            "commands returned exit 0. Checks run concurrently on managed hosts. Never blocks; verdict "
+            "is informational. Verdict: 'pass' (all OK), 'degraded' (only warn-severity failures), "
+            "'fail' (≥1 critical failure), 'error' (every check errored — likely config issue). "
+            "Use this after deploys, service restarts, firewall changes, DNS updates, schema migrations. "
+            "Cost: low-medium. Risk: none. Latency: depends on slowest check.\n"
+            "\n"
+            "Check types:\n"
+            "  http            target=URL, expected=status code or list (default [200,201,204,301,302,307,308])\n"
+            "  port            target='host:port' or just 'port' (implies 127.0.0.1)\n"
+            "  service         target=systemd unit name, expected='active' or list of states\n"
+            "  process         target=pgrep pattern\n"
+            "  log_absent      target='unit=NAME:PATTERN' or plain regex — passes if pattern NOT found\n"
+            "  log_present     same target format — passes if pattern IS found\n"
+            "  command         target=shell command, compare='exit_zero'|'exit_nonzero'|'contains'|'not_contains'|'equals'|'regex_match'\n"
+            "\n"
+            "Each check: {type, target, severity?, host?, expected?, compare?, window_seconds?, timeout_seconds?, name?}.\n"
+            "Severity 'critical' (default), 'warn', or 'info'. Only critical failures flip verdict to 'fail'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "bundle_name": {
+                    "type": "string",
+                    "description": "Short label for this bundle (e.g. 'after_nginx_restart')",
+                },
+                "default_host": {
+                    "type": "string",
+                    "description": "Host alias used for any check without an explicit 'host'. Defaults to 'localhost'.",
+                },
+                "grace_seconds": {
+                    "type": "integer",
+                    "description": "Optional wait before running checks (0-60), to let services settle.",
+                },
+                "max_parallel": {
+                    "type": "integer",
+                    "description": "Max concurrent checks within this bundle (default 12, cap 25). Use a lower value when validating against a resource-constrained host.",
+                },
+                "format": {
+                    "type": "string",
+                    "description": "Output format: 'summary' (human-readable, default) or 'json' (full structured report).",
+                },
+                "checks": {
+                    "type": "array",
+                    "description": "List of validation checks (max 25).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "description": "http|port|service|process|log_absent|log_present|command"},
+                            "target": {"type": "string"},
+                            "expected": {"description": "Type-specific expectation (int, string, list)"},
+                            "severity": {"type": "string", "description": "critical (default) | warn | info"},
+                            "host": {"type": "string"},
+                            "compare": {"type": "string"},
+                            "window_seconds": {"type": "integer"},
+                            "timeout_seconds": {"type": "integer"},
+                            "name": {"type": "string"},
+                        },
+                        "required": ["type", "target"],
+                    },
+                },
+            },
+            "required": ["checks"],
+        },
+    },
+    # --- Trajectory replay ---
+    {
+        "name": "replay_trajectory",
+        "description": (
+            "Renders a past message turn as a human-readable narrative or diffs two "
+            "turns side-by-side. Mode 'summary' (default) takes a single message_id and "
+            "returns user content → tool calls (with their key inputs) → tool outputs → "
+            "final response. Mode 'diff' takes message_id + compare_to and shows where "
+            "the two turns diverged: tool-sequence differences, output deltas on the "
+            "same tool, and outcome differences. Read-only — no re-execution, no LLM "
+            "calls, purely a view over saved trajectories. Use when debugging a past "
+            "incident or comparing a successful run with a failed one."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "ID of the primary trajectory turn to replay.",
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "'summary' (default) or 'diff'.",
+                },
+                "compare_to": {
+                    "type": "string",
+                    "description": "For mode='diff': message_id of the turn to compare against.",
+                },
+            },
+            "required": ["message_id"],
+        },
+    },
+    # --- Operational learning ---
+    {
+        "name": "detect_runbooks",
+        "description": (
+            "Mines the audit log for repeated successful tool sequences — candidate runbooks worth "
+            "naming/codifying. A sequence is a run of consecutive non-failing tool calls by the same "
+            "actor/channel, with no more than a few minutes between steps. The tool returns ranked "
+            "suggestions: ordered tool list, frequency, hosts involved, sample inputs, and a score "
+            "that weights frequency by recency and actor-concentration. This is a SUGGESTION engine — "
+            "it creates nothing. Use it to answer 'what procedures do I keep running by hand?' "
+            "Cost: low. Risk: none (read-only)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "min_frequency": {
+                    "type": "integer",
+                    "description": "Minimum repetitions across distinct sessions for a sequence to surface. Default 3.",
+                },
+                "min_length": {
+                    "type": "integer",
+                    "description": "Minimum sequence length (inclusive). Default 2.",
+                },
+                "max_length": {
+                    "type": "integer",
+                    "description": "Maximum sequence length (inclusive). Default 5.",
+                },
+                "lookback_days": {
+                    "type": "integer",
+                    "description": "Ignore audit entries older than this many days. Default 30.",
+                },
+                "session_gap_seconds": {
+                    "type": "integer",
+                    "description": "Idle gap that starts a new session. Default 300.",
+                },
+                "ignore_tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tool names that should never appear in a detected sequence (e.g. noisy reads).",
+                },
+                "format": {
+                    "type": "string",
+                    "description": "Output format: 'summary' (default human-readable) or 'json'.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max suggestions to return in summary format. Default 10.",
+                },
+            },
+        },
+    },
+    {
+        "name": "synthesize_runbook",
+        "description": (
+            "Turns a detected runbook pattern (from detect_runbooks) into a reviewable Python "
+            "skill skeleton. The generated skill runs the safe read-only steps via SkillContext "
+            "and documents the unsafe steps (run_command, write_file, etc.) as TODO blocks with "
+            "their captured inputs — those can't run from the skill sandbox and the operator "
+            "must decide how to handle them. Does NOT auto-register the skill; returns the code "
+            "for review. Operator can then call create_skill() if they like it. Sample inputs "
+            "are secret-scrubbed the same way detect_runbooks scrubs them. Cost: low. Risk: none."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sequence": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered tool-name sequence of the runbook. Typically from detect_runbooks output.",
+                },
+                "skill_name": {
+                    "type": "string",
+                    "description": "Optional skill identifier (will be normalised to snake_case).",
+                },
+                "description_override": {
+                    "type": "string",
+                    "description": "Optional human description to use instead of the auto-generated one.",
+                },
+                "format": {
+                    "type": "string",
+                    "description": "'source' (default — returns the full skill source code) or 'summary'.",
+                },
+            },
+            "required": ["sequence"],
+        },
+    },
 ]
 
 TOOL_MAP: dict[str, dict] = {t["name"]: t for t in TOOLS}
@@ -1774,16 +1962,21 @@ _tool_defs_cache: list[dict] | None = None
 def get_tool_definitions() -> list[dict]:
     """Return tool definitions.
 
+    Each description is decorated with an affordance footer (cost / risk /
+    latency / preconditions) so the LLM can price a call before making it.
+
     Results are cached. Call invalidate_tool_defs_cache()
     if TOOLS list is modified at runtime (e.g. by tests).
     """
+    from .affordances import decorate_description
+
     global _tool_defs_cache
     if _tool_defs_cache is not None:
         return _tool_defs_cache
     _tool_defs_cache = [
         {
             "name": t["name"],
-            "description": t["description"],
+            "description": decorate_description(t["name"], t["description"]),
             "input_schema": t["input_schema"],
         }
         for t in TOOLS

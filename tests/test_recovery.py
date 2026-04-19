@@ -132,13 +132,23 @@ class TestClassifyError:
         result = "nginx access log: Connection refused in line 42"
         assert classify_error(result) is None
 
-    def test_permission_denied_not_recoverable(self):
+    def test_permission_denied_classified_for_hint(self):
+        """Policy-driven recovery: permission denied is now classified for
+        HINT_AND_ESCALATE (not retried, but the LLM gets a useful hint)."""
+        from src.tools.recovery import RecoveryCategory, RecoveryStrategy, get_policy
         result = "Error: Permission denied"
-        assert classify_error(result) is None
+        cat = classify_error(result)
+        assert cat == RecoveryCategory.PERMISSION_DENIED
+        policy = get_policy(cat)
+        assert policy.strategy == RecoveryStrategy.HINT_AND_ESCALATE
+        assert policy.hint  # non-empty
 
-    def test_file_not_found_not_recoverable(self):
+    def test_file_not_found_classified_for_hint(self):
+        from src.tools.recovery import RecoveryCategory, RecoveryStrategy, get_policy
         result = "Error: No such file or directory"
-        assert classify_error(result) is None
+        cat = classify_error(result)
+        assert cat == RecoveryCategory.NOT_FOUND
+        assert get_policy(cat).strategy == RecoveryStrategy.HINT_AND_ESCALATE
 
     def test_unknown_tool_not_recoverable(self):
         result = "Unknown tool: fake_tool"
@@ -225,8 +235,13 @@ class TestGetRetryDelay:
 
 class TestRecoveryCategory:
     def test_all_categories_defined(self):
-        expected = {"ssh_transient", "connection_error", "resource_busy",
-                    "timeout", "rate_limited", "bulkhead_full"}
+        expected = {
+            "ssh_transient", "connection_error", "resource_busy",
+            "timeout", "rate_limited", "bulkhead_full",
+            # policy-driven additions
+            "auth_failure", "not_found", "disk_full",
+            "dependency_missing", "permission_denied",
+        }
         assert {c.value for c in RecoveryCategory} == expected
 
     def test_str_enum(self):
@@ -238,9 +253,12 @@ class TestRecoveryCategory:
             assert cat in _RECOVERABLE_PATTERNS
             assert len(_RECOVERABLE_PATTERNS[cat]) > 0
 
-    def test_all_categories_have_delays(self):
+    def test_all_categories_have_policies(self):
+        """Every category must map to an explicit policy (default fallback is NO_ACTION)."""
+        from src.tools.recovery import get_policy
         for cat in RecoveryCategory:
-            assert cat in _CATEGORY_DELAYS
+            policy = get_policy(cat)
+            assert policy is not None
 
 
 # ====================================================================
@@ -1054,3 +1072,341 @@ class TestUnsafeToRetry:
         ]
         for tool in safe_tools:
             assert tool not in UNSAFE_TO_RETRY, f"{tool} should be safe to retry"
+
+
+# ====================================================================
+# Policy-driven recovery (v2)
+# ====================================================================
+
+class TestRecoveryPolicies:
+    """Each category must map to a RecoveryPolicy that says what to do."""
+
+    def test_transient_categories_retry(self):
+        from src.tools.recovery import RecoveryCategory, RecoveryStrategy, get_policy
+        for cat in [
+            RecoveryCategory.SSH_TRANSIENT,
+            RecoveryCategory.CONNECTION_ERROR,
+            RecoveryCategory.RESOURCE_BUSY,
+            RecoveryCategory.RATE_LIMITED,
+            RecoveryCategory.BULKHEAD_FULL,
+        ]:
+            assert get_policy(cat).strategy == RecoveryStrategy.RETRY_WITH_DELAY
+
+    def test_failure_class_categories_hint(self):
+        from src.tools.recovery import RecoveryCategory, RecoveryStrategy, get_policy
+        for cat in [
+            RecoveryCategory.AUTH_FAILURE,
+            RecoveryCategory.NOT_FOUND,
+            RecoveryCategory.DISK_FULL,
+            RecoveryCategory.DEPENDENCY_MISSING,
+            RecoveryCategory.PERMISSION_DENIED,
+        ]:
+            policy = get_policy(cat)
+            assert policy.strategy == RecoveryStrategy.HINT_AND_ESCALATE
+            assert policy.hint, f"{cat} must have a hint"
+
+    def test_timeout_no_action(self):
+        from src.tools.recovery import RecoveryCategory, RecoveryStrategy, get_policy
+        assert get_policy(RecoveryCategory.TIMEOUT).strategy == RecoveryStrategy.NO_ACTION
+
+
+class TestNewCategoryClassification:
+    def test_auth_failure_401(self):
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error("Error: 401 Unauthorized on /api/thing") == RecoveryCategory.AUTH_FAILURE
+
+    def test_auth_failure_ssh_publickey(self):
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error(
+            "Command failed (exit 255):\nPermission denied (publickey,password)."
+        ) == RecoveryCategory.AUTH_FAILURE
+
+    def test_not_found_404(self):
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error("Error: 404 Not Found") == RecoveryCategory.NOT_FOUND
+
+    def test_not_found_file(self):
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error("Error: No such file or directory: /foo") == RecoveryCategory.NOT_FOUND
+
+    def test_disk_full_enospc(self):
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error("Error: write failed: ENOSPC") == RecoveryCategory.DISK_FULL
+
+    def test_disk_full_no_space(self):
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error(
+            "Command failed (exit 1):\nNo space left on device"
+        ) == RecoveryCategory.DISK_FULL
+
+    def test_dependency_module_not_found(self):
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error(
+            "Command failed (exit 1):\nModuleNotFoundError: No module named 'requests'"
+        ) == RecoveryCategory.DEPENDENCY_MISSING
+
+    def test_dependency_command_not_found(self):
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error(
+            "Command failed (exit 127):\nbash: kubectl: command not found"
+        ) == RecoveryCategory.DEPENDENCY_MISSING
+
+    def test_permission_denied_file(self):
+        """Plain 'Permission denied' (no '(publickey' suffix) classifies as PERMISSION_DENIED."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error(
+            "Error: Permission denied: /etc/shadow"
+        ) == RecoveryCategory.PERMISSION_DENIED
+
+    def test_auth_takes_precedence_over_permission(self):
+        """SSH pubkey denial should hit AUTH_FAILURE, not PERMISSION_DENIED."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        # AUTH_FAILURE patterns are declared before PERMISSION_DENIED so its
+        # longer, more specific 'Permission denied (publickey' wins.
+        assert classify_error(
+            "Command failed (exit 255):\nPermission denied (publickey,password)."
+        ) == RecoveryCategory.AUTH_FAILURE
+
+    def test_get_hint_returns_nonempty(self):
+        from src.tools.recovery import get_hint, RecoveryCategory
+        assert "authentication" in get_hint(RecoveryCategory.AUTH_FAILURE).lower()
+        assert "not found" in get_hint(RecoveryCategory.NOT_FOUND).lower()
+        assert "disk" in get_hint(RecoveryCategory.DISK_FULL).lower()
+        assert "dependency" in get_hint(RecoveryCategory.DEPENDENCY_MISSING).lower()
+
+
+# ====================================================================
+# Executor integration — HINT_AND_ESCALATE strategy
+# ====================================================================
+
+class TestExecutorHintAndEscalate:
+    @pytest.fixture
+    def executor(self):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+        config = ToolsConfig(command_timeout_seconds=5)
+        return ToolExecutor(config=config)
+
+    @pytest.mark.asyncio
+    async def test_auth_failure_appends_hint_without_retry(self, executor):
+        calls = 0
+
+        async def _handler(inp):
+            nonlocal calls
+            calls += 1
+            return "Error: 401 Unauthorized from API"
+
+        executor._handle_test_tool = _handler
+        result = await executor.execute("test_tool", {})
+        assert calls == 1, "HINT_AND_ESCALATE must NOT retry"
+        assert "401 Unauthorized" in result
+        assert "recovery hint" in result.lower()
+        assert "authentication" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_not_found_appends_hint(self, executor):
+        calls = 0
+
+        async def _handler(inp):
+            nonlocal calls
+            calls += 1
+            return "Error: No such file or directory: /nonesuch"
+
+        executor._handle_test_tool = _handler
+        result = await executor.execute("test_tool", {})
+        assert calls == 1
+        assert "recovery hint" in result.lower()
+        assert "not found" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_hint_is_idempotent(self, executor):
+        """If hint text is already in the result, don't append a duplicate."""
+        from src.tools.recovery import get_hint, RecoveryCategory
+        hint = get_hint(RecoveryCategory.NOT_FOUND)
+        async def _handler(inp):
+            return f"Error: No such file or directory\n\n{hint}"
+        executor._handle_test_tool = _handler
+        result = await executor.execute("test_tool", {})
+        # The hint should appear exactly once.
+        assert result.count(hint) == 1
+
+    @pytest.mark.asyncio
+    async def test_disk_full_safe_for_unsafe_tool(self, executor):
+        """DISK_FULL on an UNSAFE_TO_RETRY tool should still get the hint (no re-execution)."""
+        calls = 0
+        async def _handler(inp):
+            nonlocal calls
+            calls += 1
+            return "Command failed (exit 1):\nNo space left on device"
+        executor._handle_write_file = _handler  # write_file is in UNSAFE_TO_RETRY
+        result = await executor.execute("write_file", {"host": "x", "path": "/y", "content": "z"})
+        assert calls == 1
+        assert "recovery hint" in result.lower()
+        assert "disk" in result.lower() or "cleanup" in result.lower()
+
+
+# ====================================================================
+# decide_recovery_action — single source of truth for dispatch
+# ====================================================================
+
+class TestDecideRecoveryAction:
+    def test_none_category_is_skip(self):
+        from src.tools.recovery import decide_recovery_action
+        d = decide_recovery_action(tool_name="run_command", category=None)
+        assert d.action == "skip"
+
+    def test_hint_category_returns_hint(self):
+        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        d = decide_recovery_action(tool_name="run_command", category=RecoveryCategory.AUTH_FAILURE)
+        assert d.action == "hint"
+        assert "authentication" in d.hint_text.lower()
+
+    def test_hint_category_safe_for_unsafe_tool(self):
+        """HINT_AND_ESCALATE never re-executes, so it's always safe — even for UNSAFE_TO_RETRY tools."""
+        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        d = decide_recovery_action(tool_name="write_file", category=RecoveryCategory.DISK_FULL)
+        assert d.action == "hint"
+        assert d.hint_text
+
+    def test_retry_blocked_for_unsafe_tool(self):
+        """RETRY_WITH_DELAY must be downgraded to 'skip' when tool is UNSAFE_TO_RETRY."""
+        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        d = decide_recovery_action(tool_name="write_file", category=RecoveryCategory.SSH_TRANSIENT)
+        assert d.action == "skip"
+
+    def test_retry_allowed_for_safe_tool(self):
+        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        d = decide_recovery_action(tool_name="read_file", category=RecoveryCategory.SSH_TRANSIENT)
+        assert d.action == "retry"
+        assert d.delay_seconds > 0
+
+    def test_timeout_is_skip(self):
+        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        d = decide_recovery_action(tool_name="read_file", category=RecoveryCategory.TIMEOUT)
+        assert d.action == "skip"
+
+
+class TestClassificationPriority:
+    def test_auth_wins_over_permission(self):
+        """SSH pubkey denial must always classify as AUTH_FAILURE — order stable."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        for _ in range(5):
+            cat = classify_error(
+                "Command failed (exit 255):\nPermission denied (publickey,password)."
+            )
+            assert cat == RecoveryCategory.AUTH_FAILURE
+
+    def test_not_found_wins_over_dependency_for_file_errors(self):
+        """'No such file or directory' must classify as NOT_FOUND, not DEPENDENCY_MISSING."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error(
+            "Error: No such file or directory: /etc/xyz"
+        ) == RecoveryCategory.NOT_FOUND
+
+    def test_transient_wins_over_everything(self):
+        """Connection issues classify before AUTH / NOT_FOUND even if patterns overlap."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error(
+            "Command failed (exit 255):\nConnection refused"
+        ) == RecoveryCategory.SSH_TRANSIENT
+
+
+# ====================================================================
+# Executor integration — explicit end-to-end: UNSAFE_TO_RETRY + RETRY category
+# ====================================================================
+
+class TestExecutorUnsafeToolCategorizedFailure:
+    """Odin's core concern: a future table edit that gives write_file a
+    RETRY_WITH_DELAY-classified failure must NOT cause the executor to
+    re-execute write_file. Guard must hold.
+    """
+
+    @pytest.fixture
+    def executor(self):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+        config = ToolsConfig(command_timeout_seconds=5)
+        return ToolExecutor(config=config)
+
+    @pytest.mark.asyncio
+    async def test_unsafe_tool_ssh_transient_is_not_retried(self, executor):
+        """write_file hitting an SSH_TRANSIENT-classified error (currently a
+        RETRY_WITH_DELAY category) must NOT be retried — write_file is in
+        UNSAFE_TO_RETRY because it may have already executed."""
+        calls = 0
+
+        async def _handler(inp):
+            nonlocal calls
+            calls += 1
+            return "Command failed (exit 255):\nConnection refused"
+
+        executor._handle_write_file = _handler
+        result = await executor.execute(
+            "write_file", {"host": "h", "path": "/x", "content": "y"},
+        )
+        assert calls == 1, (
+            "write_file must NOT be retried even on transient errors — "
+            "the write may have already happened on the remote."
+        )
+        assert "Connection refused" in result
+        # The failure is still recorded for observability.
+        summary = executor.recovery_stats.get_summary()
+        assert summary["totals"]["failures"] == 1
+        assert summary["totals"]["attempts"] == 0, "No retry attempt should be made"
+
+    @pytest.mark.asyncio
+    async def test_safe_tool_ssh_transient_is_retried(self, executor):
+        """read_file is NOT in UNSAFE_TO_RETRY; it should be retried on
+        transient errors and succeed."""
+        calls = 0
+
+        async def _handler(inp):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "Command failed (exit 255):\nConnection refused"
+            return "ok"
+
+        executor._handle_read_file = _handler
+        result = await executor.execute("read_file", {"host": "h", "path": "/x"})
+        assert calls == 2
+        assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_safe_tool_persistent_transient_records_failure(self, executor):
+        """Read tool that keeps hitting transient errors — one retry, then failure."""
+        calls = 0
+
+        async def _handler(inp):
+            nonlocal calls
+            calls += 1
+            return "Command failed (exit 255):\nConnection refused"
+
+        executor._handle_read_file = _handler
+        result = await executor.execute("read_file", {"host": "h", "path": "/x"})
+        assert calls == 2
+        assert "Connection refused" in result
+        summary = executor.recovery_stats.get_summary()
+        assert summary["totals"]["attempts"] == 1
+        assert summary["totals"]["failures"] == 1
+
+    @pytest.mark.asyncio
+    async def test_unsafe_tool_auth_failure_hints_without_retry(self, executor):
+        """The other half of Odin's ask: confirm AUTH_FAILURE → hint (not retry)
+        even though write_file is UNSAFE_TO_RETRY — safe because hinting
+        never re-executes."""
+        calls = 0
+
+        async def _handler(inp):
+            nonlocal calls
+            calls += 1
+            return "Command failed (exit 255):\nPermission denied (publickey,password)."
+
+        executor._handle_write_file = _handler
+        result = await executor.execute(
+            "write_file", {"host": "h", "path": "/x", "content": "y"},
+        )
+        assert calls == 1
+        # Hint text must be appended without re-running the tool.
+        assert "recovery hint" in result.lower()
+        assert "authentication" in result.lower()
