@@ -22,8 +22,8 @@ class TestSystemPromptRule12:
             claude_code_dir="/opt/odin",
         )
 
-    def test_rule_12_present(self):
-        assert "12. EVALUATIVE DISCIPLINE" in self._prompt()
+    def test_evaluative_discipline_present(self):
+        assert "EVALUATIVE DISCIPLINE" in self._prompt()
 
     def test_mentions_artifact_check(self):
         p = self._prompt()
@@ -36,14 +36,11 @@ class TestSystemPromptRule12:
     def test_mentions_plausible_substitute_rejection(self):
         assert "don't ship a plausible substitute" in self._prompt()
 
-    def test_mentions_anti_offer_pattern(self):
-        assert 'Don\'t close with "I could also' in self._prompt()
-
     def test_prompt_size_reasonable(self):
-        """Sanity-check that the rule didn't balloon the prompt. Under
-        6000 chars keeps a healthy margin vs. the ~5500 baseline."""
+        """Sanity-check that the prompt stays lean after refactor.
+        Under 4500 chars with minimal hosts/context."""
         size = len(self._prompt())
-        assert size < 6000, f"system prompt is {size} chars — Rule 12 is too long"
+        assert size < 4500, f"system prompt is {size} chars — too bloated"
 
 
 class TestCompletionClassifierPrompt:
