@@ -1432,13 +1432,20 @@ class ToolExecutor:
         grace_seconds = max(0, min(grace_seconds, 60))
         fmt = str(inp.get("format") or "summary").strip().lower()
 
+        governor = getattr(self, "command_governor", None)
+
         async def _exec(address: str, command: str, ssh_user: str, *, timeout: int) -> tuple[int, str]:
-            prev = self._current_tool_timeout
-            self._current_tool_timeout = timeout
-            try:
-                return await self._exec_command(address, command, ssh_user, timeout=timeout)
-            finally:
-                self._current_tool_timeout = prev
+            # Never mutate shared state here — concurrent checks would race.
+            # _exec_command accepts a per-call timeout, which is honored
+            # directly by the SSH/local primitives without touching self.
+            if governor is not None:
+                try:
+                    decision = governor.check(command)
+                    if not decision.allowed:
+                        return 1, f"governor-blocked: {decision.denial_message()}"
+                except Exception:
+                    log.exception("governor check raised for validation command")
+            return await self._exec_command(address, command, ssh_user, timeout=timeout)
 
         report = await run_bundle(
             raw_checks,

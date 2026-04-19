@@ -48,6 +48,26 @@ VALID_COMPARE_OPS = frozenset({
     "exit_zero", "exit_nonzero", "regex_match",
 })
 
+# compare ops that require a non-empty 'expected' value
+_COMPARE_OPS_REQUIRING_EXPECTED = frozenset({
+    "equals", "contains", "not_contains", "regex_match", "status_in",
+})
+
+# compare ops that are valid for each check type (others are rejected at parse
+# time so the API never silently promises flexibility it won't deliver).
+_ALLOWED_COMPARE_FOR_TYPE: dict[str, frozenset[str]] = {
+    "http": frozenset({"status_in", "equals"}),
+    "port": frozenset({"exit_zero"}),
+    "service": frozenset({"equals", "status_in"}),
+    "process": frozenset({"exit_zero"}),
+    "log_absent": frozenset({"not_contains"}),
+    "log_present": frozenset({"contains"}),
+    "command": frozenset({
+        "exit_zero", "exit_nonzero", "equals", "contains",
+        "not_contains", "regex_match",
+    }),
+}
+
 
 @dataclass(slots=True)
 class Check:
@@ -129,6 +149,28 @@ def parse_checks(raw_checks: list[dict]) -> tuple[list[Check], list[str]]:
             if compare not in VALID_COMPARE_OPS:
                 errors.append(f"check[{i}]: invalid compare '{compare}' (valid: {sorted(VALID_COMPARE_OPS)})")
                 continue
+            allowed_for_type = _ALLOWED_COMPARE_FOR_TYPE.get(c_type, frozenset())
+            if compare not in allowed_for_type:
+                errors.append(
+                    f"check[{i}]: compare '{compare}' is not valid for type '{c_type}' "
+                    f"(allowed: {sorted(allowed_for_type)})"
+                )
+                continue
+        expected = raw.get("expected")
+        # Require 'expected' for compare ops that need a value — but only when
+        # the caller explicitly chose the compare op. Defaults have built-in
+        # fallback expectations (e.g. http default = 2xx/3xx, service default
+        # = 'active'), so leaving compare unset is still valid.
+        needs_expected = (
+            compare is not None
+            and compare in _COMPARE_OPS_REQUIRING_EXPECTED
+            and (expected is None or (isinstance(expected, (str, list, tuple)) and len(expected) == 0))
+        )
+        if needs_expected:
+            errors.append(
+                f"check[{i}]: compare '{compare}' requires a non-empty 'expected' value"
+            )
+            continue
         timeout = int(raw.get("timeout_seconds", DEFAULT_CHECK_TIMEOUT))
         timeout = max(1, min(timeout, 120))
         window = int(raw.get("window_seconds", DEFAULT_LOG_WINDOW_SECONDS))
@@ -224,14 +266,27 @@ def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
         expected = check.expected
         if expected is None:
             expected = [200, 201, 204, 301, 302, 307, 308]
+        # 'equals' with scalar expected means exact match; 'status_in' with
+        # list expected means membership; normalise both to a set of codes.
         if isinstance(expected, int):
-            expected = [expected]
-        if isinstance(expected, list):
-            expected_codes = {str(int(c)) for c in expected if isinstance(c, (int, str)) and str(c).isdigit()}
-            if status_code in expected_codes:
-                return "pass", ""
-            return "fail", f"expected status in {sorted(expected_codes)}, got {status_code}"
-        return "error", f"invalid 'expected' for http check: {expected!r}"
+            expected_list = [expected]
+        elif isinstance(expected, str) and expected.isdigit():
+            expected_list = [int(expected)]
+        elif isinstance(expected, list):
+            expected_list = expected
+        else:
+            return "error", f"invalid 'expected' for http check: {expected!r}"
+        expected_codes = {
+            str(int(c)) for c in expected_list
+            if isinstance(c, (int, str)) and str(c).isdigit()
+        }
+        if not expected_codes:
+            return "error", f"'expected' for http check yielded no status codes: {expected!r}"
+        if compare == "equals" and len(expected_codes) != 1:
+            return "error", "compare='equals' on http requires a single status code"
+        if status_code in expected_codes:
+            return "pass", ""
+        return "fail", f"expected status in {sorted(expected_codes)}, got {status_code}"
 
     if check.type == "port":
         if "OPEN" in out_stripped:
@@ -239,7 +294,10 @@ def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
         return "fail", f"port closed (exit {exit_code})"
 
     if check.type == "service":
-        expected = check.expected or "active"
+        expected = check.expected if check.expected is not None else "active"
+        # 'status_in' + list, or 'equals' + scalar — both supported.
+        if compare == "status_in" and not isinstance(expected, list):
+            return "error", "compare='status_in' on service requires list 'expected'"
         if isinstance(expected, list):
             if out_stripped in {str(e) for e in expected}:
                 return "pass", ""
