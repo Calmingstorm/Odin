@@ -184,6 +184,8 @@ def find_diff_pair(
     *,
     prefer_opposite_outcome: bool = True,
     min_similarity: float = 0.2,
+    opposite_outcome_boost: float = 0.15,
+    boost_floor: float = 0.35,
 ) -> dict | None:
     """Given a primary trajectory turn, pick the best candidate for a
     diff pairing.
@@ -196,6 +198,14 @@ def find_diff_pair(
     This is the primitive Odin called for in his Task 2 analysis:
     replay_trajectory's diff mode becomes diagnosis instead of
     archaeology once the tool can PICK the right comparison target.
+
+    Opposite-outcome boost (Odin's PR #16 review note): the boost only
+    applies when the candidate *already* clears ``boost_floor`` on raw
+    similarity (default 0.35). Below that the boost is zero, so a
+    merely-okay opposite-outcome match can't beat a genuinely-close
+    same-outcome near-clone. Boost itself is 0.15 (tuned down from an
+    earlier 0.25 that could, on short/generic user prompts, let a 0.2
+    similarity with opposite outcome beat a 0.4 same-outcome match).
     """
     if not isinstance(primary, dict) or not candidates:
         return None
@@ -214,13 +224,17 @@ def find_diff_pair(
         sim = _jaccard(primary_tokens, cand_tokens)
         if sim < min_similarity:
             continue
-        # Opposite-outcome boost: +0.25 to similarity so a slightly-less-
-        # similar but outcome-contrasting turn wins over a near-clone
-        # with the same outcome, which would give no diagnostic signal.
-        if prefer_opposite_outcome and bool(cand.get("is_error")) != primary_err:
-            score = sim + 0.25
-        else:
-            score = sim
+        score = sim
+        # The boost only fires once similarity is already strong enough
+        # that pairing these two turns makes sense on intent. For weaker
+        # matches we stay on raw similarity so a plausible opposite
+        # outcome can't drag a bad pair to the top.
+        if (
+            prefer_opposite_outcome
+            and sim >= boost_floor
+            and bool(cand.get("is_error")) != primary_err
+        ):
+            score = sim + opposite_outcome_boost
         if score > best_score:
             best_score = score
             best = cand

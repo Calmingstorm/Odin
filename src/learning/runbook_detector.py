@@ -256,9 +256,23 @@ def _match_session_to_trajectory(
 ) -> _TrajectoryRecord | None:
     """Given a session (list of audit entries from the same actor+channel,
     sorted by time), find the trajectory turn most likely to have
-    produced it. Heuristic: the most recent trajectory in the same
-    (channel, actor) bucket whose timestamp is <= the session's first
-    tool call AND within ``max_skew_seconds`` of it.
+    produced it.
+
+    **Timestamp semantics (Odin's PR #16 review catch):** trajectories
+    are persisted at END of turn by `TrajectorySaver.save()`, while the
+    audit events that made up the session happen DURING the turn. So
+    the correct trajectory for a session has ``ts_epoch`` *after* the
+    session's first audit entry and typically within a few minutes of
+    the session's last event. An earlier version of this function only
+    scanned trajectories with ``ts_epoch <= first.ts_epoch``, which
+    quietly missed every real match in production.
+
+    Heuristic: consider the session's time-span [first, last]. For each
+    candidate trajectory in the same (channel, actor) bucket, compute
+    the minimum gap to that span — zero if the trajectory save time
+    lands within it, the distance to the nearer endpoint otherwise.
+    Pick the candidate with the smallest gap, and reject if that gap
+    exceeds ``max_skew_seconds``.
 
     Returns None when there's no credible match — callers use that
     signal to leave user_queries empty rather than inventing one.
@@ -266,19 +280,26 @@ def _match_session_to_trajectory(
     if not session:
         return None
     first = session[0]
+    last = session[-1]
     recs = index.get((first.channel, first.actor)) or []
     if not recs:
         return None
-    # Binary-search style scan: recs is time-sorted. We want the latest
-    # rec with ts_epoch <= first.ts_epoch, then check skew.
+
+    def gap(rec: _TrajectoryRecord) -> float:
+        if rec.ts_epoch < first.ts_epoch:
+            return first.ts_epoch - rec.ts_epoch
+        if rec.ts_epoch > last.ts_epoch:
+            return rec.ts_epoch - last.ts_epoch
+        return 0.0  # trajectory save time falls within the session span
+
     best: _TrajectoryRecord | None = None
+    best_gap = float("inf")
     for r in recs:
-        if r.ts_epoch > first.ts_epoch:
-            break
-        best = r
-    if best is None:
-        return None
-    if first.ts_epoch - best.ts_epoch > max_skew_seconds:
+        g = gap(r)
+        if g < best_gap:
+            best_gap = g
+            best = r
+    if best is None or best_gap > max_skew_seconds:
         return None
     return best
 

@@ -333,7 +333,12 @@ class TestDetectPatterns:
 
     def test_session_context_user_queries_populated(self, tmp_path):
         """When trajectories_dir is provided, each suggestion carries the
-        user queries that kicked off the matching sessions."""
+        user queries that kicked off the matching sessions.
+
+        Reflects real production timing: TrajectorySaver writes the
+        trajectory at END of turn, AFTER the audit events. The matcher
+        must find the trajectory whose timestamp falls inside or just
+        after the session window (Odin's PR #16 review catch)."""
         audit = tmp_path / "audit.jsonl"
         traj_dir = tmp_path / "trajectories"
         traj_dir.mkdir()
@@ -343,9 +348,13 @@ class TestDetectPatterns:
         traj_rows: list[dict] = []
         for i in range(3):
             session_start = base + timedelta(hours=i)
-            # One trajectory turn per session, slightly BEFORE the tool calls
+            audit_rows.append(_entry(session_start, "run_command"))
+            audit_rows.append(_entry(
+                session_start + timedelta(seconds=5), "http_probe",
+            ))
+            # Trajectory saved AFTER the session's last event (end of turn).
             traj_rows.append({
-                "timestamp": _iso(session_start - timedelta(seconds=1)),
+                "timestamp": _iso(session_start + timedelta(seconds=10)),
                 "channel_id": "c1",
                 "user_id": "alice",
                 "user_name": "alice",
@@ -354,10 +363,6 @@ class TestDetectPatterns:
                 "iterations": [],
                 "tools_used": ["run_command", "http_probe"],
             })
-            audit_rows.append(_entry(session_start, "run_command"))
-            audit_rows.append(_entry(
-                session_start + timedelta(seconds=5), "http_probe",
-            ))
         with audit.open("w") as f:
             for r in audit_rows:
                 f.write(json.dumps(r) + "\n")
@@ -388,8 +393,13 @@ class TestDetectPatterns:
         traj_rows: list[dict] = []
         for i in range(4):
             session_start = base + timedelta(hours=i)
+            audit_rows.append(_entry(session_start, "read_file"))
+            audit_rows.append(_entry(
+                session_start + timedelta(seconds=5), "http_probe",
+            ))
+            # Trajectory saved end-of-turn (after the audit events).
             traj_rows.append({
-                "timestamp": _iso(session_start - timedelta(seconds=1)),
+                "timestamp": _iso(session_start + timedelta(seconds=10)),
                 "channel_id": "c1",
                 "user_id": "alice",
                 "user_name": "alice",
@@ -397,10 +407,6 @@ class TestDetectPatterns:
                 "is_error": (i < 2),  # first 2 errored, last 2 ok
                 "iterations": [],
             })
-            audit_rows.append(_entry(session_start, "read_file"))
-            audit_rows.append(_entry(
-                session_start + timedelta(seconds=5), "http_probe",
-            ))
         with audit.open("w") as f:
             for r in audit_rows:
                 f.write(json.dumps(r) + "\n")
@@ -416,6 +422,102 @@ class TestDetectPatterns:
         assert suggestions
         assert suggestions[0].error_session_fraction == 0.5
         assert suggestions[0].linked_session_count == 4
+
+    def test_matcher_handles_trajectory_saved_after_session(self, tmp_path):
+        """Odin's PR #16 review catch: TrajectorySaver writes at END of
+        turn (after all audit events). The matcher must still find
+        that trajectory even though its save timestamp is AFTER the
+        session's first audit entry."""
+        from src.learning.runbook_detector import (
+            _TrajectoryRecord,
+            _match_session_to_trajectory,
+        )
+        # Build a fake session and a trajectory saved after it.
+        session_start = datetime(2026, 4, 18, 10, 0, 0, tzinfo=timezone.utc)
+        session = [
+            AuditEntry.from_line(json.dumps(_entry(session_start, "read_file"))),
+            AuditEntry.from_line(json.dumps(_entry(
+                session_start + timedelta(seconds=20), "http_probe",
+            ))),
+        ]
+        assert all(s is not None for s in session)
+        # Trajectory record saved 30 seconds AFTER session started (end of turn).
+        traj_time = session_start + timedelta(seconds=30)
+        index = {
+            ("c1", "alice"): [
+                _TrajectoryRecord(
+                    ts_epoch=traj_time.timestamp(),
+                    channel="c1",
+                    actor="alice",
+                    user_content="do the thing",
+                    is_error=False,
+                ),
+            ],
+        }
+        match = _match_session_to_trajectory(session, index, max_skew_seconds=900)
+        assert match is not None
+        assert match.user_content == "do the thing"
+
+    def test_matcher_prefers_closest_when_multiple_candidates(self, tmp_path):
+        """With several trajectories nearby, the matcher picks the one
+        closest in time to the session window."""
+        from src.learning.runbook_detector import (
+            _TrajectoryRecord,
+            _match_session_to_trajectory,
+        )
+        session_start = datetime(2026, 4, 18, 10, 0, 0, tzinfo=timezone.utc)
+        session = [
+            AuditEntry.from_line(json.dumps(_entry(session_start, "read_file"))),
+            AuditEntry.from_line(json.dumps(_entry(
+                session_start + timedelta(seconds=20), "http_probe",
+            ))),
+        ]
+        # 5 minutes before (previous turn), 30 seconds after (this turn),
+        # and 1 hour after (unrelated later turn). Match should pick the 30s-after one.
+        index = {
+            ("c1", "alice"): [
+                _TrajectoryRecord(
+                    ts_epoch=(session_start - timedelta(minutes=5)).timestamp(),
+                    channel="c1", actor="alice",
+                    user_content="previous turn", is_error=False,
+                ),
+                _TrajectoryRecord(
+                    ts_epoch=(session_start + timedelta(seconds=30)).timestamp(),
+                    channel="c1", actor="alice",
+                    user_content="correct turn", is_error=False,
+                ),
+                _TrajectoryRecord(
+                    ts_epoch=(session_start + timedelta(hours=1)).timestamp(),
+                    channel="c1", actor="alice",
+                    user_content="later turn", is_error=False,
+                ),
+            ],
+        }
+        match = _match_session_to_trajectory(session, index, max_skew_seconds=900)
+        assert match is not None
+        assert match.user_content == "correct turn"
+
+    def test_matcher_rejects_beyond_skew_window(self, tmp_path):
+        from src.learning.runbook_detector import (
+            _TrajectoryRecord,
+            _match_session_to_trajectory,
+        )
+        session_start = datetime(2026, 4, 18, 10, 0, 0, tzinfo=timezone.utc)
+        session = [
+            AuditEntry.from_line(json.dumps(_entry(session_start, "read_file"))),
+        ]
+        # Trajectory 2 hours after session — way outside the 15-minute skew.
+        index = {
+            ("c1", "alice"): [
+                _TrajectoryRecord(
+                    ts_epoch=(session_start + timedelta(hours=2)).timestamp(),
+                    channel="c1", actor="alice",
+                    user_content="unrelated later turn", is_error=False,
+                ),
+            ],
+        }
+        match = _match_session_to_trajectory(session, index, max_skew_seconds=900)
+        assert match is None
 
     def test_session_context_absent_when_no_trajectories_dir(self, tmp_path):
         """Backward-compat: omitting trajectories_dir leaves the new fields empty."""

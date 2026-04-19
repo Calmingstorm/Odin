@@ -153,13 +153,43 @@ class TestFindDiffPair:
         assert match is not None
         assert match["message_id"] == "c2"
 
-    def test_prefers_opposite_outcome(self):
-        """A slightly-less-similar failed pair beats a more-similar success
-        pair when the primary was successful — that's the diagnostic win."""
+    def test_prefers_opposite_outcome_when_match_is_strong(self):
+        """When both candidates are strongly similar (above boost_floor),
+        the opposite-outcome one should win — that's the diagnostic
+        signal."""
         primary = self._turn("m1", "restart nginx on prod", err=False)
         candidates = [
             self._turn("c1", "restart nginx on prod today", err=False),  # sim high, same outcome
             self._turn("c2", "restart nginx on prod", err=True),          # sim high, opposite outcome
+        ]
+        match = find_diff_pair(primary, candidates)
+        assert match["message_id"] == "c2"
+
+    def test_weak_opposite_outcome_does_not_beat_strong_same_outcome(self):
+        """Odin PR #16 review: on short/generic prompts the +0.25 boost
+        could let a 0.2-similar opposite-outcome candidate beat a
+        genuinely-closer same-outcome match. With boost_floor=0.35,
+        the boost only fires when similarity is ALREADY high, so a
+        near-clone same-outcome match wins in this scenario."""
+        primary = self._turn("m1", "go run the thing", err=False)
+        candidates = [
+            # Near-clone, same outcome — this is the real operational
+            # match. Two-word overlap on short prompt yields moderate sim.
+            self._turn("c1", "go run the thing now", err=False),
+            # Far-weaker content but opposite outcome. Under the old
+            # flat +0.25 boost this could win; it shouldn't.
+            self._turn("c2", "go check memory", err=True),
+        ]
+        match = find_diff_pair(primary, candidates)
+        assert match["message_id"] == "c1"
+
+    def test_boost_applies_when_both_candidates_strong(self):
+        """Sanity: when both candidates exceed boost_floor, opposite
+        outcome still wins (the core behavior we want to preserve)."""
+        primary = self._turn("m1", "deploy staging to prod now please", err=False)
+        candidates = [
+            self._turn("c1", "deploy staging to prod now please", err=False),  # sim=1.0
+            self._turn("c2", "deploy staging to prod now please", err=True),    # sim=1.0, opposite
         ]
         match = find_diff_pair(primary, candidates)
         assert match["message_id"] == "c2"
