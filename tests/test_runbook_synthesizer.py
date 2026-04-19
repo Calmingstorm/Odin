@@ -111,6 +111,75 @@ class TestSynthesizeSkillCode:
         assert "STEPS = ['http_probe', 'read_file', 'run_command']" in source
 
 
+class TestCodeInjectionHardening:
+    """Round 3 review — generated code must not be breakable by crafted inputs."""
+
+    def test_rejects_tool_name_with_quote(self):
+        """Embedding a tool name with a quote would break out of the string literal."""
+        s = _suggestion(["http_probe", "bad'name"])
+        with pytest.raises(ValueError, match="snake_case identifier"):
+            synthesize_skill_code(s)
+
+    def test_rejects_tool_name_with_newline(self):
+        s = _suggestion(["http_probe", "bad\nname"])
+        with pytest.raises(ValueError):
+            synthesize_skill_code(s)
+
+    def test_rejects_tool_name_with_semicolon(self):
+        s = _suggestion(["http_probe", "bad;import os;os.system('rm -rf /')"])
+        with pytest.raises(ValueError):
+            synthesize_skill_code(s)
+
+    def test_captured_input_with_quote_does_not_break_literal(self):
+        """Captured inputs with single quotes should parse as valid Python."""
+        s = _suggestion(
+            ["run_command"],
+            samples=[{
+                "tool_name": "run_command",
+                "host": "hostA",
+                "input": {"command": "echo 'it's a string with quotes' and \"doubles\""},
+            }],
+        )
+        source = synthesize_skill_code(s)
+        # Round-trip through AST — any escape bug would raise SyntaxError.
+        ast.parse(source)
+
+    def test_captured_input_with_newline_does_not_escape_literal(self):
+        s = _suggestion(
+            ["run_command"],
+            samples=[{
+                "tool_name": "run_command",
+                "host": "hostA",
+                "input": {"command": "line1\nline2\nline3"},
+            }],
+        )
+        source = synthesize_skill_code(s)
+        ast.parse(source)
+
+    def test_generated_source_is_always_parseable(self):
+        """Every safe-tool-name combination + quoted/unquoted input combination should produce valid Python."""
+        for cmd in [
+            "simple",
+            "has 'single' quotes",
+            'has "double" quotes',
+            "has\nnewline",
+            "has\\backslash",
+            "has { curly } braces",
+            "{% template %}",
+            "#!/bin/bash\necho hi",
+        ]:
+            s = _suggestion(
+                ["http_probe"],
+                samples=[{
+                    "tool_name": "http_probe",
+                    "host": "hostA",
+                    "input": {"command": cmd},
+                }],
+            )
+            source = synthesize_skill_code(s)
+            ast.parse(source)
+
+
 class TestSynthesizeSummary:
     def test_counts_safe_vs_unsafe(self):
         s = _suggestion(["http_probe", "read_file", "run_command", "write_file"])

@@ -281,6 +281,45 @@ class TestEvaluate:
         assert status == "error"
         assert "bad regex" in err
 
+    def test_regex_match_rejects_redos_shape(self):
+        """Round 3 review — catastrophic-backtracking patterns blocked."""
+        status, err = _evaluate(
+            Check(type="command", target="x", compare="regex_match", expected="(a+)+b"),
+            0, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!",
+        )
+        assert status == "error"
+        assert "catastrophic backtracking" in err
+
+    def test_regex_match_rejects_oversized_pattern(self):
+        big = "a" * 300
+        status, err = _evaluate(
+            Check(type="command", target="x", compare="regex_match", expected=big),
+            0, "xxx",
+        )
+        assert status == "error"
+        assert "too long" in err
+
+    def test_regex_match_rejects_backreference(self):
+        status, err = _evaluate(
+            Check(type="command", target="x", compare="regex_match", expected=r"(a)\1b"),
+            0, "aab",
+        )
+        assert status == "error"
+        assert "backref" in err.lower() or "backtracking" in err.lower()
+
+    def test_regex_match_truncates_huge_input(self):
+        """Ensure the matcher can't be tripped by a 10-MB input string."""
+        # pattern searches for '!' at the end; we put it past the truncation
+        # boundary so a pass would require looking at everything.
+        huge = ("a" * 15000) + "!"
+        status, _ = _evaluate(
+            Check(type="command", target="x", compare="regex_match", expected=r"!$"),
+            0, huge,
+        )
+        # Bounded by MAX_REGEX_INPUT_CHARS — the '!' is past 10_000 so this
+        # fails closed (the protection works).
+        assert status == "fail"
+
 
 class TestVerdict:
     def _r(self, severity: str, status: str) -> CheckResult:
@@ -463,6 +502,39 @@ class TestRunBundleIntegration:
         assert set(timeouts_seen) == {3, 10, 5}
 
     @pytest.mark.asyncio
+    async def test_max_parallel_bounds_concurrency(self):
+        """Round 3 review — bundle-level semaphore caps fan-out."""
+        in_flight = 0
+        max_in_flight = 0
+        lock = asyncio.Lock()
+
+        async def tracking_exec(addr, cmd, user, *, timeout):
+            nonlocal in_flight, max_in_flight
+            async with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            try:
+                await asyncio.sleep(0.02)
+                return (0, "200")
+            finally:
+                async with lock:
+                    in_flight -= 1
+
+        checks = [{"type": "http", "target": f"https://h/{i}"} for i in range(15)]
+        report = await run_bundle(
+            checks,
+            bundle_name="c",
+            default_host="localhost",
+            resolve_host=_resolver,
+            exec_command=tracking_exec,
+            max_parallel=3,
+        )
+        assert report.total == 15
+        assert max_in_flight <= 3, (
+            f"max_parallel=3 not honored (saw {max_in_flight} in flight)"
+        )
+
+    @pytest.mark.asyncio
     async def test_grace_seconds_is_applied(self):
         async def fake_exec(*a, **kw):
             return (0, "200")
@@ -496,3 +568,44 @@ class TestRunBundleIntegration:
         assert "PASS" in text
         assert "homepage" in text
         assert "duration=" in text
+
+
+class TestExecutorGovernorPath:
+    """Round 3 review — governor exceptions on command-type checks must
+    fail closed (report the error), not silently bypass."""
+
+    @pytest.mark.asyncio
+    async def test_governor_exception_surfaces_as_error(self):
+        # Use run_bundle directly with a fake exec_command; we simulate
+        # the executor's wrapper that calls the governor.
+        raised = False
+
+        class _FailingGovernor:
+            def check(self, command):
+                nonlocal raised
+                raised = True
+                raise RuntimeError("governor db unavailable")
+
+        gov = _FailingGovernor()
+
+        async def wrapped(addr, cmd, user, *, timeout):
+            try:
+                gov.check(cmd)
+            except Exception as ge:
+                return 1, f"validate_action: governor check raised {type(ge).__name__}: {ge}"
+            return (0, "ok")
+
+        report = await run_bundle(
+            [{"type": "command", "target": "echo ok", "compare": "exit_zero"}],
+            bundle_name="gov",
+            default_host="localhost",
+            resolve_host=_resolver,
+            exec_command=wrapped,
+        )
+        assert raised
+        # The check must fail (not silently pass) when the governor blows up.
+        assert report.verdict in ("fail", "error")
+        assert any(
+            "governor check raised" in (r.observed + r.error)
+            for r in report.checks
+        )

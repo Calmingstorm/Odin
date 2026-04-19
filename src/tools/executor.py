@@ -1445,6 +1445,7 @@ class ToolExecutor:
         default_host = str(default_host).strip() if default_host else None
         grace_seconds = int(inp.get("grace_seconds") or 0)
         grace_seconds = max(0, min(grace_seconds, 60))
+        max_parallel = int(inp.get("max_parallel") or 12)
         fmt = str(inp.get("format") or "summary").strip().lower()
 
         governor = getattr(self, "command_governor", None)
@@ -1456,10 +1457,17 @@ class ToolExecutor:
             if governor is not None:
                 try:
                     decision = governor.check(command)
-                    if not decision.allowed:
-                        return 1, f"governor-blocked: {decision.denial_message()}"
-                except Exception:
+                except Exception as ge:
+                    # Fail-closed on governor exceptions: we advertise
+                    # command-type checks as going through the governor;
+                    # silently bypassing it if the governor blows up would
+                    # be exactly the "safe unless error path" foot-gun
+                    # Odin flagged. Emit the error into the result so the
+                    # operator sees it, and treat the check as errored.
                     log.exception("governor check raised for validation command")
+                    return 1, f"validate_action: governor check raised {type(ge).__name__}: {ge}"
+                if not decision.allowed:
+                    return 1, f"governor-blocked: {decision.denial_message()}"
             return await self._exec_command(address, command, ssh_user, timeout=timeout)
 
         report = await run_bundle(
@@ -1469,6 +1477,7 @@ class ToolExecutor:
             resolve_host=self._resolve_host,
             exec_command=_exec,
             grace_seconds=grace_seconds,
+            max_parallel=max_parallel,
         )
 
         if fmt == "json":

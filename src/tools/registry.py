@@ -1801,6 +1801,10 @@ TOOLS: list[dict] = [
                     "type": "integer",
                     "description": "Optional wait before running checks (0-60), to let services settle.",
                 },
+                "max_parallel": {
+                    "type": "integer",
+                    "description": "Max concurrent checks within this bundle (default 12, cap 25). Use a lower value when validating against a resource-constrained host.",
+                },
                 "format": {
                     "type": "string",
                     "description": "Output format: 'summary' (human-readable, default) or 'json' (full structured report).",

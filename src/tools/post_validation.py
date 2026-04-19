@@ -38,6 +38,30 @@ MAX_CHECKS = 25
 MAX_TARGET_LEN = 500
 DEFAULT_CHECK_TIMEOUT = 20
 DEFAULT_LOG_WINDOW_SECONDS = 120
+# Ceiling on in-bundle parallelism so a large fan-out doesn't starve
+# other bundles or overload the ssh / subprocess bulkheads. Twelve lets
+# a typical validation bundle finish in roughly one round-trip while
+# leaving headroom for concurrent bot traffic.
+DEFAULT_MAX_PARALLEL_CHECKS = 12
+
+# ReDoS hardening limits for the regex_match compare op.
+# The combination of pattern + output size caps is cheap belt-and-braces
+# protection against catastrophic-backtracking patterns — we can't use
+# re2 without adding a native dep, and Python's stdlib re has no
+# timeout. We cap both the pattern length and the output window so the
+# worst-case runtime is bounded.
+MAX_REGEX_PATTERN_LEN = 200
+MAX_REGEX_INPUT_CHARS = 10_000
+# Patterns with nested quantifiers are a common ReDoS footgun — reject
+# the obvious shapes at parse time rather than letting them run.
+_REDOS_HEURISTIC = re.compile(
+    r"""
+    \([^)]*[+*]\)[+*]          # (a+)+ or (a*)*
+    | \([^)]*\|[^)]*\)[+*]     # (a|b)+
+    | \\[0-9]                  # backreferences — also a common ReDoS source
+    """,
+    re.VERBOSE,
+)
 
 VALID_TYPES = frozenset({
     "http", "port", "service", "process", "log_absent", "log_present", "command",
@@ -340,10 +364,25 @@ def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
                 return "pass", ""
             return "fail", f"expected '{expected}', got '{out_stripped[:200]}'"
         if compare == "regex_match":
+            pattern = str(expected or "")
+            # ReDoS hardening: length cap + heuristic rejection of
+            # catastrophic-backtracking shapes + input truncation.
+            if len(pattern) > MAX_REGEX_PATTERN_LEN:
+                return "error", (
+                    f"regex pattern too long ({len(pattern)} > "
+                    f"{MAX_REGEX_PATTERN_LEN}); refusing to run"
+                )
+            if _REDOS_HEURISTIC.search(pattern):
+                return "error", (
+                    "regex rejected: nested quantifier or backreference detected — "
+                    "catastrophic backtracking risk. Rewrite without (a+)+ style "
+                    "shapes or prefer 'contains'."
+                )
+            haystack = output[:MAX_REGEX_INPUT_CHARS]
             try:
-                if expected and re.search(str(expected), output):
+                if pattern and re.search(pattern, haystack):
                     return "pass", ""
-                return "fail", f"regex '{expected}' did not match"
+                return "fail", f"regex '{pattern}' did not match"
             except re.error as e:
                 return "error", f"bad regex: {e}"
         return "error", f"unsupported compare '{compare}' for command check"
@@ -378,6 +417,7 @@ async def run_bundle(
     resolve_host: HostResolver,
     exec_command: Callable[..., Awaitable[tuple[int, str]]],
     grace_seconds: int = 0,
+    max_parallel: int = DEFAULT_MAX_PARALLEL_CHECKS,
 ) -> ValidationReport:
     """Run a validation bundle. Host resolution: explicit > default > localhost.
 
@@ -402,6 +442,11 @@ async def run_bundle(
             bundle=bundle_name, checks=dummies,
         )
 
+    # Bundle-level semaphore bounds fan-out so a 25-check bundle doesn't
+    # exhaust the SSH/subprocess bulkheads the rest of the bot shares.
+    cap = max(1, min(int(max_parallel) or DEFAULT_MAX_PARALLEL_CHECKS, MAX_CHECKS))
+    sem = asyncio.Semaphore(cap)
+
     async def _run_one(idx: int, check: Check) -> CheckResult:
         resolved_host = check.host or default_host or "localhost"
         name = check.name or f"{check.type}[{idx}]"
@@ -410,37 +455,38 @@ async def run_bundle(
             severity=check.severity, status="error", host=resolved_host,
         )
         t0 = time.monotonic()
-        try:
-            resolved = resolve_host(resolved_host)
-            if not resolved:
-                result.error = f"unknown host alias: {resolved_host}"
-                return result
-            address, ssh_user, _os = resolved
-            command = _build_command(check)
-            if command is None:
-                result.error = f"could not build command for check type '{check.type}' (bad target?)"
-                return result
+        async with sem:
             try:
-                exit_code, output = await asyncio.wait_for(
-                    exec_command(address, command, ssh_user, timeout=check.timeout_seconds),
-                    timeout=check.timeout_seconds + 5,
-                )
-            except asyncio.TimeoutError:
-                result.status = "error"
-                result.error = f"timed out after {check.timeout_seconds}s"
+                resolved = resolve_host(resolved_host)
+                if not resolved:
+                    result.error = f"unknown host alias: {resolved_host}"
+                    return result
+                address, ssh_user, _os = resolved
+                command = _build_command(check)
+                if command is None:
+                    result.error = f"could not build command for check type '{check.type}' (bad target?)"
+                    return result
+                try:
+                    exit_code, output = await asyncio.wait_for(
+                        exec_command(address, command, ssh_user, timeout=check.timeout_seconds),
+                        timeout=check.timeout_seconds + 5,
+                    )
+                except asyncio.TimeoutError:
+                    result.status = "error"
+                    result.error = f"timed out after {check.timeout_seconds}s"
+                    return result
+                result.observed = output.strip()[:500]
+                status, err = _evaluate(check, exit_code, output)
+                result.status = status
+                result.error = err
                 return result
-            result.observed = output.strip()[:500]
-            status, err = _evaluate(check, exit_code, output)
-            result.status = status
-            result.error = err
-            return result
-        except Exception as e:
-            result.status = "error"
-            result.error = f"{type(e).__name__}: {e}"
-            log.exception("validation check failed: %s", name)
-            return result
-        finally:
-            result.duration_ms = int((time.monotonic() - t0) * 1000)
+            except Exception as e:
+                result.status = "error"
+                result.error = f"{type(e).__name__}: {e}"
+                log.exception("validation check failed: %s", name)
+                return result
+            finally:
+                result.duration_ms = int((time.monotonic() - t0) * 1000)
 
     coros = [_run_one(i, c) for i, c in enumerate(checks)]
     results = await asyncio.gather(*coros)

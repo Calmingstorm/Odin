@@ -49,6 +49,22 @@ _SAFE_TOOLS: frozenset[str] = frozenset({
 
 _IDENT_SAFE = re.compile(r"[^a-z0-9_]+")
 
+# Tool names embedded into generated source MUST match this exactly, or we
+# refuse to render. Prevents anyone passing a crafted "tool name" with
+# quotes/newlines that would break out of string literals in the generated
+# code. Real tool names are snake_case identifiers.
+_TOOL_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
+
+
+def _assert_safe_tool_name(name: str) -> str:
+    """Raise if ``name`` can't be safely embedded in generated source."""
+    if not isinstance(name, str) or not _TOOL_NAME_RE.match(name):
+        raise ValueError(
+            f"refusing to synthesize — tool name {name!r} is not a valid "
+            "snake_case identifier"
+        )
+    return name
+
 
 def normalise_skill_name(raw: str) -> str:
     """Turn an arbitrary suggested name into a valid Python identifier
@@ -104,6 +120,12 @@ def synthesize_skill_code(
     hosts = ", ".join(suggestion.hosts) or "(host unknown)"
     steps = suggestion.sequence or []
     samples = suggestion.sample_inputs or []
+    # Validate every step name BEFORE emitting source — embedding an
+    # attacker-controlled string in generated code is a code-injection
+    # risk. Real tool names are plain snake_case; anything else is
+    # rejected.
+    for step in steps:
+        _assert_safe_tool_name(step)
 
     if description_override:
         description = description_override
@@ -147,32 +169,43 @@ def synthesize_skill_code(
         sample = samples[i] if i < len(samples) else {"tool_name": step, "input": {}}
         sample_input = sample.get("input") or {}
         pretty_input = _safe_repr(sample_input)
+        # step has already passed _assert_safe_tool_name; repr() gives us a
+        # guaranteed-safe string literal for embedding even though step is
+        # already restricted to an identifier-shape.
+        step_lit = repr(step)
+        step_num_lit = repr(f"step {i + 1}")
         if step in _SAFE_TOOLS:
             body_lines.append(
                 f"    # step {i + 1}: {step} (safe — invoked via SkillContext)"
             )
             body_lines.append(
-                f"    step_input_{i} = {{**{pretty_input}, **(inp.get('overrides', {{}}).get('step_{i}', {{}}))}}"
+                f"    step_input_{i} = {{**{pretty_input}, "
+                f"**(inp.get('overrides', {{}}).get('step_{i}', {{}}))}}"
             )
             body_lines.append(
-                f"    result_{i} = await context.execute_tool('{step}', step_input_{i})"
+                f"    result_{i} = await context.execute_tool({step_lit}, step_input_{i})"
             )
             body_lines.append(
-                f"    report.append(f\"step {i + 1} [{step}] → {{result_{i}[:200]}}\")"
+                f"    report.append({step_num_lit} + ' [' + {step_lit} + '] → ' + str(result_{i})[:200])"
             )
         else:
             body_lines.append(
                 f"    # step {i + 1}: {step} — UNSAFE FROM SKILLS. Operator must run this manually."
             )
+            # Comment safe because pretty_input has no newlines (repr() of
+            # primitives never emits raw newlines — only escape sequences).
             body_lines.append(
                 f"    # captured input (scrubbed): {pretty_input}"
             )
             body_lines.append(
-                f"    report.append('step {i + 1} [{step}]: SKIPPED — requires operator to run manually. "
-                f"Captured input attached below.')"
+                f"    report.append({step_num_lit} + ' [' + {step_lit} + ']: "
+                f"SKIPPED — requires operator to run manually. Captured input attached below.')"
             )
+            # Stringify the already-safe-repr'd input and embed via a
+            # second repr() so no content can break out of the literal.
+            captured_repr = repr("    captured_input: " + pretty_input)
             body_lines.append(
-                f"    report.append(f'    captured_input: {pretty_input!s}')"
+                f"    report.append({captured_repr})"
             )
         body_lines.append("")
     body_lines.append("    return '\\n'.join(report)")

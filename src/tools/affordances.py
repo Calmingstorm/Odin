@@ -150,6 +150,31 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
         ("validation checks reference reachable hosts",))),
     ("detect_runbooks", Affordance(Cost.LOW, Risk.NONE, Latency.FAST,
         ("audit log present",))),
+    ("replay_trajectory", Affordance(Cost.LOW, Risk.NONE, Latency.FAST,
+        ("trajectory file present for the target message_id",))),
+    ("synthesize_runbook", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
+    # Audit / search
+    ("search_audit", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
+    ("create_digest", Affordance(Cost.MEDIUM, Risk.NONE, Latency.SECONDS, ())),
+    # Skill lifecycle (non-destructive toggles + packaging)
+    ("enable_skill", Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ())),
+    ("disable_skill", Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ())),
+    ("install_skill", Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.FAST, ())),
+    ("export_skill", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
+    ("skill_status", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
+    # Task lifecycle
+    ("cancel_task", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
+    # Browser (explicit leaf entries alongside the prefix)
+    ("browser_screenshot", Affordance(Cost.MEDIUM, Risk.LOW, Latency.SECONDS,
+        ("browser session initialized",))),
+    # Discord surfaces
+    ("read_channel", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
+    # Agent messaging / orchestration
+    ("send_to_agent", Affordance(Cost.LOW, Risk.LOW, Latency.FAST,
+        ("target agent exists and is running",))),
+    ("spawn_loop_agents", Affordance(Cost.VERY_HIGH, Risk.HIGH, Latency.UNBOUNDED,
+        ("agent tool enabled",))),
+    ("collect_loop_agents", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS, ())),
 ]
 
 # Default when no prefix matches. Deliberately conservative: unknown
