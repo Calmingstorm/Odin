@@ -19,6 +19,29 @@ class RecoveryCategory(str, Enum):
     TIMEOUT = "timeout"
     RATE_LIMITED = "rate_limited"
     BULKHEAD_FULL = "bulkhead_full"
+    # Policy-driven categories (v2): failures that shouldn't be silently
+    # retried but should annotate the result with a useful hint so the LLM
+    # can adapt on the next iteration instead of blindly repeating.
+    AUTH_FAILURE = "auth_failure"
+    NOT_FOUND = "not_found"
+    DISK_FULL = "disk_full"
+    DEPENDENCY_MISSING = "dependency_missing"
+    PERMISSION_DENIED = "permission_denied"
+
+
+class RecoveryStrategy(str, Enum):
+    """What to do when a category fires.
+
+    RETRY_WITH_DELAY — sleep and try the same call once more (legacy behavior).
+    HINT_AND_ESCALATE — don't retry; append a recovery hint to the result
+        so the LLM can choose a different tool / host / input on the next
+        iteration. Safe for UNSAFE_TO_RETRY tools because we never re-execute.
+    NO_ACTION — don't retry, don't annotate (e.g. the error is already
+        self-explanatory or the tool declines recovery).
+    """
+    RETRY_WITH_DELAY = "retry"
+    HINT_AND_ESCALATE = "hint"
+    NO_ACTION = "none"
 
 
 UNSAFE_TO_RETRY: frozenset[str] = frozenset({
@@ -101,6 +124,42 @@ _RECOVERABLE_PATTERNS: dict[RecoveryCategory, tuple[str, ...]] = {
     RecoveryCategory.BULKHEAD_FULL: (
         "bulkhead full",
     ),
+    RecoveryCategory.AUTH_FAILURE: (
+        "authentication failed",
+        "Authentication failed",
+        "401 Unauthorized",
+        "403 Forbidden",
+        "Bad credentials",
+        "invalid_token",
+        "token expired",
+        "Permission denied (publickey",
+    ),
+    RecoveryCategory.NOT_FOUND: (
+        "404 Not Found",
+        "No such file or directory",
+        "does not exist",
+        "ENOENT",
+        "not found in",
+    ),
+    RecoveryCategory.DISK_FULL: (
+        "No space left on device",
+        "ENOSPC",
+        "disk quota exceeded",
+    ),
+    RecoveryCategory.DEPENDENCY_MISSING: (
+        "ModuleNotFoundError",
+        "command not found",
+        "ImportError",
+        "No module named",
+        "manifest unknown",
+        "Unable to find image",
+    ),
+    RecoveryCategory.PERMISSION_DENIED: (
+        "Permission denied",
+        "EACCES",
+        "Operation not permitted",
+        "EPERM",
+    ),
 }
 
 # Error prefixes that indicate a tool returned an error (not normal output).
@@ -125,6 +184,101 @@ _CATEGORY_DELAYS: dict[RecoveryCategory, float] = {
 _SKIP_RESULT_CATEGORIES = frozenset({
     RecoveryCategory.TIMEOUT,
 })
+
+
+@dataclass(frozen=True)
+class RecoveryPolicy:
+    """A strategy + optional hint for handling a recovery category.
+
+    Hints are short natural-language directives injected into the tool
+    result. They're consumed by the LLM on the next iteration — 'try tool
+    X', 'verify host Y', 'escalate to operator'. The point is that
+    identical-retry is often wasted effort; a different next step is
+    frequently the actual recovery.
+    """
+    strategy: RecoveryStrategy
+    delay_seconds: float = 1.0
+    hint: str = ""
+
+
+# Default per-category policies. Transient categories keep the legacy
+# one-shot retry; failure-class categories prefer hinting over retrying
+# (retrying a 401 produces a second 401 — escalate to the LLM instead).
+_DEFAULT_POLICIES: dict[RecoveryCategory, RecoveryPolicy] = {
+    RecoveryCategory.SSH_TRANSIENT: RecoveryPolicy(
+        RecoveryStrategy.RETRY_WITH_DELAY, 2.0,
+    ),
+    RecoveryCategory.CONNECTION_ERROR: RecoveryPolicy(
+        RecoveryStrategy.RETRY_WITH_DELAY, 1.0,
+    ),
+    RecoveryCategory.RESOURCE_BUSY: RecoveryPolicy(
+        RecoveryStrategy.RETRY_WITH_DELAY, 1.0,
+    ),
+    RecoveryCategory.TIMEOUT: RecoveryPolicy(
+        RecoveryStrategy.NO_ACTION, 0.0,
+    ),
+    RecoveryCategory.RATE_LIMITED: RecoveryPolicy(
+        RecoveryStrategy.RETRY_WITH_DELAY, 2.0,
+    ),
+    RecoveryCategory.BULKHEAD_FULL: RecoveryPolicy(
+        RecoveryStrategy.RETRY_WITH_DELAY, 1.0,
+    ),
+    RecoveryCategory.AUTH_FAILURE: RecoveryPolicy(
+        RecoveryStrategy.HINT_AND_ESCALATE, 0.0,
+        hint=(
+            "[recovery hint: authentication failure — do not retry the same "
+            "call. Verify credentials, refresh the token/key, or escalate to "
+            "the operator. If SSH, check ssh_key_path and known_hosts. If API, "
+            "check the secret store entry for this host/service.]"
+        ),
+    ),
+    RecoveryCategory.NOT_FOUND: RecoveryPolicy(
+        RecoveryStrategy.HINT_AND_ESCALATE, 0.0,
+        hint=(
+            "[recovery hint: target not found — do not retry with the same "
+            "path/URL. Use read_file or http_probe on a parent path to locate "
+            "the real target, or ask the operator for the correct reference.]"
+        ),
+    ),
+    RecoveryCategory.DISK_FULL: RecoveryPolicy(
+        RecoveryStrategy.HINT_AND_ESCALATE, 0.0,
+        hint=(
+            "[recovery hint: disk full on target host — do not retry. Run "
+            "'df -h' to confirm, then identify a cleanup candidate (logs, "
+            "caches, old snapshots) before any follow-up write operation.]"
+        ),
+    ),
+    RecoveryCategory.DEPENDENCY_MISSING: RecoveryPolicy(
+        RecoveryStrategy.HINT_AND_ESCALATE, 0.0,
+        hint=(
+            "[recovery hint: missing dependency — do not retry. The command "
+            "or module is not installed on the target. Propose an install "
+            "step (apt/pip/docker pull/package) or switch to an alternative "
+            "tool that doesn't need it.]"
+        ),
+    ),
+    RecoveryCategory.PERMISSION_DENIED: RecoveryPolicy(
+        RecoveryStrategy.HINT_AND_ESCALATE, 0.0,
+        hint=(
+            "[recovery hint: permission denied — do not retry with the same "
+            "user. Verify file mode/owner (ls -l), consider sudo if the "
+            "operator approved it for this task, or escalate.]"
+        ),
+    ),
+}
+
+
+def get_policy(category: RecoveryCategory) -> RecoveryPolicy:
+    """Return the default policy for a category, or a NO_ACTION fallback."""
+    return _DEFAULT_POLICIES.get(
+        category,
+        RecoveryPolicy(RecoveryStrategy.NO_ACTION, 0.0),
+    )
+
+
+def get_hint(category: RecoveryCategory) -> str:
+    """Return the hint string for a category's policy (may be empty)."""
+    return get_policy(category).hint
 
 
 def classify_error(error_text: str) -> RecoveryCategory | None:

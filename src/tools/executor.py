@@ -23,9 +23,11 @@ from .bulkhead import BulkheadFullError, BulkheadRegistry
 from .recovery import (
     RecoveryCategory,
     RecoveryStats,
+    RecoveryStrategy,
     UNSAFE_TO_RETRY,
     classify_error as _classify_error,
     classify_exception as _classify_exception,
+    get_policy as _get_recovery_policy,
     get_retry_delay as _get_retry_delay,
 )
 from .result_validator import ResultValidationStats, validate_tool_result
@@ -159,14 +161,28 @@ class ToolExecutor:
             category = self._check_recoverable(result)
             if category is not None:
                 snippet = result[:120] if isinstance(result, str) else ""
-                if tool_name in UNSAFE_TO_RETRY:
+                policy = _get_recovery_policy(category)
+                if policy.strategy == RecoveryStrategy.HINT_AND_ESCALATE:
+                    # Don't re-execute; annotate the result with a hint so the
+                    # LLM picks a different next step. Safe for UNSAFE_TO_RETRY
+                    # tools because nothing runs twice.
+                    self.recovery_stats.record_failure(tool_name, category, snippet)
+                    log.info(
+                        "Recovery hint for %s (%s): not retrying, annotating result",
+                        tool_name, category.value,
+                    )
+                    if policy.hint and isinstance(result, str) and policy.hint not in result:
+                        result = f"{result}\n\n{policy.hint}"
+                elif policy.strategy == RecoveryStrategy.NO_ACTION:
+                    self.recovery_stats.record_failure(tool_name, category, snippet)
+                elif tool_name in UNSAFE_TO_RETRY:
                     log.warning(
                         "Recovery skipped for %s (%s): tool is not safe to retry (may have already executed)",
                         tool_name, category.value,
                     )
                     self.recovery_stats.record_failure(tool_name, category, snippet)
                 else:
-                    delay = _get_retry_delay(category)
+                    delay = policy.delay_seconds if policy.delay_seconds else _get_retry_delay(category)
                     self.recovery_stats.record_attempt(tool_name, category, snippet)
                     log.info("Recovery for %s (%s): retrying after %.1fs", tool_name, category.value, delay)
                     if delay > 0:
