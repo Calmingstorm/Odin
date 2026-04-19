@@ -4,56 +4,26 @@
  */
 import { api, ws } from './api.js';
 import DashboardPage from './pages/dashboard.js';
-import SessionsPage from './pages/sessions.js';
-import ToolsPage from './pages/tools.js';
-import SkillsPage from './pages/skills.js';
-import KnowledgePage from './pages/knowledge.js';
-import SchedulesPage from './pages/schedules.js';
-import LoopsPage from './pages/loops.js';
-import ProcessesPage from './pages/processes.js';
-import ConfigPage from './pages/config.js';
-import LogsPage from './pages/logs.js';
-import AuditPage from './pages/audit.js';
-import MemoryPage from './pages/memory.js';
-import AgentsPage from './pages/agents.js';
 import ChatPage from './pages/chat.js';
-import UsagePage from './pages/usage.js';
-import TracesPage from './pages/traces.js';
-import HealthPage from './pages/health.js';
-import ResourcesPage from './pages/resources.js';
-import InternalsPage from './pages/internals.js';
-import ExecutionPage from './pages/execution.js';
+import OperationsPage from './pages/operations.js';
+import HistoryPage from './pages/history.js';
+import CapabilitiesPage from './pages/capabilities.js';
+import SystemPage from './pages/system.js';
 
 const { createApp, ref, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
 const { createRouter, createWebHashHistory } = VueRouter;
 
-// All page components imported above
-
 // ---------------------------------------------------------------------------
-// Router
+// Router — 6 top-level items, sub-pages rendered as tabs within each
 // ---------------------------------------------------------------------------
 const routes = [
-  { path: '/',           redirect: '/dashboard' },
-  { path: '/dashboard',  component: DashboardPage,  meta: { label: 'Dashboard',  icon: '\u{1F4CA}' } },
-  { path: '/execution', component: ExecutionPage,  meta: { label: 'Execution',  icon: '\u{1F3AF}' } },
-  { path: '/chat',       component: ChatPage,       meta: { label: 'Chat',       icon: '\u{1F4AD}' } },
-  { path: '/sessions',   component: SessionsPage,   meta: { label: 'Sessions',   icon: '\u{1F4AC}' } },
-  { path: '/tools',      component: ToolsPage,      meta: { label: 'Tools',      icon: '\u{1F527}' } },
-  { path: '/skills',     component: SkillsPage,     meta: { label: 'Skills',     icon: '\u{1F9E9}' } },
-  { path: '/knowledge',  component: KnowledgePage,  meta: { label: 'Knowledge',  icon: '\u{1F4DA}' } },
-  { path: '/schedules',  component: SchedulesPage,  meta: { label: 'Schedules',  icon: '\u{23F0}' } },
-  { path: '/loops',      component: LoopsPage,      meta: { label: 'Loops',      icon: '\u{1F504}' } },
-  { path: '/processes',  component: ProcessesPage,  meta: { label: 'Processes',  icon: '\u{2699}\u{FE0F}' } },
-  { path: '/audit',      component: AuditPage,      meta: { label: 'Audit',      icon: '\u{1F4DD}' } },
-  { path: '/config',     component: ConfigPage,     meta: { label: 'Config',     icon: '\u{2699}\u{FE0F}' } },
-  { path: '/logs',       component: LogsPage,       meta: { label: 'Logs',       icon: '\u{1F4C4}' } },
-  { path: '/memory',     component: MemoryPage,     meta: { label: 'Memory',     icon: '\u{1F9E0}' } },
-  { path: '/agents',     component: AgentsPage,     meta: { label: 'Agents',     icon: '\u{1F916}' } },
-  { path: '/usage',      component: UsagePage,      meta: { label: 'Usage',      icon: '\u{1F4B0}' } },
-  { path: '/traces',     component: TracesPage,     meta: { label: 'Traces',     icon: '\u{1F50D}' } },
-  { path: '/health',     component: HealthPage,     meta: { label: 'Health',     icon: '\u{1FA7A}' } },
-  { path: '/resources',  component: ResourcesPage,  meta: { label: 'Resources',  icon: '\u{1F4E6}' } },
-  { path: '/internals',  component: InternalsPage,  meta: { label: 'Internals',  icon: '\u{1F50C}' } },
+  { path: '/',              redirect: '/dashboard' },
+  { path: '/dashboard',     component: DashboardPage,    meta: { label: 'Dashboard',     icon: '\u{1F4CA}' } },
+  { path: '/chat',          component: ChatPage,          meta: { label: 'Chat',          icon: '\u{1F4AD}' } },
+  { path: '/operations',    component: OperationsPage,    meta: { label: 'Operations',    icon: '\u{1F3AF}' } },
+  { path: '/history',       component: HistoryPage,       meta: { label: 'History',       icon: '\u{1F4DD}' } },
+  { path: '/capabilities',  component: CapabilitiesPage,  meta: { label: 'Capabilities',  icon: '\u{1F527}' } },
+  { path: '/system',        component: SystemPage,        meta: { label: 'System',        icon: '\u{2699}\u{FE0F}' } },
 ];
 
 const router = createRouter({
