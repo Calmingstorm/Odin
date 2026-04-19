@@ -192,6 +192,87 @@ class TestDetectPatterns:
         # Shorter prefix ["write_file", "run_command"] should be shadowed out
         assert ["write_file", "run_command"] not in seqs
 
+    def test_shorter_with_more_sessions_survives_shadowing(self, tmp_path):
+        """If [A,B] appears in more sessions than [A,B,C], the shorter must
+        survive — it's its own pattern, not a prefix we can discard."""
+        base = datetime(2026, 4, 18, 10, 0, 0)
+        events: list[dict] = []
+        # Three sessions with the full [A,B,C] sequence
+        for i in range(3):
+            t = base + timedelta(hours=i)
+            events.append(_entry(t, "write_file"))
+            events.append(_entry(t + timedelta(seconds=5), "run_command"))
+            events.append(_entry(t + timedelta(seconds=10), "validate_action"))
+        # Three additional sessions with just [A,B] (no C)
+        for i in range(3):
+            t = base + timedelta(hours=10 + i)
+            events.append(_entry(t, "write_file"))
+            events.append(_entry(t + timedelta(seconds=5), "run_command"))
+        audit = tmp_path / "audit.jsonl"
+        _write_audit(audit, events)
+        suggestions = detect_patterns(
+            audit, min_frequency=3, min_length=2, max_length=5,
+            now=base + timedelta(hours=20),
+        )
+        seqs = [s.sequence for s in suggestions]
+        assert ["write_file", "run_command"] in seqs
+        assert ["write_file", "run_command", "validate_action"] in seqs
+
+    def test_sample_inputs_scrub_secrets(self, tmp_path):
+        """Runbook suggestions must not echo secrets from audit inputs."""
+        base = datetime(2026, 4, 18, 10, 0, 0)
+        events: list[dict] = []
+        for i in range(3):
+            t = base + timedelta(hours=i)
+            events.append({
+                "timestamp": _iso(t),
+                "user_id": "alice",
+                "user_name": "alice",
+                "channel_id": "c1",
+                "tool_name": "run_command",
+                "tool_input": {
+                    "host": "hostA",
+                    "command": "curl -H 'Authorization: Bearer sk-ant-api03-SECRETSECRET1234567890abcd' https://x",
+                },
+                "error": None,
+            })
+            events.append({
+                "timestamp": _iso(t + timedelta(seconds=10)),
+                "user_id": "alice",
+                "user_name": "alice",
+                "channel_id": "c1",
+                "tool_name": "validate_action",
+                "tool_input": {"host": "hostA", "command": "echo ok"},
+                "error": None,
+            })
+        audit = tmp_path / "audit.jsonl"
+        _write_audit(audit, events)
+        suggestions = detect_patterns(
+            audit, min_frequency=3, min_length=2, max_length=5,
+            now=base + timedelta(hours=5),
+        )
+        assert suggestions
+        # Dump every sample input and assert no raw token bytes remain.
+        raw = json.dumps([s.to_dict() for s in suggestions])
+        assert "sk-ant-api03-SECRETSECRET1234567890abcd" not in raw
+
+    def test_session_presence_drives_score(self):
+        """Score must grow with session_count, not raw frequency."""
+        now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
+        bursty_single_session = RunbookSuggestion(
+            sequence=["a", "b"], frequency=10, session_count=2,
+            hosts=["h"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        distributed = RunbookSuggestion(
+            sequence=["a", "b"], frequency=5, session_count=5,
+            hosts=["h"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        assert distributed.score(now=now) > bursty_single_session.score(now=now)
+
     def test_score_prefers_recent(self):
         now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
         stale = RunbookSuggestion(

@@ -76,11 +76,12 @@ class AuditEntry:
 @dataclass(slots=True)
 class RunbookSuggestion:
     sequence: list[str]
-    frequency: int
-    hosts: list[str]
-    actors: list[str]
-    first_seen: str
-    last_seen: str
+    frequency: int                  # total ngram occurrences (may include within-session repeats)
+    session_count: int = 0          # distinct sessions the sequence appeared in — used for scoring
+    hosts: list[str] = field(default_factory=list)
+    actors: list[str] = field(default_factory=list)
+    first_seen: str = ""
+    last_seen: str = ""
     sample_inputs: list[dict] = field(default_factory=list)
 
     @property
@@ -88,9 +89,10 @@ class RunbookSuggestion:
         return len(self.sequence)
 
     def score(self, *, now: datetime | None = None) -> float:
-        """Higher score = better candidate. Weighted by frequency, recency,
-        and actor concentration. Pure heuristic — documented here so future
-        tuning is obvious."""
+        """Higher score = better candidate. Session-presence (not raw n-gram
+        count) drives the frequency term — a sequence that shows up in six
+        distinct sessions beats one that happens eight times inside two
+        sessions. Weighted further by recency and actor concentration."""
         if not self.sequence:
             return 0.0
         now = now or datetime.now(timezone.utc)
@@ -106,7 +108,8 @@ class RunbookSuggestion:
         recency_weight = max(0.1, 1.0 - (recency_days / DEFAULT_LOOKBACK_DAYS))
         length_bonus = 1.0 + 0.2 * (self.length - 1)
         concentration_bonus = 1.0 if len(self.actors) <= 2 else 0.75
-        return self.frequency * length_bonus * recency_weight * concentration_bonus
+        base = self.session_count or self.frequency
+        return base * length_bonus * recency_weight * concentration_bonus
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -257,18 +260,11 @@ def detect_patterns(
         timestamps = [o.timestamp for occ in seq_occurrences for o in occ]
         first_seen = min(timestamps) if timestamps else ""
         last_seen = max(timestamps) if timestamps else ""
-        sample = [
-            {
-                "tool_name": o.tool_name,
-                "host": o.host,
-                "input": {k: v for k, v in (o.raw.get("tool_input") or {}).items()
-                           if k in ("host", "command", "path", "script", "target")},
-            }
-            for o in seq_occurrences[0]
-        ]
+        sample = _build_sample_inputs(seq_occurrences[0])
         suggestions.append(RunbookSuggestion(
             sequence=list(seq),
             frequency=freq,
+            session_count=len(distinct_sessions),
             hosts=hosts,
             actors=actors,
             first_seen=first_seen,
@@ -276,11 +272,13 @@ def detect_patterns(
             sample_inputs=sample,
         ))
 
-    # Suppress a shorter sequence if a longer sequence with equal frequency
-    # exists that starts the same way (the longer one is strictly more
-    # informative — the shorter is just its prefix).
+    # Suppress a shorter sequence only if a longer sequence whose strict
+    # prefix matches the shorter has at least as many distinct sessions —
+    # otherwise the shorter sequence is an independent pattern that shows
+    # up in more places and deserves to surface on its own.
     kept: list[RunbookSuggestion] = []
     by_len = sorted(suggestions, key=lambda s: s.length, reverse=True)
+    seq_index = {tuple(s.sequence): s for s in by_len}
     shadowed: set[tuple[str, ...]] = set()
     for s in by_len:
         seq_t = tuple(s.sequence)
@@ -288,10 +286,54 @@ def detect_patterns(
             continue
         kept.append(s)
         for L in range(s.length - 1, min_length - 1, -1):
-            shadowed.add(seq_t[:L])
+            prefix = seq_t[:L]
+            shorter = seq_index.get(prefix)
+            if shorter is None:
+                continue
+            # Only shadow the shorter when the longer actually covers it —
+            # i.e. the shorter isn't repeating in sessions the longer doesn't.
+            if shorter.session_count <= s.session_count:
+                shadowed.add(prefix)
 
     kept.sort(key=lambda s: s.score(now=now), reverse=True)
     return kept
+
+
+def _build_sample_inputs(sample_entries: list[AuditEntry]) -> list[dict]:
+    """Build a per-step sample input list with secret-bearing values scrubbed.
+
+    We intentionally include only a small allowlist of input keys (host,
+    command, path, script, target), then scrub those values through the
+    standard secret scrubber before they leave the detector. This prevents
+    runbook suggestions from becoming a secret-exfiltration side channel
+    when audit entries capture tool inputs that contain tokens or creds.
+    """
+    try:
+        from ..llm.secret_scrubber import scrub_output_secrets as _scrub
+    except Exception:  # pragma: no cover - scrubber is a normal runtime dep
+        def _scrub(s: str) -> str:
+            return s
+
+    ALLOWED_KEYS = ("host", "command", "path", "script", "target")
+    out: list[dict] = []
+    for entry in sample_entries:
+        raw_inp = entry.raw.get("tool_input") or {}
+        clean: dict = {}
+        if isinstance(raw_inp, dict):
+            for key in ALLOWED_KEYS:
+                val = raw_inp.get(key)
+                if val is None:
+                    continue
+                if isinstance(val, str):
+                    clean[key] = _scrub(val)
+                else:
+                    clean[key] = val
+        out.append({
+            "tool_name": entry.tool_name,
+            "host": entry.host,
+            "input": clean,
+        })
+    return out
 
 
 def format_suggestions(
