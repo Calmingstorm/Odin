@@ -87,13 +87,18 @@ class AuditLogger:
         metadata: dict | None = None,
     ) -> None:
         """Log a generic state-changing event (agents, schedules, permissions, etc.)."""
+        elapsed = (metadata or {}).get("elapsed_ms")
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": event_type,
             "action": action,
             "actor": actor,
             "detail": detail[:500],
+            "tool_name": action,
+            "user_id": actor,
         }
+        if elapsed is not None:
+            entry["execution_time_ms"] = elapsed
         if channel_id:
             entry["channel_id"] = channel_id
         if metadata:
