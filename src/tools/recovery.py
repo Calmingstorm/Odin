@@ -281,21 +281,94 @@ def get_hint(category: RecoveryCategory) -> str:
     return get_policy(category).hint
 
 
+# Explicit classification priority. The first category in this list whose
+# patterns match the error wins — AUTH_FAILURE before PERMISSION_DENIED,
+# NOT_FOUND before DEPENDENCY_MISSING, etc. We rely on this order instead
+# of dict-insertion ordering so a future refactor can't silently flip
+# precedence.
+_CLASSIFICATION_PRIORITY: tuple[RecoveryCategory, ...] = (
+    # Transient / connectivity first — those patterns are the most specific
+    # and shouldn't be misread as permission or dependency issues.
+    RecoveryCategory.SSH_TRANSIENT,
+    RecoveryCategory.CONNECTION_ERROR,
+    RecoveryCategory.RESOURCE_BUSY,
+    RecoveryCategory.TIMEOUT,
+    RecoveryCategory.RATE_LIMITED,
+    RecoveryCategory.BULKHEAD_FULL,
+    # Auth BEFORE generic permission so "Permission denied (publickey" hits
+    # AUTH_FAILURE rather than the broader PERMISSION_DENIED rule.
+    RecoveryCategory.AUTH_FAILURE,
+    RecoveryCategory.PERMISSION_DENIED,
+    # Not-found BEFORE dependency-missing so "No such file" doesn't trip on
+    # ModuleNotFoundError's 'No module named' substring by accident.
+    RecoveryCategory.NOT_FOUND,
+    RecoveryCategory.DEPENDENCY_MISSING,
+    RecoveryCategory.DISK_FULL,
+)
+
+
+@dataclass(frozen=True)
+class RecoveryAction:
+    """Single-shot decision about what to do with a failed tool result.
+
+    Having the full decision in one object means the executor never has
+    to re-derive any of it. A future edit to the policy table cannot
+    accidentally bypass the UNSAFE_TO_RETRY guard, because this function
+    is the sole place the guard is consulted.
+    """
+    action: str  # "retry" | "hint" | "skip"
+    category: RecoveryCategory | None
+    delay_seconds: float = 0.0
+    hint_text: str = ""
+
+
+def decide_recovery_action(
+    *, tool_name: str, category: RecoveryCategory | None,
+) -> RecoveryAction:
+    """Single source of truth for 'what do we do about this failure'.
+
+    - category is None (un-classified failure) → skip
+    - TIMEOUT → skip (handled elsewhere via timeout chain)
+    - HINT_AND_ESCALATE policy → hint (safe for UNSAFE_TO_RETRY — no re-exec)
+    - NO_ACTION policy → skip
+    - RETRY_WITH_DELAY policy + tool in UNSAFE_TO_RETRY → skip (must not re-exec)
+    - RETRY_WITH_DELAY policy + tool safe → retry with configured delay
+    """
+    if category is None:
+        return RecoveryAction(action="skip", category=None)
+    policy = get_policy(category)
+    if policy.strategy == RecoveryStrategy.HINT_AND_ESCALATE:
+        return RecoveryAction(
+            action="hint", category=category, hint_text=policy.hint,
+        )
+    if policy.strategy == RecoveryStrategy.NO_ACTION:
+        return RecoveryAction(action="skip", category=category)
+    # Remaining case: RETRY_WITH_DELAY.
+    if tool_name in UNSAFE_TO_RETRY:
+        return RecoveryAction(action="skip", category=category)
+    delay = policy.delay_seconds if policy.delay_seconds else get_retry_delay(category)
+    return RecoveryAction(
+        action="retry", category=category, delay_seconds=delay,
+    )
+
+
 def classify_error(error_text: str) -> RecoveryCategory | None:
     """Classify a tool error string into a recoverable category.
 
     Only examines strings that start with known error prefixes to avoid
     false-positives on normal command output containing error-like text.
-    Returns None for non-errors or non-recoverable errors.
+    Categories are consulted in the order declared by
+    ``_CLASSIFICATION_PRIORITY`` (AUTH before generic PERMISSION_DENIED,
+    etc.) — we don't rely on dict insertion order.
     """
     if not isinstance(error_text, str):
         return None
     if not any(error_text.startswith(p) for p in _ERROR_PREFIXES):
         return None
-    for category, patterns in _RECOVERABLE_PATTERNS.items():
+    for category in _CLASSIFICATION_PRIORITY:
         if category in _SKIP_RESULT_CATEGORIES:
             continue
-        for pattern in patterns:
+        for pattern in _RECOVERABLE_PATTERNS.get(category, ()):
             if pattern in error_text:
                 return category
     return None
@@ -305,12 +378,13 @@ def classify_exception(error_text: str) -> RecoveryCategory | None:
     """Classify an exception description into a recoverable category.
 
     More permissive than classify_error — exceptions are inherently
-    error conditions so no prefix check is needed.
+    error conditions so no prefix check is needed. Priority ordering is
+    shared with classify_error.
     """
     if not isinstance(error_text, str):
         return None
-    for category, patterns in _RECOVERABLE_PATTERNS.items():
-        for pattern in patterns:
+    for category in _CLASSIFICATION_PRIORITY:
+        for pattern in _RECOVERABLE_PATTERNS.get(category, ()):
             if pattern in error_text:
                 return category
     return None

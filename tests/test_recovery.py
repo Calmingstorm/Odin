@@ -1243,3 +1243,69 @@ class TestExecutorHintAndEscalate:
         assert calls == 1
         assert "recovery hint" in result.lower()
         assert "disk" in result.lower() or "cleanup" in result.lower()
+
+
+# ====================================================================
+# decide_recovery_action — single source of truth for dispatch
+# ====================================================================
+
+class TestDecideRecoveryAction:
+    def test_none_category_is_skip(self):
+        from src.tools.recovery import decide_recovery_action
+        d = decide_recovery_action(tool_name="run_command", category=None)
+        assert d.action == "skip"
+
+    def test_hint_category_returns_hint(self):
+        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        d = decide_recovery_action(tool_name="run_command", category=RecoveryCategory.AUTH_FAILURE)
+        assert d.action == "hint"
+        assert "authentication" in d.hint_text.lower()
+
+    def test_hint_category_safe_for_unsafe_tool(self):
+        """HINT_AND_ESCALATE never re-executes, so it's always safe — even for UNSAFE_TO_RETRY tools."""
+        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        d = decide_recovery_action(tool_name="write_file", category=RecoveryCategory.DISK_FULL)
+        assert d.action == "hint"
+        assert d.hint_text
+
+    def test_retry_blocked_for_unsafe_tool(self):
+        """RETRY_WITH_DELAY must be downgraded to 'skip' when tool is UNSAFE_TO_RETRY."""
+        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        d = decide_recovery_action(tool_name="write_file", category=RecoveryCategory.SSH_TRANSIENT)
+        assert d.action == "skip"
+
+    def test_retry_allowed_for_safe_tool(self):
+        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        d = decide_recovery_action(tool_name="read_file", category=RecoveryCategory.SSH_TRANSIENT)
+        assert d.action == "retry"
+        assert d.delay_seconds > 0
+
+    def test_timeout_is_skip(self):
+        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        d = decide_recovery_action(tool_name="read_file", category=RecoveryCategory.TIMEOUT)
+        assert d.action == "skip"
+
+
+class TestClassificationPriority:
+    def test_auth_wins_over_permission(self):
+        """SSH pubkey denial must always classify as AUTH_FAILURE — order stable."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        for _ in range(5):
+            cat = classify_error(
+                "Command failed (exit 255):\nPermission denied (publickey,password)."
+            )
+            assert cat == RecoveryCategory.AUTH_FAILURE
+
+    def test_not_found_wins_over_dependency_for_file_errors(self):
+        """'No such file or directory' must classify as NOT_FOUND, not DEPENDENCY_MISSING."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error(
+            "Error: No such file or directory: /etc/xyz"
+        ) == RecoveryCategory.NOT_FOUND
+
+    def test_transient_wins_over_everything(self):
+        """Connection issues classify before AUTH / NOT_FOUND even if patterns overlap."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        assert classify_error(
+            "Command failed (exit 255):\nConnection refused"
+        ) == RecoveryCategory.SSH_TRANSIENT
