@@ -2235,6 +2235,131 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response(executor.validation_stats.as_dict())
 
     # ------------------------------------------------------------------
+    # Runbook detection + synthesis (observability + operator tooling)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/runbooks/detect")
+    async def runbooks_detect(request: web.Request) -> web.Response:
+        from ..learning.runbook_detector import detect_patterns
+        audit_path = getattr(bot.config.tools, "audit_log_path", None) or "./data/audit.jsonl"
+        min_freq = _safe_int_param(request, "min_frequency", 3, hi=100)
+        lookback = _safe_int_param(request, "lookback_days", 30, hi=365)
+        min_len = _safe_int_param(request, "min_length", 2, hi=10)
+        max_len = _safe_int_param(request, "max_length", 5, hi=10)
+        limit = _safe_int_param(request, "limit", 25, hi=100)
+        try:
+            suggestions = await asyncio.to_thread(
+                detect_patterns, audit_path,
+                min_frequency=min_freq, lookback_days=lookback,
+                min_length=min_len, max_length=max(min_len, max_len),
+            )
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+        return web.json_response({
+            "suggestions": [s.to_dict() for s in suggestions[:limit]],
+            "total": len(suggestions),
+        })
+
+    @routes.post("/api/runbooks/synthesize")
+    async def runbooks_synthesize(request: web.Request) -> web.Response:
+        from ..learning.runbook_detector import RunbookSuggestion, detect_patterns
+        from ..learning.runbook_synthesizer import (
+            synthesize_skill_code,
+            synthesize_summary,
+        )
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        sequence = body.get("sequence")
+        if not isinstance(sequence, list) or not sequence:
+            return web.json_response({"error": "'sequence' (non-empty list) is required"}, status=400)
+        sequence = [str(s) for s in sequence]
+        skill_name = body.get("skill_name") or None
+        description = body.get("description_override") or None
+
+        audit_path = getattr(bot.config.tools, "audit_log_path", None) or "./data/audit.jsonl"
+
+        def _find() -> RunbookSuggestion | None:
+            try:
+                all_s = detect_patterns(
+                    audit_path, min_frequency=1,
+                    min_length=len(sequence), max_length=len(sequence),
+                    lookback_days=365,
+                )
+            except Exception:
+                return None
+            for s in all_s:
+                if s.sequence == sequence:
+                    return s
+            return None
+
+        found = await asyncio.to_thread(_find)
+        if found is None:
+            found = RunbookSuggestion(
+                sequence=list(sequence), frequency=0, session_count=0,
+                hosts=[], actors=[], first_seen="", last_seen="",
+                sample_inputs=[{"tool_name": s, "host": None, "input": {}} for s in sequence],
+            )
+        source = synthesize_skill_code(
+            found, skill_name=skill_name, description_override=description,
+        )
+        return web.json_response({
+            "source": source,
+            "summary": synthesize_summary(source, found),
+            "metadata": found.to_dict(),
+        })
+
+    # ------------------------------------------------------------------
+    # Trajectory replay (narrative + diff)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/trajectories/replay/{message_id}")
+    async def trajectory_replay(request: web.Request) -> web.Response:
+        from ..trajectories.replay import summarize_turn
+        from ..trajectories.saver import TrajectorySaver
+        mid = request.match_info.get("message_id", "").strip()
+        if not mid:
+            return web.json_response({"error": "message_id is required"}, status=400)
+        saver = TrajectorySaver()
+        entry = await saver.find_by_message_id(mid)
+        if not entry:
+            return web.json_response({"error": f"no trajectory for {mid}"}, status=404)
+        return web.json_response({
+            "message_id": mid,
+            "summary": summarize_turn(entry),
+            "entry": entry,
+        })
+
+    @routes.get("/api/trajectories/diff")
+    async def trajectory_diff(request: web.Request) -> web.Response:
+        from ..trajectories.replay import diff_turns
+        from ..trajectories.saver import TrajectorySaver
+        a = request.query.get("a", "").strip()
+        b = request.query.get("b", "").strip()
+        if not a or not b:
+            return web.json_response({"error": "both 'a' and 'b' query params are required"}, status=400)
+        saver = TrajectorySaver()
+        ea = await saver.find_by_message_id(a)
+        eb = await saver.find_by_message_id(b)
+        if not ea or not eb:
+            missing = [m for m, x in ((a, ea), (b, eb)) if not x]
+            return web.json_response({"error": f"no trajectory for: {', '.join(missing)}"}, status=404)
+        return web.json_response({
+            "a": a, "b": b,
+            "diff": diff_turns(ea, eb),
+        })
+
+    # ------------------------------------------------------------------
+    # Tool affordances (cost/risk/latency metadata)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/affordances")
+    async def affordances(_request: web.Request) -> web.Response:
+        from ..tools.affordances import all_affordances
+        return web.json_response({"affordances": all_affordances()})
+
+    # ------------------------------------------------------------------
     # Context compression stats (observability)
     # ------------------------------------------------------------------
 
