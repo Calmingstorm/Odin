@@ -609,6 +609,23 @@ class HealthServer:
         expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, signature)
 
+    def _verify_shared_secret(self, header_value: str) -> bool:
+        """Verify a shared-secret header (e.g. Grafana X-Webhook-Secret,
+        GitLab X-Gitlab-Token) against the configured webhook secret.
+
+        **Fails closed**: returns False if no secret is configured so
+        webhooks don't accept unauthenticated POSTs when the operator
+        hasn't set one up. Odin's PR #18 self-audit finding #1: the
+        Grafana and generic webhook handlers previously gated auth on
+        ``if self._webhook_config.secret:``, silently accepting
+        everything when the secret was empty.
+        """
+        secret = self._webhook_config.secret
+        if not secret:
+            log.warning("Webhook rejected: no secret configured for shared-secret verification")
+            return False
+        return hmac.compare_digest(header_value, secret)
+
     def _get_channel_id(self, source: str) -> str | None:
         """Get the channel ID for a webhook source."""
         if source == "gitea" and self._webhook_config.gitea_channel_id:
@@ -709,11 +726,12 @@ class HealthServer:
     async def _webhook_grafana(self, request: web.Request) -> web.Response:
         body = await request.read()
 
-        # Authenticate via shared secret header (configure in Grafana contact point)
-        if self._webhook_config.secret:
-            secret_header = request.headers.get("X-Webhook-Secret", "")
-            if not hmac.compare_digest(secret_header, self._webhook_config.secret):
-                return web.json_response({"error": "invalid secret"}, status=403)
+        # Authenticate via shared secret header (configure in Grafana contact
+        # point). Fails closed — if no secret is configured server-side the
+        # request is rejected rather than accepted unauthenticated.
+        secret_header = request.headers.get("X-Webhook-Secret", "")
+        if not self._verify_shared_secret(secret_header):
+            return web.json_response({"error": "invalid secret"}, status=403)
 
         try:
             data = json.loads(body)
@@ -775,9 +793,8 @@ class HealthServer:
     async def _webhook_generic(self, request: web.Request) -> web.Response:
         body = await request.read()
         secret_header = request.headers.get("X-Webhook-Secret", "")
-        if self._webhook_config.secret and not hmac.compare_digest(
-            secret_header, self._webhook_config.secret
-        ):
+        # Fails closed — same hardening as grafana (PR #18 finding #1).
+        if not self._verify_shared_secret(secret_header):
             return web.json_response({"error": "invalid secret"}, status=403)
 
         try:

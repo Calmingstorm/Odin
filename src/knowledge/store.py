@@ -36,9 +36,25 @@ class KnowledgeStore:
         self._conn: sqlite3.Connection | None = None
         self._has_vec = False
         self._fts = fts_index
+        # Odin's PR #18 self-audit finding #3: the shared SQLite
+        # connection with ``check_same_thread=False`` was being hit by
+        # concurrent writers from ``asyncio.to_thread`` call sites and
+        # threw a stream of "bad parameter or other API misuse" errors
+        # under load (proved by live stress test with 40 concurrent
+        # ingests). Two-part fix:
+        #  1. ``busy_timeout`` lets SQLite wait for contended locks
+        #     instead of failing immediately.
+        #  2. ``_write_lock`` serializes async writers (ingest, delete)
+        #     so only one to_thread-wrapped write runs at a time.
+        #     WAL mode still allows concurrent reads, so this doesn't
+        #     hurt read latency.
+        self._write_lock = asyncio.Lock()
         try:
             conn = sqlite3.connect(db_path, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
+            # 30 seconds is generous but bounded — prevents indefinite
+            # hangs while still absorbing typical contention windows.
+            conn.execute("PRAGMA busy_timeout=30000")
             self._has_vec = load_extension(conn)
             if not self._has_vec:
                 log.warning("sqlite-vec not available — vector search disabled, FTS-only mode")
@@ -202,10 +218,7 @@ class KnowledgeStore:
         old_content = await asyncio.to_thread(self.get_source_content, source)
         is_update = old_content is not None
 
-        # Remove any existing chunks for this source (blocking → offload)
-        await asyncio.to_thread(self.delete_source, source, _record_version=False)
-
-        # Embed all chunks first (async, non-blocking)
+        # Embed all chunks first (async, non-blocking — no DB state touched).
         vectors: list[list[float] | None] = []
         for chunk in chunks:
             if self._has_vec and embedder:
@@ -216,19 +229,26 @@ class KnowledgeStore:
             else:
                 vectors.append(None)
 
-        # Batch write metadata + vectors to DB (blocking → offload)
-        indexed = await asyncio.to_thread(
-            self._write_chunks_sync, chunks, vectors, doc_hash_id, source,
-            now, uploader, doc_content_hash,
-        )
+        # Serialize ALL writes (delete + insert + version record) behind
+        # the async write lock. Pre-PR #18 this section raced itself under
+        # concurrent ingest and produced silent SQLite misuse errors.
+        async with self._write_lock:
+            # Remove any existing chunks for this source (blocking → offload)
+            await asyncio.to_thread(self.delete_source, source, _record_version=False)
 
-        # Record version
-        action = "update" if is_update else "create"
-        diff_summary = self._make_diff_summary(old_content, content)
-        await asyncio.to_thread(
-            self._record_version, source, doc_content_hash, content,
-            indexed, uploader, action, diff_summary,
-        )
+            # Batch write metadata + vectors to DB (blocking → offload)
+            indexed = await asyncio.to_thread(
+                self._write_chunks_sync, chunks, vectors, doc_hash_id, source,
+                now, uploader, doc_content_hash,
+            )
+
+            # Record version
+            action = "update" if is_update else "create"
+            diff_summary = self._make_diff_summary(old_content, content)
+            await asyncio.to_thread(
+                self._record_version, source, doc_content_hash, content,
+                indexed, uploader, action, diff_summary,
+            )
 
         log.info("Ingested '%s': %d/%d chunks indexed", source, indexed, len(chunks))
         return indexed

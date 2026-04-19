@@ -862,8 +862,16 @@ class TestConstants:
 # ---------------------------------------------------------------------------
 
 
+# PR #18: grafana webhook now fails closed when no secret is
+# configured. The integration tests default to a non-empty test secret
+# and pass the corresponding header on each POST. The explicit
+# auth-required test overrides this and verifies both paths.
+_TEST_WEBHOOK_SECRET = "test-webhook-secret"
+_TEST_WEBHOOK_HEADERS = {"X-Webhook-Secret": _TEST_WEBHOOK_SECRET}
+
+
 def _make_grafana_server(
-    *, rules=None, auto_remediate=False, webhook_secret=""
+    *, rules=None, auto_remediate=False, webhook_secret=_TEST_WEBHOOK_SECRET,
 ):
     wh_cfg = WebhookConfig(enabled=True, secret=webhook_secret, grafana_channel_id="chan1")
     ga_cfg = GrafanaAlertConfig(
@@ -908,6 +916,7 @@ class TestHealthServerGrafanaIntegration:
             resp = await client.post(
                 "/webhook/grafana",
                 json=payload,
+                headers=_TEST_WEBHOOK_HEADERS,
             )
             assert resp.status == 200
         assert len(sent) == 1
@@ -924,6 +933,7 @@ class TestHealthServerGrafanaIntegration:
             resp = await client.post(
                 "/webhook/grafana",
                 json=_legacy_payload(),
+                headers=_TEST_WEBHOOK_HEADERS,
             )
             assert resp.status == 200
         assert len(sent) == 1
@@ -941,7 +951,10 @@ class TestHealthServerGrafanaIntegration:
 
         payload = _unified_payload(_firing_alert())
         async with TestClient(TestServer(server._app)) as client:
-            resp = await client.post("/webhook/grafana", json=payload)
+            resp = await client.post(
+                "/webhook/grafana", json=payload,
+                headers=_TEST_WEBHOOK_HEADERS,
+            )
             assert resp.status == 200
 
         loop_callback.assert_called_once()
@@ -958,7 +971,10 @@ class TestHealthServerGrafanaIntegration:
 
         payload = _unified_payload(_firing_alert())
         async with TestClient(TestServer(server._app)) as client:
-            resp = await client.post("/webhook/grafana", json=payload)
+            resp = await client.post(
+                "/webhook/grafana", json=payload,
+                headers=_TEST_WEBHOOK_HEADERS,
+            )
             assert resp.status == 200
         assert "remediation" not in sent[0].lower()
 
@@ -972,7 +988,10 @@ class TestHealthServerGrafanaIntegration:
 
         payload = _unified_payload(_firing_alert())
         async with TestClient(TestServer(server._app)) as client:
-            resp = await client.post("/webhook/grafana", json=payload)
+            resp = await client.post(
+                "/webhook/grafana", json=payload,
+                headers=_TEST_WEBHOOK_HEADERS,
+            )
             assert resp.status == 200
 
     async def test_webhook_auth_required(self):
@@ -998,7 +1017,10 @@ class TestHealthServerGrafanaIntegration:
             resp = await client.post(
                 "/webhook/grafana",
                 data=b"not json",
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    **_TEST_WEBHOOK_HEADERS,
+                },
             )
             assert resp.status == 400
 
@@ -1014,7 +1036,10 @@ class TestHealthServerGrafanaIntegration:
 
         payload = _unified_payload(_resolved_alert())
         async with TestClient(TestServer(server._app)) as client:
-            resp = await client.post("/webhook/grafana", json=payload)
+            resp = await client.post(
+                "/webhook/grafana", json=payload,
+                headers=_TEST_WEBHOOK_HEADERS,
+            )
             assert resp.status == 200
         loop_callback.assert_not_called()
 
@@ -1026,7 +1051,10 @@ class TestHealthServerGrafanaIntegration:
 
         payload = _unified_payload(_firing_alert())
         async with TestClient(TestServer(server._app)) as client:
-            resp = await client.post("/webhook/grafana", json=payload)
+            resp = await client.post(
+                "/webhook/grafana", json=payload,
+                headers=_TEST_WEBHOOK_HEADERS,
+            )
             assert resp.status == 200
         trigger_cb.assert_called_once()
         call_args = trigger_cb.call_args
@@ -1046,7 +1074,10 @@ class TestHealthServerGrafanaIntegration:
             _firing_alert(), _resolved_alert("Other"),
         )
         async with TestClient(TestServer(server._app)) as client:
-            resp = await client.post("/webhook/grafana", json=payload)
+            resp = await client.post(
+                "/webhook/grafana", json=payload,
+                headers=_TEST_WEBHOOK_HEADERS,
+            )
             assert resp.status == 200
         event_data = trigger_cb.call_args[0][1]
         assert event_data["alert_count"] == 2

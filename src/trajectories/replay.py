@@ -147,26 +147,56 @@ def _tool_io_pairs(entry: dict) -> list[tuple[str, Any, str]]:
     return pairs
 
 
+# Short tokens that carry real diagnostic meaning even though the
+# generic "tokens < 3 chars are noise" rule would drop them. Odin's
+# PR #18 self-audit finding #4: dropping "db", "io", "vm", "k8s"
+# blinded similarity matching to the technical core of operator
+# queries. Keep this list small and genuinely-technical — don't
+# pack in every abbreviation that might be signal.
+_SHORT_TECHNICAL_TOKENS: frozenset[str] = frozenset({
+    # Storage / data
+    "db", "io", "s3",
+    # Infra / virtualization
+    "vm", "k8s", "aws", "gcp", "eks", "gke", "aks",
+    # Networking
+    "ip", "dns", "tcp", "udp", "ssh", "tls", "ssl", "vpn", "lan", "wan",
+    # Protocols / APIs
+    "api", "rpc", "sql", "http",
+    # Services / systems
+    "os", "ci", "cd", "qa", "ui", "ux",
+    # File / formats (less common but useful)
+    "pr", "js", "ts", "py", "md", "yaml",
+})
+
+
 def _tokenize(text: str) -> set[str]:
-    """Cheap tokenization for intent similarity. Lowercase, word-split,
-    drop tokens <3 chars. Good enough for jaccard scoring on user queries.
+    """Cheap tokenization for intent similarity. Lowercase, word-split;
+    normally drop tokens <3 chars, but keep an allowlist of short
+    technical tokens that carry genuine signal (db, io, vm, k8s, tls…).
+
+    Good enough for jaccard scoring on user queries. Short allowlist
+    is intentionally narrow so common English shorts ("to", "of",
+    "in") don't inflate similarity.
     """
     if not isinstance(text, str):
         return set()
     tokens = set()
     buf: list[str] = []
+
+    def _maybe_add(tok: str) -> None:
+        if not tok:
+            return
+        if len(tok) >= 3 or tok in _SHORT_TECHNICAL_TOKENS:
+            tokens.add(tok)
+
     for ch in text.lower():
         if ch.isalnum() or ch == "_":
             buf.append(ch)
         elif buf:
-            tok = "".join(buf)
-            if len(tok) >= 3:
-                tokens.add(tok)
+            _maybe_add("".join(buf))
             buf = []
     if buf:
-        tok = "".join(buf)
-        if len(tok) >= 3:
-            tokens.add(tok)
+        _maybe_add("".join(buf))
     return tokens
 
 

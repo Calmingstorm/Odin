@@ -159,6 +159,13 @@ class ToolsConfig(BaseModel):
     claude_code_user: str = ""
     claude_code_dir: str = "/opt/odin"
     skill_allowed_urls: list[str] = Field(default_factory=list)
+    # Odin's PR #18 self-audit caught that these were read via
+    # getattr(..., None) with hardcoded defaults in the handlers —
+    # Pydantic silently dropped the values when operators set them,
+    # so the fields looked configurable but weren't. Declaring them
+    # here fixes the silent-drop bug and makes defaults discoverable.
+    audit_log_path: str = "./data/audit.jsonl"
+    trajectory_path: str = "./data/trajectories"
     ssh_retry: RetryConfig = RetryConfig(max_retries=2, base_delay=0.5, max_delay=10.0)
     bulkhead: BulkheadConfig = BulkheadConfig()
     ssh_pool: SSHPoolConfig = SSHPoolConfig()
