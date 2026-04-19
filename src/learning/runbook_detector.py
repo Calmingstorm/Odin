@@ -630,9 +630,22 @@ def format_suggestions(
             f"on {hosts} (last: {s.last_seen[:19]})"
         )
         lines.append(header)
-        # Session-context lines only appear when a trajectory index was
-        # supplied at detection time and actually matched something;
-        # otherwise the pattern is still shown but without intent hints.
+        if s.sample_inputs:
+            lines.append("      sample steps:")
+            for step in s.sample_inputs:
+                inp = step.get("input", {})
+                parts = []
+                if inp.get("command"):
+                    parts.append(f"cmd={inp['command'][:80]}")
+                if inp.get("script"):
+                    script_preview = inp["script"].split("\n")[0][:60]
+                    parts.append(f"script={script_preview}")
+                if inp.get("path"):
+                    parts.append(f"path={inp['path']}")
+                if inp.get("host"):
+                    parts.append(f"host={inp['host']}")
+                if parts:
+                    lines.append(f"        {step.get('tool_name', '?')}: {', '.join(parts)}")
         if s.user_queries:
             err_hint = (
                 f", err_sessions={s.error_session_fraction:.0%}"

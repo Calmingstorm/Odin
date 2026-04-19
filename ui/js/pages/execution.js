@@ -42,11 +42,15 @@ export default {
           task.status = payload.metadata?.error ? 'error' : 'success';
           task.elapsed = payload.metadata?.elapsed_ms || (Date.now() - task.startTime);
           task.result = payload.detail || '';
-          activeTasks.value.splice(idx, 1);
-          recentHistory.value.unshift(task);
-          if (recentHistory.value.length > maxHistory) {
-            recentHistory.value.pop();
-          }
+          task.fadingOut = true;
+          setTimeout(() => {
+            const i = activeTasks.value.indexOf(task);
+            if (i >= 0) activeTasks.value.splice(i, 1);
+            recentHistory.value.unshift(task);
+            if (recentHistory.value.length > maxHistory) {
+              recentHistory.value.pop();
+            }
+          }, 5000);
         }
         return;
       }
@@ -113,14 +117,19 @@ export default {
           No active tool executions
         </div>
         <div v-for="task in activeTasks" :key="task.id"
-             class="bg-gray-900 rounded-lg p-3 mb-2 border border-blue-500/30">
+             class="bg-gray-900 rounded-lg p-3 mb-2"
+             :class="task.fadingOut
+               ? (task.status === 'error' ? 'border border-red-500/40' : 'border border-green-500/40')
+               : 'border border-blue-500/30'"
+             :style="task.fadingOut ? 'opacity: 0; transition: opacity 4.5s ease-out;' : ''">
           <div class="flex items-center justify-between mb-2">
             <div class="flex items-center gap-2">
-              <span class="animate-pulse text-blue-400">\u{23F3}</span>
+              <span v-if="task.fadingOut" :class="task.status === 'error' ? 'text-red-400' : 'text-green-400'">{{ statusIcon(task.status) }}</span>
+              <span v-else class="animate-pulse text-blue-400">\u{23F3}</span>
               <span class="text-white font-mono text-sm font-bold">{{ task.tool }}</span>
               <span class="text-gray-500 text-xs">iter {{ task.iteration }}</span>
             </div>
-            <span class="text-blue-400 font-mono text-sm">{{ formatMs(task.elapsed) }}</span>
+            <span :class="task.fadingOut ? 'text-gray-400' : 'text-blue-400'" class="font-mono text-sm">{{ formatMs(task.elapsed) }}</span>
           </div>
           <!-- Streaming output for this tool -->
           <div v-if="streamOutput[task.tool]"

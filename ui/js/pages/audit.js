@@ -92,7 +92,9 @@ export default {
               <td class="text-xs text-gray-400 mobile-hide">{{ e.user || e.user_id || '—' }}</td>
               <td class="text-xs text-gray-400 font-mono mobile-hide">{{ e.host || '—' }}</td>
               <td class="text-xs text-gray-400 mobile-hide">
-                {{ e.duration ? (e.duration < 1 ? (e.duration * 1000).toFixed(0) + 'ms' : e.duration.toFixed(1) + 's') : '—' }}
+                {{ e.duration ? (e.duration < 1 ? (e.duration * 1000).toFixed(0) + 'ms' : e.duration.toFixed(1) + 's')
+                   : e.execution_time_ms != null ? (e.execution_time_ms < 1000 ? e.execution_time_ms + 'ms' : (e.execution_time_ms / 1000).toFixed(1) + 's')
+                   : '—' }}
               </td>
               <td>
                 <span v-if="e.error" class="badge badge-danger">error</span>
