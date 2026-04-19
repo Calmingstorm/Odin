@@ -1309,3 +1309,104 @@ class TestClassificationPriority:
         assert classify_error(
             "Command failed (exit 255):\nConnection refused"
         ) == RecoveryCategory.SSH_TRANSIENT
+
+
+# ====================================================================
+# Executor integration — explicit end-to-end: UNSAFE_TO_RETRY + RETRY category
+# ====================================================================
+
+class TestExecutorUnsafeToolCategorizedFailure:
+    """Odin's core concern: a future table edit that gives write_file a
+    RETRY_WITH_DELAY-classified failure must NOT cause the executor to
+    re-execute write_file. Guard must hold.
+    """
+
+    @pytest.fixture
+    def executor(self):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+        config = ToolsConfig(command_timeout_seconds=5)
+        return ToolExecutor(config=config)
+
+    @pytest.mark.asyncio
+    async def test_unsafe_tool_ssh_transient_is_not_retried(self, executor):
+        """write_file hitting an SSH_TRANSIENT-classified error (currently a
+        RETRY_WITH_DELAY category) must NOT be retried — write_file is in
+        UNSAFE_TO_RETRY because it may have already executed."""
+        calls = 0
+
+        async def _handler(inp):
+            nonlocal calls
+            calls += 1
+            return "Command failed (exit 255):\nConnection refused"
+
+        executor._handle_write_file = _handler
+        result = await executor.execute(
+            "write_file", {"host": "h", "path": "/x", "content": "y"},
+        )
+        assert calls == 1, (
+            "write_file must NOT be retried even on transient errors — "
+            "the write may have already happened on the remote."
+        )
+        assert "Connection refused" in result
+        # The failure is still recorded for observability.
+        summary = executor.recovery_stats.get_summary()
+        assert summary["totals"]["failures"] == 1
+        assert summary["totals"]["attempts"] == 0, "No retry attempt should be made"
+
+    @pytest.mark.asyncio
+    async def test_safe_tool_ssh_transient_is_retried(self, executor):
+        """read_file is NOT in UNSAFE_TO_RETRY; it should be retried on
+        transient errors and succeed."""
+        calls = 0
+
+        async def _handler(inp):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "Command failed (exit 255):\nConnection refused"
+            return "ok"
+
+        executor._handle_read_file = _handler
+        result = await executor.execute("read_file", {"host": "h", "path": "/x"})
+        assert calls == 2
+        assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_safe_tool_persistent_transient_records_failure(self, executor):
+        """Read tool that keeps hitting transient errors — one retry, then failure."""
+        calls = 0
+
+        async def _handler(inp):
+            nonlocal calls
+            calls += 1
+            return "Command failed (exit 255):\nConnection refused"
+
+        executor._handle_read_file = _handler
+        result = await executor.execute("read_file", {"host": "h", "path": "/x"})
+        assert calls == 2
+        assert "Connection refused" in result
+        summary = executor.recovery_stats.get_summary()
+        assert summary["totals"]["attempts"] == 1
+        assert summary["totals"]["failures"] == 1
+
+    @pytest.mark.asyncio
+    async def test_unsafe_tool_auth_failure_hints_without_retry(self, executor):
+        """The other half of Odin's ask: confirm AUTH_FAILURE → hint (not retry)
+        even though write_file is UNSAFE_TO_RETRY — safe because hinting
+        never re-executes."""
+        calls = 0
+
+        async def _handler(inp):
+            nonlocal calls
+            calls += 1
+            return "Command failed (exit 255):\nPermission denied (publickey,password)."
+
+        executor._handle_write_file = _handler
+        result = await executor.execute(
+            "write_file", {"host": "h", "path": "/x", "content": "y"},
+        )
+        assert calls == 1
+        # Hint text must be appended without re-running the tool.
+        assert "recovery hint" in result.lower()
+        assert "authentication" in result.lower()
