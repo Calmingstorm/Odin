@@ -287,6 +287,67 @@ class TestDetectPatterns:
         )
         assert fresh.score(now=now) > stale.score(now=now)
 
+    def test_diverse_sequence_beats_self_repeat(self):
+        """The core operational-value fix: run_command × 5 (high frequency,
+        low value) must score BELOW a 3-tool diagnostic sequence even with
+        lower raw frequency."""
+        now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
+        shallow = RunbookSuggestion(
+            sequence=["run_command", "run_command", "run_command", "run_command", "run_command"],
+            frequency=500, session_count=100,
+            hosts=["hostA"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        diagnostic = RunbookSuggestion(
+            sequence=["search_audit", "read_file", "http_probe"],
+            frequency=20, session_count=10,
+            hosts=["hostA"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        assert diagnostic.score(now=now) > shallow.score(now=now), (
+            f"diagnostic {diagnostic.score(now=now):.2f} should beat "
+            f"shallow {shallow.score(now=now):.2f}"
+        )
+
+    def test_trivial_repetition_penalty(self):
+        """A pure same-tool-N-times pattern gets penalised."""
+        now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
+        pure_repeat = RunbookSuggestion(
+            sequence=["run_command"] * 5,
+            frequency=100, session_count=50,
+            hosts=["h"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        mixed = RunbookSuggestion(
+            sequence=["run_command", "read_file", "run_command", "read_file", "run_command"],
+            frequency=100, session_count=50,
+            hosts=["h"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        # Same everything except sequence composition — mixed should score higher
+        assert mixed.score(now=now) > pure_repeat.score(now=now)
+
+    def test_multi_host_scores_higher(self):
+        """A pattern observed across 3 hosts beats the same pattern on 1 host."""
+        now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
+        single_host = RunbookSuggestion(
+            sequence=["a", "b", "c"], frequency=10, session_count=5,
+            hosts=["hostA"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        multi_host = RunbookSuggestion(
+            sequence=["a", "b", "c"], frequency=10, session_count=5,
+            hosts=["hostA", "hostB", "hostC"], actors=["alice"],
+            first_seen=_iso(now - timedelta(days=1)),
+            last_seen=_iso(now - timedelta(days=1)),
+        )
+        assert multi_host.score(now=now) > single_host.score(now=now)
+
 
 class TestFormatters:
     def test_empty_summary(self):

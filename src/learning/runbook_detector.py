@@ -90,9 +90,23 @@ class RunbookSuggestion:
 
     def score(self, *, now: datetime | None = None) -> float:
         """Higher score = better candidate. Session-presence (not raw n-gram
-        count) drives the frequency term — a sequence that shows up in six
-        distinct sessions beats one that happens eight times inside two
-        sessions. Weighted further by recency and actor concentration."""
+        count) drives the frequency term, then we weight by tool
+        diversity, host diversity, recency, and actor concentration —
+        and heavily damp trivial self-repetition patterns so
+        ``run_command x 5`` can't drown out real diagnostic workflows.
+
+        Formula::
+
+            base = session_count or frequency
+            score = base
+                  * length_bonus
+                  * recency_weight
+                  * concentration_bonus
+                  * diversity_bonus
+                  * host_diversity_bonus
+                  * trivial_repetition_penalty
+
+        Each multiplier is documented inline so tuning stays visible."""
         if not self.sequence:
             return 0.0
         now = now or datetime.now(timezone.utc)
@@ -109,7 +123,50 @@ class RunbookSuggestion:
         length_bonus = 1.0 + 0.2 * (self.length - 1)
         concentration_bonus = 1.0 if len(self.actors) <= 2 else 0.75
         base = self.session_count or self.frequency
-        return base * length_bonus * recency_weight * concentration_bonus
+
+        # Tool-diversity bonus: a mixed-tool sequence (e.g.
+        # search_audit → read_file → http_probe) is a better
+        # candidate than N steps of the same tool. Scales from 1.0
+        # (all steps same tool) up to 1.5 (all steps distinct).
+        distinct_tools = len(set(self.sequence))
+        if self.length >= 1:
+            diversity_fraction = (distinct_tools - 1) / max(1, self.length - 1)
+        else:
+            diversity_fraction = 0.0
+        diversity_bonus = 1.0 + 0.5 * diversity_fraction
+
+        # Host-diversity bonus: a pattern observed on multiple hosts
+        # is more likely to be a real procedure than a single-host
+        # habit. 1.0 for ≤1 host, up to 1.3 for 3+ hosts.
+        host_count = len(self.hosts)
+        host_diversity_bonus = 1.0 + 0.15 * min(2, max(0, host_count - 1))
+
+        # Trivial-repetition penalty: damp sequences dominated by a
+        # single tool. If the most-common tool is >50% of the sequence
+        # we scale the penalty linearly; at 100% dominance (pure
+        # self-repeat like run_command × 5) the score is multiplied by
+        # 0.1 so even a high-frequency habit can't out-rank a real
+        # mixed-tool diagnostic workflow.
+        if self.sequence:
+            most_common_count = max(self.sequence.count(t) for t in set(self.sequence))
+            dominance = most_common_count / self.length
+        else:
+            dominance = 0.0
+        if dominance > 0.5:
+            # Linear falloff from 1.0 at dominance=0.5 to 0.1 at 1.0.
+            trivial_penalty = max(0.1, 1.0 - 1.8 * (dominance - 0.5))
+        else:
+            trivial_penalty = 1.0
+
+        return (
+            base
+            * length_bonus
+            * recency_weight
+            * concentration_bonus
+            * diversity_bonus
+            * host_diversity_bonus
+            * trivial_penalty
+        )
 
     def to_dict(self) -> dict:
         d = asdict(self)
