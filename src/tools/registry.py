@@ -1837,31 +1837,32 @@ TOOLS: list[dict] = [
         "name": "replay_trajectory",
         "description": (
             "Renders a past message turn as a human-readable narrative or diffs two "
-            "turns side-by-side. Mode 'summary' (default) takes a single message_id and "
-            "returns user content → tool calls (with their key inputs) → tool outputs → "
-            "final response. Mode 'diff' takes message_id + compare_to and shows where "
-            "the two turns diverged: tool-sequence differences, output deltas on the "
-            "same tool, and outcome differences. Read-only — no re-execution, no LLM "
-            "calls, purely a view over saved trajectories. Use when debugging a past "
-            "incident or comparing a successful run with a failed one."
+            "turns side-by-side. Mode 'summary' (default) takes a message_id and returns "
+            "user content → tool calls → tool outputs → final response. Mode 'diff' takes "
+            "message_id + compare_to and shows where the two turns diverged. Mode 'list' "
+            "(or any call without message_id) lists recent trajectory-bearing message IDs "
+            "so you can pick a valid one. Read-only — no re-execution, no LLM calls. "
+            "IMPORTANT: trajectories are only saved for TURN-STARTING messages. A Discord "
+            "message_id that appears only as a tool-call argument (e.g. an add_reaction "
+            "target) is NOT retrievable here — call with mode='list' first if unsure."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "message_id": {
                     "type": "string",
-                    "description": "ID of the primary trajectory turn to replay.",
+                    "description": "ID of the primary trajectory turn to replay. Omit (or use mode='list') to list recent valid IDs.",
                 },
                 "mode": {
                     "type": "string",
-                    "description": "'summary' (default) or 'diff'.",
+                    "description": "'summary' (default), 'diff', or 'list'.",
                 },
                 "compare_to": {
                     "type": "string",
                     "description": "For mode='diff': message_id of the turn to compare against.",
                 },
             },
-            "required": ["message_id"],
+            "required": [],
         },
     },
     # --- Operational learning ---

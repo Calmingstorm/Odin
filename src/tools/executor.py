@@ -1489,22 +1489,53 @@ class ToolExecutor:
         from ..trajectories.saver import TrajectorySaver
 
         message_id = str(inp.get("message_id") or "").strip()
-        if not message_id:
-            return "Error: 'message_id' is required."
         mode = str(inp.get("mode") or "summary").strip().lower()
         compare_to = str(inp.get("compare_to") or "").strip()
 
         saver = TrajectorySaver()
+
+        # Mode 'list' (and empty message_id) shows recent trajectories so the
+        # operator can pick a valid starting point. Trajectories are only
+        # saved for turn-starting user messages — not every Discord message
+        # becomes one, and Odin-side tool-call arguments that contain a
+        # message_id (e.g. add_reaction) are NOT retrievable via this tool.
+        if mode == "list" or not message_id:
+            recent = await saver.search(limit=15)
+            if not recent:
+                return "No trajectories found. Odin may not have served any messages yet on this host."
+            lines = [f"Recent {len(recent)} trajectories (newest first):"]
+            for entry in recent:
+                mid = entry.get("message_id", "?")
+                who = entry.get("user_name", "?")
+                ts = entry.get("timestamp", "")
+                preview = (entry.get("user_content") or "").strip().splitlines()
+                first_line = preview[0][:80] if preview else "(empty)"
+                is_err = "ERROR" if entry.get("is_error") else "ok"
+                lines.append(f"  {mid}  [{ts[:19]}] {who}: {first_line}  ({is_err})")
+            lines.append("")
+            lines.append("Call with mode='summary' and message_id=<ID above> to replay.")
+            return "\n".join(lines)
+
         primary = await saver.find_by_message_id(message_id)
         if not primary:
-            return f"Error: no trajectory found for message_id='{message_id}'."
+            return (
+                f"Error: no trajectory found for message_id='{message_id}'.\n"
+                "Trajectories are only saved for TURN-STARTING messages (a user's "
+                "request that kicked off tool use). A Discord message_id that appears "
+                "only as a tool-call argument (e.g. an add_reaction target) is not "
+                "retrievable here. Call replay_trajectory with mode='list' to see "
+                "recent trajectory-bearing message IDs, or search /api/trajectories."
+            )
 
         if mode == "diff":
             if not compare_to:
                 return "Error: mode='diff' requires 'compare_to' (another message_id)."
             other = await saver.find_by_message_id(compare_to)
             if not other:
-                return f"Error: no trajectory found for compare_to='{compare_to}'."
+                return (
+                    f"Error: no trajectory found for compare_to='{compare_to}'.\n"
+                    "Use mode='list' to see recent trajectory-bearing IDs."
+                )
             return diff_turns(primary, other)
         return summarize_turn(primary)
 
