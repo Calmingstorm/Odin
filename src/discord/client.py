@@ -2173,8 +2173,8 @@ class OdinBot(commands.Bot):
                 timeout=10,
             )
         except Exception as e:
-            log.warning("Completion classifier: error/timeout (%s) — treating as INCOMPLETE to avoid premature stop", e)
-            return False, ""
+            log.warning("Completion classifier: error/timeout (%s) — fail-open to COMPLETE", e)
+            return True, ""
 
         return self._parse_classifier_response(raw)
 
