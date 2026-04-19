@@ -218,7 +218,29 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/setup/complete")
     async def setup_complete(request: web.Request) -> web.Response:
-        """Receive wizard data, write config files, signal restart."""
+        """Receive wizard data, write config files, signal restart.
+
+        Gated on ``is_setup_needed()`` — once setup is done, this
+        endpoint returns ``409 Conflict`` instead of silently rewriting
+        the operator's config. Odin's PR #18 self-audit finding #2:
+        first-boot routes should stop being first-boot routes after
+        first boot.
+        """
+        config_path = Path("config.yml")
+        env_path = Path(".env")
+        if not is_setup_needed(config_path, env_path):
+            return web.json_response(
+                {
+                    "error": "setup already complete",
+                    "detail": (
+                        "The setup wizard endpoint only accepts writes on "
+                        "first boot. Use the regular config management "
+                        "endpoints to change operational settings after "
+                        "initial setup."
+                    ),
+                },
+                status=409,
+            )
         try:
             data = await request.json()
         except Exception:

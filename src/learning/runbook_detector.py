@@ -20,6 +20,7 @@ Principles:
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -194,6 +195,37 @@ class _TrajectoryRecord:
     is_error: bool
 
 
+_TRAJECTORY_FILENAME_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.jsonl$")
+
+
+def _file_is_before_cutoff(filepath: Path, since_epoch: float | None) -> bool:
+    """Odin's PR #18 self-audit finding #6: load_trajectory_index used
+    to reparse every JSONL file even when the cutoff eliminated them
+    entirely. Trajectories are written to YYYY-MM-DD.jsonl partitions,
+    so we can skip a whole file based on its filename date — no need
+    to open and scan lines we'd immediately drop.
+
+    Adds one-day slack so timezone edges and late-in-day writes don't
+    get falsely skipped.
+    """
+    if since_epoch is None:
+        return False
+    m = _TRAJECTORY_FILENAME_RE.match(filepath.name)
+    if not m:
+        return False  # unknown shape — scan it, don't silently skip
+    try:
+        file_day_end = datetime(
+            int(m.group(1)), int(m.group(2)), int(m.group(3)),
+            23, 59, 59, tzinfo=timezone.utc,
+        )
+    except ValueError:
+        return False
+    # slack: treat the file as "possibly relevant" until a full day
+    # past its date has elapsed before the cutoff.
+    slack_seconds = 86400
+    return (file_day_end.timestamp() + slack_seconds) < since_epoch
+
+
 def load_trajectory_index(
     trajectories_dir: str | Path,
     *, since_epoch: float | None = None,
@@ -213,6 +245,10 @@ def load_trajectory_index(
     except OSError as e:
         log.error("Failed to list trajectories dir %s: %s", path, e)
         return dict(out)
+    # Filename-date pre-filter: skip whole partitions whose date is
+    # well before since_epoch. Per-entry filter stays in place for
+    # edge cases in the surviving files.
+    files = [f for f in files if not _file_is_before_cutoff(f, since_epoch)]
     for filepath in files:
         try:
             with filepath.open("r") as f:
@@ -467,11 +503,26 @@ def detect_patterns(
         # caller passed a trajectories_dir). We keep only the first five
         # distinct user queries so the output doesn't balloon, and
         # compute error_session_fraction across matched sessions only.
+        #
+        # Odin's PR #18 self-audit finding #7: two different audit
+        # sessions can match to the SAME trajectory record (the matcher
+        # picks the nearest-in-time trajectory for each, and when user
+        # turns have multiple interleaved tool sessions within the skew
+        # window, several sessions share one origin turn). Naive
+        # counting treated that as "2 linked sessions" and doubled the
+        # trajectory's contribution to the error fraction. Dedupe on
+        # the trajectory identity — one trajectory contributes once.
+        seen_trajs: set[int] = set()
         linked_trajs: list[_TrajectoryRecord] = []
         for sid in distinct_sessions:
             rec = session_to_traj.get(sid)
-            if rec is not None:
-                linked_trajs.append(rec)
+            if rec is None:
+                continue
+            traj_key = id(rec)  # same object across sessions → single dedupe
+            if traj_key in seen_trajs:
+                continue
+            seen_trajs.add(traj_key)
+            linked_trajs.append(rec)
         seen_queries: list[str] = []
         for rec in linked_trajs:
             q = (rec.user_content or "").strip()

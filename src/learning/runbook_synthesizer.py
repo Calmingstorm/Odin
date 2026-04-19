@@ -130,22 +130,47 @@ CLASSIFICATION_HYBRID = "hybrid"
 CLASSIFICATION_DOCS_ONLY = "documentation_only"
 
 
-def classify_sequence(sequence: list[str]) -> str:
+def classify_sequence(
+    sequence: list[str],
+    sample_inputs: list[dict] | None = None,
+) -> str:
     """Classify a runbook sequence by whether SkillContext can run it.
 
-    Returns one of ``executable`` (every step is in SKILL_SAFE_TOOLS),
-    ``hybrid`` (some steps safe, some not), or ``documentation_only``
-    (no steps are runnable from a skill). Used by synthesizers and by
-    the summary output so operators see up-front whether the artifact
-    is automation or a checklist.
+    Returns one of ``executable`` (every step is in SKILL_SAFE_TOOLS
+    AND has captured inputs to run against), ``hybrid`` (some steps
+    safe, some not, OR safe sequence with empty inputs — operator has
+    to fill in the blanks), or ``documentation_only`` (no steps are
+    runnable from a skill). Used by synthesizers and by the summary
+    output so operators see up-front whether the artifact is automation
+    or a checklist.
+
+    Odin's PR #18 self-audit finding #9: a sequence of all-safe tools
+    paired with empty sample_inputs was classified ``executable`` even
+    though the generated skill would call tools with empty dicts and
+    produce nothing useful. When samples are missing/empty, downgrade
+    to ``hybrid`` so the classification banner reflects that operator
+    input is required.
     """
     if not sequence:
         return CLASSIFICATION_DOCS_ONLY
     safe_count = sum(1 for s in sequence if s in _SAFE_TOOLS)
-    if safe_count == len(sequence):
-        return CLASSIFICATION_EXECUTABLE
     if safe_count == 0:
         return CLASSIFICATION_DOCS_ONLY
+    if safe_count == len(sequence):
+        # Normally ``executable``, but if captured inputs are empty for
+        # every step the skill would run with empty dicts — operator
+        # must supply overrides, so this is effectively hybrid.
+        if sample_inputs is None:
+            return CLASSIFICATION_EXECUTABLE
+        if not sample_inputs:
+            return CLASSIFICATION_HYBRID
+        any_populated = any(
+            (isinstance(s, dict) and s.get("input"))
+            for s in sample_inputs
+        )
+        if not any_populated:
+            return CLASSIFICATION_HYBRID
+        return CLASSIFICATION_EXECUTABLE
     return CLASSIFICATION_HYBRID
 
 
@@ -199,9 +224,19 @@ def synthesize_runbook_code(
     classification unavoidable to anyone reading the file or browsing
     installed skills. No more checklist-wearing-a-skill's-clothes.
     """
+    steps = suggestion.sequence or []
+    # Odin's PR #18 self-audit finding #8: an empty sequence silently
+    # produced a "valid" skill shell with STEPS = [] and an empty
+    # execute body — loaded and did nothing. Fail loudly instead so
+    # the caller knows there's nothing to synthesize.
+    if not steps:
+        raise ValueError(
+            "Cannot synthesize a runbook from an empty sequence — the "
+            "generated module would load but do nothing. Provide a "
+            "non-empty sequence from detect_runbooks or another source."
+        )
     name = normalise_skill_name(skill_name or "_".join(suggestion.sequence[:3]))
     hosts = ", ".join(suggestion.hosts) or "(host unknown)"
-    steps = suggestion.sequence or []
     samples = suggestion.sample_inputs or []
     # Validate every step name BEFORE emitting source — embedding an
     # attacker-controlled string in generated code is a code-injection
@@ -210,7 +245,7 @@ def synthesize_runbook_code(
     for step in steps:
         _assert_safe_tool_name(step)
 
-    classification = classify_sequence(steps)
+    classification = classify_sequence(steps, samples)
 
     if description_override:
         description = description_override
@@ -363,7 +398,9 @@ def synthesize_summary(source: str, suggestion: RunbookSuggestion) -> str:
     checklist (documentation-only), hybrid, or executable — no more
     calling every output a "skill" regardless of whether it runs.
     """
-    classification = classify_sequence(suggestion.sequence)
+    classification = classify_sequence(
+        suggestion.sequence, suggestion.sample_inputs,
+    )
     safe = sum(1 for s in suggestion.sequence if s in _SAFE_TOOLS)
     unsafe = len(suggestion.sequence) - safe
     kind_label = {
