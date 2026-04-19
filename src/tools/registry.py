@@ -1828,6 +1828,57 @@ TOOLS: list[dict] = [
             "required": ["checks"],
         },
     },
+    # --- Operational learning ---
+    {
+        "name": "detect_runbooks",
+        "description": (
+            "Mines the audit log for repeated successful tool sequences — candidate runbooks worth "
+            "naming/codifying. A sequence is a run of consecutive non-failing tool calls by the same "
+            "actor/channel, with no more than a few minutes between steps. The tool returns ranked "
+            "suggestions: ordered tool list, frequency, hosts involved, sample inputs, and a score "
+            "that weights frequency by recency and actor-concentration. This is a SUGGESTION engine — "
+            "it creates nothing. Use it to answer 'what procedures do I keep running by hand?' "
+            "Cost: low. Risk: none (read-only)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "min_frequency": {
+                    "type": "integer",
+                    "description": "Minimum repetitions across distinct sessions for a sequence to surface. Default 3.",
+                },
+                "min_length": {
+                    "type": "integer",
+                    "description": "Minimum sequence length (inclusive). Default 2.",
+                },
+                "max_length": {
+                    "type": "integer",
+                    "description": "Maximum sequence length (inclusive). Default 5.",
+                },
+                "lookback_days": {
+                    "type": "integer",
+                    "description": "Ignore audit entries older than this many days. Default 30.",
+                },
+                "session_gap_seconds": {
+                    "type": "integer",
+                    "description": "Idle gap that starts a new session. Default 300.",
+                },
+                "ignore_tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tool names that should never appear in a detected sequence (e.g. noisy reads).",
+                },
+                "format": {
+                    "type": "string",
+                    "description": "Output format: 'summary' (default human-readable) or 'json'.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max suggestions to return in summary format. Default 10.",
+                },
+            },
+        },
+    },
 ]
 
 TOOL_MAP: dict[str, dict] = {t["name"]: t for t in TOOLS}

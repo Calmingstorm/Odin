@@ -1452,3 +1452,39 @@ class ToolExecutor:
         if fmt == "json":
             return report_as_json(report)
         return format_report_summary(report)
+
+    async def _handle_detect_runbooks(self, inp: dict) -> str:
+        from ..learning.runbook_detector import (
+            detect_patterns,
+            format_suggestions,
+            suggestions_as_json,
+        )
+
+        audit_path = getattr(self.config, "audit_log_path", None) or "./data/audit.jsonl"
+        min_freq = int(inp.get("min_frequency") or 3)
+        min_len = int(inp.get("min_length") or 2)
+        max_len = int(inp.get("max_length") or 5)
+        lookback = int(inp.get("lookback_days") or 30)
+        gap = int(inp.get("session_gap_seconds") or 300)
+        limit = int(inp.get("limit") or 10)
+        fmt = str(inp.get("format") or "summary").strip().lower()
+        ignore = inp.get("ignore_tools") or []
+        if not isinstance(ignore, list):
+            ignore = []
+
+        # Run the I/O + CPU work off the event loop.
+        def _scan() -> list:
+            return detect_patterns(
+                audit_path,
+                min_frequency=max(1, min_freq),
+                min_length=max(2, min_len),
+                max_length=max(min_len, max_len),
+                lookback_days=max(1, min(lookback, 365)),
+                session_gap_seconds=max(30, min(gap, 7200)),
+                ignore_tools=[str(t) for t in ignore],
+            )
+
+        suggestions = await asyncio.to_thread(_scan)
+        if fmt == "json":
+            return suggestions_as_json(suggestions[:limit])
+        return format_suggestions(suggestions, limit=max(1, min(limit, 50)))
