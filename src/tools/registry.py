@@ -1911,6 +1911,41 @@ TOOLS: list[dict] = [
             },
         },
     },
+    {
+        "name": "synthesize_runbook",
+        "description": (
+            "Turns a detected runbook pattern (from detect_runbooks) into a reviewable Python "
+            "skill skeleton. The generated skill runs the safe read-only steps via SkillContext "
+            "and documents the unsafe steps (run_command, write_file, etc.) as TODO blocks with "
+            "their captured inputs — those can't run from the skill sandbox and the operator "
+            "must decide how to handle them. Does NOT auto-register the skill; returns the code "
+            "for review. Operator can then call create_skill() if they like it. Sample inputs "
+            "are secret-scrubbed the same way detect_runbooks scrubs them. Cost: low. Risk: none."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sequence": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered tool-name sequence of the runbook. Typically from detect_runbooks output.",
+                },
+                "skill_name": {
+                    "type": "string",
+                    "description": "Optional skill identifier (will be normalised to snake_case).",
+                },
+                "description_override": {
+                    "type": "string",
+                    "description": "Optional human description to use instead of the auto-generated one.",
+                },
+                "format": {
+                    "type": "string",
+                    "description": "'source' (default — returns the full skill source code) or 'summary'.",
+                },
+            },
+            "required": ["sequence"],
+        },
+    },
 ]
 
 TOOL_MAP: dict[str, dict] = {t["name"]: t for t in TOOLS}
