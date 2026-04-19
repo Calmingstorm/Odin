@@ -129,6 +129,10 @@ _RECOVERABLE_PATTERNS: dict[RecoveryCategory, tuple[str, ...]] = {
         "Authentication failed",
         "401 Unauthorized",
         "403 Forbidden",
+        # HTTP status strings from aiohttp use "<code>: <reason>" — the
+        # colon-form needs its own entry.
+        "HTTP 401:",
+        "HTTP 403:",
         "Bad credentials",
         "invalid_token",
         "token expired",
@@ -136,6 +140,9 @@ _RECOVERABLE_PATTERNS: dict[RecoveryCategory, tuple[str, ...]] = {
     ),
     RecoveryCategory.NOT_FOUND: (
         "404 Not Found",
+        # aiohttp resp.reason form: "HTTP 404: Not Found" — different
+        # from the bare "404 Not Found" pattern, so list both.
+        "HTTP 404:",
         "No such file or directory",
         "does not exist",
         "ENOENT",
@@ -153,6 +160,18 @@ _RECOVERABLE_PATTERNS: dict[RecoveryCategory, tuple[str, ...]] = {
         "No module named",
         "manifest unknown",
         "Unable to find image",
+        # Debian/Ubuntu `sh` emits "<cmd>: not found" (no "command"
+        # prefix) when a binary isn't on PATH. Typical shape:
+        #   /bin/sh: 1: kubectl: not found
+        # Order matters: the newline-anchored pattern is the clean
+        # match; the second, unanchored pattern is a fallback for
+        # output truncated at MAX_RESULT mid-line or emitted without
+        # a trailing newline. NOT_FOUND owns "not found in" and is
+        # checked first in _CLASSIFICATION_PRIORITY, so mid-line
+        # prose like "error: config key: not found in map" routes
+        # correctly and never reaches this fallback.
+        ": not found\n",
+        ": not found",
     ),
     RecoveryCategory.PERMISSION_DENIED: (
         "Permission denied",

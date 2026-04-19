@@ -1410,3 +1410,120 @@ class TestExecutorUnsafeToolCategorizedFailure:
         # Hint text must be appended without re-running the tool.
         assert "recovery hint" in result.lower()
         assert "authentication" in result.lower()
+
+
+# ====================================================================
+# Pattern-coverage gaps surfaced during post-deploy smoke testing
+# ====================================================================
+
+class TestPatternCoverageGaps:
+    """Smoke testing on 2026-04-19 surfaced two pattern-coverage gaps:
+    Ubuntu's `sh` uses "<cmd>: not found" (no 'command' prefix), and
+    fetch_url returned HTTP status strings without an "Error:" prefix
+    so classify_error couldn't see them. These tests lock the fixes."""
+
+    def test_ubuntu_sh_missing_binary_classifies_as_dependency(self):
+        """The exact shape Odin reproduced in smoke test: Ubuntu sh on
+        a container with kubectl not installed."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        result = "Command failed (exit 127):\n/bin/sh: 1: kubectl: not found\n"
+        assert classify_error(result) == RecoveryCategory.DEPENDENCY_MISSING
+
+    def test_ubuntu_sh_missing_binary_no_newline_still_matches(self):
+        """Odin's PR #15 round-1 note: output truncated mid-line at the
+        MAX_RESULT cap, or emitted without a trailing newline, must still
+        classify. The unanchored ': not found' fallback covers this."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        result = "Command failed (exit 127):\n/bin/sh: 1: kubectl: not found"
+        assert classify_error(result) == RecoveryCategory.DEPENDENCY_MISSING
+
+    def test_mid_line_not_found_routes_to_not_found_not_dependency(self):
+        """Priority ordering check: NOT_FOUND owns 'not found in' and is
+        checked before DEPENDENCY_MISSING, so prose like 'key: not found
+        in map' routes to NOT_FOUND and doesn't miscategorize as a
+        missing dependency despite the fallback pattern."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        result = "Command failed (exit 1):\nerror: config key: not found in map"
+        assert classify_error(result) == RecoveryCategory.NOT_FOUND
+
+    def test_fetch_url_404_is_classifiable(self):
+        """fetch_url now prefixes non-2xx with 'Error:' so the classifier
+        sees the error shape and tags NOT_FOUND. Locks the contract."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        result = "Error: HTTP 404: Not Found"
+        assert classify_error(result) == RecoveryCategory.NOT_FOUND
+
+    def test_fetch_url_401_classifies_as_auth(self):
+        from src.tools.recovery import classify_error, RecoveryCategory
+        result = "Error: HTTP 401: Unauthorized"
+        assert classify_error(result) == RecoveryCategory.AUTH_FAILURE
+
+    def test_fetch_url_403_classifies_as_auth(self):
+        from src.tools.recovery import classify_error, RecoveryCategory
+        # 403 Forbidden is an auth pattern — verify it hits AUTH_FAILURE
+        # (the priority list has AUTH before PERMISSION, so pubkey-style
+        # HTTP errors don't mislabel as permission denied).
+        result = "Error: HTTP 403: Forbidden"
+        assert classify_error(result) == RecoveryCategory.AUTH_FAILURE
+
+    @pytest.mark.asyncio
+    async def test_fetch_url_client_error_has_error_prefix(self):
+        """Odin's PR #15 round-2 non-blocker: replace placeholder with a
+        real mocked test. The specific contract changed by this PR is
+        that aiohttp.ClientError now produces a return string starting
+        with 'Error:' (was 'Fetch error:'), so classify_error can at
+        least see it has the right shape. We don't assert a specific
+        category here — the str form of aiohttp errors varies across
+        versions, and classification of network errors is covered by
+        the broader CONNECTION_ERROR tests using known patterns."""
+        import aiohttp
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.tools.web import fetch_url
+
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.get = MagicMock(
+            side_effect=aiohttp.ClientConnectionError("connection reset")
+        )
+
+        with patch("src.tools.web.aiohttp.ClientSession", return_value=mock_session):
+            result = await fetch_url("https://example.com/anything")
+
+        assert result.startswith("Error:"), f"expected 'Error:' prefix, got: {result!r}"
+        assert "connection reset" in result
+
+    @pytest.mark.asyncio
+    async def test_fetch_url_404_shape_end_to_end(self):
+        """Round-trip the 404 path: the handler emits 'Error: HTTP 404:
+        Not Found' and classify_error then tags NOT_FOUND. Proves the
+        two PR halves (handler prefix + recovery pattern) compose."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.tools.web import fetch_url
+        from src.tools.recovery import classify_error, RecoveryCategory
+
+        mock_resp = MagicMock()
+        mock_resp.status = 404
+        mock_resp.reason = "Not Found"
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.get = MagicMock(return_value=mock_resp)
+
+        with patch("src.tools.web.aiohttp.ClientSession", return_value=mock_session):
+            result = await fetch_url("https://example.com/missing")
+
+        assert result == "Error: HTTP 404: Not Found"
+        assert classify_error(result) == RecoveryCategory.NOT_FOUND
+
+    def test_fetch_url_5xx_classifies_as_error_not_hint(self):
+        """5xx errors don't map to any recovery category we define, so
+        they shouldn't falsely trigger a hint — only 4xx auth/not_found
+        categories should fire."""
+        from src.tools.recovery import classify_error, RecoveryCategory
+        result = "Error: HTTP 503: Service Unavailable"
+        # No category pattern matches this; classify returns None.
+        assert classify_error(result) is None
