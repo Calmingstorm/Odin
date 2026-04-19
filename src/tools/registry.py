@@ -1762,6 +1762,72 @@ TOOLS: list[dict] = [
             "required": ["plan"],
         },
     },
+    # --- Post-action validation ---
+    {
+        "name": "validate_action",
+        "description": (
+            "Runs a bundle of validation checks after an operational change (deploy, restart, config "
+            "push, migration) to confirm the system is actually healthy — not just that the preceding "
+            "commands returned exit 0. Checks run concurrently on managed hosts. Never blocks; verdict "
+            "is informational. Verdict: 'pass' (all OK), 'degraded' (only warn-severity failures), "
+            "'fail' (≥1 critical failure), 'error' (every check errored — likely config issue). "
+            "Use this after deploys, service restarts, firewall changes, DNS updates, schema migrations. "
+            "Cost: low-medium. Risk: none. Latency: depends on slowest check.\n"
+            "\n"
+            "Check types:\n"
+            "  http            target=URL, expected=status code or list (default [200,201,204,301,302,307,308])\n"
+            "  port            target='host:port' or just 'port' (implies 127.0.0.1)\n"
+            "  service         target=systemd unit name, expected='active' or list of states\n"
+            "  process         target=pgrep pattern\n"
+            "  log_absent      target='unit=NAME:PATTERN' or plain regex — passes if pattern NOT found\n"
+            "  log_present     same target format — passes if pattern IS found\n"
+            "  command         target=shell command, compare='exit_zero'|'exit_nonzero'|'contains'|'not_contains'|'equals'|'regex_match'\n"
+            "\n"
+            "Each check: {type, target, severity?, host?, expected?, compare?, window_seconds?, timeout_seconds?, name?}.\n"
+            "Severity 'critical' (default), 'warn', or 'info'. Only critical failures flip verdict to 'fail'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "bundle_name": {
+                    "type": "string",
+                    "description": "Short label for this bundle (e.g. 'after_nginx_restart')",
+                },
+                "default_host": {
+                    "type": "string",
+                    "description": "Host alias used for any check without an explicit 'host'. Defaults to 'localhost'.",
+                },
+                "grace_seconds": {
+                    "type": "integer",
+                    "description": "Optional wait before running checks (0-60), to let services settle.",
+                },
+                "format": {
+                    "type": "string",
+                    "description": "Output format: 'summary' (human-readable, default) or 'json' (full structured report).",
+                },
+                "checks": {
+                    "type": "array",
+                    "description": "List of validation checks (max 25).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "description": "http|port|service|process|log_absent|log_present|command"},
+                            "target": {"type": "string"},
+                            "expected": {"description": "Type-specific expectation (int, string, list)"},
+                            "severity": {"type": "string", "description": "critical (default) | warn | info"},
+                            "host": {"type": "string"},
+                            "compare": {"type": "string"},
+                            "window_seconds": {"type": "integer"},
+                            "timeout_seconds": {"type": "integer"},
+                            "name": {"type": "string"},
+                        },
+                        "required": ["type", "target"],
+                    },
+                },
+            },
+            "required": ["checks"],
+        },
+    },
 ]
 
 TOOL_MAP: dict[str, dict] = {t["name"]: t for t in TOOLS}

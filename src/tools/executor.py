@@ -1413,3 +1413,42 @@ class ToolExecutor:
 
         runner = PlanRunner()
         return await runner.run(inp)
+
+    async def _handle_validate_action(self, inp: dict) -> str:
+        from .post_validation import (
+            format_report_summary,
+            report_as_json,
+            run_bundle,
+        )
+
+        raw_checks = inp.get("checks")
+        if not isinstance(raw_checks, list) or not raw_checks:
+            return "Error: 'checks' must be a non-empty list. See tool description for check schema."
+
+        bundle_name = str(inp.get("bundle_name") or "unnamed").strip()[:120]
+        default_host = inp.get("default_host")
+        default_host = str(default_host).strip() if default_host else None
+        grace_seconds = int(inp.get("grace_seconds") or 0)
+        grace_seconds = max(0, min(grace_seconds, 60))
+        fmt = str(inp.get("format") or "summary").strip().lower()
+
+        async def _exec(address: str, command: str, ssh_user: str, *, timeout: int) -> tuple[int, str]:
+            prev = self._current_tool_timeout
+            self._current_tool_timeout = timeout
+            try:
+                return await self._exec_command(address, command, ssh_user, timeout=timeout)
+            finally:
+                self._current_tool_timeout = prev
+
+        report = await run_bundle(
+            raw_checks,
+            bundle_name=bundle_name,
+            default_host=default_host,
+            resolve_host=self._resolve_host,
+            exec_command=_exec,
+            grace_seconds=grace_seconds,
+        )
+
+        if fmt == "json":
+            return report_as_json(report)
+        return format_report_summary(report)
