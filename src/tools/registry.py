@@ -1926,12 +1926,17 @@ TOOLS: list[dict] = [
         "name": "synthesize_runbook",
         "description": (
             "Turns a detected runbook pattern (from detect_runbooks) into a reviewable Python "
-            "skill skeleton. The generated skill runs the safe read-only steps via SkillContext "
-            "and documents the unsafe steps (run_command, write_file, etc.) as TODO blocks with "
-            "their captured inputs — those can't run from the skill sandbox and the operator "
-            "must decide how to handle them. Does NOT auto-register the skill; returns the code "
-            "for review. Operator can then call create_skill() if they like it. Sample inputs "
-            "are secret-scrubbed the same way detect_runbooks scrubs them. Cost: low. Risk: none."
+            "module, CLASSIFIED up front as 'executable', 'hybrid', or 'checklist' "
+            "(documentation only) based on whether the constituent tools are SkillContext-safe. "
+            "The classification lands in the generated docstring banner, a module-level "
+            "SYNTHESIS_CLASSIFICATION constant, a SKILL_DEFINITION.tags entry, and the "
+            "description prefix — so operators can't mistake a checklist for automation. "
+            "- 'executable': every step is SkillContext-safe; loads and runs end-to-end. "
+            "- 'hybrid': some safe steps, some unsafe; safe steps run, unsafe steps print "
+            "documentation with captured input for operator execution. "
+            "- 'checklist': no safe steps; loads but runs nothing, serves as structured docs. "
+            "Does NOT auto-register; returns code for review. Sample inputs secret-scrubbed. "
+            "Cost: low. Risk: none."
         ),
         "input_schema": {
             "type": "object",

@@ -192,3 +192,147 @@ class TestSynthesizeSummary:
         s = _suggestion(["http_probe"])
         source = synthesize_skill_code(s)
         assert "create_skill" in synthesize_summary(source, s)
+
+
+class TestClassification:
+    """Addresses Odin's PR #16 post-merge critique: synthesized output
+    must declare up front whether it's automation or documentation.
+    `synthesize_runbook` used to produce checklist-wearing-a-skill's-
+    clothes regardless of whether steps were actually runnable. Now
+    every output carries a classification."""
+
+    def test_all_safe_sequence_classified_executable(self):
+        from src.learning.runbook_synthesizer import (
+            CLASSIFICATION_EXECUTABLE,
+            classify_sequence,
+        )
+        # All of these are in SKILL_SAFE_TOOLS
+        assert classify_sequence(
+            ["http_probe", "read_file", "search_audit"],
+        ) == CLASSIFICATION_EXECUTABLE
+
+    def test_all_unsafe_sequence_classified_docs_only(self):
+        from src.learning.runbook_synthesizer import (
+            CLASSIFICATION_DOCS_ONLY,
+            classify_sequence,
+        )
+        assert classify_sequence(
+            ["run_command", "write_file", "claude_code"],
+        ) == CLASSIFICATION_DOCS_ONLY
+
+    def test_mixed_sequence_classified_hybrid(self):
+        from src.learning.runbook_synthesizer import (
+            CLASSIFICATION_HYBRID,
+            classify_sequence,
+        )
+        assert classify_sequence(
+            ["claude_code", "read_file", "run_command"],
+        ) == CLASSIFICATION_HYBRID
+
+    def test_empty_sequence_is_docs_only(self):
+        from src.learning.runbook_synthesizer import (
+            CLASSIFICATION_DOCS_ONLY,
+            classify_sequence,
+        )
+        assert classify_sequence([]) == CLASSIFICATION_DOCS_ONLY
+
+    def test_generated_source_carries_classification_constant(self):
+        """SYNTHESIS_CLASSIFICATION must be a literal in the source,
+        so tests and operators can grep for it without importing."""
+        s = _suggestion(["run_command", "write_file"])
+        source = synthesize_skill_code(s)
+        assert "SYNTHESIS_CLASSIFICATION = 'documentation_only'" in source
+
+    def test_executable_classification_lands_in_tags(self):
+        s = _suggestion(["http_probe", "read_file"])
+        source = synthesize_skill_code(s)
+        assert "'executable'" in source
+        assert "'documentation_only'" not in source
+        # Tags list must contain the classification
+        assert "\"runbook\", \"synthesized\", 'executable'" in source
+
+    def test_docs_only_description_prefixed_with_checklist(self):
+        """Operators see the [checklist] tag in create_skill / list_skills
+        output without opening the generated file."""
+        s = _suggestion(["run_command", "write_file"])
+        source = synthesize_skill_code(s)
+        # Description (inside SKILL_DEFINITION) starts with [checklist]
+        assert "[checklist]" in source
+
+    def test_hybrid_description_prefixed_with_hybrid(self):
+        s = _suggestion(["run_command", "read_file"])
+        source = synthesize_skill_code(s)
+        assert "[hybrid]" in source
+
+    def test_executable_description_prefixed_with_executable(self):
+        s = _suggestion(["http_probe", "read_file"])
+        source = synthesize_skill_code(s)
+        assert "[executable]" in source
+
+    def test_banner_warns_on_checklist(self):
+        """The docstring banner must make it impossible to mistake a
+        checklist for automation."""
+        s = _suggestion(["run_command", "claude_code"])
+        source = synthesize_skill_code(s)
+        assert "CHECKLIST (documentation only)" in source
+        assert "Do not mistake this for automation" in source
+
+    def test_banner_warns_on_hybrid(self):
+        s = _suggestion(["run_command", "read_file"])
+        source = synthesize_skill_code(s)
+        assert "HYBRID RUNBOOK" in source
+        # textwrap.fill may split the banner across lines; test tolerates
+        # that by checking for unambiguous short signal phrases.
+        assert "TODO blocks" in source
+        assert "SkillContext" in source
+
+    def test_banner_confirms_executable(self):
+        s = _suggestion(["http_probe", "read_file"])
+        source = synthesize_skill_code(s)
+        assert "EXECUTABLE RUNBOOK" in source
+        assert "real automation" in source
+
+    def test_description_override_still_gets_classification_prefix(self):
+        """Even when the caller passes description_override, the
+        classification tag must be prepended so honest labeling isn't
+        bypassed by a well-meaning renamer."""
+        s = _suggestion(["run_command", "write_file"])
+        source = synthesize_skill_code(
+            s, description_override="my cool procedure",
+        )
+        assert "[checklist] my cool procedure" in source
+
+    def test_summary_uses_classification_vocabulary(self):
+        from src.learning.runbook_synthesizer import synthesize_summary
+        s = _suggestion(["run_command", "write_file"])
+        source = synthesize_skill_code(s)
+        summary = synthesize_summary(source, s)
+        # New vocabulary: no more "runbook skill" for a thing that runs nothing
+        assert "checklist (documentation only)" in summary
+        assert "This is a CHECKLIST, not automation" in summary
+
+    def test_summary_hybrid_vocabulary(self):
+        from src.learning.runbook_synthesizer import synthesize_summary
+        s = _suggestion(["run_command", "read_file"])
+        source = synthesize_skill_code(s)
+        summary = synthesize_summary(source, s)
+        assert "hybrid runbook" in summary
+        assert "Partial automation" in summary
+
+    def test_summary_executable_vocabulary(self):
+        from src.learning.runbook_synthesizer import synthesize_summary
+        s = _suggestion(["http_probe", "read_file"])
+        source = synthesize_skill_code(s)
+        summary = synthesize_summary(source, s)
+        assert "executable runbook" in summary
+        assert "Fully executable" in summary
+
+
+class TestBackwardCompat:
+    def test_synthesize_skill_code_alias_exists(self):
+        """During rollout, callers still import synthesize_skill_code."""
+        from src.learning.runbook_synthesizer import (
+            synthesize_runbook_code,
+            synthesize_skill_code,
+        )
+        assert synthesize_skill_code is synthesize_runbook_code

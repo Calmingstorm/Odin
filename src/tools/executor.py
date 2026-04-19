@@ -1574,7 +1574,7 @@ class ToolExecutor:
     async def _handle_synthesize_runbook(self, inp: dict) -> str:
         from ..learning.runbook_detector import RunbookSuggestion, detect_patterns
         from ..learning.runbook_synthesizer import (
-            synthesize_skill_code,
+            synthesize_runbook_code,
             synthesize_summary,
         )
 
@@ -1612,7 +1612,7 @@ class ToolExecutor:
 
         skill_name = inp.get("skill_name")
         desc = inp.get("description_override")
-        source = synthesize_skill_code(
+        source = synthesize_runbook_code(
             found,
             skill_name=str(skill_name) if skill_name else None,
             description_override=str(desc) if desc else None,
