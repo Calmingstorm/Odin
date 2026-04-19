@@ -2231,12 +2231,13 @@ class OdinBot(commands.Bot):
         # Insert context separator between history and the current user request
         # so Codex evaluates tools fresh instead of repeating patterns from history
         is_bot_message = getattr(message.author, "bot", False) and self.config.discord.respond_to_bots
-        # Always inject message ID so the LLM can reference it (e.g. add_reaction)
-        msg_id_note = f"Current message ID: {message.id}"
-        # Generate request hash + metadata for disambiguation
-        _content_str = message.content if isinstance(message.content, str) else str(message.id)
-        req_hash = hashlib.sha256(_content_str.encode()).hexdigest()[:8]
-        req_time = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        from .tool_loop_helpers import (
+            build_request_preamble,
+            compute_request_id,
+            current_request_time,
+        )
+        req_hash = compute_request_id(message.content if isinstance(message.content, str) else str(message.id))
+        req_time = current_request_time()
         user_display = getattr(message.author, "display_name", str(message.author))
         # Build channel context line for spatial awareness
         _ch = message.channel
@@ -2246,42 +2247,22 @@ class OdinBot(commands.Bot):
             channel_ctx = f"Channel: #{_ch.parent.name} → thread: {_ch_name}"
         else:
             channel_ctx = f"Channel: #{_ch_name}"
+        preamble = build_request_preamble(
+            request_id=req_hash,
+            request_time=req_time,
+            user_display=user_display,
+            user_id=message.author.id,
+            message_id=message.id,
+            channel_description=channel_ctx,
+            has_history=len(messages) > 1,
+            topic_change=topic_change,
+            from_another_bot=is_bot_message,
+        )
         if len(messages) > 1:
-            sep_text = (
-                f"=== CURRENT REQUEST [req-{req_hash}] ===\n"
-                f"Time: {req_time}\n"
-                f"From: {user_display} (ID: {message.author.id})\n"
-                f"{channel_ctx}\n"
-                f"{msg_id_note}\n"
-                "--- HISTORY ABOVE | REQUEST BELOW ---\n"
-                "Messages above are HISTORY — context for understanding what happened. "
-                "History is NOT a task queue. Each message above was a SEPARATE request. "
-                "Act ONLY on the new message below — do not replay other requests from history. "
-                "If asked to 'redo' or 'do what was asked', identify the ONE specific task "
-                "being referenced — do not sweep through history re-executing everything. "
-                "Evaluate tools fresh. Do not repeat prior refusals."
-            )
-            if topic_change:
-                sep_text += (
-                    "\n\nTOPIC CHANGE DETECTED. The user has switched to a new subject. "
-                    "History above is from a DIFFERENT topic — do NOT carry over "
-                    "assumptions, hosts, files, or context from the previous topic. "
-                    "Treat this as a fresh request."
-                )
-            if is_bot_message:
-                sep_text += (
-                    "\n\nIMPORTANT: This message is from ANOTHER BOT. "
-                    "Bots cannot confirm, choose, or approve. "
-                    "EXECUTE immediately — never hedge, ask permission, or say "
-                    "'if you want' / 'shall I' / 'would you like'. "
-                    "If the message contains code, use run_script to execute it. "
-                    "If it asks for output, call the tool and paste raw results."
-                )
-            separator = {"role": "developer", "content": sep_text}
-            messages.insert(-1, separator)
+            messages.insert(-1, preamble)
         else:
             # No history — still provide message ID + channel context
-            messages.insert(0, {"role": "developer", "content": f"{channel_ctx}\n{msg_id_note}"})
+            messages.insert(0, preamble)
 
         # Track which tools are used during this loop for tool memory
         # Local variable (not instance attr) to avoid cross-channel contamination
