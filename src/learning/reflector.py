@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -251,8 +251,21 @@ class ConversationReflector:
                 len(new_entries), len(merged),
             )
 
+    _MAX_ENTRY_AGE_DAYS = 90
+
     async def _consolidate(self, entries: list[dict]) -> list[dict]:
         """Ask the LLM to merge entries down to the consolidation target."""
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=self._MAX_ENTRY_AGE_DAYS)
+        before = len(entries)
+        entries = [
+            e for e in entries
+            if not e.get("created_at") or datetime.fromisoformat(e["created_at"]) > cutoff
+        ]
+        if len(entries) < before:
+            log.info("Reflector: expired %d entries older than %d days", before - len(entries), self._MAX_ENTRY_AGE_DAYS)
+        if not entries:
+            return []
         entries_text = json.dumps(entries, indent=2)
         prompt = (
             _CONSOLIDATION_HEADER + str(self._consolidation_target)

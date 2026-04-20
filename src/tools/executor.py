@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import shlex
 from pathlib import Path
 
@@ -440,7 +441,7 @@ class ToolExecutor:
         # Base64-encode script to avoid all quoting/heredoc issues
         encoded = base64.b64encode(script.encode()).decode()
 
-        safe_filename = shlex.quote(filename)
+        safe_filename = shlex.quote(os.path.basename(filename))
         # Write to temp file, execute, capture output, clean up
         cmd = (
             f"TMPF=$(mktemp /tmp/{safe_filename}.XXXXXXXX) && "

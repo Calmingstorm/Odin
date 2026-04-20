@@ -64,6 +64,8 @@ logs/
 build-loop.sh
 build_log.txt
 build_log_*.txt
+CLAUDE.md
+BUILD_STATUS.md
 
 # Runtime state (credentials, sessions, knowledge DB, trajectories, logs)
 data/

@@ -20,6 +20,8 @@ OUTPUT_SECRET_PATTERNS = [
     re.compile(r"gh[pousr]_[A-Za-z0-9_]{36,}"),
     # AWS access key IDs
     re.compile(r"AKIA[0-9A-Z]{16}"),
+    # AWS secret access keys
+    re.compile(r"(?:aws_secret_access_key|aws_secret_key)\s*[:=]\s*[A-Za-z0-9/+=]{40}", re.IGNORECASE),
     # Stripe live/test secret keys
     re.compile(r"[sr]k_(live|test)_[A-Za-z0-9]{20,}"),
     # Slack tokens (xoxb, xoxp, xoxa, xoxo, xoxr, xoxs)
