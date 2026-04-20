@@ -53,7 +53,7 @@ class TestGetAffordance:
 
     def test_new_tools_have_entries(self):
         """Tools added in this branch must be in the affordance table."""
-        for name in ("validate_action", "detect_runbooks"):
+        for name in ("validate_action",):
             aff = get_affordance(name)
             assert aff.risk == Risk.NONE
 

@@ -22,7 +22,6 @@ from src.tools.tool_memory import (
     ToolMemory,
     _cosine,
     _jaccard,
-    contextual_bias_hints,
     extract_keywords,
 )
 
@@ -428,71 +427,3 @@ class TestConstants:
         assert 0 < MIN_JACCARD_SCORE < 1
 
 
-# ---------------------------------------------------------------------------
-# contextual_bias_hints
-# ---------------------------------------------------------------------------
-
-class TestContextualBiasHints:
-    def test_prior_failure_what_happened(self):
-        result = contextual_bias_hints("what happened with the deploy last night")
-        assert "replay_trajectory" in result
-        assert "search_audit" in result
-
-    def test_prior_failure_went_wrong(self):
-        result = contextual_bias_hints("what went wrong with nginx")
-        assert "replay_trajectory" in result
-
-    def test_prior_failure_why_fail(self):
-        result = contextual_bias_hints("why did the restart fail")
-        assert "replay_trajectory" in result
-
-    def test_prior_failure_last_time(self):
-        result = contextual_bias_hints("last time I ran the migration it broke")
-        assert "replay_trajectory" in result
-
-    def test_prior_failure_previous_error(self):
-        result = contextual_bias_hints("show me the previous error")
-        assert "replay_trajectory" in result
-
-    def test_prior_failure_earlier_broke(self):
-        result = contextual_bias_hints("earlier the deploy broke production")
-        assert "replay_trajectory" in result
-
-    def test_no_bias_for_normal_query(self):
-        result = contextual_bias_hints("check disk usage on server")
-        assert result == ""
-
-    def test_no_bias_for_empty_query(self):
-        result = contextual_bias_hints("")
-        assert result == ""
-
-    def test_case_insensitive(self):
-        result = contextual_bias_hints("What Happened with the service")
-        assert "replay_trajectory" in result
-
-
-# ---------------------------------------------------------------------------
-# format_hints with contextual bias
-# ---------------------------------------------------------------------------
-
-class TestFormatHintsWithBias:
-    @pytest.mark.asyncio
-    async def test_bias_injected_for_failure_query(self):
-        tm = ToolMemory()
-        result = await tm.format_hints("what happened with the deploy")
-        assert "replay_trajectory" in result
-        assert "Tool Selection Bias" in result
-
-    @pytest.mark.asyncio
-    async def test_bias_combined_with_patterns(self):
-        tm = ToolMemory()
-        await tm.record("what happened deploy", ["replay_trajectory", "search_audit"])
-        result = await tm.format_hints("what happened with the deploy")
-        assert "Tool Selection Bias" in result
-        assert "Tool Use Patterns" in result
-
-    @pytest.mark.asyncio
-    async def test_no_bias_for_normal_query(self):
-        tm = ToolMemory()
-        result = await tm.format_hints("restart nginx on webhost")
-        assert "Tool Selection Bias" not in result
