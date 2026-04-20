@@ -41,25 +41,30 @@ _STOP_WORDS = frozenset({
 _WORD_RE = re.compile(r"[a-z0-9_]+")
 
 _PRIOR_FAILURE_RE = re.compile(
-    r"(?:what happened|went wrong|why did .* fail|last time|previous.* (?:fail|error|crash|issue)"
-    r"|prior (?:failure|error|incident|turn)|earlier.* (?:fail|broke|error)"
-    r"|what went wrong|why .* broke|replay|show me (?:the|that) (?:failure|error))",
+    r"(?:what happened|went wrong|why did .* fail|last time|last failure|last error"
+    r"|previous(?:ly)?(?:.*(?:turn|run|attempt|fail|error|crash|issue|incident))?"
+    r"|prior (?:failure|error|incident|turn|run|attempt)"
+    r"|earlier.*(?:fail|broke|error|went wrong|turn)"
+    r"|what went wrong|why .* broke|replay|show me (?:the|that) (?:failure|error|turn)"
+    r"|why did you do|what happened before|previous turn|prior turn|earlier turn)",
     re.IGNORECASE,
 )
 
 
 def contextual_bias_hints(query: str) -> str:
     """Return static tool-selection bias hints based on query content."""
+    hints: list[str] = []
     if _PRIOR_FAILURE_RE.search(query):
-        return (
-            "## Tool Selection Bias\n"
+        hints.append(
             "This looks like a question about a prior failure or previous turn. "
             "Use `replay_trajectory` first — it reconstructs exact tool calls and "
             "outputs from that turn. Only fall back to `search_audit` if the "
             "trajectory is unavailable or a broader time-range search is needed."
         )
-    return ""
-
+    return (
+        "## Tool Selection Bias\n" + "\n".join(f"- {hint}" for hint in hints)
+        if hints else ""
+    )
 
 def extract_keywords(text: str) -> list[str]:
     """Extract meaningful keywords from a query string."""
