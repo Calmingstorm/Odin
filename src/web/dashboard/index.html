@@ -3,13 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Odin Dashboard</title>
+    <title>Odin — Autonomous Execution Agent</title>
+    <meta name="description" content="Odin executes real work from Discord: incident response, deploys, investigations, automation, and post-change validation across shell, browser, files, and infrastructure tools.">
     <link rel="stylesheet" href="/static/css/odin.css">
 </head>
 <body>
     <header class="odin-header">
         <h1>Odin</h1>
         <nav class="odin-nav">
+            <a href="#capabilities">Capabilities</a>
+            <a href="#examples">Examples</a>
             <a href="/dashboard">Dashboard</a>
             <a href="/auth/login" id="login-btn">Login with Discord</a>
         </nav>
@@ -17,16 +20,40 @@
 
     <main class="odin-main" id="app">
         <section class="odin-hero">
-            <h2>All-seeing moderation for Discord</h2>
-            <p>Manage your server from the web. Log in to get started.</p>
+            <h2>The execution agent for operators</h2>
+            <p>Runs real tools on real systems from Discord. Investigate incidents, deploy changes, automate checks, and verify outcomes without permission ping-pong.</p>
+            <div class="odin-hero-actions">
+                <a href="/auth/login" class="odin-cta-primary">Open Dashboard</a>
+                <a href="https://github.com/Calmingstorm/Odin" class="odin-cta-secondary">View on GitHub</a>
+            </div>
         </section>
+
+        <section class="odin-section" id="capabilities">
+            <h3>Why Odin is better at the job</h3>
+            <ul>
+                <li><strong>Executes, not just advises</strong> — shell, Docker, Kubernetes, Terraform, browser automation, files, and workflows from chat.</li>
+                <li><strong>Handles end-to-end operations</strong> — schedules, background tasks, sub-agents, and multi-step execution without babysitting.</li>
+                <li><strong>Verifies the result</strong> — audit trails, trajectory capture, and post-change validation cut down on fake-done nonsense.</li>
+            </ul>
+        </section>
+
+        <section class="odin-section" id="examples">
+            <h3>What you can ask Odin to do</h3>
+            <ul>
+                <li><code>@Odin restart nginx and verify the site is healthy</code></li>
+                <li><code>@Odin investigate why backups failed last night and summarize the root cause</code></li>
+                <li><code>@Odin deploy this branch to staging, run validation, and post the diff</code></li>
+                <li><code>@Odin schedule a disk check every 6 hours and alert if usage exceeds 85%</code></li>
+            </ul>
+        </section>
+
         <section class="odin-guilds" id="guilds" style="display:none;">
             <!-- Populated by odin-api.js -->
         </section>
     </main>
 
     <footer class="odin-footer">
-        <p>Odin Bot &mdash; Open Source Discord Moderation</p>
+        <p>Odin Bot &mdash; Autonomous execution for operators on Discord</p>
     </footer>
 
     <script src="/static/js/odin-api.js"></script>

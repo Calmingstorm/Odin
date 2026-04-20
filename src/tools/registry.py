@@ -418,7 +418,7 @@ TOOLS: list[dict] = [
     # --- Audit ---
     {
         "name": "search_audit",
-        "description": "Searches audit log of tool executions. Returns '[date] tool_name by user (status, Nms)'. Filterable by tool, user, host, keyword, date.",
+        "description": "Searches audit log of tool executions. Returns '[date] tool_name by user (status, Nms)'. Filterable by tool, user, host, keyword, date. For investigating a specific prior failure or replaying what happened in a single turn, prefer replay_trajectory instead — it gives full tool call details. Use search_audit for broader searches across multiple sessions or time ranges.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1771,7 +1771,9 @@ TOOLS: list[dict] = [
             "commands returned exit 0. Checks run concurrently on managed hosts. Never blocks; verdict "
             "is informational. Verdict: 'pass' (all OK), 'degraded' (only warn-severity failures), "
             "'fail' (≥1 critical failure), 'error' (every check errored — likely config issue). "
-            "Use this after deploys, service restarts, firewall changes, DNS updates, schema migrations. "
+            "ALWAYS call this automatically after deploys, service restarts, container replacements, "
+            "compose up/down, config writes to running services, firewall changes, DNS updates, "
+            "schema migrations — do not wait to be asked. "
             "Cost: low-medium. Risk: none. Latency: depends on slowest check.\n"
             "\n"
             "Check types:\n"
@@ -1837,7 +1839,9 @@ TOOLS: list[dict] = [
         "name": "replay_trajectory",
         "description": (
             "Renders a past message turn as a human-readable narrative or diffs two "
-            "turns side-by-side. Modes:\n"
+            "turns side-by-side. Prefer this over search_audit when the user asks about "
+            "a prior failure, a previous turn, what happened last time, or why something "
+            "went wrong — it reconstructs exact tool calls and outputs. Modes:\n"
             "  'summary' (default) — takes message_id; returns user content → tool calls "
             "  → tool outputs → final response.\n"
             "  'diff' — takes message_id + compare_to; shows where the two turns diverged.\n"
