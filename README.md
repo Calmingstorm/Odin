@@ -2,7 +2,25 @@
 
 An autonomous execution agent on Discord. Norse god of wisdom and war, stuck managing mortal infrastructure for eternity.
 
-Odin is a general-purpose AI assistant and infrastructure operator that lives in Discord. Give it a task — monitoring, deployment, code review, investigation, automation — and it executes immediately using 71 tools, shell access, browser automation, scheduled tasks, background agents, and a persistent knowledge base. It also handles moderation, conversation, and creative tasks.
+Odin executes real work from Discord: incident response, deploys, investigations, code review, automation, and scheduled operations across 71 tools. It runs shell commands on managed hosts, uses browser automation, orchestrates agents and workflows, and verifies results instead of stopping at command exit codes.
+
+## Why operators pick Odin
+
+Most AI bots stop at advice. Odin executes.
+
+- **Runs real systems** — SSH on managed hosts, Docker, Kubernetes, Terraform, browser automation, and file operations from chat.
+- **Finishes multi-step work** — scheduling, background workflows, autonomous loops, and sub-agents for fan-out tasks.
+- **Verifies outcomes** — audit trails, trajectory capture, and post-change validation reduce the usual "it said it worked" nonsense.
+- **Stays operationally useful** — persistent memory, knowledge search, web UI, and live traces keep context attached to the work.
+
+## Quick examples
+
+Tell Odin things like:
+
+- `@Odin restart nginx and verify the site is healthy`
+- `@Odin investigate why backups failed last night and summarize the root cause`
+- `@Odin deploy this branch to staging, run validation, and post the diff`
+- `@Odin schedule a disk check every 6 hours and alert if usage exceeds 85%`
 
 ## What It Can Do
 
