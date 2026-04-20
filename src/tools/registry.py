@@ -1979,6 +1979,7 @@ def get_tool_definitions() -> list[dict]:
             "name": t["name"],
             "description": decorate_description(t["name"], t["description"]),
             "input_schema": t["input_schema"],
+            **({"is_core": True} if t.get("is_core") else {}),
         }
         for t in TOOLS
     ]
