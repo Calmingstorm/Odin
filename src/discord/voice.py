@@ -62,8 +62,6 @@ def _patch_voice_recv_dave():
                         _dave_fail_count[0] += 1
                         if _dave_fail_count[0] <= 5 or _dave_fail_count[0] % 100 == 0:
                             log.warning("DAVE decrypt returned None #%d", _dave_fail_count[0])
-                        pcm = self._decoder.decode(None, fec=False) if self._decoder else b''
-                        return packet, pcm
                 else:
                     # No DAVE session — try decoding directly (unencrypted)
                     pass
@@ -71,8 +69,6 @@ def _patch_voice_recv_dave():
                 _dave_fail_count[0] += 1
                 if _dave_fail_count[0] <= 5 or _dave_fail_count[0] % 100 == 0:
                     log.warning("DAVE decrypt error #%d: %s", _dave_fail_count[0], e)
-                pcm = self._decoder.decode(None, fec=False) if self._decoder else b''
-                return packet, pcm
 
             return _original_decode(self, packet)
 
@@ -170,7 +166,7 @@ class VoiceManager:
             return self._voice_client.channel
         return None
 
-    def _get_transcript_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
+    def _get_transcript_channel(self) -> discord.TextChannel | None:
         if self._transcript_channel:
             return self._transcript_channel
         if self._config.transcript_channel_id:
@@ -455,7 +451,7 @@ class VoiceManager:
                             break
 
             if member and guild:
-                transcript_ch = self._get_transcript_channel(guild)
+                transcript_ch = self._get_transcript_channel()
                 if transcript_ch:
                     await self.on_transcription(text, member, transcript_ch)
                 else:

@@ -326,6 +326,8 @@ def compress_tool_context(
     if stats:
         stats.compressions += 1
         stats.iterations_compressed += compressed_count
+        if chars_saved < 0:
+            log.warning("Compression ineffective: added %d chars instead of saving", -chars_saved)
         stats.chars_saved += max(0, chars_saved)
 
     log.info(

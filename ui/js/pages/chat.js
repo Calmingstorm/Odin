@@ -14,7 +14,8 @@ function renderMarkdown(text) {
   if (!text) return '';
   try {
     if (typeof marked !== 'undefined' && marked.parse) {
-      return marked.parse(text, markedOpts);
+      const html = marked.parse(text, markedOpts);
+      return typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(html) : html;
     }
   } catch { /* fall through */ }
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');

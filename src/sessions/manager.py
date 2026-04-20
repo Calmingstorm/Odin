@@ -55,7 +55,6 @@ CHAT_RESPONSE_MAX_CHARS = 1500  # max chars for text-only (no-tool) response in 
 
 # Context budget constants
 CONTEXT_TOKEN_BUDGET = 16000  # max estimated tokens for history sent to LLM
-CHARS_PER_TOKEN = 4  # rough estimate: 1 token ≈ 4 chars
 BUDGET_KEEP_RECENT = 5  # always keep the most recent N messages regardless of budget
 
 # Session token budget — auto-compact when a session's estimated tokens exceed this
