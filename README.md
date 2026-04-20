@@ -2,7 +2,7 @@
 
 An autonomous execution agent on Discord. Norse god of wisdom and war, stuck managing mortal infrastructure for eternity.
 
-Odin executes real work from Discord: incident response, deploys, investigations, code review, automation, and scheduled operations across 71 tools. It runs shell commands on managed hosts, uses browser automation, orchestrates agents and workflows, and verifies results instead of stopping at command exit codes.
+Odin executes real work from Discord: incident response, deploys, investigations, code review, automation, and scheduled operations across 72 tools (25 core, 47 skill). It runs shell commands on managed hosts, uses browser automation, orchestrates agents and workflows, and verifies results automatically after service changes.
 
 ## Why operators pick Odin
 
@@ -10,8 +10,8 @@ Most AI bots stop at advice. Odin executes.
 
 - **Runs real systems** — SSH on managed hosts, Docker, Kubernetes, Terraform, browser automation, and file operations from chat.
 - **Finishes multi-step work** — scheduling, background workflows, autonomous loops, and sub-agents for fan-out tasks.
-- **Verifies outcomes** — audit trails, trajectory capture, and post-change validation reduce the usual "it said it worked" nonsense.
-- **Stays operationally useful** — persistent memory, knowledge search, web UI, and live traces keep context attached to the work.
+- **Verifies outcomes** — `validate_action` auto-triggers after service restarts, deploys, and config changes. HMAC-signed audit trail for every tool call.
+- **Stays operationally useful** — persistent memory, knowledge search, web UI, and trajectory logging keep context attached to the work.
 
 ## Quick examples
 
@@ -25,55 +25,61 @@ Tell Odin things like:
 ## What It Can Do
 
 **Infrastructure & DevOps**
-- Shell execution on managed hosts (`run_command`, `run_script`)
+- Shell execution on managed hosts (`run_command`, `run_script`, `run_command_multi`)
 - Git operations, Docker management, kubectl, Terraform
 - HTTP endpoint probing with timing breakdown
-- Scheduled health checks (cron or one-shot)
-- Background multi-step workflows (`delegate_task`)
+- Post-change validation (`validate_action`) — auto-verifies service health after restarts, deploys, config writes
+- Scheduled health checks, daily infrastructure digests
 
 **AI & Code**
 - Claude Code delegation for code generation, review, and analysis
 - Codex (GPT-5.4) conversation with full tool use
 - ComfyUI image generation
-- PDF analysis, web search, browser automation
+- PDF analysis, image analysis, web search, browser automation
 
 **Automation**
 - Autonomous loops with stuck-detection and backoff
 - Sub-agent spawning (parallel, nested up to depth 2)
-- User-created Python skills with hot-reload
-- Cron scheduling with adaptive tick and wake events
+- User-created Python skills with hot-reload and AST validation
+- Cron scheduling with webhook triggers (Gitea, Grafana, GitHub, GitLab)
 
 **Knowledge & Memory**
-- Persistent memory (per-user and global notes)
-- Knowledge base with FTS5 search, dedup, versioning
-- Conversation session management with compaction
-- Trajectory saving for every interaction
+- Persistent memory (per-user and global key-value notes)
+- Knowledge base with FTS5 + vector search, dedup, versioning
+- Conversation session management with adaptive compaction
+- Trajectory saving for every interaction (per-turn JSONL)
 
 **Security**
 - CommandGovernor: blocks destructive shell commands and exfiltration patterns before execution
-- Permission tiers (admin/user/guest) with per-tool filtering
-- Secret scrubbing on all input/output paths
+- Permission tiers (admin/user/guest) with per-tool RBAC
+- Secret scrubbing on all input/output paths (API keys, tokens, JWTs, AWS keys, database URIs)
+- SSRF validation on all URL-accepting endpoints
+- DOMPurify-sanitized markdown rendering in web UI
 - AST-based skill validation (no exec during validation)
-- Web API authentication with per-session isolation
+- Web API authentication with session isolation and CSRF protection
 
 **Web UI** (19 pages)
 - Dashboard, chat, sessions, tools, skills, knowledge
 - Schedules, loops, agents, processes, audit log
 - Config editor, memory viewer, traces, health, resources
-- Internals: startup diagnostics, subsystem guard, governor stats, connection pools
+- Real-time tool execution viewer with streaming output
 
 ## Architecture
 
 ```
 Discord ──> OdinBot (client.py)
                │
-               ├── Tool Executor ──> 71 tools (shell, browser, git, docker, etc.)
+               ├── Tool Executor ──> 72 tools (shell, browser, git, docker, etc.)
                │       │
                │       ├── CommandGovernor (blocks dangerous commands)
-               │       ├── Risk Classifier (observability)
+               │       ├── Risk Classifier (observability tags)
                │       └── Bulkhead isolation (concurrency limits)
                │
-               ├── Codex Client ──> GPT-5.4 (tool loop with up to 30 iterations)
+               ├── Codex Client ──> GPT-5.4 (tool loop with up to 500 iterations)
+               │       │
+               │       ├── Response Guards (fabrication, hedging, premature failure)
+               │       ├── Completion Classifier (fail-open)
+               │       └── Context Compressor (adaptive)
                │
                ├── Agent Manager ──> Sub-agents (parallel, nested)
                ├── Loop Manager ──> Autonomous monitoring loops
@@ -102,7 +108,7 @@ edit config.yml              # Set hosts, Codex credentials, etc.
 python -m src
 ```
 
-The web UI starts automatically at the configured port (default 3001). If `web.api_token` is set in config.yml, you'll need to authenticate.
+The web UI starts automatically at the configured port (default 3001). Set `web.api_token` in config.yml to require authentication.
 
 ## Configuration
 
@@ -116,35 +122,34 @@ The web UI starts automatically at the configured port (default 3001). If `web.a
 ### Key Config Sections
 
 - **`discord`**: token, allowed users/channels, mention-only mode, bot interaction
-- **`openai_codex`**: model (gpt-5.4), max tokens, credentials, model routing, context compression
-- **`tools`**: SSH hosts, command timeout, skill URLs, Claude Code host
-- **`browser`**: native Playwright (empty `cdp_url`) or remote CDP
+- **`openai_codex`**: model, max tokens, credentials, model routing, context compression
+- **`tools`**: SSH hosts, command timeout, per-tool timeout overrides, Claude Code host
+- **`browser`**: native Playwright (empty `cdp_url`) or remote CDP endpoint
 - **`web`**: port, API token, session timeout
 - **`permissions`**: default tier, per-user overrides
 
-## Tools (71)
+## Tools (72)
 
 | Category | Tools |
 |----------|-------|
-| System & Commands | `run_command`, `run_script`, `read_file`, `write_file`, `list_directory`, `search_files`, `post_file` |
-| DevOps & Infrastructure | `git_ops`, `docker_ops`, `kubectl`, `terraform_ops`, `http_probe` |
-| Agents & Orchestration | `spawn_agent`, `send_to_agent`, `wait_for_agents`, `get_agent_results`, `kill_agent` |
-| Workflows & Tasks | `delegate_task`, `execute_plan`, `schedule_task`, `start_loop`, `stop_loop` |
-| AI & Generation | `claude_code`, `generate_image`, `analyze_image`, `analyze_pdf` |
-| Skills | `create_skill`, `edit_skill`, `invoke_skill`, `delete_skill`, `install_skill` |
-| Knowledge & Search | `search_knowledge`, `ingest_document`, `search_history`, `search_audit` |
-| Network & Web | `browser_screenshot`, `browser_read_page`, `web_search`, `fetch_url` |
-| Discord | `send_message`, `add_reaction`, `read_channel`, `create_poll` |
-| Memory & State | `memory_manage`, `manage_list` |
-| Integrations | `issue_tracker`, `slack_send` |
+| Shell & Files | `run_command`, `run_script`, `run_command_multi`, `read_file`, `write_file`, `generate_file`, `post_file`, `manage_process` |
+| Infrastructure | `git_ops`, `docker_ops`, `kubectl`, `terraform_ops`, `http_probe` |
+| Agents & Orchestration | `delegate_task`, `list_tasks`, `cancel_task`, `spawn_agent`, `send_to_agent`, `list_agents`, `kill_agent`, `get_agent_results`, `wait_for_agents`, `spawn_loop_agents`, `collect_loop_agents` |
+| Scheduling & Loops | `schedule_task`, `list_schedules`, `update_schedule`, `delete_schedule`, `parse_time`, `create_digest`, `start_loop`, `stop_loop`, `list_loops`, `execute_plan` |
+| AI & Code | `claude_code`, `generate_image`, `analyze_image`, `analyze_pdf` |
+| Skills | `create_skill`, `edit_skill`, `delete_skill`, `list_skills`, `enable_skill`, `disable_skill`, `install_skill`, `export_skill`, `skill_status`, `invoke_skill` |
+| Knowledge & Memory | `memory_manage`, `manage_list`, `search_history`, `search_audit`, `search_knowledge`, `ingest_document`, `bulk_ingest_knowledge`, `list_knowledge`, `delete_knowledge` |
+| Web & Browser | `web_search`, `fetch_url`, `browser_screenshot`, `browser_read_page`, `browser_read_table`, `browser_click`, `browser_fill`, `browser_evaluate` |
+| Discord | `read_channel`, `add_reaction`, `create_poll`, `purge_messages` |
+| Validation & Security | `validate_action`, `set_permission`, `issue_tracker` |
 
 ## Testing
 
 ```bash
-# Core smoke tests (fast)
-pytest tests/test_executor_integration_smoke.py -q
+# Full suite (~5490 tests)
+pytest tests/ -q
 
-# Full suite (~5300 tests)
+# Skip slow/optional tests
 pytest tests/ --ignore=tests/test_tools -q
 ```
 
@@ -153,44 +158,40 @@ pytest tests/ --ignore=tests/test_tools -q
 ```
 src/
   __main__.py              Entry point
-  config/schema.py         Pydantic config with protected_namespaces
+  config/schema.py         Pydantic config models
   discord/
     client.py              OdinBot — main executor (~4800 lines)
+    response_guards.py     Fabrication, hedging, premature failure detection
+    tool_loop_helpers.py   Request preamble, topic change detection
     cogs/                  9 moderation/utility cog extensions
-    background_task.py     Delegated task execution
   tools/
-    executor.py            Tool dispatch + CommandGovernor
-    registry.py            71 tool definitions
+    executor.py            Tool dispatch + recovery
+    registry.py            72 tool definitions (25 core, 47 skill)
     skill_manager.py       Skill CRUD + AST validation
-    skill_context.py       Skill runtime API
-    risk_classifier.py     Risk classification + CommandGovernor
-    autonomous_loop.py     Background monitoring loops
+    command_governor.py    Destructive command blocking
+    post_validation.py     validate_action implementation
+    recovery.py            Error classification + retry
     browser.py             Native Playwright browser
-    process_manager.py     Background process registry
   llm/
-    system_prompt.py       Odin's personality + rules
-    codex_auth.py          OAuth token management (atomic writes, 0600 perms)
-    openai_codex.py        Codex chat client
-    secret_scrubber.py     Input/output secret detection
+    system_prompt.py       Identity, execution policy, tool hierarchy
+    openai_codex.py        Codex streaming client
+    auxiliary.py            Smart model routing (cheap/strong)
+    secret_scrubber.py     Secret detection and redaction
+    context_compressor.py  Adaptive context compression
   agents/manager.py        Sub-agent lifecycle + state machine
-  scheduler/scheduler.py   Cron + one-shot + webhook triggers (deadlock-free)
-  sessions/manager.py      Per-channel history + compaction + archive retention
-  knowledge/store.py       FTS5 knowledge base with dedup + versioning
-  search/fts.py            Full-text search index
-  health/
-    server.py              aiohttp web server + auth middleware
-    checker.py             Component health status
-    startup.py             Boot-time diagnostics (8 checks)
+  scheduler/scheduler.py   Cron + one-shot + webhook triggers
+  sessions/manager.py      Per-channel history + compaction + topic detection
+  knowledge/store.py       FTS5 + vector knowledge base
+  health/server.py         aiohttp web server + auth middleware
   web/
     api.py                 136 REST endpoints
-    chat.py                Web chat handler
-    websocket.py           Live log/event streaming + WS chat
-  permissions/manager.py   RBAC tier system
+    websocket.py           Live event streaming + WS chat
   audit/logger.py          HMAC-chainable audit log
+  learning/reflector.py    Cross-conversation learning (90-day expiry)
+  trajectories/saver.py    Per-turn JSONL trajectory logging
 
 ui/                        Vue 3 + Tailwind web dashboard (19 pages)
-tests/                     5300+ tests
-scripts/                   codex_login.py, deploy helpers
+tests/                     5490+ tests
 config.yml                 Default configuration template
 ```
 
