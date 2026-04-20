@@ -40,6 +40,26 @@ _STOP_WORDS = frozenset({
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")
 
+_PRIOR_FAILURE_RE = re.compile(
+    r"(?:what happened|went wrong|why did .* fail|last time|previous.* (?:fail|error|crash|issue)"
+    r"|prior (?:failure|error|incident|turn)|earlier.* (?:fail|broke|error)"
+    r"|what went wrong|why .* broke|replay|show me (?:the|that) (?:failure|error))",
+    re.IGNORECASE,
+)
+
+
+def contextual_bias_hints(query: str) -> str:
+    """Return static tool-selection bias hints based on query content."""
+    if _PRIOR_FAILURE_RE.search(query):
+        return (
+            "## Tool Selection Bias\n"
+            "This looks like a question about a prior failure or previous turn. "
+            "Use `replay_trajectory` first — it reconstructs exact tool calls and "
+            "outputs from that turn. Only fall back to `search_audit` if the "
+            "trajectory is unavailable or a broader time-range search is needed."
+        )
+    return ""
+
 
 def extract_keywords(text: str) -> list[str]:
     """Extract meaningful keywords from a query string."""
@@ -238,6 +258,10 @@ class ToolMemory:
                 "For similar queries, these tool sequences worked well:\n"
                 + "\n".join(lines)
             )
+
+        bias = contextual_bias_hints(query)
+        if bias:
+            result = f"{bias}\n\n{result}" if result else bias
 
         self._hints_cache[cache_key] = (now, result)
 
