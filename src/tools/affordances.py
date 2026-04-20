@@ -148,10 +148,6 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     # Post-action validation + runbook detection (our new tools)
     ("validate_action", Affordance(Cost.MEDIUM, Risk.NONE, Latency.SECONDS,
         ("validation checks reference reachable hosts",))),
-    ("detect_runbooks", Affordance(Cost.LOW, Risk.NONE, Latency.FAST,
-        ("audit log present",))),
-    ("replay_trajectory", Affordance(Cost.LOW, Risk.NONE, Latency.FAST,
-        ("trajectory file present for the target message_id",))),
     # Audit / search
     ("search_audit", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
     ("create_digest", Affordance(Cost.MEDIUM, Risk.NONE, Latency.SECONDS, ())),

@@ -432,7 +432,7 @@ TOOLS: list[dict] = [
     {
         "name": "search_audit",
         "is_core": True,
-        "description": "Searches audit log of tool executions. Returns '[date] tool_name by user (status, Nms)'. Filterable by tool, user, host, keyword, date. For investigating a specific prior failure or replaying what happened in a single turn, prefer replay_trajectory instead — it gives full tool call details. Use search_audit for broader searches across multiple sessions or time ranges.",
+        "description": "Searches audit log of tool executions. Returns '[date] tool_name by user (status, Nms)'. Filterable by tool, user, host, keyword, date.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1857,98 +1857,6 @@ TOOLS: list[dict] = [
                 },
             },
             "required": ["checks"],
-        },
-    },
-    # --- Trajectory replay ---
-    {
-        "name": "replay_trajectory",
-        "description": (
-            "Renders a past message turn as a human-readable narrative or diffs two "
-            "turns side-by-side. Prefer this over search_audit when the user asks about "
-            "a prior failure, a previous turn, what happened last time, or why something "
-            "went wrong — it reconstructs exact tool calls and outputs. Modes:\n"
-            "  'summary' (default) — takes message_id; returns user content → tool calls "
-            "  → tool outputs → final response.\n"
-            "  'diff' — takes message_id + compare_to; shows where the two turns diverged.\n"
-            "  'find_diff_pair' — takes message_id; auto-picks the closest counterpart "
-            "  turn by user_content similarity (Jaccard) with a bias toward opposite "
-            "  outcome (failed-pairs-with-success), then diffs automatically. Use this "
-            "  when you want diagnosis instead of manual pair-hunting; fails cleanly "
-            "  if no similar turn exists.\n"
-            "  'list' (or any call without message_id) — lists recent trajectory-bearing "
-            "  message IDs so you can pick a valid one.\n"
-            "Read-only — no re-execution, no LLM calls. IMPORTANT: trajectories are only "
-            "saved for TURN-STARTING messages. A message_id that appears only as a "
-            "tool-call argument is NOT retrievable here."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "message_id": {
-                    "type": "string",
-                    "description": "ID of the primary trajectory turn. Omit for mode='list'.",
-                },
-                "mode": {
-                    "type": "string",
-                    "description": "'summary' (default) | 'diff' | 'find_diff_pair' | 'list'.",
-                },
-                "compare_to": {
-                    "type": "string",
-                    "description": "For mode='diff': message_id of the turn to compare against. Ignored for other modes.",
-                },
-            },
-            "required": [],
-        },
-    },
-    # --- Operational learning ---
-    {
-        "name": "detect_runbooks",
-        "description": (
-            "Mines the audit log for repeated successful tool sequences — candidate runbooks worth "
-            "naming/codifying. A sequence is a run of consecutive non-failing tool calls by the same "
-            "actor/channel, with no more than a few minutes between steps. The tool returns ranked "
-            "suggestions: ordered tool list, frequency, hosts involved, sample inputs, and a score "
-            "that weights frequency by recency and actor-concentration. This is a SUGGESTION engine — "
-            "it creates nothing. Use it to answer 'what procedures do I keep running by hand?' "
-            "Cost: low. Risk: none (read-only)."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "min_frequency": {
-                    "type": "integer",
-                    "description": "Minimum repetitions across distinct sessions for a sequence to surface. Default 3.",
-                },
-                "min_length": {
-                    "type": "integer",
-                    "description": "Minimum sequence length (inclusive). Default 2.",
-                },
-                "max_length": {
-                    "type": "integer",
-                    "description": "Maximum sequence length (inclusive). Default 5.",
-                },
-                "lookback_days": {
-                    "type": "integer",
-                    "description": "Ignore audit entries older than this many days. Default 30.",
-                },
-                "session_gap_seconds": {
-                    "type": "integer",
-                    "description": "Idle gap that starts a new session. Default 300.",
-                },
-                "ignore_tools": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Tool names that should never appear in a detected sequence (e.g. noisy reads).",
-                },
-                "format": {
-                    "type": "string",
-                    "description": "Output format: 'summary' (default human-readable) or 'json'.",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max suggestions to return in summary format. Default 10.",
-                },
-            },
         },
     },
 ]
