@@ -51,9 +51,13 @@ class TestToolsConfigToolTimeouts:
 
 
 class TestGetToolTimeout:
-    def test_no_overrides_returns_default(self):
+    def test_no_overrides_returns_builtin_for_run_command(self):
         config = ToolsConfig(command_timeout_seconds=300)
-        assert config.get_tool_timeout("run_command") == 300
+        assert config.get_tool_timeout("run_command") == 900
+
+    def test_no_overrides_returns_default_for_other_tools(self):
+        config = ToolsConfig(command_timeout_seconds=300)
+        assert config.get_tool_timeout("http_probe") == 300
 
     def test_override_returns_custom(self):
         config = ToolsConfig(
@@ -330,7 +334,7 @@ class TestConfigYAMLCompat:
         config = ToolsConfig(tool_timeouts={"claude_code": 600, "run_script": 120})
         assert config.get_tool_timeout("claude_code") == 600
         assert config.get_tool_timeout("run_script") == 120
-        assert config.get_tool_timeout("run_command") == 300
+        assert config.get_tool_timeout("run_command") == 900
 
     def test_full_config_with_tool_timeouts(self):
         config = Config(
@@ -338,7 +342,7 @@ class TestConfigYAMLCompat:
             tools={"tool_timeouts": {"claude_code": 600}},
         )
         assert config.tools.get_tool_timeout("claude_code") == 600
-        assert config.tools.get_tool_timeout("run_command") == 300
+        assert config.tools.get_tool_timeout("run_command") == 900
 
     def test_full_config_without_tool_timeouts(self):
         config = Config(discord={"token": "test"})
@@ -498,7 +502,7 @@ class TestToolTimeoutsAPI:
             data = await resp.json()
             tool_map = {t["name"]: t for t in data}
             assert tool_map["claude_code"]["timeout"] == 600
-            assert tool_map["run_command"]["timeout"] == 300
+            assert tool_map["run_command"]["timeout"] == 900
 
 
 # ---------------------------------------------------------------------------
@@ -526,8 +530,8 @@ class TestExecutorConfigIntegration:
         config = ToolsConfig(command_timeout_seconds=300)
         executor = ToolExecutor(config=config)
 
-        # No custom timeout initially
-        assert config.get_tool_timeout("run_command") == 300
+        # No custom timeout — builtin default applies
+        assert config.get_tool_timeout("run_command") == 900
 
         # Add a custom timeout
         config.tool_timeouts["run_command"] = 60

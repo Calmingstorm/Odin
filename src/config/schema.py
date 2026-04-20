@@ -192,8 +192,17 @@ class ToolsConfig(BaseModel):
             raise ValueError("tool iteration cap must be >= 1")
         return v
 
+    _BUILTIN_TOOL_TIMEOUTS: dict[str, int] = {
+        "run_command": 900,
+        "run_script": 900,
+    }
+
     def get_tool_timeout(self, tool_name: str) -> int:
-        return self.tool_timeouts.get(tool_name, self.command_timeout_seconds)
+        if tool_name in self.tool_timeouts:
+            return self.tool_timeouts[tool_name]
+        if tool_name in self._BUILTIN_TOOL_TIMEOUTS:
+            return self._BUILTIN_TOOL_TIMEOUTS[tool_name]
+        return self.command_timeout_seconds
 
     @property
     def tool_timeout_seconds(self) -> int:

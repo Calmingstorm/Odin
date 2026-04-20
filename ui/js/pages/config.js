@@ -30,6 +30,7 @@ const VALIDATION_RULES = {
   'browser.default_timeout_ms': { type: 'number', min: 100, message: 'Must be at least 100ms' },
   'browser.viewport_width': { type: 'number', min: 100, max: 7680, message: 'Must be 100\u20137680' },
   'browser.viewport_height': { type: 'number', min: 100, max: 4320, message: 'Must be 100\u20134320' },
+  'tools.command_timeout_seconds': { type: 'number', min: 10, max: 3600, message: 'Must be 10\u20133600 seconds' },
 };
 
 // Section grouping: category -> { label, icon, sections[] }
