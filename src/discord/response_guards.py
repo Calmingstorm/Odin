@@ -350,10 +350,9 @@ def detect_hedging(text: str, tools_used: list[str]) -> bool:
     return any(p.search(text) for p in _HEDGING_PATTERNS)
 
 
-# Developer message injected when hedging is detected on a bot message.
 _HEDGING_RETRY_MSG = {
     "role": "developer",
-    "content": "This is another bot. Do not say 'shall I' or 'if you want'. Execute immediately with tool calls.",
+    "content": "Do not hedge. Execute immediately with tool calls.",
 }
 
 
