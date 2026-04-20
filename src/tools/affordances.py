@@ -152,7 +152,6 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
         ("audit log present",))),
     ("replay_trajectory", Affordance(Cost.LOW, Risk.NONE, Latency.FAST,
         ("trajectory file present for the target message_id",))),
-    ("synthesize_runbook", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
     # Audit / search
     ("search_audit", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
     ("create_digest", Affordance(Cost.MEDIUM, Risk.NONE, Latency.SECONDS, ())),

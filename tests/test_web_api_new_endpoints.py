@@ -86,30 +86,6 @@ class TestRunbooksDetectEndpoint:
             )
 
 
-class TestRunbooksSynthesizeEndpoint:
-    @pytest.mark.asyncio
-    async def test_rejects_missing_sequence(self, tmp_path):
-        bot = _make_bot(tmp_path)
-        async with await _client(bot) as client:
-            resp = await client.post("/api/runbooks/synthesize", json={})
-            assert resp.status == 400
-
-    @pytest.mark.asyncio
-    async def test_generates_source_for_ad_hoc_sequence(self, tmp_path):
-        bot = _make_bot(tmp_path)
-        async with await _client(bot) as client:
-            resp = await client.post(
-                "/api/runbooks/synthesize",
-                json={"sequence": ["http_probe", "read_file"], "skill_name": "my test"},
-            )
-            assert resp.status == 200
-            data = await resp.json()
-            assert "SKILL_DEFINITION" in data["source"]
-            assert "async def execute" in data["source"]
-            assert "context.execute_tool('http_probe'" in data["source"]
-            assert "safe steps" in data["summary"]
-
-
 class TestTrajectoryReplayEndpoints:
     @pytest.mark.asyncio
     async def test_replay_missing_returns_404(self, tmp_path):

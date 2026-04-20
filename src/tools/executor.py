@@ -1571,57 +1571,6 @@ class ToolExecutor:
             return diff_turns(primary, other)
         return summarize_turn(primary)
 
-    async def _handle_synthesize_runbook(self, inp: dict) -> str:
-        from ..learning.runbook_detector import RunbookSuggestion, detect_patterns
-        from ..learning.runbook_synthesizer import (
-            synthesize_runbook_code,
-            synthesize_summary,
-        )
-
-        sequence = inp.get("sequence")
-        if not isinstance(sequence, list) or not sequence:
-            return "Error: 'sequence' (list of tool names) is required."
-        sequence = [str(s) for s in sequence]
-
-        audit_path = getattr(self.config, "audit_log_path", None) or "./data/audit.jsonl"
-        # Look up the detector's record for this sequence so the generated
-        # skill carries real sample inputs / host / frequency metadata.
-        def _find() -> RunbookSuggestion | None:
-            try:
-                all_suggestions = detect_patterns(
-                    audit_path, min_frequency=1, min_length=len(sequence),
-                    max_length=len(sequence), lookback_days=365,
-                )
-            except Exception:
-                return None
-            target = list(sequence)
-            for s in all_suggestions:
-                if s.sequence == target:
-                    return s
-            return None
-
-        found = await asyncio.to_thread(_find)
-        if found is None:
-            # Not in audit log — still generate a skeleton with empty samples
-            found = RunbookSuggestion(
-                sequence=list(sequence), frequency=0, session_count=0,
-                hosts=[], actors=[],
-                first_seen="", last_seen="",
-                sample_inputs=[{"tool_name": s, "host": None, "input": {}} for s in sequence],
-            )
-
-        skill_name = inp.get("skill_name")
-        desc = inp.get("description_override")
-        source = synthesize_runbook_code(
-            found,
-            skill_name=str(skill_name) if skill_name else None,
-            description_override=str(desc) if desc else None,
-        )
-        fmt = str(inp.get("format") or "source").strip().lower()
-        if fmt == "summary":
-            return synthesize_summary(source, found)
-        return source
-
     async def _handle_detect_runbooks(self, inp: dict) -> str:
         from ..learning.runbook_detector import (
             detect_patterns,

@@ -5,6 +5,7 @@ TOOLS: list[dict] = [
     # --- Shell execution ---
     {
         "name": "run_command",
+        "is_core": True,
         "description": "Runs a shell command on a managed host. Returns stdout/stderr (max 200 lines). On failure: 'Command failed (exit N): output'. For multi-line scripts, use run_script. For multiple hosts, use run_command_multi.",
         "input_schema": {
             "type": "object",
@@ -23,6 +24,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "run_script",
+        "is_core": True,
         "description": (
             "Runs a multi-line script on a managed host via temp file. Handles heredocs, code blocks, "
             "and complex quoting. Returns stdout/stderr (max 200 lines). On failure: 'Script failed (exit N): output'. "
@@ -54,6 +56,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "run_command_multi",
+        "is_core": True,
         "description": "Runs a command on multiple hosts in parallel. Returns per-host '### hostname\\n```\\noutput\\n```'. Pass ['all'] for all configured hosts. For one host, use run_command.",
         "input_schema": {
             "type": "object",
@@ -74,6 +77,7 @@ TOOLS: list[dict] = [
     # --- File operations ---
     {
         "name": "read_file",
+        "is_core": True,
         "description": "Returns the contents of a file on a managed host. Default 200 lines, max 1000. To write, use write_file. For multi-file analysis, use claude_code with allow_edits=false.",
         "input_schema": {
             "type": "object",
@@ -96,6 +100,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "write_file",
+        "is_core": True,
         "description": "Writes content to a file on a managed host (creates or overwrites). To read first, use read_file. For multi-file edits, use claude_code.",
         "input_schema": {
             "type": "object",
@@ -154,6 +159,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "generate_file",
+        "is_core": True,
         "description": "Creates a file (script, code, CSV, report, etc.) and posts it as a Discord attachment. For files on a host, use post_file.",
         "input_schema": {
             "type": "object",
@@ -177,6 +183,7 @@ TOOLS: list[dict] = [
     # --- Scheduling ---
     {
         "name": "schedule_task",
+        "is_core": True,
         "description": (
             "Schedules a recurring (cron), one-time (run_at), or webhook-triggered task. "
             "Use parse_time to convert natural language to run_at. "
@@ -267,6 +274,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "list_schedules",
+        "is_core": True,
         "description": "Lists all scheduled tasks with IDs, descriptions, and next run times. To delete, use delete_schedule.",
         "input_schema": {
             "type": "object",
@@ -275,6 +283,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "update_schedule",
+        "is_core": True,
         "description": (
             "Updates an existing schedule by ID. Only provided fields are changed. "
             "Can change description, cron, run_at, trigger, message, tool_name, tool_input, steps, or channel_id. "
@@ -338,6 +347,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "delete_schedule",
+        "is_core": True,
         "description": "Deletes a scheduled task by ID. To list schedules first, use list_schedules.",
         "input_schema": {
             "type": "object",
@@ -352,6 +362,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "parse_time",
+        "is_core": True,
         "description": (
             "Converts natural language time to ISO datetime "
             "(e.g. 'in 2 hours', 'tomorrow at 9am', 'next Friday at 3pm'). "
@@ -371,6 +382,7 @@ TOOLS: list[dict] = [
     # --- History and memory ---
     {
         "name": "search_history",
+        "is_core": True,
         "description": "Searches past conversation history and full channel message logs from all users. Uses keyword, semantic, and FTS matching. Returns '[date] (role): content'. For ingested docs, use search_knowledge.",
         "input_schema": {
             "type": "object",
@@ -389,6 +401,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "memory_manage",
+        "is_core": True,
         "description": "Persistent memory that survives across conversations. 'save'/'get'/'list'/'delete' notes. 'personal' = per-user, 'global' = shared with everyone.",
         "input_schema": {
             "type": "object",
@@ -418,6 +431,7 @@ TOOLS: list[dict] = [
     # --- Audit ---
     {
         "name": "search_audit",
+        "is_core": True,
         "description": "Searches audit log of tool executions. Returns '[date] tool_name by user (status, Nms)'. Filterable by tool, user, host, keyword, date. For investigating a specific prior failure or replaying what happened in a single turn, prefer replay_trajectory instead — it gives full tool call details. Use search_audit for broader searches across multiple sessions or time ranges.",
         "input_schema": {
             "type": "object",
@@ -632,6 +646,7 @@ TOOLS: list[dict] = [
     # --- Background task delegation ---
     {
         "name": "delegate_task",
+        "is_core": True,
         "description": (
             "Runs a multi-step task in the background, posting progress to Discord. "
             "Steps run sequentially with conditions (substring match, ! to negate), "
@@ -670,6 +685,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "list_tasks",
+        "is_core": True,
         "description": "Lists background tasks. Without task_id: overview. With task_id: step-by-step details. See delegate_task, cancel_task.",
         "input_schema": {
             "type": "object",
@@ -683,6 +699,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "cancel_task",
+        "is_core": True,
         "description": "Cancels a running background task. Get task IDs from list_tasks.",
         "input_schema": {
             "type": "object",
@@ -972,6 +989,7 @@ TOOLS: list[dict] = [
     # --- Claude Code ---
     {
         "name": "claude_code",
+        "is_core": True,
         "description": (
             "Deep reasoning agent for complex multi-step tasks (3+ tool calls): code generation, "
             "repo analysis, debugging, building/deploying. Runs an entire chain in one session. "
@@ -1097,6 +1115,7 @@ TOOLS: list[dict] = [
     # --- Process management ---
     {
         "name": "manage_process",
+        "is_core": True,
         "description": (
             "Manages background processes (start/poll/write/kill/list). "
             "Start spawns a command, returns PID. Poll gets output. Write sends stdin. "
@@ -1133,6 +1152,7 @@ TOOLS: list[dict] = [
     # --- List management ---
     {
         "name": "manage_list",
+        "is_core": True,
         "description": (
             "Manages named lists (grocery, todo, shopping, etc.). "
             "Created on first add. 'personal' = private, 'shared' = visible to all. "
@@ -1393,6 +1413,7 @@ TOOLS: list[dict] = [
     # --- Git operations ---
     {
         "name": "git_ops",
+        "is_core": True,
         "description": (
             "Git operations on a managed host. Actions: clone, status, diff, log, branch, "
             "commit, push, pull, checkout, fetch, stash. Push checks branch freshness first "
@@ -1437,6 +1458,7 @@ TOOLS: list[dict] = [
     # --- Kubernetes operations ---
     {
         "name": "kubectl",
+        "is_core": True,
         "description": (
             "Kubernetes operations on a managed host. Actions: get, describe, logs, apply, delete, "
             "exec, rollout, scale, top, config. Runs kubectl via SSH on the target host (or locally). "
@@ -1481,6 +1503,7 @@ TOOLS: list[dict] = [
     # --- Docker operations ---
     {
         "name": "docker_ops",
+        "is_core": True,
         "description": (
             "Docker operations on a managed host. Actions: ps, run, exec, logs, build, pull, "
             "stop, rm, inspect, stats, compose_up, compose_down, compose_ps, compose_logs. "
@@ -1738,6 +1761,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "execute_plan",
+        "is_core": True,
         "description": (
             "Execute a multi-step workflow plan using the Odin DAG planner. "
             "Accepts a declarative plan as a JSON string or dict with dependency-aware "
@@ -1765,6 +1789,7 @@ TOOLS: list[dict] = [
     # --- Post-action validation ---
     {
         "name": "validate_action",
+        "is_core": True,
         "description": (
             "Runs a bundle of validation checks after an operational change (deploy, restart, config "
             "push, migration) to confirm the system is actually healthy — not just that the preceding "
@@ -1924,46 +1949,6 @@ TOOLS: list[dict] = [
                     "description": "Max suggestions to return in summary format. Default 10.",
                 },
             },
-        },
-    },
-    {
-        "name": "synthesize_runbook",
-        "description": (
-            "Turns a detected runbook pattern (from detect_runbooks) into a reviewable Python "
-            "module, CLASSIFIED up front as 'executable', 'hybrid', or 'checklist' "
-            "(documentation only) based on whether the constituent tools are SkillContext-safe. "
-            "The classification lands in the generated docstring banner, a module-level "
-            "SYNTHESIS_CLASSIFICATION constant, a SKILL_DEFINITION.tags entry, and the "
-            "description prefix — so operators can't mistake a checklist for automation. "
-            "- 'executable': every step is SkillContext-safe; loads and runs end-to-end. "
-            "- 'hybrid': some safe steps, some unsafe; safe steps run, unsafe steps print "
-            "documentation with captured input for operator execution. "
-            "- 'checklist': no safe steps; loads but runs nothing, serves as structured docs. "
-            "Does NOT auto-register; returns code for review. Sample inputs secret-scrubbed. "
-            "Cost: low. Risk: none."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "sequence": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Ordered tool-name sequence of the runbook. Typically from detect_runbooks output.",
-                },
-                "skill_name": {
-                    "type": "string",
-                    "description": "Optional skill identifier (will be normalised to snake_case).",
-                },
-                "description_override": {
-                    "type": "string",
-                    "description": "Optional human description to use instead of the auto-generated one.",
-                },
-                "format": {
-                    "type": "string",
-                    "description": "'source' (default — returns the full skill source code) or 'summary'.",
-                },
-            },
-            "required": ["sequence"],
         },
     },
 ]
