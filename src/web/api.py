@@ -904,7 +904,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/skills")
     async def create_skill(request: web.Request) -> web.Response:
-        data = await request.json()
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
         name = data.get("name", "").strip()
         code = data.get("code", "").strip()
         if not name or not code:
@@ -929,7 +932,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.put("/api/skills/{name}")
     async def update_skill(request: web.Request) -> web.Response:
         name = request.match_info["name"]
-        data = await request.json()
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
         code = data.get("code", "").strip()
         if not code:
             return web.json_response({"error": "code is required"}, status=400)
@@ -982,7 +988,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/skills/validate")
     async def validate_skill(request: web.Request) -> web.Response:
-        data = await request.json()
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
         code = data.get("code", "").strip()
         if not code:
             return web.json_response({"error": "code is required"}, status=400)
