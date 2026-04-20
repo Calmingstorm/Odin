@@ -712,6 +712,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 "name": tool["name"],
                 "description": tool["description"],
                 "timeout": tools_config.get_tool_timeout(tool["name"]),
+                "is_core": tool.get("is_core", False),
             }
             for tool in all_tools
         ]
@@ -2280,69 +2281,6 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response({
             "suggestions": [s.to_dict() for s in suggestions[:limit]],
             "total": len(suggestions),
-        })
-
-    @routes.post("/api/runbooks/synthesize")
-    async def runbooks_synthesize(request: web.Request) -> web.Response:
-        from ..learning.runbook_detector import RunbookSuggestion, detect_patterns
-        from ..learning.runbook_synthesizer import (
-            synthesize_skill_code,
-            synthesize_summary,
-        )
-        from ..llm.secret_scrubber import scrub_output_secrets
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-        sequence = body.get("sequence")
-        if not isinstance(sequence, list) or not sequence:
-            return web.json_response({"error": "'sequence' (non-empty list) is required"}, status=400)
-        sequence = [str(s) for s in sequence]
-        skill_name = body.get("skill_name") or None
-        description = body.get("description_override") or None
-
-        audit_path = getattr(bot.config.tools, "audit_log_path", None) or "./data/audit.jsonl"
-
-        def _find() -> RunbookSuggestion | None:
-            try:
-                all_s = detect_patterns(
-                    audit_path, min_frequency=1,
-                    min_length=len(sequence), max_length=len(sequence),
-                    lookback_days=365,
-                )
-            except Exception:
-                return None
-            for s in all_s:
-                if s.sequence == sequence:
-                    return s
-            return None
-
-        found = await asyncio.to_thread(_find)
-        if found is None:
-            found = RunbookSuggestion(
-                sequence=list(sequence), frequency=0, session_count=0,
-                hosts=[], actors=[], first_seen="", last_seen="",
-                sample_inputs=[{"tool_name": s, "host": None, "input": {}} for s in sequence],
-            )
-        source = synthesize_skill_code(
-            found, skill_name=skill_name, description_override=description,
-        )
-        # Belt and braces: synthesize_skill_code already scrubs the embedded
-        # captured inputs, but run the output through the scrubber one more
-        # time before it leaves the process. Generated skills that leave via
-        # the web API are a natural place to leak anything the detector
-        # pipeline missed.
-        source = scrub_output_secrets(source)
-        return web.json_response({
-            "source": source,
-            "summary": synthesize_summary(source, found),
-            "metadata": {
-                "sequence": found.sequence,
-                "frequency": found.frequency,
-                "session_count": found.session_count,
-                "hosts": found.hosts,
-                "length": found.length,
-            },
         })
 
     # ------------------------------------------------------------------
