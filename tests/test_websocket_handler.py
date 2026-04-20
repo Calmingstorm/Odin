@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -178,15 +178,15 @@ class TestHandleChat:
         assert resp["type"] == "chat_error"
 
     @pytest.mark.asyncio
-    async def test_chat_default_channel(self):
+    async def test_chat_uses_session_based_channel_id(self):
         mgr = WebSocketManager(_make_bot())
         ws = _make_ws()
+        ws._odin_session_id = "session-1234567890abcdef-extra"
         mock_result = {"response": "ok", "tools_used": [], "is_error": False}
         with patch("src.web.websocket.process_web_chat", new_callable=AsyncMock, return_value=mock_result) as mock_fn:
             await mgr._handle_chat(ws, {"content": "hi"})
-        # channel_id should default to "web-default"
         call_args = mock_fn.call_args
-        assert call_args[0][2] == "web-default"  # channel_id
+        assert call_args[0][2] == "ws-session-12345678"  # first 16 chars of session id
 
 
 # ---------------------------------------------------------------------------
