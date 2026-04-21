@@ -35,12 +35,14 @@ const VALIDATION_RULES = {
 
 // Section grouping: category -> { label, icon, sections[] }
 const SECTION_GROUPS = [
-  { key: 'core', label: 'Core', icon: '\u2699', sections: ['timezone', 'discord', 'logging', 'permissions'] },
-  { key: 'llm', label: 'LLM & AI', icon: '\uD83E\uDDE0', sections: ['openai_codex', 'context'] },
-  { key: 'data', label: 'Data & Storage', icon: '\uD83D\uDCBE', sections: ['sessions', 'learning', 'search', 'usage'] },
-  { key: 'services', label: 'Services', icon: '\uD83D\uDD17', sections: ['webhook', 'monitoring', 'voice', 'browser', 'comfyui'] },
+  { key: 'core', label: 'Core', icon: '\u2699', sections: ['timezone', 'discord', 'logging', 'permissions', 'graceful_degradation'] },
+  { key: 'llm', label: 'LLM & AI', icon: '\uD83E\uDDE0', sections: ['openai_codex', 'context', 'agents'] },
+  { key: 'data', label: 'Data & Storage', icon: '\uD83D\uDCBE', sections: ['sessions', 'learning', 'search', 'usage', 'audit'] },
+  { key: 'services', label: 'Services', icon: '\uD83D\uDD17', sections: ['webhook', 'monitoring', 'voice', 'browser', 'comfyui', 'mcp', 'slack'] },
   { key: 'infra', label: 'Infrastructure', icon: '\uD83D\uDEE0', sections: ['tools'] },
   { key: 'ui', label: 'Web UI', icon: '\uD83C\uDF10', sections: ['web'] },
+  { key: 'automation', label: 'Automation', icon: '\uD83D\uDD04', sections: ['message_triggers', 'reaction_triggers', 'grafana_alerts', 'outbound_webhooks'] },
+  { key: 'integrations', label: 'Integrations', icon: '\uD83D\uDD0C', sections: ['issue_tracker'] },
 ];
 
 const REDACTED = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
