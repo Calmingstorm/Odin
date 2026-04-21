@@ -197,9 +197,18 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.get("/api/auth/session")
     async def auth_session(request: web.Request) -> web.Response:
         sm = request.app.get("session_manager")
+        auth_header = request.headers.get("Authorization", "")
+        is_authed = False
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            api_token = request.app.get("api_token", "")
+            if api_token and token == api_token:
+                is_authed = True
+            elif sm and sm.validate(token):
+                is_authed = True
         timeout = sm.timeout_seconds if sm else 0
         return web.json_response({
-            "authenticated": True,
+            "authenticated": is_authed,
             "timeout_seconds": timeout,
             "active_sessions": sm.active_count if sm else 0,
         })

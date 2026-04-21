@@ -1398,7 +1398,8 @@ class ToolExecutor:
             import json
             return json.dumps(result, indent=2)
         except IssueTrackerError as e:
-            return f"issue_tracker error: {e}"
+            from ..llm.secret_scrubber import scrub_output_secrets
+            return f"issue_tracker error: {scrub_output_secrets(str(e))}"
 
     async def _handle_http_probe(self, inp: dict) -> str:
         from .http_probe_ops import build_http_probe_command
