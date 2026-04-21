@@ -9,7 +9,7 @@
 | 4 | Analyze project 3 (Nanobot) | **COMPLETE** | 2 issues created (#45-#46): runtime self-introspection tool, process-level shell sandbox |
 | 5 | Analyze project 4 (Lilium AI) | **COMPLETE** | 2 issues created (#47-#48): runtime log injection into agent context, lightweight scheduled code tasks |
 | 6 | Analyze project 5 (Kiro Discord Bot) | **COMPLETE** | 2 issues created (#49-#50): thread-based task execution with tool progress, cron execution history |
-| 7 | Analyze project 6 | pending | |
+| 7 | Analyze project 6 (ZeroClaw) | **COMPLETE** | 3 issues created (#51-#53): event-driven SOPs with deterministic execution, cost budget enforcement, emergency stop (e-stop) |
 | 8 | Analyze project 7-8 | pending | |
 | 9 | Analyze remaining projects | pending | |
 | 10 | Final summary + prioritized roadmap issue | pending | |
@@ -818,3 +818,244 @@ Kiro Discord Bot is a well-crafted Discord wrapper for kiro-cli with excellent D
 ---
 
 **Round 6 status: COMPLETE. Kiro Discord Bot analyzed, 2 issues created (#49-#50). Cleanup done.**
+
+---
+
+### Round 7 — ZeroClaw Deep Analysis (2026-04-21)
+
+**Project:** ZeroClaw (https://github.com/zeroclaw-labs/zeroclaw)
+**What it is:** Fast, small, fully autonomous AI personal assistant. 100% Rust (single binary, <5MB RAM, <10ms cold start). MIT + Apache-2.0 licensed, v0.7.1. Built by Harvard/MIT/Sundai.Club community. Fork/evolution of OpenClaw rewritten in Rust for edge deployment. Runs on $10 hardware. Local-first Gateway as control plane.
+
+**Key stats:** 70+ tools, 27+ channel integrations, 20+ LLM provider backends, SOP engine (Standard Operating Procedures), Routines engine (event-triggered automation), SkillForge (automated skill discovery), multi-sandbox security (Bubblewrap, Landlock, Firejail, Seatbelt, Docker), hardware peripheral support (ESP32, STM32, Arduino, RPi), React 19 web dashboard, tunnel support (Cloudflare, Tailscale, ngrok, OpenVPN), cost budget enforcement, e-stop system, swarm tool, pipeline tool, Verifiable Intent credentials.
+
+---
+
+#### What ZeroClaw Does Well (vs Odin)
+
+**1. Standard Operating Procedures (SOPs) — Event-Driven Workflow Automation**
+Full SOP framework (`crates/zeroclaw-runtime/src/sop/`):
+- **SOP definition format**: `SOP.toml` (metadata, triggers, priority, execution mode, cooldown, max concurrent) + `SOP.md` (procedure steps with suggested tools) per directory under `<workspace>/sops/`
+- **Triggers**: MQTT topics (with conditions), webhooks (by path), cron expressions, peripheral signals (board+signal+condition), manual
+- **Five execution modes**: Auto (full autonomy), Supervised (approval before start), StepByStep (approval per step), PriorityBased (critical=auto, normal=supervised), **Deterministic** (no LLM round-trips — step outputs pipe directly to next step inputs, checkpoint steps pause for human approval)
+- **Typed steps**: JSON Schema on step input/output for validation
+- **Run lifecycle**: SOP engine with trigger matching, run start/advance/complete/fail/cancel, concurrency limits (per-SOP + global), cooldown between runs
+- **Deterministic savings tracking**: measures cumulative LLM cost avoided by deterministic execution
+- **Full SOP dispatch pipeline**: event → match triggers → check cooldown/concurrency → start run → return action (ExecuteStep, WaitApproval, DeterministicStep, CheckpointWait, Completed, Failed)
+- **Metrics collector**: runs completed/failed/cancelled, steps executed/defined/failed/skipped, human approvals, timeout auto-approvals, windowed and all-time aggregation, per-SOP and global
+- **Audit logger**: full audit trail of SOP events
+
+Odin has three separate systems (webhook triggers in `scheduler.py`, cron scheduling, `execute_plan` DAG) but no unified SOP framework. Missing: deterministic execution mode, multi-trigger-type workflows, per-step checkpoint approval, concurrency/cooldown, SOP metrics.
+
+**2. Cost Budget Enforcement with Daily/Monthly Limits**
+`crates/zeroclaw-runtime/src/cost/tracker.rs`:
+- `check_budget(estimated_cost_usd)` before every LLM call
+- Returns `Allowed`, `Warning` (approaching configurable `warn_at_percent`), or `Exceeded` (over limit)
+- `daily_limit_usd` and `monthly_limit_usd` configurable in config
+- Persistent JSONL-based cost storage (survives restarts)
+- Per-session + global aggregation with summary API
+
+Odin has `CostTracker` (`src/llm/cost_tracker.py`) that **tracks** costs with per-user/channel/tool breakdown and Prometheus metrics, but never **enforces** limits. No daily/monthly caps, no warning thresholds, no mechanism to block an LLM call that would exceed a budget. For a 24/7 autonomous agent, runaway cost is an operational risk.
+
+**3. Emergency Stop (E-Stop) with Multi-Level Kill Switch**
+`crates/zeroclaw-runtime/src/security/estop.rs`:
+- **Four stop levels**: `KillAll` (halt everything), `NetworkKill` (block outbound network), `DomainBlock(domains)` (block specific domains with glob patterns), `ToolFreeze(tools)` (freeze specific tools)
+- **Persistent state**: JSON state file survives restarts
+- **Fail-closed design**: if state file corrupted → defaults to `kill_all = true`
+- **OTP-protected resume**: requires valid one-time password to disengage e-stop
+- **Granular control**: can freeze just `shell_exec` while keeping `read_file` available, or block `*.production.internal` while allowing other domains
+
+Odin has no e-stop mechanism. The only way to stop operations is killing the process (lossy — loses session state, audit context, in-flight operations). No granular tool/domain freezing, no protection against accidental resume.
+
+**4. Routines Engine — Lightweight Event-Triggered Automation**
+`crates/zeroclaw-runtime/src/routines/`:
+- Event-triggered automation rules defined in `routines.toml`
+- Pattern matching: exact, glob, regex strategies across event sources (webhook, cron, channels, system)
+- Actions: trigger SOP, execute shell command, send message, run cron job
+- Per-routine cooldown to prevent rapid re-triggering
+- Bridges channel messages, cron ticks, webhooks, and system events into the SOP pipeline
+
+Odin's webhook triggers are similar but simpler (AND-logic matching on event data). Routines add pattern strategies (glob, regex), bridge more event sources, and integrate directly with the SOP pipeline. However, the gap is partially covered by existing webhook triggers and the proposed SOP system (#51).
+
+**5. Swarm Tool — Multi-Agent Orchestration Strategies**
+`crates/zeroclaw-tools/src/swarm.rs`:
+- Three swarm strategies: Sequential (pipeline: A→B→C), Parallel (fan-out/fan-in), Router (LLM-selected agent)
+- Per-agent config: provider, model, system prompt, temperature
+- Timeout per agent, security policy enforcement
+
+Odin has `delegate_task`, `spawn_loop_agents`, `collect_loop_agents` which cover similar ground. The Router strategy (LLM picks which agent based on the task) is novel but niche.
+
+**6. Pipeline Tool — Collapse Multi-Step Tool Chains**
+`crates/zeroclaw-tools/src/pipeline.rs`:
+- Agent invokes `execute_pipeline` with JSON payload of steps
+- Steps executed sequentially or in parallel
+- Result interpolation between steps
+- Allowed tools whitelist, max steps limit
+
+Already covered by #43 (programmatic tool calling) which is the same concept approached differently.
+
+**7. SkillForge — Automated Skill Discovery**
+`crates/zeroclaw-runtime/src/skillforge/`:
+- Pipeline: Scout (discover from GitHub/ClawHub) → Evaluate (score candidates) → Integrate (generate manifests)
+- Configurable: auto_integrate, sources, scan_interval_hours, min_score
+- Security audit before integration
+
+Already partially covered by #42 (autonomous skill creation). SkillForge is more about discovering *external* skills rather than creating new ones from experience.
+
+**8. Approval Manager — Interactive Approval Workflow**
+`crates/zeroclaw-runtime/src/approval/`:
+- Pre-execution approval prompts for supervised mode
+- Config-level `auto_approve` and `always_ask` tool lists
+- Session-scoped "Always" allowlist (approve once → auto-approved for session)
+- Audit trail of all approval decisions
+- Non-interactive mode for channels (auto-deny what would need approval)
+
+Odin's CommandGovernor classifies risk but doesn't prompt for approval. This is closely related to #53 (e-stop) — approval gating is a softer version of the same concept.
+
+**9. Lifecycle Hooks — Interceptable Event Pipeline**
+`crates/zeroclaw-runtime/src/hooks/`:
+- HookHandler trait with priority ordering
+- Events: gateway start/stop, session start/end, LLM input/output, tool pre/post execution, message pre/post
+- Modifying hooks run sequentially (pipe output), void hooks run in parallel
+- Cancel capability (hook can abort an operation)
+
+Odin doesn't have a formal hook system. Tool execution goes straight through the executor without interception points.
+
+**10. Trust Tracker — Per-Domain Trust Scores**
+`crates/zeroclaw-runtime/src/trust/`:
+- Per-domain trust scores (0.0-1.0) with correction penalty
+- Correction types: user override, quality failure, SOP deviation
+- Regression alerts when trust drops below threshold
+- Decay over time, configurable parameters
+
+Novel concept for tracking agent reliability per operational domain. Odin has no equivalent — reliability is not tracked per domain.
+
+**11. Observability — Pluggable Backend System**
+`crates/zeroclaw-runtime/src/observability/`:
+- Observer trait with multiple backends: Log, Verbose, Prometheus, OpenTelemetry (OTLP), Noop
+- Factory pattern: config selects backend
+- Runtime trace support
+
+Odin has Prometheus metrics (`health/metrics.py`) and comprehensive logging but no pluggable observability backends or native OpenTelemetry/OTLP support.
+
+**12. Hardware Peripherals**
+- ESP32, STM32 Nucleo, Arduino, Raspberry Pi GPIO via `Peripheral` trait
+- Firmware targets with flash support (`zeroclaw peripheral flash`)
+- Hardware tools: board_info, memory_map, memory_read
+
+Irrelevant for Odin's infrastructure execution focus.
+
+**13. Multi-Sandbox Security**
+- Pluggable sandbox backends: Docker, Bubblewrap, Firejail, Landlock (Linux), Seatbelt (macOS)
+- `create_sandbox()` auto-detects best available backend
+- Workspace boundary enforcement, path traversal blocking, forbidden paths
+- Prompt guard (prompt injection defense)
+- Leak detector, vulnerability scanner, WebAuthn support
+
+Already partially covered by #46 (process-level shell sandbox). ZeroClaw's multi-sandbox approach is more comprehensive but the core concept is covered.
+
+**14. Tunnel Support**
+- Cloudflare, Tailscale, ngrok, OpenVPN, Pinggy, custom command tunnels
+- Health check per tunnel, public URL management
+
+Interesting for remote access but tangential to Odin's core infrastructure execution use case.
+
+**15. Escalation Tool with Urgency-Aware Routing**
+`crates/zeroclaw-tools/src/escalate.rs`:
+- Agent-callable `escalate_to_human` tool with urgency levels (low/medium/high/critical)
+- High/critical urgency triggers Pushover mobile notifications
+- Optional blocking mode to wait for human response
+- Formatted escalation messages with urgency prefix
+
+Odin has `recovery.py` (retry transient failures before surfacing to user) but no proactive escalation tool that the agent can invoke to alert a human operator with urgency routing and mobile push.
+
+---
+
+#### What Odin Does Better Than ZeroClaw
+
+**1. Infrastructure-Specific Tool Suite**
+Odin: 72 deeply parameterized tools with first-class kubectl, terraform, docker_ops, http_probe, git_ops, SSH, MCP, process management, autonomous loops, browser automation — all with structured JSON schemas and rich parameter support. ZeroClaw: ~70 tools but mostly general-purpose (shell, file, git, web, browser, integrations like Jira/Notion/Google Workspace). Infrastructure operations in ZeroClaw go through raw shell execution or cloud_ops (which is read-only advisory, not operational).
+
+**2. Post-Action Validation**
+`validate_action` automatically runs health checks (HTTP, port, service, process, log, command) after operational changes with severity levels. ZeroClaw has nothing comparable.
+
+**3. DAG Plan Execution**
+`execute_plan` with dependency-aware parallel execution and structured plan format. ZeroClaw's pipeline tool is sequential/parallel but doesn't support DAG dependency resolution.
+
+**4. Risk Classification & Affordance Metadata**
+Every tool tagged with cost/risk/latency/preconditions. LLM self-prices calls. ZeroClaw doesn't have tool-level risk metadata.
+
+**5. Grafana Alert Auto-Remediation & Webhook Workflows**
+Alert-triggered automated remediation with HMAC-verified webhook routing from Gitea/Grafana/GitHub/GitLab. ZeroClaw has SOPs and routines but no Grafana-specific alert integration with auto-remediation.
+
+**6. Autonomous Execution Loops**
+`start_loop` / `stop_loop` / `list_loops` / `spawn_loop_agents` / `collect_loop_agents` — purpose-built continuous monitoring primitives. ZeroClaw has cron and SOPs but not the same autonomous loop concept.
+
+**7. HMAC-Signed Audit Log & Secret Scrubber**
+Tamper-evident audit entries with HMAC signing, secret scrubber on all I/O paths, response guards (fabrication detection). ZeroClaw has audit logging and secrets management but not HMAC-signed tamper-evident audit entries.
+
+**8. CommandGovernor with Detailed Risk Classification**
+Regex-based command risk classification with severity levels and detailed audit trail. ZeroClaw uses workspace boundary + path traversal blocking + command allowlists (different approach — allowlist vs classification).
+
+**9. Adaptive Session Compaction**
+Activity-rate-scaled compaction with topic change detection and relevance scoring. ZeroClaw has context management but Odin's is more sophisticated.
+
+---
+
+#### What's Comparable (No Gap)
+
+- Cron scheduling (both support cron expressions, one-shot, webhook triggers)
+- Shell execution (both support local + Docker sandboxing)
+- File operations (both read/write/edit/glob/grep)
+- Web search and fetch (both have web tools — already issued as #39)
+- Browser automation (both use Chromium-based automation)
+- Git operations (both have git tools)
+- Knowledge base / memory (both have persistent memory systems)
+- MCP support (both integrate with MCP servers)
+- Skills/plugins (both have skill systems with security auditing)
+- Sub-agent delegation (both spawn background subagents)
+- Multi-provider LLM (already issued as #38)
+- Web dashboard (both have React-based web UIs)
+- Docker operations (both have Docker tools)
+- Voice/STT (both support speech-to-text)
+- Multi-sandbox security (partially covered by #46)
+
+---
+
+#### Issues Created
+
+| Issue | Title | Value |
+|-------|-------|-------|
+| [#51](https://github.com/Calmingstorm/Odin/issues/51) | feat: event-driven Standard Operating Procedures (SOPs) with deterministic execution | **HIGH** — unifies webhook+cron+plan into structured workflows, deterministic mode eliminates LLM cost for well-known procedures, checkpoint approval for high-risk ops |
+| [#52](https://github.com/Calmingstorm/Odin/issues/52) | feat: cost budget enforcement with daily/monthly spending limits | **HIGH** — critical safety net for 24/7 autonomous agent, prevents runaway costs from stuck loops or chatty cron jobs |
+| [#53](https://github.com/Calmingstorm/Odin/issues/53) | feat: emergency stop (e-stop) with multi-level kill switch and OTP-protected resume | **HIGH** — operational safety for infrastructure executor with shell/kubectl/terraform access, granular control without losing session state |
+
+**Features considered but NOT issued (not high enough value or already covered):**
+- Routines engine — interesting but substantially overlaps with Odin's existing webhook triggers and the proposed SOP system (#51). Routines are essentially a lightweight bridge between events and SOPs; the SOP issue covers the core value.
+- Swarm tool (sequential/parallel/router strategies) — Odin's `delegate_task` + `spawn_loop_agents` + `collect_loop_agents` covers similar orchestration patterns. The router strategy (LLM picks agent) is novel but niche.
+- Pipeline tool — already covered by #43 (programmatic tool calling) from Hermes Agent analysis.
+- SkillForge (automated skill discovery from GitHub) — already partially covered by #42 (autonomous skill creation). External skill discovery is a product direction decision, not a core capability gap.
+- Approval manager — closely related to e-stop (#53) and could be part of that implementation. The core concept (prompt before risky operations) is a refinement of CommandGovernor rather than a distinct new capability.
+- Lifecycle hooks — useful architectural pattern but Odin can add hook points incrementally as needed. Not a standalone feature gap.
+- Trust tracker (per-domain trust scores) — novel concept but niche. Odin's operational model doesn't yet need domain-specific reliability tracking. Could be valuable later once the SOP system (#51) provides enough structured execution data to score against.
+- Observability backends (OpenTelemetry/OTLP) — nice-to-have for teams using OTLP, but Odin already has Prometheus metrics. Adding OTLP export is a minor enhancement, not a feature gap.
+- Hardware peripherals (ESP32/STM32/Arduino/RPi) — irrelevant for Odin's infrastructure execution focus.
+- Tunnel support (Cloudflare/Tailscale/ngrok) — tangential to core use case. Odin already has web UI + Discord; remote access via tunnel is deployment-specific.
+- Multi-sandbox security (Bubblewrap/Landlock/Firejail/Seatbelt) — already covered by #46 (process-level shell sandbox).
+- Escalation tool with urgency routing — interesting but narrow. Odin's Slack webhook notifications + Discord responses cover most escalation needs. The Pushover mobile push for critical urgency is a nice touch but could be a minor enhancement to existing notification system rather than a standalone feature.
+- Verifiable Intent (SD-JWT credentials for commerce-gated actions) — highly specialized for agent commerce scenarios. Not relevant to Odin's infrastructure execution focus.
+- 27+ channel integrations — Odin is Discord-only by design. Multi-channel is a product direction decision.
+- i18n (30+ languages for tool descriptions) — cosmetic for Odin's operator-focused use case.
+
+---
+
+#### Overall Assessment
+
+ZeroClaw is the most architecturally sophisticated project analyzed so far — a full rewrite of OpenClaw in Rust with a comprehensive security model, SOP engine, routines engine, cost enforcement, e-stop, and hardware peripheral support. Its Rust implementation gives it exceptional performance characteristics (<5MB RAM, <10ms cold start) that are impressive for edge deployment.
+
+However, for Odin's specific use case as an infrastructure executor, ZeroClaw's advantages are primarily in the **operational safety and workflow automation** categories rather than in raw tool capability. Odin has deeper infrastructure-specific tools (kubectl, terraform, docker_ops, http_probe, validate_action) while ZeroClaw has stronger operational guard rails (SOPs, cost limits, e-stop, approval gating).
+
+The three issues created (#51-#53) represent the highest-value gaps: SOPs would transform how Odin handles well-known operational procedures, cost enforcement is a critical safety net for autonomous operation, and e-stop provides the operational kill switch that any production infrastructure executor needs.
+
+---
+
+**Round 7 status: COMPLETE. ZeroClaw analyzed, 3 issues created (#51-#53). Cleanup done.**
