@@ -19,14 +19,18 @@ def create_auth_routes() -> list[web.RouteDef]:
 
     @routes.get("/auth/callback")
     async def callback(request: web.Request) -> web.Response:
-        code = request.query.get("code")
-        if not code:
-            raise web.HTTPBadRequest(text="Missing authorization code")
-        # Placeholder — would exchange code for token
-        return web.json_response({"status": "authenticated"})
+        return web.json_response(
+            {"error": "Discord OAuth not implemented. Use API token auth."},
+            status=501,
+        )
 
     @routes.get("/auth/logout")
     async def logout(request: web.Request) -> web.Response:
+        sm = request.app.get("session_manager")
+        if sm:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                sm.destroy(auth_header[7:])
         return web.json_response({"status": "logged_out"})
 
     return list(routes)

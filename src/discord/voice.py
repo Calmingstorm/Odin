@@ -33,6 +33,10 @@ def _patch_voice_recv_dave():
         import davey
         from discord.ext.voice_recv.opus import PacketDecoder
 
+        if getattr(PacketDecoder._decode_packet, "_odin_dave_patched", False):
+            log.info("DAVE voice patch already installed, skipping")
+            return
+
         _original_decode = PacketDecoder._decode_packet
 
         _dave_fail_count = [0]
@@ -72,6 +76,7 @@ def _patch_voice_recv_dave():
 
             return _original_decode(self, packet)
 
+        _patched_decode._odin_dave_patched = True
         PacketDecoder._decode_packet = _patched_decode
         log.info("Patched voice_recv with DAVE decryption support")
     except ImportError:
