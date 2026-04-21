@@ -5,7 +5,7 @@
 |-------|-------|--------|---------|
 | 1 | Web research — find 8-10 competitor/similar projects | **COMPLETE** | Found 10 projects across Discord AI agents, autonomous frameworks, and DevOps tools |
 | 2 | Analyze project 1 (OpenClaw) | **COMPLETE** | 4 issues created (#38-#41): multi-provider LLM failover, pluggable web search, background memory consolidation, live browser viewer |
-| 3 | Analyze project 2 | pending | |
+| 3 | Analyze project 2 (Hermes Agent) | **COMPLETE** | 3 issues created (#42-#44): autonomous skill creation, programmatic tool calling, filesystem checkpoints |
 | 4 | Analyze project 3 | pending | |
 | 5 | Analyze project 4 | pending | |
 | 6 | Analyze project 5 | pending | |
@@ -212,3 +212,122 @@ Every tool tagged with cost/risk/latency/preconditions — LLM self-prices calls
 ---
 
 **Round 2 status: COMPLETE. OpenClaw analyzed, 4 issues created. Cleanup done.**
+
+---
+
+### Round 3 — Hermes Agent Deep Analysis (2026-04-21)
+
+**Project:** Hermes Agent (https://github.com/NousResearch/hermes-agent)
+**What it is:** Self-improving AI agent by Nous Research. Python, MIT licensed, v0.10.0. Built on the concept of a "closed learning loop" — agent creates skills from experience, improves them during use, nudges itself to persist knowledge. Multi-platform gateway (Discord, Telegram, Slack, WhatsApp, Signal, CLI). Forked from/migrates from OpenClaw.
+
+**Key stats:** ~40+ tools in core toolset, 25+ bundled skill categories, 6 terminal backends, 3000+ tests, community Skills Hub (agentskills.io), Honcho dialectic user modeling integration, 7+ messaging platforms.
+
+---
+
+#### What Hermes Agent Does Well (vs Odin)
+
+**1. Self-Improving Skills (Autonomous Skill Creation)**
+After every N tool-calling iterations (`skill_nudge_interval`, default 10), a background review agent spawns with a full conversation snapshot. It examines the session and decides whether to create new skills or improve existing ones. Skills are stored as structured SKILL.md files in `~/.hermes/skills/` with subdirectories for references, templates, scripts, and assets. A security scanner (`skills_guard.py`) performs regex-based static analysis for data exfiltration, prompt injection, destructive commands, persistence, obfuscation before accepting agent-created skills. Trust levels: builtin (always trusted), trusted (known repos), community (any findings = blocked), agent-created (safe/caution allowed, dangerous blocked).
+
+Odin has skills (`skill_manager.py`) and ConversationReflector, but: (a) the reflector only extracts declarative insights (corrections, preferences, facts) — it doesn't create reusable procedural skills, and (b) skill creation is manual only — the agent never autonomously creates skills from successful task patterns.
+
+**2. Programmatic Tool Calling (PTC) — Code Execution Sandbox**
+The `execute_code` tool lets the LLM write a Python script that calls Hermes tools via RPC. Two transports: Unix domain sockets (local) and file-based RPC (remote backends). The parent generates a `hermes_tools.py` stub with RPC functions, spawns the script, dispatches tool calls back to the parent. Only stdout is returned to the LLM — intermediate tool results never enter context. Whitelisted tools: web_search, web_extract, read_file, write_file, search_files, patch, terminal. Limits: 5 min timeout, 50 tool calls, 50KB stdout.
+
+Odin has no equivalent. Every tool call is a separate inference turn, consuming context window. For multi-step infrastructure workflows (check pods → read logs → check limits → restart → validate), PTC could collapse 8+ turns into 1.
+
+**3. Transparent Filesystem Checkpoints with Rollback**
+`checkpoint_manager.py` — shadow git repos at `~/.hermes/checkpoints/{sha256(abs_dir)[:16]}/` using `GIT_DIR + GIT_WORK_TREE` to avoid polluting projects. Auto-triggers before file-mutating operations once per conversation turn. Max 50K files, 30s git timeout. Provides rollback to any previous checkpoint by commit hash (validated against injection).
+
+Odin has `audit/diff_tracker.py` for observability (records diffs) but no rollback mechanism. Checkpoints add the actual recovery capability.
+
+**4. Memory Nudge System (Background Memory Review)**
+Every N user turns (`memory_nudge_interval`, default 10), a background review agent spawns to examine the conversation and save relevant memories. This runs AFTER the response is delivered so it never competes with the user's task. Combined with skill nudges for a dual review system.
+
+Odin's ConversationReflector is reactive (post-conversation) and extracts insights, but it's simpler — no periodic nudging during long sessions, no background agent fork.
+
+**5. Mixture-of-Agents (MoA)**
+Routes complex reasoning tasks to multiple frontier models in parallel (Claude Opus, Gemini Pro, GPT-5.4 Pro, DeepSeek v3.2) and aggregates responses using an aggregator model. For "extremely difficult problems requiring intense reasoning." Odin has no multi-model consultation capability.
+
+**6. Cross-Session Recall with LLM Summarization**
+`session_search` tool: FTS5 search across all past session transcripts → groups by session → truncates to ~100K chars centered on matches → sends to cheap/fast model (Gemini Flash) for focused summarization → returns per-session summaries. Odin has `search_history` with FTS but returns raw results, not LLM-summarized contextual recall.
+
+**7. Honcho Dialectic User Modeling**
+Deep user modeling via Honcho integration — multi-pass dialectic reasoning about the user, session summaries, bidirectional peer tools, persistent conclusions. Builds an evolving model of who the user is (preferences, goals, working style). Two-layer context injection: base context (session summary + user representation + peer cards) and dialectic supplement (multi-pass reasoning). Cold-start vs warm-session prompts. Odin's UserProfile is just XP/level/warnings (gamification), not understanding.
+
+**8. Six Terminal Backends**
+Local, Docker, SSH, Daytona (serverless), Modal (serverless cloud), Singularity (HPC containers). Each backend supports persistent session snapshots, file sync, and the full tool interface. Odin has local + SSH + Docker tools but not serverless cloud execution backends (Modal/Daytona).
+
+**9. Dangerous Command Approval with LLM Smart Approval**
+Pattern detection + per-session approval state + permanent allowlist + smart approval via auxiliary LLM (auto-approve low-risk commands in context). Odin's `CommandGovernor` is observability-only — classifies risk but never blocks or prompts for approval.
+
+**10. Skills Hub Community Registry**
+Integration with agentskills.io for browsing, installing, and publishing skills from a community hub. Security scanning before installation. Odin's skills are local-only.
+
+---
+
+#### What Odin Does Better Than Hermes Agent
+
+**1. Infrastructure-Specific Tool Suite**
+Odin has 72 deeply parameterized tools specifically for infrastructure: first-class kubectl, terraform, docker_ops, http_probe, git_ops with structured schemas. Hermes delegates most infra work to raw `terminal` (shell execution) without structured tool wrappers.
+
+**2. Post-Action Validation**
+`validate_action` automatically runs health checks (HTTP, port, service, process, log, command) after operational changes. Hermes has nothing comparable — no automatic verification after mutations.
+
+**3. DAG Plan Execution**
+Structured dependency-aware parallel execution via `execute_plan`. Hermes has `delegate_task` for parallel subagents but no formal DAG execution with dependency resolution.
+
+**4. Risk Classification & Affordance Metadata**
+Every tool tagged with cost/risk/latency/preconditions. LLM self-prices calls. Hermes doesn't do this.
+
+**5. Grafana Alert Auto-Remediation & Webhook Workflows**
+Inbound webhooks from Gitea/Grafana/GitHub/GitLab with HMAC verification routing to automated remediation. Hermes has cron but not alert-triggered workflows.
+
+**6. Autonomous Execution Loops**
+`start_loop` / `stop_loop` / `list_loops` / `spawn_loop_agents` / `collect_loop_agents` — purpose-built for continuous monitoring and iterative tasks. Hermes has cron scheduling but not the same autonomous loop primitives.
+
+**7. HMAC-Signed Audit Log & Secret Scrubber**
+Defense-in-depth security: HMAC-signed audit entries (tamper detection), secret scrubber on all I/O paths, response guards (fabrication detection). Hermes has command approval but less defense-in-depth on the audit side.
+
+---
+
+#### What's Comparable (No Gap)
+
+- Skills/plugins system (both create, edit, delete, list, invoke skills)
+- Cron scheduling (both support cron expressions with platform delivery)
+- Browser automation (both use Playwright/CDP)
+- Shell execution (both support local + SSH)
+- File operations (both read/write/search)
+- Git operations (both have git tools)
+- Knowledge base / memory (both have persistent memory with different architectures)
+- MCP support (both integrate with MCP servers)
+- Sub-agent delegation (both spawn parallel subagents)
+- Multi-provider LLM support (both support multiple providers — already issued as #38)
+- Web search (both have web search — already issued as #39)
+- Voice support (both have TTS/STT)
+- Image generation (both support image generation)
+- Docker operations (both have Docker tools)
+- Todo/task management (both have todo tools)
+
+---
+
+#### Issues Created
+
+| Issue | Title | Value |
+|-------|-------|-------|
+| [#42](https://github.com/Calmingstorm/Odin/issues/42) | feat: autonomous skill creation from successful task patterns | **HIGH** — operational runbook learning, reduces context usage, improves reliability over time |
+| [#43](https://github.com/Calmingstorm/Odin/issues/43) | feat: programmatic tool calling — execute Python scripts that call Odin tools via RPC | **HIGH** — collapses multi-step tool chains into single turns, critical for infrastructure workflows |
+| [#44](https://github.com/Calmingstorm/Odin/issues/44) | feat: transparent filesystem checkpoints with rollback before file mutations | **MEDIUM** — safety net for config/manifest edits, complements validate_action with actual undo |
+
+**Features considered but NOT issued (not high enough value for Odin's use case):**
+- Mixture-of-Agents (MoA) — interesting for hard reasoning but niche; Odin's infrastructure tasks rarely need multi-model consensus. Cost and latency overhead is high for operational work that needs to be fast.
+- Honcho dialectic user modeling — sophisticated but designed for personal AI assistants. Odin's users are ops teams running infrastructure; deep individual user modeling is less valuable than operational knowledge. ConversationReflector + memory_manage already covers the practical needs.
+- Cross-session recall with LLM summarization — Odin's `search_history` already provides FTS search across sessions. Adding LLM summarization is a nice-to-have enhancement but not a distinct missing capability. Could be a minor PR rather than a feature issue.
+- Skills Hub / community registry — valuable for general-purpose agents but Odin's skills are infrastructure-specific. A community registry for infra runbooks is a product decision, not a technical gap.
+- Six terminal backends (Modal/Daytona/Singularity) — Odin already has local + SSH + Docker. Serverless cloud backends are interesting but tangential to Odin's core use case of managing existing infrastructure.
+- Dangerous command approval with LLM smart approval — Odin's CommandGovernor is observability-only by design. Adding blocking/approval would change the autonomous execution model. Could be a config option but the current approach (classify + audit) is defensible for an agent that's supposed to execute autonomously.
+- Memory nudge system — partially covered by existing ConversationReflector. The periodic nudging during long sessions could be a minor enhancement to the reflector rather than a new system. Already issued background memory consolidation (#40) from OpenClaw analysis covers the broader concept.
+
+---
+
+**Round 3 status: COMPLETE. Hermes Agent analyzed, 3 issues created (#42-#44). Cleanup done.**
