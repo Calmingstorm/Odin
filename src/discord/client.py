@@ -1855,7 +1855,16 @@ class OdinBot(commands.Bot):
                 except Exception as e:
                     text_parts.append(f"[Attachment: {att.filename} (failed to read: {e})]")
             else:
-                text_parts.append(f"[Attachment: {att.filename} ({att.content_type or 'binary'}, {att.size} bytes)]")
+                try:
+                    data = await att.read()
+                    save_path = Path(f"/tmp/{att.filename}")
+                    save_path.write_bytes(data)
+                    text_parts.append(
+                        f"[Attachment saved: /tmp/{att.filename} ({att.content_type or 'binary'}, {att.size:,} bytes)]"
+                    )
+                    log.info("Saved binary attachment: /tmp/%s (%d bytes)", att.filename, att.size)
+                except Exception as e:
+                    text_parts.append(f"[Attachment: {att.filename} (failed to save: {e})]")
 
         return "\n\n".join(text_parts) if text_parts else "", image_blocks
 
