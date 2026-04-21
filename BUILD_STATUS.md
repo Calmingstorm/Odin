@@ -6,7 +6,7 @@
 | 1 | Web research — find 8-10 competitor/similar projects | **COMPLETE** | Found 10 projects across Discord AI agents, autonomous frameworks, and DevOps tools |
 | 2 | Analyze project 1 (OpenClaw) | **COMPLETE** | 4 issues created (#38-#41): multi-provider LLM failover, pluggable web search, background memory consolidation, live browser viewer |
 | 3 | Analyze project 2 (Hermes Agent) | **COMPLETE** | 3 issues created (#42-#44): autonomous skill creation, programmatic tool calling, filesystem checkpoints |
-| 4 | Analyze project 3 | pending | |
+| 4 | Analyze project 3 (Nanobot) | **COMPLETE** | 2 issues created (#45-#46): runtime self-introspection tool, process-level shell sandbox |
 | 5 | Analyze project 4 | pending | |
 | 6 | Analyze project 5 | pending | |
 | 7 | Analyze project 6 | pending | |
@@ -331,3 +331,138 @@ Defense-in-depth security: HMAC-signed audit entries (tamper detection), secret 
 ---
 
 **Round 3 status: COMPLETE. Hermes Agent analyzed, 3 issues created (#42-#44). Cleanup done.**
+
+---
+
+### Round 4 — Nanobot Deep Analysis (2026-04-21)
+
+**Project:** Nanobot (https://github.com/HKUDS/nanobot)
+**What it is:** Ultra-lightweight personal AI agent. Python, MIT licensed, v0.1.5.post2. Inspired by OpenClaw, Claude Code, and Codex — keeps the core agent loop small and readable while supporting chat channels, memory, MCP, and deployment. Active development with near-daily releases. From Hong Kong University of Data Science (HKUDS).
+
+**Key stats:** ~15 built-in tools, 16+ channel integrations, 25+ LLM provider backends, builtin + workspace skills system, Dream memory processor, WebUI (in development), OpenAI-compatible API, cron scheduling.
+
+---
+
+#### What Nanobot Does Well (vs Odin)
+
+**1. Runtime Self-Introspection Tool (MyTool / `my`)**
+Built-in `my` tool that lets the LLM agent inspect and modify its own runtime state during execution:
+- `check` action: inspect current iteration, max iterations, context window tokens, model, workspace, last token usage, exec/web config. Supports dot-path navigation (e.g. `web_config.enable`).
+- `set` action: modify allowed fields (max_iterations capped 1-100, context_window_tokens, model) or store notes in a session-scoped scratchpad (max 64 keys, JSON-safe values).
+- Security: BLOCKED set of sensitive fields (bus, provider, credentials, security boundaries), READ_ONLY set (subagents, exec_config), denied dunder attributes, sensitive field name detection. All modifications audit-logged.
+- Scratchpad: agent can store working notes that persist across tool calls within a session — useful for complex multi-step workflows.
+
+Odin has no equivalent. No way for the agent to check "how much context/iterations do I have left?" or store intermediate state in a scratchpad.
+
+**2. Process-Level Shell Sandbox (bubblewrap/bwrap)**
+Shell commands can be wrapped in Linux namespace isolation via bubblewrap:
+- Workspace directory bind-mounted read-write
+- System directories (/usr, /bin, /lib, /etc/ssl, /etc/resolv.conf) bind-mounted read-only
+- Config directory hidden behind tmpfs (prevents reading ~/.nanobot/config.json from shell)
+- Media directory read-only for attachments
+- Isolated /proc, /dev, /tmp
+- `--new-session` and `--die-with-parent` for clean lifecycle
+
+Odin's CommandGovernor uses regex pattern matching to block dangerous commands — effective but fundamentally incomplete (obfuscated/novel commands can bypass regex). bwrap provides a hard security boundary: even if a command bypasses pattern matching, it can't access files outside the workspace.
+
+**3. Dream Memory System — Two-Phase with Git Versioning**
+Sophisticated memory architecture:
+- Three memory files: `SOUL.md` (agent identity/voice), `USER.md` (user profile/preferences), `MEMORY.md` (project facts/decisions)
+- `history.jsonl` — cursor-based append-only archive of consolidated conversation summaries
+- Dream processor: Phase 1 (LLM analysis of new history entries) → Phase 2 (AgentRunner with read_file/edit_file tools for targeted incremental edits to memory files)
+- Per-line age annotations via git blame (lines older than 14 days get `← Nd` suffix so Dream can prioritize freshness)
+- GitStore: memory files version-controlled with dulwich (pure Python git). Auto-commit after Dream changes, full revert capability, diff between versions
+- User commands: `/dream` (run now), `/dream-log` (show latest change), `/dream-restore` (revert to previous state)
+- Dream can discover and create new skills from conversation patterns (writes SKILL.md files under workspace/skills/)
+
+Odin's ConversationReflector extracts insights post-conversation, but: (a) no git versioning or revert for knowledge base, (b) no per-line age tracking to identify stale knowledge, (c) no targeted incremental edits (reflector creates new entries rather than editing existing knowledge), (d) no user-facing memory inspection/restore commands. Already issued as #40 (background consolidation), #42 (skill creation), and #44 (checkpoints) in prior rounds.
+
+**4. Auto-Compact for Idle Sessions**
+Proactive compression of idle sessions based on configurable TTL:
+- When a session exceeds `session_ttl_minutes` of inactivity, a background task archives old messages via LLM summarization
+- Retains a recent suffix (last 8 messages) for continuity
+- On session resume, injects a "Resumed Session" context with the summary so the user sees continuity
+- Token-based consolidation: estimates prompt token count (including system prompt, tools, history) and consolidates when approaching context window budget
+
+Odin has adaptive compaction in sessions/manager.py (message-count-based with activity rate scaling), but the token-based estimation and idle-session proactive compression are more sophisticated approaches.
+
+**5. Pluggable Web Search (6 providers)**
+Brave, DuckDuckGo, Tavily, SearXNG, Jina, Kagi — with automatic fallback to DuckDuckGo when API keys are missing. Already issued as #39.
+
+**6. 25+ LLM Provider Backends**
+OpenRouter, Anthropic, OpenAI, Azure OpenAI, Groq, DeepSeek, Gemini, Ollama, LM Studio, vLLM, Mistral, MiniMax, GitHub Copilot (OAuth), OpenAI Codex (OAuth), and many more. Already issued as #38.
+
+**7. SSRF Protection on Web Fetch**
+`validate_url_safe()` checks resolved IPs against internal/private ranges before web_fetch, with redirect validation after following redirects. Odin's web tools validate URL schemes but may not check resolved IPs against SSRF-prone ranges.
+
+**8. 16+ Channel Integrations**
+Discord, Telegram, Slack, WhatsApp, WeChat, Feishu, QQ, DingTalk, MS Teams, Matrix, Email, WebSocket, WeCom, and more. Odin is Discord-only by design.
+
+---
+
+#### What Odin Does Better Than Nanobot
+
+**1. Infrastructure-Specific Tool Suite**
+Odin has 72 deeply parameterized tools for infrastructure: first-class kubectl, terraform, docker_ops, http_probe, git_ops with structured schemas. Nanobot has ~15 general tools (exec, read_file, write_file, edit_file, glob, grep, web_search, web_fetch, spawn, cron, message, notebook_edit, my) and delegates infrastructure work to raw `exec` (shell execution).
+
+**2. Post-Action Validation**
+`validate_action` tool runs health checks (HTTP, port, service, process, log, command) after operational changes. Nanobot has nothing comparable.
+
+**3. DAG Plan Execution**
+`execute_plan` with dependency-aware parallel execution. Nanobot's subagent system is simpler (spawn independent tasks, no DAG resolution).
+
+**4. Risk Classification & Affordance Metadata**
+Every Odin tool tagged with cost/risk/latency/preconditions. LLM self-prices calls. Nanobot doesn't do this.
+
+**5. Grafana Alert Auto-Remediation & Webhook Workflows**
+Alert-triggered automated remediation with HMAC-verified webhook routing. Nanobot has cron but no alert-triggered workflows.
+
+**6. Autonomous Execution Loops**
+`start_loop` / `stop_loop` — continuous monitoring and iterative task primitives. Nanobot has cron but not autonomous loops.
+
+**7. HMAC-Signed Audit Log & Secret Scrubber**
+Tamper-evident audit, secret scrubber on all I/O, response guards. Nanobot has command deny patterns and SSRF protection but less defense-in-depth on the audit side.
+
+**8. CommandGovernor with Risk Classification**
+Even though it's regex-based, Odin classifies command risk levels and provides observability. Nanobot's deny patterns just block — no risk classification or detailed audit trail.
+
+**9. Adaptive Session Compaction**
+Odin's compaction scales with channel activity rate (high-activity channels compact earlier), uses topic change detection, and relevance scoring to select which messages to keep. Nanobot's consolidation is simpler (token-based threshold).
+
+---
+
+#### What's Comparable (No Gap)
+
+- Cron scheduling (both support cron expressions, intervals, one-shot timers)
+- Shell execution (both support local shell with safety guards)
+- File operations (both read/write/edit/list/glob/grep)
+- Web search and fetch (both have web tools — already issued as #39)
+- Sub-agent spawning (both spawn background subagents)
+- Skills/plugins (both have skill systems with SKILL.md format)
+- MCP support (both integrate with MCP servers)
+- Memory/knowledge base (both have persistent memory — architectures differ)
+- Multi-provider LLM (both support multiple providers — already issued as #38)
+- Auto-compaction (both compact context — approaches differ)
+
+---
+
+#### Issues Created
+
+| Issue | Title | Value |
+|-------|-------|-------|
+| [#45](https://github.com/Calmingstorm/Odin/issues/45) | feat: runtime self-introspection tool for context and resource awareness | **MEDIUM-HIGH** — prevents context overflow in long workflows, enables budget-aware execution, session-scoped scratchpad for intermediate state |
+| [#46](https://github.com/Calmingstorm/Odin/issues/46) | feat: process-level shell sandbox with filesystem isolation | **HIGH** — defense-in-depth for shell execution, hard security boundary vs regex-only pattern matching, critical for production infrastructure access |
+
+**Features considered but NOT issued (not high enough value or already covered):**
+- Dream memory system (two-phase with git versioning) — The core concepts are already covered by #40 (background memory consolidation), #42 (autonomous skill creation from patterns), and #44 (filesystem checkpoints with rollback). The git-versioned memory is a specific implementation detail of #40/#44 rather than a separate feature gap.
+- Auto-compact for idle sessions — Odin already has adaptive compaction in sessions/manager.py with activity rate scaling and topic detection. The token-based estimation is a refinement, not a missing capability. Could be a minor PR rather than a feature issue.
+- SSRF protection on web fetch — Important but narrow in scope. Odin's web tools should validate resolved IPs, but this is a security fix/hardening task, not a feature. Could be filed as a security issue separately.
+- 16+ channel integrations — Odin is Discord-only by design. Adding channels is a product direction decision, not a feature gap.
+- Structured memory separation (SOUL.md/USER.md/MEMORY.md) — An architectural choice. Odin's ConversationReflector already categorizes insights (correction, preference, operational, fact). The file separation is implementation detail.
+- Notebook editing tool — Jupyter notebook support is niche for an infrastructure executor.
+- OpenAI-compatible API — Already considered in Round 2 (not issued as tangential).
+- Langfuse observability integration — Nice-to-have but Odin already has comprehensive audit logging.
+
+---
+
+**Round 4 status: COMPLETE. Nanobot analyzed, 2 issues created (#45-#46). Cleanup done.**
