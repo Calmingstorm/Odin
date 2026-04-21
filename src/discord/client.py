@@ -1574,7 +1574,12 @@ class OdinBot(commands.Bot):
                     return
             # Allow specific webhooks (via ALLOWED_WEBHOOK_IDS env var)
             is_allowed_webhook = message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
-            if not is_allowed_webhook and not self.config.discord.respond_to_bots:
+            _bot_gid = str(message.guild.id) if message.guild else None
+            _bot_cid = str(message.channel.id)
+            _respond_bots = self.channel_config.should_respond_to_bots(
+                _bot_gid, _bot_cid, self.config.discord.respond_to_bots,
+            )
+            if not is_allowed_webhook and not _respond_bots:
                 return
 
         is_test_webhook = message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
@@ -1597,7 +1602,9 @@ class OdinBot(commands.Bot):
         )
         if _require_mention:
             is_dm = not hasattr(message.channel, "guild") or message.channel.guild is None
-            is_bot_buffered = message.author.bot and self.config.discord.respond_to_bots
+            is_bot_buffered = message.author.bot and self.channel_config.should_respond_to_bots(
+                guild_id, channel_id_str, self.config.discord.respond_to_bots,
+            )
             if not is_dm and not is_bot_buffered:
                 is_mentioned = self.user and (
                     self.user.mentioned_in(message)

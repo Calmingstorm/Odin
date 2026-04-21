@@ -54,7 +54,7 @@ _CSP_POLICY = "; ".join([
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.tailwindcss.com",
     "font-src 'self' https://fonts.gstatic.com",
     "connect-src 'self' ws: wss:",
-    "img-src 'self' data:",
+    "img-src 'self' data: https://cdn.discordapp.com",
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self'",

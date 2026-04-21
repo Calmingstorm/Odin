@@ -61,6 +61,15 @@ export default {
                   <span class="toggle-slider"></span>
                 </label>
               </label>
+              <label class="flex items-center gap-2 text-xs text-gray-400">
+                Respond to bots
+                <label class="toggle-switch">
+                  <input type="checkbox"
+                    :checked="guildBots(guild)"
+                    @change="setGuildConfig(guild.id, 'respond_to_bots', $event.target.checked)" />
+                  <span class="toggle-slider"></span>
+                </label>
+              </label>
               <button @click="toggleGuild(guild.id)" class="btn btn-ghost text-xs">
                 {{ expanded[guild.id] ? 'Hide channels' : 'Show channels' }}
               </button>
@@ -76,6 +85,7 @@ export default {
                   <th>Category</th>
                   <th class="text-center" style="width:100px">Enabled</th>
                   <th class="text-center" style="width:120px">Require @mention</th>
+                  <th class="text-center" style="width:120px">Respond to bots</th>
                   <th class="text-center" style="width:80px">Override</th>
                 </tr>
               </thead>
@@ -97,6 +107,14 @@ export default {
                       <input type="checkbox"
                         :checked="ch.effective.require_mention"
                         @change="setChannelConfig(ch.id, guild.id, 'require_mention', $event.target.checked)" />
+                      <span class="toggle-slider"></span>
+                    </label>
+                  </td>
+                  <td class="text-center">
+                    <label class="toggle-switch">
+                      <input type="checkbox"
+                        :checked="ch.effective.respond_to_bots"
+                        @change="setChannelConfig(ch.id, guild.id, 'respond_to_bots', $event.target.checked)" />
                       <span class="toggle-slider"></span>
                     </label>
                   </td>
@@ -129,6 +147,11 @@ export default {
 
     function guildMention(guild) {
       if (guild.config && guild.config.require_mention !== undefined) return guild.config.require_mention;
+      return false;
+    }
+
+    function guildBots(guild) {
+      if (guild.config && guild.config.respond_to_bots !== undefined) return guild.config.respond_to_bots;
       return false;
     }
 
@@ -182,7 +205,7 @@ export default {
 
     return {
       guilds, loading, error, expanded,
-      guildEnabled, guildMention, hasOverride, toggleGuild,
+      guildEnabled, guildMention, guildBots, hasOverride, toggleGuild,
       fetchGuilds, setGuildConfig, setChannelConfig, clearOverride,
     };
   },

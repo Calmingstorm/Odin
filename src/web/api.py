@@ -418,12 +418,19 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                     gid, cid, bot.config.discord.require_mention,
                 )
                 effective_enabled = cc.is_enabled(gid, cid)
+                effective_bots = cc.should_respond_to_bots(
+                    gid, cid, bot.config.discord.respond_to_bots,
+                )
                 channels.append({
                     "id": cid,
                     "name": ch.name,
                     "category": ch.category.name if ch.category else None,
                     "config": ch_cfg,
-                    "effective": {"enabled": effective_enabled, "require_mention": effective_mention},
+                    "effective": {
+                        "enabled": effective_enabled,
+                        "require_mention": effective_mention,
+                        "respond_to_bots": effective_bots,
+                    },
                 })
             result.append({
                 "id": gid,
@@ -446,6 +453,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             gid,
             enabled=data.get("enabled"),
             require_mention=data.get("require_mention"),
+            respond_to_bots=data.get("respond_to_bots"),
         )
         return web.json_response({"guild_id": gid, "config": cfg})
 
@@ -460,6 +468,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             cid,
             enabled=data.get("enabled"),
             require_mention=data.get("require_mention"),
+            respond_to_bots=data.get("respond_to_bots"),
             clear=data.get("clear", False),
         )
         return web.json_response({"channel_id": cid, "config": cfg})

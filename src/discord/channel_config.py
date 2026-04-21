@@ -46,6 +46,16 @@ class ChannelConfigManager:
         }, indent=2))
         tmp.replace(self._path)
 
+    def should_respond_to_bots(self, guild_id: str | None, channel_id: str, global_default: bool = False) -> bool:
+        ch = self._channel_overrides.get(channel_id, {})
+        if ch.get("respond_to_bots") is not None:
+            return ch["respond_to_bots"]
+        if guild_id:
+            gd = self._guild_defaults.get(guild_id, {})
+            if gd.get("respond_to_bots") is not None:
+                return gd["respond_to_bots"]
+        return global_default
+
     def is_enabled(self, guild_id: str | None, channel_id: str, global_default: bool = True) -> bool:
         ch = self._channel_overrides.get(channel_id, {})
         if "enabled" in ch:
@@ -68,7 +78,7 @@ class ChannelConfigManager:
 
     def set_guild_config(self, guild_id: str, **kwargs: Any) -> dict[str, Any]:
         current = self._guild_defaults.get(guild_id, {})
-        for k in ("enabled", "require_mention"):
+        for k in ("enabled", "require_mention", "respond_to_bots"):
             if k in kwargs and kwargs[k] is not None:
                 current[k] = kwargs[k]
         self._guild_defaults[guild_id] = current
@@ -77,7 +87,7 @@ class ChannelConfigManager:
 
     def set_channel_config(self, channel_id: str, **kwargs: Any) -> dict[str, Any]:
         current = self._channel_overrides.get(channel_id, {})
-        for k in ("enabled", "require_mention"):
+        for k in ("enabled", "require_mention", "respond_to_bots"):
             if k in kwargs and kwargs[k] is not None:
                 current[k] = kwargs[k]
         if kwargs.get("clear"):
