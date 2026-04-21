@@ -8,7 +8,7 @@
 | 3 | Analyze project 2 (Hermes Agent) | **COMPLETE** | 3 issues created (#42-#44): autonomous skill creation, programmatic tool calling, filesystem checkpoints |
 | 4 | Analyze project 3 (Nanobot) | **COMPLETE** | 2 issues created (#45-#46): runtime self-introspection tool, process-level shell sandbox |
 | 5 | Analyze project 4 (Lilium AI) | **COMPLETE** | 2 issues created (#47-#48): runtime log injection into agent context, lightweight scheduled code tasks |
-| 6 | Analyze project 5 | pending | |
+| 6 | Analyze project 5 (Kiro Discord Bot) | **COMPLETE** | 2 issues created (#49-#50): thread-based task execution with tool progress, cron execution history |
 | 7 | Analyze project 6 | pending | |
 | 8 | Analyze project 7-8 | pending | |
 | 9 | Analyze remaining projects | pending | |
@@ -618,3 +618,203 @@ Lilium AI is significantly simpler than Odin — ~15 tools vs 72, no infrastruct
 ---
 
 **Round 5 status: COMPLETE. Lilium AI analyzed, 2 issues created (#47-#48). Cleanup done.**
+
+---
+
+### Round 6 — Kiro Discord Bot Deep Analysis (2026-04-21)
+
+**Project:** Kiro Discord Bot (https://github.com/nczz/kiro-discord-bot)
+**What it is:** A trainable AI agent that lives in Discord — binds to a codebase, remembers rules, gets smarter with use. Go, MIT licensed. Written by nczz. Wraps kiro-cli (AWS-backed AI agent CLI) via the Agent Client Protocol (ACP) over stdio JSON-RPC. Discord-native, per-channel isolated sessions, per-thread dedicated agents.
+
+**Key stats:** ~20 slash commands + `!` prefix variants, per-channel agent sessions + per-thread agent sessions, persistent memory rules + session-scoped flash memory, cron scheduling with execution history, auto-healing heartbeat, Discord MCP server (23 tools), Media Generation MCP server (6 tools), STT via Groq/OpenAI Whisper, i18n (en + zh-TW), JSONL conversation logging, steering files system (.kiro/steering/*.md).
+
+---
+
+#### What Kiro Discord Bot Does Well (vs Odin)
+
+**1. Thread-Based Task Execution with Real-Time Tool Progress**
+Every user message triggers a Discord thread. All tool execution is posted as individual thread messages with kind-specific icons:
+- 📖 read, ✏️ edit, 🗑️ delete, ▶️ execute, 🔍 search, 🌐 fetch, 🧠 think, ⚙️ other
+- Tool start: icon + title + affected file paths (in full mode)
+- Tool result: full output in code block (up to 1900 chars), truncated with "..." if longer
+- Tool failure: ❌ + title + error output in code block
+- Agent thoughts: 💭 prefix
+- Final response: complete text, auto-split at 2000 chars
+
+Main channel message gets emoji reactions for status: ⏳ queued → 🔄 processing → ⚙️ tool running → ✅ done / ❌ error / ⚠️ timeout.
+
+**Silent mode** (`/silent` toggle, default on): compact output — tool start shows icon + title only (no file list), tool results and thoughts hidden, failures show one-line summary only. Users choose between detailed audit view and low-noise monitoring.
+
+Odin's tool execution happens inline in the conversation without thread-based progress display. For long infrastructure workflows (deploy → validate → check logs → restart → revalidate), this means tool progress isn't visible in real-time and the main channel gets cluttered with intermediate steps.
+
+**2. Cron Execution History with Trend-Aware Monitoring**
+Each cron job stores execution history in JSONL (`data/cron/<jobID>/history.jsonl`). Records: timestamp, prompt, response, full log, status (ok/error), duration_sec. Configurable `history_limit` per job (default 10).
+
+When a cron job executes, the prompt builder loads the last N history entries and injects them:
+```
+[Previous execution history]
+[04/21 09:00] (ok) Disk usage: /data 78% — all services healthy
+[04/20 09:00] (ok) Disk usage: /data 76% — all services healthy
+---
+```
+
+This enables the agent to detect trends: "disk usage increased 2%/day for the last 3 days" rather than just reporting current state in isolation.
+
+Odin's cron scheduling runs tasks through the agent loop but each execution starts with zero context about previous runs. No per-job execution history is maintained.
+
+**3. Dual-Layer Memory: Persistent Rules + Session-Scoped Flash Memory**
+Two separate memory systems:
+- **Persistent memory** (`/memory add ...`): Rules stored in per-channel `memory.json`. Injected into every prompt as `[Memory Rules — always follow these]`. Survives restarts.
+- **Flash memory** (`/flashmemory add ...`): Session-scoped entries stored in-memory only. Injected as `[Flash Memory — current session emphasis]`. Cleared on `/reset`.
+
+Use case: persistent rule = "always use conventional commits", flash memory = "focus on the staging cluster for this session" or "we're in change freeze, be extra cautious". Flash memory lets users set temporary emphasis without polluting permanent rules.
+
+Odin has persistent session memory and ConversationReflector, but no explicit session-scoped ephemeral memory where users can set temporary emphasis that auto-clears on session reset.
+
+**4. Auto-Healing Heartbeat with Agent Liveness Checks**
+Background heartbeat loop (configurable interval, default 60s) runs registered tasks:
+- **HealthTask**: iterates all active sessions, checks agent liveness (`IsAlive()`), auto-restarts dead agents, notifies channel
+- **CleanupTask**: removes expired attachments (configurable retention days)
+- **CronTask**: checks and executes due cron jobs + one-shot reminders
+- **ThreadCleanupTask**: evicts idle thread agents (configurable idle timeout)
+- **ChannelCleanupTask**: stops idle channel agents (configurable, default disabled)
+
+Agent death detection: watches child process exit, marks as "stopped", calls onExit callback. On next message, `ensureWorker()` detects dead agent and restarts automatically.
+
+Odin has session management with recovery but not a proactive heartbeat that continuously monitors agent process health and auto-restarts with user notification.
+
+**5. Per-Thread Dedicated Agents with LRU Eviction**
+Each Discord thread gets its own isolated agent (separate kiro-cli process) with:
+- Parent channel's working directory and model inherited
+- Thread conversation history injected into first prompt
+- Configurable max concurrent thread agents (default 5)
+- LRU eviction when at capacity (evicts least recently active)
+- Idle timeout cleanup (default 900s)
+- Independent `/compact`, `/clear`, `/model` per thread
+- Activity tracking during tool execution prevents premature cleanup of long-running tasks
+
+Odin has per-thread sessions with parent context inheritance (`discord/client.py:1937-1965`), which is comparable. The LRU eviction and configurable limits are implementation differences but the core capability is similar.
+
+**6. Steering Files (.kiro/steering/*.md)**
+Structured per-project rules files that define agent behavior:
+- Project-local: `<project>/.kiro/steering/*.md` — module boundaries, build commands, domain rules
+- Global: `~/.kiro/steering/*.md` — cross-project behavioral guidelines
+- Loaded by kiro-cli automatically when agent starts in a directory
+- Separate from memory system — these are static architectural constraints, not learned preferences
+
+Odin has generic context loading from `.md` files in a context directory but no structured steering framework with specific format conventions and directory hierarchy.
+
+**7. Message Deduplication for Gateway Reconnects**
+TTL-based `seenMessages` set with 5-minute expiry. On every `MESSAGE_CREATE` event, checks if the message ID was already processed. Prevents duplicate processing during Discord gateway reconnections (which replay recent events).
+
+Odin has no message deduplication for gateway reconnection events. This could cause duplicate task execution after network interruptions.
+
+**8. Budget-Based Context Injection on Session Restart**
+When agent restarts, `BuildContextPromptBudget()` reads the JSONL conversation log and reconstructs history:
+- Loads last N turns (configurable, default 10 for channels, 20 for threads)
+- Character budget system (default 20K chars for channels, 80K for threads)
+- Recent turns kept intact, older turns progressively truncated
+- Injected into first prompt as `[Previous conversation context for session continuity]`
+
+Odin's session management handles context on restart, but the budget-based truncation with priority for recent turns is a more sophisticated approach.
+
+**9. Context Usage Warnings**
+When agent's context usage exceeds 90% (tracked via `_kiro.dev/metadata` notifications), a warning is posted to the thread: "⚠️ Context usage is at X%". This helps users know when to `/compact` or `/reset`.
+
+Odin tracks context usage percentage via `get_session_token_usage()` (exposed via `/api/sessions/token-usage`) but does not proactively warn users in Discord when context is running low.
+
+**10. One-Shot Natural Language Reminders**
+`/remind <time> <content>` creates a one-time notification. Time parsing supports: `+30m`, `+2h`, `HH:MM`, `tomorrow HH:MM`, Chinese formats (`30分鐘後`, `明天 09:00`). Two modes: simple notify (just posts a message mentioning the user) or agent-executed (spawns a temp agent to process the prompt).
+
+Odin already has natural language time parsing (`time_parser.py`) and reminders (`reminders.py` cog). Comparable — no gap.
+
+---
+
+#### What Odin Does Better Than Kiro Discord Bot
+
+**1. Massive Native Tool Suite**
+Odin: 72 deeply parameterized tools with first-class kubectl, terraform, docker_ops, http_probe, git_ops, SSH, MCP, process management, autonomous loops, browser automation — all with structured JSON schemas. Kiro: wraps kiro-cli which provides general-purpose tools (read, write, edit, execute, search, fetch) but no infrastructure-specific tool wrappers. All infrastructure operations go through raw shell execution.
+
+**2. Post-Action Validation**
+`validate_action` tool automatically runs health checks (HTTP, port, service, process, log, command) after operational changes with severity levels. Kiro has nothing comparable.
+
+**3. DAG Plan Execution**
+`execute_plan` with dependency-aware parallel execution. Kiro has no structured plan execution — tasks are sequential or manually delegated.
+
+**4. Risk Classification & Affordance Metadata**
+Every tool tagged with cost/risk/latency/preconditions. LLM self-prices calls. Kiro doesn't do this.
+
+**5. Grafana Alert Auto-Remediation & Webhook Workflows**
+Alert-triggered automated remediation with HMAC-verified webhook routing from Gitea/Grafana/GitHub/GitLab. Kiro has cron but no alert-triggered workflows.
+
+**6. Autonomous Execution Loops**
+`start_loop` / `stop_loop` — continuous monitoring and iterative task primitives. Kiro has cron but not autonomous loops.
+
+**7. HMAC-Signed Audit Log & Secret Scrubber**
+Tamper-evident audit entries, secret scrubber on all I/O paths, response guards (fabrication detection). Kiro has no security architecture — it runs kiro-cli with `--trust-all-tools` by default.
+
+**8. CommandGovernor with Risk Classification**
+Regex-based command risk classification with severity levels and detailed audit trail. Kiro has no command filtering or risk assessment.
+
+**9. Sub-Agent Orchestration Depth**
+`delegate_task`, `spawn_loop_agents`, `collect_loop_agents` with nesting and fan-out patterns. Kiro's agents are isolated per-channel/per-thread — no sub-agent delegation or orchestration.
+
+**10. Knowledge Base with Hybrid Search**
+`SessionVectorStore` with keyword + vector (embedding) hybrid search. Kiro's memory is a simple ordered list of string rules — no semantic search capability.
+
+**11. Browser Automation (Playwright)**
+Full Playwright integration for browser automation. Kiro delegates browser tasks to kiro-cli's built-in tools.
+
+**12. Web UI Dashboard**
+Web-based UI for managing sessions, viewing logs, and interacting with agents. Kiro is Discord-only with no web interface.
+
+---
+
+#### What's Comparable (No Gap)
+
+- Per-channel isolated sessions (both maintain per-channel agent sessions)
+- Per-thread agents (both spawn dedicated agents for Discord threads with parent context)
+- Cron scheduling (both support cron expressions — Odin's is more mature)
+- Shell execution (both execute shell commands in a working directory)
+- File operations (both read/write/edit files)
+- Web search and fetch (both have web tools — already issued as #39)
+- MCP support (both integrate with MCP servers)
+- Natural language reminders (both parse relative/absolute time expressions)
+- Conversation logging (both maintain JSONL/persistent conversation logs)
+- Context compaction (both compress conversation history to fit token limits)
+- Model switching per channel (both support per-channel model selection)
+- STT / voice message transcription (both support speech-to-text)
+- Multi-provider LLM (already issued as #38)
+- Discord slash commands + prefix commands (both register and handle both)
+- Attachment handling (both download and process Discord attachments)
+
+---
+
+#### Issues Created
+
+| Issue | Title | Value |
+|-------|-------|-------|
+| [#49](https://github.com/Calmingstorm/Odin/issues/49) | feat: thread-based task execution with real-time tool progress display | **HIGH** — infrastructure workflow observability, clean channels, audit trail per task, real-time progress visibility |
+| [#50](https://github.com/Calmingstorm/Odin/issues/50) | feat: cron execution history with trend-aware scheduled monitoring | **MEDIUM-HIGH** — transforms scheduled monitoring from state reporting to trend detection, critical for ops alerting |
+
+**Features considered but NOT issued (not high enough value or already covered):**
+- Dual-layer memory (persistent rules + flash memory) — interesting UX pattern but Odin's existing memory system (ConversationReflector + memory_manage) covers the practical needs. Flash memory is essentially "set a temporary note and delete it later" — achievable with existing tools. Not a distinct capability gap.
+- Auto-healing heartbeat — Odin's session management already handles recovery. A proactive heartbeat is more robust but incremental. The core concept (detect dead process, restart) is standard process supervision that could be a minor PR rather than a feature issue.
+- Steering files (.kiro/steering/*.md) — Odin already has generic context loading from .md files. The structured steering concept is more of a UX/organizational convention than a missing technical capability. Could be documented as a best practice for existing context loading.
+- Message deduplication for gateway reconnects — important reliability improvement but narrow scope. This is a bug fix / hardening task, not a feature. Would be better as a separate bug report if the issue is observed in practice.
+- Budget-based context injection on restart — Odin's session management already handles context restoration. The budget-based truncation is a refinement of existing capability, not a new feature.
+- Context usage warnings in Discord — Odin already tracks context usage metrics. Adding a warning message when usage exceeds a threshold is a ~10-line enhancement, not a feature issue.
+- Silent/compact mode for tool output — closely tied to #49 (thread-based execution). Would be a natural part of implementing thread-based progress display rather than a separate issue.
+- Per-thread model switching — Odin already supports model configuration per session. Per-thread model selection is an implementation detail.
+- i18n (en + zh-TW) — Odin is English-focused. Localization is a product direction decision, not a feature gap.
+- Media Generation MCP server — Odin already supports MCP integration. Users can connect any MCP server including media generation. Not a gap.
+
+---
+
+#### Overall Assessment
+
+Kiro Discord Bot is a well-crafted Discord wrapper for kiro-cli with excellent Discord UX patterns (thread-based execution, status reactions, silent mode, flash memory, auto-healing). However, it has essentially zero infrastructure-specific capabilities — it delegates everything to kiro-cli's general-purpose tools. Where Kiro shines is in the **Discord integration layer**: how tasks are presented, how progress is displayed, how agents are managed across channels and threads. Odin is vastly more capable as an infrastructure executor (72 tools vs. delegating to shell) but could adopt Kiro's Discord UX patterns for better operational visibility. The two genuinely novel ideas for Odin: (1) thread-based execution with real-time tool progress display for long infrastructure workflows, and (2) cron execution history that enables trend-aware scheduled monitoring.
+
+---
+
+**Round 6 status: COMPLETE. Kiro Discord Bot analyzed, 2 issues created (#49-#50). Cleanup done.**
