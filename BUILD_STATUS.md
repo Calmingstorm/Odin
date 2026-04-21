@@ -4,7 +4,7 @@
 | Round | Focus | Status | Summary |
 |-------|-------|--------|---------|
 | 1 | Web research — find 8-10 competitor/similar projects | **COMPLETE** | Found 10 projects across Discord AI agents, autonomous frameworks, and DevOps tools |
-| 2 | Analyze project 1 | pending | |
+| 2 | Analyze project 1 (OpenClaw) | **COMPLETE** | 4 issues created (#38-#41): multi-provider LLM failover, pluggable web search, background memory consolidation, live browser viewer |
 | 3 | Analyze project 2 | pending | |
 | 4 | Analyze project 3 | pending | |
 | 5 | Analyze project 4 | pending | |
@@ -103,3 +103,112 @@
 ---
 
 **Round 1 status: COMPLETE. Ready for rounds 2-9 to begin deep analysis.**
+
+---
+
+### Round 2 — OpenClaw Deep Analysis (2026-04-21)
+
+**Project:** OpenClaw (https://github.com/openclaw/openclaw)
+**What it is:** The largest open-source autonomous agent framework (302K+ stars). Node.js/TypeScript, MIT licensed, v2026.4.20. Local-first, single Gateway daemon as control plane. Bills itself as "the AI that actually does things."
+
+**Key stats:** 24 messaging platform integrations, 40+ LLM provider backends, 55 bundled skills, ~50-70 core tools (depending on plugins/providers enabled), full plugin SDK with 80+ capability contracts.
+
+---
+
+#### What OpenClaw Does Well (vs Odin)
+
+**1. Multi-Provider LLM Support**
+OpenClaw supports 40+ LLM providers (OpenAI, Anthropic, Google, Groq, Ollama, vLLM, DeepSeek, Mistral, xAI, Amazon Bedrock, Azure, and dozens more) with cooldown-based auth profile rotation, configurable fallback chains, per-job model override, and live model-switch detection with retry. Odin is locked to a single provider (Codex/GPT-5.4) with a circuit breaker and basic auxiliary fallback.
+
+**2. Dream Mode (Background Memory Consolidation)**
+Three-phase scheduled pipeline: Light (every 6h — ingest signals, deduplicate), Deep (3 AM daily — score and promote durable knowledge with recency decay), REM (weekly — extract themes, reinforce patterns). Includes memory health monitoring with auto-recovery when quality drops below threshold. Generates a human-readable "Dream Diary." Odin's ConversationReflector is reactive (post-conversation only) and simpler.
+
+**3. Pluggable Web Search**
+12+ search providers: Brave, DuckDuckGo, Exa, Firecrawl, Gemini, Grok/xAI, Kimi/Moonshot, MiniMax, Ollama, Perplexity, SearXNG, Tavily. Odin is hardcoded to DuckDuckGo only.
+
+**4. Live Browser Observation (noVNC)**
+Browser sandbox runs Chrome in a Docker container with noVNC access. Users get a token-authenticated URL to watch the browser navigate in real-time. Odin's Playwright runs headlessly with no visual observation.
+
+**5. 24 Channel Integrations**
+WhatsApp, Telegram, Slack, Discord, Google Chat, Signal, iMessage, IRC, Teams, Matrix, Feishu, LINE, Mattermost, and more. Odin is Discord-only (with Slack webhook for alerts).
+
+**6. Deterministic Workflow Runtime (Lobster)**
+In-process typed JSON pipeline DSL with approval gates, resumable tokens, and deterministic execution. Odin has `execute_plan` (DAG-based) but no mid-workflow approval gates.
+
+**7. ACP Harness Bridge**
+Can spawn Codex, Claude Code, Gemini CLI as conversation-bound sub-agent sessions via the Agent Client Protocol. Odin has `claude_code` tool but single-harness only.
+
+**8. Standing Orders**
+Structured pattern for granting permanent operating authority — combined with cron for truly autonomous programs without per-task prompting. Different from just scheduling.
+
+**9. Context Engine Plugin Slot**
+The entire context assembly pipeline is replaceable as a plugin. Enables third-party context strategies.
+
+**10. OpenAI-Compatible HTTP API Surface**
+Gateway optionally serves `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/models` — any OpenAI-compatible tool can connect to OpenClaw.
+
+---
+
+#### What Odin Does Better Than OpenClaw
+
+**1. Infrastructure-Specific Tools**
+Odin has first-class Kubernetes (`kubectl`), Terraform, Docker Compose, and HTTP probe tools with deep parameter support. OpenClaw delegates these to raw shell execution without structured tool wrappers.
+
+**2. Post-Action Validation**
+Odin's `validate_action` tool automatically runs health checks after operational changes (deploys, restarts, config writes). Supports HTTP, port, service, process, log, and command checks with severity levels. OpenClaw has nothing comparable.
+
+**3. Grafana Alert Auto-Remediation**
+Pattern-matching on alert names with automatic remediation loops. OpenClaw doesn't have native alert integration.
+
+**4. Webhook-Triggered Workflows**
+Inbound webhooks from Gitea, Grafana, GitHub, GitLab with HMAC verification routing to scheduled tasks with AND-logic matching. OpenClaw has webhook hooks but not the same structured trigger-to-workflow pipeline.
+
+**5. Security Architecture**
+CommandGovernor (destructive pattern blocking), HMAC-signed audit log, secret scrubber on all I/O paths, response guards (fabrication detection). OpenClaw has sandbox isolation but less defense-in-depth on the execution side.
+
+**6. DAG Plan Execution**
+Structured dependency-aware parallel execution with JSON plan format. OpenClaw's Lobster is different (sequential with approval gates, not DAG-parallel).
+
+**7. Risk Classification & Affordance Metadata**
+Every tool tagged with cost/risk/latency/preconditions — LLM self-prices calls. OpenClaw doesn't do this.
+
+---
+
+#### What's Comparable (No Gap)
+
+- Sub-agent orchestration (both support parallel agents, nesting, fan-out)
+- Cron scheduling (both support cron expressions, one-shot, webhook triggers)
+- Browser automation (both use Chrome/Chromium — Playwright vs CDP)
+- Shell execution (both support remote SSH)
+- File operations (both read/write remote files)
+- Git operations (both have git tools)
+- Knowledge base / memory (both have persistent memory, though architectures differ)
+- MCP support (both integrate with MCP servers)
+- Skills / plugins (both allow user-created tools)
+- Voice (both support voice channels with wake word + STT + TTS)
+- Image generation (both support ComfyUI and other providers)
+- Docker operations (both have Docker tools)
+
+---
+
+#### Issues Created
+
+| Issue | Title | Value |
+|-------|-------|-------|
+| [#38](https://github.com/Calmingstorm/Odin/issues/38) | feat: multi-provider LLM support with failover chains | **HIGH** — resilience, cost optimization, rate limit handling |
+| [#39](https://github.com/Calmingstorm/Odin/issues/39) | feat: pluggable web search with multiple provider backends | **MEDIUM-HIGH** — search quality, resilience, self-hosted option |
+| [#40](https://github.com/Calmingstorm/Odin/issues/40) | feat: background memory consolidation with scheduled review cycles | **MEDIUM** — operational pattern learning, memory health |
+| [#41](https://github.com/Calmingstorm/Odin/issues/41) | feat: live browser session viewer for observing automation in real-time | **MEDIUM** — debugging, trust, audit |
+
+**Features considered but NOT issued (not high enough value for an infrastructure executor):**
+- 24 channel integrations — Odin is Discord-focused by design; adding Slack/Telegram as full control channels is a different product direction, not a gap
+- Standing Orders — interesting concept but largely achievable through Odin's existing cron + workflow system with minor enhancements
+- Lobster deterministic pipelines — Odin's DAG execution + delegate_task covers similar ground; approval gates could be a small enhancement to existing plan execution rather than a new system
+- ACP harness bridge — niche; Odin's `claude_code` tool is sufficient for most delegation use cases
+- OpenAI-compatible API surface — useful but tangential to core infrastructure execution
+- Context engine plugin slot — over-engineering for Odin's scope
+- Video/music generation — irrelevant for infrastructure execution
+
+---
+
+**Round 2 status: COMPLETE. OpenClaw analyzed, 4 issues created. Cleanup done.**
