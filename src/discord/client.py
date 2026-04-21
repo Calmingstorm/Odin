@@ -38,6 +38,7 @@ from ..tools import ToolExecutor, SkillManager, get_tool_definitions
 from ..tools.tool_memory import ToolMemory
 from ..search import LocalEmbedder, SessionVectorStore
 from ..permissions import PermissionManager
+from .channel_config import ChannelConfigManager
 from .channel_logger import ChannelLogger
 from .voice import VoiceManager, VoiceMessageProxy
 
@@ -325,6 +326,7 @@ class OdinBot(commands.Bot):
         self.sessions.load()
 
         self._memory_path = "./data/memory.json"
+        self.channel_config = ChannelConfigManager("./data/channel_config.json")
 
         # Passive channel logger — writes ALL guild messages to JSONL (zero LLM tokens)
         self.channel_logger = ChannelLogger("./data/channel_logs")
@@ -1581,11 +1583,19 @@ class OdinBot(commands.Bot):
         if not self._is_allowed_channel(message.channel.id):
             return
 
-        # require_mention: only respond when the bot is @mentioned (or in DMs)
+        # Per-channel enabled check (channel override > guild default > global)
+        guild_id = str(message.guild.id) if message.guild else None
+        channel_id_str = str(message.channel.id)
+        if not self.channel_config.is_enabled(guild_id, channel_id_str):
+            return
+
+        # Per-channel require_mention check (channel override > guild default > global)
         # Bot messages skip this gate — they go into the buffer and the mention
-        # check happens after all segments are collected (so multi-message bot
-        # responses where only the first part has the @mention still get through).
-        if self.config.discord.require_mention:
+        # check happens after all segments are collected.
+        _require_mention = self.channel_config.should_require_mention(
+            guild_id, channel_id_str, self.config.discord.require_mention,
+        )
+        if _require_mention:
             is_dm = not hasattr(message.channel, "guild") or message.channel.guild is None
             is_bot_buffered = message.author.bot and self.config.discord.respond_to_bots
             if not is_dm and not is_bot_buffered:
@@ -1636,7 +1646,12 @@ class OdinBot(commands.Bot):
                 combined = combine_bot_messages(parts)
                 log.info("Bot buffer flushed: %d messages from %s combined", len(parts), orig_msg.author)
                 # require_mention for bots: check if ANY buffered part mentions us
-                if self.config.discord.require_mention and self.user:
+                _bot_guild_id = str(orig_msg.guild.id) if orig_msg.guild else None
+                _bot_channel_id = str(orig_msg.channel.id)
+                _bot_require = self.channel_config.should_require_mention(
+                    _bot_guild_id, _bot_channel_id, self.config.discord.require_mention,
+                )
+                if _bot_require and self.user:
                     mention_str = f"<@{self.user.id}>"
                     mention_nick = f"<@!{self.user.id}>"
                     if not any(mention_str in p or mention_nick in p for p in parts):

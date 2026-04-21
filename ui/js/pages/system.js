@@ -3,6 +3,7 @@ import HealthPage from './health.js';
 import ResourcesPage from './resources.js';
 import LogsPage from './logs.js';
 import ConfigPage from './config.js';
+import DiscordConfigPage from './discord-config.js';
 import InternalsPage from './internals.js';
 
 export default {
@@ -13,6 +14,7 @@ export default {
       { id: 'resources', label: 'Resources', component: ResourcesPage },
       { id: 'logs', label: 'Logs', component: LogsPage },
       { id: 'config', label: 'Config', component: ConfigPage },
+      { id: 'discord', label: 'Discord', component: DiscordConfigPage },
       { id: 'internals', label: 'Internals', component: InternalsPage },
     ];
     return { tabs };
