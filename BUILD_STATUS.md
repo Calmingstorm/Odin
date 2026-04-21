@@ -10,7 +10,7 @@
 | 5 | Analyze project 4 (Lilium AI) | **COMPLETE** | 2 issues created (#47-#48): runtime log injection into agent context, lightweight scheduled code tasks |
 | 6 | Analyze project 5 (Kiro Discord Bot) | **COMPLETE** | 2 issues created (#49-#50): thread-based task execution with tool progress, cron execution history |
 | 7 | Analyze project 6 (ZeroClaw) | **COMPLETE** | 3 issues created (#51-#53): event-driven SOPs with deterministic execution, cost budget enforcement, emergency stop (e-stop) |
-| 8 | Analyze project 7-8 | pending | |
+| 8 | Analyze project 7-8 (OpenAgent + DevOpsGPT) | **COMPLETE** | 1 issue created (#54): persistent operational workflows with visual web builder and AI-composable API. DevOpsGPT: no issues — different product category (software dev automation), stale (last commit Aug 2024) |
 | 9 | Analyze remaining projects | pending | |
 | 10 | Final summary + prioritized roadmap issue | pending | |
 
@@ -1059,3 +1059,242 @@ The three issues created (#51-#53) represent the highest-value gaps: SOPs would 
 ---
 
 **Round 7 status: COMPLETE. ZeroClaw analyzed, 3 issues created (#51-#53). Cleanup done.**
+
+---
+
+### Round 8 — OpenAgent + DevOpsGPT Deep Analysis (2026-04-21)
+
+---
+
+#### Project 7: OpenAgent
+
+**Project:** OpenAgent (https://github.com/geroale/OpenAgent)
+**What it is:** Persistent AI agent framework with MCP tools, long-term memory, and multi-channel support. Python, MIT licensed, v0.12.15. Model agnostic by design — supports Claude CLI/API, Z.ai GLM, Ollama, LM Studio, vLLM, and OpenAI-compatible providers. Three independent apps: Agent Server (Python runtime), CLI Client, Desktop App (Electron + React Native Web).
+
+**Key stats:** ~12 bundled MCP servers (shell, editor, filesystem, web-search, chrome-devtools, computer-control, messaging, scheduler, mcp-manager, model-manager, workflow-manager, vault), multi-provider LLM with Smart Router (LLM-powered model selection), Obsidian-compatible markdown memory vault with wikilinks/graph, n8n-style workflow engine with visual web builder, Dream Mode (nightly maintenance), auto-update mechanism, 3+ channel bridges (Discord, Telegram, WhatsApp), budget tracking.
+
+---
+
+#### What OpenAgent Does Well (vs Odin)
+
+**1. Persistent Operational Workflow Engine with Visual Web Builder (n8n-style)**
+Full workflow system with:
+- **Block catalog**: 12 block types across 4 categories — triggers (manual, schedule, AI-invoked), tools (mcp-tool, http-request), AI (ai-prompt with model override and session policy), flow control (if, loop, wait, parallel, merge), utility (set-variable)
+- **DAG executor** (`workflow/executor.py`): batch-parallel walker with per-edge routing. Edges start `pending`. When a node runs, its `taken` sourceHandles turn matching edges into `satisfied`; the rest become `skipped`. Nodes whose incoming edges are all skipped are marked `dead` and outgoing edges cascade-skip. Handles if/else (one branch satisfied, other skipped+cascaded), parallel (all branches satisfied, run concurrently), merge (waits for upstream, handles partial-skip).
+- **Template system**: Jinja expressions resolved against context — `{{inputs.field}}`, `{{nodes.n3.output.status}}`, `{{vars.counter}}`, `{{now}}`, `{{run_id}}`
+- **AI-composable API**: `workflow-manager` MCP server exposes `create_workflow`, `add_block`, `update_block`, `remove_block`, `connect_blocks`, `run_workflow`, `list_workflows`, `get_workflow`, `describe_block_type`. The agent can programmatically compose workflows at runtime.
+- **Persistence**: Workflows stored in SQLite with graph_json, trigger_kind (manual/schedule/ai/hybrid), cron_expression, enabled flag, last_run_at, next_run_at. Workflow runs tracked with inputs, outputs, trace, timing.
+- **Visual web UI**: React-based workflow editor (block palette, drag-and-drop, wire connections, properties panel, run trace viewer)
+- **Error handling**: per-block `on_error` (halt/continue/branch) with error handle routing
+- **Scheduler integration**: Workflows with cron triggers picked up by main scheduler loop alongside scheduled_tasks
+
+Odin has `execute_plan` (inline one-shot JSON DAG with dependency-aware parallel execution) and `PlanStore` (pending plans for user approval), but:
+- Plans are one-shot, not persistent/reusable
+- No flow control blocks (if/else, loops, parallel/merge, wait)
+- No template system for cross-step data flow
+- No visual builder in web UI
+- The agent can't compose persistent workflows via tool calls
+- No workflow run history or trace
+
+**2. Obsidian-Compatible Markdown Memory Vault**
+Memory stored as markdown files with YAML frontmatter, wikilinks `[[note-name]]`, and tags. Vault exposed via:
+- MCP tool: `mcpvault` with `list_notes`, `search_notes`, `write_note`, `patch_note`, `delete_note`
+- REST API: CRUD for notes, full-text search, graph endpoint (nodes + edges from wikilinks)
+- Web UI: vault sidebar, note viewer, graph visualization
+
+Odin has `knowledge_base` with `SessionVectorStore` (hybrid keyword + vector search via `LocalEmbedder`). The vault approach is an architectural choice (file-based markdown vs DB-backed vector store), not a capability gap. Both support persistent memory with search. Odin's vector search may be more useful for semantic retrieval in infrastructure contexts.
+
+**3. Smart Model Router with LLM Classifier**
+`SmartRouter` uses a classifier LLM call to examine the user's message and the available model catalog, then routes to the best model for that session. Routes between Agno providers (OpenAI, Groq, DeepSeek, Ollama, etc.) and Claude CLI. Session binding ensures subsequent turns stay on the same provider.
+
+Already covered by #38 (multi-provider LLM support with failover chains). The classifier-based routing is a sophisticated approach to model selection.
+
+**4. Dream Mode (Nightly Maintenance)**
+Scheduled task (configurable cron, default 3 AM) that:
+- Cleans temp files older than 24 hours
+- Curates memory vault: merges duplicate notes, updates outdated info, removes trivial notes, cross-links related notes with wikilinks, updates frontmatter tags
+- System health check: disk usage, memory, top CPU processes
+- Logs results to `dream-logs/dream-log-YYYY-MM-DD.md`
+
+Already covered by #40 (background memory consolidation with scheduled review cycles). Dream Mode is OpenAgent's implementation of the same concept.
+
+**5. Computer Control MCP (Rust Native Binary)**
+Rust-based MCP server for OS-level desktop control:
+- Actions: key, type, mouse_move, left_click, left_click_drag, right_click, middle_click, double_click, scroll, get_screenshot, get_cursor_position, start_screen_recording, stop_screen_recording
+- Coordinate scaling for API image space → logical screen
+- Region-of-interest cropping for focused capture
+- Cross-platform: macOS (CoreGraphics/Accessibility), Linux (X11/Wayland), Windows
+
+Irrelevant for Odin's infrastructure execution focus. Odin uses Playwright for browser automation, which is the appropriate tool for web-based infrastructure management.
+
+**6. Auto-Update for Frozen Executables**
+`updater.py`: downloads latest release from GitHub, verifies SHA256 checksum, replaces running executable. macOS/Linux: rename current → .old, move new → current. Exit with code 75 for service manager restart.
+
+Interesting operational convenience but tangential to Odin's core capabilities. Odin is deployed via source/Docker, not frozen executables.
+
+**7. Budget Tracking with Monthly Limits**
+`BudgetTracker`: tracks monthly LLM API spend, computes remaining budget, budget ratio (fraction remaining). Integrated with Smart Router.
+
+Already covered by #52 (cost budget enforcement with daily/monthly spending limits). OpenAgent's implementation is simpler (tracking only, no enforcement/blocking).
+
+**8. MCP Server Lifecycle Management**
+`mcp-manager` MCP server: the agent can add/remove/toggle MCP servers at runtime without process restart. DB-backed configuration with seed from YAML on first boot.
+
+Odin can connect to MCP servers via configuration but can't dynamically add/remove them at runtime via tool calls. This is an interesting capability but niche — infrastructure MCP servers are typically stable, not frequently added/removed.
+
+**9. Model Discovery and Live Provider Probing**
+`discovery.py`: probes connected providers to discover available models dynamically. Combined with `catalog.py` (pricing data for 100+ models across providers) for cost-aware routing.
+
+Part of #38 scope (multi-provider LLM support).
+
+---
+
+#### What Odin Does Better Than OpenAgent
+
+**1. Infrastructure-Specific Tool Suite**
+Odin: 72 deeply parameterized tools with first-class kubectl, terraform, docker_ops, http_probe, git_ops, SSH, MCP, process management, autonomous loops, browser automation — all with structured JSON schemas. OpenAgent: ~12 MCP servers providing general tools (shell, editor, filesystem, web-search, browser, messaging). Infrastructure operations delegated to raw shell execution.
+
+**2. Post-Action Validation**
+`validate_action` automatically runs health checks (HTTP, port, service, process, log, command) after operational changes with severity levels. OpenAgent has nothing comparable.
+
+**3. DAG Plan Execution (Inline)**
+`execute_plan` with dependency-aware parallel execution and structured plan format for ad-hoc operational tasks. OpenAgent's workflows are persistent but its inline execution is less mature for on-the-fly plans.
+
+**4. Risk Classification & Affordance Metadata**
+Every tool tagged with cost/risk/latency/preconditions. LLM self-prices calls. OpenAgent doesn't have tool-level risk metadata.
+
+**5. Grafana Alert Auto-Remediation & Webhook Workflows**
+Alert-triggered automated remediation with HMAC-verified webhook routing from Gitea/Grafana/GitHub/GitLab. OpenAgent has cron and workflow triggers but no Grafana-specific alert integration.
+
+**6. Autonomous Execution Loops**
+`start_loop` / `stop_loop` / `list_loops` / `spawn_loop_agents` / `collect_loop_agents` — purpose-built continuous monitoring primitives. OpenAgent has cron and workflows but not the same autonomous loop concept.
+
+**7. HMAC-Signed Audit Log & Secret Scrubber**
+Tamper-evident audit entries, secret scrubber on all I/O paths, response guards (fabrication detection). OpenAgent has no comparable security architecture.
+
+**8. CommandGovernor with Risk Classification**
+Regex-based command risk classification with severity levels and detailed audit trail. OpenAgent's shell MCP relies on MCP-level access control (filesystem roots) but no command-level risk classification.
+
+**9. Adaptive Session Compaction**
+Activity-rate-scaled compaction with topic change detection and relevance scoring. OpenAgent delegates session management to the provider (Claude CLI sessions, Agno history).
+
+**10. Sub-Agent Orchestration Depth**
+`delegate_task`, `spawn_loop_agents`, `collect_loop_agents` with nesting and fan-out patterns. OpenAgent's agent model is single-agent with workflow-level parallelism, not nested sub-agents.
+
+---
+
+#### What's Comparable (No Gap)
+
+- Cron scheduling (both support cron expressions — Odin's cron is mature, OpenAgent adds workflow triggers)
+- Shell execution (both support local shell with safety measures)
+- File operations (both read/write/edit via structured tools or MCP)
+- Web search and fetch (both have web tools — already issued as #39)
+- Browser automation (both use Chromium — Playwright vs Chrome DevTools MCP)
+- Git operations (both have git tools)
+- Knowledge base / memory (both have persistent memory — Odin uses vector store, OpenAgent uses Obsidian vault)
+- MCP support (both integrate with MCP servers)
+- Multi-provider LLM (already issued as #38)
+- Web dashboard (both have web UIs)
+- Docker operations (both have Docker tools/shell access)
+- Voice/STT (both support speech-to-text)
+- Usage/cost tracking (already issued as #52)
+- Memory consolidation (already issued as #40)
+
+---
+
+#### Issues Created
+
+| Issue | Title | Value |
+|-------|-------|-------|
+| [#54](https://github.com/Calmingstorm/Odin/issues/54) | feat: persistent operational workflows with visual web builder and AI-composable API | **HIGH** — transforms operational automation from one-shot inline plans to persistent, reusable, AI-composable workflows with flow control. Visual builder makes complex ops accessible. Complements #51 (SOPs) and #42 (skill creation). |
+
+**Features considered but NOT issued (not high enough value or already covered):**
+- Obsidian-compatible markdown vault — architectural choice, not a capability gap. Odin's vector store provides better semantic retrieval for infrastructure contexts. The graph visualization is interesting UI but doesn't unlock new capabilities.
+- Smart model router with LLM classifier — covered by #38 (multi-provider LLM support). The classifier-based routing is an implementation detail.
+- Dream mode — covered by #40 (background memory consolidation).
+- Computer control MCP — irrelevant for infrastructure execution. Desktop automation (mouse/keyboard/screenshots) is a different product direction.
+- Auto-update — operational convenience for binary distribution. Odin is deployed differently.
+- Budget tracking — covered by #52 (cost budget enforcement).
+- MCP server lifecycle management — interesting but niche. Infrastructure MCP servers are typically stable.
+- Model discovery — part of #38 scope.
+- Multi-agent serving (independent agents in parallel) — architecture decision, not a feature Odin needs (it's a single Discord bot serving multiple channels).
+- Channel bridges (Telegram, WhatsApp) — Odin is Discord-only by design.
+
+---
+
+#### Overall Assessment
+
+OpenAgent is a well-architected, actively developed framework (v0.12.15, April 2026) that takes a different philosophical approach from Odin: it's model-agnostic, MCP-centric, and multi-channel, designed as a general-purpose persistent AI agent. Its standout feature is the n8n-style workflow engine with visual web builder and AI-composable API — this is genuinely novel and fills a gap in how Odin handles operational automation.
+
+Where OpenAgent falls short for infrastructure execution: it has no infrastructure-specific tools (everything goes through raw shell), no post-action validation, no risk classification, no alert integration, no autonomous loops, and no defense-in-depth security. It's built for personal productivity (memory vault, dream mode, desktop app), not for 24/7 infrastructure operations.
+
+The single issue created (#54) captures the highest-value gap: persistent workflows that the agent can compose and that users can build visually. This naturally extends Odin's existing `execute_plan` and complements the SOP system (#51) with a visual composition layer.
+
+---
+
+#### Project 8: DevOpsGPT
+
+**Project:** DevOpsGPT (https://github.com/kuafuai/DevOpsGPT)
+**What it is:** Multi-agent system for AI-driven software development automation. Python (Flask), MIT licensed. Last commit: **August 14, 2024** (stale — nearly 2 years with no updates). From KuafuAI. Converts natural language requirements into working software through a multi-step pipeline: requirement analysis → API doc generation → subtask decomposition → pseudocode → code generation → compile/lint check → CI trigger → CD deployment.
+
+**Key stats:** Flask web app with SQLite, GitHub/GitLab CI integration, AWS ECS/Aliyun CD deployment, multi-language code generation (Java/Python/Vue), AI-powered code review and error repair, i18n (English/Chinese/Japanese), workspace-based project management.
+
+---
+
+#### What DevOpsGPT Does (and Why It's Not Relevant to Odin)
+
+DevOpsGPT is fundamentally a **software development automation tool**, not an infrastructure execution agent. It occupies an entirely different product category from Odin.
+
+**DevOpsGPT's pipeline:**
+1. User writes a requirement in natural language via web UI
+2. LLM analyzes requirement, generates API documentation
+3. LLM decomposes requirement into subtasks
+4. LLM reads existing codebase structure and generates pseudocode
+5. LLM generates production code from pseudocode + specifications
+6. System runs compile check and lint check on generated code
+7. LLM analyzes build errors and suggests fixes
+8. System triggers GitHub Actions / GitLab CI pipeline
+9. System monitors pipeline status, reads job logs
+10. System triggers deployment to AWS ECS / Aliyun
+
+**What DevOpsGPT has that Odin doesn't:**
+- Structured CI/CD pipeline integration (trigger GitHub Actions workflows, poll pipeline status, read job logs, trigger ECS/Aliyun deployment) — but Odin achieves this through shell execution (`gh workflow run`, `gh run view`) and webhook triggers. The structured approach is more of a UI convenience than a missing capability.
+- AI-powered code review with multi-pass refinement (generate → review → fix → reference repair → merge with existing code) — this is a software development workflow, not infrastructure execution.
+- Subtask decomposition from natural language requirements — a code generation pattern, not relevant to Odin's operational focus.
+
+**What DevOpsGPT lacks (compared to Odin):**
+- No Discord integration (web UI only)
+- No shell execution tools (only CI/CD-specific integrations)
+- No cron scheduling
+- No agent loops or sub-agents
+- No browser automation
+- No knowledge base or memory
+- No MCP support
+- No infrastructure-specific tools (kubectl, terraform, docker, etc.)
+- No security architecture (no command filtering, no audit, no secret scrubbing)
+- No real-time conversation or tool execution — it's a step-by-step web wizard
+- Stale: last commit August 2024, no maintained releases
+
+**Code quality observations:**
+- Hardcoded strings, no proper error handling in many places
+- Variable naming inconsistencies (camelCase vs snake_case mixed)
+- `print()` statements used for debugging instead of logging
+- Undefined variable `e` referenced in error messages (line 45 of `devops_github.py`)
+- Thread-local storage abuse (`storage.set/get`) for cross-request state
+- No tests
+
+---
+
+#### Issues Created
+
+None. DevOpsGPT is in a fundamentally different product category (software development automation) from Odin (infrastructure execution agent). It is significantly less sophisticated, has been stale for nearly 2 years, and does not offer any features that would be genuinely useful for an infrastructure executor bot. Its CI/CD integration patterns are achievable through Odin's existing shell execution and webhook triggers.
+
+---
+
+#### Overall Assessment
+
+DevOpsGPT is the weakest project in the analysis set. It's a stale (Aug 2024) web wizard for AI-assisted software development with CI/CD integration — interesting concept but poorly executed (code quality issues, no tests, no security) and in a completely different product category from Odin. Odin already surpasses DevOpsGPT in every dimension relevant to automation: more tools, better security, real-time execution, persistent sessions, scheduling, memory, and Discord-native operation.
+
+---
+
+**Round 8 status: COMPLETE. OpenAgent analyzed (1 issue created, #54). DevOpsGPT analyzed (0 issues — different product category, stale). Cleanup done.**
