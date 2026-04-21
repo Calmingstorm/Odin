@@ -12,7 +12,7 @@
 | 7 | Analyze project 6 (ZeroClaw) | **COMPLETE** | 3 issues created (#51-#53): event-driven SOPs with deterministic execution, cost budget enforcement, emergency stop (e-stop) |
 | 8 | Analyze project 7-8 (OpenAgent + DevOpsGPT) | **COMPLETE** | 1 issue created (#54): persistent operational workflows with visual web builder and AI-composable API. DevOpsGPT: no issues — different product category (software dev automation), stale (last commit Aug 2024) |
 | 9 | Analyze projects 9-10 (a0-discord + claude-code-discord) | **COMPLETE** | 1 issue created (#55): cross-bot Discord channel monitoring. Both projects are in different niches (Discord data extraction plugin and Claude Code SDK wrapper) — limited novel gaps for an infrastructure executor |
-| 10 | Final summary + prioritized roadmap issue | pending | |
+| 10 | Final summary + prioritized roadmap issue | **COMPLETE** | 1 summary issue created (#56): prioritized roadmap across all 18 feature issues from 10 projects |
 
 ## Round Notes
 
@@ -1582,3 +1582,123 @@ Activity-rate-scaled compaction with topic change detection and relevance scorin
 ---
 
 **Round 9 status: COMPLETE. a0-discord analyzed (contributed to #55). claude-code-discord analyzed (contributed to #55). 1 issue created (#55). Cleanup done.**
+
+---
+
+### Round 10 — Final Summary & Prioritized Roadmap (2026-04-21)
+
+**Objective:** Review all findings across rounds 1-9, create a summary issue with a prioritized feature roadmap, and close out the competitive analysis loop.
+
+---
+
+#### Analysis Overview
+
+| Metric | Count |
+|--------|-------|
+| Projects researched (Round 1) | 10 |
+| Projects deeply analyzed (Rounds 2-9) | 10 |
+| Total feature issues created | 18 (#38–#55) |
+| Summary roadmap issue | 1 (#56) |
+| Projects yielding no issues | 1 (DevOpsGPT — different product category, stale) |
+| Projects yielding 1 issue | 3 (Lilium AI ×2, OpenAgent ×1, a0-discord+claude-code-discord ×1) |
+| Projects yielding 2 issues | 2 (Nanobot ×2, Kiro ×2) |
+| Projects yielding 3 issues | 2 (Hermes Agent ×3, ZeroClaw ×3) |
+| Projects yielding 4 issues | 1 (OpenClaw ×4) |
+
+---
+
+#### All Issues Created — Ranked by Priority
+
+**Tier 1 — Critical Safety & Operational Foundations (P0-P1)**
+
+| # | Issue | Title | Value Rating | Source Project |
+|---|-------|-------|-------------|----------------|
+| 1 | [#53](https://github.com/Calmingstorm/Odin/issues/53) | Emergency stop (e-stop) with multi-level kill switch and OTP-protected resume | **HIGH** | ZeroClaw |
+| 2 | [#52](https://github.com/Calmingstorm/Odin/issues/52) | Cost budget enforcement with daily/monthly spending limits | **HIGH** | ZeroClaw |
+| 3 | [#46](https://github.com/Calmingstorm/Odin/issues/46) | Process-level shell sandbox with filesystem isolation | **HIGH** | Nanobot |
+| 4 | [#51](https://github.com/Calmingstorm/Odin/issues/51) | Event-driven SOPs with deterministic execution | **HIGH** | ZeroClaw |
+
+**Tier 2 — High-Value Capability Gaps (P2-P3)**
+
+| # | Issue | Title | Value Rating | Source Project |
+|---|-------|-------|-------------|----------------|
+| 5 | [#43](https://github.com/Calmingstorm/Odin/issues/43) | Programmatic tool calling — execute Python scripts that call Odin tools via RPC | **HIGH** | Hermes Agent |
+| 6 | [#49](https://github.com/Calmingstorm/Odin/issues/49) | Thread-based task execution with real-time tool progress display | **HIGH** | Kiro Discord Bot |
+| 7 | [#38](https://github.com/Calmingstorm/Odin/issues/38) | Multi-provider LLM support with failover chains | **HIGH** | OpenClaw |
+| 8 | [#42](https://github.com/Calmingstorm/Odin/issues/42) | Autonomous skill creation from successful task patterns | **HIGH** | Hermes Agent |
+| 9 | [#54](https://github.com/Calmingstorm/Odin/issues/54) | Persistent operational workflows with visual web builder and AI-composable API | **HIGH** | OpenAgent |
+
+**Tier 3 — Medium-High Value Enhancements (P3-P4)**
+
+| # | Issue | Title | Value Rating | Source Project |
+|---|-------|-------|-------------|----------------|
+| 10 | [#50](https://github.com/Calmingstorm/Odin/issues/50) | Cron execution history with trend-aware scheduled monitoring | **MEDIUM-HIGH** | Kiro Discord Bot |
+| 11 | [#45](https://github.com/Calmingstorm/Odin/issues/45) | Runtime self-introspection tool for context and resource awareness | **MEDIUM-HIGH** | Nanobot |
+| 12 | [#47](https://github.com/Calmingstorm/Odin/issues/47) | Runtime log injection into agent context between tool calls | **MEDIUM-HIGH** | Lilium AI |
+| 13 | [#55](https://github.com/Calmingstorm/Odin/issues/55) | Cross-bot Discord channel monitoring with auto-investigation triggers | **MEDIUM-HIGH** | a0-discord, claude-code-discord |
+| 14 | [#39](https://github.com/Calmingstorm/Odin/issues/39) | Pluggable web search with multiple provider backends | **MEDIUM-HIGH** | OpenClaw |
+
+**Tier 4 — Medium Value Nice-to-Haves (P4-P5)**
+
+| # | Issue | Title | Value Rating | Source Project |
+|---|-------|-------|-------------|----------------|
+| 15 | [#44](https://github.com/Calmingstorm/Odin/issues/44) | Transparent filesystem checkpoints with rollback before file mutations | **MEDIUM** | Hermes Agent |
+| 16 | [#48](https://github.com/Calmingstorm/Odin/issues/48) | Lightweight scheduled code tasks that bypass LLM inference | **MEDIUM** | Lilium AI |
+| 17 | [#40](https://github.com/Calmingstorm/Odin/issues/40) | Background memory consolidation with scheduled review cycles | **MEDIUM** | OpenClaw |
+| 18 | [#41](https://github.com/Calmingstorm/Odin/issues/41) | Live browser session viewer for observing automation in real-time | **MEDIUM** | OpenClaw |
+
+---
+
+#### Competitive Landscape Themes
+
+**1. Safety is the biggest gap.** Three of the top four priorities are safety features (e-stop, cost enforcement, shell sandbox). Every project analyzed has stronger execution guardrails than Odin. OpenClaw has standing orders with audit, Hermes has LLM-powered command approval, Nanobot has bubblewrap sandbox, ZeroClaw has a full e-stop + approval + sandbox stack. Odin's CommandGovernor (regex pattern matching) and PermissionManager (user tiers) are good but insufficient for a production infrastructure executor with kubectl/terraform/shell access. **Phase 1 should be entirely safety-focused.**
+
+**2. Workflow automation is fragmented.** Odin has three separate systems (webhook triggers, cron scheduling, execute_plan) that don't compose. ZeroClaw's SOPs (#51) and OpenAgent's workflow engine (#54) show what a unified system looks like: triggers → conditions → steps → validation, with deterministic execution for well-known procedures. This is the highest-leverage architectural improvement.
+
+**3. The "learning agent" pattern is emerging.** Hermes Agent's autonomous skill creation (#42), Nanobot's dream skill discovery, and OpenClaw's SkillForge all point toward agents that learn from experience. For Odin, this means creating reusable infrastructure runbooks from successful remediation patterns — reducing context usage and improving reliability over time.
+
+**4. Programmatic tool calling is a multiplier.** Hermes Agent's PTC (#43) and ZeroClaw's pipeline tool both address the same problem: multi-step infrastructure workflows burning N inference turns when a single script could call N tools. For Odin's typical workflow (check pods → read logs → check limits → restart → validate), PTC could reduce 8+ turns to 1 — saving ~$0.30-0.50 per workflow and 30-60 seconds of latency.
+
+**5. Discord UX matters for operational teams.** Kiro Discord Bot's thread-based execution (#49), status reactions, and silent mode show that how ops tasks are displayed in Discord is as important as the execution itself. Real-time tool progress in threads, cron execution history (#50), and cross-bot monitoring (#55) would make Odin significantly more usable for teams monitoring infrastructure through Discord.
+
+**6. Odin's infrastructure depth is unmatched.** No project analyzed comes close to Odin's 72 deeply parameterized infrastructure tools, post-action validation, risk classification, Grafana alert auto-remediation, or autonomous execution loops. The competitive gaps are in safety, workflow orchestration, and agent intelligence — not in raw infrastructure capability.
+
+---
+
+#### What Was NOT Issued (Cross-Cutting Themes)
+
+Features that appeared in multiple projects but were deliberately excluded from issues:
+
+- **Multi-channel support** (Discord + Slack + Telegram + WhatsApp) — Odin is Discord-only by design. Adding full control channels for other platforms is a product direction decision, not a gap. Appeared in OpenClaw (24 channels), ZeroClaw (27), Hermes (7), Nanobot (16), Lilium (12), OpenAgent (3).
+
+- **Interactive approval before tool execution** — Discussed in ZeroClaw (approval manager), Hermes (LLM smart approval), claude-code-discord (Discord buttons). Odin is designed for autonomous execution. Adding interactive approval would fundamentally change the execution model and add latency to time-critical remediation.
+
+- **Community skill/plugin marketplace** — Discussed in Hermes (agentskills.io), ZeroClaw (ClawHub), Nanobot (skill registry). Valuable for general-purpose agents but Odin's skills are infrastructure-specific. A community registry is a product strategy, not a technical gap.
+
+- **OpenAI-compatible API surface** — Discussed in OpenClaw and Nanobot. Useful for tool integration but tangential to Odin's core infrastructure execution.
+
+- **Prompt injection defense / input sanitization** — a0-discord has excellent sanitization (60+ patterns, Unicode normalization). Odin's current defense is a system prompt instruction. While input sanitization is important (especially with cross-bot monitoring #55), it's security hardening rather than a feature — should be part of implementation for relevant issues.
+
+- **Desktop/computer control** (mouse, keyboard, screenshots) — OpenAgent and Lilium AI have OS-level control. Irrelevant for infrastructure execution — Odin uses Playwright for web-based infra management.
+
+---
+
+#### Summary Issue Created
+
+| Issue | Title |
+|-------|-------|
+| [#56](https://github.com/Calmingstorm/Odin/issues/56) | Competitive analysis: prioritized feature roadmap |
+
+Contains: full prioritized roadmap (5 tiers, 5 implementation phases), dependency graph, competitive landscape summary, per-project attribution, and Odin's unmatched strengths.
+
+---
+
+**Round 10 status: COMPLETE. Summary issue #56 created with prioritized roadmap of all 18 feature issues across 10 projects. Competitive analysis loop finished.**
+
+---
+
+## Analysis Complete
+
+**Total competitive analysis loop: 10 rounds, 10 projects analyzed, 18 feature issues + 1 summary roadmap issue = 19 issues created.**
+
+The analysis identified that Odin's infrastructure execution depth is unmatched, but safety guardrails (e-stop, cost enforcement, shell sandbox), workflow automation maturity (SOPs, persistent workflows), and agent intelligence (skill learning, programmatic tool calling, self-introspection) are the highest-value areas for improvement.
