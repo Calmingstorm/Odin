@@ -181,9 +181,7 @@ async def process_web_chat(
         response = _scrub(response)
 
         if not is_error:
-            # Match client.py behaviour: only save if tools were used or handoff
-            if tools_used or handoff:
-                bot.sessions.add_message(channel_id, "assistant", response)
+            bot.sessions.add_message(channel_id, "assistant", response)
             bot.sessions.prune()
             try:
                 await asyncio.to_thread(bot.sessions.save)

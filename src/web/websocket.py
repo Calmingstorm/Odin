@@ -137,8 +137,10 @@ class WebSocketManager:
             })
             return
 
-        ws_session_id = getattr(ws, "_odin_session_id", "ws-anon")
-        channel_id = f"ws-{ws_session_id[:16]}"
+        channel_id = (data.get("channel_id") or "").strip()
+        if not channel_id:
+            ws_session_id = getattr(ws, "_odin_session_id", "ws-anon")
+            channel_id = f"ws-{ws_session_id[:16]}"
         user_id = "web-user"
         username = "WebUser"
 
