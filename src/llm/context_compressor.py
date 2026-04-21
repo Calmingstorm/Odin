@@ -17,8 +17,8 @@ from ..odin_log import get_logger
 
 log = get_logger("context_compressor")
 
-DEFAULT_MAX_CONTEXT_CHARS = 120_000
-DEFAULT_KEEP_RECENT = 6
+DEFAULT_MAX_CONTEXT_CHARS = 300_000
+DEFAULT_KEEP_RECENT = 20
 COMPRESSED_ITERATION_MAX_CHARS = 120
 
 

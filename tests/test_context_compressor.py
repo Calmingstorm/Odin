@@ -677,8 +677,8 @@ class TestContextCompressionConfig:
         from src.config.schema import ContextCompressionConfig
         cfg = ContextCompressionConfig()
         assert cfg.enabled is True
-        assert cfg.max_context_chars == 120_000
-        assert cfg.keep_recent_iterations == 6
+        assert cfg.max_context_chars == 300_000
+        assert cfg.keep_recent_iterations == 20
 
     def test_custom_config(self):
         from src.config.schema import ContextCompressionConfig
@@ -716,10 +716,10 @@ class TestContextCompressionConfig:
 # -----------------------------------------------------------------------
 class TestConstants:
     def test_default_max_context_chars(self):
-        assert DEFAULT_MAX_CONTEXT_CHARS == 120_000
+        assert DEFAULT_MAX_CONTEXT_CHARS == 300_000
 
     def test_default_keep_recent(self):
-        assert DEFAULT_KEEP_RECENT == 6
+        assert DEFAULT_KEEP_RECENT == 20
 
     def test_compressed_max_chars(self):
         assert COMPRESSED_ITERATION_MAX_CHARS == 120
