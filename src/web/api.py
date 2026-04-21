@@ -399,6 +399,71 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "monitoring": monitoring,
         })
 
+    # ------------------------------------------------------------------
+    # Discord per-guild/per-channel config
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/discord/guilds")
+    async def discord_guilds(_request: web.Request) -> web.Response:
+        result = []
+        cc = bot.channel_config
+        for g in bot.guilds:
+            gid = str(g.id)
+            guild_cfg = cc.get_guild_config(gid)
+            channels = []
+            for ch in sorted(g.text_channels, key=lambda c: c.position):
+                cid = str(ch.id)
+                ch_cfg = cc.get_channel_config(cid)
+                effective_mention = cc.should_require_mention(
+                    gid, cid, bot.config.discord.require_mention,
+                )
+                effective_enabled = cc.is_enabled(gid, cid)
+                channels.append({
+                    "id": cid,
+                    "name": ch.name,
+                    "category": ch.category.name if ch.category else None,
+                    "config": ch_cfg,
+                    "effective": {"enabled": effective_enabled, "require_mention": effective_mention},
+                })
+            result.append({
+                "id": gid,
+                "name": g.name,
+                "member_count": g.member_count or 0,
+                "icon_url": str(g.icon.url) if g.icon else None,
+                "config": guild_cfg,
+                "channels": channels,
+            })
+        return web.json_response(result)
+
+    @routes.put("/api/discord/guild/{guild_id}/config")
+    async def update_guild_config(request: web.Request) -> web.Response:
+        gid = request.match_info["guild_id"]
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        cfg = bot.channel_config.set_guild_config(
+            gid,
+            enabled=data.get("enabled"),
+            require_mention=data.get("require_mention"),
+        )
+        return web.json_response({"guild_id": gid, "config": cfg})
+
+    @routes.put("/api/discord/channel/{channel_id}/config")
+    async def update_channel_config(request: web.Request) -> web.Response:
+        cid = request.match_info["channel_id"]
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        cfg = bot.channel_config.set_channel_config(
+            cid,
+            enabled=data.get("enabled"),
+            require_mention=data.get("require_mention"),
+            clear=data.get("clear", False),
+        )
+        return web.json_response({"channel_id": cid, "config": cfg})
+
     @routes.get("/api/health/components")
     async def get_health_components(_request: web.Request) -> web.Response:
         from ..health.checker import check_all
