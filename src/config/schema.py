@@ -28,7 +28,7 @@ class SessionsConfig(BaseModel):
     max_history: int = 50
     max_age_hours: int = 24
     persist_directory: str = "./data/sessions"
-    token_budget: int = 128_000
+    token_budget: int = 256_000
     adaptive_compaction: bool = True
 
 
@@ -135,8 +135,8 @@ class ConnectionPoolConfig(BaseModel):
 
 class ContextCompressionConfig(BaseModel):
     enabled: bool = True
-    max_context_chars: int = 300_000
-    keep_recent_iterations: int = 20
+    max_context_chars: int = 750_000
+    keep_recent_iterations: int = 30
 
 
 class ModelRoutingConfig(BaseModel):

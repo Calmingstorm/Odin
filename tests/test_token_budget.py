@@ -315,7 +315,7 @@ class TestSessionTokenPrometheusMetrics:
 class TestSessionsConfigTokenBudget:
     def test_default_value(self):
         config = SessionsConfig()
-        assert config.token_budget == 128_000
+        assert config.token_budget == 256_000
 
     def test_custom_value(self):
         config = SessionsConfig(token_budget=64_000)
@@ -350,11 +350,11 @@ class TestEstimateTokensConsolidation:
 
 class TestDefaultSessionTokenBudget:
     def test_value(self):
-        assert DEFAULT_SESSION_TOKEN_BUDGET == 128_000
+        assert DEFAULT_SESSION_TOKEN_BUDGET == 256_000
 
     def test_exported_from_init(self):
         from src.sessions import DEFAULT_SESSION_TOKEN_BUDGET as exported
-        assert exported == 128_000
+        assert exported == 256_000
 
 
 # ---------------------------------------------------------------------------

@@ -522,7 +522,7 @@ class TestSessionsConfigAdaptive:
         config = SessionsConfig()
         assert config.max_history == 50
         assert config.max_age_hours == 24
-        assert config.token_budget == 128_000
+        assert config.token_budget == 256_000
 
 
 # ---------------------------------------------------------------------------

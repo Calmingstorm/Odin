@@ -79,14 +79,14 @@ class TestSessionStats:
             total_tokens=15000,
             total_messages=42,
             over_budget_count=1,
-            token_budget=128000,
+            token_budget=256000,
         )
         d = ss.to_dict()
         assert d["active_count"] == 3
         assert d["total_tokens"] == 15000
         assert d["total_messages"] == 42
         assert d["over_budget_count"] == 1
-        assert d["token_budget"] == 128000
+        assert d["token_budget"] == 256000
         assert "persist_dir" in d
         assert isinstance(d["per_session"], list)
 

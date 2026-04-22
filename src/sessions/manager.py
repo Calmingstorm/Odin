@@ -58,7 +58,7 @@ CONTEXT_TOKEN_BUDGET = 16000  # max estimated tokens for history sent to LLM
 BUDGET_KEEP_RECENT = 5  # always keep the most recent N messages regardless of budget
 
 # Session token budget — auto-compact when a session's estimated tokens exceed this
-DEFAULT_SESSION_TOKEN_BUDGET = 128_000
+DEFAULT_SESSION_TOKEN_BUDGET = 256_000
 
 # Common stop words to ignore when scoring relevance
 _STOP_WORDS = frozenset({

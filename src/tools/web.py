@@ -14,7 +14,7 @@ from ..odin_log import get_logger
 
 log = get_logger("tools.web")
 
-MAX_CONTENT_CHARS = 4000
+MAX_CONTENT_CHARS = 16_000
 FETCH_TIMEOUT = aiohttp.ClientTimeout(total=15)
 SEARCH_TIMEOUT = aiohttp.ClientTimeout(total=10)
 

@@ -2071,7 +2071,7 @@ class OdinBot(commands.Bot):
                 # Pass current message content for relevance scoring —
                 # older messages unrelated to the current query are dropped
                 task_history = await self.sessions.get_task_history(
-                    channel_id, max_messages=20, current_query=content,
+                    channel_id, max_messages=40, current_query=content,
                     topic_change=topic_info["is_topic_change"],
                 )
                 if image_blocks and task_history and task_history[-1]["role"] == "user":

@@ -43,7 +43,7 @@ def _manager(tmp_path) -> SessionManager:
         max_history=50,
         max_age_hours=24,
         persist_dir=str(tmp_path),
-        token_budget=128_000,
+        token_budget=256_000,
     )
 
 

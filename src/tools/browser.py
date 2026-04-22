@@ -216,7 +216,7 @@ async def handle_browser_read_page(
     """Navigate to a URL, extract visible text content."""
     url = inp["url"]
     selector = inp.get("selector")
-    max_chars = min(inp.get("max_chars", 4000), 8000)
+    max_chars = min(inp.get("max_chars", 16000), 32000)
     wait_seconds = min(inp.get("wait_seconds", 0), 10)
 
     _validate_url(url)
@@ -292,7 +292,7 @@ async def handle_browser_read_table(
 
     md = "\n".join(lines)
     if len(md) > 4000:
-        md = md[:4000] + "\n... (table truncated)"
+        md = md[:16000] + "\n... (table truncated)"
 
     return f"**{title}** — Table {table_index + 1} of {table_count}\n\n{md}"
 
@@ -388,6 +388,6 @@ async def handle_browser_evaluate(
         text = str(result)
 
     if len(text) > 4000:
-        text = text[:4000] + "\n... (result truncated)"
+        text = text[:16000] + "\n... (result truncated)"
 
     return text
