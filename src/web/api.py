@@ -648,6 +648,42 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         sessions.sort(key=lambda s: s["last_active"], reverse=True)
         return web.json_response(sessions)
 
+    @routes.get("/api/sessions/token-usage")
+    async def session_token_usage(_request: web.Request) -> web.Response:
+        usage = bot.sessions.get_session_token_usage()
+        return web.json_response(usage)
+
+    @routes.get("/api/sessions/activity")
+    async def session_activity(_request: web.Request) -> web.Response:
+        activity = bot.sessions.get_activity_metrics()
+        return web.json_response(activity)
+
+    @routes.get("/api/sessions/search")
+    async def search_sessions(request: web.Request) -> web.Response:
+        query = request.query.get("q", "").strip()
+        if not query:
+            return web.json_response({"error": "q parameter required"}, status=400)
+        limit = _safe_int_param(request, "limit", 20, hi=50)
+        channel_id = request.query.get("channel_id") or None
+        user_id = request.query.get("user_id") or None
+        after: float | None = None
+        before: float | None = None
+        if request.query.get("after"):
+            try:
+                after = float(request.query["after"])
+            except ValueError:
+                pass
+        if request.query.get("before"):
+            try:
+                before = float(request.query["before"])
+            except ValueError:
+                pass
+        results = await bot.sessions.search_history(
+            query, limit=limit, channel_id=channel_id,
+            user_id=user_id, after=after, before=before,
+        )
+        return web.json_response({"query": query, "results": results, "count": len(results)})
+
     @routes.get("/api/sessions/{channel_id}")
     async def get_session(request: web.Request) -> web.Response:
         cid = request.match_info["channel_id"]
@@ -745,42 +781,6 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 bot.sessions.reset(cid)
                 cleared += 1
         return web.json_response({"status": "cleared", "count": cleared})
-
-    @routes.get("/api/sessions/token-usage")
-    async def session_token_usage(_request: web.Request) -> web.Response:
-        usage = bot.sessions.get_session_token_usage()
-        return web.json_response(usage)
-
-    @routes.get("/api/sessions/activity")
-    async def session_activity(_request: web.Request) -> web.Response:
-        activity = bot.sessions.get_activity_metrics()
-        return web.json_response(activity)
-
-    @routes.get("/api/sessions/search")
-    async def search_sessions(request: web.Request) -> web.Response:
-        query = request.query.get("q", "").strip()
-        if not query:
-            return web.json_response({"error": "q parameter required"}, status=400)
-        limit = _safe_int_param(request, "limit", 20, hi=50)
-        channel_id = request.query.get("channel_id") or None
-        user_id = request.query.get("user_id") or None
-        after: float | None = None
-        before: float | None = None
-        if request.query.get("after"):
-            try:
-                after = float(request.query["after"])
-            except ValueError:
-                pass
-        if request.query.get("before"):
-            try:
-                before = float(request.query["before"])
-            except ValueError:
-                pass
-        results = await bot.sessions.search_history(
-            query, limit=limit, channel_id=channel_id,
-            user_id=user_id, after=after, before=before,
-        )
-        return web.json_response({"query": query, "results": results, "count": len(results)})
 
     # ------------------------------------------------------------------
     # Tools
