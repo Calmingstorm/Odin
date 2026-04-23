@@ -1155,6 +1155,24 @@ class OdinBot(commands.Bot):
                 log.exception("CostTracker.record failed (non-fatal)")
         return resp
 
+    async def _operational_reflection(
+        self, user_request: str, tools_used: list[str],
+        response: str, is_error: bool, user_id: str | None,
+    ) -> None:
+        """Fire-and-forget post-operation reflection."""
+        try:
+            tool_details = [{"tool": t} for t in tools_used[:20]]
+            await self.reflector.reflect_on_operation(
+                user_request=user_request,
+                tools_used=tools_used,
+                tool_details=tool_details,
+                final_response=response,
+                is_error=is_error,
+                user_id=user_id,
+            )
+        except Exception as e:
+            log.debug("Operational reflection failed (non-fatal): %s", e)
+
     async def _save_turn_trajectory(
         self, trajectory, *, error: str = "", final_response: str = "",
         tools_used: list[str] | None = None,
@@ -2173,6 +2191,11 @@ class OdinBot(commands.Bot):
                     )
                 except Exception:
                     pass  # Non-critical
+
+                # Post-operation reflection — learn from what actually happened
+                asyncio.create_task(self._operational_reflection(
+                    content, tools_used, response, is_error, user_id,
+                ))
         else:
             # Save a sanitized error marker instead of the full error response.
             # The user sees the full error on Discord, but raw refusals and

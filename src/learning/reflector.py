@@ -135,6 +135,101 @@ class ConversationReflector:
         lines = [f"- [{e['category']}] {e['content']}" for e in filtered]
         return "## Learned Context\n" + "\n".join(lines)
 
+    async def reflect_on_operation(
+        self,
+        user_request: str,
+        tools_used: list[str],
+        tool_details: list[dict],
+        final_response: str,
+        is_error: bool = False,
+        user_id: str | None = None,
+    ) -> None:
+        """Post-operation reflection using structured tool call data.
+
+        Runs after a tool loop completes. Extracts durable operational
+        lessons from what actually happened — tool calls, results, errors,
+        and the final response — rather than raw conversation text.
+        """
+        if not self._enabled or not self._text_fn:
+            return
+        if not tools_used:
+            return
+
+        detail_lines = []
+        for d in tool_details[:15]:
+            tool = d.get("tool", "?")
+            inp = d.get("input", "")
+            result = d.get("result", "")
+            if isinstance(inp, dict):
+                inp = json.dumps(inp)
+            inp_preview = str(inp)[:120]
+            result_preview = str(result)[:120]
+            status = "ERROR" if d.get("error") else "OK"
+            detail_lines.append(f"  {tool}({inp_preview}) → {status}: {result_preview}")
+
+        operation_summary = (
+            f"User request: {user_request[:300]}\n"
+            f"Tools used: {', '.join(tools_used[:20])}\n"
+            f"Outcome: {'ERROR' if is_error else 'SUCCESS'}\n"
+            f"Tool call details:\n" + "\n".join(detail_lines) + "\n"
+            f"Final response: {final_response[:500]}"
+        )
+
+        existing = self._load().get("entries", [])
+        existing_text = "\n".join(
+            f"- [{e['category']}] {e['key']}: {e['content']}"
+            for e in existing
+        ) if existing else "(none)"
+
+        prompt = (
+            "Review this completed operation and extract ONLY durable operational "
+            "lessons worth remembering for future similar tasks. Focus on:\n"
+            "- Corrections the results revealed (wrong assumptions, unexpected behavior)\n"
+            "- Operational facts discovered (API formats, file locations, tool quirks)\n"
+            "- What worked well that should be repeated\n"
+            "- What failed and why\n\n"
+            "Do NOT record:\n"
+            "- Ephemeral task details (file paths in /tmp, one-time actions)\n"
+            "- Things already known (check existing entries below)\n"
+            "- Generic knowledge the bot already has\n\n"
+            "Return a JSON array. Each entry: {\"key\": \"snake_case_id\", "
+            "\"category\": \"correction|operational|preference\", "
+            "\"content\": \"concise lesson\"}\n"
+            "Return [] if nothing worth remembering.\n\n"
+            "Currently known:\n" + existing_text + "\n\n"
+            "Operation:\n" + operation_summary
+        )
+
+        user_ids = [user_id] if user_id else []
+        try:
+            raw = await self._text_fn(
+                [{"role": "user", "content": prompt}],
+                "You extract operational lessons from tool execution results. "
+                "Only record what the operation actually revealed. Return valid JSON.",
+            )
+            new_entries = self._parse_entries(raw.strip())
+            if not new_entries:
+                return
+
+            single_user = user_ids[0] if len(user_ids) == 1 else None
+            for entry in new_entries:
+                if entry["category"] in ("preference", "correction") and single_user:
+                    if "user_id" not in entry:
+                        entry["user_id"] = single_user
+
+            async with self._lock:
+                data = await asyncio.to_thread(self._load)
+                existing = data.get("entries", [])
+                merged = self._merge_entries(existing, new_entries)
+                if len(merged) > self._max_entries:
+                    merged = await self._consolidate(merged)
+                data["entries"] = merged
+                data["last_reflection"] = datetime.now(timezone.utc).isoformat()
+                await asyncio.to_thread(self._save, data)
+                log.info("Operational reflection: %d new entries merged", len(new_entries))
+        except Exception as e:
+            log.error("Operational reflection failed: %s", e)
+
     async def reflect_on_session(
         self, session: Session, *, user_id: str | None = None,
         user_ids: list[str] | None = None,
@@ -254,24 +349,7 @@ class ConversationReflector:
                     # If it didn't and we have multiple users, leave untagged (global)
                 # operational and fact entries stay global (no user_id)
 
-            # Merge by key
-            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            existing_by_key = {e["key"]: e for e in existing}
-            for entry in new_entries:
-                entry["content"] = entry["content"][:150]
-                if entry["key"] in existing_by_key:
-                    existing_by_key[entry["key"]]["content"] = entry["content"]
-                    existing_by_key[entry["key"]]["category"] = entry["category"]
-                    existing_by_key[entry["key"]]["updated_at"] = now
-                    # Update user_id if set
-                    if "user_id" in entry:
-                        existing_by_key[entry["key"]]["user_id"] = entry["user_id"]
-                else:
-                    entry["created_at"] = now
-                    entry["updated_at"] = now
-                    existing_by_key[entry["key"]] = entry
-
-            merged = list(existing_by_key.values())
+            merged = self._merge_entries(existing, new_entries)
 
             # Consolidate if over limit
             if len(merged) > self._max_entries:
@@ -284,6 +362,24 @@ class ConversationReflector:
                 "Reflection complete: %d new insights, %d total entries",
                 len(new_entries), len(merged),
             )
+
+    @staticmethod
+    def _merge_entries(existing: list[dict], new_entries: list[dict]) -> list[dict]:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        by_key = {e["key"]: e for e in existing}
+        for entry in new_entries:
+            entry["content"] = entry["content"][:150]
+            if entry["key"] in by_key:
+                by_key[entry["key"]]["content"] = entry["content"]
+                by_key[entry["key"]]["category"] = entry["category"]
+                by_key[entry["key"]]["updated_at"] = now
+                if "user_id" in entry:
+                    by_key[entry["key"]]["user_id"] = entry["user_id"]
+            else:
+                entry["created_at"] = now
+                entry["updated_at"] = now
+                by_key[entry["key"]] = entry
+        return list(by_key.values())
 
     _MAX_ENTRY_AGE_DAYS = 90
 
