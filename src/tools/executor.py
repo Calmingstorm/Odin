@@ -784,7 +784,8 @@ class ToolExecutor:
         claude_args = [
             "claude",
             "--print",
-            "--output-format text",
+            "--output-format stream-json",
+            "--verbose",
             "--no-session-persistence",
         ]
         if allow_edits:
@@ -859,11 +860,109 @@ class ToolExecutor:
         if code != 0:
             return f"Claude Code failed (exit {code}):\n{output[-2000:]}"
 
-        max_output = inp.get("max_output_chars", 3000)
-        if len(output) > max_output:
+        response_text, activity = self._parse_claude_stream_json(output)
+
+        max_output = inp.get("max_output_chars", 6000)
+        if len(response_text) > max_output:
             half = max_output // 2
-            output = output[:half] + "[... truncated ...]" + output[-half:]
-        return output + file_manifest
+            response_text = response_text[:half] + "[... truncated ...]" + response_text[-half:]
+        return response_text + activity + file_manifest
+
+    @staticmethod
+    def _parse_claude_stream_json(raw_output: str) -> tuple[str, str]:
+        """Parse stream-json output into (response_text, activity_summary)."""
+        response_text = ""
+        tool_calls: list[dict] = []
+        cost = 0.0
+        num_turns = 0
+        duration_ms = 0
+
+        for line in raw_output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = d.get("type", "")
+
+            if msg_type == "assistant":
+                for block in (d.get("message") or {}).get("content", []):
+                    bt = block.get("type", "")
+                    if bt == "tool_use":
+                        inp = block.get("input", {})
+                        entry = {"tool": block.get("name", "?"), "input": inp}
+                        tool_calls.append(entry)
+
+            elif msg_type == "result":
+                response_text = d.get("result", "") or ""
+                cost = d.get("total_cost_usd", 0)
+                num_turns = d.get("num_turns", 0)
+                duration_ms = d.get("duration_ms", 0)
+
+        if not tool_calls and not cost:
+            return raw_output, ""
+
+        lines = ["\n\n--- claude_code activity ---"]
+        lines.append(f"Turns: {num_turns} | Cost: ${cost:.4f} | Duration: {duration_ms / 1000:.1f}s")
+
+        reads = []
+        edits = []
+        writes = []
+        commands = []
+        other = []
+
+        for tc in tool_calls:
+            tool = tc["tool"]
+            inp = tc["input"]
+            if tool == "Read":
+                path = inp.get("file_path", "?")
+                if path not in reads:
+                    reads.append(path)
+            elif tool == "Edit":
+                path = inp.get("file_path", "?")
+                old = inp.get("old_string", "")
+                new = inp.get("new_string", "")
+                edits.append(f"{path}: '{old[:40]}' → '{new[:40]}'")
+            elif tool == "Write":
+                path = inp.get("file_path", "?")
+                size = len(inp.get("content", ""))
+                writes.append(f"{path} ({size} chars)")
+            elif tool in ("Bash", "bash"):
+                cmd = inp.get("command", "?")
+                commands.append(cmd[:100])
+            else:
+                desc = inp.get("description", "") or inp.get("query", "") or inp.get("pattern", "")
+                other.append(f"{tool}: {desc[:60]}" if desc else tool)
+
+        if reads:
+            shown = reads[:10]
+            extra = f" (+{len(reads) - 10} more)" if len(reads) > 10 else ""
+            lines.append(f"Files read: {', '.join(shown)}{extra}")
+        if edits:
+            lines.append("Files edited:")
+            for e in edits[:8]:
+                lines.append(f"  {e}")
+            if len(edits) > 8:
+                lines.append(f"  (+{len(edits) - 8} more)")
+        if writes:
+            lines.append(f"Files written: {', '.join(writes[:8])}")
+        if commands:
+            lines.append("Commands run:")
+            for c in commands[:8]:
+                lines.append(f"  $ {c}")
+            if len(commands) > 8:
+                lines.append(f"  (+{len(commands) - 8} more)")
+        if other:
+            lines.append(f"Other tools: {', '.join(other[:8])}")
+
+        activity = "\n".join(lines)
+        if len(activity) > 2000:
+            activity = activity[:1997] + "..."
+
+        return response_text, activity
 
     def set_user_context(self, user_id: str | None) -> None:
         """Deprecated: user_id is now passed directly to execute().
