@@ -403,7 +403,7 @@ class CodexChatClient:
                     CODEX_API_URL,
                     headers=headers,
                     json=body,
-                    timeout=aiohttp.ClientTimeout(total=300),
+                    timeout=aiohttp.ClientTimeout(total=600),
                 ) as resp:
                     if resp.status == 200:
                         result = await self._read_tool_stream(resp)
@@ -635,7 +635,7 @@ class CodexChatClient:
                     CODEX_API_URL,
                     headers=headers,
                     json=body,
-                    timeout=aiohttp.ClientTimeout(total=300),
+                    timeout=aiohttp.ClientTimeout(total=600),
                 ) as resp:
                     if resp.status == 200:
                         result = await self._read_stream(resp)
