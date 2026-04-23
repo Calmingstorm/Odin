@@ -97,7 +97,7 @@ def check_discord_token(config: Any) -> DiagnosticResult:
             name="discord_token",
             passed=False,
             detail="Discord bot token is missing or empty",
-            recommendation="Set ODIN_TOKEN in your .env file or shell environment.",
+            recommendation="Set DISCORD_TOKEN in your .env file or shell environment.",
         )
     # Mask token for metadata — show first 5 chars only
     masked = token[:5] + "…" if len(token) > 5 else token

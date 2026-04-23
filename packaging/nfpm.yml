@@ -9,7 +9,7 @@ priority: optional
 maintainer: Odin Maintainers <odin@localhost>
 description: |
   Odin — autonomous execution agent on Discord.
-  71 tools, shell access, browser automation, scheduled tasks,
+  72 tools, shell access, browser automation, scheduled tasks,
   sub-agents, knowledge base, and a 19-page web management UI.
 vendor: Odin
 homepage: https://github.com/Calmingstorm/Odin
@@ -40,6 +40,9 @@ contents:
 
   - src: ./.env.example
     dst: /opt/odin/.env.example
+
+  - src: ./scripts/codex_login.py
+    dst: /opt/odin/scripts/codex_login.py
 
   - src: ./packaging/odin.service
     dst: /usr/lib/systemd/system/odin.service

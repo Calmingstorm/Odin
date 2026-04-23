@@ -14,7 +14,7 @@ class TestOdinConfig:
         assert config.token == ""
 
     def test_from_env(self, monkeypatch):
-        monkeypatch.setenv("ODIN_TOKEN", "fake-token")
+        monkeypatch.setenv("DISCORD_TOKEN", "fake-token")
         monkeypatch.setenv("ODIN_PREFIX", "?")
         monkeypatch.setenv("ODIN_WEB_PORT", "9090")
         config = OdinConfig.from_env()
@@ -25,7 +25,7 @@ class TestOdinConfig:
     def test_validate_missing_token(self):
         config = OdinConfig()
         errors = config.validate()
-        assert "ODIN_TOKEN is required" in errors
+        assert "DISCORD_TOKEN is required" in errors[0]
 
     def test_validate_default_secret(self):
         config = OdinConfig(token="x")

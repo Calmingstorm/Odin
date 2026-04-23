@@ -47,7 +47,7 @@ class OdinConfig:
         """Build config from environment variables."""
         _load_env()
         return cls(
-            token=os.getenv("ODIN_TOKEN", ""),
+            token=os.getenv("DISCORD_TOKEN", os.getenv("ODIN_TOKEN", "")),
             prefix=os.getenv("ODIN_PREFIX", "!"),
             log_level=os.getenv("ODIN_LOG_LEVEL", "INFO"),
             database_url=os.getenv(
@@ -66,7 +66,7 @@ class OdinConfig:
         """Return a list of validation errors (empty if valid)."""
         errors = []
         if not self.token:
-            errors.append("ODIN_TOKEN is required")
+            errors.append("DISCORD_TOKEN is required (set in .env or environment)")
         if self.web_secret == "change-me":
             errors.append("ODIN_WEB_SECRET should be changed from default")
         return errors
