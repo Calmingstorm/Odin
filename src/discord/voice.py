@@ -15,7 +15,10 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 import discord
-from discord.ext import voice_recv
+try:
+    from discord.ext import voice_recv
+except ImportError:
+    voice_recv = None
 
 if TYPE_CHECKING:
     from ..config.schema import VoiceConfig
@@ -85,7 +88,8 @@ def _patch_voice_recv_dave():
         log.warning("Failed to patch voice_recv for DAVE: %s", e)
 
 
-_patch_voice_recv_dave()
+if voice_recv is not None:
+    _patch_voice_recv_dave()
 
 # Discord voice: 48kHz stereo s16le, 20ms frames
 DISCORD_SAMPLE_RATE = 48000
@@ -147,7 +151,7 @@ class VoiceManager:
     ) -> None:
         self._config = config
         self._bot = bot
-        self._voice_client: voice_recv.VoiceRecvClient | None = None
+        self._voice_client = None
         self._ws = None
         self._ws_task: asyncio.Task | None = None
         self._tts_buffer: bytearray = bytearray()
@@ -206,8 +210,9 @@ class VoiceManager:
                 pass
 
         try:
-            # Connect using VoiceRecvClient for audio receive support
-            self._voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
+            # Connect using VoiceRecvClient for audio receive support (if available)
+            connect_cls = voice_recv.VoiceRecvClient if voice_recv else discord.VoiceClient
+            self._voice_client = await channel.connect(cls=connect_cls)
             log.info("Joined voice channel: %s (is_connected=%s)", channel.name, self._voice_client.is_connected())
         except Exception as e:
             log.error("Failed to join voice channel: %s", e, exc_info=True)
@@ -242,7 +247,9 @@ class VoiceManager:
 
     def _start_listening(self) -> None:
         """Start receiving audio via discord-ext-voice-recv."""
-        if not self._voice_client:
+        if not self._voice_client or voice_recv is None:
+            if voice_recv is None:
+                log.info("voice_recv not installed — audio receive disabled")
             return
         try:
             self._audio_frame_count = 0
