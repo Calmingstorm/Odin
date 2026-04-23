@@ -75,6 +75,40 @@ class ConversationReflector:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(json.dumps(data, indent=2))
 
+    def get_all_entries(self) -> list[dict]:
+        return self._load().get("entries", [])
+
+    def get_metadata(self) -> dict:
+        data = self._load()
+        return {
+            "count": len(data.get("entries", [])),
+            "last_reflection": data.get("last_reflection"),
+            "version": data.get("version", 1),
+        }
+
+    def delete_entry(self, key: str) -> bool:
+        data = self._load()
+        entries = data.get("entries", [])
+        before = len(entries)
+        data["entries"] = [e for e in entries if e.get("key") != key]
+        if len(data["entries"]) < before:
+            self._save(data)
+            return True
+        return False
+
+    def update_entry(self, key: str, content: str | None = None, category: str | None = None) -> dict | None:
+        data = self._load()
+        for e in data.get("entries", []):
+            if e.get("key") == key:
+                if content is not None:
+                    e["content"] = content
+                if category is not None:
+                    e["category"] = category
+                e["updated_at"] = datetime.now(timezone.utc).isoformat()
+                self._save(data)
+                return e
+        return None
+
     def get_prompt_section(self, user_id: str | None = None) -> str:
         """Format learned entries for injection into the system prompt.
 

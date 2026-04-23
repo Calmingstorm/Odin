@@ -3,6 +3,7 @@ import ToolsPage from './tools.js';
 import SkillsPage from './skills.js';
 import KnowledgePage from './knowledge.js';
 import MemoryPage from './memory.js';
+import LearnedPage from './learned.js';
 
 export default {
   components: { TabbedPage },
@@ -12,6 +13,7 @@ export default {
       { id: 'skills', label: 'Skills', component: SkillsPage },
       { id: 'knowledge', label: 'Knowledge', component: KnowledgePage },
       { id: 'memory', label: 'Memory', component: MemoryPage },
+      { id: 'learned', label: 'Learned', component: LearnedPage },
     ];
     return { tabs };
   },

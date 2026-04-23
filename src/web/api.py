@@ -2350,6 +2350,39 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response(executor.validation_stats.as_dict())
 
     # ------------------------------------------------------------------
+    # Learned context (reflector)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/learned")
+    async def list_learned(_request: web.Request) -> web.Response:
+        entries = bot.reflector.get_all_entries()
+        meta = bot.reflector.get_metadata()
+        return web.json_response({"entries": entries, **meta})
+
+    @routes.delete("/api/learned/{key}")
+    async def delete_learned(request: web.Request) -> web.Response:
+        key = request.match_info["key"]
+        if bot.reflector.delete_entry(key):
+            return web.json_response({"status": "deleted", "key": key})
+        return web.json_response({"error": "entry not found"}, status=404)
+
+    @routes.put("/api/learned/{key}")
+    async def update_learned(request: web.Request) -> web.Response:
+        key = request.match_info["key"]
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        updated = bot.reflector.update_entry(
+            key,
+            content=data.get("content"),
+            category=data.get("category"),
+        )
+        if updated:
+            return web.json_response(updated)
+        return web.json_response({"error": "entry not found"}, status=404)
+
+    # ------------------------------------------------------------------
     # Tool affordances (cost/risk/latency metadata)
     # ------------------------------------------------------------------
 
