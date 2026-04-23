@@ -101,7 +101,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     },
     "openai_codex": {
         "enabled": True,
-        "model": "gpt-5.4",
+        "model": "gpt-5.5",
         "max_tokens": 4096,
         "credentials_path": "./data/codex_auth.json",
     },

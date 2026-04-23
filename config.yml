@@ -14,7 +14,7 @@ openai_codex:
   enabled: true
   # ChatGPT-account Codex backend only supports the GPT-5 family
   # (gpt-4o et al return "model not supported" via this auth path).
-  model: gpt-5.4
+  model: gpt-5.5
   max_tokens: 4096
   credentials_path: ./data/codex_auth.json
 
