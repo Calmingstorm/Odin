@@ -753,30 +753,10 @@ class ToolExecutor:
         address, ssh_user, _os = resolved
 
         claude_user = self.config.claude_code_user
-        tmpdir = ""
         import os
         _already_claude_user = (os.getenv("USER", "") == claude_user) if claude_user else False
-        if allow_edits:
-            if not claude_user:
-                return "claude_code_user not configured — required for allow_edits=true"
-            safe_user = shlex.quote(claude_user)
-            if _already_claude_user:
-                mktemp_cmd = "mktemp -d /tmp/claude_code_XXXXXXXX"
-            else:
-                mktemp_cmd = f"su - {safe_user} -c 'mktemp -d /tmp/claude_code_XXXXXXXX'"
-            _, tmpdir = await self._exec_command(
-                address, mktemp_cmd, ssh_user, timeout=10,
-            )
-            tmpdir = tmpdir.strip()
-            if not tmpdir or not tmpdir.startswith("/tmp/claude_code_"):
-                return f"Failed to create temp directory: {tmpdir}"
-            prompt = prompt.replace(working_dir + "/", "./")
-            prompt = prompt.replace(working_dir, ".")
-            prompt = (
-                f"IMPORTANT: Write ALL files relative to the current directory (.)."
-                f" Do NOT use absolute paths. The current directory represents"
-                f" {working_dir}.\n\n{prompt}"
-            )
+        if allow_edits and not claude_user:
+            return "claude_code_user not configured — required for allow_edits=true"
 
         import base64 as b64mod
         encoded_prompt = b64mod.b64encode(prompt.encode()).decode()
@@ -794,16 +774,16 @@ class ToolExecutor:
             claude_args.append(f"--allowedTools {shlex.quote(allowed_tools)}")
 
         claude_cmd = " ".join(claude_args)
+        safe_wd = shlex.quote(working_dir)
 
         if allow_edits:
-            safe_tmpdir = shlex.quote(tmpdir)
-            inner = f"cd {safe_tmpdir} && echo '{encoded_prompt}' | base64 -d | timeout 3600 {claude_cmd}"
+            safe_user = shlex.quote(claude_user)
+            inner = f"cd {safe_wd} && echo '{encoded_prompt}' | base64 -d | timeout 3600 {claude_cmd}"
             if _already_claude_user:
                 cmd = inner
             else:
                 cmd = f"su - {safe_user} -c {shlex.quote(inner)}"
         else:
-            safe_wd = shlex.quote(working_dir)
             cmd = f"cd {safe_wd} && echo '{encoded_prompt}' | base64 -d | timeout 3600 {claude_cmd}"
 
         on_output = None
@@ -822,41 +802,6 @@ class ToolExecutor:
             except Exception:
                 pass
 
-        file_manifest = ""
-
-        if allow_edits:
-            if code == 0:
-                _, file_list = await self._exec_command(
-                    address,
-                    f"find {safe_tmpdir} -type f -not -path '*/.git/*' -not -name '*.pyc' | sort",
-                    ssh_user, timeout=10,
-                )
-                files_found = file_list.strip()
-                if files_found:
-                    safe_target = shlex.quote(working_dir)
-                    cp_code, cp_output = await self._exec_command(
-                        address,
-                        f"mkdir -p {safe_target} && cp -a {safe_tmpdir}/. {safe_target}/",
-                        ssh_user, timeout=30,
-                    )
-                    if cp_code != 0:
-                        file_manifest = (
-                            f"\n\nWARNING: File copy to {working_dir} failed "
-                            f"(exit {cp_code}): {cp_output[:300]}"
-                        )
-                    else:
-                        target_files = files_found.replace(tmpdir, working_dir)
-                        file_manifest = (
-                            "\n\n--- FILES ON DISK ---\n"
-                            "claude_code wrote these files directly to disk at "
-                            f"{working_dir}. Do NOT rewrite them with write_file.\n"
-                            f"{target_files}"
-                        )
-            # Clean up temp dir
-            await self._exec_command(
-                address, f"rm -rf {safe_tmpdir}", ssh_user, timeout=10,
-            )
-
         if code != 0:
             return f"Claude Code failed (exit {code}):\n{output[-2000:]}"
 
@@ -866,7 +811,7 @@ class ToolExecutor:
         if len(response_text) > max_output:
             half = max_output // 2
             response_text = response_text[:half] + "[... truncated ...]" + response_text[-half:]
-        return response_text + activity + file_manifest
+        return response_text + activity
 
     @staticmethod
     def _parse_claude_stream_json(raw_output: str) -> tuple[str, str]:
