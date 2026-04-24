@@ -469,7 +469,7 @@ class TestExecutorRecovery:
 
         executor._handle_test_tool = _handler
         result = await executor.execute("test_tool", {})
-        assert result == "success"
+        assert str(result) == "success"
         assert call_count == 2
         summary = executor.recovery_stats.get_summary()
         assert summary["totals"]["attempts"] == 1
@@ -483,7 +483,7 @@ class TestExecutorRecovery:
 
         executor._handle_test_tool = _handler
         result = await executor.execute("test_tool", {})
-        assert "ConnectionResetError" in result
+        assert "ConnectionResetError" in str(result)
         summary = executor.recovery_stats.get_summary()
         assert summary["totals"]["attempts"] == 1
         assert summary["totals"]["failures"] == 1
@@ -499,7 +499,7 @@ class TestExecutorRecovery:
 
         executor._handle_test_tool = _handler
         result = await executor.execute("test_tool", {})
-        assert "invalid argument" in result
+        assert "invalid argument" in str(result)
         assert call_count == 1
         assert executor.recovery_stats.get_summary()["totals"]["attempts"] == 0
 
@@ -516,7 +516,7 @@ class TestExecutorRecovery:
         executor.config.get_tool_timeout.return_value = 0.1
         executor._handle_test_tool = _handler
         result = await executor.execute("test_tool", {})
-        assert "timed out" in result
+        assert "timed out" in str(result)
         assert call_count == 1
 
     @pytest.mark.asyncio
@@ -535,7 +535,7 @@ class TestExecutorRecovery:
 
         executor._handle_test_tool = _handler
         result = await executor.execute("test_tool", {})
-        assert "ConnectionResetError" in result
+        assert "ConnectionResetError" in str(result)
         assert call_count == 1
 
     @pytest.mark.asyncio
@@ -551,7 +551,7 @@ class TestExecutorRecovery:
 
         executor._handle_test_tool = _handler
         result = await executor.execute("test_tool", {})
-        assert result == "OK"
+        assert str(result) == "OK"
         assert call_count == 2
 
     @pytest.mark.asyncio
@@ -565,7 +565,7 @@ class TestExecutorRecovery:
 
         executor._handle_test_tool = _handler
         result = await executor.execute("test_tool", {})
-        assert result == "all good"
+        assert str(result) == "all good"
         assert call_count == 1
 
     @pytest.mark.asyncio
@@ -582,7 +582,7 @@ class TestExecutorRecovery:
         executor._handle_test_tool = _handler
         with patch("src.tools.executor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             result = await executor.execute("test_tool", {})
-        assert result == "OK"
+        assert str(result) == "OK"
         mock_sleep.assert_awaited_once_with(1.0)
 
     @pytest.mark.asyncio
@@ -632,7 +632,7 @@ class TestExecutorRecovery:
 
         executor._handle_test_tool = _handler
         result = await executor.execute("test_tool", {})
-        assert result == "success"
+        assert str(result) == "success"
         assert call_count == 2
 
 
@@ -949,7 +949,7 @@ class TestEdgeCases:
 
         executor._handle_run_command = _handler
         result = await executor.execute("run_command", {}, user_id="guest_user")
-        assert "Permission denied" in result
+        assert "Permission denied" in str(result)
         assert call_count == 0
 
     @pytest.mark.asyncio
@@ -958,7 +958,7 @@ class TestEdgeCases:
         from src.tools.executor import ToolExecutor
         executor = ToolExecutor()
         result = await executor.execute("nonexistent_tool", {})
-        assert "Unknown tool" in result
+        assert "Unknown tool" in str(result)
 
     @pytest.mark.asyncio
     async def test_recovery_only_retries_once(self):
@@ -977,7 +977,7 @@ class TestEdgeCases:
         executor._handle_test_tool = _handler
         result = await executor.execute("test_tool", {})
         assert call_count == 2
-        assert "ConnectionResetError" in result
+        assert "ConnectionResetError" in str(result)
 
     @pytest.mark.asyncio
     async def test_concurrent_tool_recovery_independent(self):
@@ -1008,8 +1008,9 @@ class TestEdgeCases:
             executor.execute("tool_a", {}),
             executor.execute("tool_b", {}),
         )
-        assert "a_ok" in results
-        assert "b_ok" in results
+        result_strs = [str(r) for r in results]
+        assert "a_ok" in result_strs
+        assert "b_ok" in result_strs
         assert call_counts["tool_a"] == 2
         assert call_counts["tool_b"] == 2
 
@@ -1028,7 +1029,7 @@ class TestEdgeCases:
 
         executor._handle_weird_tool = _handler
         result = await executor.execute("weird_tool", {})
-        assert result == "42"
+        assert str(result) == "42"
 
 
 # ====================================================================
@@ -1199,9 +1200,9 @@ class TestExecutorHintAndEscalate:
         executor._handle_test_tool = _handler
         result = await executor.execute("test_tool", {})
         assert calls == 1, "HINT_AND_ESCALATE must NOT retry"
-        assert "401 Unauthorized" in result
-        assert "recovery hint" in result.lower()
-        assert "authentication" in result.lower()
+        assert "401 Unauthorized" in str(result)
+        assert "recovery hint" in str(result).lower()
+        assert "authentication" in str(result).lower()
 
     @pytest.mark.asyncio
     async def test_not_found_appends_hint(self, executor):
@@ -1215,8 +1216,8 @@ class TestExecutorHintAndEscalate:
         executor._handle_test_tool = _handler
         result = await executor.execute("test_tool", {})
         assert calls == 1
-        assert "recovery hint" in result.lower()
-        assert "not found" in result.lower()
+        assert "recovery hint" in str(result).lower()
+        assert "not found" in str(result).lower()
 
     @pytest.mark.asyncio
     async def test_hint_is_idempotent(self, executor):
@@ -1228,7 +1229,7 @@ class TestExecutorHintAndEscalate:
         executor._handle_test_tool = _handler
         result = await executor.execute("test_tool", {})
         # The hint should appear exactly once.
-        assert result.count(hint) == 1
+        assert str(result).count(hint) == 1
 
     @pytest.mark.asyncio
     async def test_disk_full_safe_for_unsafe_tool(self, executor):
@@ -1241,8 +1242,8 @@ class TestExecutorHintAndEscalate:
         executor._handle_write_file = _handler  # write_file is in UNSAFE_TO_RETRY
         result = await executor.execute("write_file", {"host": "x", "path": "/y", "content": "z"})
         assert calls == 1
-        assert "recovery hint" in result.lower()
-        assert "disk" in result.lower() or "cleanup" in result.lower()
+        assert "recovery hint" in str(result).lower()
+        assert "disk" in str(result).lower() or "cleanup" in str(result).lower()
 
 
 # ====================================================================
@@ -1348,7 +1349,7 @@ class TestExecutorUnsafeToolCategorizedFailure:
             "write_file must NOT be retried even on transient errors — "
             "the write may have already happened on the remote."
         )
-        assert "Connection refused" in result
+        assert "Connection refused" in str(result)
         # The failure is still recorded for observability.
         summary = executor.recovery_stats.get_summary()
         assert summary["totals"]["failures"] == 1
@@ -1370,7 +1371,7 @@ class TestExecutorUnsafeToolCategorizedFailure:
         executor._handle_read_file = _handler
         result = await executor.execute("read_file", {"host": "h", "path": "/x"})
         assert calls == 2
-        assert result == "ok"
+        assert str(result) == "ok"
 
     @pytest.mark.asyncio
     async def test_safe_tool_persistent_transient_records_failure(self, executor):
@@ -1385,7 +1386,7 @@ class TestExecutorUnsafeToolCategorizedFailure:
         executor._handle_read_file = _handler
         result = await executor.execute("read_file", {"host": "h", "path": "/x"})
         assert calls == 2
-        assert "Connection refused" in result
+        assert "Connection refused" in str(result)
         summary = executor.recovery_stats.get_summary()
         assert summary["totals"]["attempts"] == 1
         assert summary["totals"]["failures"] == 1
@@ -1408,8 +1409,8 @@ class TestExecutorUnsafeToolCategorizedFailure:
         )
         assert calls == 1
         # Hint text must be appended without re-running the tool.
-        assert "recovery hint" in result.lower()
-        assert "authentication" in result.lower()
+        assert "recovery hint" in str(result).lower()
+        assert "authentication" in str(result).lower()
 
 
 # ====================================================================
@@ -1490,8 +1491,8 @@ class TestPatternCoverageGaps:
         with patch("src.tools.web.aiohttp.ClientSession", return_value=mock_session):
             result = await fetch_url("https://example.com/anything")
 
-        assert result.startswith("Error:"), f"expected 'Error:' prefix, got: {result!r}"
-        assert "connection reset" in result
+        assert str(result).startswith("Error:"), f"expected 'Error:' prefix, got: {result!r}"
+        assert "connection reset" in str(result)
 
     @pytest.mark.asyncio
     async def test_fetch_url_404_shape_end_to_end(self):
@@ -1516,7 +1517,7 @@ class TestPatternCoverageGaps:
         with patch("src.tools.web.aiohttp.ClientSession", return_value=mock_session):
             result = await fetch_url("https://example.com/missing")
 
-        assert result == "Error: HTTP 404: Not Found"
+        assert str(result) == "Error: HTTP 404: Not Found"
         assert classify_error(result) == RecoveryCategory.NOT_FOUND
 
     def test_fetch_url_5xx_classifies_as_error_not_hint(self):

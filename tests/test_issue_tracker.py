@@ -1388,7 +1388,7 @@ class TestExecutorHandler:
             "issue_id": "uuid-1",
             "body": "test comment",
         })
-        parsed = json.loads(result)
+        parsed = json.loads(str(result))
         assert parsed["id"] == "c1"
 
 

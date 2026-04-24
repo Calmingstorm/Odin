@@ -495,7 +495,7 @@ class TestHandleGitOps:
             "host": "nonexistent",
             "action": "status",
         })
-        assert "Unknown or disallowed host" in result
+        assert "Unknown or disallowed host" in str(result)
 
     async def test_unknown_action(self):
         exe = self._make_executor()
@@ -503,7 +503,7 @@ class TestHandleGitOps:
             "host": "myserver",
             "action": "rebase",
         })
-        assert "Unknown git action" in result
+        assert "Unknown git action" in str(result)
 
     async def test_missing_action(self):
         exe = self._make_executor()
@@ -511,7 +511,7 @@ class TestHandleGitOps:
             "host": "myserver",
             "action": "",
         })
-        assert "Unknown git action" in result
+        assert "Unknown git action" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_status_dispatches(self, mock_exec):
@@ -525,7 +525,7 @@ class TestHandleGitOps:
         cmd = mock_exec.call_args[0][1]
         assert "git" in cmd
         assert "status" in cmd
-        assert "## main" in result
+        assert "## main" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_clone_dispatches(self, mock_exec):
@@ -536,7 +536,7 @@ class TestHandleGitOps:
             "action": "clone",
             "params": {"url": "https://github.com/user/repo.git"},
         })
-        assert "Cloning" in result
+        assert "Cloning" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_diff_dispatches(self, mock_exec):
@@ -547,7 +547,7 @@ class TestHandleGitOps:
             "action": "diff",
             "params": {"staged": True},
         })
-        assert "diff" in result
+        assert "diff" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_commit_dispatches(self, mock_exec):
@@ -558,7 +558,7 @@ class TestHandleGitOps:
             "action": "commit",
             "params": {"message": "fix typo", "add_all": True},
         })
-        assert "abc1234" in result
+        assert "abc1234" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_log_dispatches(self, mock_exec):
@@ -569,7 +569,7 @@ class TestHandleGitOps:
             "action": "log",
             "params": {"count": 5},
         })
-        assert "abc1234" in result
+        assert "abc1234" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_branch_list_dispatches(self, mock_exec):
@@ -579,7 +579,7 @@ class TestHandleGitOps:
             "host": "myserver",
             "action": "branch",
         })
-        assert "main" in result
+        assert "main" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_checkout_dispatches(self, mock_exec):
@@ -590,7 +590,7 @@ class TestHandleGitOps:
             "action": "checkout",
             "params": {"target": "develop"},
         })
-        assert "Switched" in result
+        assert "Switched" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_fetch_dispatches(self, mock_exec):
@@ -600,7 +600,7 @@ class TestHandleGitOps:
             "host": "myserver",
             "action": "fetch",
         })
-        assert "completed successfully" in result
+        assert "completed successfully" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_pull_dispatches(self, mock_exec):
@@ -610,7 +610,7 @@ class TestHandleGitOps:
             "host": "myserver",
             "action": "pull",
         })
-        assert "Already up to date" in result
+        assert "Already up to date" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_stash_dispatches(self, mock_exec):
@@ -620,7 +620,7 @@ class TestHandleGitOps:
             "host": "myserver",
             "action": "stash",
         })
-        assert "Saved" in result
+        assert "Saved" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_command_failure_returns_error(self, mock_exec):
@@ -630,8 +630,8 @@ class TestHandleGitOps:
             "host": "myserver",
             "action": "status",
         })
-        assert "failed" in result
-        assert "128" in result
+        assert "failed" in str(result)
+        assert "128" in str(result)
 
     async def test_validation_error_returns_message(self):
         exe = self._make_executor()
@@ -640,8 +640,8 @@ class TestHandleGitOps:
             "action": "clone",
             "params": {},
         })
-        assert "git_ops error" in result
-        assert "url" in result.lower()
+        assert "git_ops error" in str(result)
+        assert "url" in str(result).lower()
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_empty_output_shows_success(self, mock_exec):
@@ -651,7 +651,7 @@ class TestHandleGitOps:
             "host": "myserver",
             "action": "fetch",
         })
-        assert "completed successfully" in result
+        assert "completed successfully" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_no_params_defaults_to_empty(self, mock_exec):
@@ -661,7 +661,7 @@ class TestHandleGitOps:
             "host": "myserver",
             "action": "status",
         })
-        assert "main" in result
+        assert "main" in str(result)
 
 
 # ---------------------------------------------------------------------------
@@ -686,7 +686,7 @@ class TestPushFreshnessCheck:
             "action": "push",
         })
         assert mock_exec.call_count == 2
-        assert "blocked" not in result.lower()
+        assert "blocked" not in str(result).lower()
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_push_fresh_up_to_date_succeeds(self, mock_exec):
@@ -723,8 +723,8 @@ class TestPushFreshnessCheck:
             "host": "myserver",
             "action": "push",
         })
-        assert "blocked" in result.lower()
-        assert "pull or rebase" in result
+        assert "blocked" in str(result).lower()
+        assert "pull or rebase" in str(result)
         assert mock_exec.call_count == 1
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
@@ -735,7 +735,7 @@ class TestPushFreshnessCheck:
             "host": "myserver",
             "action": "push",
         })
-        assert "freshness check failed" in result.lower()
+        assert "freshness check failed" in str(result).lower()
         assert mock_exec.call_count == 1
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
@@ -749,7 +749,7 @@ class TestPushFreshnessCheck:
             "host": "myserver",
             "action": "push",
         })
-        assert "push failed" in result.lower()
+        assert "push failed" in str(result).lower()
         assert mock_exec.call_count == 2
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
@@ -763,7 +763,7 @@ class TestPushFreshnessCheck:
             "host": "myserver",
             "action": "push",
         })
-        assert "completed successfully" in result.lower()
+        assert "completed successfully" in str(result).lower()
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_push_force_still_checks_freshness(self, mock_exec):
@@ -776,7 +776,7 @@ class TestPushFreshnessCheck:
             "action": "push",
             "params": {"force": True},
         })
-        assert "blocked" in result.lower()
+        assert "blocked" in str(result).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -875,7 +875,7 @@ class TestEdgeCases:
             "host": "myserver",
             "action": "status",
         })
-        assert "timed out" in result
+        assert "timed out" in str(result)
         metrics = exe.get_metrics()
         assert metrics["git_ops"]["timeouts"] == 1
 

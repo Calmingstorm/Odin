@@ -22,7 +22,7 @@ async def test_execute_plan_via_tool_executor():
         ],
     })
     result = await executor.execute("execute_plan", {"plan": plan, "format": "json"})
-    parsed = json.loads(result)
+    parsed = json.loads(str(result))
     assert parsed["success"] is True
     assert "integration-test" in parsed["steps"]["s1"]["output"]["stdout"]
 
@@ -31,7 +31,7 @@ async def test_execute_plan_via_tool_executor():
 async def test_execute_unknown_tool():
     executor = ToolExecutor()
     result = await executor.execute("nonexistent_tool", {})
-    assert "unknown tool" in result.lower()
+    assert "unknown tool" in str(result).lower()
 
 
 @pytest.mark.asyncio
@@ -61,8 +61,8 @@ async def test_execute_timeout_returns_error():
     executor._handle_slow_tool = _slow_handler  # type: ignore[attr-defined]
 
     result = await executor.execute("slow_tool", {})
-    assert "timed out" in result
-    assert "1s" in result
+    assert "timed out" in str(result)
+    assert "1s" in str(result)
 
     metrics = executor.get_metrics()
     assert "slow_tool" in metrics
@@ -82,7 +82,7 @@ async def test_execute_timeout_does_not_affect_fast_tools():
     executor._handle_fast_tool = _fast_handler  # type: ignore[attr-defined]
 
     result = await executor.execute("fast_tool", {})
-    assert result == "done"
+    assert str(result) == "done"
 
     metrics = executor.get_metrics()
     assert metrics["fast_tool"]["calls"] == 1
