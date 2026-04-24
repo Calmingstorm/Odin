@@ -135,8 +135,9 @@ class TestBehaviorPreservedByRefactor:
                 "Bots cannot confirm, choose, or approve. "
                 "EXECUTE immediately — never hedge, ask permission, or say "
                 "'if you want' / 'shall I' / 'would you like'. "
-                "If the message contains code, use run_script to execute it. "
-                "If it asks for output, call the tool and paste raw results."
+                "If execution is explicitly requested, use run_script or run_command. "
+                "If code is presented for review, discussion, or as context, "
+                "do not execute it — analyze and respond to the substance."
             )
         return {"role": "developer", "content": sep_text}
 

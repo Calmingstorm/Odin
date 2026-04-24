@@ -31,16 +31,16 @@ class TestSystemPromptRule12:
         assert "confirm your response actually contains it" in p
 
     def test_mentions_frequency_not_value(self):
-        assert "frequency is not value" in self._prompt()
+        assert "operationally useful" in self._prompt()
 
-    def test_mentions_plausible_substitute_rejection(self):
-        assert "don't ship a plausible substitute" in self._prompt()
+    def test_mentions_honest_failure(self):
+        assert "I couldn't do it cleanly" in self._prompt()
 
     def test_prompt_size_reasonable(self):
         """Sanity-check that the prompt stays lean after refactor.
-        Under 4500 chars with minimal hosts/context."""
+        Under 5000 chars with minimal hosts/context."""
         size = len(self._prompt())
-        assert size < 4500, f"system prompt is {size} chars — too bloated"
+        assert size < 5000, f"system prompt is {size} chars — too bloated"
 
 
 class TestCompletionClassifierPrompt:

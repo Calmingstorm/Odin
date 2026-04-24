@@ -54,6 +54,7 @@ class Affordance:
     risk: Risk
     latency: Latency
     preconditions: tuple[str, ...] = field(default_factory=tuple)
+    gotchas: tuple[str, ...] = field(default_factory=tuple)
 
 
 # ---------------------------------------------------------------------------
@@ -105,18 +106,27 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     ("get_agent_results", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
     ("start_loop", Affordance(Cost.HIGH, Risk.HIGH, Latency.UNBOUNDED, ())),
     ("stop_loop", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
-    ("schedule_task", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
+    ("schedule_task", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, (),
+        ("workflow steps need populated tool_input with all required fields",
+         "run_at must be ISO format — use parse_time first for natural language"))),
     ("delete_schedule", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
     ("update_schedule", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
-    ("delegate_task", Affordance(Cost.HIGH, Risk.HIGH, Latency.UNBOUNDED, ())),
+    ("delegate_task", Affordance(Cost.HIGH, Risk.HIGH, Latency.UNBOUNDED, (),
+        ("every run_command step needs tool_input.command",
+         "steps execute sequentially — use {prev_output} to chain results"))),
     # Infra
-    ("git_ops", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS, ())),
+    ("git_ops", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS, (),
+        ("params go under params object, not top level",
+         "for complex git workflows, prefer run_command with raw git"))),
     ("docker_ops", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS,
-        ("docker daemon reachable",))),
+        ("docker daemon reachable",),
+        ("action names are compose_up/compose_down, not up/down",
+         "for complex compose operations, prefer run_command with raw docker"))),
     ("terraform_ops", Affordance(Cost.HIGH, Risk.CRITICAL, Latency.MINUTES,
         ("terraform state accessible",))),
     ("kubectl", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS,
-        ("kubeconfig configured",))),
+        ("kubeconfig configured",),
+        ("for complex kubectl operations, prefer run_command with raw kubectl",))),
     ("manage_process", Affordance(Cost.LOW, Risk.HIGH, Latency.FAST, ())),
     ("http_probe", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS, ())),
     # LLM-in-tool
@@ -127,7 +137,9 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     ("edit_skill", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
     ("delete_skill", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
     ("invoke_skill", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.UNBOUNDED,
-        ("skill must exist",))),
+        ("skill must exist",),
+        ("pass skill arguments under input, not at top level",
+         "use list_skills first if unsure about parameter names"))),
     # Knowledge management
     ("ingest_document", Affordance(Cost.HIGH, Risk.LOW, Latency.SECONDS, ())),
     ("bulk_ingest_knowledge", Affordance(Cost.HIGH, Risk.LOW, Latency.MINUTES, ())),
@@ -203,6 +215,8 @@ def format_affordance_footer(tool_name: str) -> str:
     footer = "[affordances: " + " ".join(parts) + "]"
     if aff.preconditions:
         footer += " (requires: " + "; ".join(aff.preconditions) + ")"
+    if aff.gotchas:
+        footer += " (gotchas: " + "; ".join(aff.gotchas) + ")"
     return footer
 
 
