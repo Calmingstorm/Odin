@@ -973,6 +973,15 @@ class OdinBot(commands.Bot):
         if hasattr(self, "agent_manager"):
             self.agent_manager.check_health()
 
+        # Clean up old attachment workspaces
+        try:
+            from .attachments import AttachmentProcessor
+            cfg = self.config.attachments if hasattr(self.config, "attachments") else None
+            proc = AttachmentProcessor(**({"temp_dir": cfg.temp_directory, "retention_hours": cfg.retention_hours} if cfg else {}))
+            proc.cleanup_old_workspaces()
+        except Exception:
+            pass
+
         # Clean up loop-agent bridge records for finished loops
         if hasattr(self, "loop_agent_bridge"):
             for loop_id in list(self.loop_agent_bridge._loop_agents):
@@ -1736,7 +1745,7 @@ class OdinBot(commands.Bot):
             content = content.replace(f"<@!{self.user.id}>", "").strip()
 
         # Handle file attachments — append file contents to the message
-        attachment_text, image_blocks = await self._process_attachments(message)
+        attachment_text, image_blocks = await self._process_attachments(message, content)
         if attachment_text:
             attachment_text = scrub_output_secrets(attachment_text)
             content = f"{content}\n\n{attachment_text}" if content else attachment_text
@@ -1796,188 +1805,52 @@ class OdinBot(commands.Bot):
 
         await self._handle_message(message, content, image_blocks=image_blocks, voice_callback=vc_callback)
 
-    async def _process_attachments(self, message: discord.Message) -> tuple[str, list[dict]]:
-        """Download attachments and return (text_parts, image_blocks).
+    async def _process_attachments(self, message: discord.Message, content: str = "") -> tuple[str, list[dict]]:
+        """Process attachments via AttachmentProcessor.
 
-        Text files are returned as formatted strings.
-        Images are returned as image content blocks (base64).
+        Returns (inline_text, image_blocks).
         """
-        text_parts = []
-        image_blocks = []
+        if not message.attachments:
+            return "", []
 
-        _image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-        _image_media_types = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+        from .attachments import AttachmentProcessor, infer_attachment_intent
 
-        for att in message.attachments:
-            ext = "." + att.filename.rsplit(".", 1)[-1].lower() if "." in att.filename else ""
+        cfg = self.config.attachments if hasattr(self.config, "attachments") else None
+        processor = AttachmentProcessor(
+            **({"temp_dir": cfg.temp_directory,
+                "inline_max_bytes": cfg.inline_text_max_bytes,
+                "preview_max_chars": cfg.preview_max_chars,
+                "large_preview_chars": cfg.large_preview_chars,
+                "archive_max_bytes": cfg.archive_max_bytes,
+                "archive_max_files": cfg.archive_max_files,
+                "archive_extract_max_bytes": cfg.archive_extract_max_bytes,
+                "archive_preview_total_chars": cfg.archive_preview_total_chars,
+                "retention_hours": cfg.retention_hours,
+                } if cfg else {})
+        )
 
-            # Image attachments — send to Claude as vision content blocks
-            is_image = ext in _image_extensions or (att.content_type and att.content_type in _image_media_types)
-            if is_image:
-                # Image size limit: 5MB per image (base64-encoded)
-                if att.size > 5 * 1024 * 1024:
-                    text_parts.append(f"[Image: {att.filename} ({att.size / 1024 / 1024:.1f} MB, exceeds 5 MB limit)]")
-                    continue
-                try:
-                    data = await att.read()
-                    b64 = base64.b64encode(data).decode("ascii")
-                    # Detect actual media type from file magic bytes, don't trust Discord's content_type
-                    media_type = self._detect_image_type(data) or att.content_type or f"image/{ext.lstrip('.')}"
-                    if media_type == "image/jpg":
-                        media_type = "image/jpeg"
-                    image_blocks.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": b64,
-                        },
-                    })
-                    text_parts.append(f"[User shared image: {att.filename}]")
-                    log.info("Processed image attachment: %s (%d KB)", att.filename, att.size // 1024)
-                except Exception as e:
-                    text_parts.append(f"[Image: {att.filename} (failed to read: {e})]")
-                continue
+        recent_assistant = None
+        session = self.sessions.get(str(message.channel.id))
+        if session and session.messages:
+            for m in reversed(session.messages):
+                if m.role == "assistant":
+                    recent_assistant = m.content
+                    break
 
-            # PDF attachments — extract text inline
-            if ext == ".pdf":
-                if att.size > 25 * 1024 * 1024:
-                    text_parts.append(f"[PDF: {att.filename} ({att.size / 1024 / 1024:.1f} MB, exceeds 25 MB limit)]")
-                    continue
-                try:
-                    import fitz
-                    data = await att.read()
-                    doc = fitz.open(stream=data, filetype="pdf")
-                    try:
-                        pages_text = []
-                        for i, page in enumerate(doc):
-                            pages_text.append(f"Page {i + 1}: {page.get_text()}")
-                        full_text = "\n".join(pages_text)
-                        if len(full_text) > 8000:
-                            full_text = full_text[:8000] + "\n[... truncated ...]"
-                        text_parts.append(
-                            f"**Attached PDF: {att.filename}** ({doc.page_count} pages)\n```\n{full_text}\n```\n"
-                            f"[This is a PDF. Text has been extracted. For detailed analysis, use analyze_pdf tool.]"
-                        )
-                    finally:
-                        doc.close()
-                except Exception as e:
-                    text_parts.append(f"[PDF: {att.filename} (failed to extract text: {e})]")
-                continue
+        intent = infer_attachment_intent(content, recent_assistant)
 
-            # Text files — read and inline
-            text_extensions = {
-                ".txt", ".md", ".yml", ".yaml", ".json", ".toml", ".ini",
-                ".cfg", ".conf", ".py", ".sh", ".bash", ".js", ".ts",
-                ".html", ".css", ".xml", ".csv", ".log", ".env",
-                ".service", ".timer", ".sql", ".php", ".rb", ".go",
-                ".rs", ".java", ".c", ".h", ".cpp", ".hpp",
-            }
+        result = await processor.process(
+            message.attachments,
+            channel_id=str(message.channel.id),
+            message_id=str(message.id),
+            intent=intent,
+        )
 
-            is_text = ext in text_extensions or (att.content_type and "text" in att.content_type)
+        if result.warnings:
+            for w in result.warnings:
+                log.warning("Attachment warning: %s", w)
 
-            # Large text files (>100KB) — preview + suggest knowledge base ingestion
-            if att.size > 100_000 and is_text:
-                try:
-                    data = await att.read()
-                    text = data.decode("utf-8", errors="replace")
-                    preview = text[:2000]
-                    text_parts.append(
-                        f"**Attached file: {att.filename}** ({att.size:,} bytes — too large to fully inline, showing first 2KB)\n"
-                        f"```\n{preview}\n```\n"
-                        f"[This file is {att.size:,} bytes. You should offer to ingest it into the knowledge base "
-                        f"using the ingest_document tool so it can be searched later.]"
-                    )
-                except Exception as e:
-                    text_parts.append(f"[Attachment: {att.filename} (failed to read: {e})]")
-                continue
-
-            if att.size > 100_000:
-                text_parts.append(f"[Attachment: {att.filename} ({att.size} bytes, too large to read)]")
-                continue
-
-            if is_text:
-                try:
-                    data = await att.read()
-                    text = data.decode("utf-8", errors="replace")
-                    text_parts.append(f"**Attached file: {att.filename}**\n```\n{text}\n```")
-                    # Append smart context hints based on file type and size
-                    hint = self._get_attachment_hint(att.filename, ext, att.size)
-                    if hint:
-                        text_parts.append(hint)
-                except Exception as e:
-                    text_parts.append(f"[Attachment: {att.filename} (failed to read: {e})]")
-            else:
-                try:
-                    data = await att.read()
-                    save_path = Path(f"/tmp/{att.filename}")
-                    save_path.write_bytes(data)
-                    text_parts.append(
-                        f"[Attachment saved: /tmp/{att.filename} ({att.content_type or 'binary'}, {att.size:,} bytes)]"
-                    )
-                    log.info("Saved binary attachment: /tmp/%s (%d bytes)", att.filename, att.size)
-                except Exception as e:
-                    text_parts.append(f"[Attachment: {att.filename} (failed to save: {e})]")
-
-        return "\n\n".join(text_parts) if text_parts else "", image_blocks
-
-    @staticmethod
-    def _get_attachment_hint(filename: str, ext: str, size: int) -> str:
-        """Return a context hint for the LLM based on file type and size.
-
-        Hints guide the LLM to suggest appropriate actions (ingest, create skill, deploy).
-        Returns empty string if no special hint applies.
-        """
-        hints = []
-
-        # Python files — suggest creating as a skill
-        if ext == ".py":
-            hints.append(
-                "[This is a Python file. If it looks like a bot skill/tool "
-                "(has SKILL_DEFINITION and execute function), offer to create it as a skill "
-                "using the create_skill tool. Otherwise, offer to ingest it as documentation.]"
-            )
-
-        # YAML/JSON config files — suggest deploying or ingesting
-        elif ext in {".yml", ".yaml", ".json", ".toml", ".ini", ".cfg", ".conf"}:
-            hints.append(
-                "[This is a configuration file. You can offer to: "
-                "(1) deploy it to a host using write_file, "
-                "(2) ingest it into the knowledge base as documentation using ingest_document, "
-                "or (3) analyze it and suggest improvements.]"
-            )
-
-        # Shell scripts — suggest deploying or reviewing
-        elif ext in {".sh", ".bash"}:
-            hints.append(
-                "[This is a shell script. You can offer to: "
-                "(1) deploy it to a host using write_file, "
-                "(2) review it for issues, or "
-                "(3) run it on a specific host using run_command.]"
-            )
-
-        # Systemd units — suggest deploying
-        elif ext in {".service", ".timer"}:
-            hints.append(
-                "[This is a systemd unit file. You can offer to deploy it to a host "
-                "using write_file (to /etc/systemd/system/) and enable it.]"
-            )
-
-        # Documentation files — suggest knowledge base ingestion
-        elif ext in {".md", ".txt"}:
-            hints.append(
-                "[This is a documentation file. You can offer to ingest it into the "
-                "knowledge base using the ingest_document tool so it can be searched later.]"
-            )
-
-        # Large files (>50KB) — always suggest knowledge base ingestion
-        if size > 50_000:
-            hints.append(
-                "[This file is large. You should offer to ingest it into the knowledge base "
-                "using the ingest_document tool for future reference.]"
-            )
-
-        return "\n".join(hints)
+        return result.inline_text, result.image_blocks
 
     async def _on_voice_transcription(
         self, text: str, member: discord.Member, transcript_channel: discord.TextChannel,

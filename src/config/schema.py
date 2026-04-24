@@ -367,6 +367,18 @@ class WebConfig(BaseModel):
             raise ValueError("port must be between 1 and 65535")
         return v
 
+
+class AttachmentsConfig(BaseModel):
+    temp_directory: str = "/tmp/odin-attachments"
+    inline_text_max_bytes: int = 100_000
+    preview_max_chars: int = 12_000
+    large_preview_chars: int = 4_000
+    archive_max_bytes: int = 50 * 1024 * 1024
+    archive_max_files: int = 500
+    archive_extract_max_bytes: int = 200 * 1024 * 1024
+    archive_preview_total_chars: int = 20_000
+    retention_hours: int = 24
+
     def resolve_api_identity(self, token: str) -> ApiTokenIdentity | None:
         """Look up identity for an API token. Falls back to default if single token configured."""
         for t in self.api_tokens:
@@ -512,6 +524,7 @@ class Config(BaseModel):
     permissions: PermissionsConfig = PermissionsConfig()
     comfyui: ComfyUIConfig = ComfyUIConfig()
     web: WebConfig = WebConfig()
+    attachments: AttachmentsConfig = AttachmentsConfig()
     reaction_triggers: ReactionTriggerConfig = ReactionTriggerConfig()
     message_triggers: MessageTriggerConfig = MessageTriggerConfig()
     mcp: MCPConfig = MCPConfig()
