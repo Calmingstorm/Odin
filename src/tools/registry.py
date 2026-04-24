@@ -1863,6 +1863,31 @@ TOOLS: list[dict] = [
 
 TOOL_MAP: dict[str, dict] = {t["name"]: t for t in TOOLS}
 
+# Tools that modify external state (services, files, infrastructure).
+# Used by mutation detection, governor policy, and audit classification.
+MUTATING_TOOLS: frozenset[str] = frozenset({
+    "run_command", "run_script", "run_command_multi",
+    "write_file", "generate_file",
+    "docker_ops", "git_ops", "kubectl",
+    "manage_process",
+    "ingest_document", "bulk_ingest_knowledge",
+    "delete_knowledge",
+    "memory_manage",
+    "set_permission",
+    "schedule_task", "update_schedule", "delete_schedule",
+    "start_loop", "stop_loop",
+    "spawn_agent", "kill_agent",
+    "create_skill", "edit_skill", "delete_skill",
+    "enable_skill", "disable_skill", "install_skill",
+    "browser_click", "browser_fill", "browser_evaluate",
+    "add_reaction", "purge_messages",
+    "validate_action",
+})
+
+READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    t["name"] for t in TOOLS if t["name"] not in MUTATING_TOOLS
+)
+
 
 # Cache for get_tool_definitions — avoids rebuilding dicts on every message.
 _tool_defs_cache: list[dict] | None = None
