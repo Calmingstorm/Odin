@@ -228,6 +228,9 @@ class OdinBot(commands.Bot):
 
         # Per-channel lock to prevent concurrent processing of the same message
         self._channel_locks: dict[str, asyncio.Lock] = {}
+        # Per-channel cancellation for /stop command
+        self._cancel_events: dict[str, asyncio.Event] = {}
+        self._active_request_by_channel: dict[str, str] = {}
         # Pending file attachments from skills — per-channel to avoid cross-channel leaks
         self._pending_files: dict[str, list[tuple[bytes, str]]] = {}
         # Track recently processed message IDs to prevent duplicate handling
@@ -952,6 +955,20 @@ class OdinBot(commands.Bot):
             if leaked:
                 log.warning("Evicted %d stale pending file(s) for channel %s", len(leaked), cid)
 
+        # Clean up stale cancel events and active request tracking
+        stale_cancel = [
+            cid for cid, ev in self._cancel_events.items()
+            if cid not in active_channels and not ev.is_set()
+        ]
+        for cid in stale_cancel:
+            del self._cancel_events[cid]
+        stale_active = [
+            cid for cid in self._active_request_by_channel
+            if cid not in active_channels
+        ]
+        for cid in stale_active:
+            del self._active_request_by_channel[cid]
+
         # Agent lifecycle: kill stuck agents, log stale ones
         if hasattr(self, "agent_manager"):
             self.agent_manager.check_health()
@@ -1074,6 +1091,24 @@ class OdinBot(commands.Bot):
                 "Claude Code: Max subscription"
             )
 
+
+        @self.tree.command(name="stop", description="Stop Odin's current task in this channel")
+        async def cmd_stop(interaction: discord.Interaction) -> None:
+            if not self._is_allowed_user(interaction.user):
+                await interaction.response.send_message("Access denied.", ephemeral=True)
+                return
+            channel_id = str(interaction.channel_id)
+            event = self._cancel_events.setdefault(channel_id, asyncio.Event())
+            active = self._active_request_by_channel.get(channel_id)
+            if active:
+                event.set()
+                await interaction.response.send_message("Stopping current task...", ephemeral=True)
+            else:
+                await interaction.response.send_message("No active task in this channel.", ephemeral=True)
+
+    def _is_cancelled(self, channel_id: str) -> bool:
+        ev = self._cancel_events.get(channel_id)
+        return bool(ev and ev.is_set())
 
     def _is_allowed_user(self, user: discord.User | discord.Member) -> bool:
         if not self.config.discord.allowed_users:
@@ -2114,6 +2149,14 @@ class OdinBot(commands.Bot):
                     response = f"Tool execution failed: {codex_err}"
                     is_error = True
                     handoff = False
+                # Clean up /stop cancellation state
+                _ch = str(message.channel.id)
+                if self._active_request_by_channel.get(_ch):
+                    self._active_request_by_channel.pop(_ch, None)
+                    ev = self._cancel_events.get(_ch)
+                    if ev:
+                        ev.clear()
+
                 # Skill requested Codex handoff — route skill result to Codex for response
                 if handoff and self.codex_client and not is_error:
                     log.info("Skill handoff to Codex for response")
@@ -2459,7 +2502,22 @@ class OdinBot(commands.Bot):
         _validation_retries: int = 0
         _MAX_VALIDATION_RETRIES = 2
 
+        # Per-request cancellation via /stop command
+        _ch_id = str(message.channel.id)
+        _cancel = self._cancel_events.setdefault(_ch_id, asyncio.Event())
+        self._active_request_by_channel[_ch_id] = req_hash
+
+        def _stopped(where: str) -> tuple[str, bool, bool, list[str], bool]:
+            log.info("Task stopped by /stop in channel %s at %s", _ch_id, where)
+            suffix = ""
+            if _pending_validations or _validation_required:
+                suffix = " Pending post-action validation was not run."
+            tools_note = f" Tools used: {', '.join(tools_used_in_loop)}." if tools_used_in_loop else ""
+            return f"Task stopped by user.{tools_note}{suffix}", False, False, tools_used_in_loop, False
+
         for iteration in range(chat_cap):
+            if _cancel.is_set():
+                return _stopped("iteration_start")
             # Context auto-compression — when accumulated tool iterations push
             # the message list over the configured budget, summarise older
             # iterations into a single text message and keep the most recent N
@@ -2516,6 +2574,9 @@ class OdinBot(commands.Bot):
                     except Exception:
                         pass
 
+            if _cancel.is_set():
+                return _stopped("after_llm")
+
             # Record this iteration's tool calls + LLM text into the trajectory and stuck tracker
             iter_tool_calls = [
                 {"id": tc.id, "name": tc.name, "input": tc.input}
@@ -2554,6 +2615,8 @@ class OdinBot(commands.Bot):
                     })
                     continue
             if not llm_resp.is_tool_use:
+                if _cancel.is_set():
+                    return _stopped("before_validation")
                 # Enforce pending validation before allowing final response
                 if _validation_required and _validation_retries < _MAX_VALIDATION_RETRIES:
                     _validation_retries += 1
@@ -3014,6 +3077,9 @@ class OdinBot(commands.Bot):
                     *[_run_tool_with_timeout(b) for b in tool_calls],
                 )
             messages.append({"role": "user", "content": list(tool_results)})
+
+            if _cancel.is_set():
+                return _stopped("after_tools")
 
             # Clear validation requirement if validate_action was called this iteration
             if _validation_required and "validate_action" in [t.name for t in tool_calls]:
