@@ -1567,10 +1567,17 @@ class ToolExecutor:
         return _truncate_lines(output) if output.strip() else "http_probe: no response received"
 
     async def _handle_execute_plan(self, inp: dict) -> str:
-        """Execute a DAG plan using the Odin planner."""
-        from src.tools.plan_runner import PlanRunner
+        """Execute a DAG plan using the Odin planner.
 
-        runner = PlanRunner()
+        Routes shell/file tools through ToolExecutor so they inherit
+        governor, RBAC, audit, and mutation detection.
+        """
+        from src.tools.plan_runner import PlanRunner
+        from src.tools.plan_executor_bridge import create_executor_backed_registry
+
+        default_host = list(self.config.hosts.keys())[0] if self.config.hosts else "localhost"
+        registry = create_executor_backed_registry(self, default_host=default_host)
+        runner = PlanRunner(registry=registry)
         return await runner.run(inp)
 
     async def _handle_validate_action(self, inp: dict) -> str:

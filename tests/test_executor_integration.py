@@ -13,8 +13,11 @@ from src.tools.executor import ToolExecutor
 
 @pytest.mark.asyncio
 async def test_execute_plan_via_tool_executor():
-    """The execute_plan tool works through the main ToolExecutor dispatch."""
-    executor = ToolExecutor()
+    """The execute_plan tool routes shell commands through ToolExecutor security pipeline."""
+    from src.config.schema import ToolHost
+    cfg = ToolsConfig()
+    cfg.hosts = {"localhost": ToolHost(address="localhost", ssh_user="", os="linux")}
+    executor = ToolExecutor(config=cfg)
     plan = json.dumps({
         "name": "via-executor",
         "steps": [
