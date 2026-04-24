@@ -32,6 +32,7 @@ from .recovery import (
     get_policy as _get_recovery_policy,
     get_retry_delay as _get_retry_delay,
 )
+from .post_validation import annotate_if_mutation
 from .result_validator import ResultValidationStats, ToolResult, validate_tool_result
 from .risk_classifier import RiskLevel, RiskStats, classify_tool
 from .output_streamer import ToolOutputStreamer
@@ -199,6 +200,9 @@ class ToolExecutor:
                         self.recovery_stats.record_success(tool_name, category, snippet)
                         raw_result = retry_result
                     is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
+
+        if not is_error and isinstance(raw_result, str):
+            raw_result, _mutation = annotate_if_mutation(tool_name, tool_input, raw_result)
 
         outcome = validate_tool_result(tool_name, raw_result, stats=self.validation_stats)
 

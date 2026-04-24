@@ -609,3 +609,84 @@ class TestExecutorGovernorPath:
             "governor check raised" in (r.observed + r.error)
             for r in report.checks
         )
+
+
+class TestMutationDetection:
+    """Tests for the mutation detection and annotation system."""
+
+    def test_detects_systemctl_restart(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("run_command", {"command": "systemctl restart nginx"})
+        assert result.detected
+        assert "service lifecycle" in result.reason
+
+    def test_detects_docker_compose_up(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("run_command", {"command": "docker compose up -d --build"})
+        assert result.detected
+        assert "container" in result.reason
+
+    def test_detects_kubectl_apply(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("run_command", {"command": "kubectl apply -f deploy.yaml"})
+        assert result.detected
+        assert "kubernetes" in result.reason
+
+    def test_detects_config_write(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("write_file", {"path": "/etc/nginx/nginx.conf"})
+        assert result.detected
+        assert "config write" in result.reason
+
+    def test_detects_mutation_tool(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("docker_ops", {"action": "restart"})
+        assert result.detected
+
+    def test_ignores_read_commands(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("run_command", {"command": "cat /etc/hosts"})
+        assert not result.detected
+
+    def test_ignores_read_file(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("read_file", {"path": "/etc/hosts"})
+        assert not result.detected
+
+    def test_annotate_adds_hint(self):
+        from src.tools.post_validation import annotate_if_mutation
+        output, detection = annotate_if_mutation(
+            "run_command", {"command": "systemctl restart nginx"}, "ok"
+        )
+        assert detection.detected
+        assert "[post-action]" in output
+        assert "validate_action" in output
+
+    def test_annotate_skips_on_error(self):
+        from src.tools.post_validation import annotate_if_mutation
+        output, detection = annotate_if_mutation(
+            "run_command", {"command": "systemctl restart nginx"},
+            "Error: permission denied"
+        )
+        assert detection.detected
+        assert "[post-action]" not in output
+
+    def test_annotate_skips_non_mutation(self):
+        from src.tools.post_validation import annotate_if_mutation
+        output, detection = annotate_if_mutation(
+            "run_command", {"command": "ls -la"}, "total 42"
+        )
+        assert not detection.detected
+        assert output == "total 42"
+
+    def test_detects_run_script_mutations(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("run_script", {"script": "apt-get install -y curl"})
+        assert result.detected
+        assert "package" in result.reason
+
+    def test_detects_firewall_change(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("run_command", {"command": "ufw allow 8080"})
+        assert result.detected
+        assert "firewall" in result.reason
