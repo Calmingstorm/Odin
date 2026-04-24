@@ -2600,6 +2600,7 @@ class OdinBot(commands.Bot):
                         "iteration": iteration,
                         "tools_used": tools_used_in_loop,
                     })
+                    _clear_active()
                     return (
                         f"Detected a stuck tool-call cycle after {iteration + 1} iterations. "
                         f"Stopping to avoid burning the iteration budget on a repeat pattern."
