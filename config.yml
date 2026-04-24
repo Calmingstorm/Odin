@@ -92,10 +92,11 @@ comfyui:
   enabled: true
   url: http://localhost:8188
 
+# Web UI and API — all web configuration lives here (not in .env)
 web:
   enabled: true
-  port: 3001
-  api_token: ''
+  port: 3000        # Web UI and API port (default: 3000)
+  api_token: ''     # Set a token to require auth; empty = no auth (dev mode)
 
 # Discord reaction triggers — fire scheduler triggers when users react with emoji
 reaction_triggers:
