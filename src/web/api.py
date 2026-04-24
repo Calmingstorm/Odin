@@ -617,6 +617,51 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             resp["files"] = files
         return web.json_response(resp, status=status)
 
+    @routes.post("/api/execute")
+    async def execute(request: web.Request) -> web.Response:
+        """Stateless prompt execution — no session history, no persistence.
+
+        Designed for CLI tools, scripts, CI/CD pipelines, and automation.
+        Each request gets a unique ephemeral channel_id that is discarded
+        after the response is returned.
+        """
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        content = (data.get("prompt") or data.get("content") or "").strip()
+        if not content:
+            return web.json_response({"error": "prompt is required"}, status=400)
+        if len(content) > MAX_CHAT_CONTENT_LEN:
+            return web.json_response(
+                {"error": f"prompt exceeds {MAX_CHAT_CONTENT_LEN} chars"}, status=400
+            )
+
+        import uuid
+        channel_id = f"api-{uuid.uuid4().hex[:12]}"
+        user_id = data.get("user_id", "api-user")
+        username = data.get("username", "API")
+
+        result = await process_web_chat(
+            bot, content, channel_id,
+            user_id=user_id, username=username,
+        )
+
+        # Clean up the ephemeral session immediately
+        bot.sessions._sessions.pop(channel_id, None)
+
+        status = 200 if not result["is_error"] else 502
+        resp = {
+            "response": result["response"],
+            "tools_used": result["tools_used"],
+            "is_error": result["is_error"],
+        }
+        files = result.get("files", [])
+        if files:
+            resp["files"] = files
+        return web.json_response(resp, status=status)
+
     # ------------------------------------------------------------------
     # Sessions
     # ------------------------------------------------------------------

@@ -162,7 +162,7 @@ class TestCheckDiscordToken:
         result = check_discord_token(cfg)
         assert result.passed is False
         assert "missing" in result.detail.lower()
-        assert "ODIN_TOKEN" in result.recommendation
+        assert "DISCORD_TOKEN" in result.recommendation
 
     def test_token_missing_attr(self):
         cfg = MagicMock(spec=[])
