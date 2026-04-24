@@ -553,10 +553,10 @@ _MUTATION_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bufw\s+(allow|deny|delete|enable|disable)\b"), "firewall change"),
 ]
 
-_MUTATION_TOOLS = frozenset({
-    "docker_ops",
-    "deploy",
-})
+_MUTATION_TOOL_ACTIONS: dict[str, frozenset[str]] = {
+    "docker_ops": frozenset({"start", "stop", "restart", "rm", "rmi", "up", "down", "build", "recreate"}),
+    "deploy": frozenset(),
+}
 
 _VALIDATION_HINT = (
     "\n\n[post-action] Operational mutation detected ({reason}). "
@@ -574,8 +574,13 @@ class MutationDetection:
 
 def detect_mutation(tool_name: str, tool_input: dict) -> MutationDetection:
     """Check if a tool call represents an operational mutation."""
-    if tool_name in _MUTATION_TOOLS:
-        return MutationDetection(True, f"tool: {tool_name}")
+    if tool_name in _MUTATION_TOOL_ACTIONS:
+        allowed_actions = _MUTATION_TOOL_ACTIONS[tool_name]
+        if not allowed_actions:
+            return MutationDetection(True, f"tool: {tool_name}")
+        action = tool_input.get("action", "")
+        if action in allowed_actions:
+            return MutationDetection(True, f"{tool_name}: {action}")
 
     command = ""
     if tool_name == "run_command":

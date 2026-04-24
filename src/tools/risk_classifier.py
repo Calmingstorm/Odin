@@ -320,16 +320,7 @@ class CommandGovernor:
 
         assessment = classify_command(command)
 
-        host_policy = self._host_overrides.get(host, "") if host else ""
-        if host_policy == "strict" and assessment.level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
-            result = CommandGovernorResult(
-                False, assessment.level, f"{assessment.reason} (host '{host}' is strict-mode)",
-                _SUGGESTION_MAP.get(assessment.reason, ""),
-            )
-            self._stats.record_block(command, result)
-            log.warning("Governor BLOCKED (strict host %s): %s — %s", host, assessment.reason, command[:200])
-            return result
-
+        # Precedence: exfil → critical (admin-overridable) → strict-host (HIGH only)
         if self._block_critical and assessment.level == RiskLevel.CRITICAL:
             if is_admin and self._admin_can_override:
                 log.warning(
@@ -344,6 +335,16 @@ class CommandGovernor:
             )
             self._stats.record_block(command, result)
             log.warning("Governor BLOCKED (critical): %s — %s", assessment.reason, command[:200])
+            return result
+
+        host_policy = self._host_overrides.get(host, "") if host else ""
+        if host_policy == "strict" and assessment.level == RiskLevel.HIGH:
+            result = CommandGovernorResult(
+                False, assessment.level, f"{assessment.reason} (host '{host}' is strict-mode)",
+                _SUGGESTION_MAP.get(assessment.reason, ""),
+            )
+            self._stats.record_block(command, result)
+            log.warning("Governor BLOCKED (strict host %s): %s — %s", host, assessment.reason, command[:200])
             return result
 
         if assessment.level == RiskLevel.HIGH:

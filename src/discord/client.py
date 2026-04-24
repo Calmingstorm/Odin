@@ -2693,6 +2693,7 @@ class OdinBot(commands.Bot):
 
                 t0 = time.monotonic()
                 error = None
+                tool_result = None
                 # Handle Discord-native tools
                 try:
                     if tool_name == "purge_messages":
@@ -3501,7 +3502,7 @@ class OdinBot(commands.Bot):
             if isinstance(result, Exception):
                 sections.append(f"### {label}\nERROR: {result}")
             else:
-                sections.append(f"### {label}\n{result[:800]}")
+                sections.append(f"### {label}\n{str(result)[:800]}")
 
         return "\n\n".join(sections)
 
@@ -4401,7 +4402,8 @@ class OdinBot(commands.Bot):
             )
 
         # --- Executor-routed tools (run_command, run_script, SSH, etc.) ---
-        return await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+        result = await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+        return str(result)
 
     async def _handle_read_channel(self, message: discord.Message, inp: dict) -> str:
         """Read recent messages from a Discord channel.
@@ -4685,8 +4687,8 @@ class OdinBot(commands.Bot):
                     output = await self.skill_manager.execute(tool_name, tool_input)
                 else:
                     output = await self.tool_executor.execute(tool_name, tool_input)
-                prev_output = output
-                results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{output[:400]}\n```")
+                prev_output = str(output)
+                results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{str(output)[:400]}\n```")
             except Exception as e:
                 results.append(f"**Step {i+1}** (`{step_desc}`): FAILED — {e}")
                 on_failure = step.get("on_failure", "abort")
@@ -4747,7 +4749,7 @@ class OdinBot(commands.Bot):
             tool_input = schedule.get("tool_input", {})
             try:
                 result = await self.tool_executor.execute(tool_name, tool_input)
-                text = f"**Scheduled: {schedule['description']}**\n```\n{result[:1800]}\n```"
+                text = f"**Scheduled: {schedule['description']}**\n```\n{str(result)[:1800]}\n```"
                 await channel.send(scrub_response_secrets(text))
             except (discord.HTTPException, discord.Forbidden, discord.NotFound) as e:
                 log.warning("Scheduled task Discord error: %s", e)

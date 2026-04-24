@@ -45,7 +45,6 @@ TriggerCallback = Callable[[str, dict], Awaitable[int]]
 AUTH_PUBLIC_PREFIXES = ("/health", "/metrics", "/webhook/", "/ui")
 AUTH_PUBLIC_EXACT = frozenset({"/api/auth/login"})
 
-# Legacy aliases — used internally by the middleware
 _AUTH_SKIP_PREFIXES = AUTH_PUBLIC_PREFIXES
 _AUTH_SKIP_PATHS = AUTH_PUBLIC_EXACT
 

@@ -638,10 +638,17 @@ class TestMutationDetection:
         assert result.detected
         assert "config write" in result.reason
 
-    def test_detects_mutation_tool(self):
+    def test_detects_mutation_tool_action(self):
         from src.tools.post_validation import detect_mutation
         result = detect_mutation("docker_ops", {"action": "restart"})
         assert result.detected
+        assert "restart" in result.reason
+
+    def test_ignores_docker_ops_read_actions(self):
+        from src.tools.post_validation import detect_mutation
+        for action in ("ps", "logs", "inspect", "stats"):
+            result = detect_mutation("docker_ops", {"action": action})
+            assert not result.detected, f"docker_ops {action} should not be a mutation"
 
     def test_ignores_read_commands(self):
         from src.tools.post_validation import detect_mutation
