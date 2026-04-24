@@ -159,14 +159,14 @@ class TestAttachmentProcessor:
         assert result.image_blocks[0]["type"] == "image"
 
     @pytest.mark.asyncio
-    async def test_intent_does_not_auto_ingest(self):
+    async def test_ingest_intent_produces_marker_not_auto_ingest(self):
         proc = AttachmentProcessor()
         att = _mock_attachment("data.txt", 50, "text/plain", b"some data")
         result = await proc.process(
             [att], "ch1", "msg1", intent=AttachmentIntent.INGEST_KNOWLEDGE,
         )
-        assert "ingest" not in result.inline_text.lower()
         assert "current task" in result.inline_text.lower()
+        assert "ingest_document" in result.inline_text
 
     @pytest.mark.asyncio
     async def test_filename_sanitized_in_workspace(self, tmp_path):

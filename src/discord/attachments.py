@@ -37,9 +37,10 @@ _TEXT_EXTENSIONS = frozenset({
     ".service", ".timer", ".sql", ".php", ".rb", ".go",
     ".rs", ".java", ".c", ".h", ".cpp", ".hpp", ".lua",
     ".mk", ".makefile", ".dockerfile", ".gitignore",
+    ".patch", ".diff", ".properties", ".gradle",
 })
 
-_ARCHIVE_EXTENSIONS = frozenset({".zip", ".tar", ".tar.gz", ".tgz", ".gz"})
+_ARCHIVE_EXTENSIONS = frozenset({".zip", ".tar", ".tar.gz", ".tgz"})
 
 _INGEST_PATTERNS = re.compile(
     r"\b(ingest|index|add to knowledge|remember this|save.*(for later|to knowledge))\b",
@@ -133,9 +134,10 @@ def _is_text_file(filename: str, content_type: str | None) -> bool:
 
 
 def _get_ext(filename: str) -> str:
-    if filename.endswith(".tar.gz"):
+    lower = filename.lower()
+    if lower.endswith(".tar.gz"):
         return ".tar.gz"
-    return "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return "." + lower.rsplit(".", 1)[-1] if "." in lower else ""
 
 
 def _is_archive(filename: str) -> bool:
@@ -280,11 +282,15 @@ class AttachmentProcessor:
             text = data.decode("utf-8", errors="replace")
             digest = _sha256(data)
 
+            intent_note = ""
+            if intent == AttachmentIntent.INGEST_KNOWLEDGE:
+                intent_note = " User requested knowledge ingestion; use ingest_document if appropriate."
+
             if att.size <= self.inline_max_bytes:
                 preview = _preview_text(text, ext, self.preview_max_chars)
                 text_parts.append(
                     f"**Attached file: {att.filename}**\n```\n{preview}\n```\n"
-                    f"[File read for current task.]"
+                    f"[File read for current task.{intent_note}]"
                 )
             else:
                 ws = self._workspace(channel_id, message_id)
@@ -384,17 +390,24 @@ class AttachmentProcessor:
                 manifest.append(f"Too large uncompressed ({total_uncompressed:,} > {self.archive_extract_max_bytes:,})")
                 return manifest, False
 
-            # Security: check for path traversal
-            for entry in entries:
-                if entry.filename.startswith("/") or ".." in entry.filename:
-                    manifest.append(f"BLOCKED: unsafe path '{entry.filename}'")
-                    return manifest, False
-
             top_dirs = sorted({e.filename.split("/")[0] for e in entries if "/" in e.filename})
             manifest.append(f"Top-level: {', '.join(top_dirs[:10])}")
 
             extract_dir.mkdir(parents=True, exist_ok=True)
-            zf.extractall(extract_dir)
+            base = extract_dir.resolve()
+            for entry in entries:
+                from pathlib import PurePosixPath
+                parts = PurePosixPath(entry.filename).parts
+                if entry.filename.startswith("/") or ".." in parts:
+                    manifest.append(f"BLOCKED: unsafe path '{entry.filename}'")
+                    shutil.rmtree(extract_dir, ignore_errors=True)
+                    return manifest, False
+                target = (extract_dir / entry.filename).resolve()
+                if target != base and base not in target.parents:
+                    manifest.append(f"BLOCKED: path escapes workspace '{entry.filename}'")
+                    shutil.rmtree(extract_dir, ignore_errors=True)
+                    return manifest, False
+                zf.extract(entry, extract_dir)
             return manifest, True
 
     def _extract_tar(self, archive_path: Path, extract_dir: Path) -> tuple[list[str], bool]:
@@ -413,16 +426,24 @@ class AttachmentProcessor:
                 manifest.append(f"Too large uncompressed")
                 return manifest, False
 
-            for m in members:
-                if m.name.startswith("/") or ".." in m.name or m.issym() or m.islnk():
-                    manifest.append(f"BLOCKED: unsafe entry '{m.name}'")
-                    return manifest, False
-
             top_dirs = sorted({m.name.split("/")[0] for m in members if "/" in m.name})
             manifest.append(f"Top-level: {', '.join(top_dirs[:10])}")
 
             extract_dir.mkdir(parents=True, exist_ok=True)
-            tf.extractall(extract_dir, filter="data")
+            base = extract_dir.resolve()
+            for m in members:
+                from pathlib import PurePosixPath
+                parts = PurePosixPath(m.name).parts
+                if m.name.startswith("/") or ".." in parts or m.issym() or m.islnk():
+                    manifest.append(f"BLOCKED: unsafe entry '{m.name}'")
+                    shutil.rmtree(extract_dir, ignore_errors=True)
+                    return manifest, False
+                target = (extract_dir / m.name).resolve()
+                if target != base and base not in target.parents:
+                    manifest.append(f"BLOCKED: path escapes workspace '{m.name}'")
+                    shutil.rmtree(extract_dir, ignore_errors=True)
+                    return manifest, False
+                tf.extract(m, extract_dir, filter="data")
             return manifest, True
 
     def _preview_archive_files(self, extract_dir: Path) -> str:
