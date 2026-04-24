@@ -2546,6 +2546,19 @@ class OdinBot(commands.Bot):
                     })
                     continue
             if not llm_resp.is_tool_use:
+                # Enforce pending validation before allowing final response
+                if _validation_required and _validation_retries < _MAX_VALIDATION_RETRIES:
+                    _validation_retries += 1
+                    log.warning("Validation required but model returned text — forcing continuation (attempt %d)", _validation_retries)
+                    messages.append({
+                        "role": "developer",
+                        "content": (
+                            "[VALIDATION REQUIRED] You have pending post-action validation. "
+                            "Call validate_action before responding to the user."
+                        ),
+                    })
+                    continue
+
                 # Fabrication detection: if no tools were called and the
                 # response looks like it fabricated results, retry once.
                 if (
@@ -2957,6 +2970,9 @@ class OdinBot(commands.Bot):
 
             # Track mutations that need post-action validation
             _pending_validations: list[str] = []
+            _validation_required: bool = False
+            _validation_retries: int = 0
+            _MAX_VALIDATION_RETRIES = 2
 
             # Run all tool calls concurrently with per-tool timeout
             tool_timeout = self.config.tools.tool_timeout_seconds
@@ -2997,9 +3013,15 @@ class OdinBot(commands.Bot):
                 )
             messages.append({"role": "user", "content": list(tool_results)})
 
+            # Clear validation requirement if validate_action was called this iteration
+            if _validation_required and "validate_action" in [t.name for t in tool_calls]:
+                _validation_required = False
+                _validation_retries = 0
+
             # Auto-inject validation instruction when mutations were detected
             if _pending_validations:
                 mutation_list = "; ".join(_pending_validations)
+                _validation_required = True
                 messages.append({
                     "role": "developer",
                     "content": (

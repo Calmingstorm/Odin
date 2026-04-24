@@ -231,6 +231,7 @@ def summarize_tool_response(
 
 
 _SUMMARY_PREFIX = "[Previous conversation summary:"
+_PROTECTED_PREFIXES = ("[HISTORY_READ_ONLY]", "[COMPLETED SUMMARY]", _SUMMARY_PREFIX)
 
 
 def _content_text(m: dict) -> str:
@@ -265,13 +266,16 @@ def apply_token_budget(
     recent = messages[-keep_n:]
     older = messages[:-keep_n] if keep_n < len(messages) else []
 
-    # Detect summary pair at the start of older messages
-    has_summary = (
-        len(older) >= 2
-        and _content_text(older[0]).startswith(_SUMMARY_PREFIX)
-    )
-    summary_pair = older[:2] if has_summary else []
-    droppable = older[2:] if has_summary else list(older)
+    # Detect protected metadata at the start (marker + summary pair)
+    protected_count = 0
+    for m in older:
+        text = _content_text(m)
+        if any(text.startswith(p) for p in _PROTECTED_PREFIXES) or text == "Understood, I have context from our previous conversation.":
+            protected_count += 1
+        else:
+            break
+    summary_pair = older[:protected_count] if protected_count else []
+    droppable = older[protected_count:] if protected_count else list(older)
 
     def _older_tokens() -> int:
         return sum(estimate_tokens(_content_text(m)) for m in summary_pair + droppable)

@@ -1380,6 +1380,9 @@ class ToolExecutor:
 
         if action == "push":
             freshness_cmd, push_cmd = cmds
+            allowed, denial, _ = self._govern_command(push_cmd, host)
+            if not allowed:
+                return denial
             code, output = await self._exec_command(
                 address, freshness_cmd, ssh_user,
             )
@@ -1395,6 +1398,9 @@ class ToolExecutor:
             return _truncate_lines(output) if output.strip() else "Push completed successfully."
         else:
             cmd = cmds
+            allowed, denial, _ = self._govern_command(cmd, host)
+            if not allowed:
+                return denial
             code, output = await self._exec_command(address, cmd, ssh_user)
             if code != 0:
                 return f"git {action} failed (exit {code}):\n{_truncate_lines(output)}"
@@ -1422,6 +1428,10 @@ class ToolExecutor:
             cmd = build_kubectl_command(action, params)
         except ValueError as e:
             return f"kubectl error: {e}"
+
+        allowed, denial, _ = self._govern_command(cmd, host)
+        if not allowed:
+            return denial
 
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:
@@ -1451,6 +1461,10 @@ class ToolExecutor:
         except ValueError as e:
             return f"docker_ops error: {e}"
 
+        allowed, denial, _ = self._govern_command(cmd, host)
+        if not allowed:
+            return denial
+
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:
             return f"docker {action} failed (exit {code}):\n{_truncate_lines(output)}"
@@ -1478,6 +1492,10 @@ class ToolExecutor:
             cmd = build_terraform_command(action, params)
         except ValueError as e:
             return f"terraform_ops error: {e}"
+
+        allowed, denial, _ = self._govern_command(cmd, host)
+        if not allowed:
+            return denial
 
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:

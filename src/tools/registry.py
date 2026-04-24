@@ -1886,6 +1886,8 @@ MUTATING_TOOLS: frozenset[str] = frozenset({
     "delegate_task", "cancel_task",
     "create_digest", "create_poll",
     "generate_image",
+    "issue_tracker", "execute_plan",
+    "send_to_agent", "spawn_loop_agents",
 })
 
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
