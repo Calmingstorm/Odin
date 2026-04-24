@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
@@ -203,6 +203,61 @@ class TestExecuteEndpoint:
                 },
             )
             assert resp.status == 400
+
+
+class TestRealHandler:
+    """Tests against the real /api/execute handler from src/web/api.py."""
+
+    @pytest.mark.asyncio
+    async def test_identity_hardcoded_not_caller_controlled(self):
+        bot = _make_bot()
+        bot.config = MagicMock()
+        bot.config.web.api_token = ""
+        mock_result = {
+            "response": "ok",
+            "tools_used": [],
+            "is_error": False,
+            "files": [],
+        }
+        with patch("src.web.chat.process_web_chat", new_callable=AsyncMock, return_value=mock_result):
+            from src.web.api import setup_api
+            app = web.Application()
+            setup_api(app, bot)
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post(
+                    "/api/execute",
+                    json={"prompt": "test", "user_id": "admin", "username": "root"},
+                )
+                assert resp.status == 200
+                from src.web.chat import process_web_chat
+                process_web_chat.assert_awaited_once()
+                assert process_web_chat.call_args.kwargs["user_id"] == "api-user"
+                assert process_web_chat.call_args.kwargs["username"] == "API"
+
+    @pytest.mark.asyncio
+    async def test_session_reset_called(self):
+        bot = _make_bot()
+        bot.config = MagicMock()
+        bot.config.web.api_token = ""
+        mock_result = {
+            "response": "done",
+            "tools_used": [],
+            "is_error": False,
+            "files": [],
+        }
+        with patch("src.web.chat.process_web_chat", new_callable=AsyncMock, return_value=mock_result):
+            from src.web.api import setup_api
+            app = web.Application()
+            setup_api(app, bot)
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post(
+                    "/api/execute",
+                    json={"prompt": "test"},
+                )
+                assert resp.status == 200
+                bot.sessions.reset.assert_called_once()
+                channel_id = bot.sessions.reset.call_args[0][0]
+                assert channel_id.startswith("api-")
 
 
 class TestCLIScript:
