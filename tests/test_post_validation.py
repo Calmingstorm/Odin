@@ -638,17 +638,37 @@ class TestMutationDetection:
         assert result.detected
         assert "config write" in result.reason
 
-    def test_detects_mutation_tool_action(self):
+    def test_detects_docker_ops_compose_up(self):
         from src.tools.post_validation import detect_mutation
-        result = detect_mutation("docker_ops", {"action": "restart"})
+        result = detect_mutation("docker_ops", {"action": "compose_up"})
         assert result.detected
-        assert "restart" in result.reason
+        assert "compose_up" in result.reason
+
+    def test_detects_docker_ops_compose_down(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("docker_ops", {"action": "compose_down"})
+        assert result.detected
+
+    def test_detects_docker_ops_build(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("docker_ops", {"action": "build"})
+        assert result.detected
 
     def test_ignores_docker_ops_read_actions(self):
         from src.tools.post_validation import detect_mutation
-        for action in ("ps", "logs", "inspect", "stats"):
+        for action in ("ps", "logs", "inspect", "stats", "compose_ps", "compose_logs"):
             result = detect_mutation("docker_ops", {"action": action})
             assert not result.detected, f"docker_ops {action} should not be a mutation"
+
+    def test_detects_kubectl_apply(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("kubectl", {"action": "apply"})
+        assert result.detected
+
+    def test_ignores_kubectl_get(self):
+        from src.tools.post_validation import detect_mutation
+        result = detect_mutation("kubectl", {"action": "get"})
+        assert not result.detected
 
     def test_ignores_read_commands(self):
         from src.tools.post_validation import detect_mutation

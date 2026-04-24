@@ -92,6 +92,8 @@ class ToolResult:
     tool_name: str = ""
     risk_level: str = "low"
     risk_reason: str = ""
+    requires_validation: bool = False
+    validation_reason: str = ""
 
     def __str__(self) -> str:
         return self.output

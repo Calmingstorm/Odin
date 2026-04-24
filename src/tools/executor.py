@@ -214,8 +214,12 @@ class ToolExecutor:
                         raw_result = retry_result
                     is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
 
+        mutation_detected = False
+        mutation_reason = ""
         if not is_error and isinstance(raw_result, str):
             raw_result, _mutation = annotate_if_mutation(tool_name, tool_input, raw_result)
+            mutation_detected = _mutation.detected
+            mutation_reason = _mutation.reason
 
         outcome = validate_tool_result(tool_name, raw_result, stats=self.validation_stats)
 
@@ -236,6 +240,8 @@ class ToolExecutor:
             tool_name=tool_name,
             risk_level=assessment.level.value,
             risk_reason=assessment.reason,
+            requires_validation=mutation_detected,
+            validation_reason=mutation_reason,
         )
 
     async def _try_tool(
@@ -393,6 +399,20 @@ class ToolExecutor:
             return f"Command failed (exit {code}):\n{output}"
         return output
 
+    def _govern_command(self, command: str, host: str | None = None) -> tuple[bool, str, str]:
+        """Shared governor check. Returns (allowed, denial_message, governor_note)."""
+        if not getattr(self, "command_governor", None):
+            return True, "", ""
+        check = self.command_governor.check(
+            command, user_tier=getattr(self, "_current_user_tier", None), host=host,
+        )
+        if not check.allowed:
+            return False, check.denial_message(), ""
+        note = ""
+        if check.risk.value in ("high", "critical"):
+            note = f"[governor: allowed — {check.risk.value} risk, {check.reason}]\n"
+        return True, "", note
+
     async def _handle_run_command(self, inp: dict) -> str:
         command = inp.get("command")
         host = inp.get("host")
@@ -401,15 +421,9 @@ class ToolExecutor:
         if not host:
             return "Error: 'host' is required for run_command."
 
-        governor_note = ""
-        if getattr(self, "command_governor", None):
-            check = self.command_governor.check(
-                command, user_tier=getattr(self, "_current_user_tier", None), host=host,
-            )
-            if not check.allowed:
-                return check.denial_message()
-            if check.risk.value in ("high", "critical"):
-                governor_note = f"[governor: allowed — {check.risk.value} risk, {check.reason}]\n"
+        allowed, denial, governor_note = self._govern_command(command, host)
+        if not allowed:
+            return denial
 
         # Stream output if enabled for this tool
         on_output = None
@@ -453,15 +467,9 @@ class ToolExecutor:
             return "Error: 'script' is required for run_script."
         interpreter = inp.get("interpreter", "bash")
 
-        governor_note = ""
-        if getattr(self, "command_governor", None):
-            check = self.command_governor.check(
-                script, user_tier=getattr(self, "_current_user_tier", None), host=host,
-            )
-            if not check.allowed:
-                return check.denial_message()
-            if check.risk.value in ("high", "critical"):
-                governor_note = f"[governor: allowed — {check.risk.value} risk, {check.reason}]\n"
+        allowed, denial, governor_note = self._govern_command(script, host)
+        if not allowed:
+            return denial
 
         # Map interpreter to file extension
         ext_map = {
@@ -557,23 +565,34 @@ class ToolExecutor:
         hosts = inp["hosts"]
         command = inp["command"]
 
-        # Expand "all"
         if hosts == ["all"] or hosts == "all":
             hosts = list(self.config.hosts.keys())
+
+        # Per-host governor check before launching parallel tasks
+        blocked_hosts = []
+        allowed_hosts = []
+        for h in hosts:
+            allowed, denial, _ = self._govern_command(command, h)
+            if not allowed:
+                blocked_hosts.append((h, denial))
+            else:
+                allowed_hosts.append(h)
 
         async def _run_one(alias: str) -> str:
             result = await self._run_on_host(alias, command)
             result = _truncate_lines(result)
             return f"### {alias}\n```\n{result.strip()}\n```"
 
-        tasks = [_run_one(h) for h in hosts]
+        tasks = [_run_one(h) for h in allowed_hosts]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         parts = []
-        for h, r in zip(hosts, results):
+        for h, r in zip(allowed_hosts, results):
             if isinstance(r, Exception):
                 parts.append(f"### {h}\n```\nError: {r}\n```")
             else:
                 parts.append(r)
+        for h, denial in blocked_hosts:
+            parts.append(f"### {h}\n```\n{denial}\n```")
         return "\n\n".join(parts)
 
     # --- Browser tools (text-returning, screenshot handled in client.py) ---
@@ -741,12 +760,9 @@ class ToolExecutor:
                 return "command is required for start action."
             if not host:
                 return "host is required for start action."
-            if getattr(self, "command_governor", None):
-                check = self.command_governor.check(
-                    command, user_tier=getattr(self, "_current_user_tier", None), host=host,
-                )
-                if not check.allowed:
-                    return check.denial_message()
+            allowed, denial, _ = self._govern_command(command, host)
+            if not allowed:
+                return denial
             # Validate host against configured hosts
             resolved = self._resolve_host(host)
             if not resolved:
@@ -1364,6 +1380,9 @@ class ToolExecutor:
 
         if action == "push":
             freshness_cmd, push_cmd = cmds
+            allowed, denial, _ = self._govern_command(push_cmd, host)
+            if not allowed:
+                return denial
             code, output = await self._exec_command(
                 address, freshness_cmd, ssh_user,
             )
@@ -1379,6 +1398,9 @@ class ToolExecutor:
             return _truncate_lines(output) if output.strip() else "Push completed successfully."
         else:
             cmd = cmds
+            allowed, denial, _ = self._govern_command(cmd, host)
+            if not allowed:
+                return denial
             code, output = await self._exec_command(address, cmd, ssh_user)
             if code != 0:
                 return f"git {action} failed (exit {code}):\n{_truncate_lines(output)}"
@@ -1406,6 +1428,10 @@ class ToolExecutor:
             cmd = build_kubectl_command(action, params)
         except ValueError as e:
             return f"kubectl error: {e}"
+
+        allowed, denial, _ = self._govern_command(cmd, host)
+        if not allowed:
+            return denial
 
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:
@@ -1435,6 +1461,10 @@ class ToolExecutor:
         except ValueError as e:
             return f"docker_ops error: {e}"
 
+        allowed, denial, _ = self._govern_command(cmd, host)
+        if not allowed:
+            return denial
+
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:
             return f"docker {action} failed (exit {code}):\n{_truncate_lines(output)}"
@@ -1462,6 +1492,10 @@ class ToolExecutor:
             cmd = build_terraform_command(action, params)
         except ValueError as e:
             return f"terraform_ops error: {e}"
+
+        allowed, denial, _ = self._govern_command(cmd, host)
+        if not allowed:
+            return denial
 
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:

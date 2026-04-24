@@ -213,13 +213,14 @@ class TestRealHandler:
         bot = _make_bot()
         bot.config = MagicMock()
         bot.config.web.api_token = ""
+        bot.config.web.resolve_api_identity.return_value = None
         mock_result = {
             "response": "ok",
             "tools_used": [],
             "is_error": False,
             "files": [],
         }
-        with patch("src.web.chat.process_web_chat", new_callable=AsyncMock, return_value=mock_result):
+        with patch("src.web.api.process_web_chat", new_callable=AsyncMock, return_value=mock_result):
             from src.web.api import setup_api
             app = web.Application()
             setup_api(app, bot)
@@ -229,7 +230,7 @@ class TestRealHandler:
                     json={"prompt": "test", "user_id": "admin", "username": "root"},
                 )
                 assert resp.status == 200
-                from src.web.chat import process_web_chat
+                from src.web.api import process_web_chat
                 process_web_chat.assert_awaited_once()
                 assert process_web_chat.call_args.kwargs["user_id"] == "api-user"
                 assert process_web_chat.call_args.kwargs["username"] == "API"
@@ -239,13 +240,14 @@ class TestRealHandler:
         bot = _make_bot()
         bot.config = MagicMock()
         bot.config.web.api_token = ""
+        bot.config.web.resolve_api_identity.return_value = None
         mock_result = {
             "response": "done",
             "tools_used": [],
             "is_error": False,
             "files": [],
         }
-        with patch("src.web.chat.process_web_chat", new_callable=AsyncMock, return_value=mock_result):
+        with patch("src.web.api.process_web_chat", new_callable=AsyncMock, return_value=mock_result):
             from src.web.api import setup_api
             app = web.Application()
             setup_api(app, bot)

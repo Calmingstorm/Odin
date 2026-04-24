@@ -146,19 +146,26 @@ def _make_auth_middleware(
             return await handler(request)
         # Skip auth if no token configured (dev mode)
         token = web_config.api_token
-        if not token:
+        has_any_token = token or getattr(web_config, "api_tokens", None)
+        if not has_any_token:
             return await handler(request)
 
         # Extract bearer value from Authorization header
         auth_header = request.headers.get("Authorization", "")
-        expected_bearer = f"Bearer {token}"
-        if hmac.compare_digest(auth_header, expected_bearer):
-            request._session_id = "admin-token"
-            return await handler(request)
-        # Check session tokens (Bearer <session_id>)
         bearer_prefix = "Bearer "
         if auth_header.startswith(bearer_prefix):
             bearer_value = auth_header[len(bearer_prefix):]
+            # Check legacy single token
+            if token and hmac.compare_digest(bearer_value, token):
+                request._session_id = "admin-token"
+                return await handler(request)
+            # Check multi-token identities
+            identity = web_config.resolve_api_identity(bearer_value) if hasattr(web_config, "resolve_api_identity") else None
+            if identity is not None:
+                request._session_id = identity.user_id
+                request._api_identity = identity
+                return await handler(request)
+            # Check session tokens
             if session_manager.validate(bearer_value):
                 request._session_id = bearer_value
                 return await handler(request)
@@ -166,9 +173,15 @@ def _make_auth_middleware(
         # Check query param token (for downloads, WebSocket)
         query_token = request.query.get("token", "")
         if query_token:
-            if hmac.compare_digest(query_token, token):
+            if token and hmac.compare_digest(query_token, token):
                 request._session_id = "admin-token"
                 return await handler(request)
+            if hasattr(web_config, "resolve_api_identity"):
+                identity = web_config.resolve_api_identity(query_token)
+                if identity is not None:
+                    request._session_id = identity.user_id
+                    request._api_identity = identity
+                    return await handler(request)
             if session_manager.validate(query_token):
                 request._session_id = query_token
                 return await handler(request)

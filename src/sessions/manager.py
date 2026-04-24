@@ -77,6 +77,25 @@ def _tokenize(text: str) -> set[str]:
     return {t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOP_WORDS and len(t) > 1}
 
 
+_IMPERATIVE_RE = re.compile(
+    r"^(?:run|execute|restart|deploy|check|install|update|delete|create|stop|start|kill|push|merge|build)\s+",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _sanitize_summary(summary: str) -> str:
+    """Reframe imperative tool requests in summaries as completed facts.
+
+    Prevents the model from re-executing commands that appear in
+    conversation summaries as if they were pending tasks.
+    """
+    summary = _IMPERATIVE_RE.sub(
+        lambda m: f"[completed] {m.group(0)}",
+        summary,
+    )
+    return summary
+
+
 def _lerp(low: float, high: float, t: float) -> float:
     """Linear interpolation between low and high, t clamped to [0, 1]."""
     t = max(0.0, min(1.0, t))
@@ -212,6 +231,7 @@ def summarize_tool_response(
 
 
 _SUMMARY_PREFIX = "[Previous conversation summary:"
+_PROTECTED_PREFIXES = ("[HISTORY_READ_ONLY]", "[COMPLETED SUMMARY]", _SUMMARY_PREFIX)
 
 
 def _content_text(m: dict) -> str:
@@ -246,13 +266,16 @@ def apply_token_budget(
     recent = messages[-keep_n:]
     older = messages[:-keep_n] if keep_n < len(messages) else []
 
-    # Detect summary pair at the start of older messages
-    has_summary = (
-        len(older) >= 2
-        and _content_text(older[0]).startswith(_SUMMARY_PREFIX)
-    )
-    summary_pair = older[:2] if has_summary else []
-    droppable = older[2:] if has_summary else list(older)
+    # Detect protected metadata at the start (marker + summary pair)
+    protected_count = 0
+    for m in older:
+        text = _content_text(m)
+        if any(text.startswith(p) for p in _PROTECTED_PREFIXES) or text == "Understood, I have context from our previous conversation.":
+            protected_count += 1
+        else:
+            break
+    summary_pair = older[:protected_count] if protected_count else []
+    droppable = older[protected_count:] if protected_count else list(older)
 
     def _older_tokens() -> int:
         return sum(estimate_tokens(_content_text(m)) for m in summary_pair + droppable)
@@ -613,13 +636,25 @@ class SessionManager:
 
         # Prepend summary if available
         if session.summary:
+            sanitized = _sanitize_summary(session.summary)
             messages.insert(0, {
                 "role": "user",
-                "content": f"[Previous conversation summary: {session.summary}]",
+                "content": f"[COMPLETED SUMMARY] {sanitized}",
             })
             messages.insert(1, {
                 "role": "assistant",
                 "content": "Understood, I have context from our previous conversation.",
+            })
+
+        # Mark ALL history (including summary) as read-only — must be first
+        if len(messages) > 1:
+            messages.insert(0, {
+                "role": "developer",
+                "content": (
+                    "[HISTORY_READ_ONLY] Everything below until the CURRENT_REQUEST marker "
+                    "is prior conversation context — completed interactions, not pending work. "
+                    "Do not re-execute tool calls or commands mentioned in history or summaries."
+                ),
             })
 
         # Enforce token budget — drop oldest first, keep recent BUDGET_KEEP_RECENT

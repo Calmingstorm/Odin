@@ -776,6 +776,30 @@ class TestInvokeSkillTool:
         assert result.allowed
 
     @pytest.mark.asyncio
+    async def test_run_command_multi_per_host_governor(self):
+        """run_command_multi checks governor per-host before parallel dispatch."""
+        from src.tools.executor import ToolExecutor
+        from src.config.schema import ToolsConfig, GovernorConfig
+        from unittest.mock import AsyncMock
+
+        cfg = ToolsConfig(
+            governor=GovernorConfig(host_overrides={"prod": "strict"}),
+        )
+        cfg.hosts = {
+            "dev": type("H", (), {"address": "localhost", "ssh_user": "root", "os": "linux"})(),
+            "prod": type("H", (), {"address": "localhost", "ssh_user": "root", "os": "linux"})(),
+        }
+        exe = ToolExecutor(config=cfg)
+        exe._run_on_host = AsyncMock(return_value="ok")
+        result = await exe._handle_run_command_multi({
+            "hosts": ["dev", "prod"],
+            "command": "systemctl restart nginx",
+        })
+        assert "ok" in result
+        assert "strict" in result
+        exe._run_on_host.assert_called_once_with("dev", "systemctl restart nginx")
+
+    @pytest.mark.asyncio
     async def test_memory_manage_get_action(self, tmp_path):
         """memory_manage supports 'get' action — a single-key lookup."""
         from src.tools.executor import ToolExecutor

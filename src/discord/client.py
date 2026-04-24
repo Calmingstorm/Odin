@@ -2451,6 +2451,12 @@ class OdinBot(commands.Bot):
             user_name=str(getattr(message.author, "display_name", "")),
         )
 
+        # Post-mutation validation state — persists across iterations
+        _pending_validations: list[str] = []
+        _validation_required: bool = False
+        _validation_retries: int = 0
+        _MAX_VALIDATION_RETRIES = 2
+
         for iteration in range(chat_cap):
             # Context auto-compression — when accumulated tool iterations push
             # the message list over the configured budget, summarise older
@@ -2546,6 +2552,19 @@ class OdinBot(commands.Bot):
                     })
                     continue
             if not llm_resp.is_tool_use:
+                # Enforce pending validation before allowing final response
+                if _validation_required and _validation_retries < _MAX_VALIDATION_RETRIES:
+                    _validation_retries += 1
+                    log.warning("Validation required but model returned text — forcing continuation (attempt %d)", _validation_retries)
+                    messages.append({
+                        "role": "developer",
+                        "content": (
+                            "[VALIDATION REQUIRED] You have pending post-action validation. "
+                            "Call validate_action before responding to the user."
+                        ),
+                    })
+                    continue
+
                 # Fabrication detection: if no tools were called and the
                 # response looks like it fabricated results, retry once.
                 if (
@@ -2940,6 +2959,12 @@ class OdinBot(commands.Bot):
                 except Exception:
                     pass  # Non-critical tracking
 
+                # Track mutations requiring post-action validation
+                if tool_result is not None and tool_result.requires_validation and tool_result.ok:
+                    _pending_validations.append(
+                        f"{tool_name}: {tool_result.validation_reason}"
+                    )
+
                 # Truncate large outputs before sending back to the LLM.
                 tool_content = truncate_tool_output(result)
 
@@ -2987,6 +3012,25 @@ class OdinBot(commands.Bot):
                     *[_run_tool_with_timeout(b) for b in tool_calls],
                 )
             messages.append({"role": "user", "content": list(tool_results)})
+
+            # Clear validation requirement if validate_action was called this iteration
+            if _validation_required and "validate_action" in [t.name for t in tool_calls]:
+                _validation_required = False
+                _validation_retries = 0
+
+            # Auto-inject validation instruction when mutations were detected
+            if _pending_validations:
+                mutation_list = "; ".join(_pending_validations)
+                _validation_required = True
+                messages.append({
+                    "role": "developer",
+                    "content": (
+                        f"[AUTO-VALIDATE] Operational mutation(s) detected: {mutation_list}. "
+                        "You MUST call validate_action now to confirm the change took effect. "
+                        "Infer appropriate checks from the mutation type."
+                    ),
+                })
+                _pending_validations.clear()
 
             # Inject pending image blocks as vision content for the next LLM call.
             # This reuses the same base64 image block format as _process_attachments.

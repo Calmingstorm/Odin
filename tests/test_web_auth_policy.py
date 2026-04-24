@@ -18,6 +18,8 @@ def _make_bot():
     bot = MagicMock()
     bot.config = MagicMock()
     bot.config.web.api_token = "test-secret-token"
+    bot.config.web.api_tokens = []
+    bot.config.web.resolve_api_identity.return_value = None
     bot.sessions = MagicMock()
     bot.sessions.count.return_value = 0
     bot.sessions.ids.return_value = []
