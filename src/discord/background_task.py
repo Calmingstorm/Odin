@@ -365,7 +365,7 @@ async def _execute_tool(
         tool_input = {**tool_input, "host": _get_default_host(executor)}
     # run_command/run_script: if 'command'/'script' missing, let executor handle it
     # (it will return an error that _is_error_output catches)
-    return await executor.execute(tool_name, tool_input)
+    return str(await executor.execute(tool_name, tool_input))
 
 
 def _substitute_vars(
