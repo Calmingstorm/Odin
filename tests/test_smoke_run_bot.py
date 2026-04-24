@@ -51,13 +51,13 @@ class TestOdinConfig:
         from src.config import OdinConfig
         cfg = OdinConfig()
         errors = cfg.validate()
-        assert any("ODIN_TOKEN" in e for e in errors)
+        assert any("DISCORD_TOKEN" in e for e in errors)
 
     def test_construct_with_token(self):
         from src.config import OdinConfig
         cfg = OdinConfig(token="test-token-123")
         errors = cfg.validate()
-        assert not any("ODIN_TOKEN" in e for e in errors)
+        assert not any("DISCORD_TOKEN" in e for e in errors)
 
 
 # ---------------------------------------------------------------------------

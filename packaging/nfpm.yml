@@ -44,6 +44,11 @@ contents:
   - src: ./scripts/codex_login.py
     dst: /opt/odin/scripts/codex_login.py
 
+  - src: ./scripts/odin-cli.py
+    dst: /usr/local/bin/odin
+    file_info:
+      mode: 0755
+
   - src: ./packaging/odin.service
     dst: /usr/lib/systemd/system/odin.service
 
