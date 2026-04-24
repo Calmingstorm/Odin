@@ -322,7 +322,8 @@ class TestProcessWithToolsEndToEnd:
             )
 
         bot.codex_client.chat_with_tools = fake_chat_with_tools
-        bot.tool_executor.execute = AsyncMock(return_value="Filesystem 42% used")
+        from src.tools.result_validator import ToolResult
+        bot.tool_executor.execute = AsyncMock(return_value=ToolResult(output="Filesystem 42% used", tool_name="check_disk"))
         bot.audit.log_execution = AsyncMock()
 
         # Build a fake Discord message

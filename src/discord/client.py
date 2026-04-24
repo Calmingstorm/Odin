@@ -2867,17 +2867,21 @@ class OdinBot(commands.Bot):
                             file_callback=_skill_file,
                         )
                     else:
-                        result = await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+                        tool_result = await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+                        result = str(tool_result)
                 except asyncio.TimeoutError as e:
                     error = str(e)
                     result = f"Tool {tool_name} timed out: {e}"
+                    tool_result = None
                     log.warning("Tool %s timed out after %.1fs", tool_name, time.monotonic() - t0)
                 except (ValueError, KeyError, TypeError) as e:
                     error = str(e)
                     result = f"Tool {tool_name} input error: {e}"
+                    tool_result = None
                 except Exception as e:
                     error = str(e)
                     result = f"Error executing {tool_name}: {e}"
+                    tool_result = None
                     log.warning("Unexpected tool error for %s: %s", tool_name, e)
 
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -2889,6 +2893,12 @@ class OdinBot(commands.Bot):
 
                 # Scrub secrets from tool output
                 result = scrub_output_secrets(result)
+
+                # Use structured metadata from ToolResult when available
+                if tool_result is not None:
+                    elapsed_ms = tool_result.duration_ms or elapsed_ms
+                    if tool_result.error and not error:
+                        error = tool_result.error
 
                 # Audit log — never crash tool execution on audit failure
                 try:
@@ -2906,13 +2916,15 @@ class OdinBot(commands.Bot):
                         result_summary=result,
                         execution_time_ms=elapsed_ms,
                         error=error,
+                        risk_level=tool_result.risk_level if tool_result else None,
+                        risk_reason=tool_result.risk_reason if tool_result else None,
                     )
                     await self.audit.log_event(
                         event_type="tool_end",
                         action=tool_name,
                         actor=str(message.author.id),
                         channel_id=str(message.channel.id),
-                        detail=result[:150] if isinstance(result, str) else "",
+                        detail=result[:150],
                         metadata={"elapsed_ms": elapsed_ms, "error": error, "iteration": iteration},
                     )
                 except Exception as audit_err:
@@ -2928,9 +2940,6 @@ class OdinBot(commands.Bot):
                     pass  # Non-critical tracking
 
                 # Truncate large outputs before sending back to the LLM.
-                # Tool results stay in messages and are re-sent every iteration,
-                # so capping here prevents a single large result from ballooning
-                # input token costs across the tool loop.
                 tool_content = truncate_tool_output(result)
 
                 return {

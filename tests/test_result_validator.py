@@ -461,13 +461,13 @@ class TestExecutorIntegration:
     @pytest.mark.asyncio
     async def test_unknown_tool_not_validated_as_empty(self, executor):
         result = await executor.execute("nonexistent_tool", {})
-        assert result == "Unknown tool: nonexistent_tool"
+        assert str(result) == "Unknown tool: nonexistent_tool"
+        assert not result.ok
+        assert result.error == "unknown_tool"
 
     @pytest.mark.asyncio
     async def test_validation_stats_increment(self, executor):
         assert executor.validation_stats.total_validated == 0
-        # Execute a real handler that returns a string
-        # Use run_command which requires host — will fail but still validates
         from unittest.mock import AsyncMock, patch
         async def mock_handler(inp):
             return "test output"
@@ -477,7 +477,8 @@ class TestExecutorIntegration:
             mock_classify.return_value = RiskAssessment(level=RiskLevel.LOW, reason="test")
             result = await executor.execute("test_tool", {})
         assert executor.validation_stats.total_validated == 1
-        assert result == "test output"
+        assert str(result) == "test output"
+        assert result.ok
 
     @pytest.mark.asyncio
     async def test_none_result_normalised(self, executor):
@@ -488,7 +489,7 @@ class TestExecutorIntegration:
             from src.tools.risk_classifier import RiskAssessment, RiskLevel
             mock_classify.return_value = RiskAssessment(level=RiskLevel.LOW, reason="test")
             result = await executor.execute("test_tool", {})
-        assert result == _EMPTY_RESULT_PLACEHOLDER
+        assert str(result) == _EMPTY_RESULT_PLACEHOLDER
         assert executor.validation_stats.coerced_type == 1
 
     @pytest.mark.asyncio
@@ -500,7 +501,7 @@ class TestExecutorIntegration:
             from src.tools.risk_classifier import RiskAssessment, RiskLevel
             mock_classify.return_value = RiskAssessment(level=RiskLevel.LOW, reason="test")
             result = await executor.execute("test_tool", {})
-        assert result == _EMPTY_RESULT_PLACEHOLDER
+        assert str(result) == _EMPTY_RESULT_PLACEHOLDER
         assert executor.validation_stats.replaced_empty == 1
 
 

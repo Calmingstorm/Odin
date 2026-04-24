@@ -32,7 +32,7 @@ from .recovery import (
     get_policy as _get_recovery_policy,
     get_retry_delay as _get_retry_delay,
 )
-from .result_validator import ResultValidationStats, validate_tool_result
+from .result_validator import ResultValidationStats, ToolResult, validate_tool_result
 from .risk_classifier import RiskLevel, RiskStats, classify_tool
 from .output_streamer import ToolOutputStreamer
 from .ssh import is_local_address, run_local_command, run_ssh_command
@@ -136,17 +136,17 @@ class ToolExecutor:
             )
         return None
 
-    async def execute(self, tool_name: str, tool_input: dict, *, user_id: str | None = None) -> str:
+    async def execute(self, tool_name: str, tool_input: dict, *, user_id: str | None = None) -> ToolResult:
         handler = getattr(self, f"_handle_{tool_name}", None)
         if handler is None:
-            return f"Unknown tool: {tool_name}"
+            return ToolResult(output=f"Unknown tool: {tool_name}", ok=False, error="unknown_tool", tool_name=tool_name)
 
         denial = self.check_permission(tool_name, user_id)
         if denial:
             log.warning("RBAC denied %s for user %s on tool %s", self._permission_manager.get_tier(user_id), user_id, tool_name)
             self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
             self._metrics[tool_name]["errors"] += 1
-            return denial
+            return ToolResult(output=denial, ok=False, error="permission_denied", tool_name=tool_name)
 
         assessment = classify_tool(tool_name, tool_input)
         self.risk_stats.record(tool_name, assessment)
@@ -157,12 +157,16 @@ class ToolExecutor:
             )
 
         timeout = self.config.get_tool_timeout(tool_name)
-        result = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
+        t0 = asyncio.get_event_loop().time()
+        raw_result = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
+        duration_ms = int((asyncio.get_event_loop().time() - t0) * 1000)
+
+        is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
 
         if self._recovery_enabled:
-            category = self._check_recoverable(result)
+            category = self._check_recoverable(raw_result)
             if category is not None:
-                snippet = result[:120] if isinstance(result, str) else ""
+                snippet = raw_result[:120] if isinstance(raw_result, str) else ""
                 decision = _decide_recovery_action(tool_name=tool_name, category=category)
                 if decision.action == "hint":
                     self.recovery_stats.record_failure(tool_name, category, snippet)
@@ -171,8 +175,8 @@ class ToolExecutor:
                         tool_name, category.value,
                     )
                     hint = decision.hint_text
-                    if hint and isinstance(result, str) and hint not in result:
-                        result = f"{result}\n\n{hint}"
+                    if hint and isinstance(raw_result, str) and hint not in raw_result:
+                        raw_result = f"{raw_result}\n\n{hint}"
                 elif decision.action == "skip":
                     if tool_name in UNSAFE_TO_RETRY:
                         log.warning(
@@ -181,7 +185,6 @@ class ToolExecutor:
                         )
                     self.recovery_stats.record_failure(tool_name, category, snippet)
                 else:
-                    # decision.action == "retry"
                     delay = decision.delay_seconds
                     self.recovery_stats.record_attempt(tool_name, category, snippet)
                     log.info("Recovery for %s (%s): retrying after %.1fs", tool_name, category.value, delay)
@@ -191,13 +194,32 @@ class ToolExecutor:
                     retry_cat = self._check_recoverable(retry_result)
                     if retry_cat is not None:
                         self.recovery_stats.record_failure(tool_name, category, snippet)
-                        result = retry_result
+                        raw_result = retry_result
                     else:
                         self.recovery_stats.record_success(tool_name, category, snippet)
-                        result = retry_result
+                        raw_result = retry_result
+                    is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
 
-        outcome = validate_tool_result(tool_name, result, stats=self.validation_stats)
-        return outcome.normalized
+        outcome = validate_tool_result(tool_name, raw_result, stats=self.validation_stats)
+
+        exit_code: int | None = None
+        if isinstance(raw_result, str):
+            import re as _re
+            m = _re.search(r"\(exit (\d+)\)", raw_result)
+            if m:
+                exit_code = int(m.group(1))
+
+        return ToolResult(
+            output=outcome.normalized,
+            ok=not is_error,
+            error=raw_result[:200] if is_error else None,
+            exit_code=exit_code,
+            truncated="truncated" in outcome.violations,
+            duration_ms=duration_ms,
+            tool_name=tool_name,
+            risk_level=assessment.level.value,
+            risk_reason=assessment.reason,
+        )
 
     async def _try_tool(
         self, tool_name: str, handler, tool_input: dict,
