@@ -1825,6 +1825,7 @@ class OdinBot(commands.Bot):
                 "archive_max_files": cfg.archive_max_files,
                 "archive_extract_max_bytes": cfg.archive_extract_max_bytes,
                 "archive_preview_total_chars": cfg.archive_preview_total_chars,
+                "archive_preview_file_max_bytes": cfg.archive_preview_file_max_bytes,
                 "image_max_bytes": cfg.image_max_bytes,
                 "pdf_max_bytes": cfg.pdf_max_bytes,
                 "retention_hours": cfg.retention_hours,

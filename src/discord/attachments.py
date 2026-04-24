@@ -155,6 +155,7 @@ class AttachmentProcessor:
         archive_max_files: int = 500,
         archive_extract_max_bytes: int = 200 * 1024 * 1024,
         archive_preview_total_chars: int = 20_000,
+        archive_preview_file_max_bytes: int = 64_000,
         image_max_bytes: int = 5 * 1024 * 1024,
         pdf_max_bytes: int = 25 * 1024 * 1024,
         retention_hours: int = 24,
@@ -167,6 +168,7 @@ class AttachmentProcessor:
         self.archive_max_files = archive_max_files
         self.archive_extract_max_bytes = archive_extract_max_bytes
         self.archive_preview_total_chars = archive_preview_total_chars
+        self.archive_preview_file_max_bytes = archive_preview_file_max_bytes
         self.image_max_bytes = image_max_bytes
         self.pdf_max_bytes = pdf_max_bytes
         self.retention_hours = retention_hours
@@ -454,7 +456,7 @@ class AttachmentProcessor:
                 continue
             if not _is_text_file(p.name, None):
                 continue
-            if p.stat().st_size > 64_000:
+            if p.stat().st_size > self.archive_preview_file_max_bytes:
                 continue
             try:
                 content = p.read_text(errors="replace")[:2000]
