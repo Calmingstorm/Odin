@@ -710,7 +710,7 @@ class TestHandleKubectl:
             "action": "get",
             "params": {"resource": "pods"},
         })
-        assert "Unknown or disallowed host" in result
+        assert "Unknown or disallowed host" in str(result)
 
     async def test_unknown_action(self):
         exe = self._make_executor()
@@ -718,7 +718,7 @@ class TestHandleKubectl:
             "host": "k8s-master",
             "action": "patch",
         })
-        assert "Unknown kubectl action" in result
+        assert "Unknown kubectl action" in str(result)
 
     async def test_missing_action(self):
         exe = self._make_executor()
@@ -726,7 +726,7 @@ class TestHandleKubectl:
             "host": "k8s-master",
             "action": "",
         })
-        assert "Unknown kubectl action" in result
+        assert "Unknown kubectl action" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_get_dispatches(self, mock_exec):
@@ -741,7 +741,7 @@ class TestHandleKubectl:
         cmd = mock_exec.call_args[0][1]
         assert "kubectl" in cmd
         assert "get" in cmd
-        assert "nginx" in result
+        assert "nginx" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_describe_dispatches(self, mock_exec):
@@ -752,7 +752,7 @@ class TestHandleKubectl:
             "action": "describe",
             "params": {"resource": "pod", "name": "nginx"},
         })
-        assert "Name: nginx" in result
+        assert "Name: nginx" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_logs_dispatches(self, mock_exec):
@@ -763,7 +763,7 @@ class TestHandleKubectl:
             "action": "logs",
             "params": {"pod": "api-server-abc"},
         })
-        assert "Starting server" in result
+        assert "Starting server" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_apply_dispatches(self, mock_exec):
@@ -774,7 +774,7 @@ class TestHandleKubectl:
             "action": "apply",
             "params": {"file": "/tmp/deploy.yaml"},
         })
-        assert "configured" in result
+        assert "configured" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_delete_dispatches(self, mock_exec):
@@ -785,7 +785,7 @@ class TestHandleKubectl:
             "action": "delete",
             "params": {"resource": "pod", "name": "old-pod"},
         })
-        assert "deleted" in result
+        assert "deleted" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_exec_dispatches(self, mock_exec):
@@ -796,7 +796,7 @@ class TestHandleKubectl:
             "action": "exec",
             "params": {"pod": "app-1", "command": "whoami"},
         })
-        assert "root" in result
+        assert "root" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_rollout_dispatches(self, mock_exec):
@@ -807,7 +807,7 @@ class TestHandleKubectl:
             "action": "rollout",
             "params": {"subaction": "restart", "resource": "deployment/web"},
         })
-        assert "restarted" in result
+        assert "restarted" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_scale_dispatches(self, mock_exec):
@@ -818,7 +818,7 @@ class TestHandleKubectl:
             "action": "scale",
             "params": {"resource": "deployment/web", "replicas": 5},
         })
-        assert "scaled" in result
+        assert "scaled" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_top_dispatches(self, mock_exec):
@@ -829,7 +829,7 @@ class TestHandleKubectl:
             "action": "top",
             "params": {"resource": "pods"},
         })
-        assert "app" in result
+        assert "app" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_config_dispatches(self, mock_exec):
@@ -840,7 +840,7 @@ class TestHandleKubectl:
             "action": "config",
             "params": {"subaction": "get-contexts"},
         })
-        assert "prod" in result
+        assert "prod" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_command_failure(self, mock_exec):
@@ -851,8 +851,8 @@ class TestHandleKubectl:
             "action": "get",
             "params": {"resource": "foos"},
         })
-        assert "failed (exit 1)" in result
-        assert "doesn't have a resource type" in result
+        assert "failed (exit 1)" in str(result)
+        assert "doesn't have a resource type" in str(result)
 
     async def test_validation_error(self):
         exe = self._make_executor()
@@ -861,7 +861,7 @@ class TestHandleKubectl:
             "action": "apply",
             "params": {},
         })
-        assert "kubectl error" in result
+        assert "kubectl error" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_empty_output_shows_success(self, mock_exec):
@@ -872,7 +872,7 @@ class TestHandleKubectl:
             "action": "get",
             "params": {"resource": "pods"},
         })
-        assert "completed successfully" in result
+        assert "completed successfully" in str(result)
 
     async def test_no_params_default(self):
         exe = self._make_executor()
@@ -880,7 +880,7 @@ class TestHandleKubectl:
             "host": "k8s-master",
             "action": "get",
         })
-        assert "kubectl error" in result
+        assert "kubectl error" in str(result)
 
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_correct_ssh_user(self, mock_exec):

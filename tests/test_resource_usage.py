@@ -7,6 +7,13 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
 
+
+def _mock_sessions(bot, sessions_dict: dict | None = None):
+    """Configure bot.sessions mock with public API methods."""
+    d = sessions_dict if sessions_dict is not None else {}
+    bot.sessions.count.return_value = len(d)
+    bot.sessions.items_snapshot.return_value = list(d.items())
+
 import pytest
 
 from src.monitoring.resource_usage import (
@@ -275,7 +282,8 @@ class TestCollectSessionStats:
 
     def test_sessions_not_dict(self):
         bot = MagicMock()
-        bot.sessions._sessions = "not a dict"
+        bot.sessions.count.return_value = 0
+        bot.sessions.items_snapshot.return_value = []
         stats = collect_session_stats(bot)
         assert stats.active_count == 0
 
@@ -289,7 +297,7 @@ class TestCollectSessionStats:
         session2.estimated_tokens = 8000
         session2.messages = [1, 2]
         session2.summary = ""
-        bot.sessions._sessions = {"ch1": session1, "ch2": session2}
+        _mock_sessions(bot, {"ch1": session1, "ch2": session2})
         bot.sessions.token_budget = 128000
         bot.sessions.persist_directory = "/nonexistent/sessions"
         stats = collect_session_stats(bot)
@@ -305,7 +313,7 @@ class TestCollectSessionStats:
         session1.estimated_tokens = 200000
         session1.messages = []
         session1.summary = ""
-        bot.sessions._sessions = {"ch1": session1}
+        _mock_sessions(bot, {"ch1": session1})
         bot.sessions.token_budget = 128000
         bot.sessions.persist_directory = "/nonexistent"
         stats = collect_session_stats(bot)
@@ -317,7 +325,7 @@ class TestCollectSessionStats:
         session1.estimated_tokens = 1000
         session1.messages = [1]
         session1.summary = "has summary"
-        bot.sessions._sessions = {"chan_42": session1}
+        _mock_sessions(bot, {"chan_42": session1})
         bot.sessions.token_budget = 128000
         bot.sessions.persist_directory = "/nonexistent"
         stats = collect_session_stats(bot)
@@ -334,7 +342,7 @@ class TestCollectSessionStats:
         session1.estimated_tokens = 5000
         session1.messages = []
         session1.summary = ""
-        bot.sessions._sessions = {"ch1": session1}
+        _mock_sessions(bot, {"ch1": session1})
         bot.sessions.token_budget = 0
         bot.sessions.persist_directory = "/nonexistent"
         stats = collect_session_stats(bot)
@@ -342,14 +350,13 @@ class TestCollectSessionStats:
 
     def test_exception_handling(self):
         bot = MagicMock()
-        bot.sessions._sessions = MagicMock(side_effect=Exception("boom"))
-        type(bot.sessions)._sessions = PropertyMock(side_effect=Exception("boom"))
+        bot.sessions.count.side_effect = Exception("boom")
         stats = collect_session_stats(bot)
         assert stats.active_count == 0
 
     def test_persist_dir_scanning(self):
         bot = MagicMock()
-        bot.sessions._sessions = {}
+        _mock_sessions(bot, {})
         bot.sessions.token_budget = 128000
         with tempfile.TemporaryDirectory() as td:
             (Path(td) / "sess.json").write_text("{}")
@@ -587,7 +594,7 @@ class TestCollectTrajectoryStats:
 class TestCollectAll:
     def _make_bot(self):
         bot = MagicMock()
-        bot.sessions._sessions = {}
+        _mock_sessions(bot, {})
         bot.sessions.token_budget = 128000
         bot.sessions.persist_directory = "/nonexistent/sessions"
         bot.knowledge = None
@@ -659,7 +666,7 @@ class TestCollectAll:
         session1.estimated_tokens = 5000
         session1.messages = [1, 2]
         session1.summary = ""
-        bot.sessions._sessions = {"ch1": session1}
+        _mock_sessions(bot, {"ch1": session1})
         bot.sessions.token_budget = 128000
         bot.sessions.persist_directory = "/nonexistent"
 
@@ -688,7 +695,7 @@ class TestResourceUsageAPI:
         bot = MagicMock()
         bot.is_ready.return_value = True
         bot.guilds = []
-        bot.sessions._sessions = {}
+        _mock_sessions(bot, {})
         bot.sessions.token_budget = 128000
         bot.sessions.persist_directory = "/nonexistent"
         bot.sessions.get_session_token_usage.return_value = {}
@@ -747,7 +754,7 @@ class TestResourceUsageAPI:
         session1.estimated_tokens = 3000
         session1.messages = [1]
         session1.summary = ""
-        bot.sessions._sessions = {"ch1": session1}
+        _mock_sessions(bot, {"ch1": session1})
 
         app = web.Application()
         routes = create_api_routes(bot)
@@ -857,7 +864,7 @@ class TestEdgeCases:
 
     def test_session_stats_no_persist_dir_attr(self):
         bot = MagicMock()
-        bot.sessions._sessions = {}
+        _mock_sessions(bot, {})
         bot.sessions.token_budget = 0
         del bot.sessions.persist_directory
         stats = collect_session_stats(bot)
@@ -884,7 +891,7 @@ class TestEdgeCases:
 
     def test_collect_all_storage_total_sums(self):
         bot = MagicMock()
-        bot.sessions._sessions = {}
+        _mock_sessions(bot, {})
         bot.sessions.token_budget = 0
         with tempfile.TemporaryDirectory() as td:
             (Path(td) / "s1.json").write_text("x" * 500)

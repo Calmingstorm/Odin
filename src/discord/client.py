@@ -928,7 +928,7 @@ class OdinBot(commands.Bot):
             del self._recent_actions[channel_id]
 
         # Clean up _channel_locks for channels no longer in active sessions
-        active_channels = set(self.sessions._sessions.keys())
+        active_channels = set(self.sessions.ids())
         stale_locks = [cid for cid in self._channel_locks if cid not in active_channels]
         for cid in stale_locks:
             del self._channel_locks[cid]
@@ -2693,6 +2693,7 @@ class OdinBot(commands.Bot):
 
                 t0 = time.monotonic()
                 error = None
+                tool_result = None
                 # Handle Discord-native tools
                 try:
                     if tool_name == "purge_messages":
@@ -2867,17 +2868,21 @@ class OdinBot(commands.Bot):
                             file_callback=_skill_file,
                         )
                     else:
-                        result = await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+                        tool_result = await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+                        result = str(tool_result)
                 except asyncio.TimeoutError as e:
                     error = str(e)
                     result = f"Tool {tool_name} timed out: {e}"
+                    tool_result = None
                     log.warning("Tool %s timed out after %.1fs", tool_name, time.monotonic() - t0)
                 except (ValueError, KeyError, TypeError) as e:
                     error = str(e)
                     result = f"Tool {tool_name} input error: {e}"
+                    tool_result = None
                 except Exception as e:
                     error = str(e)
                     result = f"Error executing {tool_name}: {e}"
+                    tool_result = None
                     log.warning("Unexpected tool error for %s: %s", tool_name, e)
 
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -2889,6 +2894,12 @@ class OdinBot(commands.Bot):
 
                 # Scrub secrets from tool output
                 result = scrub_output_secrets(result)
+
+                # Use structured metadata from ToolResult when available
+                if tool_result is not None:
+                    elapsed_ms = tool_result.duration_ms or elapsed_ms
+                    if tool_result.error and not error:
+                        error = tool_result.error
 
                 # Audit log — never crash tool execution on audit failure
                 try:
@@ -2906,13 +2917,15 @@ class OdinBot(commands.Bot):
                         result_summary=result,
                         execution_time_ms=elapsed_ms,
                         error=error,
+                        risk_level=tool_result.risk_level if tool_result else None,
+                        risk_reason=tool_result.risk_reason if tool_result else None,
                     )
                     await self.audit.log_event(
                         event_type="tool_end",
                         action=tool_name,
                         actor=str(message.author.id),
                         channel_id=str(message.channel.id),
-                        detail=result[:150] if isinstance(result, str) else "",
+                        detail=result[:150],
                         metadata={"elapsed_ms": elapsed_ms, "error": error, "iteration": iteration},
                     )
                 except Exception as audit_err:
@@ -2928,9 +2941,6 @@ class OdinBot(commands.Bot):
                     pass  # Non-critical tracking
 
                 # Truncate large outputs before sending back to the LLM.
-                # Tool results stay in messages and are re-sent every iteration,
-                # so capping here prevents a single large result from ballooning
-                # input token costs across the tool loop.
                 tool_content = truncate_tool_output(result)
 
                 return {
@@ -3492,7 +3502,7 @@ class OdinBot(commands.Bot):
             if isinstance(result, Exception):
                 sections.append(f"### {label}\nERROR: {result}")
             else:
-                sections.append(f"### {label}\n{result[:800]}")
+                sections.append(f"### {label}\n{str(result)[:800]}")
 
         return "\n\n".join(sections)
 
@@ -4392,7 +4402,8 @@ class OdinBot(commands.Bot):
             )
 
         # --- Executor-routed tools (run_command, run_script, SSH, etc.) ---
-        return await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+        result = await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+        return str(result)
 
     async def _handle_read_channel(self, message: discord.Message, inp: dict) -> str:
         """Read recent messages from a Discord channel.
@@ -4676,8 +4687,8 @@ class OdinBot(commands.Bot):
                     output = await self.skill_manager.execute(tool_name, tool_input)
                 else:
                     output = await self.tool_executor.execute(tool_name, tool_input)
-                prev_output = output
-                results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{output[:400]}\n```")
+                prev_output = str(output)
+                results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{str(output)[:400]}\n```")
             except Exception as e:
                 results.append(f"**Step {i+1}** (`{step_desc}`): FAILED — {e}")
                 on_failure = step.get("on_failure", "abort")
@@ -4738,7 +4749,7 @@ class OdinBot(commands.Bot):
             tool_input = schedule.get("tool_input", {})
             try:
                 result = await self.tool_executor.execute(tool_name, tool_input)
-                text = f"**Scheduled: {schedule['description']}**\n```\n{result[:1800]}\n```"
+                text = f"**Scheduled: {schedule['description']}**\n```\n{str(result)[:1800]}\n```"
                 await channel.send(scrub_response_secrets(text))
             except (discord.HTTPException, discord.Forbidden, discord.NotFound) as e:
                 log.warning("Scheduled task Discord error: %s", e)

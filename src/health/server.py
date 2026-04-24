@@ -37,11 +37,16 @@ ComponentCheck = Callable[[], tuple[bool, str]]
 SendMessageCallback = Callable[[str, str], Awaitable[None]]
 TriggerCallback = Callable[[str, dict], Awaitable[int]]
 
-# Paths that skip API token authentication
-_AUTH_SKIP_PREFIXES = ("/health", "/metrics", "/webhook/", "/ui")
+# --- Route auth policy table ---
+# Single source of truth for which routes bypass authentication.
+# PUBLIC_PREFIXES: any path starting with these skips auth entirely.
+# PUBLIC_EXACT: specific /api/ paths that skip auth (e.g. login).
+# Everything else under /api/ requires a valid Bearer token or session.
+AUTH_PUBLIC_PREFIXES = ("/health", "/metrics", "/webhook/", "/ui")
+AUTH_PUBLIC_EXACT = frozenset({"/api/auth/login"})
 
-# Exact API paths that skip token auth (login must be accessible unauthenticated)
-_AUTH_SKIP_PATHS = frozenset({"/api/auth/login"})
+_AUTH_SKIP_PREFIXES = AUTH_PUBLIC_PREFIXES
+_AUTH_SKIP_PATHS = AUTH_PUBLIC_EXACT
 
 # Rate-limit: max requests per window per IP on /api/ routes
 _RATE_LIMIT_MAX = 120

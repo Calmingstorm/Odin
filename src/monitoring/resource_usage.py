@@ -151,14 +151,10 @@ def collect_session_stats(bot: Any) -> SessionStats:
         if sm is None:
             return stats
 
-        sessions = getattr(sm, "_sessions", {})
-        if not isinstance(sessions, dict):
-            return stats
-
-        stats.active_count = len(sessions)
+        stats.active_count = sm.count() if hasattr(sm, "count") else 0
         stats.token_budget = getattr(sm, "token_budget", 0)
 
-        for cid, session in sessions.items():
+        for cid, session in (sm.items_snapshot() if hasattr(sm, "items_snapshot") else []):
             tokens = getattr(session, "estimated_tokens", 0)
             msg_count = len(getattr(session, "messages", []))
             stats.total_tokens += tokens

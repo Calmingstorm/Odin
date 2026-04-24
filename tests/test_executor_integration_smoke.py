@@ -322,7 +322,8 @@ class TestProcessWithToolsEndToEnd:
             )
 
         bot.codex_client.chat_with_tools = fake_chat_with_tools
-        bot.tool_executor.execute = AsyncMock(return_value="Filesystem 42% used")
+        from src.tools.result_validator import ToolResult
+        bot.tool_executor.execute = AsyncMock(return_value=ToolResult(output="Filesystem 42% used", tool_name="check_disk"))
         bot.audit.log_execution = AsyncMock()
 
         # Build a fake Discord message
@@ -729,6 +730,50 @@ class TestInvokeSkillTool:
         result = gov.check("rm -rf /")
         assert not result.allowed
         assert "critical" in result.denial_message().lower()
+
+    def test_command_governor_admin_override_critical(self):
+        """Admin can override critical blocks when admin_can_override is True."""
+        from src.tools.risk_classifier import CommandGovernor
+        gov = CommandGovernor(admin_can_override=True)
+        result = gov.check("rm -rf /", user_tier="admin")
+        assert result.allowed
+        assert "admin override" in result.reason
+
+    def test_command_governor_admin_override_disabled(self):
+        """Admin cannot override when admin_can_override is False."""
+        from src.tools.risk_classifier import CommandGovernor
+        gov = CommandGovernor(admin_can_override=False)
+        result = gov.check("rm -rf /", user_tier="admin")
+        assert not result.allowed
+
+    def test_command_governor_non_admin_blocked(self):
+        """Non-admin users are always blocked on critical commands."""
+        from src.tools.risk_classifier import CommandGovernor
+        gov = CommandGovernor(admin_can_override=True)
+        result = gov.check("rm -rf /", user_tier="user")
+        assert not result.allowed
+
+    def test_command_governor_strict_host(self):
+        """Strict host blocks HIGH-risk commands."""
+        from src.tools.risk_classifier import CommandGovernor
+        gov = CommandGovernor(host_overrides={"prod": "strict"})
+        result = gov.check("systemctl restart nginx", host="prod")
+        assert not result.allowed
+        assert "strict" in result.reason
+
+    def test_command_governor_strict_host_allows_low(self):
+        """Strict host still allows LOW-risk commands."""
+        from src.tools.risk_classifier import CommandGovernor
+        gov = CommandGovernor(host_overrides={"prod": "strict"})
+        result = gov.check("df -h", host="prod")
+        assert result.allowed
+
+    def test_command_governor_non_strict_host_allows_high(self):
+        """Non-strict hosts allow HIGH-risk commands."""
+        from src.tools.risk_classifier import CommandGovernor
+        gov = CommandGovernor(host_overrides={"prod": "strict"})
+        result = gov.check("systemctl restart nginx", host="dev")
+        assert result.allowed
 
     @pytest.mark.asyncio
     async def test_memory_manage_get_action(self, tmp_path):

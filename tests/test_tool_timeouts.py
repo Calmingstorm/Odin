@@ -150,7 +150,7 @@ class TestExecutorPerToolTimeout:
 
         with patch("asyncio.wait_for", side_effect=close_and_raise):
             result = await executor.execute("run_command", {"command": "sleep 100"})
-            assert "timed out after 60s" in result
+            assert "timed out after 60s" in str(result)
 
     async def test_timeout_message_uses_global_when_no_override(self, executor):
         """When a non-overridden tool times out, the error uses the global default."""
@@ -166,7 +166,7 @@ class TestExecutorPerToolTimeout:
 
         with patch("asyncio.wait_for", side_effect=close_and_raise):
             result = await executor.execute("write_file", {})
-            assert "timed out after 300s" in result
+            assert "timed out after 300s" in str(result)
 
     async def test_metrics_recorded_on_timeout(self, executor):
         """Timeout metrics are recorded when a per-tool timeout fires."""
@@ -523,7 +523,7 @@ class TestExecutorConfigIntegration:
 
         executor._handle_run_command = echo_handler
         result = await executor.execute("run_command", {"command": "echo test"})
-        assert result == "ok: {'command': 'echo test'}"
+        assert str(result) == "ok: {'command': 'echo test'}"
 
     async def test_executor_config_change_reflected_immediately(self):
         from src.tools.executor import ToolExecutor

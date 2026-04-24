@@ -530,3 +530,86 @@ def format_report_summary(report: ValidationReport) -> str:
 
 def report_as_json(report: ValidationReport) -> str:
     return json.dumps(report.to_dict(), indent=2, default=str)
+
+
+# --- Mutation detection ---------------------------------------------------
+# Detects operational mutations from tool calls so the executor can
+# auto-annotate results with a validation reminder.  Moves the
+# "always validate after changes" invariant from the system prompt
+# into enforced code.
+
+_MUTATION_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bsystemctl\s+(restart|stop|start|reload|enable|disable)\b"), "service lifecycle change"),
+    (re.compile(r"\bservice\s+\S+\s+(restart|stop|start)\b"), "service lifecycle change"),
+    (re.compile(r"\bdocker\s+(compose\s+)?(up|down|restart|stop|start|rm)\b"), "container operation"),
+    (re.compile(r"\bdocker-compose\s+(up|down|restart|stop)\b"), "compose operation"),
+    (re.compile(r"\bkubectl\s+(apply|delete|rollout|scale|patch)\b"), "kubernetes mutation"),
+    (re.compile(r"\bterraform\s+(apply|destroy)\b"), "infrastructure mutation"),
+    (re.compile(r"\bansible-playbook\b"), "ansible deployment"),
+    (re.compile(r"\b(apt|apt-get|yum|dnf)\s+(install|remove|purge|upgrade)\b"), "package change"),
+    (re.compile(r"\bpip3?\s+install\b"), "pip install"),
+    (re.compile(r"\bnginx\s+-s\s+reload\b"), "nginx reload"),
+    (re.compile(r"\biptables\b"), "firewall change"),
+    (re.compile(r"\bufw\s+(allow|deny|delete|enable|disable)\b"), "firewall change"),
+]
+
+_MUTATION_TOOL_ACTIONS: dict[str, frozenset[str]] = {
+    "docker_ops": frozenset({"start", "stop", "restart", "rm", "rmi", "up", "down", "build", "recreate"}),
+    "deploy": frozenset(),
+}
+
+_VALIDATION_HINT = (
+    "\n\n[post-action] Operational mutation detected ({reason}). "
+    "Consider running validate_action to confirm the change took effect."
+)
+
+
+class MutationDetection:
+    __slots__ = ("detected", "reason")
+
+    def __init__(self, detected: bool, reason: str):
+        self.detected = detected
+        self.reason = reason
+
+
+def detect_mutation(tool_name: str, tool_input: dict) -> MutationDetection:
+    """Check if a tool call represents an operational mutation."""
+    if tool_name in _MUTATION_TOOL_ACTIONS:
+        allowed_actions = _MUTATION_TOOL_ACTIONS[tool_name]
+        if not allowed_actions:
+            return MutationDetection(True, f"tool: {tool_name}")
+        action = tool_input.get("action", "")
+        if action in allowed_actions:
+            return MutationDetection(True, f"{tool_name}: {action}")
+
+    command = ""
+    if tool_name == "run_command":
+        command = tool_input.get("command", "")
+    elif tool_name == "run_script":
+        command = tool_input.get("script", "")
+    elif tool_name == "run_command_multi":
+        command = tool_input.get("command", "")
+    elif tool_name == "write_file":
+        path = tool_input.get("path", "")
+        if any(p in path for p in ("/etc/", "/opt/", "nginx", "apache", "systemd", ".service", ".conf")):
+            return MutationDetection(True, f"config write: {path}")
+
+    if command:
+        for pattern, reason in _MUTATION_PATTERNS:
+            if pattern.search(command):
+                return MutationDetection(True, reason)
+
+    return MutationDetection(False, "")
+
+
+def annotate_if_mutation(
+    tool_name: str, tool_input: dict, output: str,
+) -> tuple[str, MutationDetection]:
+    """Append a validation hint if a mutation was detected.
+
+    Returns (possibly annotated output, detection result).
+    """
+    detection = detect_mutation(tool_name, tool_input)
+    if detection.detected and not output.startswith(("Error", "Command failed", "Script failed")):
+        output = output + _VALIDATION_HINT.format(reason=detection.reason)
+    return output, detection

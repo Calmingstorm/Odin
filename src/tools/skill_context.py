@@ -168,19 +168,19 @@ class SkillContext:
         host = hosts[0]
         from urllib.parse import quote as url_quote
         encoded_query = url_quote(query)
-        return await self._executor.execute("run_command", {
+        return str(await self._executor.execute("run_command", {
             "host": host,
             "command": f"curl -sf 'http://localhost:9090/api/v1/query?query={encoded_query}'",
-        })
+        }))
 
     async def read_file(self, host: str, path: str, lines: int = 200) -> str:
         """Read a file from a managed host. Returns file content."""
         if is_path_denied(path):
             self._log.warning("Skill attempted to read denied path: %s", path)
             return f"Access denied: '{path}' is a restricted path."
-        return await self._executor.execute("read_file", {
+        return str(await self._executor.execute("read_file", {
             "host": host, "path": path, "lines": lines,
-        })
+        }))
 
     async def post_message(self, text: str) -> None:
         """Send a message to the channel that invoked this skill."""
@@ -388,7 +388,7 @@ class SkillContext:
             if is_path_denied(path):
                 self._log.warning("Skill attempted to read denied path via tool: %s", path)
                 return f"Access denied: '{path}' is a restricted path."
-        return await self._executor.execute(tool_name, tool_input or {})
+        return str(await self._executor.execute(tool_name, tool_input or {}))
 
     def log(self, msg: str) -> None:
         """Write a log message under the skill's namespace."""

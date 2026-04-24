@@ -121,8 +121,7 @@ def check_sessions(bot: OdinBot) -> ComponentStatus:
             detail="Session manager not initialised",
         )
     try:
-        session_dict = getattr(sessions, "_sessions", {})
-        count = len(session_dict) if isinstance(session_dict, dict) else 0
+        count = sessions.count() if hasattr(sessions, "count") else 0
         token_metrics = {}
         if hasattr(sessions, "get_token_metrics"):
             token_metrics = sessions.get_token_metrics()

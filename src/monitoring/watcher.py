@@ -120,10 +120,10 @@ class InfraWatcher:
 
     async def _check_disk(self, check: MonitorCheck) -> None:
         for host in check.hosts:
-            output = await self._executor.execute("run_command", {
+            output = str(await self._executor.execute("run_command", {
                 "host": host,
                 "command": "df -h --exclude-type=tmpfs --exclude-type=devtmpfs",
-            })
+            }))
             # Parse df -h output for usage percentages
             for line in output.strip().split("\n"):
                 match = re.search(r"(\d+)%\s+(/\S*)", line)
@@ -141,10 +141,10 @@ class InfraWatcher:
 
     async def _check_memory(self, check: MonitorCheck) -> None:
         for host in check.hosts:
-            output = await self._executor.execute("run_command", {
+            output = str(await self._executor.execute("run_command", {
                 "host": host,
                 "command": "free -h",
-            })
+            }))
             # Parse "free -h" output — look for Mem: line
             for line in output.strip().split("\n"):
                 if line.startswith("Mem:"):
@@ -166,10 +166,10 @@ class InfraWatcher:
     async def _check_service(self, check: MonitorCheck) -> None:
         for host in check.hosts:
             for service in check.services:
-                output = await self._executor.execute("run_command", {
+                output = str(await self._executor.execute("run_command", {
                     "host": host,
                     "command": f"systemctl status {service} --no-pager -l",
-                })
+                }))
                 # Check if the service is not active
                 is_down = (
                     "could not be found" in output.lower()
@@ -196,10 +196,10 @@ class InfraWatcher:
             return
         from urllib.parse import quote as url_quote
         safe_query = url_quote(check.query)
-        output = await self._executor.execute("run_command", {
+        output = str(await self._executor.execute("run_command", {
             "host": host,
             "command": f"curl -s 'http://127.0.0.1:9090/api/v1/query?query={safe_query}'",
-        })
+        }))
         # If the query returns results (non-empty result array), alert.
         if output.strip() != "No results." and '"result":[]' not in output and '"result": []' not in output:
             key = f"{check.name}:promql"

@@ -74,6 +74,48 @@ DEFAULT_SCHEMA = ToolResultSchema()
 
 
 @dataclass(slots=True)
+class ToolResult:
+    """Structured tool execution result.
+
+    Carries metadata alongside the output string so downstream code
+    (audit, web API, retry logic) can inspect structured state instead
+    of parsing error strings.  ``str(result)`` returns the output for
+    backward-compatible string usage.
+    """
+
+    output: str
+    ok: bool = True
+    error: str | None = None
+    exit_code: int | None = None
+    truncated: bool = False
+    duration_ms: int = 0
+    tool_name: str = ""
+    risk_level: str = "low"
+    risk_reason: str = ""
+
+    def __str__(self) -> str:
+        return self.output
+
+    def as_dict(self) -> dict:
+        d: dict = {
+            "ok": self.ok,
+            "output": self.output,
+            "truncated": self.truncated,
+            "duration_ms": self.duration_ms,
+        }
+        if self.error:
+            d["error"] = self.error
+        if self.exit_code is not None:
+            d["exit_code"] = self.exit_code
+        if self.tool_name:
+            d["tool_name"] = self.tool_name
+        if self.risk_level != "low":
+            d["risk_level"] = self.risk_level
+            d["risk_reason"] = self.risk_reason
+        return d
+
+
+@dataclass(slots=True)
 class ValidationOutcome:
     """Result of validating a single tool result."""
 

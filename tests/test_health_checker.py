@@ -183,6 +183,7 @@ class TestCheckSessions:
     def test_healthy(self):
         bot = MagicMock()
         bot.sessions._sessions = {"ch1": MagicMock(), "ch2": MagicMock()}
+        bot.sessions.count.return_value = 2
         bot.sessions.get_token_metrics.return_value = {
             "total_tokens": 5000,
             "over_budget_count": 0,
@@ -196,6 +197,7 @@ class TestCheckSessions:
     def test_over_budget(self):
         bot = MagicMock()
         bot.sessions._sessions = {"ch1": MagicMock()}
+        bot.sessions.count.return_value = 1
         bot.sessions.get_token_metrics.return_value = {
             "total_tokens": 100000,
             "over_budget_count": 1,
@@ -213,6 +215,7 @@ class TestCheckSessions:
     def test_no_token_metrics_method(self):
         bot = MagicMock()
         bot.sessions._sessions = {}
+        bot.sessions.count.return_value = 0
         del bot.sessions.get_token_metrics
         result = check_sessions(bot)
         assert result.healthy is True
@@ -221,6 +224,7 @@ class TestCheckSessions:
     def test_exception(self):
         bot = MagicMock()
         bot.sessions._sessions = {}
+        bot.sessions.count.return_value = 0
         bot.sessions.get_token_metrics.side_effect = RuntimeError("db error")
         result = check_sessions(bot)
         assert result.healthy is False
@@ -595,6 +599,7 @@ class TestCheckAll:
         bot.codex._session = session
         # sessions
         bot.sessions._sessions = {}
+        bot.sessions.count.return_value = 0
         bot.sessions.get_token_metrics.return_value = {"total_tokens": 0, "over_budget_count": 0}
         # knowledge
         bot.knowledge.available = True
@@ -655,8 +660,7 @@ class TestCheckAll:
 
     def test_checker_crash_handled(self):
         bot = self._make_healthy_bot()
-        # Make check_sessions crash by making _sessions raise
-        type(bot.sessions)._sessions = PropertyMock(side_effect=RuntimeError("crash"))
+        bot.sessions.count.side_effect = RuntimeError("crash")
         result = check_all(bot)
         session_comp = next(c for c in result["components"] if c["name"] == "sessions")
         assert session_comp["healthy"] is False
@@ -748,6 +752,7 @@ class TestHealthAPI:
         session.closed = False
         bot.codex._session = session
         bot.sessions._sessions = {}
+        bot.sessions.count.return_value = 0
         bot.sessions.get_token_metrics.return_value = {"total_tokens": 0, "over_budget_count": 0}
         bot.knowledge.available = True
         bot.knowledge.count.return_value = 0
@@ -834,7 +839,7 @@ class TestEdgeCases:
 
     def test_sessions_non_dict(self):
         bot = MagicMock()
-        bot.sessions._sessions = "not a dict"
+        bot.sessions.count.return_value = 0
         bot.sessions.get_token_metrics.return_value = {"total_tokens": 0, "over_budget_count": 0}
         result = check_sessions(bot)
         assert result.metadata["count"] == 0

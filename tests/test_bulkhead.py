@@ -373,7 +373,7 @@ class TestExecutorBulkheadIntegration:
         with patch("src.tools.browser.handle_browser_read_page", new_callable=AsyncMock) as mock_handler:
             mock_handler.return_value = "page content"
             result = await ex._handle_browser_read_page({"url": "http://example.com"})
-            assert result == "page content"
+            assert str(result) == "page content"
             assert browser_bh.total == 1
 
 
@@ -754,7 +754,7 @@ class TestIsolationSemantics:
 
             # run_command via execute() should return error string
             result = await ex.execute("run_command", {"host": "srv", "command": "c3"})
-            assert "SSH bulkhead full" in result
+            assert "SSH bulkhead full" in str(result)
 
             gate.set()
             await t1
