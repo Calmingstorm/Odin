@@ -108,11 +108,11 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     ("stop_loop", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
     ("schedule_task", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, (),
         ("workflow steps need populated tool_input with all required fields",
-         "use natural language time strings — parse_time validates them"))),
+         "run_at must be ISO format — use parse_time first for natural language"))),
     ("delete_schedule", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
     ("update_schedule", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
     ("delegate_task", Affordance(Cost.HIGH, Risk.HIGH, Latency.UNBOUNDED, (),
-        ("every run_command step needs tool_input.command and tool_input.host",
+        ("every run_command step needs tool_input.command",
          "steps execute sequentially — use {prev_output} to chain results"))),
     # Infra
     ("git_ops", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS, (),
