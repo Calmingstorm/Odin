@@ -254,29 +254,62 @@ _SUGGESTION_MAP: dict[str, str] = {
 class CommandGovernor:
     """Enforces shell command policy before execution.
 
-    CRITICAL commands and exfiltration patterns are always blocked.
+    CRITICAL commands and exfiltration patterns are always blocked
+    (unless admin_can_override is True and the caller is an admin).
     HIGH commands are allowed but logged with warnings.
     The governor runs AFTER the LLM chooses a tool but BEFORE anything
     touches a shell — the last line of defense.
+
+    Per-host overrides allow tightening policy for sensitive hosts
+    (e.g. block HIGH on production, allow on dev).
     """
 
-    def __init__(self, block_critical: bool = True, block_exfil: bool = True) -> None:
+    def __init__(
+        self,
+        block_critical: bool = True,
+        block_exfil: bool = True,
+        admin_can_override: bool = True,
+        host_overrides: dict[str, str] | None = None,
+    ) -> None:
         self._block_critical = block_critical
         self._block_exfil = block_exfil
+        self._admin_can_override = admin_can_override
+        self._host_overrides = host_overrides or {}
         self._stats = GovernorStats()
 
     @property
     def stats(self) -> "GovernorStats":
         return self._stats
 
-    def check(self, command: str) -> CommandGovernorResult:
-        """Check a command against the policy. Returns allow/deny with reason."""
+    def check(
+        self,
+        command: str,
+        *,
+        user_tier: str | None = None,
+        host: str | None = None,
+    ) -> CommandGovernorResult:
+        """Check a command against the policy.
+
+        Args:
+            command: The shell command string.
+            user_tier: Permission tier of the caller (admin/user/guest).
+            host: Target host alias for per-host policy overrides.
+        """
         if not command or not command.strip():
             return CommandGovernorResult(True, RiskLevel.LOW, "empty command")
+
+        is_admin = user_tier == "admin"
 
         if self._block_exfil:
             for pattern, reason in _EXFIL_PATTERNS:
                 if pattern.search(command):
+                    if is_admin and self._admin_can_override:
+                        log.warning(
+                            "Governor ALLOWED (admin override, exfil): %s — %s",
+                            reason, command[:200],
+                        )
+                        self._stats.record_allow(command, RiskAssessment(RiskLevel.CRITICAL, reason))
+                        return CommandGovernorResult(True, RiskLevel.CRITICAL, f"{reason} (admin override)")
                     result = CommandGovernorResult(
                         False, RiskLevel.CRITICAL, reason,
                         _SUGGESTION_MAP.get(reason, ""),
@@ -287,7 +320,24 @@ class CommandGovernor:
 
         assessment = classify_command(command)
 
+        host_policy = self._host_overrides.get(host, "") if host else ""
+        if host_policy == "strict" and assessment.level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            result = CommandGovernorResult(
+                False, assessment.level, f"{assessment.reason} (host '{host}' is strict-mode)",
+                _SUGGESTION_MAP.get(assessment.reason, ""),
+            )
+            self._stats.record_block(command, result)
+            log.warning("Governor BLOCKED (strict host %s): %s — %s", host, assessment.reason, command[:200])
+            return result
+
         if self._block_critical and assessment.level == RiskLevel.CRITICAL:
+            if is_admin and self._admin_can_override:
+                log.warning(
+                    "Governor ALLOWED (admin override, critical): %s — %s",
+                    assessment.reason, command[:200],
+                )
+                self._stats.record_allow(command, assessment)
+                return CommandGovernorResult(True, RiskLevel.CRITICAL, f"{assessment.reason} (admin override)")
             result = CommandGovernorResult(
                 False, RiskLevel.CRITICAL, assessment.reason,
                 _SUGGESTION_MAP.get(assessment.reason, ""),

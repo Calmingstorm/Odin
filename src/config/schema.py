@@ -148,8 +148,16 @@ class ModelRoutingConfig(BaseModel):
     )
 
 
+class GovernorConfig(BaseModel):
+    block_critical: bool = True
+    block_exfil: bool = True
+    admin_can_override: bool = True
+    host_overrides: dict[str, str] = Field(default_factory=dict)
+
+
 class ToolsConfig(BaseModel):
     enabled: bool = True
+    governor: GovernorConfig = GovernorConfig()
     ssh_key_path: str = "/app/.ssh/id_ed25519"
     ssh_known_hosts_path: str = "/app/.ssh/known_hosts"
     hosts: dict[str, ToolHost] = Field(default_factory=dict)

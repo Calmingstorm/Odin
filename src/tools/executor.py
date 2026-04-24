@@ -96,7 +96,16 @@ class ToolExecutor:
         self.recovery_stats = RecoveryStats()
         self.validation_stats = ResultValidationStats()
         from .risk_classifier import CommandGovernor
-        self.command_governor = CommandGovernor()
+        gov_cfg = getattr(self.config, "governor", None)
+        if gov_cfg:
+            self.command_governor = CommandGovernor(
+                block_critical=gov_cfg.block_critical,
+                block_exfil=gov_cfg.block_exfil,
+                admin_can_override=gov_cfg.admin_can_override,
+                host_overrides=dict(gov_cfg.host_overrides) if gov_cfg.host_overrides else None,
+            )
+        else:
+            self.command_governor = CommandGovernor()
         self._recovery_enabled = self.config.recovery.enabled
         self.freshness_stats = FreshnessStats()
         self._branch_freshness_enabled = self.config.branch_freshness.enabled
@@ -141,6 +150,10 @@ class ToolExecutor:
         handler = getattr(self, f"_handle_{tool_name}", None)
         if handler is None:
             return ToolResult(output=f"Unknown tool: {tool_name}", ok=False, error="unknown_tool", tool_name=tool_name)
+
+        self._current_user_tier = (
+            self._permission_manager.get_tier(user_id) if self._permission_manager and user_id else None
+        )
 
         denial = self.check_permission(tool_name, user_id)
         if denial:
@@ -390,7 +403,9 @@ class ToolExecutor:
 
         governor_note = ""
         if getattr(self, "command_governor", None):
-            check = self.command_governor.check(command)
+            check = self.command_governor.check(
+                command, user_tier=getattr(self, "_current_user_tier", None), host=host,
+            )
             if not check.allowed:
                 return check.denial_message()
             if check.risk.value in ("high", "critical"):
@@ -440,7 +455,9 @@ class ToolExecutor:
 
         governor_note = ""
         if getattr(self, "command_governor", None):
-            check = self.command_governor.check(script)
+            check = self.command_governor.check(
+                script, user_tier=getattr(self, "_current_user_tier", None), host=host,
+            )
             if not check.allowed:
                 return check.denial_message()
             if check.risk.value in ("high", "critical"):
@@ -725,7 +742,9 @@ class ToolExecutor:
             if not host:
                 return "host is required for start action."
             if getattr(self, "command_governor", None):
-                check = self.command_governor.check(command)
+                check = self.command_governor.check(
+                    command, user_tier=getattr(self, "_current_user_tier", None), host=host,
+                )
                 if not check.allowed:
                     return check.denial_message()
             # Validate host against configured hosts
