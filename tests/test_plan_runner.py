@@ -22,7 +22,7 @@ async def test_run_simple_plan(runner):
         "name": "simple",
         "steps": [{"id": "a", "tool": "echo", "params": {"msg": "hello"}}],
     })
-    result = await runner.run({"plan": plan_json})
+    result, _ok = await runner.run({"plan": plan_json})
     assert "SUCCESS" in result
     assert "simple" in result
 
@@ -34,7 +34,7 @@ async def test_run_plan_json_format(runner):
         "name": "json-out",
         "steps": [{"id": "a", "tool": "echo", "params": {"x": 1}}],
     })
-    result = await runner.run({"plan": plan, "format": "json"})
+    result, _ok = await runner.run({"plan": plan, "format": "json"})
     parsed = json.loads(result)
     assert parsed["success"] is True
     assert parsed["name"] == "json-out"
@@ -55,7 +55,7 @@ async def test_run_plan_with_deps(runner):
             },
         ],
     })
-    result = await runner.run({"plan": plan, "format": "json"})
+    result, _ok = await runner.run({"plan": plan, "format": "json"})
     parsed = json.loads(result)
     assert parsed["success"] is True
     assert parsed["steps"]["second"]["output"]["prev"] == "one"
@@ -70,7 +70,7 @@ async def test_run_plan_failure(runner):
             {"id": "boom", "tool": "fail", "params": {"message": "test error"}},
         ],
     })
-    result = await runner.run({"plan": plan})
+    result, _ok = await runner.run({"plan": plan})
     assert "FAILED" in result
 
 
@@ -84,7 +84,7 @@ async def test_run_plan_cascade_skip(runner):
             {"id": "b", "tool": "echo", "depends_on": "a"},
         ],
     })
-    result = await runner.run({"plan": plan, "format": "json"})
+    result, _ok = await runner.run({"plan": plan, "format": "json"})
     parsed = json.loads(result)
     assert parsed["steps"]["a"]["status"] == "failed"
     assert parsed["steps"]["b"]["status"] == "skipped"
@@ -99,19 +99,19 @@ async def test_run_plan_validation_error(runner):
             {"id": "a", "tool": "ts", "depends_on": "missing"},
         ],
     })
-    result = await runner.run({"plan": plan})
+    result, _ok = await runner.run({"plan": plan})
     assert "validation failed" in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_run_missing_plan_arg(runner):
-    result = await runner.run({})
+    result, _ok = await runner.run({})
     assert "required" in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_run_bad_json(runner):
-    result = await runner.run({"plan": "{not valid"})
+    result, _ok = await runner.run({"plan": "{not valid"})
     assert "error" in result.lower()
 
 
@@ -122,7 +122,7 @@ async def test_run_plan_dict_input(runner):
         "name": "dict-plan",
         "steps": [{"id": "a", "tool": "echo", "params": {"k": "v"}}],
     }
-    result = await runner.run({"plan": plan, "format": "json"})
+    result, _ok = await runner.run({"plan": plan, "format": "json"})
     parsed = json.loads(result)
     assert parsed["success"] is True
 
@@ -137,7 +137,7 @@ async def test_run_plan_with_shell(ts_registry):
             {"id": "hw", "tool": "shell", "params": {"command": "echo hello-world"}},
         ],
     })
-    result = await runner.run({"plan": plan, "format": "json"})
+    result, _ok = await runner.run({"plan": plan, "format": "json"})
     parsed = json.loads(result)
     assert parsed["success"] is True
     assert "hello-world" in parsed["steps"]["hw"]["output"]["stdout"]

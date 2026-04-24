@@ -13,8 +13,11 @@ from src.tools.executor import ToolExecutor
 
 @pytest.mark.asyncio
 async def test_execute_plan_via_tool_executor():
-    """The execute_plan tool works through the main ToolExecutor dispatch."""
-    executor = ToolExecutor()
+    """The execute_plan tool routes shell commands through ToolExecutor security pipeline."""
+    from src.config.schema import ToolHost
+    cfg = ToolsConfig()
+    cfg.hosts = {"localhost": ToolHost(address="localhost", ssh_user="", os="linux")}
+    executor = ToolExecutor(config=cfg)
     plan = json.dumps({
         "name": "via-executor",
         "steps": [
@@ -25,6 +28,40 @@ async def test_execute_plan_via_tool_executor():
     parsed = json.loads(str(result))
     assert parsed["success"] is True
     assert "integration-test" in parsed["steps"]["s1"]["output"]["stdout"]
+
+
+@pytest.mark.asyncio
+async def test_execute_plan_failed_step_summary_format():
+    """Failed plan step marks ToolResult.ok=False even with default summary format."""
+    from src.config.schema import ToolHost
+    cfg = ToolsConfig()
+    cfg.hosts = {"localhost": ToolHost(address="localhost", ssh_user="", os="linux")}
+    executor = ToolExecutor(config=cfg)
+    plan = json.dumps({
+        "name": "fail-test",
+        "steps": [
+            {"id": "s1", "tool": "shell", "params": {"command": "false"}},
+        ],
+    })
+    result = await executor.execute("execute_plan", {"plan": plan})
+    assert not result.ok, f"Failed plan should have ok=False, got ok={result.ok}"
+
+
+@pytest.mark.asyncio
+async def test_execute_plan_failed_step_dict_format():
+    """Failed plan step marks ToolResult.ok=False with dict format."""
+    from src.config.schema import ToolHost
+    cfg = ToolsConfig()
+    cfg.hosts = {"localhost": ToolHost(address="localhost", ssh_user="", os="linux")}
+    executor = ToolExecutor(config=cfg)
+    plan = json.dumps({
+        "name": "fail-dict",
+        "steps": [
+            {"id": "s1", "tool": "shell", "params": {"command": "false"}},
+        ],
+    })
+    result = await executor.execute("execute_plan", {"plan": plan, "format": "dict"})
+    assert not result.ok
 
 
 @pytest.mark.asyncio

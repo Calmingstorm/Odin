@@ -172,10 +172,17 @@ class ToolExecutor:
 
         timeout = self.config.get_tool_timeout(tool_name)
         t0 = asyncio.get_event_loop().time()
-        raw_result = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
+        raw = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
         duration_ms = int((asyncio.get_event_loop().time() - t0) * 1000)
 
-        is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
+        # Unpack structured (output, exit_code) returns from handlers
+        if isinstance(raw, tuple):
+            raw_result, exit_code = raw[0], raw[1]
+            is_error = exit_code != 0
+        else:
+            raw_result = raw
+            exit_code = None
+            is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
 
         if self._recovery_enabled:
             category = self._check_recoverable(raw_result)
@@ -204,15 +211,18 @@ class ToolExecutor:
                     log.info("Recovery for %s (%s): retrying after %.1fs", tool_name, category.value, delay)
                     if delay > 0:
                         await asyncio.sleep(delay)
-                    retry_result = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
-                    retry_cat = self._check_recoverable(retry_result)
+                    retry_raw = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
+                    if isinstance(retry_raw, tuple):
+                        raw_result, exit_code = retry_raw[0], retry_raw[1]
+                        is_error = exit_code != 0
+                    else:
+                        raw_result = retry_raw
+                    retry_cat = self._check_recoverable(raw_result)
                     if retry_cat is not None:
                         self.recovery_stats.record_failure(tool_name, category, snippet)
-                        raw_result = retry_result
                     else:
                         self.recovery_stats.record_success(tool_name, category, snippet)
-                        raw_result = retry_result
-                    is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
+                        is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
 
         mutation_detected = False
         mutation_reason = ""
@@ -221,10 +231,17 @@ class ToolExecutor:
             mutation_detected = _mutation.detected
             mutation_reason = _mutation.reason
 
+        # Propagate nested mutation state from execute_plan
+        plan_tracker = getattr(self, "_plan_mutation_tracker", None)
+        if plan_tracker and plan_tracker.detected:
+            mutation_detected = True
+            mutation_reason = mutation_reason or "; ".join(plan_tracker.reasons)
+            del self._plan_mutation_tracker
+
         outcome = validate_tool_result(tool_name, raw_result, stats=self.validation_stats)
 
-        exit_code: int | None = None
-        if isinstance(raw_result, str):
+        # Extract exit code from string if handler didn't return one
+        if exit_code is None and isinstance(raw_result, str):
             import re as _re
             m = _re.search(r"\(exit (\d+)\)", raw_result)
             if m:
@@ -247,8 +264,13 @@ class ToolExecutor:
     async def _try_tool(
         self, tool_name: str, handler, tool_input: dict,
         timeout: int, user_id: str | None,
-    ) -> str:
-        """Single attempt at executing a tool handler."""
+    ) -> str | tuple[str, int]:
+        """Single attempt at executing a tool handler.
+
+        Handlers may return either a plain string or a (output, exit_code)
+        tuple.  Tuples propagate exit codes into ToolResult without
+        string-prefix parsing.
+        """
         try:
             self._current_tool_timeout = timeout
             if tool_name in ("memory_manage", "manage_list"):
@@ -264,12 +286,12 @@ class ToolExecutor:
             self._metrics[tool_name]["errors"] += 1
             self._metrics[tool_name]["timeouts"] += 1
             log.error("Tool %s timed out after %ds", tool_name, timeout)
-            return f"Error: tool '{tool_name}' timed out after {timeout}s"
+            return f"Error: tool '{tool_name}' timed out after {timeout}s", -1
         except Exception as e:
             self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
             self._metrics[tool_name]["errors"] += 1
             log.error("Tool %s failed: %s", tool_name, e)
-            return f"Error executing {tool_name}: {e}"
+            return f"Error executing {tool_name}: {e}", -1
 
     # Categories excluded from tool-level recovery (they have their own
     # retry logic or the cost of retrying exceeds the benefit).
@@ -389,15 +411,15 @@ class ToolExecutor:
                 return 1, "Error: SSH bulkhead full — too many concurrent SSH commands"
         return await run_ssh_command(**ssh_kwargs)
 
-    async def _run_on_host(self, alias: str, command: str) -> str:
+    async def _run_on_host(self, alias: str, command: str) -> str | tuple[str, int]:
         resolved = self._resolve_host(alias)
         if not resolved:
             return f"Unknown or disallowed host: {alias}"
         address, ssh_user, _os = resolved
         code, output = await self._exec_command(address, command, ssh_user)
         if code != 0:
-            return f"Command failed (exit {code}):\n{output}"
-        return output
+            return f"Command failed (exit {code}):\n{output}", code
+        return output, 0
 
     def _govern_command(self, command: str, host: str | None = None) -> tuple[bool, str, str]:
         """Shared governor check. Returns (allowed, denial_message, governor_note)."""
@@ -455,7 +477,8 @@ class ToolExecutor:
         output = _truncate_lines(output)
         if self._branch_freshness_enabled and is_test_command(command) and is_test_failure(output):
             output = await self._annotate_with_freshness(output, host, "run_command", command)
-        return f"{governor_note}{output}" if governor_note else output
+        text = f"{governor_note}{output}" if governor_note else output
+        return text, code
 
     async def _handle_run_script(self, inp: dict) -> str:
         """Write a script to a temp file, execute it, and clean up."""
@@ -522,9 +545,11 @@ class ToolExecutor:
             result = f"Script failed (exit {code}):\n{_truncate_lines(output)}"
             if self._branch_freshness_enabled and is_test_command(script) and is_test_failure(result):
                 result = await self._annotate_with_freshness(result, host, "run_script", script[:120])
-            return f"{governor_note}{result}" if governor_note else result
+            text = f"{governor_note}{result}" if governor_note else result
+            return text, code
         output = _truncate_lines(output)
-        return f"{governor_note}{output}" if governor_note else output
+        text = f"{governor_note}{output}" if governor_note else output
+        return text, 0
 
     async def _handle_read_file(self, inp: dict) -> str:
         path = inp.get("path")
@@ -579,9 +604,10 @@ class ToolExecutor:
                 allowed_hosts.append(h)
 
         async def _run_one(alias: str) -> str:
-            result = await self._run_on_host(alias, command)
-            result = _truncate_lines(result)
-            return f"### {alias}\n```\n{result.strip()}\n```"
+            raw = await self._run_on_host(alias, command)
+            text = raw[0] if isinstance(raw, tuple) else raw
+            text = _truncate_lines(text)
+            return f"### {alias}\n```\n{text.strip()}\n```"
 
         tasks = [_run_one(h) for h in allowed_hosts]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1387,15 +1413,15 @@ class ToolExecutor:
                 address, freshness_cmd, ssh_user,
             )
             if code != 0:
-                return f"Branch freshness check failed (exit {code}):\n{output}"
+                return f"Branch freshness check failed (exit {code}):\n{output}", code
             if output.strip().startswith("STALE:"):
-                return f"Push blocked — {output.strip().split(':', 1)[1].strip()}"
+                return f"Push blocked — {output.strip().split(':', 1)[1].strip()}", 1
             code, output = await self._exec_command(
                 address, push_cmd, ssh_user,
             )
             if code != 0:
-                return f"Push failed (exit {code}):\n{_truncate_lines(output)}"
-            return _truncate_lines(output) if output.strip() else "Push completed successfully."
+                return f"Push failed (exit {code}):\n{_truncate_lines(output)}", code
+            return (_truncate_lines(output) if output.strip() else "Push completed successfully."), 0
         else:
             cmd = cmds
             allowed, denial, _ = self._govern_command(cmd, host)
@@ -1403,8 +1429,8 @@ class ToolExecutor:
                 return denial
             code, output = await self._exec_command(address, cmd, ssh_user)
             if code != 0:
-                return f"git {action} failed (exit {code}):\n{_truncate_lines(output)}"
-            return _truncate_lines(output) if output.strip() else f"git {action} completed successfully."
+                return f"git {action} failed (exit {code}):\n{_truncate_lines(output)}", code
+            return (_truncate_lines(output) if output.strip() else f"git {action} completed successfully."), 0
 
     async def _handle_kubectl(self, inp: dict) -> str:
         from .kubectl_ops import ALLOWED_ACTIONS as KUBECTL_ACTIONS, build_kubectl_command
@@ -1435,8 +1461,8 @@ class ToolExecutor:
 
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:
-            return f"kubectl {action} failed (exit {code}):\n{_truncate_lines(output)}"
-        return _truncate_lines(output) if output.strip() else f"kubectl {action} completed successfully."
+            return f"kubectl {action} failed (exit {code}):\n{_truncate_lines(output)}", code
+        return (_truncate_lines(output) if output.strip() else f"kubectl {action} completed successfully."), 0
 
     async def _handle_docker_ops(self, inp: dict) -> str:
         from .docker_ops import ALLOWED_ACTIONS as DOCKER_ACTIONS, build_docker_command
@@ -1467,8 +1493,8 @@ class ToolExecutor:
 
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:
-            return f"docker {action} failed (exit {code}):\n{_truncate_lines(output)}"
-        return _truncate_lines(output) if output.strip() else f"docker {action} completed successfully."
+            return f"docker {action} failed (exit {code}):\n{_truncate_lines(output)}", code
+        return (_truncate_lines(output) if output.strip() else f"docker {action} completed successfully."), 0
 
     async def _handle_terraform_ops(self, inp: dict) -> str:
         from .terraform_ops import ALLOWED_ACTIONS as TF_ACTIONS, build_terraform_command
@@ -1499,8 +1525,8 @@ class ToolExecutor:
 
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:
-            return f"terraform {action} failed (exit {code}):\n{_truncate_lines(output)}"
-        return _truncate_lines(output) if output.strip() else f"terraform {action} completed successfully."
+            return f"terraform {action} failed (exit {code}):\n{_truncate_lines(output)}", code
+        return (_truncate_lines(output) if output.strip() else f"terraform {action} completed successfully."), 0
 
     async def _handle_issue_tracker(self, inp: dict) -> str:
         action = inp.get("action", "")
@@ -1547,12 +1573,25 @@ class ToolExecutor:
             return f"http_probe failed (exit {code}): curl returned no output"
         return _truncate_lines(output) if output.strip() else "http_probe: no response received"
 
-    async def _handle_execute_plan(self, inp: dict) -> str:
-        """Execute a DAG plan using the Odin planner."""
-        from src.tools.plan_runner import PlanRunner
+    async def _handle_execute_plan(self, inp: dict) -> str | tuple[str, int]:
+        """Execute a DAG plan using the Odin planner.
 
-        runner = PlanRunner()
-        return await runner.run(inp)
+        Routes shell/file tools through ToolExecutor so they inherit
+        governor, RBAC, audit, and mutation detection.  Propagates
+        nested mutation validation requirements to the outer result.
+        """
+        from src.tools.plan_runner import PlanRunner
+        from src.tools.plan_executor_bridge import create_executor_backed_registry
+
+        default_host = list(self.config.hosts.keys())[0] if self.config.hosts else "localhost"
+        registry, tracker = create_executor_backed_registry(self, default_host=default_host)
+        runner = PlanRunner(registry=registry)
+        output, success = await runner.run(inp)
+
+        if tracker.detected:
+            self._plan_mutation_tracker = tracker
+
+        return output, (0 if success else 1)
 
     async def _handle_validate_action(self, inp: dict) -> str:
         from .post_validation import (

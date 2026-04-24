@@ -663,7 +663,7 @@ class TestHandleTerraformOps:
             "host": "nohost",
             "action": "plan",
         })
-        assert "Unknown or disallowed host" in result
+        assert "Unknown or disallowed host" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_unknown_action(self, executor):
@@ -671,14 +671,14 @@ class TestHandleTerraformOps:
             "host": "infra",
             "action": "deploy",
         })
-        assert "Unknown terraform action" in result
+        assert "Unknown terraform action" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_missing_action(self, executor):
         result = await executor._handle_terraform_ops({
             "host": "infra",
         })
-        assert "Unknown terraform action" in result
+        assert "Unknown terraform action" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_init_dispatch(self, executor):
@@ -689,7 +689,7 @@ class TestHandleTerraformOps:
         executor._exec_command.assert_called_once()
         cmd = executor._exec_command.call_args[0][1]
         assert cmd.startswith("terraform init")
-        assert "Success" in result or "completed successfully" in result
+        assert "Success" in result or "completed successfully" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_plan_dispatch(self, executor):
@@ -720,8 +720,8 @@ class TestHandleTerraformOps:
             "action": "apply",
             "params": {},
         })
-        assert "terraform_ops error" in result
-        assert "plan_file" in result
+        assert "terraform_ops error" in (result[0] if isinstance(result, tuple) else result)
+        assert "plan_file" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_output_dispatch(self, executor):
@@ -803,8 +803,8 @@ class TestHandleTerraformOps:
             "host": "infra",
             "action": "init",
         })
-        assert "terraform init failed" in result
-        assert "exit 1" in result
+        assert "terraform init failed" in (result[0] if isinstance(result, tuple) else result)
+        assert "exit 1" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_empty_output(self, executor):
@@ -813,7 +813,7 @@ class TestHandleTerraformOps:
             "host": "infra",
             "action": "validate",
         })
-        assert "completed successfully" in result
+        assert "completed successfully" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_no_params_default(self, executor):
@@ -841,8 +841,8 @@ class TestHandleTerraformOps:
             "action": "state",
             "params": {"subaction": "show"},
         })
-        assert "terraform_ops error" in result
-        assert "address" in result
+        assert "terraform_ops error" in (result[0] if isinstance(result, tuple) else result)
+        assert "address" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_import_validation_error(self, executor):
@@ -851,8 +851,8 @@ class TestHandleTerraformOps:
             "action": "import",
             "params": {"address": "aws_instance.web"},
         })
-        assert "terraform_ops error" in result
-        assert "id" in result
+        assert "terraform_ops error" in (result[0] if isinstance(result, tuple) else result)
+        assert "id" in (result[0] if isinstance(result, tuple) else result)
 
 
 # ---------------------------------------------------------------------------

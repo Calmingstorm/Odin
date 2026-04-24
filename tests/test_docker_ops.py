@@ -719,19 +719,19 @@ class TestHandleDockerOps:
     async def test_unknown_host(self):
         ex = _make_executor()
         result = await ex._handle_docker_ops({"host": "nope", "action": "ps"})
-        assert "Unknown or disallowed host" in result
+        assert "Unknown or disallowed host" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_unknown_action(self):
         ex = _make_executor()
         result = await ex._handle_docker_ops({"host": "prod", "action": "nope"})
-        assert "Unknown docker action" in result
+        assert "Unknown docker action" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_missing_action(self):
         ex = _make_executor()
         result = await ex._handle_docker_ops({"host": "prod"})
-        assert "Unknown docker action" in result
+        assert "Unknown docker action" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_ps_dispatch(self):
@@ -739,7 +739,7 @@ class TestHandleDockerOps:
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "CONTAINER ID  IMAGE  STATUS\nabc  nginx  Up")
             result = await ex._handle_docker_ops({"host": "prod", "action": "ps"})
-        assert "nginx" in result
+        assert "nginx" in (result[0] if isinstance(result, tuple) else result)
         mock_exec.assert_awaited_once()
         cmd_arg = mock_exec.call_args[0][1]
         assert cmd_arg.startswith("docker ps")
@@ -753,7 +753,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "run",
                 "params": {"image": "nginx", "detach": True},
             })
-        assert "abc123" in result
+        assert "abc123" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_exec_dispatch(self):
@@ -764,7 +764,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "exec",
                 "params": {"container": "web", "command": "ls"},
             })
-        assert "file.txt" in result
+        assert "file.txt" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_logs_dispatch(self):
@@ -775,7 +775,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "logs",
                 "params": {"container": "web"},
             })
-        assert "log line" in result
+        assert "log line" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_build_dispatch(self):
@@ -786,7 +786,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "build",
                 "params": {"tag": "myapp:latest"},
             })
-        assert "Successfully built" in result
+        assert "Successfully built" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_pull_dispatch(self):
@@ -797,7 +797,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "pull",
                 "params": {"image": "nginx:latest"},
             })
-        assert "Downloaded" in result
+        assert "Downloaded" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_stop_dispatch(self):
@@ -808,7 +808,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "stop",
                 "params": {"container": "web"},
             })
-        assert "web" in result
+        assert "web" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_rm_dispatch(self):
@@ -819,7 +819,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "rm",
                 "params": {"container": "web"},
             })
-        assert "web" in result
+        assert "web" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_inspect_dispatch(self):
@@ -830,7 +830,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "inspect",
                 "params": {"target": "web"},
             })
-        assert "running" in result
+        assert "running" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_stats_dispatch(self):
@@ -841,7 +841,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "stats",
                 "params": {},
             })
-        assert "CPU%" in result
+        assert "CPU%" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_compose_up_dispatch(self):
@@ -852,7 +852,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "compose_up",
                 "params": {},
             })
-        assert "Creating" in result
+        assert "Creating" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_compose_down_dispatch(self):
@@ -863,7 +863,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "compose_down",
                 "params": {},
             })
-        assert "Stopping" in result
+        assert "Stopping" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_compose_ps_dispatch(self):
@@ -874,7 +874,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "compose_ps",
                 "params": {},
             })
-        assert "running" in result
+        assert "running" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_compose_logs_dispatch(self):
@@ -885,7 +885,7 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "compose_logs",
                 "params": {},
             })
-        assert "Starting" in result
+        assert "Starting" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_command_failure(self):
@@ -896,8 +896,8 @@ class TestHandleDockerOps:
                 "host": "prod", "action": "logs",
                 "params": {"container": "web"},
             })
-        assert "failed" in result
-        assert "exit 1" in result
+        assert "failed" in (result[0] if isinstance(result, tuple) else result)
+        assert "exit 1" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_validation_error(self):
@@ -905,7 +905,7 @@ class TestHandleDockerOps:
         result = await ex._handle_docker_ops({
             "host": "prod", "action": "run", "params": {},
         })
-        assert "docker_ops error" in result
+        assert "docker_ops error" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_empty_output(self):
@@ -915,7 +915,7 @@ class TestHandleDockerOps:
             result = await ex._handle_docker_ops({
                 "host": "prod", "action": "ps", "params": {},
             })
-        assert "completed successfully" in result
+        assert "completed successfully" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_no_params_default(self):
@@ -925,7 +925,7 @@ class TestHandleDockerOps:
             result = await ex._handle_docker_ops({
                 "host": "prod", "action": "ps",
             })
-        assert "docker ps output" in result
+        assert "docker ps output" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_correct_ssh_user(self):
