@@ -554,8 +554,9 @@ _MUTATION_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 _MUTATION_TOOL_ACTIONS: dict[str, frozenset[str]] = {
-    "docker_ops": frozenset({"start", "stop", "restart", "rm", "rmi", "up", "down", "build", "recreate"}),
-    "deploy": frozenset(),
+    "docker_ops": frozenset({"run", "build", "pull", "stop", "rm", "compose_up", "compose_down"}),
+    "kubectl": frozenset({"apply", "delete", "rollout", "scale", "patch"}),
+    "terraform_ops": frozenset({"apply", "destroy"}),
 }
 
 _VALIDATION_HINT = (

@@ -639,10 +639,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
         channel_id = f"api-{uuid.uuid4().hex[:12]}"
 
-        # Resolve identity from API token
-        auth_header = request.headers.get("Authorization", "")
-        bearer_token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
-        identity = bot.config.web.resolve_api_identity(bearer_token)
+        # Resolve identity from middleware or fallback
+        identity = getattr(request, "_api_identity", None)
+        if identity is None:
+            auth_header = request.headers.get("Authorization", "")
+            bearer_token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+            identity = bot.config.web.resolve_api_identity(bearer_token)
         user_id = identity.user_id if identity else "api-user"
         username = identity.username if identity else "API"
 

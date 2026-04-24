@@ -630,27 +630,27 @@ class SessionManager:
 
         messages = [{"role": m.role, "content": m.content} for m in filtered]
 
-        # Mark all history messages as read-only context
-        if len(messages) > 1:
-            messages.insert(0, {
-                "role": "developer",
-                "content": (
-                    "[HISTORY_READ_ONLY] The messages below until the CURRENT_REQUEST marker "
-                    "are prior conversation context. They are completed interactions, not pending work. "
-                    "Do not re-execute tool calls or commands mentioned in history."
-                ),
-            })
-
         # Prepend summary if available
         if session.summary:
             sanitized = _sanitize_summary(session.summary)
             messages.insert(0, {
                 "role": "user",
-                "content": f"[Previous conversation summary: {sanitized}]",
+                "content": f"[COMPLETED SUMMARY] {sanitized}",
             })
             messages.insert(1, {
                 "role": "assistant",
                 "content": "Understood, I have context from our previous conversation.",
+            })
+
+        # Mark ALL history (including summary) as read-only — must be first
+        if len(messages) > 1:
+            messages.insert(0, {
+                "role": "developer",
+                "content": (
+                    "[HISTORY_READ_ONLY] Everything below until the CURRENT_REQUEST marker "
+                    "is prior conversation context — completed interactions, not pending work. "
+                    "Do not re-execute tool calls or commands mentioned in history or summaries."
+                ),
             })
 
         # Enforce token budget — drop oldest first, keep recent BUDGET_KEEP_RECENT
