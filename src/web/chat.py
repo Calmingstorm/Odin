@@ -124,7 +124,8 @@ class WebMessage:
     from a discord.Message object.
     """
 
-    def __init__(self, channel_id: str, user_id: str, username: str, content: str = ""):
+    def __init__(self, channel_id: str, user_id: str, username: str, content: str = "",
+                 allowed_tools: list[str] | None = None):
         self.id = next(_msg_id_counter)
         self.content = content
         self.channel = _WebChannel(channel_id)
@@ -132,6 +133,7 @@ class WebMessage:
         self.webhook_id = None
         self.attachments = []
         self.guild = None
+        self.allowed_tools = allowed_tools
 
 
 # Re-use the same scrubbing function applied to Discord responses.
@@ -149,6 +151,7 @@ async def process_web_chat(
     channel_id: str,
     user_id: str = "web-user",
     username: str = "WebUser",
+    allowed_tools: list[str] | None = None,
 ) -> dict:
     """Process a web chat message through the Codex tool loop.
 
@@ -157,7 +160,8 @@ async def process_web_chat(
       - tools_used: list[str] — tool names called during processing
       - is_error: bool — whether an error occurred
     """
-    msg = WebMessage(channel_id=channel_id, user_id=user_id, username=username, content=content)
+    msg = WebMessage(channel_id=channel_id, user_id=user_id, username=username, content=content,
+                     allowed_tools=allowed_tools)
     web_channel = msg.channel  # type: _WebChannel
     tagged = f"[{username}]: {content}"
     bot.sessions.add_message(channel_id, "user", tagged, user_id=user_id)

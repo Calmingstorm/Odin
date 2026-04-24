@@ -2425,6 +2425,11 @@ class OdinBot(commands.Bot):
         is_test_wh = message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
         if tools is not None and not is_test_wh:
             tools = self.permissions.filter_tools(user_id, tools)
+            # Apply API token allowed_tools scope if present
+            api_allowed = getattr(message, "allowed_tools", None)
+            if api_allowed and tools:
+                allowed_set = set(api_allowed)
+                tools = [t for t in tools if t["name"] in allowed_set]
             # Normalize empty tool list to None
             if tools is not None and not tools:
                 tools = None
