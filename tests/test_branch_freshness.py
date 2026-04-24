@@ -566,8 +566,8 @@ class TestExecutorFreshnessIntegration:
         executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
         result = await executor._handle_run_command({"host": "local", "command": "pytest tests/ -q"})
-        assert "[STALE BRANCH]" in result
-        assert "5 commit(s) behind" in result
+        assert "[STALE BRANCH]" in (result[0] if isinstance(result, tuple) else result)
+        assert "5 commit(s) behind" in (result[0] if isinstance(result, tuple) else result)
         assert executor.freshness_stats.get_summary()["total_checks"] == 1
         assert executor.freshness_stats.get_summary()["stale_found"] == 1
 
@@ -589,7 +589,7 @@ class TestExecutorFreshnessIntegration:
         executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
         result = await executor._handle_run_command({"host": "local", "command": "pytest tests/"})
-        assert "[STALE BRANCH]" not in result
+        assert "[STALE BRANCH]" not in (result[0] if isinstance(result, tuple) else result)
         assert executor.freshness_stats.get_summary()["total_checks"] == 1
         assert executor.freshness_stats.get_summary()["stale_found"] == 0
 
@@ -602,7 +602,7 @@ class TestExecutorFreshnessIntegration:
         executor._run_on_host = mock_run_on_host
 
         result = await executor._handle_run_command({"host": "local", "command": "ls /nonexistent"})
-        assert "[STALE BRANCH]" not in result
+        assert "[STALE BRANCH]" not in (result[0] if isinstance(result, tuple) else result)
         assert executor.freshness_stats.get_summary()["total_checks"] == 0
 
     @pytest.mark.asyncio
@@ -614,7 +614,7 @@ class TestExecutorFreshnessIntegration:
         executor._run_on_host = mock_run_on_host
 
         result = await executor._handle_run_command({"host": "local", "command": "pytest tests/"})
-        assert "[STALE BRANCH]" not in result
+        assert "[STALE BRANCH]" not in (result[0] if isinstance(result, tuple) else result)
         assert executor.freshness_stats.get_summary()["total_checks"] == 0
 
     @pytest.mark.asyncio
@@ -628,7 +628,7 @@ class TestExecutorFreshnessIntegration:
         executor._run_on_host = mock_run_on_host
 
         result = await executor._handle_run_command({"host": "local", "command": "pytest tests/"})
-        assert "[STALE BRANCH]" not in result
+        assert "[STALE BRANCH]" not in (result[0] if isinstance(result, tuple) else result)
         assert executor.freshness_stats.get_summary()["total_checks"] == 0
 
     @pytest.mark.asyncio
@@ -643,8 +643,8 @@ class TestExecutorFreshnessIntegration:
         executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
         result = await executor._handle_run_command({"host": "local", "command": "pytest tests/"})
-        assert "3 failed" in result
-        assert "[STALE BRANCH]" not in result
+        assert "3 failed" in (result[0] if isinstance(result, tuple) else result)
+        assert "[STALE BRANCH]" not in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_fetch_failure_tracked(self, executor):
@@ -696,9 +696,9 @@ class TestExecutorRunScriptFreshness:
             "script": "#!/bin/bash\npytest tests/ -q",
             "interpreter": "bash",
         })
-        assert "Script failed" in result
-        assert "[STALE BRANCH]" in result
-        assert "3 commit(s) behind" in result
+        assert "Script failed" in (result[0] if isinstance(result, tuple) else result)
+        assert "[STALE BRANCH]" in (result[0] if isinstance(result, tuple) else result)
+        assert "3 commit(s) behind" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_script_non_test_not_annotated(self, executor):
@@ -714,8 +714,8 @@ class TestExecutorRunScriptFreshness:
             "script": "#!/bin/bash\nls /nonexistent",
             "interpreter": "bash",
         })
-        assert "Script failed" in result
-        assert "[STALE BRANCH]" not in result
+        assert "Script failed" in (result[0] if isinstance(result, tuple) else result)
+        assert "[STALE BRANCH]" not in (result[0] if isinstance(result, tuple) else result)
 
 
 # ====================================================================
