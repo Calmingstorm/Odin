@@ -108,7 +108,7 @@ edit config.yml              # Set hosts, Codex credentials, etc.
 python -m src
 ```
 
-The web UI starts automatically at the configured port (default 3001). Set `web.api_token` in config.yml to require authentication.
+The web UI starts automatically at the configured port (default 3000). Set `web.api_token` in config.yml to require authentication.
 
 ## Configuration
 

@@ -117,7 +117,7 @@ Run `playwright install chromium` after installation.
 ```yaml
 web:
   enabled: true
-  port: 3001
+  port: 3000
   api_token: ${WEB_API_TOKEN}    # Required for production
   session_timeout_minutes: 0     # 0 = persist until logout
 ```
