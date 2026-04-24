@@ -231,6 +231,13 @@ class ToolExecutor:
             mutation_detected = _mutation.detected
             mutation_reason = _mutation.reason
 
+        # Propagate nested mutation state from execute_plan
+        plan_tracker = getattr(self, "_plan_mutation_tracker", None)
+        if plan_tracker and plan_tracker.detected:
+            mutation_detected = True
+            mutation_reason = mutation_reason or "; ".join(plan_tracker.reasons)
+            del self._plan_mutation_tracker
+
         outcome = validate_tool_result(tool_name, raw_result, stats=self.validation_stats)
 
         # Extract exit code from string if handler didn't return one
@@ -1566,19 +1573,34 @@ class ToolExecutor:
             return f"http_probe failed (exit {code}): curl returned no output"
         return _truncate_lines(output) if output.strip() else "http_probe: no response received"
 
-    async def _handle_execute_plan(self, inp: dict) -> str:
+    async def _handle_execute_plan(self, inp: dict) -> str | tuple[str, int]:
         """Execute a DAG plan using the Odin planner.
 
         Routes shell/file tools through ToolExecutor so they inherit
-        governor, RBAC, audit, and mutation detection.
+        governor, RBAC, audit, and mutation detection.  Propagates
+        nested mutation validation requirements to the outer result.
         """
         from src.tools.plan_runner import PlanRunner
         from src.tools.plan_executor_bridge import create_executor_backed_registry
 
         default_host = list(self.config.hosts.keys())[0] if self.config.hosts else "localhost"
-        registry = create_executor_backed_registry(self, default_host=default_host)
+        registry, tracker = create_executor_backed_registry(self, default_host=default_host)
         runner = PlanRunner(registry=registry)
-        return await runner.run(inp)
+        output = await runner.run(inp)
+
+        # Propagate nested mutation validation to the outer ToolResult
+        if tracker.detected:
+            self._plan_mutation_tracker = tracker
+
+        # Check if the plan itself failed
+        try:
+            import json as _json
+            parsed = _json.loads(output)
+            if not parsed.get("success", True):
+                return output, 1
+        except (ValueError, TypeError):
+            pass
+        return output, 0
 
     async def _handle_validate_action(self, inp: dict) -> str:
         from .post_validation import (

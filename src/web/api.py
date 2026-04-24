@@ -647,7 +647,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             identity = bot.config.web.resolve_api_identity(bearer_token)
         user_id = identity.user_id if identity else "api-user"
         username = identity.username if identity else "API"
-        token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
+        token_tools = identity.allowed_tools if identity is not None else None
 
         result = await process_web_chat(
             bot, content, channel_id,

@@ -2427,12 +2427,9 @@ class OdinBot(commands.Bot):
             tools = self.permissions.filter_tools(user_id, tools)
             # Apply API token allowed_tools scope if present
             api_allowed = getattr(message, "allowed_tools", None)
-            if api_allowed and tools:
+            if api_allowed is not None and tools:
                 allowed_set = set(api_allowed)
                 tools = [t for t in tools if t["name"] in allowed_set]
-            # Normalize empty tool list to None
-            if tools is not None and not tools:
-                tools = None
 
         # Collect image blocks from analyze_image calls for vision injection
         pending_image_blocks: list[dict] = []
