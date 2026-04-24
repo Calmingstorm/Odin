@@ -2451,6 +2451,12 @@ class OdinBot(commands.Bot):
             user_name=str(getattr(message.author, "display_name", "")),
         )
 
+        # Post-mutation validation state — persists across iterations
+        _pending_validations: list[str] = []
+        _validation_required: bool = False
+        _validation_retries: int = 0
+        _MAX_VALIDATION_RETRIES = 2
+
         for iteration in range(chat_cap):
             # Context auto-compression — when accumulated tool iterations push
             # the message list over the configured budget, summarise older
@@ -2967,12 +2973,6 @@ class OdinBot(commands.Bot):
                     "tool_use_id": block.id,
                     "content": tool_content,
                 }
-
-            # Track mutations that need post-action validation
-            _pending_validations: list[str] = []
-            _validation_required: bool = False
-            _validation_retries: int = 0
-            _MAX_VALIDATION_RETRIES = 2
 
             # Run all tool calls concurrently with per-tool timeout
             tool_timeout = self.config.tools.tool_timeout_seconds
