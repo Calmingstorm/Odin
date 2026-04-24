@@ -2940,6 +2940,12 @@ class OdinBot(commands.Bot):
                 except Exception:
                     pass  # Non-critical tracking
 
+                # Track mutations requiring post-action validation
+                if tool_result is not None and tool_result.requires_validation and tool_result.ok:
+                    _pending_validations.append(
+                        f"{tool_name}: {tool_result.validation_reason}"
+                    )
+
                 # Truncate large outputs before sending back to the LLM.
                 tool_content = truncate_tool_output(result)
 
@@ -2948,6 +2954,9 @@ class OdinBot(commands.Bot):
                     "tool_use_id": block.id,
                     "content": tool_content,
                 }
+
+            # Track mutations that need post-action validation
+            _pending_validations: list[str] = []
 
             # Run all tool calls concurrently with per-tool timeout
             tool_timeout = self.config.tools.tool_timeout_seconds
@@ -2987,6 +2996,19 @@ class OdinBot(commands.Bot):
                     *[_run_tool_with_timeout(b) for b in tool_calls],
                 )
             messages.append({"role": "user", "content": list(tool_results)})
+
+            # Auto-inject validation instruction when mutations were detected
+            if _pending_validations:
+                mutation_list = "; ".join(_pending_validations)
+                messages.append({
+                    "role": "developer",
+                    "content": (
+                        f"[AUTO-VALIDATE] Operational mutation(s) detected: {mutation_list}. "
+                        "You MUST call validate_action now to confirm the change took effect. "
+                        "Infer appropriate checks from the mutation type."
+                    ),
+                })
+                _pending_validations.clear()
 
             # Inject pending image blocks as vision content for the next LLM call.
             # This reuses the same base64 image block format as _process_attachments.

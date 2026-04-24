@@ -214,8 +214,12 @@ class ToolExecutor:
                         raw_result = retry_result
                     is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
 
+        mutation_detected = False
+        mutation_reason = ""
         if not is_error and isinstance(raw_result, str):
             raw_result, _mutation = annotate_if_mutation(tool_name, tool_input, raw_result)
+            mutation_detected = _mutation.detected
+            mutation_reason = _mutation.reason
 
         outcome = validate_tool_result(tool_name, raw_result, stats=self.validation_stats)
 
@@ -236,6 +240,8 @@ class ToolExecutor:
             tool_name=tool_name,
             risk_level=assessment.level.value,
             risk_reason=assessment.reason,
+            requires_validation=mutation_detected,
+            validation_reason=mutation_reason,
         )
 
     async def _try_tool(
