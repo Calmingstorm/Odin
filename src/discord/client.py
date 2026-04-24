@@ -964,7 +964,7 @@ class OdinBot(commands.Bot):
             del self._cancel_events[cid]
         stale_active = [
             cid for cid in self._active_request_by_channel
-            if cid not in active_channels
+            if cid not in active_channels and not self._cancel_events.get(cid, asyncio.Event()).is_set()
         ]
         for cid in stale_active:
             del self._active_request_by_channel[cid]
@@ -2149,14 +2149,6 @@ class OdinBot(commands.Bot):
                     response = f"Tool execution failed: {codex_err}"
                     is_error = True
                     handoff = False
-                # Clean up /stop cancellation state
-                _ch = str(message.channel.id)
-                if self._active_request_by_channel.get(_ch):
-                    self._active_request_by_channel.pop(_ch, None)
-                    ev = self._cancel_events.get(_ch)
-                    if ev:
-                        ev.clear()
-
                 # Skill requested Codex handoff — route skill result to Codex for response
                 if handoff and self.codex_client and not is_error:
                     log.info("Skill handoff to Codex for response")
@@ -2505,10 +2497,17 @@ class OdinBot(commands.Bot):
         # Per-request cancellation via /stop command
         _ch_id = str(message.channel.id)
         _cancel = self._cancel_events.setdefault(_ch_id, asyncio.Event())
-        self._active_request_by_channel[_ch_id] = req_hash
+        _req_id = req_hash
+        self._active_request_by_channel[_ch_id] = _req_id
+
+        def _clear_active():
+            if self._active_request_by_channel.get(_ch_id) == _req_id:
+                self._active_request_by_channel.pop(_ch_id, None)
+                _cancel.clear()
 
         def _stopped(where: str) -> tuple[str, bool, bool, list[str], bool]:
             log.info("Task stopped by /stop in channel %s at %s", _ch_id, where)
+            _clear_active()
             suffix = ""
             if _pending_validations or _validation_required:
                 suffix = " Pending post-action validation was not run."
@@ -2561,11 +2560,13 @@ class OdinBot(commands.Bot):
                     )
                 except Exception as retry_err:
                     await self._save_turn_trajectory(_trajectory, error=str(retry_err))
+                    _clear_active()
                     return f"LLM API error (circuit breaker recovery failed): {retry_err}", False, True, tools_used_in_loop, False
             except Exception as api_err:
                 err_msg = str(api_err) or f"{type(api_err).__name__} (no message)"
                 log.error("LLM API call failed: %s", err_msg, exc_info=True)
                 await self._save_turn_trajectory(_trajectory, error=err_msg)
+                _clear_active()
                 return f"LLM API error: {err_msg}", False, True, tools_used_in_loop, False
             finally:
                 if typing_cm is not None:
@@ -2740,6 +2741,7 @@ class OdinBot(commands.Bot):
                 await self._save_turn_trajectory(
                     _trajectory, final_response=_final, tools_used=tools_used_in_loop,
                 )
+                _clear_active()
                 return _final, False, False, tools_used_in_loop, False
 
             # Build internal-format assistant content from LLMResponse
@@ -3123,8 +3125,10 @@ class OdinBot(commands.Bot):
                 skill_output = "\n".join(
                     r["content"] for r in tool_results if isinstance(r, dict)
                 )
+                _clear_active()
                 return skill_output, False, False, tools_used_in_loop, True  # handoff=True
 
+        _clear_active()
         log.warning(
             "Chat tool-iteration cap hit (%d) after %d tool calls; exiting loop",
             chat_cap, len(tools_used_in_loop),
