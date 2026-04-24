@@ -38,23 +38,17 @@ class PlanRunner:
     def registry(self) -> ToolRegistry:
         return self._registry
 
-    async def run(self, args: dict[str, Any]) -> str:
+    async def run(self, args: dict[str, Any]) -> tuple[str, bool]:
         """Parse, validate, execute, and format a plan.
-
-        Parameters
-        ----------
-        args : dict
-            Must contain ``plan`` (JSON string or dict).
-            Optional ``format`` key: ``"summary"`` (default), ``"json"``, or ``"dict"``.
 
         Returns
         -------
-        str
-            Formatted result suitable for display to a user or LLM.
+        tuple[str, bool]
+            (formatted_output, success) — success is from PlanResult directly.
         """
         plan_source = args.get("plan")
         if plan_source is None:
-            return "Error: 'plan' argument is required"
+            return "Error: 'plan' argument is required", False
 
         fmt = args.get("format", "summary")
 
@@ -65,14 +59,14 @@ class PlanRunner:
             elif isinstance(plan_source, dict):
                 plan = load_plan(plan_source)
             else:
-                return f"Error: 'plan' must be a JSON string or dict, got {type(plan_source).__name__}"
+                return f"Error: 'plan' must be a JSON string or dict, got {type(plan_source).__name__}", False
         except (ValueError, Exception) as exc:
-            return f"Error parsing plan: {exc}"
+            return f"Error parsing plan: {exc}", False
 
         # Validate
         errors = self._planner.validate(plan)
         if errors:
-            return "Plan validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+            return "Plan validation failed:\n" + "\n".join(f"  - {e}" for e in errors), False
 
         # Execute
         log.info("Executing plan '%s' (%d steps)", plan.name, len(plan.steps))
@@ -80,10 +74,10 @@ class PlanRunner:
         try:
             result = await self._planner.execute(plan)
         except PlanValidationError as exc:
-            return f"Plan validation error: {exc}"
+            return f"Plan validation error: {exc}", False
         except Exception as exc:
             log.exception("Plan execution failed")
-            return f"Plan execution error: {exc}"
+            return f"Plan execution error: {exc}", False
 
         elapsed = time.time() - start
         log.info(
@@ -93,7 +87,7 @@ class PlanRunner:
             "SUCCESS" if result.success else "FAILED",
         )
 
-        return self._format(result, fmt)
+        return self._format(result, fmt), result.success
 
     @staticmethod
     def _format(result: PlanResult, fmt: str) -> str:

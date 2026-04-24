@@ -1586,21 +1586,12 @@ class ToolExecutor:
         default_host = list(self.config.hosts.keys())[0] if self.config.hosts else "localhost"
         registry, tracker = create_executor_backed_registry(self, default_host=default_host)
         runner = PlanRunner(registry=registry)
-        output = await runner.run(inp)
+        output, success = await runner.run(inp)
 
-        # Propagate nested mutation validation to the outer ToolResult
         if tracker.detected:
             self._plan_mutation_tracker = tracker
 
-        # Check if the plan itself failed
-        try:
-            import json as _json
-            parsed = _json.loads(output)
-            if not parsed.get("success", True):
-                return output, 1
-        except (ValueError, TypeError):
-            pass
-        return output, 0
+        return output, (0 if success else 1)
 
     async def _handle_validate_action(self, inp: dict) -> str:
         from .post_validation import (

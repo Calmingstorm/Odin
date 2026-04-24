@@ -105,7 +105,12 @@ class ExecutorReadFileTool(BaseTool):
 
 
 class ExecutorWriteFileTool(BaseTool):
-    """Write file tool routed through ToolExecutor."""
+    """Write file tool routed through ToolExecutor.
+
+    All plan write_file operations are considered mutations regardless
+    of path, since they execute within a plan context where any file
+    write is an intentional state change worth validating.
+    """
 
     def __init__(self, executor: ToolExecutor, default_host: str = "localhost",
                  mutation_tracker: MutationTracker | None = None) -> None:
@@ -115,12 +120,17 @@ class ExecutorWriteFileTool(BaseTool):
 
     async def execute(self, params: dict[str, Any], ctx: "ExecutionContext") -> Any:
         host = params.get("host", self._default_host)
+        path = params["path"]
         result = await self._executor.execute("write_file", {
             "host": host,
-            "path": params["path"],
+            "path": path,
             "content": params["content"],
         })
-        if self._tracker:
+        # All plan write_file operations are mutations
+        if self._tracker and result.ok:
+            self._tracker.detected = True
+            self._tracker.reasons.append(f"plan write_file: {path}")
+        elif self._tracker:
             self._tracker.track(result)
         if not result.ok:
             raise RuntimeError(f"write_file failed: {result.error or result.output[:200]}")
