@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -638,18 +639,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 {"error": f"prompt exceeds {MAX_CHAT_CONTENT_LEN} chars"}, status=400
             )
 
-        import uuid
         channel_id = f"api-{uuid.uuid4().hex[:12]}"
-        user_id = data.get("user_id", "api-user")
-        username = data.get("username", "API")
 
         result = await process_web_chat(
             bot, content, channel_id,
-            user_id=user_id, username=username,
+            user_id="api-user", username="API",
         )
 
-        # Clean up the ephemeral session immediately
-        bot.sessions._sessions.pop(channel_id, None)
+        bot.sessions.reset(channel_id)
 
         status = 200 if not result["is_error"] else 502
         resp = {

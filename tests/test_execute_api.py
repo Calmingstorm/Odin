@@ -1,7 +1,13 @@
-"""Tests for the /api/execute stateless endpoint and CLI script."""
+"""Tests for the /api/execute stateless endpoint and CLI script.
+
+Uses a standalone aiohttp app that mirrors the real handler logic from
+src/web/api.py.  This avoids bootstrapping a full OdinBot but means
+changes to the production handler must be reflected here.
+"""
 from __future__ import annotations
 
 import json
+import uuid
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,13 +20,13 @@ MAX_CHAT_CONTENT_LEN = 32_000
 def _make_bot():
     bot = MagicMock()
     bot.sessions = MagicMock()
-    bot.sessions._sessions = {}
     return bot
 
 
 _mock_result = None
 
 def _make_app(bot):
+    """Build a minimal app whose /api/execute mirrors the real handler."""
     app = web.Application()
     routes = web.RouteTableDef()
 
@@ -37,10 +43,14 @@ def _make_app(bot):
         if not content:
             return web.json_response({"error": "prompt is required"}, status=400)
 
-        import uuid
         channel_id = f"api-{uuid.uuid4().hex[:12]}"
         result = _mock_result or {"response": "", "tools_used": [], "is_error": True, "files": []}
-        bot.sessions._sessions.pop(channel_id, None)
+
+        # Mirror production: identity is hardcoded, not caller-controlled
+        _user_id = "api-user"
+        _username = "API"
+
+        bot.sessions.reset(channel_id)
 
         status_code = 200 if not result["is_error"] else 502
         resp = {"response": result["response"], "tools_used": result["tools_used"], "is_error": result["is_error"]}
@@ -152,8 +162,31 @@ class TestExecuteEndpoint:
                     headers={"Authorization": "Bearer test-token"},
                 )
                 assert resp.status == 200
-                for key in list(bot.sessions._sessions.keys()):
-                    assert not key.startswith("api-")
+                bot.sessions.reset.assert_called_once()
+                call_arg = bot.sessions.reset.call_args[0][0]
+                assert call_arg.startswith("api-")
+        finally:
+            _mock_result = None
+
+    @pytest.mark.asyncio
+    async def test_ignores_caller_identity_fields(self):
+        """Caller-supplied user_id/username must not override fixed service identity."""
+        global _mock_result
+        bot = _make_bot()
+        _mock_result = {
+            "response": "ok",
+            "tools_used": [],
+            "is_error": False,
+            "files": [],
+        }
+        try:
+            async with await _client(bot) as client:
+                resp = await client.post(
+                    "/api/execute",
+                    json={"prompt": "test", "user_id": "admin", "username": "root"},
+                    headers={"Authorization": "Bearer test-token"},
+                )
+                assert resp.status == 200
         finally:
             _mock_result = None
 
