@@ -77,6 +77,25 @@ def _tokenize(text: str) -> set[str]:
     return {t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOP_WORDS and len(t) > 1}
 
 
+_IMPERATIVE_RE = re.compile(
+    r"^(?:run|execute|restart|deploy|check|install|update|delete|create|stop|start|kill|push|merge|build)\s+",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _sanitize_summary(summary: str) -> str:
+    """Reframe imperative tool requests in summaries as completed facts.
+
+    Prevents the model from re-executing commands that appear in
+    conversation summaries as if they were pending tasks.
+    """
+    summary = _IMPERATIVE_RE.sub(
+        lambda m: f"[completed] {m.group(0)}",
+        summary,
+    )
+    return summary
+
+
 def _lerp(low: float, high: float, t: float) -> float:
     """Linear interpolation between low and high, t clamped to [0, 1]."""
     t = max(0.0, min(1.0, t))
@@ -611,11 +630,23 @@ class SessionManager:
 
         messages = [{"role": m.role, "content": m.content} for m in filtered]
 
+        # Mark all history messages as read-only context
+        if len(messages) > 1:
+            messages.insert(0, {
+                "role": "developer",
+                "content": (
+                    "[HISTORY_READ_ONLY] The messages below until the CURRENT_REQUEST marker "
+                    "are prior conversation context. They are completed interactions, not pending work. "
+                    "Do not re-execute tool calls or commands mentioned in history."
+                ),
+            })
+
         # Prepend summary if available
         if session.summary:
+            sanitized = _sanitize_summary(session.summary)
             messages.insert(0, {
                 "role": "user",
-                "content": f"[Previous conversation summary: {session.summary}]",
+                "content": f"[Previous conversation summary: {sanitized}]",
             })
             messages.insert(1, {
                 "role": "assistant",
