@@ -14,11 +14,6 @@ EnvironmentFile=/etc/odin/.env
 Restart=always
 RestartSec=5
 
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-ReadWritePaths=/var/lib/odin /var/log/odin
 LimitNOFILE=65536
 
 [Install]
