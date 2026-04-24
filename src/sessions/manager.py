@@ -862,6 +862,37 @@ class SessionManager:
         self._sessions.pop(channel_id, None)
         log.info("Session reset for channel %s", channel_id)
 
+    def count(self) -> int:
+        return len(self._sessions)
+
+    def ids(self) -> list[str]:
+        return list(self._sessions.keys())
+
+    def get(self, channel_id: str) -> Session | None:
+        return self._sessions.get(channel_id)
+
+    def exists(self, channel_id: str) -> bool:
+        return channel_id in self._sessions
+
+    def items_snapshot(self) -> list[tuple[str, Session]]:
+        return list(self._sessions.items())
+
+    def reset_many(self, channel_ids: list[str]) -> int:
+        removed = 0
+        for cid in channel_ids:
+            if self._sessions.pop(cid, None) is not None:
+                removed += 1
+        if removed:
+            log.info("Bulk reset %d sessions", removed)
+        return removed
+
+    def clear_all(self) -> int:
+        count = len(self._sessions)
+        self._sessions.clear()
+        if count:
+            log.info("Cleared all %d sessions", count)
+        return count
+
     def prune(self) -> int:
         now = time.time()
         expired = [

@@ -390,7 +390,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "user_count": user_count,
             "tool_count": len(tools),
             "skill_count": len(bot.skill_manager.list_skills()),
-            "session_count": len(bot.sessions._sessions),
+            "session_count": bot.sessions.count(),
             "loop_count": bot.loop_manager.active_count,
             "schedule_count": len(bot.scheduler.list_all()),
             "agent_count": agent_count,
@@ -560,10 +560,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/sessions/clear-all")
     async def clear_all_sessions(_request: web.Request) -> web.Response:
-        channel_ids = list(bot.sessions._sessions.keys())
-        for cid in channel_ids:
-            bot.sessions.reset(cid)
-        return web.json_response({"status": "cleared", "count": len(channel_ids)})
+        count = bot.sessions.clear_all()
+        return web.json_response({"status": "cleared", "count": count})
 
     @routes.post("/api/reload")
     async def reload_config(_request: web.Request) -> web.Response:
@@ -666,7 +664,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.get("/api/sessions")
     async def list_sessions(_request: web.Request) -> web.Response:
         sessions = []
-        for cid, session in bot.sessions._sessions.items():
+        for cid, session in bot.sessions.items_snapshot():
             # Build preview from last 2 messages
             preview = []
             for m in session.messages[-2:]:
@@ -729,7 +727,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.get("/api/sessions/{channel_id}")
     async def get_session(request: web.Request) -> web.Response:
         cid = request.match_info["channel_id"]
-        session = bot.sessions._sessions.get(cid)
+        session = bot.sessions.get(cid)
         if not session:
             return web.json_response({"error": "session not found"}, status=404)
         messages = [
@@ -754,7 +752,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.get("/api/sessions/{channel_id}/export")
     async def export_session(request: web.Request) -> web.Response:
         cid = request.match_info["channel_id"]
-        session = bot.sessions._sessions.get(cid)
+        session = bot.sessions.get(cid)
         if not session:
             return web.json_response({"error": "session not found"}, status=404)
         fmt = request.query.get("format", "json")
@@ -801,7 +799,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.delete("/api/sessions/{channel_id}")
     async def delete_session(request: web.Request) -> web.Response:
         cid = request.match_info["channel_id"]
-        if cid not in bot.sessions._sessions:
+        if not bot.sessions.exists(cid):
             return web.json_response({"error": "session not found"}, status=404)
         bot.sessions.reset(cid)
         return web.json_response({"status": "cleared"})
@@ -817,11 +815,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response(
                 {"error": "channel_ids must be a non-empty list"}, status=400
             )
-        cleared = 0
-        for cid in channel_ids:
-            if cid in bot.sessions._sessions:
-                bot.sessions.reset(cid)
-                cleared += 1
+        cleared = bot.sessions.reset_many(channel_ids)
         return web.json_response({"status": "cleared", "count": cleared})
 
     # ------------------------------------------------------------------

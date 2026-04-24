@@ -928,7 +928,7 @@ class OdinBot(commands.Bot):
             del self._recent_actions[channel_id]
 
         # Clean up _channel_locks for channels no longer in active sessions
-        active_channels = set(self.sessions._sessions.keys())
+        active_channels = set(self.sessions.ids())
         stale_locks = [cid for cid in self._channel_locks if cid not in active_channels]
         for cid in stale_locks:
             del self._channel_locks[cid]
