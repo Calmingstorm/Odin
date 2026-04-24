@@ -45,7 +45,7 @@ class TestOdinConfig:
         from src.config import OdinConfig
         cfg = OdinConfig()
         assert cfg.token == ""
-        assert cfg.prefix == "!"
+        assert cfg.log_level == "INFO"
 
     def test_validate_missing_token(self):
         from src.config import OdinConfig
