@@ -639,9 +639,16 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
         channel_id = f"api-{uuid.uuid4().hex[:12]}"
 
+        # Resolve identity from API token
+        auth_header = request.headers.get("Authorization", "")
+        bearer_token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+        identity = bot.config.web.resolve_api_identity(bearer_token)
+        user_id = identity.user_id if identity else "api-user"
+        username = identity.username if identity else "API"
+
         result = await process_web_chat(
             bot, content, channel_id,
-            user_id="api-user", username="API",
+            user_id=user_id, username=username,
         )
 
         bot.sessions.reset(channel_id)
@@ -651,7 +658,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "response": result["response"],
             "tools_used": result["tools_used"],
             "is_error": result["is_error"],
+            "source": "web_api",
         }
+        if identity and identity.label:
+            resp["token_label"] = identity.label
         files = result.get("files", [])
         if files:
             resp["files"] = files

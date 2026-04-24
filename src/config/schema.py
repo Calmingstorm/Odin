@@ -343,11 +343,22 @@ class AuditConfig(BaseModel):
     hmac_key: str = ""  # Empty = signing disabled
 
 
+class ApiTokenIdentity(BaseModel):
+    token: str = ""
+    user_id: str = "api-user"
+    username: str = "API"
+    tier: str = "admin"
+    allowed_tools: list[str] = Field(default_factory=list)
+    allowed_hosts: list[str] = Field(default_factory=list)
+    label: str = ""
+
+
 class WebConfig(BaseModel):
     enabled: bool = True
-    api_token: str = ""  # Empty = no auth required (dev mode)
-    session_timeout_minutes: int = 0  # 0 = no timeout (sessions persist until logout)
-    port: int = 3000  # HTTP server port for health checks + web UI
+    api_token: str = ""
+    api_tokens: list[ApiTokenIdentity] = Field(default_factory=list)
+    session_timeout_minutes: int = 0
+    port: int = 3000
 
     @field_validator("port")
     @classmethod
@@ -355,6 +366,18 @@ class WebConfig(BaseModel):
         if v < 1 or v > 65535:
             raise ValueError("port must be between 1 and 65535")
         return v
+
+    def resolve_api_identity(self, token: str) -> ApiTokenIdentity | None:
+        """Look up identity for an API token. Falls back to default if single token configured."""
+        for t in self.api_tokens:
+            if t.token and t.token == token:
+                return t
+        if self.api_token and token == self.api_token:
+            return ApiTokenIdentity(
+                token=self.api_token, user_id="api-admin",
+                username="Admin", tier="admin", label="default",
+            )
+        return None
 
 
 class ComfyUIConfig(BaseModel):
