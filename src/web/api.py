@@ -155,7 +155,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "token is required"}, status=400)
 
         api_token = bot.config.web.api_token
-        if not api_token:
+        has_any_token = api_token or bot.config.web.api_tokens
+        if not has_any_token:
             # No auth configured — dev mode, issue session anyway
             sm = request.app.get("session_manager")
             if sm:
@@ -166,8 +167,23 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 })
             return web.json_response({"error": "no session manager"}, status=500)
 
+        # Check multi-token identities first
+        identity = bot.config.web.resolve_api_identity(token)
+        if identity is not None:
+            sm = request.app.get("session_manager")
+            if not sm:
+                return web.json_response({"error": "no session manager"}, status=500)
+            sid, timeout = sm.create()
+            return web.json_response({
+                "session_id": sid,
+                "timeout_seconds": timeout,
+            })
+
+        # Fall back to legacy single token
         import hmac as _hmac
-        if not _hmac.compare_digest(token, api_token):
+        if api_token and not _hmac.compare_digest(token, api_token):
+            return web.json_response({"error": "invalid token"}, status=401)
+        if not api_token:
             return web.json_response({"error": "invalid token"}, status=401)
 
         sm = request.app.get("session_manager")
