@@ -75,6 +75,7 @@ class SessionManager:
 
     def __init__(self, timeout_minutes: int = 0) -> None:
         self._sessions: dict[str, float] = {}  # session_id -> last_activity (monotonic)
+        self._identities: dict[str, object] = {}  # session_id -> ApiTokenIdentity or None
         self._timeout = timeout_minutes * 60 if timeout_minutes > 0 else 0
 
     @property
@@ -85,12 +86,18 @@ class SessionManager:
     def timeout_seconds(self) -> int:
         return self._timeout
 
-    def create(self) -> tuple[str, int]:
+    def create(self, identity: object = None) -> tuple[str, int]:
         """Create a new session. Returns (session_id, timeout_seconds)."""
         self.cleanup()
         sid = secrets.token_urlsafe(32)
         self._sessions[sid] = time.monotonic()
+        if identity is not None:
+            self._identities[sid] = identity
         return sid, self._timeout
+
+    def get_identity(self, sid: str) -> object | None:
+        """Return the identity bound to a session, if any."""
+        return self._identities.get(sid)
 
     def validate(self, sid: str) -> bool:
         """Validate a session ID. Returns False if expired or unknown."""
@@ -99,13 +106,14 @@ class SessionManager:
             return False
         if self._timeout > 0 and (time.monotonic() - ts) > self._timeout:
             del self._sessions[sid]
+            self._identities.pop(sid, None)
             return False
-        # Refresh activity timestamp
         self._sessions[sid] = time.monotonic()
         return True
 
     def destroy(self, sid: str) -> bool:
         """Destroy a session. Returns True if it existed."""
+        self._identities.pop(sid, None)
         return self._sessions.pop(sid, None) is not None
 
     def cleanup(self) -> int:
@@ -116,6 +124,7 @@ class SessionManager:
         expired = [sid for sid, ts in self._sessions.items() if now - ts > self._timeout]
         for sid in expired:
             del self._sessions[sid]
+            self._identities.pop(sid, None)
         return len(expired)
 
 
@@ -165,9 +174,12 @@ def _make_auth_middleware(
                 request._session_id = identity.user_id
                 request._api_identity = identity
                 return await handler(request)
-            # Check session tokens
+            # Check session tokens — restore bound identity if present
             if session_manager.validate(bearer_value):
                 request._session_id = bearer_value
+                session_identity = session_manager.get_identity(bearer_value)
+                if session_identity is not None:
+                    request._api_identity = session_identity
                 return await handler(request)
 
         # Check query param token (for downloads, WebSocket)
@@ -184,6 +196,9 @@ def _make_auth_middleware(
                     return await handler(request)
             if session_manager.validate(query_token):
                 request._session_id = query_token
+                session_identity = session_manager.get_identity(query_token)
+                if session_identity is not None:
+                    request._api_identity = session_identity
                 return await handler(request)
 
         return web.json_response({"error": "unauthorized"}, status=401)

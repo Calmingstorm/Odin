@@ -173,7 +173,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             sm = request.app.get("session_manager")
             if not sm:
                 return web.json_response({"error": "no session manager"}, status=500)
-            sid, timeout = sm.create()
+            sid, timeout = sm.create(identity=identity)
             return web.json_response({
                 "session_id": sid,
                 "timeout_seconds": timeout,
