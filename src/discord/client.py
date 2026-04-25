@@ -570,7 +570,7 @@ class OdinBot(commands.Bot):
         if hasattr(self.config, "personality") and self.config.personality.user_presets:
             from src.llm.system_prompt import register_user_presets
             register_user_presets({
-                k: {"identity": v.identity, "voice": v.voice}
+                k: {"name": v.name, "identity": v.identity, "voice": v.voice}
                 for k, v in self.config.personality.user_presets.items()
             })
 
@@ -797,6 +797,7 @@ class OdinBot(commands.Bot):
             tz=self.config.timezone,
             claude_code_dir=self.config.tools.claude_code_dir,
             personality_preset=p_cfg.preset if p_cfg else "odin",
+            personality_name=p_cfg.custom_name if p_cfg else "",
             personality_identity=p_cfg.custom_identity if p_cfg else "",
             personality_voice=p_cfg.custom_voice if p_cfg else "",
         )
@@ -894,6 +895,7 @@ class OdinBot(commands.Bot):
             voice_info=voice_info,
             tz=self.config.timezone,
             personality_preset=p_cfg.preset if p_cfg else "odin",
+            personality_name=p_cfg.custom_name if p_cfg else "",
             personality_identity=p_cfg.custom_identity if p_cfg else "",
             personality_voice=p_cfg.custom_voice if p_cfg else "",
         )

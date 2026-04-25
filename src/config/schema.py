@@ -382,12 +382,14 @@ class WebConfig(BaseModel):
 
 
 class PersonalityPreset(BaseModel):
+    name: str = ""
     identity: str = ""
     voice: str = ""
 
 
 class PersonalityConfig(BaseModel):
     preset: str = "odin"
+    custom_name: str = ""
     custom_identity: str = ""
     custom_voice: str = ""
     user_presets: dict[str, PersonalityPreset] = Field(default_factory=dict)

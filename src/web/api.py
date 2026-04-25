@@ -594,11 +594,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     async def get_personality(_request: web.Request) -> web.Response:
         from src.llm.system_prompt import PERSONALITY_PRESETS
         p = bot.config.personality if hasattr(bot.config, "personality") else None
-        user_presets = {k: {"identity": v.identity, "voice": v.voice}
+        user_presets = {k: {"name": v.name, "identity": v.identity, "voice": v.voice}
                        for k, v in (p.user_presets.items() if p else {})}
         all_presets = {**{k: v for k, v in PERSONALITY_PRESETS.items()}, **user_presets}
         return web.json_response({
             "preset": p.preset if p else "odin",
+            "custom_name": p.custom_name if p else "",
             "custom_identity": p.custom_identity if p else "",
             "custom_voice": p.custom_voice if p else "",
             "presets": all_presets,
@@ -613,16 +614,17 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON"}, status=400)
         preset = data.get("preset", "odin")
+        custom_name = data.get("custom_name", "")
         custom_identity = data.get("custom_identity", "")
         custom_voice = data.get("custom_voice", "")
         from src.config.schema import PersonalityConfig
         existing_user_presets = bot.config.personality.user_presets if hasattr(bot.config, "personality") else {}
         bot.config.personality = PersonalityConfig(
-            preset=preset, custom_identity=custom_identity, custom_voice=custom_voice,
+            preset=preset, custom_name=custom_name, custom_identity=custom_identity, custom_voice=custom_voice,
             user_presets=existing_user_presets,
         )
         from src.llm.system_prompt import register_user_presets
-        register_user_presets({k: {"identity": v.identity, "voice": v.voice} for k, v in existing_user_presets.items()})
+        register_user_presets({k: {"name": v.name, "identity": v.identity, "voice": v.voice} for k, v in existing_user_presets.items()})
         current = bot.config.model_dump()
         config_path = getattr(request.app, "_config_path", "config.yml")
         await asyncio.to_thread(_write_config, config_path, current)
@@ -645,14 +647,15 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         from src.llm.system_prompt import PERSONALITY_PRESETS
         if name in PERSONALITY_PRESETS:
             return web.json_response({"error": f"cannot overwrite built-in preset '{name}'"}, status=400)
+        display_name = data.get("display_name", name)
         identity = data.get("identity", "")
         voice = data.get("voice", "")
         if not identity and not voice:
             return web.json_response({"error": "identity or voice is required"}, status=400)
         from src.config.schema import PersonalityPreset
-        bot.config.personality.user_presets[name] = PersonalityPreset(identity=identity, voice=voice)
+        bot.config.personality.user_presets[name] = PersonalityPreset(name=display_name, identity=identity, voice=voice)
         from src.llm.system_prompt import register_user_presets
-        register_user_presets({k: {"identity": v.identity, "voice": v.voice} for k, v in bot.config.personality.user_presets.items()})
+        register_user_presets({k: {"name": v.name, "identity": v.identity, "voice": v.voice} for k, v in bot.config.personality.user_presets.items()})
         current = bot.config.model_dump()
         config_path = getattr(request.app, "_config_path", "config.yml")
         await asyncio.to_thread(_write_config, config_path, current)
@@ -668,7 +671,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "preset not found"}, status=404)
         del bot.config.personality.user_presets[name]
         from src.llm.system_prompt import register_user_presets
-        register_user_presets({k: {"identity": v.identity, "voice": v.voice} for k, v in bot.config.personality.user_presets.items()})
+        register_user_presets({k: {"name": v.name, "identity": v.identity, "voice": v.voice} for k, v in bot.config.personality.user_presets.items()})
         if bot.config.personality.preset == name:
             bot.config.personality.preset = "odin"
             bot._invalidate_prompt_caches()

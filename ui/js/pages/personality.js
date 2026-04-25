@@ -5,6 +5,7 @@ const { ref, computed, onMounted } = Vue;
 export default {
   setup() {
     const preset = ref('odin');
+    const customName = ref('');
     const customIdentity = ref('');
     const customVoice = ref('');
     const presets = ref({});
@@ -22,6 +23,11 @@ export default {
     const presetNames = computed(() => [...builtinPresets.value, ...userPresets.value]);
     const isUserPreset = computed(() => userPresets.value.includes(preset.value));
 
+    const previewName = computed(() => {
+      if (isCustom.value) return customName.value || 'Odin';
+      return presets.value[preset.value]?.name || preset.value;
+    });
+
     const previewIdentity = computed(() => {
       if (isCustom.value) return customIdentity.value || '(empty — will use Odin default)';
       return presets.value[preset.value]?.identity || '';
@@ -37,6 +43,7 @@ export default {
       try {
         const data = await api.get('/api/personality');
         preset.value = data.preset || 'odin';
+        customName.value = data.custom_name || '';
         customIdentity.value = data.custom_identity || '';
         customVoice.value = data.custom_voice || '';
         presets.value = data.presets || {};
@@ -56,6 +63,7 @@ export default {
       try {
         await api.put('/api/personality', {
           preset: preset.value,
+          custom_name: customName.value,
           custom_identity: customIdentity.value,
           custom_voice: customVoice.value,
         });
@@ -76,6 +84,7 @@ export default {
       try {
         await api.post('/api/personality/presets', {
           name,
+          display_name: previewName.value,
           identity: previewIdentity.value,
           voice: previewVoice.value,
         });
@@ -104,8 +113,8 @@ export default {
 
     onMounted(load);
 
-    return { preset, customIdentity, customVoice, presets, presetNames, isCustom, isUserPreset,
-             previewIdentity, previewVoice, saving, saved, error, loading, save,
+    return { preset, customName, customIdentity, customVoice, presets, presetNames, isCustom, isUserPreset,
+             previewName, previewIdentity, previewVoice, saving, saved, error, loading, save,
              showSavePreset, newPresetName, savingPreset, saveAsPreset, deletePreset,
              builtinPresets, userPresets };
   },
@@ -145,6 +154,11 @@ export default {
       <!-- Custom fields -->
       <div v-if="isCustom" class="hm-card space-y-4">
         <div>
+          <label class="block text-sm font-medium mb-1">Name</label>
+          <input v-model="customName" class="hm-input w-full max-w-xs" placeholder="e.g. Muninn, Heimdall, Loki..." />
+          <p class="text-gray-500 text-xs mt-1">The bot's name as used in prompts and responses.</p>
+        </div>
+        <div>
           <label class="block text-sm font-medium mb-1">Identity</label>
           <textarea v-model="customIdentity" class="hm-input w-full" rows="4"
             placeholder="Describe who the bot is — background, role, perspective..."></textarea>
@@ -160,6 +174,10 @@ export default {
       <div class="hm-card">
         <h3 class="text-sm font-medium mb-2">Preview</h3>
         <div class="bg-gray-900 rounded-lg p-4 text-sm space-y-3">
+          <div>
+            <span class="text-gray-500 text-xs uppercase tracking-wide">Name</span>
+            <p class="text-gray-300 mt-1 font-semibold">{{ previewName }}</p>
+          </div>
           <div>
             <span class="text-gray-500 text-xs uppercase tracking-wide">Identity</span>
             <p class="text-gray-300 mt-1 whitespace-pre-wrap">{{ previewIdentity }}</p>

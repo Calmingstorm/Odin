@@ -13,6 +13,7 @@ def _get_zone(tz_name: str) -> ZoneInfo:
 
 PERSONALITY_PRESETS: dict[str, dict[str, str]] = {
     "odin": {
+        "name": "Odin, the All-Father",
         "identity": (
             "Norse god of wisdom and war, stuck managing mortal infrastructure for eternity. "
             "One-eyed — you traded the other at Mimir's well for wisdom, and what you got was "
@@ -31,6 +32,7 @@ PERSONALITY_PRESETS: dict[str, dict[str, str]] = {
         ),
     },
     "professional": {
+        "name": "Mimir",
         "identity": (
             "A precise, reliable infrastructure operations assistant. You communicate clearly, "
             "professionally, and without unnecessary flair. You value accuracy over personality "
@@ -44,6 +46,7 @@ PERSONALITY_PRESETS: dict[str, dict[str, str]] = {
         ),
     },
     "friendly": {
+        "name": "Bragi",
         "identity": (
             "A helpful and approachable assistant who enjoys solving problems and explaining "
             "things clearly. You're knowledgeable but never condescending, and you celebrate "
@@ -151,11 +154,12 @@ def build_chat_system_prompt(
     voice_info: str = "",
     tz: str = "UTC",
     personality_preset: str = "odin",
+    personality_name: str = "",
     personality_identity: str = "",
     personality_voice: str = "",
 ) -> str:
     """Build a lightweight system prompt for chat-routed messages."""
-    bot_name, identity, voice = _resolve_personality(personality_preset, personality_identity, personality_voice)
+    bot_name, identity, voice = _resolve_personality(personality_preset, personality_name, personality_identity, personality_voice)
     return CHAT_SYSTEM_PROMPT_TEMPLATE.format(
         bot_name=bot_name,
         identity=identity,
@@ -176,22 +180,22 @@ def register_user_presets(presets: dict[str, dict[str, str]]) -> None:
 
 def _resolve_personality(
     preset: str = "odin",
+    custom_name: str = "",
     custom_identity: str = "",
     custom_voice: str = "",
 ) -> tuple[str, str, str]:
     """Return (bot_name, identity, voice) from preset or custom values."""
-    if preset == "custom" and (custom_identity or custom_voice):
+    if preset == "custom":
         return (
-            "your bot",
+            custom_name or "Odin",
             custom_identity or PERSONALITY_PRESETS["odin"]["identity"],
             custom_voice or PERSONALITY_PRESETS["odin"]["voice"],
         )
     if preset in _USER_PRESETS:
         p = _USER_PRESETS[preset]
-        return preset, p.get("identity", ""), p.get("voice", "")
+        return p.get("name", preset), p.get("identity", ""), p.get("voice", "")
     p = PERSONALITY_PRESETS.get(preset, PERSONALITY_PRESETS["odin"])
-    name_map = {"odin": "Odin, the All-Father", "professional": "your operations assistant", "friendly": "your assistant"}
-    return name_map.get(preset, preset), p["identity"], p["voice"]
+    return p.get("name", preset), p["identity"], p["voice"]
 
 
 def build_system_prompt(
@@ -201,13 +205,14 @@ def build_system_prompt(
     tz: str = "UTC",
     claude_code_dir: str = "/opt/odin",
     personality_preset: str = "odin",
+    personality_name: str = "",
     personality_identity: str = "",
     personality_voice: str = "",
 ) -> str:
     hosts_text = "\n".join(f"- `{alias}`: {addr}" for alias, addr in hosts.items())
     local_tz = _get_zone(tz)
     tz_abbr = datetime.now(timezone.utc).astimezone(local_tz).strftime("%Z")
-    bot_name, identity, voice = _resolve_personality(personality_preset, personality_identity, personality_voice)
+    bot_name, identity, voice = _resolve_personality(personality_preset, personality_name, personality_identity, personality_voice)
 
     return SYSTEM_PROMPT_TEMPLATE.format(
         bot_name=bot_name,
