@@ -8,13 +8,19 @@ export default {
     const customIdentity = ref('');
     const customVoice = ref('');
     const presets = ref({});
+    const builtinPresets = ref([]);
+    const userPresets = ref([]);
     const saving = ref(false);
     const saved = ref(false);
     const error = ref(null);
     const loading = ref(true);
+    const newPresetName = ref('');
+    const showSavePreset = ref(false);
+    const savingPreset = ref(false);
 
     const isCustom = computed(() => preset.value === 'custom');
-    const presetNames = computed(() => Object.keys(presets.value));
+    const presetNames = computed(() => [...builtinPresets.value, ...userPresets.value]);
+    const isUserPreset = computed(() => userPresets.value.includes(preset.value));
 
     const previewIdentity = computed(() => {
       if (isCustom.value) return customIdentity.value || '(empty — will use Odin default)';
@@ -34,6 +40,8 @@ export default {
         customIdentity.value = data.custom_identity || '';
         customVoice.value = data.custom_voice || '';
         presets.value = data.presets || {};
+        builtinPresets.value = data.builtin_presets || [];
+        userPresets.value = data.user_presets || [];
       } catch (e) {
         error.value = e.message;
       } finally {
@@ -60,14 +68,50 @@ export default {
       }
     }
 
+    async function saveAsPreset() {
+      const name = newPresetName.value.trim();
+      if (!name) return;
+      savingPreset.value = true;
+      error.value = null;
+      try {
+        await api.post('/api/personality/presets', {
+          name,
+          identity: previewIdentity.value,
+          voice: previewVoice.value,
+        });
+        showSavePreset.value = false;
+        newPresetName.value = '';
+        await load();
+        preset.value = name.toLowerCase().replace(/ /g, '_');
+      } catch (e) {
+        error.value = e.message;
+      } finally {
+        savingPreset.value = false;
+      }
+    }
+
+    async function deletePreset() {
+      if (!confirm(`Delete preset "${preset.value}"?`)) return;
+      error.value = null;
+      try {
+        await api.del(`/api/personality/presets/${preset.value}`);
+        await load();
+        preset.value = 'odin';
+      } catch (e) {
+        error.value = e.message;
+      }
+    }
+
     onMounted(load);
 
-    return { preset, customIdentity, customVoice, presets, presetNames, isCustom,
-             previewIdentity, previewVoice, saving, saved, error, loading, save };
+    return { preset, customIdentity, customVoice, presets, presetNames, isCustom, isUserPreset,
+             previewIdentity, previewVoice, saving, saved, error, loading, save,
+             showSavePreset, newPresetName, savingPreset, saveAsPreset, deletePreset,
+             builtinPresets, userPresets };
   },
 
   template: `
-  <div class="space-y-6 max-w-3xl">
+  <div class="p-6 space-y-6 max-w-3xl">
     <div>
       <h2 class="text-lg font-semibold mb-1">Personality</h2>
       <p class="text-gray-400 text-sm">Configure how Odin presents itself. Changes apply immediately — no restart needed.</p>
@@ -81,10 +125,20 @@ export default {
       <!-- Preset selector -->
       <div class="hm-card">
         <label class="block text-sm font-medium mb-2">Preset</label>
-        <select v-model="preset" class="hm-input w-full max-w-xs">
-          <option v-for="name in presetNames" :key="name" :value="name">{{ name.charAt(0).toUpperCase() + name.slice(1) }}</option>
-          <option value="custom">Custom</option>
-        </select>
+        <div class="flex items-center gap-2">
+          <select v-model="preset" class="hm-input max-w-xs">
+            <optgroup label="Built-in">
+              <option v-for="name in builtinPresets" :key="name" :value="name">{{ name.charAt(0).toUpperCase() + name.slice(1) }}</option>
+            </optgroup>
+            <optgroup v-if="userPresets.length" label="Custom presets">
+              <option v-for="name in userPresets" :key="name" :value="name">{{ name.charAt(0).toUpperCase() + name.slice(1) }}</option>
+            </optgroup>
+            <optgroup label="Other">
+              <option value="custom">Custom</option>
+            </optgroup>
+          </select>
+          <button v-if="isUserPreset" @click="deletePreset" class="btn btn-ghost text-red-400 text-xs">Delete</button>
+        </div>
         <p class="text-gray-500 text-xs mt-1">Select a personality preset or choose Custom to write your own.</p>
       </div>
 
@@ -117,14 +171,30 @@ export default {
         </div>
       </div>
 
-      <!-- Save -->
-      <div class="flex items-center gap-3">
+      <!-- Save actions -->
+      <div class="flex items-center gap-3 flex-wrap">
         <button @click="save" :disabled="saving" class="btn btn-primary">
           <span v-if="saving" class="spinner" style="width:14px;height:14px;border-width:2px;"></span>
           {{ saving ? 'Saving...' : 'Save & Apply' }}
         </button>
+        <button @click="showSavePreset = !showSavePreset" class="btn btn-ghost text-sm">
+          {{ showSavePreset ? 'Cancel' : 'Save as preset...' }}
+        </button>
         <span v-if="saved" class="text-green-400 text-sm">Applied successfully</span>
         <span v-if="error" class="text-red-400 text-sm">{{ error }}</span>
+      </div>
+
+      <!-- Save as preset form -->
+      <div v-if="showSavePreset" class="hm-card">
+        <label class="block text-sm font-medium mb-2">New preset name</label>
+        <div class="flex items-center gap-2">
+          <input v-model="newPresetName" class="hm-input max-w-xs" placeholder="e.g. incident-commander"
+            @keyup.enter="saveAsPreset" />
+          <button @click="saveAsPreset" :disabled="savingPreset || !newPresetName.trim()" class="btn btn-primary text-sm">
+            {{ savingPreset ? 'Saving...' : 'Save preset' }}
+          </button>
+        </div>
+        <p class="text-gray-500 text-xs mt-1">Saves the current preview as a reusable preset.</p>
       </div>
     </template>
   </div>

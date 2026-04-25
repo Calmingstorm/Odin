@@ -594,11 +594,16 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     async def get_personality(_request: web.Request) -> web.Response:
         from src.llm.system_prompt import PERSONALITY_PRESETS
         p = bot.config.personality if hasattr(bot.config, "personality") else None
+        user_presets = {k: {"identity": v.identity, "voice": v.voice}
+                       for k, v in (p.user_presets.items() if p else {})}
+        all_presets = {**{k: v for k, v in PERSONALITY_PRESETS.items()}, **user_presets}
         return web.json_response({
             "preset": p.preset if p else "odin",
             "custom_identity": p.custom_identity if p else "",
             "custom_voice": p.custom_voice if p else "",
-            "presets": {k: v for k, v in PERSONALITY_PRESETS.items()},
+            "presets": all_presets,
+            "builtin_presets": list(PERSONALITY_PRESETS.keys()),
+            "user_presets": list(user_presets.keys()),
         })
 
     @routes.put("/api/personality")
@@ -611,15 +616,64 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         custom_identity = data.get("custom_identity", "")
         custom_voice = data.get("custom_voice", "")
         from src.config.schema import PersonalityConfig
+        existing_user_presets = bot.config.personality.user_presets if hasattr(bot.config, "personality") else {}
         bot.config.personality = PersonalityConfig(
             preset=preset, custom_identity=custom_identity, custom_voice=custom_voice,
+            user_presets=existing_user_presets,
         )
+        from src.llm.system_prompt import register_user_presets
+        register_user_presets({k: {"identity": v.identity, "voice": v.voice} for k, v in existing_user_presets.items()})
         current = bot.config.model_dump()
         config_path = getattr(request.app, "_config_path", "config.yml")
         await asyncio.to_thread(_write_config, config_path, current)
         bot._invalidate_prompt_caches()
         bot._system_prompt = bot._build_system_prompt()
         return web.json_response({"status": "updated", "preset": preset})
+
+    @routes.post("/api/personality/presets")
+    async def save_preset(request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        name = (data.get("name") or "").strip().lower().replace(" ", "_")
+        if not name:
+            return web.json_response({"error": "name is required"}, status=400)
+        from src.llm.system_prompt import PERSONALITY_PRESETS
+        if name in PERSONALITY_PRESETS:
+            return web.json_response({"error": f"cannot overwrite built-in preset '{name}'"}, status=400)
+        identity = data.get("identity", "")
+        voice = data.get("voice", "")
+        if not identity and not voice:
+            return web.json_response({"error": "identity or voice is required"}, status=400)
+        from src.config.schema import PersonalityPreset
+        bot.config.personality.user_presets[name] = PersonalityPreset(identity=identity, voice=voice)
+        from src.llm.system_prompt import register_user_presets
+        register_user_presets({k: {"identity": v.identity, "voice": v.voice} for k, v in bot.config.personality.user_presets.items()})
+        current = bot.config.model_dump()
+        config_path = getattr(request.app, "_config_path", "config.yml")
+        await asyncio.to_thread(_write_config, config_path, current)
+        return web.json_response({"status": "saved", "name": name})
+
+    @routes.delete("/api/personality/presets/{name}")
+    async def delete_preset(request: web.Request) -> web.Response:
+        name = request.match_info["name"]
+        from src.llm.system_prompt import PERSONALITY_PRESETS
+        if name in PERSONALITY_PRESETS:
+            return web.json_response({"error": f"cannot delete built-in preset '{name}'"}, status=400)
+        if name not in bot.config.personality.user_presets:
+            return web.json_response({"error": "preset not found"}, status=404)
+        del bot.config.personality.user_presets[name]
+        from src.llm.system_prompt import register_user_presets
+        register_user_presets({k: {"identity": v.identity, "voice": v.voice} for k, v in bot.config.personality.user_presets.items()})
+        if bot.config.personality.preset == name:
+            bot.config.personality.preset = "odin"
+            bot._invalidate_prompt_caches()
+            bot._system_prompt = bot._build_system_prompt()
+        current = bot.config.model_dump()
+        config_path = getattr(request.app, "_config_path", "config.yml")
+        await asyncio.to_thread(_write_config, config_path, current)
+        return web.json_response({"status": "deleted", "name": name})
 
     # ------------------------------------------------------------------
     # Self-Update
