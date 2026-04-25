@@ -781,12 +781,16 @@ class OdinBot(commands.Bot):
                     "Users can ask you to join with '/voice join' or 'join voice'."
                 )
 
+        p_cfg = self.config.personality if hasattr(self.config, "personality") else None
         prompt = build_system_prompt(
             context=self.context_loader.context,
             hosts=self._get_cached_hosts(),
             voice_info=voice_info,
             tz=self.config.timezone,
             claude_code_dir=self.config.tools.claude_code_dir,
+            personality_preset=p_cfg.preset if p_cfg else "odin",
+            personality_identity=p_cfg.custom_identity if p_cfg else "",
+            personality_voice=p_cfg.custom_voice if p_cfg else "",
         )
 
         # Inject persistent memory into the system prompt (per-user + global)

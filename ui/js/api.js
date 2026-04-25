@@ -9,11 +9,12 @@
 
 class OdinAPI {
   constructor() {
-    this._token = sessionStorage.getItem('odin_token') || '';
+    this._token = localStorage.getItem('odin_token') || sessionStorage.getItem('odin_token') || '';
+    this._persist = localStorage.getItem('odin_persist') === '1';
     this._sessionTimeout = 0;
     this._lastActivity = Date.now();
     this._activityTimer = null;
-    this.onSessionExpired = null; // callback when session times out
+    this.onSessionExpired = null;
   }
 
   get token() { return this._token; }
@@ -24,16 +25,25 @@ class OdinAPI {
     this._sessionTimeout = timeoutSeconds;
     this._lastActivity = Date.now();
     if (token) {
-      sessionStorage.setItem('odin_token', token);
+      const store = this._persist ? localStorage : sessionStorage;
+      store.setItem('odin_token', token);
+      if (this._persist) localStorage.setItem('odin_persist', '1');
       if (timeoutSeconds > 0) {
-        sessionStorage.setItem('odin_session_timeout', String(timeoutSeconds));
+        store.setItem('odin_session_timeout', String(timeoutSeconds));
       }
       this._startActivityMonitor();
     } else {
       sessionStorage.removeItem('odin_token');
       sessionStorage.removeItem('odin_session_timeout');
+      localStorage.removeItem('odin_token');
+      localStorage.removeItem('odin_persist');
+      localStorage.removeItem('odin_session_timeout');
       this._stopActivityMonitor();
     }
+  }
+
+  setPersist(persist) {
+    this._persist = persist;
   }
 
   _startActivityMonitor() {

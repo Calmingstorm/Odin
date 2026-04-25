@@ -570,6 +570,105 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         bot._system_prompt = bot._build_system_prompt()
         return web.json_response({"status": "reloaded"})
 
+    # ------------------------------------------------------------------
+    # Personality
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/personality")
+    async def get_personality(_request: web.Request) -> web.Response:
+        from src.llm.system_prompt import PERSONALITY_PRESETS
+        p = bot.config.personality if hasattr(bot.config, "personality") else None
+        return web.json_response({
+            "preset": p.preset if p else "odin",
+            "custom_identity": p.custom_identity if p else "",
+            "custom_voice": p.custom_voice if p else "",
+            "presets": {k: v for k, v in PERSONALITY_PRESETS.items()},
+        })
+
+    @routes.put("/api/personality")
+    async def update_personality(request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        preset = data.get("preset", "odin")
+        custom_identity = data.get("custom_identity", "")
+        custom_voice = data.get("custom_voice", "")
+        from src.config.schema import PersonalityConfig
+        bot.config.personality = PersonalityConfig(
+            preset=preset, custom_identity=custom_identity, custom_voice=custom_voice,
+        )
+        current = bot.config.model_dump()
+        config_path = getattr(request.app, "_config_path", "config.yml")
+        await asyncio.to_thread(_write_config, config_path, current)
+        bot._invalidate_prompt_caches()
+        bot._system_prompt = bot._build_system_prompt()
+        return web.json_response({"status": "updated", "preset": preset})
+
+    # ------------------------------------------------------------------
+    # Self-Update
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/update/check")
+    async def check_update(_request: web.Request) -> web.Response:
+        from src.version import get_version
+        current = get_version()
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["gh", "api", "repos/Calmingstorm/Odin/releases/latest", "--jq", ".tag_name,.body"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode != 0:
+                return web.json_response({"current": current, "error": "Failed to check GitHub"}, status=502)
+            lines = result.stdout.strip().split("\n", 1)
+            latest_tag = lines[0].strip()
+            changelog = lines[1].strip() if len(lines) > 1 else ""
+            latest_version = latest_tag.lstrip("v")
+            update_available = latest_version != current and latest_tag != f"v{current}"
+            return web.json_response({
+                "current": current,
+                "latest": latest_tag,
+                "update_available": update_available,
+                "changelog": changelog[:2000],
+            })
+        except Exception as e:
+            return web.json_response({"current": current, "error": str(e)}, status=502)
+
+    @routes.post("/api/update/apply")
+    async def apply_update(request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        target = data.get("version", "latest")
+        import subprocess, os
+        try:
+            base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            cmds = [
+                ["git", "-C", base, "fetch", "--tags", "origin"],
+            ]
+            if target == "latest":
+                cmds.append(["git", "-C", base, "checkout", "master"])
+                cmds.append(["git", "-C", base, "pull", "--ff-only", "origin", "master"])
+            else:
+                cmds.append(["git", "-C", base, "checkout", target])
+            for cmd in cmds:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if r.returncode != 0:
+                    return web.json_response({"error": f"Command failed: {' '.join(cmd)}\n{r.stderr}"}, status=500)
+            # Nuke pycache
+            for root, dirs, _files in os.walk(base):
+                for d in dirs:
+                    if d == "__pycache__":
+                        import shutil
+                        shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+            # Graceful shutdown — systemd will restart with new code
+            asyncio.get_event_loop().call_later(2, lambda: os.kill(os.getpid(), 15))
+            return web.json_response({"status": "updating", "message": "Restarting with new code in 2 seconds..."})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
     @routes.post("/api/loops/stop-all")
     async def stop_all_loops(_request: web.Request) -> web.Response:
         result = bot.loop_manager.stop_loop("all")

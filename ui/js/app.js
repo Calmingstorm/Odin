@@ -8,6 +8,7 @@ import ChatPage from './pages/chat.js';
 import OperationsPage from './pages/operations.js';
 import HistoryPage from './pages/history.js';
 import CapabilitiesPage from './pages/capabilities.js';
+import PersonalityPage from './pages/personality.js';
 import SystemPage from './pages/system.js';
 
 const { createApp, ref, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
@@ -23,6 +24,7 @@ const routes = [
   { path: '/operations',    component: OperationsPage,    meta: { label: 'Operations',    icon: '\u{1F3AF}' } },
   { path: '/history',       component: HistoryPage,       meta: { label: 'History',       icon: '\u{1F4DD}' } },
   { path: '/capabilities',  component: CapabilitiesPage,  meta: { label: 'Capabilities',  icon: '\u{1F527}' } },
+  { path: '/personality',   component: PersonalityPage,   meta: { label: 'Personality',   icon: '\u{1F3AD}' } },
   { path: '/system',        component: SystemPage,        meta: { label: 'System',        icon: '\u{2699}\u{FE0F}' } },
   // Redirects from old routes to new grouped locations
   { path: '/execution',  redirect: { path: '/operations', query: { tab: 'live' } } },
@@ -78,6 +80,10 @@ const LoginScreen = {
             autofocus
             autocomplete="current-password"
           />
+          <label class="flex items-center gap-2 mb-3 text-sm text-gray-400 cursor-pointer select-none">
+            <input type="checkbox" v-model="persist" class="rounded bg-gray-800 border-gray-600" />
+            Stay logged in
+          </label>
           <button type="submit" class="btn btn-primary w-full justify-center" :disabled="busy">
             <span v-if="busy" class="spinner" style="width:14px;height:14px;border-width:2px;" aria-hidden="true"></span>
             {{ busy ? 'Connecting...' : 'Connect' }}
@@ -90,11 +96,13 @@ const LoginScreen = {
     const token = ref('');
     const error = ref(null);
     const busy = ref(false);
+    const persist = ref(false);
 
     async function login() {
       busy.value = true;
       error.value = null;
       try {
+        api.setPersist(persist.value);
         await api.login(token.value);
         props.onLogin();
       } catch (e) {
@@ -103,7 +111,7 @@ const LoginScreen = {
         busy.value = false;
       }
     }
-    return { token, error, busy, login };
+    return { token, error, busy, persist, login };
   },
 };
 

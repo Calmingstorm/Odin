@@ -5,6 +5,7 @@ import LogsPage from './logs.js';
 import ConfigPage from './config.js';
 import DiscordConfigPage from './discord-config.js';
 import InternalsPage from './internals.js';
+import UpdatePage from './update.js';
 
 export default {
   components: { TabbedPage },
@@ -16,6 +17,7 @@ export default {
       { id: 'config', label: 'Config', component: ConfigPage },
       { id: 'discord', label: 'Discord', component: DiscordConfigPage },
       { id: 'internals', label: 'Internals', component: InternalsPage },
+      { id: 'update', label: 'Update', component: UpdatePage },
     ];
     return { tabs };
   },
