@@ -1,4 +1,6 @@
-"""Odin — Discord moderation and utility bot with web dashboard."""
+"""Odin — autonomous execution agent on Discord."""
 
-__version__ = "2.0.0"
+from .version import get_version as _get_version
+
+__version__ = _get_version()
 __project__ = "Odin"
