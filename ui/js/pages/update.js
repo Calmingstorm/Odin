@@ -55,7 +55,7 @@ export default {
   },
 
   template: `
-  <div class="space-y-6 max-w-2xl">
+  <div class="p-6 space-y-6 max-w-2xl">
     <div>
       <h2 class="text-lg font-semibold mb-1">Updates</h2>
       <p class="text-gray-400 text-sm">Check for new Odin releases and apply updates.</p>
