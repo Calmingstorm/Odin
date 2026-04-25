@@ -737,18 +737,36 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
         try:
             # Backup user-modified config files before updating
-            _preserve = ["config.yml", ".env"]
+            _preserve = {"config.yml", ".env"}
             _backups: dict[str, bytes] = {}
             for fname in _preserve:
                 fpath = os.path.join(base, fname)
                 if os.path.exists(fpath):
                     _backups[fname] = open(fpath, "rb").read()
 
-            # Reset tracked files to allow clean pull (config.yml etc)
-            subprocess.run(
-                ["git", "-C", base, "checkout", "."],
-                capture_output=True, timeout=10,
+            # Check for unexpected dirty files (anything besides config.yml/.env)
+            r = subprocess.run(
+                ["git", "-C", base, "status", "--porcelain"],
+                capture_output=True, text=True, timeout=10,
             )
+            dirty = []
+            for line in r.stdout.strip().splitlines():
+                if not line.strip() or line.strip().startswith("?"):
+                    continue
+                fname = line[3:].strip().split(" -> ")[-1]
+                if fname not in _preserve:
+                    dirty.append(fname)
+            if dirty:
+                return web.json_response({
+                    "error": f"Worktree has unexpected modifications ({', '.join(dirty[:5])}). Only config.yml and .env are preserved automatically.",
+                }, status=409)
+
+            # Reset only the preserved config files for clean pull
+            for fname in _preserve:
+                subprocess.run(
+                    ["git", "-C", base, "checkout", "--", fname],
+                    capture_output=True, timeout=10,
+                )
 
             # Record current ref for potential rollback
             r = subprocess.run(
