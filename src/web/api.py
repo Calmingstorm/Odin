@@ -746,16 +746,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
             # Check for unexpected dirty files (anything besides config.yml/.env)
             r = subprocess.run(
-                ["git", "-C", base, "status", "--porcelain"],
+                ["git", "-C", base, "diff", "--name-only", "HEAD"],
                 capture_output=True, text=True, timeout=10,
             )
-            dirty = []
-            for line in r.stdout.strip().splitlines():
-                if not line.strip() or line.strip().startswith("?"):
-                    continue
-                fname = line[3:].strip().split(" -> ")[-1]
-                if fname not in _preserve:
-                    dirty.append(fname)
+            dirty = [f for f in r.stdout.strip().splitlines() if f.strip() and f.strip() not in _preserve]
             if dirty:
                 return web.json_response({
                     "error": f"Worktree has unexpected modifications ({', '.join(dirty[:5])}). Only config.yml and .env are preserved automatically.",
