@@ -656,7 +656,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             target = r.stdout.strip()
 
         # Validate tag format
-        if not _re.match(r"^v?\d+\.\d+\.\d+", target):
+        if not _re.fullmatch(r"v?\d+\.\d+\.\d+", target):
             return web.json_response({"error": f"Invalid version format: {target}"}, status=400)
 
         # Check for clean worktree (skip-worktree files are OK)
@@ -684,18 +684,23 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 (["git", "-C", base, "checkout", "master"], "checkout master"),
                 (["git", "-C", base, "merge", "--ff-only", target], "fast-forward to release tag"),
             ]
+            def _rollback(reason: str) -> web.Response:
+                if prev_ref:
+                    subprocess.run(["git", "-C", base, "checkout", "master"], capture_output=True, timeout=10)
+                    subprocess.run(["git", "-C", base, "reset", "--hard", prev_ref], capture_output=True, timeout=10)
+                return web.json_response({"error": reason}, status=500)
+
             for cmd, label in steps:
                 r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 if r.returncode != 0:
-                    # Attempt rollback on failure
-                    if prev_ref:
-                        subprocess.run(["git", "-C", base, "checkout", prev_ref], capture_output=True, timeout=10)
-                    return web.json_response({"error": f"{label} failed: {r.stderr.strip()}"}, status=500)
+                    return _rollback(f"{label} failed: {r.stderr.strip()}")
 
             # Install/update dependencies
             venv_pip = os.path.join(base, ".venv", "bin", "pip")
             if os.path.exists(venv_pip):
-                subprocess.run([venv_pip, "install", "-q", base], capture_output=True, timeout=120)
+                r = subprocess.run([venv_pip, "install", "-q", base], capture_output=True, text=True, timeout=120)
+                if r.returncode != 0:
+                    return _rollback(f"dependency install failed: {r.stderr.strip()}")
 
             # Nuke pycache
             for root, dirs, _files in os.walk(base):
