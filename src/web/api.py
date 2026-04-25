@@ -735,18 +735,33 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not _re.fullmatch(r"v?\d+\.\d+\.\d+", target):
             return web.json_response({"error": f"Invalid version format: {target}"}, status=400)
 
-        # Check for clean worktree (skip-worktree files are OK)
-        r = subprocess.run(
-            ["git", "-C", base, "status", "--porcelain"],
-            capture_output=True, text=True, timeout=10,
-        )
-        dirty = [l for l in r.stdout.strip().splitlines() if l.strip() and not l.strip().startswith("?")]
-        if dirty:
-            return web.json_response({
-                "error": f"Worktree is not clean ({len(dirty)} modified files). Stash or commit changes first.",
-            }, status=409)
-
         try:
+            # Backup user-modified config files before updating
+            _preserve = {"config.yml", ".env"}
+            _backups: dict[str, bytes] = {}
+            for fname in _preserve:
+                fpath = os.path.join(base, fname)
+                if os.path.exists(fpath):
+                    _backups[fname] = open(fpath, "rb").read()
+
+            # Check for unexpected dirty files (anything besides config.yml/.env)
+            r = subprocess.run(
+                ["git", "-C", base, "diff", "--name-only", "HEAD"],
+                capture_output=True, text=True, timeout=10,
+            )
+            dirty = [f for f in r.stdout.strip().splitlines() if f.strip() and f.strip() not in _preserve]
+            if dirty:
+                return web.json_response({
+                    "error": f"Worktree has unexpected modifications ({', '.join(dirty[:5])}). Only config.yml and .env are preserved automatically.",
+                }, status=409)
+
+            # Reset only the preserved config files for clean pull
+            for fname in _preserve:
+                subprocess.run(
+                    ["git", "-C", base, "checkout", "--", fname],
+                    capture_output=True, timeout=10,
+                )
+
             # Record current ref for potential rollback
             r = subprocess.run(
                 ["git", "-C", base, "rev-parse", "HEAD"],
@@ -764,12 +779,19 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 if prev_ref:
                     subprocess.run(["git", "-C", base, "checkout", "master"], capture_output=True, timeout=10)
                     subprocess.run(["git", "-C", base, "reset", "--hard", prev_ref], capture_output=True, timeout=10)
+                # Restore config backups even on failure
+                for fname, data in _backups.items():
+                    open(os.path.join(base, fname), "wb").write(data)
                 return web.json_response({"error": reason}, status=500)
 
             for cmd, label in steps:
                 r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 if r.returncode != 0:
                     return _rollback(f"{label} failed: {r.stderr.strip()}")
+
+            # Restore user config files after update
+            for fname, data in _backups.items():
+                open(os.path.join(base, fname), "wb").write(data)
 
             # Install/update dependencies
             venv_pip = os.path.join(base, ".venv", "bin", "pip")
