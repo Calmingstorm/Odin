@@ -671,14 +671,31 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             }, status=409)
 
         try:
-            # Fetch tags and checkout the exact release tag
-            for cmd in [
-                ["git", "-C", base, "fetch", "--tags", "origin"],
-                ["git", "-C", base, "checkout", target],
-            ]:
+            # Record current ref for potential rollback
+            r = subprocess.run(
+                ["git", "-C", base, "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            prev_ref = r.stdout.strip() if r.returncode == 0 else None
+
+            # Fetch and update master to the release tag's commit
+            steps = [
+                (["git", "-C", base, "fetch", "--tags", "origin"], "fetch"),
+                (["git", "-C", base, "checkout", "master"], "checkout master"),
+                (["git", "-C", base, "merge", "--ff-only", target], "fast-forward to release tag"),
+            ]
+            for cmd, label in steps:
                 r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 if r.returncode != 0:
-                    return web.json_response({"error": f"git failed: {r.stderr.strip()}"}, status=500)
+                    # Attempt rollback on failure
+                    if prev_ref:
+                        subprocess.run(["git", "-C", base, "checkout", prev_ref], capture_output=True, timeout=10)
+                    return web.json_response({"error": f"{label} failed: {r.stderr.strip()}"}, status=500)
+
+            # Install/update dependencies
+            venv_pip = os.path.join(base, ".venv", "bin", "pip")
+            if os.path.exists(venv_pip):
+                subprocess.run([venv_pip, "install", "-q", base], capture_output=True, timeout=120)
 
             # Nuke pycache
             for root, dirs, _files in os.walk(base):
@@ -691,7 +708,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({
                 "status": "updating",
                 "version": target,
-                "message": f"Updating to {target}. Restarting in 2 seconds...",
+                "previous": prev_ref[:12] if prev_ref else None,
+                "message": f"Updated master to {target}. Restarting in 2 seconds...",
             })
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)

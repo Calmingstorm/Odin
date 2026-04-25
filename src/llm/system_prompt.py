@@ -112,7 +112,12 @@ Match the task shape to the right tool:
 {voice_info}"""
 
 CHAT_SYSTEM_PROMPT_TEMPLATE = """You are {bot_name}, an AI assistant Discord bot.
-{chat_identity}
+
+## Identity
+{identity}
+
+{voice}
+
 You are a general-purpose assistant — you help with anything: questions, conversation, advice, coding, writing, brainstorming, and more.
 You also manage infrastructure, but only when explicitly asked — don't mention infrastructure unless the user brings it up.
 
@@ -151,10 +156,10 @@ def build_chat_system_prompt(
 ) -> str:
     """Build a lightweight system prompt for chat-routed messages."""
     bot_name, identity, voice = _resolve_personality(personality_preset, personality_identity, personality_voice)
-    chat_id = f"Your identity is {bot_name}, not Claude or ChatGPT. {voice.split(chr(10))[0].lstrip('- ') if voice else 'Be concise and helpful.'}"
     return CHAT_SYSTEM_PROMPT_TEMPLATE.format(
         bot_name=bot_name,
-        chat_identity=chat_id,
+        identity=identity,
+        voice=voice,
         current_datetime=_format_datetime(tz),
         voice_info=voice_info or "Voice support is not enabled.",
     )
