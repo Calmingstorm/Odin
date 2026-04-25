@@ -636,9 +636,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             data = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON"}, status=400)
+        import re as _re
         name = (data.get("name") or "").strip().lower().replace(" ", "_")
         if not name:
             return web.json_response({"error": "name is required"}, status=400)
+        if not _re.fullmatch(r"[a-z0-9_-]+", name):
+            return web.json_response({"error": "preset name must contain only lowercase letters, numbers, hyphens, and underscores"}, status=400)
         from src.llm.system_prompt import PERSONALITY_PRESETS
         if name in PERSONALITY_PRESETS:
             return web.json_response({"error": f"cannot overwrite built-in preset '{name}'"}, status=400)
