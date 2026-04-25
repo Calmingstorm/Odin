@@ -215,7 +215,7 @@ class OdinBot(commands.Bot):
         super().__init__(
             command_prefix=self._resolve_prefix,
             intents=intents,
-            help_command=commands.DefaultHelpCommand(no_category="General"),
+            help_command=None,
         )
 
         self.config = config
