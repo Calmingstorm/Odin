@@ -27,6 +27,12 @@ def main() -> None:
         print(f"Config file not found: {config_path}")
         sys.exit(1)
 
+    # Load .env before config.yml so ${DISCORD_TOKEN} substitution works
+    from dotenv import load_dotenv
+    env_path = Path(".env")
+    if env_path.exists():
+        load_dotenv(env_path)
+
     from src.config import load_config
     from src.discord.client import OdinBot, scrub_response_secrets
     from src.health import HealthServer
