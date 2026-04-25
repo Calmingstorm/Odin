@@ -9,8 +9,10 @@
 
 class OdinAPI {
   constructor() {
-    this._token = localStorage.getItem('odin_token') || sessionStorage.getItem('odin_token') || '';
     this._persist = localStorage.getItem('odin_persist') === '1';
+    this._token = this._persist
+      ? (localStorage.getItem('odin_token') || '')
+      : (sessionStorage.getItem('odin_token') || '');
     this._sessionTimeout = 0;
     this._lastActivity = Date.now();
     this._activityTimer = null;

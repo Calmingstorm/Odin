@@ -637,35 +637,62 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/update/apply")
     async def apply_update(request: web.Request) -> web.Response:
+        import re as _re, subprocess, os, shutil
         try:
             data = await request.json()
         except Exception:
             data = {}
         target = data.get("version", "latest")
-        import subprocess, os
+        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+        # Resolve "latest" to actual release tag
+        if target == "latest":
+            r = subprocess.run(
+                ["gh", "api", "repos/Calmingstorm/Odin/releases/latest", "--jq", ".tag_name"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if r.returncode != 0 or not r.stdout.strip():
+                return web.json_response({"error": "Failed to resolve latest release tag"}, status=502)
+            target = r.stdout.strip()
+
+        # Validate tag format
+        if not _re.match(r"^v?\d+\.\d+\.\d+", target):
+            return web.json_response({"error": f"Invalid version format: {target}"}, status=400)
+
+        # Check for clean worktree (skip-worktree files are OK)
+        r = subprocess.run(
+            ["git", "-C", base, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+        )
+        dirty = [l for l in r.stdout.strip().splitlines() if l.strip() and not l.strip().startswith("?")]
+        if dirty:
+            return web.json_response({
+                "error": f"Worktree is not clean ({len(dirty)} modified files). Stash or commit changes first.",
+            }, status=409)
+
         try:
-            base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            cmds = [
+            # Fetch tags and checkout the exact release tag
+            for cmd in [
                 ["git", "-C", base, "fetch", "--tags", "origin"],
-            ]
-            if target == "latest":
-                cmds.append(["git", "-C", base, "checkout", "master"])
-                cmds.append(["git", "-C", base, "pull", "--ff-only", "origin", "master"])
-            else:
-                cmds.append(["git", "-C", base, "checkout", target])
-            for cmd in cmds:
+                ["git", "-C", base, "checkout", target],
+            ]:
                 r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 if r.returncode != 0:
-                    return web.json_response({"error": f"Command failed: {' '.join(cmd)}\n{r.stderr}"}, status=500)
+                    return web.json_response({"error": f"git failed: {r.stderr.strip()}"}, status=500)
+
             # Nuke pycache
             for root, dirs, _files in os.walk(base):
                 for d in dirs:
                     if d == "__pycache__":
-                        import shutil
                         shutil.rmtree(os.path.join(root, d), ignore_errors=True)
-            # Graceful shutdown — systemd will restart with new code
+
+            # Graceful shutdown — systemd Restart=always will restart with new code
             asyncio.get_event_loop().call_later(2, lambda: os.kill(os.getpid(), 15))
-            return web.json_response({"status": "updating", "message": "Restarting with new code in 2 seconds..."})
+            return web.json_response({
+                "status": "updating",
+                "version": target,
+                "message": f"Updating to {target}. Restarting in 2 seconds...",
+            })
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
