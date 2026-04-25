@@ -155,7 +155,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "token is required"}, status=400)
 
         api_token = bot.config.web.api_token
-        if not api_token:
+        has_any_token = api_token or bot.config.web.api_tokens
+        if not has_any_token:
             # No auth configured — dev mode, issue session anyway
             sm = request.app.get("session_manager")
             if sm:
@@ -166,8 +167,23 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 })
             return web.json_response({"error": "no session manager"}, status=500)
 
+        # Check multi-token identities first
+        identity = bot.config.web.resolve_api_identity(token)
+        if identity is not None:
+            sm = request.app.get("session_manager")
+            if not sm:
+                return web.json_response({"error": "no session manager"}, status=500)
+            sid, timeout = sm.create(identity=identity)
+            return web.json_response({
+                "session_id": sid,
+                "timeout_seconds": timeout,
+            })
+
+        # Fall back to legacy single token
         import hmac as _hmac
-        if not _hmac.compare_digest(token, api_token):
+        if api_token and not _hmac.compare_digest(token, api_token):
+            return web.json_response({"error": "invalid token"}, status=401)
+        if not api_token:
             return web.json_response({"error": "invalid token"}, status=401)
 
         sm = request.app.get("session_manager")
@@ -569,6 +585,155 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         bot._invalidate_prompt_caches()
         bot._system_prompt = bot._build_system_prompt()
         return web.json_response({"status": "reloaded"})
+
+    # ------------------------------------------------------------------
+    # Personality
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/personality")
+    async def get_personality(_request: web.Request) -> web.Response:
+        from src.llm.system_prompt import PERSONALITY_PRESETS
+        p = bot.config.personality if hasattr(bot.config, "personality") else None
+        return web.json_response({
+            "preset": p.preset if p else "odin",
+            "custom_identity": p.custom_identity if p else "",
+            "custom_voice": p.custom_voice if p else "",
+            "presets": {k: v for k, v in PERSONALITY_PRESETS.items()},
+        })
+
+    @routes.put("/api/personality")
+    async def update_personality(request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        preset = data.get("preset", "odin")
+        custom_identity = data.get("custom_identity", "")
+        custom_voice = data.get("custom_voice", "")
+        from src.config.schema import PersonalityConfig
+        bot.config.personality = PersonalityConfig(
+            preset=preset, custom_identity=custom_identity, custom_voice=custom_voice,
+        )
+        current = bot.config.model_dump()
+        config_path = getattr(request.app, "_config_path", "config.yml")
+        await asyncio.to_thread(_write_config, config_path, current)
+        bot._invalidate_prompt_caches()
+        bot._system_prompt = bot._build_system_prompt()
+        return web.json_response({"status": "updated", "preset": preset})
+
+    # ------------------------------------------------------------------
+    # Self-Update
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/update/check")
+    async def check_update(_request: web.Request) -> web.Response:
+        from src.version import get_version
+        current = get_version()
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["gh", "api", "repos/Calmingstorm/Odin/releases/latest", "--jq", ".tag_name,.body"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode != 0:
+                return web.json_response({"current": current, "error": "Failed to check GitHub"}, status=502)
+            lines = result.stdout.strip().split("\n", 1)
+            latest_tag = lines[0].strip()
+            changelog = lines[1].strip() if len(lines) > 1 else ""
+            latest_version = latest_tag.lstrip("v")
+            update_available = latest_version != current and latest_tag != f"v{current}"
+            return web.json_response({
+                "current": current,
+                "latest": latest_tag,
+                "update_available": update_available,
+                "changelog": changelog[:2000],
+            })
+        except Exception as e:
+            return web.json_response({"current": current, "error": str(e)}, status=502)
+
+    @routes.post("/api/update/apply")
+    async def apply_update(request: web.Request) -> web.Response:
+        import re as _re, subprocess, os, shutil
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        target = data.get("version", "latest")
+        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+        # Resolve "latest" to actual release tag
+        if target == "latest":
+            r = subprocess.run(
+                ["gh", "api", "repos/Calmingstorm/Odin/releases/latest", "--jq", ".tag_name"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if r.returncode != 0 or not r.stdout.strip():
+                return web.json_response({"error": "Failed to resolve latest release tag"}, status=502)
+            target = r.stdout.strip()
+
+        # Validate tag format
+        if not _re.fullmatch(r"v?\d+\.\d+\.\d+", target):
+            return web.json_response({"error": f"Invalid version format: {target}"}, status=400)
+
+        # Check for clean worktree (skip-worktree files are OK)
+        r = subprocess.run(
+            ["git", "-C", base, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+        )
+        dirty = [l for l in r.stdout.strip().splitlines() if l.strip() and not l.strip().startswith("?")]
+        if dirty:
+            return web.json_response({
+                "error": f"Worktree is not clean ({len(dirty)} modified files). Stash or commit changes first.",
+            }, status=409)
+
+        try:
+            # Record current ref for potential rollback
+            r = subprocess.run(
+                ["git", "-C", base, "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            prev_ref = r.stdout.strip() if r.returncode == 0 else None
+
+            # Fetch and update master to the release tag's commit
+            steps = [
+                (["git", "-C", base, "fetch", "--tags", "origin"], "fetch"),
+                (["git", "-C", base, "checkout", "master"], "checkout master"),
+                (["git", "-C", base, "merge", "--ff-only", target], "fast-forward to release tag"),
+            ]
+            def _rollback(reason: str) -> web.Response:
+                if prev_ref:
+                    subprocess.run(["git", "-C", base, "checkout", "master"], capture_output=True, timeout=10)
+                    subprocess.run(["git", "-C", base, "reset", "--hard", prev_ref], capture_output=True, timeout=10)
+                return web.json_response({"error": reason}, status=500)
+
+            for cmd, label in steps:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if r.returncode != 0:
+                    return _rollback(f"{label} failed: {r.stderr.strip()}")
+
+            # Install/update dependencies
+            venv_pip = os.path.join(base, ".venv", "bin", "pip")
+            if os.path.exists(venv_pip):
+                r = subprocess.run([venv_pip, "install", "-q", base], capture_output=True, text=True, timeout=120)
+                if r.returncode != 0:
+                    return _rollback(f"dependency install failed: {r.stderr.strip()}")
+
+            # Nuke pycache
+            for root, dirs, _files in os.walk(base):
+                for d in dirs:
+                    if d == "__pycache__":
+                        shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+
+            # Graceful shutdown — systemd Restart=always will restart with new code
+            asyncio.get_event_loop().call_later(2, lambda: os.kill(os.getpid(), 15))
+            return web.json_response({
+                "status": "updating",
+                "version": target,
+                "previous": prev_ref[:12] if prev_ref else None,
+                "message": f"Updated master to {target}. Restarting in 2 seconds...",
+            })
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
 
     @routes.post("/api/loops/stop-all")
     async def stop_all_loops(_request: web.Request) -> web.Response:

@@ -381,6 +381,12 @@ class WebConfig(BaseModel):
         return None
 
 
+class PersonalityConfig(BaseModel):
+    preset: str = "odin"
+    custom_identity: str = ""
+    custom_voice: str = ""
+
+
 class AttachmentsConfig(BaseModel):
     temp_directory: str = "/tmp/odin-attachments"
     inline_text_max_bytes: int = 100_000
@@ -529,6 +535,7 @@ class Config(BaseModel):
     comfyui: ComfyUIConfig = ComfyUIConfig()
     web: WebConfig = WebConfig()
     attachments: AttachmentsConfig = AttachmentsConfig()
+    personality: PersonalityConfig = PersonalityConfig()
     reaction_triggers: ReactionTriggerConfig = ReactionTriggerConfig()
     message_triggers: MessageTriggerConfig = MessageTriggerConfig()
     mcp: MCPConfig = MCPConfig()

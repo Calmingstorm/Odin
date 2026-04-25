@@ -781,12 +781,16 @@ class OdinBot(commands.Bot):
                     "Users can ask you to join with '/voice join' or 'join voice'."
                 )
 
+        p_cfg = self.config.personality if hasattr(self.config, "personality") else None
         prompt = build_system_prompt(
             context=self.context_loader.context,
             hosts=self._get_cached_hosts(),
             voice_info=voice_info,
             tz=self.config.timezone,
             claude_code_dir=self.config.tools.claude_code_dir,
+            personality_preset=p_cfg.preset if p_cfg else "odin",
+            personality_identity=p_cfg.custom_identity if p_cfg else "",
+            personality_voice=p_cfg.custom_voice if p_cfg else "",
         )
 
         # Inject persistent memory into the system prompt (per-user + global)
@@ -877,7 +881,14 @@ class OdinBot(commands.Bot):
                     "are spoken aloud. Keep voice responses concise and conversational."
                 )
 
-        prompt = build_chat_system_prompt(voice_info=voice_info, tz=self.config.timezone)
+        p_cfg = self.config.personality if hasattr(self.config, "personality") else None
+        prompt = build_chat_system_prompt(
+            voice_info=voice_info,
+            tz=self.config.timezone,
+            personality_preset=p_cfg.preset if p_cfg else "odin",
+            personality_identity=p_cfg.custom_identity if p_cfg else "",
+            personality_voice=p_cfg.custom_voice if p_cfg else "",
+        )
 
         # Inject persistent memory (per-user + global, personalization matters for chat)
         memory = self._get_cached_memory(user_id)
