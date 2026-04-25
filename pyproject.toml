@@ -1,6 +1,6 @@
 [project]
 name = "odin-bot"
-version = "3.20.3"
+version = "3.20.4"
 description = "Odin — autonomous executor Discord bot, Heimdall-pattern with extended capability surface"
 requires-python = ">=3.11"
 license = "MIT"
