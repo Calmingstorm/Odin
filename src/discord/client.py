@@ -566,6 +566,14 @@ class OdinBot(commands.Bot):
         # health checker always reads the live value, even if the underlying
         # attribute gets reassigned during a reload or reinit.
 
+        # Register user-created personality presets from config before first prompt build
+        if hasattr(self.config, "personality") and self.config.personality.user_presets:
+            from src.llm.system_prompt import register_user_presets
+            register_user_presets({
+                k: {"identity": v.identity, "voice": v.voice}
+                for k, v in self.config.personality.user_presets.items()
+            })
+
         self._system_prompt = self._build_system_prompt()
         self._register_commands()
         self._init_allowed_webhook_ids()

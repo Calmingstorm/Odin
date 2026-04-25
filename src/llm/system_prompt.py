@@ -165,6 +165,15 @@ def build_chat_system_prompt(
     )
 
 
+_USER_PRESETS: dict[str, dict[str, str]] = {}
+
+
+def register_user_presets(presets: dict[str, dict[str, str]]) -> None:
+    """Register user-created presets from config."""
+    _USER_PRESETS.clear()
+    _USER_PRESETS.update(presets)
+
+
 def _resolve_personality(
     preset: str = "odin",
     custom_identity: str = "",
@@ -177,6 +186,9 @@ def _resolve_personality(
             custom_identity or PERSONALITY_PRESETS["odin"]["identity"],
             custom_voice or PERSONALITY_PRESETS["odin"]["voice"],
         )
+    if preset in _USER_PRESETS:
+        p = _USER_PRESETS[preset]
+        return preset, p.get("identity", ""), p.get("voice", "")
     p = PERSONALITY_PRESETS.get(preset, PERSONALITY_PRESETS["odin"])
     name_map = {"odin": "Odin, the All-Father", "professional": "your operations assistant", "friendly": "your assistant"}
     return name_map.get(preset, preset), p["identity"], p["voice"]
