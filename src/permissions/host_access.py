@@ -13,7 +13,8 @@ class HostAccessEntry:
     __slots__ = ("allowed_hosts", "default_host")
 
     def __init__(self, allowed_hosts: list[str] | None = None, default_host: str = "") -> None:
-        self.allowed_hosts: list[str] = allowed_hosts or []
+        # None = unset (inherit all), [] = explicit deny-all, [...] = whitelist
+        self.allowed_hosts: list[str] | None = allowed_hosts
         self.default_host: str = default_host
 
     def to_dict(self) -> dict:
@@ -21,8 +22,11 @@ class HostAccessEntry:
 
     @classmethod
     def from_dict(cls, data: dict) -> HostAccessEntry:
+        raw = data.get("allowed_hosts")
+        # Distinguish missing/null (None = allow all) from empty list ([] = deny all)
+        allowed = raw if isinstance(raw, list) else None
         return cls(
-            allowed_hosts=data.get("allowed_hosts", []),
+            allowed_hosts=allowed,
             default_host=data.get("default_host", ""),
         )
 
@@ -78,7 +82,7 @@ class HostAccessManager:
 
     def get_allowed_hosts(self, user_id: str) -> list[str]:
         entry = self.get_entry(user_id)
-        if not entry.allowed_hosts:
+        if entry.allowed_hosts is None:
             return list(self._available_hosts)
         return [h for h in entry.allowed_hosts if h in self._available_hosts]
 
@@ -90,8 +94,10 @@ class HostAccessManager:
         return allowed[0] if allowed else ""
 
     def is_host_allowed(self, user_id: str, host: str) -> bool:
-        allowed = self.get_allowed_hosts(user_id)
-        return host in allowed
+        entry = self.get_entry(user_id)
+        if entry.allowed_hosts is None:
+            return host in self._available_hosts
+        return host in entry.allowed_hosts and host in self._available_hosts
 
     def has_user_entry(self, user_id: str) -> bool:
         return user_id in self._users
@@ -102,14 +108,21 @@ class HostAccessManager:
             result[uid] = entry.to_dict()
         return result
 
-    async def set_user(self, user_id: str, allowed_hosts: list[str], default_host: str) -> None:
+    async def set_user(self, user_id: str, allowed_hosts: list[str] | None, default_host: str) -> None:
         async with self._lock:
-            valid_hosts = [h for h in allowed_hosts if h in self._available_hosts]
-            if default_host and default_host not in valid_hosts:
-                if valid_hosts:
+            if allowed_hosts is None:
+                valid_hosts = None
+            else:
+                valid_hosts = [h for h in allowed_hosts if h in self._available_hosts]
+            if default_host and (valid_hosts is None or default_host not in valid_hosts):
+                if valid_hosts is None:
+                    pass  # allow-all, any default is fine if it's a real host
+                elif valid_hosts:
                     default_host = valid_hosts[0]
                 else:
                     default_host = ""
+            if default_host and default_host not in self._available_hosts:
+                default_host = ""
             self._users[user_id] = HostAccessEntry(
                 allowed_hosts=valid_hosts,
                 default_host=default_host,
@@ -126,10 +139,15 @@ class HostAccessManager:
                 return True
         return False
 
-    async def set_default_policy(self, allowed_hosts: list[str], default_host: str) -> None:
+    async def set_default_policy(self, allowed_hosts: list[str] | None, default_host: str) -> None:
         async with self._lock:
-            valid_hosts = [h for h in allowed_hosts if h in self._available_hosts]
-            if default_host and default_host not in valid_hosts:
+            if allowed_hosts is None:
+                valid_hosts = None
+            else:
+                valid_hosts = [h for h in allowed_hosts if h in self._available_hosts]
+            if default_host and default_host not in self._available_hosts:
+                default_host = ""
+            if default_host and valid_hosts is not None and default_host not in valid_hosts:
                 default_host = valid_hosts[0] if valid_hosts else ""
             self._default_policy = HostAccessEntry(
                 allowed_hosts=valid_hosts,

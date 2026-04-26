@@ -358,6 +358,11 @@ class OdinBot(commands.Bot):
                 max_chunk_chars=streaming_cfg.max_chunk_chars,
             )
 
+        self.host_access_manager = HostAccessManager(
+            path="./data/host_access.json",
+            available_hosts=list(config.tools.hosts.keys()),
+        )
+
         self.tool_executor = ToolExecutor(
             config.tools, memory_path=self._memory_path,
             browser_manager=self.browser_manager,
@@ -412,11 +417,6 @@ class OdinBot(commands.Bot):
             config_tiers=config.permissions.tiers,
             default_tier=config.permissions.default_tier,
             overrides_path=config.permissions.overrides_path,
-        )
-
-        self.host_access_manager = HostAccessManager(
-            path="./data/host_access.json",
-            available_hosts=list(config.tools.hosts.keys()),
         )
 
         self.tool_memory = ToolMemory("./data/tool_memory.json")
