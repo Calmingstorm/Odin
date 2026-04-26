@@ -134,6 +134,14 @@ export default {
       toastTimer = setTimeout(() => { toast.value = null; }, 3000);
     }
 
+    function normalizeEntry(entry, hosts) {
+      if (!entry) return { allowed_hosts: [...hosts], default_host: hosts[0] || '', allow_all: true };
+      if (entry.allowed_hosts === null || entry.allowed_hosts === undefined) {
+        return { allowed_hosts: [...hosts], default_host: entry.default_host || '', allow_all: true };
+      }
+      return { allowed_hosts: entry.allowed_hosts, default_host: entry.default_host || '', allow_all: false };
+    }
+
     async function fetchData() {
       loading.value = true;
       error.value = '';
@@ -141,8 +149,13 @@ export default {
         const resp = await api.get('/api/host-access');
         data.value = resp;
         availableHosts.value = resp.available_hosts || [];
-        defaultPolicy.value = resp.default_policy || { allowed_hosts: [], default_host: '' };
-        users.value = resp.users || {};
+        defaultPolicy.value = normalizeEntry(resp.default_policy, availableHosts.value);
+        const rawUsers = resp.users || {};
+        const normalized = {};
+        for (const [uid, entry] of Object.entries(rawUsers)) {
+          normalized[uid] = normalizeEntry(entry, availableHosts.value);
+        }
+        users.value = normalized;
       } catch (e) {
         error.value = e.message || 'Failed to fetch host access data';
       } finally {
@@ -152,8 +165,9 @@ export default {
 
     async function saveDefaultPolicy() {
       try {
+        const hosts = defaultPolicy.value.allow_all ? null : defaultPolicy.value.allowed_hosts;
         await api.put('/api/host-access/default-policy', {
-          allowed_hosts: defaultPolicy.value.allowed_hosts,
+          allowed_hosts: hosts,
           default_host: defaultPolicy.value.default_host,
         });
         showToast('Default policy updated');
@@ -163,6 +177,7 @@ export default {
     }
 
     function toggleDefaultHost(host, checked) {
+      defaultPolicy.value.allow_all = false;
       if (checked) {
         if (!defaultPolicy.value.allowed_hosts.includes(host))
           defaultPolicy.value.allowed_hosts.push(host);
@@ -178,8 +193,9 @@ export default {
       const entry = users.value[uid];
       if (!entry) return;
       try {
+        const hosts = entry.allow_all ? null : entry.allowed_hosts;
         await api.put(`/api/host-access/user/${uid}`, {
-          allowed_hosts: entry.allowed_hosts,
+          allowed_hosts: hosts,
           default_host: entry.default_host,
         });
         showToast(`Updated access for ${uid}`);
@@ -191,6 +207,7 @@ export default {
     function toggleUserHost(uid, host, checked) {
       const entry = users.value[uid];
       if (!entry) return;
+      entry.allow_all = false;
       if (checked) {
         if (!entry.allowed_hosts.includes(host))
           entry.allowed_hosts.push(host);

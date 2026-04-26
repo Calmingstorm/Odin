@@ -2622,10 +2622,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
-        allowed_hosts = body.get("allowed_hosts", [])
+        allowed_hosts = body.get("allowed_hosts")
         default_host = body.get("default_host", "")
-        if not isinstance(allowed_hosts, list):
-            return web.json_response({"error": "allowed_hosts must be a list"}, status=400)
+        if allowed_hosts is not None and not isinstance(allowed_hosts, list):
+            return web.json_response({"error": "allowed_hosts must be a list or null"}, status=400)
         await ham.set_user(uid, allowed_hosts, default_host)
         try:
             audit = getattr(bot, "audit", None)
@@ -2660,10 +2660,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
-        allowed_hosts = body.get("allowed_hosts", [])
+        allowed_hosts = body.get("allowed_hosts")
         default_host = body.get("default_host", "")
-        if not isinstance(allowed_hosts, list):
-            return web.json_response({"error": "allowed_hosts must be a list"}, status=400)
+        if allowed_hosts is not None and not isinstance(allowed_hosts, list):
+            return web.json_response({"error": "allowed_hosts must be a list or null"}, status=400)
         await ham.set_default_policy(allowed_hosts, default_host)
         return web.json_response({"status": "updated"})
 
