@@ -68,8 +68,15 @@ export default {
                        @keydown.up.prevent="highlightPrev" @keydown.enter.prevent="selectHighlighted"
                        @keydown.escape="closeDropdown" @blur="onBlur"
                        class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-300 w-full" />
-                <div v-if="showDropdown && filteredMembers.length > 0"
+                <div v-if="showDropdown && (filteredMembers.length > 0 || isRawId)"
                      class="absolute z-50 mt-1 w-full max-h-60 overflow-y-auto bg-gray-900 border border-gray-600 rounded shadow-lg">
+                  <div v-if="isRawId && !filteredMembers.length"
+                       @mousedown.prevent="addRawId"
+                       class="flex items-center gap-2 px-3 py-2 cursor-pointer text-sm hover:bg-gray-800">
+                    <div class="w-5 h-5 rounded-full bg-gray-700 flex items-center justify-center text-xs text-gray-400">?</div>
+                    <span class="text-gray-200">Add by ID: {{ searchQuery.trim() }}</span>
+                    <span class="text-gray-500 text-xs ml-auto">press Enter</span>
+                  </div>
                   <div v-for="(m, idx) in filteredMembers" :key="m.id"
                        @mousedown.prevent="selectMember(m)"
                        class="flex items-center gap-2 px-3 py-2 cursor-pointer text-sm"
@@ -178,6 +185,8 @@ export default {
       return membersById.value[uid] || null;
     }
 
+    const isRawId = computed(() => /^\d{15,25}$/.test(searchQuery.value.trim()));
+
     const filteredMembers = computed(() => {
       const q = searchQuery.value.toLowerCase().trim();
       if (!q) return members.value.filter(m => !users.value[m.id]);
@@ -201,10 +210,7 @@ export default {
       loading.value = true;
       error.value = '';
       try {
-        const [hostResp, memberResp] = await Promise.all([
-          api.get('/api/host-access'),
-          api.get('/api/discord/members'),
-        ]);
+        const hostResp = await api.get('/api/host-access');
         data.value = hostResp;
         availableHosts.value = hostResp.available_hosts || [];
         defaultPolicy.value = normalizeEntry(hostResp.default_policy, availableHosts.value);
@@ -214,11 +220,15 @@ export default {
           normalized[uid] = normalizeEntry(entry, availableHosts.value);
         }
         users.value = normalized;
-        members.value = memberResp || [];
       } catch (e) {
         error.value = e.message || 'Failed to fetch host access data';
       } finally {
         loading.value = false;
+      }
+      try {
+        members.value = await api.get('/api/discord/members') || [];
+      } catch {
+        members.value = [];
       }
     }
 
@@ -308,7 +318,18 @@ export default {
 
     function selectHighlighted() {
       const m = filteredMembers.value[highlightIdx.value];
-      if (m) selectMember(m);
+      if (m) { selectMember(m); return; }
+      if (isRawId.value) addRawId();
+    }
+
+    function addRawId() {
+      const uid = searchQuery.value.trim();
+      if (!/^\d{15,25}$/.test(uid)) return;
+      users.value[uid] = { allowed_hosts: [...availableHosts.value], default_host: availableHosts.value[0] || '', allow_all: false };
+      saveUser(uid);
+      searchQuery.value = '';
+      showDropdown.value = false;
+      showAddUser.value = false;
     }
 
     function selectMember(m) {
@@ -343,11 +364,11 @@ export default {
     return {
       loading, error, data, availableHosts, defaultPolicy, users,
       showAddUser, searchQuery, showDropdown, highlightIdx, toast,
-      members, filteredMembers, searchInput,
+      members, filteredMembers, isRawId, searchInput,
       fetchData, saveDefaultPolicy, toggleDefaultHost, getMember,
       toggleUserHost, setUserDefault, openAddUser, deleteUser,
       onSearchInput, highlightNext, highlightPrev, selectHighlighted,
-      selectMember, closeDropdown, onBlur,
+      selectMember, closeDropdown, onBlur, addRawId,
     };
   },
 };
