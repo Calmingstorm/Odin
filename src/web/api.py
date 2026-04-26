@@ -2598,6 +2598,76 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response({"error": "no override found for user"}, status=404)
 
     # ------------------------------------------------------------------
+    # Host access control
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/host-access")
+    async def get_host_access(_request: web.Request) -> web.Response:
+        ham = getattr(bot, "host_access_manager", None)
+        if not ham:
+            return web.json_response({"error": "host access manager not available"}, status=503)
+        return web.json_response({
+            "available_hosts": ham.available_hosts,
+            "default_policy": ham.default_policy.to_dict(),
+            "users": ham.list_users(),
+        })
+
+    @routes.put("/api/host-access/user/{user_id}")
+    async def set_host_access_user(request: web.Request) -> web.Response:
+        ham = getattr(bot, "host_access_manager", None)
+        if not ham:
+            return web.json_response({"error": "host access manager not available"}, status=503)
+        uid = request.match_info["user_id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        allowed_hosts = body.get("allowed_hosts")
+        default_host = body.get("default_host", "")
+        if allowed_hosts is not None and not isinstance(allowed_hosts, list):
+            return web.json_response({"error": "allowed_hosts must be a list or null"}, status=400)
+        await ham.set_user(uid, allowed_hosts, default_host)
+        try:
+            audit = getattr(bot, "audit", None)
+            if audit:
+                session_id = getattr(request, "_session_id", "web-api")
+                await audit.log_event(
+                    event_type="host_access_change",
+                    action="set_user",
+                    actor=f"web:{session_id}",
+                    detail=f"Set host access for user {uid}: hosts={allowed_hosts}, default={default_host}",
+                )
+        except Exception:
+            pass
+        return web.json_response({"user_id": uid, "status": "updated"})
+
+    @routes.delete("/api/host-access/user/{user_id}")
+    async def delete_host_access_user(request: web.Request) -> web.Response:
+        ham = getattr(bot, "host_access_manager", None)
+        if not ham:
+            return web.json_response({"error": "host access manager not available"}, status=503)
+        uid = request.match_info["user_id"]
+        if await ham.delete_user(uid):
+            return web.json_response({"user_id": uid, "status": "override_removed"})
+        return web.json_response({"error": "no override found for user"}, status=404)
+
+    @routes.put("/api/host-access/default-policy")
+    async def set_host_access_default(request: web.Request) -> web.Response:
+        ham = getattr(bot, "host_access_manager", None)
+        if not ham:
+            return web.json_response({"error": "host access manager not available"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        allowed_hosts = body.get("allowed_hosts")
+        default_host = body.get("default_host", "")
+        if allowed_hosts is not None and not isinstance(allowed_hosts, list):
+            return web.json_response({"error": "allowed_hosts must be a list or null"}, status=400)
+        await ham.set_default_policy(allowed_hosts, default_host)
+        return web.json_response({"status": "updated"})
+
+    # ------------------------------------------------------------------
     # Recovery stats (observability)
     # ------------------------------------------------------------------
 
