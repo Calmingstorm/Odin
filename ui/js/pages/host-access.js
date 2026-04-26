@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 
-const { ref, computed, onMounted } = Vue;
+const { ref, computed, onMounted, nextTick } = Vue;
 
 export default {
   template: `
@@ -54,18 +54,37 @@ export default {
         <div class="hm-card">
           <div class="flex items-center justify-between mb-3">
             <h2 class="text-sm font-semibold text-gray-300">User Overrides</h2>
-            <button @click="showAddUser = true" class="btn btn-ghost text-xs" v-if="!showAddUser">
+            <button @click="openAddUser" class="btn btn-ghost text-xs" v-if="!showAddUser">
               + Add User
             </button>
           </div>
 
-          <!-- Add user form -->
+          <!-- Add user form with autocomplete -->
           <div v-if="showAddUser" class="mb-4 p-3 bg-gray-800 rounded border border-gray-700">
-            <div class="flex items-center gap-3 mb-3">
-              <input v-model="newUserId" placeholder="Discord User ID"
-                     class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-300 w-48" />
-              <button @click="addUser" :disabled="!newUserId.trim()" class="btn btn-primary text-xs">Add</button>
-              <button @click="showAddUser = false; newUserId = ''" class="btn btn-ghost text-xs">Cancel</button>
+            <div class="flex items-center gap-3 relative">
+              <div class="relative w-72">
+                <input ref="searchInput" v-model="searchQuery" placeholder="Search users..."
+                       @input="onSearchInput" @keydown.down.prevent="highlightNext"
+                       @keydown.up.prevent="highlightPrev" @keydown.enter.prevent="selectHighlighted"
+                       @keydown.escape="closeDropdown" @blur="onBlur"
+                       class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-300 w-full" />
+                <div v-if="showDropdown && filteredMembers.length > 0"
+                     class="absolute z-50 mt-1 w-full max-h-60 overflow-y-auto bg-gray-900 border border-gray-600 rounded shadow-lg">
+                  <div v-for="(m, idx) in filteredMembers" :key="m.id"
+                       @mousedown.prevent="selectMember(m)"
+                       class="flex items-center gap-2 px-3 py-2 cursor-pointer text-sm"
+                       :class="idx === highlightIdx ? 'bg-gray-700' : 'hover:bg-gray-800'">
+                    <img v-if="m.avatar_url" :src="m.avatar_url + '?size=24'" class="w-5 h-5 rounded-full" />
+                    <div v-else class="w-5 h-5 rounded-full bg-gray-700 flex items-center justify-center text-xs text-gray-400">
+                      {{ m.display_name.charAt(0) }}
+                    </div>
+                    <span class="text-gray-200">{{ m.display_name }}</span>
+                    <span class="text-gray-500 text-xs">{{ m.username }}</span>
+                    <span v-if="m.bot" class="text-xs px-1 rounded bg-indigo-900 text-indigo-300 ml-auto">BOT</span>
+                  </div>
+                </div>
+              </div>
+              <button @click="showAddUser = false; searchQuery = ''" class="btn btn-ghost text-xs">Cancel</button>
             </div>
           </div>
 
@@ -73,7 +92,7 @@ export default {
           <table v-if="Object.keys(users).length > 0" class="hm-table">
             <thead>
               <tr>
-                <th>User ID</th>
+                <th>User</th>
                 <th v-for="host in availableHosts" :key="'th-'+host" class="text-center" style="min-width:90px">
                   {{ host }}
                 </th>
@@ -83,7 +102,18 @@ export default {
             </thead>
             <tbody>
               <tr v-for="(entry, uid) in users" :key="uid">
-                <td class="font-mono text-sm">{{ uid }}</td>
+                <td class="text-sm">
+                  <div class="flex items-center gap-2">
+                    <img v-if="getMember(uid)?.avatar_url" :src="getMember(uid).avatar_url + '?size=24'"
+                         class="w-5 h-5 rounded-full" />
+                    <div v-else class="w-5 h-5 rounded-full bg-gray-700 flex items-center justify-center text-xs text-gray-400">
+                      {{ (getMember(uid)?.display_name || '?').charAt(0) }}
+                    </div>
+                    <span class="text-gray-200">{{ getMember(uid)?.display_name || uid }}</span>
+                    <span v-if="getMember(uid)" class="text-gray-500 text-xs">{{ getMember(uid).username }}</span>
+                    <span v-if="getMember(uid)?.bot" class="text-xs px-1 rounded bg-indigo-900 text-indigo-300">BOT</span>
+                  </div>
+                </td>
                 <td v-for="host in availableHosts" :key="uid+'-'+host" class="text-center">
                   <input type="checkbox" :checked="entry.allowed_hosts.includes(host)"
                          @change="toggleUserHost(uid, host, $event.target.checked)"
@@ -124,8 +154,12 @@ export default {
     const defaultPolicy = ref({ allowed_hosts: [], default_host: '' });
     const users = ref({});
     const showAddUser = ref(false);
-    const newUserId = ref('');
+    const searchQuery = ref('');
+    const showDropdown = ref(false);
+    const highlightIdx = ref(0);
     const toast = ref(null);
+    const members = ref([]);
+    const searchInput = ref(null);
 
     let toastTimer = null;
     function showToast(message, type = 'success') {
@@ -133,6 +167,27 @@ export default {
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => { toast.value = null; }, 3000);
     }
+
+    const membersById = computed(() => {
+      const map = {};
+      for (const m of members.value) map[m.id] = m;
+      return map;
+    });
+
+    function getMember(uid) {
+      return membersById.value[uid] || null;
+    }
+
+    const filteredMembers = computed(() => {
+      const q = searchQuery.value.toLowerCase().trim();
+      if (!q) return members.value.filter(m => !users.value[m.id]);
+      return members.value.filter(m =>
+        !users.value[m.id] &&
+        (m.display_name.toLowerCase().includes(q) ||
+         m.username.toLowerCase().includes(q) ||
+         m.id.includes(q))
+      );
+    });
 
     function normalizeEntry(entry, hosts) {
       if (!entry) return { allowed_hosts: [...hosts], default_host: hosts[0] || '', allow_all: true };
@@ -146,16 +201,20 @@ export default {
       loading.value = true;
       error.value = '';
       try {
-        const resp = await api.get('/api/host-access');
-        data.value = resp;
-        availableHosts.value = resp.available_hosts || [];
-        defaultPolicy.value = normalizeEntry(resp.default_policy, availableHosts.value);
-        const rawUsers = resp.users || {};
+        const [hostResp, memberResp] = await Promise.all([
+          api.get('/api/host-access'),
+          api.get('/api/discord/members'),
+        ]);
+        data.value = hostResp;
+        availableHosts.value = hostResp.available_hosts || [];
+        defaultPolicy.value = normalizeEntry(hostResp.default_policy, availableHosts.value);
+        const rawUsers = hostResp.users || {};
         const normalized = {};
         for (const [uid, entry] of Object.entries(rawUsers)) {
           normalized[uid] = normalizeEntry(entry, availableHosts.value);
         }
         users.value = normalized;
+        members.value = memberResp || [];
       } catch (e) {
         error.value = e.message || 'Failed to fetch host access data';
       } finally {
@@ -198,7 +257,8 @@ export default {
           allowed_hosts: hosts,
           default_host: entry.default_host,
         });
-        showToast(`Updated access for ${uid}`);
+        const m = getMember(uid);
+        showToast(`Updated access for ${m ? m.display_name : uid}`);
       } catch (e) {
         showToast(e.message || 'Failed to save', 'error');
       }
@@ -226,20 +286,53 @@ export default {
       saveUser(uid);
     }
 
-    function addUser() {
-      const uid = newUserId.value.trim();
-      if (!uid) return;
-      users.value[uid] = { allowed_hosts: [...availableHosts.value], default_host: availableHosts.value[0] || '' };
-      saveUser(uid);
-      newUserId.value = '';
+    function openAddUser() {
+      showAddUser.value = true;
+      searchQuery.value = '';
+      highlightIdx.value = 0;
+      nextTick(() => { if (searchInput.value) searchInput.value.focus(); });
+    }
+
+    function onSearchInput() {
+      showDropdown.value = true;
+      highlightIdx.value = 0;
+    }
+
+    function highlightNext() {
+      if (highlightIdx.value < filteredMembers.value.length - 1) highlightIdx.value++;
+    }
+
+    function highlightPrev() {
+      if (highlightIdx.value > 0) highlightIdx.value--;
+    }
+
+    function selectHighlighted() {
+      const m = filteredMembers.value[highlightIdx.value];
+      if (m) selectMember(m);
+    }
+
+    function selectMember(m) {
+      users.value[m.id] = { allowed_hosts: [...availableHosts.value], default_host: availableHosts.value[0] || '', allow_all: false };
+      saveUser(m.id);
+      searchQuery.value = '';
+      showDropdown.value = false;
       showAddUser.value = false;
+    }
+
+    function closeDropdown() {
+      showDropdown.value = false;
+    }
+
+    function onBlur() {
+      setTimeout(() => { showDropdown.value = false; }, 150);
     }
 
     async function deleteUser(uid) {
       try {
         await api.delete(`/api/host-access/user/${uid}`);
         delete users.value[uid];
-        showToast(`Removed override for ${uid}`);
+        const m = getMember(uid);
+        showToast(`Removed override for ${m ? m.display_name : uid}`);
       } catch (e) {
         showToast(e.message || 'Failed to delete', 'error');
       }
@@ -249,9 +342,12 @@ export default {
 
     return {
       loading, error, data, availableHosts, defaultPolicy, users,
-      showAddUser, newUserId, toast,
-      fetchData, saveDefaultPolicy, toggleDefaultHost,
-      toggleUserHost, setUserDefault, addUser, deleteUser,
+      showAddUser, searchQuery, showDropdown, highlightIdx, toast,
+      members, filteredMembers, searchInput,
+      fetchData, saveDefaultPolicy, toggleDefaultHost, getMember,
+      toggleUserHost, setUserDefault, openAddUser, deleteUser,
+      onSearchInput, highlightNext, highlightPrev, selectHighlighted,
+      selectMember, closeDropdown, onBlur,
     };
   },
 };

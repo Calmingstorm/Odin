@@ -459,6 +459,23 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             })
         return web.json_response(result)
 
+    @routes.get("/api/discord/members")
+    async def discord_members(_request: web.Request) -> web.Response:
+        seen = {}
+        for g in bot.guilds:
+            for m in g.members:
+                uid = str(m.id)
+                if uid not in seen:
+                    seen[uid] = {
+                        "id": uid,
+                        "username": m.name,
+                        "display_name": m.display_name,
+                        "avatar_url": str(m.display_avatar.url) if m.display_avatar else None,
+                        "bot": m.bot,
+                    }
+        members = sorted(seen.values(), key=lambda x: x["display_name"].lower())
+        return web.json_response(members)
+
     @routes.put("/api/discord/guild/{guild_id}/config")
     async def update_guild_config(request: web.Request) -> web.Response:
         gid = request.match_info["guild_id"]
