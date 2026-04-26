@@ -44,6 +44,7 @@ const routes = [
   { path: '/resources',  redirect: { path: '/system', query: { tab: 'resources' } } },
   { path: '/logs',       redirect: { path: '/system', query: { tab: 'logs' } } },
   { path: '/config',     redirect: { path: '/system', query: { tab: 'config' } } },
+  { path: '/host-access', redirect: { path: '/system', query: { tab: 'host-access' } } },
   { path: '/internals',  redirect: { path: '/system', query: { tab: 'internals' } } },
 ];
 

@@ -1,3 +1,4 @@
 from .manager import PermissionManager
+from .host_access import HostAccessManager
 
-__all__ = ["PermissionManager"]
+__all__ = ["PermissionManager", "HostAccessManager"]

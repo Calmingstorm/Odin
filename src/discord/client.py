@@ -38,6 +38,7 @@ from ..tools import ToolExecutor, SkillManager, get_tool_definitions
 from ..tools.tool_memory import ToolMemory
 from ..search import LocalEmbedder, SessionVectorStore
 from ..permissions import PermissionManager
+from ..permissions.host_access import HostAccessManager
 from .channel_config import ChannelConfigManager
 from .channel_logger import ChannelLogger
 from .voice import VoiceManager, VoiceMessageProxy
@@ -361,6 +362,7 @@ class OdinBot(commands.Bot):
             config.tools, memory_path=self._memory_path,
             browser_manager=self.browser_manager,
             output_streamer=output_streamer,
+            host_access_manager=self.host_access_manager,
         )
         self.skill_manager = SkillManager(
             skills_dir="./data/skills",
@@ -410,6 +412,11 @@ class OdinBot(commands.Bot):
             config_tiers=config.permissions.tiers,
             default_tier=config.permissions.default_tier,
             overrides_path=config.permissions.overrides_path,
+        )
+
+        self.host_access_manager = HostAccessManager(
+            path="./data/host_access.json",
+            available_hosts=list(config.tools.hosts.keys()),
         )
 
         self.tool_memory = ToolMemory("./data/tool_memory.json")

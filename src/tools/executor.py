@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
+from ..permissions.host_access import HostAccessManager
 from ..permissions.manager import PermissionManager
 from .branch_freshness import (
     BranchStatus,
@@ -83,12 +84,14 @@ class ToolExecutor:
         browser_manager: object | None = None,
         permission_manager: PermissionManager | None = None,
         output_streamer: ToolOutputStreamer | None = None,
+        host_access_manager: HostAccessManager | None = None,
     ) -> None:
         self.config = config or ToolsConfig()
         self._memory_path = Path(memory_path) if memory_path else None
         self._browser_manager = browser_manager
         self._permission_manager = permission_manager
         self.output_streamer = output_streamer
+        self._host_access = host_access_manager
         self._metrics: dict[str, dict[str, int]] = {}
         self._memory_lock = asyncio.Lock()
         self._lists_lock = asyncio.Lock()
@@ -126,7 +129,19 @@ class ToolExecutor:
         host = self.config.hosts.get(alias)
         if not host:
             return None
+        if self._host_access and self._current_user_id:
+            if not self._host_access.is_host_allowed(self._current_user_id, alias):
+                return None
         return host.address, host.ssh_user, host.os
+
+    def _resolve_default_host(self, user_id: str | None) -> str:
+        """Get the default host for a user, or first configured host."""
+        if self._host_access and user_id:
+            default = self._host_access.get_default_host(user_id)
+            if default:
+                return default
+        hosts = list(self.config.hosts.keys())
+        return hosts[0] if hosts else ""
 
     def check_permission(self, tool_name: str, user_id: str | None) -> str | None:
         """Check if user has permission to use the tool.
@@ -151,6 +166,7 @@ class ToolExecutor:
         if handler is None:
             return ToolResult(output=f"Unknown tool: {tool_name}", ok=False, error="unknown_tool", tool_name=tool_name)
 
+        self._current_user_id = user_id
         self._current_user_tier = (
             self._permission_manager.get_tier(user_id) if self._permission_manager and user_id else None
         )
@@ -441,7 +457,9 @@ class ToolExecutor:
         if not command:
             return "Error: 'command' is required for run_command."
         if not host:
-            return "Error: 'host' is required for run_command."
+            host = self._resolve_default_host(self._current_user_id)
+            if not host:
+                return "Error: 'host' is required for run_command."
 
         allowed, denial, governor_note = self._govern_command(command, host)
         if not allowed:
@@ -485,7 +503,9 @@ class ToolExecutor:
         host = inp.get("host")
         script = inp.get("script")
         if not host:
-            return "Error: 'host' is required for run_script."
+            host = self._resolve_default_host(self._current_user_id)
+            if not host:
+                return "Error: 'host' is required for run_script."
         if not script:
             return "Error: 'script' is required for run_script."
         interpreter = inp.get("interpreter", "bash")
@@ -591,12 +611,19 @@ class ToolExecutor:
         command = inp["command"]
 
         if hosts == ["all"] or hosts == "all":
-            hosts = list(self.config.hosts.keys())
+            if self._host_access and self._current_user_id:
+                hosts = self._host_access.get_allowed_hosts(self._current_user_id)
+            else:
+                hosts = list(self.config.hosts.keys())
 
-        # Per-host governor check before launching parallel tasks
+        # Per-host access + governor check before launching parallel tasks
         blocked_hosts = []
         allowed_hosts = []
         for h in hosts:
+            if self._host_access and self._current_user_id:
+                if not self._host_access.is_host_allowed(self._current_user_id, h):
+                    blocked_hosts.append((h, f"Host access denied: {h}"))
+                    continue
             allowed, denial, _ = self._govern_command(command, h)
             if not allowed:
                 blocked_hosts.append((h, denial))
