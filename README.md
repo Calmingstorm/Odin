@@ -33,7 +33,7 @@ Tell Odin things like:
 
 **AI & Code**
 - Claude Code delegation for code generation, review, and analysis
-- Codex (GPT-5.4) conversation with full tool use
+- Codex (GPT-5.5) conversation with full tool use
 - ComfyUI image generation
 - PDF analysis, image analysis, web search, browser automation
 
@@ -52,6 +52,7 @@ Tell Odin things like:
 **Security**
 - CommandGovernor: blocks destructive shell commands and exfiltration patterns before execution
 - Permission tiers (admin/user/guest) with per-tool RBAC
+- Per-user host access control with configurable defaults (WebUI-managed)
 - Secret scrubbing on all input/output paths (API keys, tokens, JWTs, AWS keys, database URIs)
 - SSRF validation on all URL-accepting endpoints
 - DOMPurify-sanitized markdown rendering in web UI
@@ -75,7 +76,7 @@ Discord ──> OdinBot (client.py)
                │       ├── Risk Classifier (observability tags)
                │       └── Bulkhead isolation (concurrency limits)
                │
-               ├── Codex Client ──> GPT-5.4 (tool loop with up to 500 iterations)
+               ├── Codex Client ──> GPT-5.5 (tool loop with up to 500 iterations)
                │       │
                │       ├── Response Guards (fabrication, hedging, premature failure)
                │       ├── Completion Classifier (fail-open)
@@ -88,7 +89,7 @@ Discord ──> OdinBot (client.py)
                ├── Knowledge Store ──> FTS5 + vector search
                ├── Session Manager ──> Per-channel history + compaction
                ├── Browser (native Playwright) ──> Screenshots, page reading, JS eval
-               └── Web API (aiohttp) ──> 136 REST endpoints + WebSocket
+               └── Web API (aiohttp) ──> 154 REST endpoints + WebSocket
 ```
 
 ## Quick Start
@@ -146,7 +147,7 @@ The web UI starts automatically at the configured port (default 3000). Set `web.
 ## Testing
 
 ```bash
-# Full suite (~5490 tests)
+# Full suite (105 files, ~3,584 test functions)
 pytest tests/ -q
 
 # Skip slow/optional tests
@@ -168,7 +169,7 @@ src/
     executor.py            Tool dispatch + recovery
     registry.py            72 tool definitions (25 core, 47 skill)
     skill_manager.py       Skill CRUD + AST validation
-    command_governor.py    Destructive command blocking
+    risk_classifier.py    CommandGovernor + risk classification
     post_validation.py     validate_action implementation
     recovery.py            Error classification + retry
     browser.py             Native Playwright browser
@@ -178,20 +179,24 @@ src/
     auxiliary.py            Smart model routing (cheap/strong)
     secret_scrubber.py     Secret detection and redaction
     context_compressor.py  Adaptive context compression
+  async_utils.py           fire_and_forget helper for background tasks
+  permissions/
+    manager.py             Permission tiers + RBAC
+    host_access.py         Per-user host access control
   agents/manager.py        Sub-agent lifecycle + state machine
   scheduler/scheduler.py   Cron + one-shot + webhook triggers
   sessions/manager.py      Per-channel history + compaction + topic detection
   knowledge/store.py       FTS5 + vector knowledge base
   health/server.py         aiohttp web server + auth middleware
   web/
-    api.py                 136 REST endpoints
+    api.py                 154 REST endpoints
     websocket.py           Live event streaming + WS chat
   audit/logger.py          HMAC-chainable audit log
   learning/reflector.py    Cross-conversation learning (90-day expiry)
   trajectories/saver.py    Per-turn JSONL trajectory logging
 
 ui/                        Vue 3 + Tailwind web dashboard (19 pages)
-tests/                     5490+ tests
+tests/                     105 files, ~3,584 test functions
 config.yml                 Default configuration template
 ```
 
