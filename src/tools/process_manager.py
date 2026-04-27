@@ -84,7 +84,8 @@ class ProcessRegistry:
         info._reader_task = asyncio.create_task(self._read_output(info))
 
         # Auto-kill after max lifetime
-        asyncio.create_task(self._enforce_lifetime(pid, MAX_LIFETIME_SECONDS))
+        from ..async_utils import fire_and_forget
+        fire_and_forget(self._enforce_lifetime(pid, MAX_LIFETIME_SECONDS), name=f"process_lifetime:{pid}")
 
         log.info("Started process PID %d: %s", pid, command[:80])
         return f"Process started (PID {pid}): {command[:120]}"

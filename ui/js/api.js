@@ -36,6 +36,8 @@ class OdinAPI {
       if (this._persist) localStorage.setItem('odin_persist', '1');
       if (timeoutSeconds > 0) {
         store.setItem('odin_session_timeout', String(timeoutSeconds));
+      } else {
+        store.removeItem('odin_session_timeout');
       }
       this._startActivityMonitor();
     } else {

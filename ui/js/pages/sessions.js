@@ -744,7 +744,7 @@ export default {
     // Export
     function exportSession(channelId, format) {
       const token = api._token;
-      let url = `/api/sessions/${channelId}/export?format=${format}`;
+      let url = `/api/sessions/${encodeURIComponent(channelId)}/export?format=${format}`;
       if (token) url += `&token=${encodeURIComponent(token)}`;
       const a = document.createElement('a');
       a.href = url;

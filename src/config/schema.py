@@ -370,10 +370,11 @@ class WebConfig(BaseModel):
 
     def resolve_api_identity(self, token: str) -> ApiTokenIdentity | None:
         """Look up identity for an API token. Falls back to default if single token configured."""
+        import hmac
         for t in self.api_tokens:
-            if t.token and t.token == token:
+            if t.token and hmac.compare_digest(t.token, token):
                 return t
-        if self.api_token and token == self.api_token:
+        if self.api_token and hmac.compare_digest(self.api_token, token):
             return ApiTokenIdentity(
                 token=self.api_token, user_id="api-admin",
                 username="Admin", tier="admin", label="default",

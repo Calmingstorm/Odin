@@ -218,8 +218,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         is_authed = False
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
+            import hmac as _hmac
             api_token = request.app.get("api_token", "")
-            if api_token and token == api_token:
+            if api_token and _hmac.compare_digest(token, api_token):
                 is_authed = True
             elif sm and sm.validate(token):
                 is_authed = True
@@ -2643,6 +2644,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         default_host = body.get("default_host", "")
         if allowed_hosts is not None and not isinstance(allowed_hosts, list):
             return web.json_response({"error": "allowed_hosts must be a list or null"}, status=400)
+        if allowed_hosts is not None and not all(isinstance(h, str) for h in allowed_hosts):
+            return web.json_response({"error": "allowed_hosts entries must be strings"}, status=400)
+        if not isinstance(default_host, str):
+            return web.json_response({"error": "default_host must be a string"}, status=400)
         await ham.set_user(uid, allowed_hosts, default_host)
         try:
             audit = getattr(bot, "audit", None)
@@ -2681,6 +2686,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         default_host = body.get("default_host", "")
         if allowed_hosts is not None and not isinstance(allowed_hosts, list):
             return web.json_response({"error": "allowed_hosts must be a list or null"}, status=400)
+        if allowed_hosts is not None and not all(isinstance(h, str) for h in allowed_hosts):
+            return web.json_response({"error": "allowed_hosts entries must be strings"}, status=400)
+        if not isinstance(default_host, str):
+            return web.json_response({"error": "default_host must be a string"}, status=400)
         await ham.set_default_policy(allowed_hosts, default_host)
         return web.json_response({"status": "updated"})
 

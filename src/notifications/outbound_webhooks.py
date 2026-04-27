@@ -497,7 +497,8 @@ class OutboundWebhookDispatcher:
             except Exception as exc:
                 log.warning("Fire-and-forget dispatch error: %s", exc)
 
-        asyncio.create_task(_do_dispatch())
+        from ..async_utils import fire_and_forget
+        fire_and_forget(_do_dispatch(), name="webhook_dispatch")
 
     async def send_test_event(self, webhook_id: str) -> DeliveryResult | None:
         """Send a test event to a specific webhook. Returns None if not found."""
