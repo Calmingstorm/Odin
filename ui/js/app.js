@@ -295,6 +295,7 @@ const App = {
       };
       ws.connect();
       fetchStatus();
+      if (statusInterval) clearInterval(statusInterval);
       statusInterval = setInterval(fetchStatus, 15000);
     }
 

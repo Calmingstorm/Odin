@@ -90,7 +90,6 @@ export default {
           <div class="tl-stat-card">
             <div class="tl-stat-value">{{ totalUsage.toLocaleString() }}</div>
             <div class="tl-stat-label">Total Executions</div>
-            <div v-if="usageHistory.length > 1" class="tl-stat-spark" v-html="totalSparkline"></div>
           </div>
         </div>
 
@@ -132,7 +131,6 @@ export default {
                     <span v-else class="tl-tool-usage-zero">\u2014</span>
                     <span class="tl-tool-usage-label">uses</span>
                   </div>
-                  <div v-if="toolSparklines[t.name]" class="tl-tool-spark" v-html="toolSparklines[t.name]"></div>
                 </div>
                 <!-- Expanded detail -->
                 <div v-if="expanded[t.name]" class="tl-tool-detail">
@@ -178,7 +176,6 @@ export default {
                     <td class="text-gray-400 text-sm mobile-hide">{{ truncate(t.description, 100) }}</td>
                     <td class="text-right">
                       <div class="flex items-center justify-end gap-2">
-                        <span v-if="toolSparklines[t.name]" v-html="toolSparklines[t.name]"></span>
                         <span v-if="stats[t.name]" class="text-gray-300 text-sm font-mono">{{ stats[t.name].toLocaleString() }}</span>
                         <span v-else class="text-gray-600 text-sm">\u2014</span>
                       </div>
@@ -358,7 +355,7 @@ export default {
       tools, loading, error, search, stats, expanded, viewMode,
       activeCategory, usageHistory,
       coreCount, skillCount, totalUsage, filteredTools, groupedTools,
-      usedCategories, toolSparklines, totalSparkline,
+      usedCategories,
       truncate, toggleExpand, refresh,
     };
   },

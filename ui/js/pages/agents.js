@@ -208,7 +208,7 @@ export default {
       try {
         await api.del(`/api/agents/${encodeURIComponent(agentId)}`);
         await fetchAgents();
-      } catch { /* ignore */ }
+      } catch (e) { error.value = e.message || 'Failed to kill agent'; }
       killing.value = null;
     }
 
