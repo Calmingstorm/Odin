@@ -1,24 +1,10 @@
 /**
- * Odin Management UI — Tools Page (Round 39 Redesign)
- * Card layout with usage sparklines, categorized tool grid
+ * Odin Management UI — Tools Page
+ * Card layout, categorized tool grid
  */
 import { api } from '../api.js';
 
 const { ref, computed, onMounted } = Vue;
-
-/**
- * Generate a tiny SVG sparkline from an array of values.
- * Returns an SVG string (inline, no external deps).
- */
-function sparklineSVG(values, width, height, color) {
-  if (!values || values.length < 2) return '';
-  const max = Math.max(...values, 1);
-  const step = width / (values.length - 1);
-  const points = values.map((v, i) => `${(i * step).toFixed(1)},${(height - (v / max) * (height - 2) - 1).toFixed(1)}`).join(' ');
-  return `<svg class="tl-sparkline" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">` +
-    `<polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>` +
-    `</svg>`;
-}
 
 /** Category mapping for tools — groups tools by functional area */
 const TOOL_CATEGORIES = [
@@ -211,58 +197,10 @@ export default {
     const expanded = ref({});
     const viewMode = ref('cards');
     const activeCategory = ref(null);
-    const usageHistory = ref([]);
 
     const coreCount = computed(() => tools.value.filter(t => t.is_core).length);
     const skillCount = computed(() => tools.value.filter(t => !t.is_core).length);
     const totalUsage = computed(() => Object.values(stats.value).reduce((a, b) => a + b, 0));
-
-    /** Generate sparkline data from stats — bucketize tools by usage tier */
-    const toolSparklines = computed(() => {
-      const result = {};
-      for (const t of tools.value) {
-        const count = stats.value[t.name] || 0;
-        if (count > 0) {
-          // Generate a simple sparkline from the tool's relative usage
-          const buckets = generateUsageBuckets(t.name, count);
-          if (buckets.length > 1) {
-            result[t.name] = sparklineSVG(buckets, 48, 16, 'rgba(217, 119, 6, 0.7)');
-          }
-        }
-      }
-      return result;
-    });
-
-    const totalSparkline = computed(() => {
-      if (usageHistory.value.length < 2) return '';
-      return sparklineSVG(usageHistory.value, 64, 20, 'rgba(217, 119, 6, 0.8)');
-    });
-
-    /** Generate pseudo-historical buckets from a single count (deterministic) */
-    function generateUsageBuckets(name, total) {
-      if (total < 2) return [];
-      const seed = hashCode(name);
-      const buckets = [];
-      const numBuckets = 7;
-      let remaining = total;
-      for (let i = 0; i < numBuckets - 1; i++) {
-        const ratio = (0.5 + 0.5 * Math.abs(Math.sin(seed + i * 1.7))) / (numBuckets - i);
-        const val = Math.max(0, Math.round(remaining * ratio));
-        buckets.push(val);
-        remaining -= val;
-      }
-      buckets.push(remaining);
-      return buckets;
-    }
-
-    function hashCode(str) {
-      let hash = 0;
-      for (let i = 0; i < str.length; i++) {
-        hash = ((hash << 5) - hash) + str.charCodeAt(i);
-        hash |= 0;
-      }
-      return hash;
-    }
 
     /** Categorize a tool based on its name */
     function categorize(name) {
@@ -338,7 +276,6 @@ export default {
         stats.value = statsData || {};
         // Build usage history from stats for total sparkline
         const vals = Object.values(statsData || {}).filter(v => v > 0).sort((a, b) => a - b);
-        usageHistory.value = vals.length > 1 ? vals.slice(-10) : [];
       } catch (e) {
         error.value = e.message;
       }
@@ -353,7 +290,7 @@ export default {
 
     return {
       tools, loading, error, search, stats, expanded, viewMode,
-      activeCategory, usageHistory,
+      activeCategory,
       coreCount, skillCount, totalUsage, filteredTools, groupedTools,
       usedCategories,
       truncate, toggleExpand, refresh,
