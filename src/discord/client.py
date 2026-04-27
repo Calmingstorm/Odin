@@ -1173,7 +1173,9 @@ class OdinBot(commands.Bot):
 
     async def _codex_call(
         self, *, messages: list, system: str, tools: list,
-        user_message: str = "", **kwargs,
+        user_message: str = "",
+        user_id: str = "", channel_id: str = "", tools_used: list[str] | None = None,
+        **kwargs,
     ):
         """Wrap Codex chat_with_tools with cost / subsystem / routing wiring.
 
@@ -1222,6 +1224,9 @@ class OdinBot(commands.Bot):
                     int(getattr(resp, "input_tokens", 0) or 0),
                     int(getattr(resp, "output_tokens", 0) or 0),
                     model=getattr(self.config.openai_codex, "model", ""),
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    tools_used=tools_used or [],
                 )
             except Exception:
                 log.exception("CostTracker.record failed (non-fatal)")
@@ -2449,10 +2454,12 @@ class OdinBot(commands.Bot):
                 log.warning("Typing indicator failed (non-fatal): %s", typing_err)
                 typing_cm = None
 
+            _channel_id = str(message.channel.id)
             try:
                 llm_resp = await self._codex_call(
                     messages=messages, system=system_prompt, tools=tools or [],
                     user_message=getattr(message, "content", "") or "",
+                    user_id=user_id, channel_id=_channel_id, tools_used=tools_used_in_loop,
                 )
             except CircuitOpenError as coe:
                 wait_secs = min(coe.retry_after, 90.0)
@@ -2461,6 +2468,7 @@ class OdinBot(commands.Bot):
                 try:
                     llm_resp = await self._codex_call(
                         messages=messages, system=system_prompt, tools=tools or [],
+                        user_id=user_id, channel_id=_channel_id, tools_used=tools_used_in_loop,
                     )
                 except Exception as retry_err:
                     await self._save_turn_trajectory(_trajectory, error=str(retry_err))
