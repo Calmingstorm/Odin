@@ -17,9 +17,11 @@ TextFn = Callable[[list[dict], str], Awaitable[str]]
 
 log = get_logger("learning")
 
+_MAX_CONTENT_CHARS = 800
+
 _REFLECTION_HEADER = """\
 Extract clear, explicit lessons from this conversation. Return a JSON array.
-Each element: {"key": "snake_case_id", "category": "correction|preference|operational|fact", "content": "max 300 chars"}
+Each element: {"key": "snake_case_id", "category": "correction|preference|operational|fact", "content": "max 800 chars"}
 Rules:
 - Max 5 insights per reflection
 - Reuse existing keys when updating a known fact
@@ -368,7 +370,7 @@ class ConversationReflector:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         by_key = {e["key"]: e for e in existing}
         for entry in new_entries:
-            entry["content"] = entry["content"][:300]
+            entry["content"] = entry["content"][:_MAX_CONTENT_CHARS]
             if entry["key"] in by_key:
                 by_key[entry["key"]]["content"] = entry["content"]
                 by_key[entry["key"]]["category"] = entry["category"]
@@ -434,7 +436,7 @@ class ConversationReflector:
         orig_by_key = {e["key"]: e for e in entries}
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         for entry in consolidated:
-            entry["content"] = entry["content"][:300]
+            entry["content"] = entry["content"][:_MAX_CONTENT_CHARS]
             if entry["key"] in orig_by_key:
                 orig = orig_by_key[entry["key"]]
                 entry["created_at"] = orig.get("created_at", now)
