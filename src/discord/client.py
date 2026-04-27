@@ -39,6 +39,7 @@ from ..tools.tool_memory import ToolMemory
 from ..search import LocalEmbedder, SessionVectorStore
 from ..permissions import PermissionManager
 from ..permissions.host_access import HostAccessManager
+from ..async_utils import fire_and_forget
 from .channel_config import ChannelConfigManager
 from .channel_logger import ChannelLogger
 from .voice import VoiceManager, VoiceMessageProxy
@@ -1557,7 +1558,7 @@ class OdinBot(commands.Bot):
             log.info("Slash commands synced to guild: %s", guild.name)
         self.scheduler.start(self._on_scheduled_task)
         if self._vector_store:
-            asyncio.create_task(self._backfill_archives())
+            fire_and_forget(self._backfill_archives(), name="backfill_archives")
         # Start proactive monitoring if configured
         if hasattr(self, "infra_watcher") and self.infra_watcher:
             self.infra_watcher.start()
@@ -2137,9 +2138,9 @@ class OdinBot(commands.Bot):
                     pass  # Non-critical
 
                 # Post-operation reflection — learn from what actually happened
-                asyncio.create_task(self._operational_reflection(
+                fire_and_forget(self._operational_reflection(
                     content, tools_used, response, is_error, user_id,
-                ))
+                ), name="operational_reflection")
         else:
             # Save a sanitized error marker instead of the full error response.
             # The user sees the full error on Discord, but raw refusals and
@@ -3736,12 +3737,12 @@ class OdinBot(commands.Bot):
         if result.startswith("Error"):
             return result
         # Lifecycle webhook: loop.started
-        asyncio.create_task(self._emit_lifecycle_event("loop.started", {
+        fire_and_forget(self._emit_lifecycle_event("loop.started", {
             "loop_id": result, "goal": goal[:200], "interval_seconds": interval,
             "mode": mode, "max_iterations": max_iterations,
             "channel_id": str(getattr(message.channel, "id", "")),
             "requester_id": str(message.author.id),
-        }))
+        }), name="lifecycle:loop.started")
         return (
             f"Loop started (ID: `{result}`): **{goal[:100]}** "
             f"(every {max(10, interval)}s, mode={mode}, max {max_iterations} iterations)"
@@ -3754,9 +3755,9 @@ class OdinBot(commands.Bot):
             return "A 'loop_id' is required."
         result = self.loop_manager.stop_loop(loop_id)
         # Lifecycle webhook: loop.stopped
-        asyncio.create_task(self._emit_lifecycle_event("loop.stopped", {
+        fire_and_forget(self._emit_lifecycle_event("loop.stopped", {
             "loop_id": loop_id, "result": result,
-        }))
+        }), name="lifecycle:loop.stopped")
         return result
 
     def _handle_list_loops(self) -> str:
