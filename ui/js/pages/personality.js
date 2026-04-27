@@ -103,7 +103,7 @@ export default {
       if (!confirm(`Delete preset "${preset.value}"?`)) return;
       error.value = null;
       try {
-        await api.del(`/api/personality/presets/${preset.value}`);
+        await api.del(`/api/personality/presets/${encodeURIComponent(preset.value)}`);
         await load();
         preset.value = 'odin';
       } catch (e) {

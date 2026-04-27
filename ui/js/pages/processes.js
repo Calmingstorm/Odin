@@ -195,7 +195,7 @@ export default {
       try {
         await api.del(`/api/processes/${killTarget.value}`);
         await fetchProcesses();
-      } catch { /* ignore */ }
+      } catch (e) { error.value = e.message || 'Failed to kill process'; }
       killing.value = false;
       killTarget.value = null;
     }

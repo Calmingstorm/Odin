@@ -350,7 +350,7 @@ export default {
 
     async function deleteUser(uid) {
       try {
-        await api.delete(`/api/host-access/user/${uid}`);
+        await api.del(`/api/host-access/user/${uid}`);
         delete users.value[uid];
         const m = getMember(uid);
         showToast(`Removed override for ${m ? m.display_name : uid}`);

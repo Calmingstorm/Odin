@@ -124,7 +124,7 @@ export default {
 
     async function saveEdit(key) {
       try {
-        await api.put('/api/learned/' + key, { content: editContent.value });
+        await api.put('/api/learned/' + encodeURIComponent(key), { content: editContent.value });
         editing.value = null;
         await fetchEntries();
       } catch (e) {
@@ -134,7 +134,7 @@ export default {
 
     async function deleteEntry(key) {
       try {
-        await api.del('/api/learned/' + key);
+        await api.del('/api/learned/' + encodeURIComponent(key));
         await fetchEntries();
       } catch (e) {
         error.value = e.message;

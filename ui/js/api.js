@@ -13,10 +13,14 @@ class OdinAPI {
     this._token = this._persist
       ? (localStorage.getItem('odin_token') || '')
       : (sessionStorage.getItem('odin_token') || '');
-    this._sessionTimeout = 0;
+    const store = this._persist ? localStorage : sessionStorage;
+    this._sessionTimeout = parseInt(store.getItem('odin_session_timeout') || '0', 10);
     this._lastActivity = Date.now();
     this._activityTimer = null;
     this.onSessionExpired = null;
+    if (this._token && this._sessionTimeout > 0) {
+      this._startActivityMonitor();
+    }
   }
 
   get token() { return this._token; }

@@ -404,6 +404,7 @@ export default {
     }
 
     async function clearSessions() {
+      if (!confirm('Clear all conversation sessions? This cannot be undone.')) return;
       actionLoading.value = { ...actionLoading.value, clearSessions: true };
       // Optimistic: immediately set sessions to 0
       const prevSessions = status.value.session_count;
@@ -421,6 +422,7 @@ export default {
     }
 
     async function stopAllLoops() {
+      if (!confirm('Stop all running loops?')) return;
       actionLoading.value = { ...actionLoading.value, stopLoops: true };
       // Optimistic: immediately set loops to 0
       const prevLoops = status.value.loop_count;

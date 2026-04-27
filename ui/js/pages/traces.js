@@ -482,7 +482,7 @@ export default {
       expandedIterations.value = {};
       try {
         if (selectedFile.value) {
-          const data = await api.get(`/api/trajectories/${selectedFile.value}?limit=${filters.value.limit}`);
+          const data = await api.get(`/api/trajectories/${encodeURIComponent(selectedFile.value)}?limit=${filters.value.limit}`);
           let results = data.entries || [];
           if (filters.value.tool_name) {
             results = results.filter(e => (e.tools_used || []).includes(filters.value.tool_name));

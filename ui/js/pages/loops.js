@@ -327,7 +327,7 @@ export default {
       try {
         await api.del(`/api/loops/${encodeURIComponent(stopTarget.value)}`);
         await fetchLoops();
-      } catch { /* ignore */ }
+      } catch (e) { error.value = e.message || 'Failed to stop loop'; }
       stopping.value = false;
       stopTarget.value = null;
     }
@@ -337,7 +337,7 @@ export default {
       try {
         await api.post(`/api/loops/${encodeURIComponent(loopId)}/restart`);
         await fetchLoops();
-      } catch { /* ignore */ }
+      } catch (e) { error.value = e.message || 'Failed to restart loop'; }
       restartingId.value = null;
     }
 

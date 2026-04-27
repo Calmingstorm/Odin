@@ -674,7 +674,7 @@ export default {
       detailLoading.value = true;
       collapsedThreads.value = new Set();
       try {
-        detail.value = await api.get(`/api/sessions/${channelId}`);
+        detail.value = await api.get(`/api/sessions/${encodeURIComponent(channelId)}`);
       } catch (e) {
         detail.value = { messages: [], summary: '' };
       }
@@ -706,14 +706,14 @@ export default {
       if (!clearTarget.value) return;
       clearing.value = true;
       try {
-        await api.del(`/api/sessions/${clearTarget.value}`);
+        await api.del(`/api/sessions/${encodeURIComponent(clearTarget.value)}`);
         if (expandedId.value === clearTarget.value) {
           expandedId.value = null;
           detail.value = null;
         }
         selected.value.delete(clearTarget.value);
         await fetchSessions();
-      } catch { /* ignore */ }
+      } catch (e) { error.value = e.message || 'Failed to clear session'; }
       clearing.value = false;
       clearTarget.value = null;
     }
@@ -736,7 +736,7 @@ export default {
         }
         selected.value = new Set();
         await fetchSessions();
-      } catch { /* ignore */ }
+      } catch (e) { error.value = e.message || 'Failed to clear sessions'; }
       clearing.value = false;
       bulkClearing.value = false;
     }
@@ -762,7 +762,7 @@ export default {
         debounceTimer = setTimeout(() => {
           fetchSessions();
           if (expandedId.value && data.payload.channel_id === expandedId.value) {
-            api.get(`/api/sessions/${expandedId.value}`)
+            api.get(`/api/sessions/${encodeURIComponent(expandedId.value)}`)
               .then(d => { detail.value = d; })
               .catch(() => {});
           }
