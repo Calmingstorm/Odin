@@ -4646,7 +4646,7 @@ class OdinBot(commands.Bot):
 
         from ..tools.comfyui import ComfyUIClient
 
-        client = ComfyUIClient(self.config.comfyui.url)
+        client = ComfyUIClient(self.config.comfyui.url, default_checkpoint=self.config.comfyui.default_checkpoint)
         image_bytes = await client.generate(
             prompt=prompt_text,
             negative=negative,

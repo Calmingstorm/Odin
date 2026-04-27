@@ -413,6 +413,7 @@ class AttachmentsConfig(BaseModel):
 class ComfyUIConfig(BaseModel):
     enabled: bool = False
     url: str = "http://localhost:8188"
+    default_checkpoint: str = ""
 
 
 class ReactionTriggerConfig(BaseModel):
