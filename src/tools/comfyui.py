@@ -60,8 +60,9 @@ _DEFAULT_WORKFLOW = {
 class ComfyUIClient:
     """Async HTTP client for ComfyUI image generation."""
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, default_checkpoint: str = "") -> None:
         self.base_url = base_url.rstrip("/")
+        self._default_checkpoint = default_checkpoint
 
     async def generate(
         self,
@@ -80,8 +81,8 @@ class ComfyUIClient:
 
         workflow = copy.deepcopy(_DEFAULT_WORKFLOW)
 
-        # Use specified model or auto-detect from available checkpoints
-        ckpt = model if model else workflow["4"]["inputs"]["ckpt_name"]
+        # Priority: explicit model param > config default > workflow hardcoded fallback
+        ckpt = model or self._default_checkpoint or workflow["4"]["inputs"]["ckpt_name"]
         resolved = await self._resolve_checkpoint(ckpt)
         if not resolved:
             log.warning("No checkpoints available on ComfyUI")
