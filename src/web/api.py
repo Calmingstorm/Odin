@@ -2720,6 +2720,45 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "message": "Credentials saved. Restart Odin to load into the active pool.",
         })
 
+    @routes.delete("/api/codex/account/{index}")
+    async def codex_delete_account(request: web.Request) -> web.Response:
+        import json as _json
+        from pathlib import Path as _Path
+        from ..llm.codex_auth import _atomic_write_secure
+
+        try:
+            index = int(request.match_info["index"])
+        except ValueError:
+            return web.json_response({"error": "index must be an integer"}, status=400)
+
+        path = _Path(bot.config.openai_codex.credentials_path)
+        if not path.exists():
+            return web.json_response({"error": "no credentials file"}, status=404)
+
+        try:
+            raw = _json.loads(path.read_text())
+        except Exception:
+            return web.json_response({"error": "failed to read credentials"}, status=500)
+
+        if isinstance(raw, list):
+            if index < 0 or index >= len(raw):
+                return web.json_response({"error": f"index {index} out of range (0-{len(raw)-1})"}, status=400)
+            removed = raw.pop(index)
+            _atomic_write_secure(path, _json.dumps(raw, indent=2))
+            email = removed.get("email", "unknown")
+        elif isinstance(raw, dict) and index == 0:
+            email = raw.get("email", "unknown")
+            _atomic_write_secure(path, _json.dumps([], indent=2))
+        else:
+            return web.json_response({"error": "invalid index"}, status=400)
+
+        return web.json_response({
+            "status": "deleted",
+            "email": email,
+            "restart_required": True,
+            "message": "Account removed. Restart Odin to apply.",
+        })
+
     # ------------------------------------------------------------------
     # Host access control
     # ------------------------------------------------------------------

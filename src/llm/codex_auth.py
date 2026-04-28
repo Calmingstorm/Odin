@@ -52,19 +52,33 @@ def _generate_pkce() -> tuple[str, str]:
 
 
 def _decode_jwt_payload(token: str) -> dict:
-    """Decode the payload section of a JWT without verification."""
+    """Decode the payload section of a JWT without verification.
+
+    Flattens OpenAI's nested claim objects (https://api.openai.com/profile,
+    https://api.openai.com/auth) into top-level keys for easier access.
+    """
     parts = token.split(".")
     if len(parts) < 2:
         return {}
     payload = parts[1]
-    # Add padding
     padding = 4 - len(payload) % 4
     if padding != 4:
         payload += "=" * padding
     try:
-        return json.loads(base64.urlsafe_b64decode(payload))
+        data = json.loads(base64.urlsafe_b64decode(payload))
     except Exception:
         return {}
+    profile = data.get("https://api.openai.com/profile", {})
+    auth = data.get("https://api.openai.com/auth", {})
+    if isinstance(profile, dict):
+        for k, v in profile.items():
+            if k not in data:
+                data[k] = v
+    if isinstance(auth, dict):
+        for k, v in auth.items():
+            if k not in data:
+                data[k] = v
+    return data
 
 
 class CodexAuth:
