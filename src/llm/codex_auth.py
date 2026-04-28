@@ -238,6 +238,8 @@ class CodexAuth:
         if "email" in payload:
             creds["email"] = payload["email"]
 
+        return creds
+
     @staticmethod
     async def request_device_code() -> dict:
         """Request a device code for headless authentication.

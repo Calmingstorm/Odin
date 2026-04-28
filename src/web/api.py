@@ -2686,7 +2686,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
-        creds_path = body.get("credentials_path", "./data/codex_auth.json")
+        creds_path = bot.config.openai_codex.credentials_path
         save_index = body.get("save_index")
 
         import json as _json
