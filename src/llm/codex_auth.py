@@ -32,6 +32,10 @@ CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 AUTH_URL = "https://auth.openai.com/oauth/authorize"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 REDIRECT_URI = "http://localhost:1455/auth/callback"
+DEVICE_REDIRECT_URI = "https://auth.openai.com/deviceauth/callback"
+DEVICE_USERCODE_URL = "https://auth.openai.com/api/accounts/deviceauth/usercode"
+DEVICE_TOKEN_URL = "https://auth.openai.com/api/accounts/deviceauth/token"
+DEVICE_VERIFY_URL = "https://auth.openai.com/codex/device"
 SCOPES = "openid profile email offline_access"
 
 # Refresh 5 minutes before expiry
@@ -195,11 +199,11 @@ class CodexAuth:
             "codex_cli_simplified_flow": "true",
             "originator": "pi",
         }
-        query = "&".join(f"{k}={v}" for k, v in params.items())
-        return f"{AUTH_URL}?{query}", code_verifier
+        from urllib.parse import urlencode
+        return f"{AUTH_URL}?{urlencode(params)}", code_verifier
 
     @staticmethod
-    async def exchange_code(code: str, code_verifier: str) -> dict:
+    async def exchange_code(code: str, code_verifier: str, redirect_uri: str = REDIRECT_URI) -> dict:
         """Exchange authorization code for tokens."""
         async with aiohttp.ClientSession(auto_decompress=False, timeout=aiohttp.ClientTimeout(total=30)) as session:
             async with session.post(
@@ -207,7 +211,7 @@ class CodexAuth:
                 data={
                     "grant_type": "authorization_code",
                     "code": code,
-                    "redirect_uri": REDIRECT_URI,
+                    "redirect_uri": redirect_uri,
                     "client_id": CLIENT_ID,
                     "code_verifier": code_verifier,
                 },
@@ -233,6 +237,57 @@ class CodexAuth:
             creds["account_id"] = payload["chatgpt_account_id"]
         if "email" in payload:
             creds["email"] = payload["email"]
+
+    @staticmethod
+    async def request_device_code() -> dict:
+        """Request a device code for headless authentication.
+
+        Returns dict with device_auth_id, user_code, interval, and verify_url.
+        """
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            async with session.post(
+                DEVICE_USERCODE_URL,
+                json={"client_id": CLIENT_ID},
+            ) as resp:
+                if resp.status != 200:
+                    body = (await resp.read()).decode("utf-8", errors="replace")
+                    raise RuntimeError(f"Device code request failed ({resp.status}): {body}")
+                data = json.loads(await resp.read())
+
+        return {
+            "device_auth_id": data["device_auth_id"],
+            "user_code": data["user_code"],
+            "interval": int(data.get("interval", 5)),
+            "verify_url": DEVICE_VERIFY_URL,
+        }
+
+    @staticmethod
+    async def poll_device_auth(device_auth_id: str, user_code: str, interval: int = 5, timeout: int = 900) -> dict:
+        """Poll for device authorization completion, then exchange for tokens.
+
+        Returns credentials dict on success, raises on timeout/error.
+        """
+        deadline = time.time() + timeout
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            while time.time() < deadline:
+                await asyncio.sleep(interval)
+                async with session.post(
+                    DEVICE_TOKEN_URL,
+                    json={"device_auth_id": device_auth_id, "user_code": user_code},
+                ) as resp:
+                    if resp.status == 200:
+                        data = json.loads(await resp.read())
+                        return await CodexAuth.exchange_code(
+                            data["authorization_code"],
+                            data["code_verifier"],
+                            redirect_uri=DEVICE_REDIRECT_URI,
+                        )
+                    if resp.status in (403, 404):
+                        continue
+                    body = (await resp.read()).decode("utf-8", errors="replace")
+                    raise RuntimeError(f"Device auth polling failed ({resp.status}): {body}")
+
+        raise TimeoutError("Device authorization timed out — user did not complete login")
 
         return creds
 
