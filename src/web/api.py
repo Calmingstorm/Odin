@@ -2716,6 +2716,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "status": "authenticated",
             "email": creds.get("email", "unknown"),
             "account_id": creds.get("account_id", ""),
+            "restart_required": True,
+            "message": "Credentials saved. Restart Odin to load into the active pool.",
         })
 
     # ------------------------------------------------------------------

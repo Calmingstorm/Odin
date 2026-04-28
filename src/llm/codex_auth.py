@@ -291,8 +291,6 @@ class CodexAuth:
 
         raise TimeoutError("Device authorization timed out — user did not complete login")
 
-        return creds
-
 
 class CodexAuthPool:
     """Manages multiple CodexAuth credential sets with automatic rotation.
