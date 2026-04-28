@@ -1481,7 +1481,6 @@ class OdinBot(commands.Bot):
         "stop_loop": "Ending a watch",
         "list_loops": "Checking active watches",
         "parse_time": "Deciphering mortal time",
-        "create_digest": "Setting up a daily report",
         "spawn_agent": "Delegating the suffering",
         "wait_for_agents": "Waiting on subordinates",
         "get_agent_results": "Collecting the findings",
@@ -1519,7 +1518,6 @@ class OdinBot(commands.Bot):
         "manage_list": "Managing a list",
         "set_permission": "Adjusting permissions",
         "issue_tracker": "Filing paperwork",
-        "execute_plan": "Executing a plan",
     }
 
     async def _set_status(self, text: str | None = None, task_start: bool = False, task_end: bool = False) -> None:
@@ -2744,8 +2742,6 @@ class OdinBot(commands.Bot):
                         )
                     elif tool_name == "search_audit":
                         result = await self._handle_search_audit(tool_input)
-                    elif tool_name == "create_digest":
-                        result = await self._handle_create_digest(message, tool_input)
                     elif tool_name == "create_skill":
                         result = await asyncio.to_thread(
                             self.skill_manager.create_skill, tool_input["name"], tool_input["code"],
@@ -3441,24 +3437,6 @@ class OdinBot(commands.Bot):
                 f"[{ts}] **{tool}** by {user} ({approved}, {elapsed}ms)\n  {status}"
             )
         return f"**Audit log ({len(results)} entries):**\n" + "\n".join(lines)
-
-    async def _handle_create_digest(self, message: discord.Message, inp: dict) -> str:
-        """Create a scheduled daily digest."""
-        cron = inp.get("cron", "0 8 * * *")
-        description = inp.get("description", "Daily Infrastructure Digest")
-        try:
-            schedule = await self.scheduler.add(
-                description=description,
-                action="digest",
-                channel_id=str(message.channel.id),
-                cron=cron,
-            )
-            return (
-                f"Created digest schedule (ID: {schedule['id']}): {description}\n"
-                f"Cron: `{cron}` | Next run: {schedule['next_run']}"
-            )
-        except ValueError as e:
-            return f"Failed to create digest: {e}"
 
     async def _on_scheduled_digest(self, schedule: dict) -> None:
         """Run the daily infrastructure digest and post results."""
@@ -4291,9 +4269,6 @@ class OdinBot(commands.Bot):
             return await self._handle_analyze_image(msg_proxy, tool_input)
         if tool_name == "generate_image":
             return await self._handle_generate_image(msg_proxy, tool_input)
-        if tool_name == "create_digest":
-            return await self._handle_create_digest(msg_proxy, tool_input)
-
         # --- Discord-native tools (input only) ---
         if tool_name == "list_schedules":
             return self._handle_list_schedules()

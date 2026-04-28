@@ -247,13 +247,6 @@ class ToolExecutor:
             mutation_detected = _mutation.detected
             mutation_reason = _mutation.reason
 
-        # Propagate nested mutation state from execute_plan
-        plan_tracker = getattr(self, "_plan_mutation_tracker", None)
-        if plan_tracker and plan_tracker.detected:
-            mutation_detected = True
-            mutation_reason = mutation_reason or "; ".join(plan_tracker.reasons)
-            del self._plan_mutation_tracker
-
         outcome = validate_tool_result(tool_name, raw_result, stats=self.validation_stats)
 
         # Extract exit code from string if handler didn't return one
@@ -1599,26 +1592,6 @@ class ToolExecutor:
         if code != 0 and not output.strip():
             return f"http_probe failed (exit {code}): curl returned no output"
         return _truncate_lines(output) if output.strip() else "http_probe: no response received"
-
-    async def _handle_execute_plan(self, inp: dict) -> str | tuple[str, int]:
-        """Execute a DAG plan using the Odin planner.
-
-        Routes shell/file tools through ToolExecutor so they inherit
-        governor, RBAC, audit, and mutation detection.  Propagates
-        nested mutation validation requirements to the outer result.
-        """
-        from src.tools.plan_runner import PlanRunner
-        from src.tools.plan_executor_bridge import create_executor_backed_registry
-
-        default_host = list(self.config.hosts.keys())[0] if self.config.hosts else "localhost"
-        registry, tracker = create_executor_backed_registry(self, default_host=default_host)
-        runner = PlanRunner(registry=registry)
-        output, success = await runner.run(inp)
-
-        if tracker.detected:
-            self._plan_mutation_tracker = tracker
-
-        return output, (0 if success else 1)
 
     async def _handle_validate_action(self, inp: dict) -> str:
         from .post_validation import (

@@ -38,7 +38,7 @@ BLOCKED_TOOLS = {
     "purge_messages", "browser_screenshot", "generate_file", "post_file",
     "browser_click", "browser_fill", "browser_evaluate",
     "delegate_task",  # no nesting
-    "schedule_task", "update_schedule", "delete_schedule", "create_digest",
+    "schedule_task", "update_schedule", "delete_schedule",
     "create_skill", "edit_skill", "delete_skill",
     "start_loop", "stop_loop",  # need LoopManager from client
     "spawn_agent", "send_to_agent", "kill_agent",  # no agent nesting
