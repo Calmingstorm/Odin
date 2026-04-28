@@ -2738,9 +2738,25 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
         auth = pool._accounts[index]
         try:
+            import json as _json
+            from pathlib import Path as _Path
+            from ..llm.codex_auth import _atomic_write_secure
+
             creds = auth._load()
             await auth._refresh(creds)
             creds = auth._load()
+
+            # Sync refreshed token back to canonical credentials file
+            path = _Path(bot.config.openai_codex.credentials_path)
+            if path.exists():
+                try:
+                    raw = _json.loads(path.read_text())
+                    if isinstance(raw, list) and index < len(raw):
+                        raw[index] = creds
+                        _atomic_write_secure(path, _json.dumps(raw, indent=2))
+                except Exception:
+                    pass
+
             return web.json_response({
                 "status": "refreshed",
                 "email": creds.get("email", "unknown"),
