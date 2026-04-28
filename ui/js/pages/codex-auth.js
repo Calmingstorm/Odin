@@ -48,7 +48,6 @@ export default {
                 <th>Account ID</th>
                 <th class="text-center">Status</th>
                 <th class="text-center">Active</th>
-                <th class="text-center">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -64,12 +63,6 @@ export default {
                 </td>
                 <td class="text-center">
                   <span v-if="a.is_current" class="text-xs px-1 rounded bg-indigo-900 text-indigo-300">Current</span>
-                </td>
-                <td class="text-center">
-                  <button v-if="a.expired || a.error" @click="startReauth(a.index)"
-                          class="text-indigo-400 hover:text-indigo-300 text-xs mr-2">Re-auth</button>
-                  <button @click="deleteAccount(a.index, a.email)"
-                          class="text-red-400 hover:text-red-300 text-xs">Delete</button>
                 </td>
               </tr>
             </tbody>
@@ -171,36 +164,15 @@ export default {
       }
     }
 
-    const reauthIndex = ref(null);
-
-    function startReauth(index) {
-      reauthIndex.value = index;
-      startDeviceLogin();
-    }
-
-    async function deleteAccount(index, email) {
-      const label = email && email !== '—' ? email : `account #${index + 1}`;
-      if (!confirm(`Delete ${label}? Requires restart to apply.`)) return;
-      try {
-        await api.del(`/api/codex/account/${index}`);
-        showToast(`Deleted ${label}. Restart required.`);
-        fetchStatus();
-      } catch (e) {
-        showToast(e.message || 'Failed to delete account', 'error');
-      }
-    }
-
     async function pollForAuth(info) {
       pollController = { cancelled: false };
       const ctrl = pollController;
       try {
-        const payload = {
+        const result = await api.post('/api/codex/device-poll', {
           device_auth_id: info.device_auth_id,
           user_code: info.user_code,
           interval: info.interval,
-        };
-        if (reauthIndex.value !== null) payload.save_index = reauthIndex.value;
-        const result = await api.post('/api/codex/device-poll', payload);
+        });
         if (ctrl.cancelled) return;
         deviceResult.value = result;
         deviceState.value = 'success';
@@ -216,7 +188,6 @@ export default {
       if (pollController) pollController.cancelled = true;
       deviceState.value = null;
       deviceInfo.value = null;
-      reauthIndex.value = null;
     }
 
     onMounted(fetchStatus);
@@ -228,7 +199,6 @@ export default {
       loading, error, data, toast,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,
       fetchStatus, startDeviceLogin, cancelDeviceLogin,
-      deleteAccount, startReauth,
     };
   },
 };
