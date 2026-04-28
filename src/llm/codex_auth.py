@@ -52,19 +52,33 @@ def _generate_pkce() -> tuple[str, str]:
 
 
 def _decode_jwt_payload(token: str) -> dict:
-    """Decode the payload section of a JWT without verification."""
+    """Decode the payload section of a JWT without verification.
+
+    Flattens OpenAI's nested claim objects (https://api.openai.com/profile,
+    https://api.openai.com/auth) into top-level keys for easier access.
+    """
     parts = token.split(".")
     if len(parts) < 2:
         return {}
     payload = parts[1]
-    # Add padding
     padding = 4 - len(payload) % 4
     if padding != 4:
         payload += "=" * padding
     try:
-        return json.loads(base64.urlsafe_b64decode(payload))
+        data = json.loads(base64.urlsafe_b64decode(payload))
     except Exception:
         return {}
+    profile = data.get("https://api.openai.com/profile", {})
+    auth = data.get("https://api.openai.com/auth", {})
+    if isinstance(profile, dict):
+        for k, v in profile.items():
+            if k not in data:
+                data[k] = v
+    if isinstance(auth, dict):
+        for k, v in auth.items():
+            if k not in data:
+                data[k] = v
+    return data
 
 
 class CodexAuth:
@@ -320,15 +334,24 @@ class CodexAuthPool:
             return
 
         if isinstance(raw, list):
-            # Multi-account format — split into individual files
+            # Multi-account format — canonical file is source of truth.
+            # Always sync shadow files and clean up stale ones.
+            valid_count = 0
             for i, creds in enumerate(raw):
                 if not isinstance(creds, dict) or not creds.get("access_token"):
                     continue
                 individual_path = self._path.parent / f"codex_auth_{i}.json"
-                if not individual_path.exists():
-                    _atomic_write_secure(individual_path, json.dumps(creds, indent=2))
+                _atomic_write_secure(individual_path, json.dumps(creds, indent=2))
                 auth = CodexAuth(str(individual_path))
                 self._accounts.append(auth)
+                valid_count = i + 1
+            # Remove stale shadow files from previous larger pools
+            for j in range(valid_count, valid_count + 20):
+                stale = self._path.parent / f"codex_auth_{j}.json"
+                if stale.exists():
+                    stale.unlink()
+                else:
+                    break
             log.info("Codex auth pool: %d account(s) loaded", len(self._accounts))
         elif isinstance(raw, dict) and raw.get("access_token"):
             # Single account (backward compat) — use the file directly
