@@ -382,17 +382,33 @@ class CodexAuthPool:
         return self._accounts[self._current_index]
 
     async def get_access_token(self) -> str:
-        """Get a token from the current account, rotating if rate-limited."""
+        """Get a token from the current account, rotating on failure or rate-limit."""
         if not self._accounts:
             raise RuntimeError("No Codex credentials configured.")
         async with self._pool_lock:
-            for _ in range(len(self._accounts)):
+            errors = []
+            for attempt in range(len(self._accounts)):
                 auth = self._accounts[self._current_index]
-                if not auth.is_rate_limited():
+                if auth.is_rate_limited():
+                    self._rotate()
+                    continue
+                try:
                     return await auth.get_access_token()
-                self._rotate()
-            log.warning("All %d Codex accounts rate-limited, using current", len(self._accounts))
-            return await self._accounts[self._current_index].get_access_token()
+                except Exception as e:
+                    idx = self._current_index
+                    try:
+                        email = auth._load().get("email", f"account {idx}")
+                    except Exception:
+                        email = f"account {idx}"
+                    log.warning("Codex account %s failed: %s — rotating to next", email, e)
+                    errors.append((idx, str(e)))
+                    auth.mark_rate_limited()
+                    if len(self._accounts) > 1:
+                        self._rotate()
+            raise RuntimeError(
+                f"All {len(self._accounts)} Codex accounts failed: "
+                + "; ".join(f"#{i}: {err}" for i, err in errors)
+            )
 
     def get_account_id(self) -> str | None:
         if not self._accounts:
@@ -420,3 +436,22 @@ class CodexAuthPool:
 
     def _rotate(self) -> None:
         self._current_index = (self._current_index + 1) % len(self._accounts)
+
+    async def set_active(self, index: int) -> None:
+        """Switch the active account to the given index."""
+        if index < 0 or index >= len(self._accounts):
+            raise ValueError(f"index {index} out of range (0-{len(self._accounts)-1})")
+        async with self._pool_lock:
+            self._current_index = index
+            try:
+                email = self._accounts[index]._load().get("email", f"account {index}")
+            except Exception:
+                email = f"account {index}"
+            log.info("Active Codex account switched to %s (#%d)", email, index)
+
+    def reload(self) -> None:
+        """Reload the pool from the canonical credentials file."""
+        self._accounts.clear()
+        self._current_index = 0
+        self._init_accounts()
+        log.info("Codex auth pool reloaded: %d account(s)", len(self._accounts))

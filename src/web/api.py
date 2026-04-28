@@ -2714,12 +2714,16 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             path.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write_secure(path, _json.dumps(creds, indent=2))
 
+        # Auto-reload pool if available
+        pool = getattr(bot, "codex_client", None)
+        pool = getattr(pool, "auth", None) if pool else None
+        if pool:
+            pool.reload()
+
         return web.json_response({
             "status": "authenticated",
             "email": creds.get("email", "unknown"),
             "account_id": creds.get("account_id", ""),
-            "restart_required": True,
-            "message": "Credentials saved. Restart Odin to load into the active pool.",
         })
 
     @routes.post("/api/codex/account/{index}/refresh")
@@ -2761,6 +2765,35 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             })
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
+
+    @routes.post("/api/codex/account/{index}/activate")
+    async def codex_activate_account(request: web.Request) -> web.Response:
+        try:
+            index = int(request.match_info["index"])
+        except ValueError:
+            return web.json_response({"error": "index must be an integer"}, status=400)
+
+        pool = getattr(bot, "codex_client", None)
+        pool = getattr(pool, "auth", None) if pool else None
+        if pool is None:
+            return web.json_response({"error": "codex not configured"}, status=503)
+        try:
+            await pool.set_active(index)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response({"status": "activated", "active_index": index})
+
+    @routes.post("/api/codex/reload")
+    async def codex_reload(_request: web.Request) -> web.Response:
+        pool = getattr(bot, "codex_client", None)
+        pool = getattr(pool, "auth", None) if pool else None
+        if pool is None:
+            return web.json_response({"error": "codex not configured"}, status=503)
+        pool.reload()
+        return web.json_response({
+            "status": "reloaded",
+            "account_count": pool.account_count,
+        })
 
     @routes.put("/api/codex/account/{index}/label")
     async def codex_set_label(request: web.Request) -> web.Response:
@@ -2846,11 +2879,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         else:
             return web.json_response({"error": "invalid index"}, status=400)
 
+        pool = getattr(bot, "codex_client", None)
+        pool = getattr(pool, "auth", None) if pool else None
+        if pool:
+            pool.reload()
+
         return web.json_response({
             "status": "deleted",
             "email": email,
-            "restart_required": True,
-            "message": "Account removed. Restart Odin to apply.",
         })
 
     # ------------------------------------------------------------------

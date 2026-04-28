@@ -87,6 +87,8 @@ export default {
                   <span v-if="a.is_current" class="text-xs px-1 rounded bg-indigo-900 text-indigo-300">Current</span>
                 </td>
                 <td class="text-center text-xs space-x-2">
+                  <button v-if="!a.is_current" @click="activateAccount(a.index)"
+                          class="text-green-400 hover:text-green-300">Activate</button>
                   <button @click="refreshAccount(a.index)" :disabled="refreshing === a.index"
                           class="text-blue-400 hover:text-blue-300">
                     {{ refreshing === a.index ? 'Refreshing...' : 'Refresh' }}
@@ -130,8 +132,7 @@ export default {
           </div>
 
           <div v-else-if="deviceState === 'success'" class="p-4 bg-green-900/30 rounded border border-green-800">
-            <p class="text-green-400 text-sm">Authenticated as {{ deviceResult.email }}.</p>
-            <p class="text-xs text-gray-400 mt-1">Restart Odin to load the new credentials into the active pool.</p>
+            <p class="text-green-400 text-sm">Authenticated as {{ deviceResult.email }}. Pool reloaded.</p>
             <button @click="deviceState = null" class="btn btn-ghost text-xs mt-2">Done</button>
           </div>
 
@@ -186,6 +187,16 @@ export default {
       }
     }
 
+    async function activateAccount(index) {
+      try {
+        await api.post(`/api/codex/account/${index}/activate`);
+        showToast('Active account switched');
+        await fetchStatus();
+      } catch (e) {
+        showToast(e.message || 'Failed to activate', 'error');
+      }
+    }
+
     async function refreshAccount(index) {
       refreshing.value = index;
       try {
@@ -221,10 +232,10 @@ export default {
 
     async function deleteAccount(index, name) {
       const label = name && name !== '—' ? name : `account #${index + 1}`;
-      if (!confirm(`Delete ${label}? Requires restart to apply.`)) return;
+      if (!confirm(`Delete ${label}?`)) return;
       try {
         await api.del(`/api/codex/account/${index}`);
-        showToast(`Deleted ${label}. Restart required.`);
+        showToast(`Deleted ${label}. Pool reloaded.`);
         await fetchStatus();
       } catch (e) {
         showToast(e.message || 'Failed to delete account', 'error');
@@ -288,7 +299,7 @@ export default {
       loading, error, data, toast, refreshing,
       editingLabel, labelValue,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,
-      fetchStatus, refreshAccount, startEditLabel, saveLabel,
+      fetchStatus, activateAccount, refreshAccount, startEditLabel, saveLabel,
       startDeviceLogin, cancelDeviceLogin,
       deleteAccount, startReauth,
     };
