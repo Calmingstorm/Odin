@@ -185,6 +185,14 @@ class CodexAuth:
         elif creds.get("email"):
             new_creds["email"] = creds["email"]
 
+        if "chatgpt_plan_type" in payload:
+            new_creds["plan_type"] = payload["chatgpt_plan_type"]
+        elif creds.get("plan_type"):
+            new_creds["plan_type"] = creds["plan_type"]
+
+        if creds.get("label"):
+            new_creds["label"] = creds["label"]
+
         self._save(new_creds)
         log.info("Codex tokens refreshed successfully")
 
@@ -251,6 +259,8 @@ class CodexAuth:
             creds["account_id"] = payload["chatgpt_account_id"]
         if "email" in payload:
             creds["email"] = payload["email"]
+        if "chatgpt_plan_type" in payload:
+            creds["plan_type"] = payload["chatgpt_plan_type"]
 
         return creds
 

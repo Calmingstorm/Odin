@@ -2639,8 +2639,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 expires_at = creds.get("expires_at", 0)
                 accounts.append({
                     "index": i,
+                    "label": creds.get("label", ""),
                     "email": creds.get("email", payload.get("email", "unknown")),
-                    "account_id": creds.get("account_id", ""),
+                    "account_id": creds.get("account_id", payload.get("chatgpt_account_id", "")),
+                    "plan_type": creds.get("plan_type", payload.get("chatgpt_plan_type", "")),
                     "expires_at": expires_at,
                     "expired": _time.time() >= expires_at,
                     "rate_limited": auth.is_rate_limited(),
@@ -2719,6 +2721,85 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "restart_required": True,
             "message": "Credentials saved. Restart Odin to load into the active pool.",
         })
+
+    @routes.post("/api/codex/account/{index}/refresh")
+    async def codex_refresh_account(request: web.Request) -> web.Response:
+        try:
+            index = int(request.match_info["index"])
+        except ValueError:
+            return web.json_response({"error": "index must be an integer"}, status=400)
+
+        pool = getattr(bot, "codex_client", None)
+        pool = getattr(pool, "auth", None) if pool else None
+        if pool is None:
+            return web.json_response({"error": "codex not configured"}, status=503)
+        if index < 0 or index >= len(pool._accounts):
+            return web.json_response({"error": f"index {index} out of range"}, status=400)
+
+        auth = pool._accounts[index]
+        try:
+            creds = auth._load()
+            await auth._refresh(creds)
+            creds = auth._load()
+            return web.json_response({
+                "status": "refreshed",
+                "email": creds.get("email", "unknown"),
+                "expired": False,
+            })
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.put("/api/codex/account/{index}/label")
+    async def codex_set_label(request: web.Request) -> web.Response:
+        import json as _json
+        from pathlib import Path as _Path
+        from ..llm.codex_auth import _atomic_write_secure
+
+        try:
+            index = int(request.match_info["index"])
+        except ValueError:
+            return web.json_response({"error": "index must be an integer"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        label = body.get("label", "")
+        if not isinstance(label, str):
+            return web.json_response({"error": "label must be a string"}, status=400)
+
+        path = _Path(bot.config.openai_codex.credentials_path)
+        if not path.exists():
+            return web.json_response({"error": "no credentials file"}, status=404)
+
+        try:
+            raw = _json.loads(path.read_text())
+        except Exception:
+            return web.json_response({"error": "failed to read credentials"}, status=500)
+
+        if isinstance(raw, list):
+            if index < 0 or index >= len(raw):
+                return web.json_response({"error": f"index {index} out of range"}, status=400)
+            raw[index]["label"] = label
+        elif isinstance(raw, dict) and index == 0:
+            raw["label"] = label
+        else:
+            return web.json_response({"error": "invalid index"}, status=400)
+
+        _atomic_write_secure(path, _json.dumps(raw, indent=2))
+
+        # Also update the in-memory shadow file so status reflects immediately
+        pool = getattr(bot, "codex_client", None)
+        pool = getattr(pool, "auth", None) if pool else None
+        if pool and index < len(pool._accounts):
+            try:
+                creds = pool._accounts[index]._load()
+                creds["label"] = label
+                pool._accounts[index]._save(creds)
+            except Exception:
+                pass
+
+        return web.json_response({"status": "updated", "label": label})
 
     @routes.delete("/api/codex/account/{index}")
     async def codex_delete_account(request: web.Request) -> web.Response:

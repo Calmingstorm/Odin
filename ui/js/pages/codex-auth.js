@@ -44,8 +44,9 @@ export default {
             <thead>
               <tr>
                 <th>#</th>
+                <th>Label</th>
                 <th>Email</th>
-                <th>Account ID</th>
+                <th>Plan</th>
                 <th class="text-center">Status</th>
                 <th class="text-center">Active</th>
                 <th class="text-center">Actions</th>
@@ -54,8 +55,28 @@ export default {
             <tbody>
               <tr v-for="a in data.accounts" :key="a.index">
                 <td class="text-gray-400">{{ a.index + 1 }}</td>
+                <td>
+                  <span v-if="editingLabel !== a.index" class="text-gray-200 cursor-pointer hover:text-indigo-300"
+                        @click="startEditLabel(a.index, a.label)"
+                        :title="a.label ? 'Click to edit' : 'Click to add label'">
+                    {{ a.label || '—' }}
+                    <span class="text-gray-600 text-xs ml-1">&#9998;</span>
+                  </span>
+                  <span v-else class="flex items-center gap-1">
+                    <input v-model="labelValue" @keydown.enter="saveLabel(a.index)" @keydown.escape="editingLabel = null"
+                           class="bg-gray-900 border border-gray-600 rounded px-2 py-0.5 text-sm text-gray-300 w-32" />
+                    <button @click="saveLabel(a.index)" class="text-green-400 text-xs">Save</button>
+                    <button @click="editingLabel = null" class="text-gray-500 text-xs">Cancel</button>
+                  </span>
+                </td>
                 <td class="text-gray-200">{{ a.email || '—' }}</td>
-                <td class="font-mono text-xs text-gray-400">{{ a.account_id ? a.account_id.slice(0, 16) + '...' : '—' }}</td>
+                <td class="text-xs">
+                  <span v-if="a.plan_type" class="px-1.5 py-0.5 rounded"
+                        :class="a.plan_type === 'plus' ? 'bg-green-900 text-green-300' : a.plan_type === 'team' ? 'bg-blue-900 text-blue-300' : 'bg-gray-700 text-gray-300'">
+                    {{ a.plan_type }}
+                  </span>
+                  <span v-else class="text-gray-500">—</span>
+                </td>
                 <td class="text-center">
                   <span v-if="a.error" class="text-red-400 text-xs">Error</span>
                   <span v-else-if="a.expired" class="text-red-400 text-xs">Expired</span>
@@ -65,11 +86,15 @@ export default {
                 <td class="text-center">
                   <span v-if="a.is_current" class="text-xs px-1 rounded bg-indigo-900 text-indigo-300">Current</span>
                 </td>
-                <td class="text-center">
+                <td class="text-center text-xs space-x-2">
+                  <button @click="refreshAccount(a.index)" :disabled="refreshing === a.index"
+                          class="text-blue-400 hover:text-blue-300">
+                    {{ refreshing === a.index ? 'Refreshing...' : 'Refresh' }}
+                  </button>
                   <button v-if="a.expired || a.error" @click="startReauth(a.index)"
-                          class="text-indigo-400 hover:text-indigo-300 text-xs mr-2">Re-auth</button>
-                  <button @click="deleteAccount(a.index, a.email)"
-                          class="text-red-400 hover:text-red-300 text-xs">Delete</button>
+                          class="text-indigo-400 hover:text-indigo-300">Re-auth</button>
+                  <button @click="deleteAccount(a.index, a.label || a.email)"
+                          class="text-red-400 hover:text-red-300">Delete</button>
                 </td>
               </tr>
             </tbody>
@@ -130,12 +155,16 @@ export default {
     const error = ref('');
     const data = ref({ configured: false, accounts: [] });
     const toast = ref(null);
+    const refreshing = ref(null);
+    const editingLabel = ref(null);
+    const labelValue = ref('');
 
     const deviceState = ref(null);
     const deviceLoading = ref(false);
     const deviceInfo = ref(null);
     const deviceResult = ref(null);
     const deviceError = ref('');
+    const reauthIndex = ref(null);
     let pollController = null;
 
     let toastTimer = null;
@@ -157,6 +186,56 @@ export default {
       }
     }
 
+    async function refreshAccount(index) {
+      refreshing.value = index;
+      try {
+        await api.post(`/api/codex/account/${index}/refresh`);
+        showToast('Token refreshed');
+        await fetchStatus();
+      } catch (e) {
+        showToast(e.message || 'Refresh failed', 'error');
+      } finally {
+        refreshing.value = null;
+      }
+    }
+
+    function startEditLabel(index, current) {
+      editingLabel.value = index;
+      labelValue.value = current || '';
+      Vue.nextTick(() => {
+        const inputs = document.querySelectorAll('input.bg-gray-900');
+        if (inputs.length) inputs[inputs.length - 1].focus();
+      });
+    }
+
+    async function saveLabel(index) {
+      try {
+        await api.put(`/api/codex/account/${index}/label`, { label: labelValue.value });
+        showToast('Label updated');
+        editingLabel.value = null;
+        await fetchStatus();
+      } catch (e) {
+        showToast(e.message || 'Failed to save label', 'error');
+      }
+    }
+
+    async function deleteAccount(index, name) {
+      const label = name && name !== '—' ? name : `account #${index + 1}`;
+      if (!confirm(`Delete ${label}? Requires restart to apply.`)) return;
+      try {
+        await api.del(`/api/codex/account/${index}`);
+        showToast(`Deleted ${label}. Restart required.`);
+        await fetchStatus();
+      } catch (e) {
+        showToast(e.message || 'Failed to delete account', 'error');
+      }
+    }
+
+    function startReauth(index) {
+      reauthIndex.value = index;
+      startDeviceLogin();
+    }
+
     async function startDeviceLogin() {
       deviceLoading.value = true;
       try {
@@ -168,25 +247,6 @@ export default {
         showToast(e.message || 'Failed to request device code', 'error');
       } finally {
         deviceLoading.value = false;
-      }
-    }
-
-    const reauthIndex = ref(null);
-
-    function startReauth(index) {
-      reauthIndex.value = index;
-      startDeviceLogin();
-    }
-
-    async function deleteAccount(index, email) {
-      const label = email && email !== '—' ? email : `account #${index + 1}`;
-      if (!confirm(`Delete ${label}? Requires restart to apply.`)) return;
-      try {
-        await api.del(`/api/codex/account/${index}`);
-        showToast(`Deleted ${label}. Restart required.`);
-        fetchStatus();
-      } catch (e) {
-        showToast(e.message || 'Failed to delete account', 'error');
       }
     }
 
@@ -225,9 +285,11 @@ export default {
     });
 
     return {
-      loading, error, data, toast,
+      loading, error, data, toast, refreshing,
+      editingLabel, labelValue,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,
-      fetchStatus, startDeviceLogin, cancelDeviceLogin,
+      fetchStatus, refreshAccount, startEditLabel, saveLabel,
+      startDeviceLogin, cancelDeviceLogin,
       deleteAccount, startReauth,
     };
   },
