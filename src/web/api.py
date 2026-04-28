@@ -2616,6 +2616,111 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response({"error": "no override found for user"}, status=404)
 
     # ------------------------------------------------------------------
+    # Codex OAuth management
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/codex/status")
+    async def codex_status(_request: web.Request) -> web.Response:
+        pool = getattr(bot, "codex_client", None)
+        pool = getattr(pool, "auth", None) if pool else None
+        if pool is None:
+            pool = getattr(bot, "_codex_auth_pool", None)
+        if pool is None:
+            return web.json_response({"configured": False, "accounts": []})
+
+        import time as _time
+        from ..llm.codex_auth import _decode_jwt_payload
+
+        accounts = []
+        for i, auth in enumerate(pool._accounts):
+            try:
+                creds = auth._load()
+                payload = _decode_jwt_payload(creds.get("access_token", ""))
+                expires_at = creds.get("expires_at", 0)
+                accounts.append({
+                    "index": i,
+                    "email": creds.get("email", payload.get("email", "unknown")),
+                    "account_id": creds.get("account_id", ""),
+                    "expires_at": expires_at,
+                    "expired": _time.time() >= expires_at,
+                    "rate_limited": auth.is_rate_limited(),
+                    "is_current": i == pool._current_index,
+                })
+            except Exception as e:
+                accounts.append({"index": i, "error": str(e)})
+
+        return web.json_response({
+            "configured": True,
+            "account_count": pool.account_count,
+            "current_index": pool._current_index,
+            "accounts": accounts,
+        })
+
+    @routes.post("/api/codex/device-code")
+    async def codex_device_code(_request: web.Request) -> web.Response:
+        from ..llm.codex_auth import CodexAuth
+        try:
+            result = await CodexAuth.request_device_code()
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.post("/api/codex/device-poll")
+    async def codex_device_poll(request: web.Request) -> web.Response:
+        from ..llm.codex_auth import CodexAuth
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        device_auth_id = body.get("device_auth_id", "")
+        user_code = body.get("user_code", "")
+        interval = body.get("interval", 5)
+        if not device_auth_id or not user_code:
+            return web.json_response({"error": "device_auth_id and user_code required"}, status=400)
+
+        try:
+            creds = await CodexAuth.poll_device_auth(device_auth_id, user_code, interval=interval)
+        except TimeoutError:
+            return web.json_response({"error": "Authorization timed out"}, status=408)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+        creds_path = bot.config.openai_codex.credentials_path
+        save_index = body.get("save_index")
+
+        import json as _json
+        from pathlib import Path as _Path
+        from ..llm.codex_auth import _atomic_write_secure
+
+        path = _Path(creds_path)
+        if save_index is not None and path.exists():
+            try:
+                raw = _json.loads(path.read_text())
+                if isinstance(raw, list) and 0 <= save_index < len(raw):
+                    raw[save_index] = creds
+                    _atomic_write_secure(path, _json.dumps(raw, indent=2))
+                elif isinstance(raw, list):
+                    raw.append(creds)
+                    _atomic_write_secure(path, _json.dumps(raw, indent=2))
+                else:
+                    _atomic_write_secure(path, _json.dumps(creds, indent=2))
+            except Exception as e:
+                return web.json_response({"error": f"Saved but failed to update pool: {e}",
+                                          "email": creds.get("email", "")}, status=207)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_secure(path, _json.dumps(creds, indent=2))
+
+        return web.json_response({
+            "status": "authenticated",
+            "email": creds.get("email", "unknown"),
+            "account_id": creds.get("account_id", ""),
+            "restart_required": True,
+            "message": "Credentials saved. Restart Odin to load into the active pool.",
+        })
+
+    # ------------------------------------------------------------------
     # Host access control
     # ------------------------------------------------------------------
 

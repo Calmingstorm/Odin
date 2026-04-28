@@ -111,6 +111,27 @@ python -m src
 
 The web UI starts automatically at the configured port (default 3000). Set `web.api_token` in config.yml to require authentication.
 
+## Codex Authentication
+
+Odin uses OpenAI Codex (ChatGPT subscription) for its LLM backend. Authentication requires a one-time OAuth login that generates tokens stored in `data/codex_auth.json`.
+
+**Browser login** (machine with a browser):
+```bash
+python scripts/codex_login.py
+```
+
+**Device login** (headless servers):
+```bash
+python scripts/codex_login.py --device
+```
+This displays a code to enter at `https://auth.openai.com/codex/device` — no local browser needed.
+
+**WebUI**: System > Codex Auth tab shows account status and supports device flow login.
+
+**Multi-account**: Store multiple credential sets as a JSON array in `data/codex_auth.json`. Odin rotates between them on rate limits automatically.
+
+Tokens auto-refresh at runtime. Re-run the login script if the bot is offline for more than ~8 days (refresh token expiry).
+
 ## Configuration
 
 | File | Purpose |
