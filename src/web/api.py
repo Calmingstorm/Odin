@@ -2749,13 +2749,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             # Sync refreshed token back to canonical credentials file
             path = _Path(bot.config.openai_codex.credentials_path)
             if path.exists():
-                try:
-                    raw = _json.loads(path.read_text())
-                    if isinstance(raw, list) and index < len(raw):
-                        raw[index] = creds
-                        _atomic_write_secure(path, _json.dumps(raw, indent=2))
-                except Exception:
-                    pass
+                raw = _json.loads(path.read_text())
+                if isinstance(raw, list) and index < len(raw):
+                    raw[index] = creds
+                    _atomic_write_secure(path, _json.dumps(raw, indent=2))
 
             return web.json_response({
                 "status": "refreshed",
