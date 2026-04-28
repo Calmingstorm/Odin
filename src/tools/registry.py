@@ -463,23 +463,6 @@ TOOLS: list[dict] = [
             },
         },
     },
-    {
-        "name": "create_digest",
-        "description": "Creates a scheduled daily infrastructure digest across all hosts (disk, memory, services, alerts).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "cron": {
-                    "type": "string",
-                    "description": "Cron expression (default '0 8 * * *' = daily 8am)",
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Description (default 'Daily Infrastructure Digest')",
-                },
-            },
-        },
-    },
     # --- Skills ---
     {
         "name": "create_skill",
@@ -1759,33 +1742,6 @@ TOOLS: list[dict] = [
             "required": ["prompt"],
         },
     },
-    {
-        "name": "execute_plan",
-        "is_core": True,
-        "description": (
-            "Execute a multi-step workflow plan using the Odin DAG planner. "
-            "Accepts a declarative plan as a JSON string or dict with dependency-aware "
-            "parallel execution, timeouts, retries, and failure cascading."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "plan": {
-                    "type": "string",
-                    "description": (
-                        "JSON string defining the plan. Must include 'name' and 'steps' array. "
-                        "Each step needs 'id' and 'tool' fields; optional: params, depends_on, "
-                        "timeout, retries, continue_on_failure."
-                    ),
-                },
-                "format": {
-                    "type": "string",
-                    "description": "Output format: 'summary', 'json', or 'dict'. Default: summary.",
-                },
-            },
-            "required": ["plan"],
-        },
-    },
     # --- Post-action validation ---
     {
         "name": "validate_action",
@@ -1884,9 +1840,9 @@ MUTATING_TOOLS: frozenset[str] = frozenset({
     "add_reaction", "purge_messages", "post_file",
     "validate_action",
     "delegate_task", "cancel_task",
-    "create_digest", "create_poll",
+    "create_poll",
     "generate_image",
-    "issue_tracker", "execute_plan",
+    "issue_tracker",
     "send_to_agent", "spawn_loop_agents",
 })
 

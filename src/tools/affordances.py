@@ -152,8 +152,6 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     # Image / media gen
     ("generate_image", Affordance(Cost.VERY_HIGH, Risk.LOW, Latency.MINUTES,
         ("ComfyUI / image backend reachable",))),
-    # Planner / plan execution
-    ("execute_plan", Affordance(Cost.HIGH, Risk.HIGH, Latency.UNBOUNDED, ())),
     # Issues / tickets
     ("issue_tracker", Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.SECONDS,
         ("issue tracker configured",))),
@@ -162,7 +160,6 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
         ("validation checks reference reachable hosts",))),
     # Audit / search
     ("search_audit", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
-    ("create_digest", Affordance(Cost.MEDIUM, Risk.NONE, Latency.SECONDS, ())),
     # Skill lifecycle (non-destructive toggles + packaging)
     ("enable_skill", Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ())),
     ("disable_skill", Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ())),

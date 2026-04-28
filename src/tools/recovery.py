@@ -82,7 +82,6 @@ UNSAFE_TO_RETRY: frozenset[str] = frozenset({
     "docker_ops",
     "terraform_ops",
     "kubectl",
-    "execute_plan",
     "issue_tracker",
 })
 
