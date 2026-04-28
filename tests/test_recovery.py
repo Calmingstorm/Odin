@@ -1058,7 +1058,7 @@ class TestUnsafeToRetry:
             assert tool in UNSAFE_TO_RETRY, f"{tool} should be unsafe to retry"
 
     def test_infra_tools_are_unsafe(self):
-        for tool in ("docker_ops", "terraform_ops", "kubectl", "execute_plan"):
+        for tool in ("docker_ops", "terraform_ops", "kubectl"):
             assert tool in UNSAFE_TO_RETRY, f"{tool} should be unsafe to retry"
 
     def test_read_only_tools_are_safe_to_retry(self):

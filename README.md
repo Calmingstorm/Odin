@@ -2,7 +2,7 @@
 
 An autonomous execution agent on Discord. Norse god of wisdom and war, stuck managing mortal infrastructure for eternity.
 
-Odin executes real work from Discord: incident response, deploys, investigations, code review, automation, and scheduled operations across 72 tools (25 core, 47 skill). It runs shell commands on managed hosts, uses browser automation, orchestrates agents and workflows, and verifies results automatically after service changes.
+Odin executes real work from Discord: incident response, deploys, investigations, code review, automation, and scheduled operations across 70 tools (25 core, 47 skill). It runs shell commands on managed hosts, uses browser automation, orchestrates agents and workflows, and verifies results automatically after service changes.
 
 ## Why operators pick Odin
 
@@ -70,7 +70,7 @@ Tell Odin things like:
 ```
 Discord ──> OdinBot (client.py)
                │
-               ├── Tool Executor ──> 72 tools (shell, browser, git, docker, etc.)
+               ├── Tool Executor ──> 70 tools (shell, browser, git, docker, etc.)
                │       │
                │       ├── CommandGovernor (blocks dangerous commands)
                │       ├── Risk Classifier (observability tags)
@@ -129,14 +129,14 @@ The web UI starts automatically at the configured port (default 3000). Set `web.
 - **`web`**: port, API token, session timeout
 - **`permissions`**: default tier, per-user overrides
 
-## Tools (72)
+## Tools (70)
 
 | Category | Tools |
 |----------|-------|
 | Shell & Files | `run_command`, `run_script`, `run_command_multi`, `read_file`, `write_file`, `generate_file`, `post_file`, `manage_process` |
 | Infrastructure | `git_ops`, `docker_ops`, `kubectl`, `terraform_ops`, `http_probe` |
 | Agents & Orchestration | `delegate_task`, `list_tasks`, `cancel_task`, `spawn_agent`, `send_to_agent`, `list_agents`, `kill_agent`, `get_agent_results`, `wait_for_agents`, `spawn_loop_agents`, `collect_loop_agents` |
-| Scheduling & Loops | `schedule_task`, `list_schedules`, `update_schedule`, `delete_schedule`, `parse_time`, `create_digest`, `start_loop`, `stop_loop`, `list_loops`, `execute_plan` |
+| Scheduling & Loops | `schedule_task`, `list_schedules`, `update_schedule`, `delete_schedule`, `parse_time`, `start_loop`, `stop_loop`, `list_loops` |
 | AI & Code | `claude_code`, `generate_image`, `analyze_image`, `analyze_pdf` |
 | Skills | `create_skill`, `edit_skill`, `delete_skill`, `list_skills`, `enable_skill`, `disable_skill`, `install_skill`, `export_skill`, `skill_status`, `invoke_skill` |
 | Knowledge & Memory | `memory_manage`, `manage_list`, `search_history`, `search_audit`, `search_knowledge`, `ingest_document`, `bulk_ingest_knowledge`, `list_knowledge`, `delete_knowledge` |
