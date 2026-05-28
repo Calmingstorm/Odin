@@ -3120,6 +3120,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         sm = request.app.get("session_manager")
         if sm:
             sm.destroy_by_user_id(uid)
+        ws_mgr = request.app.get("ws_manager")
+        if ws_mgr:
+            await ws_mgr.close_by_user_id(uid)
         return web.json_response({"user_id": uid, "token": new_token})
 
     @routes.delete("/api/tokens/{user_id}")
@@ -3137,6 +3140,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         sm = request.app.get("session_manager")
         if sm:
             sm.destroy_by_user_id(uid)
+        ws_mgr = request.app.get("ws_manager")
+        if ws_mgr:
+            await ws_mgr.close_by_user_id(uid)
         return web.json_response({"user_id": uid, "status": "deleted"})
 
     # ------------------------------------------------------------------

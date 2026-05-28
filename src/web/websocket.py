@@ -243,6 +243,25 @@ class WebSocketManager:
             self._event_subscribers.discard(ws)
             self._clients.discard(ws)
 
+    async def close_by_user_id(self, user_id: str) -> int:
+        """Close all WebSocket connections for a given user_id."""
+        to_close = []
+        for ws in list(self._clients):
+            identity = getattr(ws, "_odin_identity", None)
+            if identity and getattr(identity, "user_id", None) == user_id:
+                to_close.append(ws)
+        for ws in to_close:
+            try:
+                await ws.close(code=4002, message=b"token revoked")
+            except Exception:
+                pass
+            self._clients.discard(ws)
+            self._log_subscribers.discard(ws)
+            self._event_subscribers.discard(ws)
+        if to_close:
+            log.info("Closed %d WebSocket connection(s) for revoked user_id=%s", len(to_close), user_id)
+        return len(to_close)
+
     async def _tail_logs(self, ws: web.WebSocketResponse) -> None:
         """Tail the audit log file and stream new lines to a client."""
         log_path = Path("./data/audit.jsonl")

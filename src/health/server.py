@@ -522,6 +522,7 @@ class HealthServer:
             self._app, bot, api_token=self._web_config.api_token,
             web_config=self._web_config,
         )
+        self._app["ws_manager"] = self._ws_manager
         # Wire audit events to WebSocket for live dashboard/log updates
         ws_mgr = self._ws_manager
         bot.audit.set_event_callback(ws_mgr.broadcast_event)
