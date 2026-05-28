@@ -269,7 +269,8 @@ class TestProcessWebChat:
         bot._process_with_tools = AsyncMock(side_effect=RuntimeError("boom"))
         result = await process_web_chat(bot, "hello", "ch-1")
         assert result["is_error"] is True
-        assert "Error processing" in result["response"]
+        # User-facing error is intentionally generic (no internal details leaked)
+        assert "Something went wrong" in result["response"]
         bot.sessions.remove_last_message.assert_called_once()
 
     @pytest.mark.asyncio
@@ -278,6 +279,28 @@ class TestProcessWebChat:
         result = await process_web_chat(bot, "make image", "ch-1")
         assert "files" in result
         assert isinstance(result["files"], list)
+
+    @pytest.mark.asyncio
+    async def test_single_use_channel_does_not_register_lock(self):
+        """persist_channel_lock=False (e.g. /api/execute) must not cache a
+        per-channel lock; otherwise each ephemeral UUID channel leaks one
+        permanent entry in bot._web_channel_locks."""
+        bot = self._make_bot()
+        bot._web_channel_locks = {}  # real dict so growth is observable
+        for i in range(5):
+            await process_web_chat(bot, "hi", f"api-{i}", persist_channel_lock=False)
+        assert bot._web_channel_locks == {}
+
+    @pytest.mark.asyncio
+    async def test_stateful_channel_registers_one_lock_per_channel(self):
+        """The default path (/api/chat, WebSocket) still caches exactly one
+        lock per channel_id so a user's overlapping requests serialize."""
+        bot = self._make_bot()
+        bot._web_channel_locks = {}
+        await process_web_chat(bot, "hi", "user-1")
+        await process_web_chat(bot, "again", "user-1")
+        assert set(bot._web_channel_locks) == {"user-1"}
+        assert isinstance(bot._web_channel_locks["user-1"], asyncio.Lock)
 
 
 # ---------------------------------------------------------------------------
