@@ -3117,6 +3117,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         new_token = await tm.regenerate_token(uid)
         if new_token is None:
             return web.json_response({"error": "token not found"}, status=404)
+        sm = request.app.get("session_manager")
+        if sm:
+            sm.destroy_by_user_id(uid)
         return web.json_response({"user_id": uid, "token": new_token})
 
     @routes.delete("/api/tokens/{user_id}")
@@ -3131,6 +3134,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         deleted = await tm.delete_token(uid)
         if not deleted:
             return web.json_response({"error": "token not found"}, status=404)
+        sm = request.app.get("session_manager")
+        if sm:
+            sm.destroy_by_user_id(uid)
         return web.json_response({"user_id": uid, "status": "deleted"})
 
     # ------------------------------------------------------------------

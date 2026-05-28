@@ -74,17 +74,24 @@ class WebSocketManager:
     async def handle(self, request: web.Request) -> web.WebSocketResponse:
         """Handle a WebSocket connection at /api/ws."""
         identity = getattr(request, "_api_identity", None)
-        if self._api_token:
+        if self._api_token or self._web_config:
             token = request.query.get("token", "")
-            valid = hmac.compare_digest(token, self._api_token)
-            if not valid and self._session_manager:
+            valid = bool(identity)
+            if not valid and self._api_token and token:
+                valid = hmac.compare_digest(token, self._api_token)
+            if not valid and self._session_manager and token:
                 valid = self._session_manager.validate(token)
+            if not valid and token:
+                resolved = self._resolve_identity(token, request)
+                if resolved is not None:
+                    identity = resolved
+                    valid = True
             if not valid:
                 ws = web.WebSocketResponse()
                 await ws.prepare(request)
                 await ws.close(code=4001, message=b"unauthorized")
                 return ws
-            if identity is None:
+            if identity is None and token:
                 identity = self._resolve_identity(token, request)
 
         ws = web.WebSocketResponse(heartbeat=30.0)

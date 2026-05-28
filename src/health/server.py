@@ -116,6 +116,17 @@ class SessionManager:
         self._identities.pop(sid, None)
         return self._sessions.pop(sid, None) is not None
 
+    def destroy_by_user_id(self, user_id: str) -> int:
+        """Destroy all sessions whose bound identity has the given user_id."""
+        to_remove = []
+        for sid, identity in self._identities.items():
+            if getattr(identity, "user_id", None) == user_id:
+                to_remove.append(sid)
+        for sid in to_remove:
+            self._sessions.pop(sid, None)
+            self._identities.pop(sid, None)
+        return len(to_remove)
+
     def cleanup(self) -> int:
         """Remove expired sessions. Returns count removed."""
         if self._timeout <= 0:

@@ -48,15 +48,28 @@ class ApiTokenManager:
                     token_hash = entry.get("token_hash", "")
                     token_prefix = entry.get("token_prefix", "")
                     if not user_id or not token_hash:
+                        log.warning("Skipping token entry: missing user_id or token_hash")
+                        continue
+                    tier = entry.get("tier", "admin")
+                    if tier not in ("admin", "user", "guest"):
+                        log.warning("Skipping token %s: invalid tier '%s'", user_id, tier)
+                        continue
+                    allowed_tools = entry.get("allowed_tools", [])
+                    if not isinstance(allowed_tools, list) or not all(isinstance(t, str) for t in allowed_tools):
+                        log.warning("Skipping token %s: allowed_tools must be a list of strings", user_id)
+                        continue
+                    allowed_hosts = entry.get("allowed_hosts", [])
+                    if not isinstance(allowed_hosts, list) or not all(isinstance(h, str) for h in allowed_hosts):
+                        log.warning("Skipping token %s: allowed_hosts must be a list of strings", user_id)
                         continue
                     identity = ApiTokenIdentity(
                         token="",
                         user_id=user_id,
-                        username=entry.get("username", "API"),
-                        tier=entry.get("tier", "admin"),
-                        label=entry.get("label", ""),
-                        allowed_tools=entry.get("allowed_tools", []),
-                        allowed_hosts=entry.get("allowed_hosts", []),
+                        username=str(entry.get("username", "API")),
+                        tier=tier,
+                        label=str(entry.get("label", "")),
+                        allowed_tools=allowed_tools,
+                        allowed_hosts=allowed_hosts,
                     )
                     self._tokens[user_id] = _StoredToken(token_hash, token_prefix, identity)
                 except Exception as e:
