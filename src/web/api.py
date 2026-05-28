@@ -155,7 +155,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "token is required"}, status=400)
 
         api_token = bot.config.web.api_token
-        has_any_token = api_token or bot.config.web.api_tokens
+        tm = getattr(bot, "api_token_manager", None)
+        has_any_token = api_token or bot.config.web.api_tokens or (tm and tm.list_tokens())
         if not has_any_token:
             # No auth configured — dev mode, issue session anyway
             sm = request.app.get("session_manager")
@@ -3033,14 +3034,26 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         tier = data.get("tier", "admin")
         if tier not in ("admin", "user", "guest"):
             return web.json_response({"error": "tier must be admin, user, or guest"}, status=400)
+        allowed_tools = data.get("allowed_tools") or []
+        allowed_hosts = data.get("allowed_hosts") or []
+        if not isinstance(allowed_tools, list) or not all(isinstance(t, str) for t in allowed_tools):
+            return web.json_response({"error": "allowed_tools must be a list of strings"}, status=400)
+        if not isinstance(allowed_hosts, list) or not all(isinstance(h, str) for h in allowed_hosts):
+            return web.json_response({"error": "allowed_hosts must be a list of strings"}, status=400)
+        ham = getattr(bot, "host_access_manager", None)
+        if allowed_hosts and ham:
+            valid_hosts = set(ham.available_hosts)
+            bad = [h for h in allowed_hosts if h not in valid_hosts]
+            if bad:
+                return web.json_response({"error": f"unknown hosts: {', '.join(bad)}"}, status=400)
         try:
             identity = await tm.create_token(
                 user_id=user_id,
                 username=data.get("username") or "API",
                 tier=tier,
                 label=data.get("label") or "",
-                allowed_tools=data.get("allowed_tools"),
-                allowed_hosts=data.get("allowed_hosts"),
+                allowed_tools=allowed_tools,
+                allowed_hosts=allowed_hosts,
             )
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=409)
@@ -3073,6 +3086,18 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 kwargs[field] = data[field]
         if "tier" in kwargs and kwargs["tier"] not in ("admin", "user", "guest"):
             return web.json_response({"error": "tier must be admin, user, or guest"}, status=400)
+        if "allowed_tools" in kwargs:
+            if not isinstance(kwargs["allowed_tools"], list) or not all(isinstance(t, str) for t in kwargs["allowed_tools"]):
+                return web.json_response({"error": "allowed_tools must be a list of strings"}, status=400)
+        if "allowed_hosts" in kwargs:
+            if not isinstance(kwargs["allowed_hosts"], list) or not all(isinstance(h, str) for h in kwargs["allowed_hosts"]):
+                return web.json_response({"error": "allowed_hosts must be a list of strings"}, status=400)
+            ham = getattr(bot, "host_access_manager", None)
+            if kwargs["allowed_hosts"] and ham:
+                valid_hosts = set(ham.available_hosts)
+                bad = [h for h in kwargs["allowed_hosts"] if h not in valid_hosts]
+                if bad:
+                    return web.json_response({"error": f"unknown hosts: {', '.join(bad)}"}, status=400)
         if not kwargs:
             return web.json_response({"error": "no fields to update"}, status=400)
         identity = await tm.update_token(uid, **kwargs)

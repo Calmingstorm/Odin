@@ -162,20 +162,19 @@ async def process_web_chat(
       - tools_used: list[str] — tool names called during processing
       - is_error: bool — whether an error occurred
     """
-    perm_mgr = getattr(bot, "permissions", None)
-    ham = getattr(bot, "host_access_manager", None)
-    if tier and perm_mgr:
-        perm_mgr.set_transient_tier(user_id, tier)
-    if token_allowed_hosts and ham:
-        ham.set_transient_scope(user_id, token_allowed_hosts)
+    from ..permissions.manager import PermissionManager
+    from ..permissions.host_access import HostAccessManager
+
+    tier_token = PermissionManager.set_request_tier(tier) if tier else None
+    host_token = HostAccessManager.set_request_host_scope(token_allowed_hosts) if token_allowed_hosts else None
 
     try:
         return await _do_process_web_chat(bot, content, channel_id, user_id, username, allowed_tools)
     finally:
-        if tier and perm_mgr:
-            perm_mgr.clear_transient_tier(user_id)
-        if token_allowed_hosts and ham:
-            ham.clear_transient_scope(user_id)
+        if tier_token is not None:
+            PermissionManager.reset_request_tier(tier_token)
+        if host_token is not None:
+            HostAccessManager.reset_request_host_scope(host_token)
 
 
 async def _do_process_web_chat(

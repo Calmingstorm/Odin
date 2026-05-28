@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from ..odin_log import get_logger
 log = get_logger("permissions")
 
 VALID_TIERS = ("admin", "user", "guest")
+
+_request_tier: contextvars.ContextVar[str | None] = contextvars.ContextVar("_request_tier", default=None)
 
 # Tools available to the "user" tier — read-only monitoring and search.
 # Everything else is admin-only.
@@ -40,7 +43,6 @@ class PermissionManager:
         self._default_tier = default_tier if default_tier in VALID_TIERS else "user"
         self._overrides_path = Path(overrides_path)
         self._overrides: dict[str, str] = {}
-        self._transient_tiers: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._load_overrides()
 
@@ -61,19 +63,21 @@ class PermissionManager:
         tmp.write_text(json.dumps(self._overrides, indent=2))
         tmp.replace(self._overrides_path)
 
-    def set_transient_tier(self, user_id: str, tier: str) -> None:
-        """Set a non-persisted tier for API/web-chat identity scoping."""
-        if tier in VALID_TIERS:
-            self._transient_tiers[user_id] = tier
+    @staticmethod
+    def set_request_tier(tier: str) -> contextvars.Token:
+        """Set a request-scoped tier override (concurrency-safe via contextvars)."""
+        return _request_tier.set(tier if tier in VALID_TIERS else None)
 
-    def clear_transient_tier(self, user_id: str) -> None:
-        """Remove a transient tier binding."""
-        self._transient_tiers.pop(user_id, None)
+    @staticmethod
+    def reset_request_tier(token: contextvars.Token) -> None:
+        """Reset the request-scoped tier override."""
+        _request_tier.reset(token)
 
     def get_tier(self, user_id: str) -> str:
-        """Get the permission tier for a user. Transient > overrides > config > default."""
-        if user_id in self._transient_tiers:
-            return self._transient_tiers[user_id]
+        """Get the permission tier. Request-scoped > overrides > config > default."""
+        req_tier = _request_tier.get()
+        if req_tier is not None:
+            return req_tier
         if user_id in self._overrides:
             return self._overrides[user_id]
         return self._config_tiers.get(user_id, self._default_tier)

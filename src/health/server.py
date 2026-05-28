@@ -155,7 +155,8 @@ def _make_auth_middleware(
             return await handler(request)
         # Skip auth if no token configured (dev mode)
         token = web_config.api_token
-        has_any_token = token or getattr(web_config, "api_tokens", None)
+        tm = request.app.get("token_manager")
+        has_any_token = token or getattr(web_config, "api_tokens", None) or (tm and tm.list_tokens())
         if not has_any_token:
             return await handler(request)
 

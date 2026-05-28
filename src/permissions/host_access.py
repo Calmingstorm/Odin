@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 from pathlib import Path
 
 from ..odin_log import get_logger
 
 log = get_logger("host_access")
+
+_request_host_scope: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("_request_host_scope", default=None)
 
 
 class HostAccessEntry:
@@ -40,7 +43,6 @@ class HostAccessManager:
         self._users: dict[str, HostAccessEntry] = {}
         self._default_policy = HostAccessEntry()
         self._available_hosts: list[str] = available_hosts or []
-        self._transient_scopes: dict[str, list[str]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -81,13 +83,15 @@ class HostAccessManager:
     def get_entry(self, user_id: str) -> HostAccessEntry:
         return self._users.get(user_id, self._default_policy)
 
-    def set_transient_scope(self, user_id: str, allowed_hosts: list[str]) -> None:
-        """Set a non-persisted host scope for API token enforcement."""
-        self._transient_scopes[user_id] = allowed_hosts
+    @staticmethod
+    def set_request_host_scope(allowed_hosts: list[str]) -> contextvars.Token:
+        """Set a request-scoped host scope (concurrency-safe via contextvars)."""
+        return _request_host_scope.set(allowed_hosts)
 
-    def clear_transient_scope(self, user_id: str) -> None:
-        """Remove a transient host scope."""
-        self._transient_scopes.pop(user_id, None)
+    @staticmethod
+    def reset_request_host_scope(token: contextvars.Token) -> None:
+        """Reset the request-scoped host scope."""
+        _request_host_scope.reset(token)
 
     def get_allowed_hosts(self, user_id: str) -> list[str]:
         entry = self.get_entry(user_id)
@@ -95,7 +99,7 @@ class HostAccessManager:
             base = list(self._available_hosts)
         else:
             base = [h for h in entry.allowed_hosts if h in self._available_hosts]
-        scope = self._transient_scopes.get(user_id)
+        scope = _request_host_scope.get()
         if scope is not None:
             base = [h for h in base if h in scope]
         return base
@@ -113,7 +117,7 @@ class HostAccessManager:
             allowed = host in self._available_hosts
         else:
             allowed = host in entry.allowed_hosts and host in self._available_hosts
-        scope = self._transient_scopes.get(user_id)
+        scope = _request_host_scope.get()
         if scope is not None:
             allowed = allowed and host in scope
         return allowed

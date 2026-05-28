@@ -53,13 +53,18 @@ class WebSocketManager:
     def client_count(self) -> int:
         return len(self._clients)
 
-    def _resolve_identity(self, token: str):
+    def _resolve_identity(self, token: str, request=None):
         """Resolve an ApiTokenIdentity from a raw token string."""
         if self._session_manager:
             if self._session_manager.validate(token):
                 identity = self._session_manager.get_identity(token)
                 if identity is not None:
                     return identity
+        tm = request.app.get("token_manager") if request else None
+        if tm:
+            identity = tm.resolve(token)
+            if identity is not None:
+                return identity
         if self._web_config and hasattr(self._web_config, "resolve_api_identity"):
             identity = self._web_config.resolve_api_identity(token)
             if identity is not None:
@@ -80,7 +85,7 @@ class WebSocketManager:
                 await ws.close(code=4001, message=b"unauthorized")
                 return ws
             if identity is None:
-                identity = self._resolve_identity(token)
+                identity = self._resolve_identity(token, request)
 
         ws = web.WebSocketResponse(heartbeat=30.0)
         await ws.prepare(request)
