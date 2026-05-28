@@ -189,7 +189,7 @@ class WebSocketManager:
         username = identity.username if identity else "WebUser"
         tier = identity.tier if identity else None
         allowed_tools = identity.allowed_tools if identity and identity.allowed_tools else None
-        token_hosts = identity.allowed_hosts if identity and identity.allowed_hosts else None
+        token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
 
         log.info("WebSocket chat from %s (tier=%s): %s", username, tier or "default", content[:80])
         try:

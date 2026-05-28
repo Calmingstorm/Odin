@@ -881,7 +881,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         username = identity.username if identity else "WebUser"
         tier = identity.tier if identity else None
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
-        token_hosts = identity.allowed_hosts if identity and identity.allowed_hosts else None
+        token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
 
         result = await process_web_chat(
             bot, content, channel_id,
@@ -936,7 +936,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         username = identity.username if identity else "API"
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
         tier = identity.tier if identity else None
-        token_hosts = identity.allowed_hosts if identity and identity.allowed_hosts else None
+        token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
 
         result = await process_web_chat(
             bot, content, channel_id,
@@ -3078,11 +3078,15 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if tier not in ("admin", "user", "guest"):
             return web.json_response({"error": "tier must be admin, user, or guest"}, status=400)
         allowed_tools = data.get("allowed_tools") or []
-        allowed_hosts = data.get("allowed_hosts") or []
+        raw_hosts = data.get("allowed_hosts")
+        if raw_hosts is None:
+            allowed_hosts = None
+        elif isinstance(raw_hosts, list) and all(isinstance(h, str) for h in raw_hosts):
+            allowed_hosts = raw_hosts
+        else:
+            return web.json_response({"error": "allowed_hosts must be a list of strings or null"}, status=400)
         if not isinstance(allowed_tools, list) or not all(isinstance(t, str) for t in allowed_tools):
             return web.json_response({"error": "allowed_tools must be a list of strings"}, status=400)
-        if not isinstance(allowed_hosts, list) or not all(isinstance(h, str) for h in allowed_hosts):
-            return web.json_response({"error": "allowed_hosts must be a list of strings"}, status=400)
         ham = getattr(bot, "host_access_manager", None)
         if allowed_hosts and ham:
             valid_hosts = set(ham.available_hosts)
@@ -3133,8 +3137,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             if not isinstance(kwargs["allowed_tools"], list) or not all(isinstance(t, str) for t in kwargs["allowed_tools"]):
                 return web.json_response({"error": "allowed_tools must be a list of strings"}, status=400)
         if "allowed_hosts" in kwargs:
-            if not isinstance(kwargs["allowed_hosts"], list) or not all(isinstance(h, str) for h in kwargs["allowed_hosts"]):
-                return web.json_response({"error": "allowed_hosts must be a list of strings"}, status=400)
+            if kwargs["allowed_hosts"] is not None:
+                if not isinstance(kwargs["allowed_hosts"], list) or not all(isinstance(h, str) for h in kwargs["allowed_hosts"]):
+                    return web.json_response({"error": "allowed_hosts must be a list of strings or null"}, status=400)
             ham = getattr(bot, "host_access_manager", None)
             if kwargs["allowed_hosts"] and ham:
                 valid_hosts = set(ham.available_hosts)
