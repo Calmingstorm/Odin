@@ -108,9 +108,15 @@ class HostAccessManager:
         return base
 
     def get_default_host(self, user_id: str) -> str:
+        scope = _request_host_scope.get()
+        has_own_entry = user_id in self._users
+        if scope is not None and not has_own_entry:
+            valid = [h for h in scope if h in self._available_hosts]
+            return valid[0] if valid else ""
         entry = self.get_entry(user_id)
         if entry.default_host and entry.default_host in self._available_hosts:
-            return entry.default_host
+            if scope is None or entry.default_host in scope:
+                return entry.default_host
         allowed = self.get_allowed_hosts(user_id)
         return allowed[0] if allowed else ""
 
