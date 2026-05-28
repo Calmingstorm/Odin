@@ -116,6 +116,17 @@ class SessionManager:
         self._identities.pop(sid, None)
         return self._sessions.pop(sid, None) is not None
 
+    def destroy_by_user_id(self, user_id: str) -> int:
+        """Destroy all sessions whose bound identity has the given user_id."""
+        to_remove = []
+        for sid, identity in self._identities.items():
+            if getattr(identity, "user_id", None) == user_id:
+                to_remove.append(sid)
+        for sid in to_remove:
+            self._sessions.pop(sid, None)
+            self._identities.pop(sid, None)
+        return len(to_remove)
+
     def cleanup(self) -> int:
         """Remove expired sessions. Returns count removed."""
         if self._timeout <= 0:
@@ -155,7 +166,8 @@ def _make_auth_middleware(
             return await handler(request)
         # Skip auth if no token configured (dev mode)
         token = web_config.api_token
-        has_any_token = token or getattr(web_config, "api_tokens", None)
+        tm = request.app.get("token_manager")
+        has_any_token = token or getattr(web_config, "api_tokens", None) or (tm and tm.list_tokens())
         if not has_any_token:
             return await handler(request)
 
@@ -168,8 +180,11 @@ def _make_auth_middleware(
             if token and hmac.compare_digest(bearer_value, token):
                 request._session_id = "admin-token"
                 return await handler(request)
-            # Check multi-token identities
-            identity = web_config.resolve_api_identity(bearer_value) if hasattr(web_config, "resolve_api_identity") else None
+            # Check dynamic token manager first, then static config tokens
+            tm = request.app.get("token_manager")
+            identity = tm.resolve(bearer_value) if tm else None
+            if identity is None and hasattr(web_config, "resolve_api_identity"):
+                identity = web_config.resolve_api_identity(bearer_value)
             if identity is not None:
                 request._session_id = identity.user_id
                 request._api_identity = identity
@@ -188,12 +203,14 @@ def _make_auth_middleware(
             if token and hmac.compare_digest(query_token, token):
                 request._session_id = "admin-token"
                 return await handler(request)
-            if hasattr(web_config, "resolve_api_identity"):
+            tm = request.app.get("token_manager")
+            identity = tm.resolve(query_token) if tm else None
+            if identity is None and hasattr(web_config, "resolve_api_identity"):
                 identity = web_config.resolve_api_identity(query_token)
-                if identity is not None:
-                    request._session_id = identity.user_id
-                    request._api_identity = identity
-                    return await handler(request)
+            if identity is not None:
+                request._session_id = identity.user_id
+                request._api_identity = identity
+                return await handler(request)
             if session_manager.validate(query_token):
                 request._session_id = query_token
                 session_identity = session_manager.get_identity(query_token)
@@ -500,9 +517,12 @@ class HealthServer:
         from ..web.api import setup_api
         from ..web.websocket import setup_websocket
         setup_api(self._app, bot)
+        self._app["token_manager"] = getattr(bot, "api_token_manager", None)
         self._ws_manager = setup_websocket(
             self._app, bot, api_token=self._web_config.api_token,
+            web_config=self._web_config,
         )
+        self._app["ws_manager"] = self._ws_manager
         # Wire audit events to WebSocket for live dashboard/log updates
         ws_mgr = self._ws_manager
         bot.audit.set_event_callback(ws_mgr.broadcast_event)

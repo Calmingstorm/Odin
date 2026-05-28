@@ -32,13 +32,19 @@ _LOG_TAIL_LINES = 50
 _LOG_POLL_INTERVAL = 1.0
 
 
+_WS_CHAT_RATE_LIMIT = 10
+_WS_CHAT_RATE_WINDOW = 60.0
+_WS_CHAT_TIMEOUT = 300.0
+
+
 class WebSocketManager:
     """Manages WebSocket connections and broadcasts events."""
 
-    def __init__(self, bot: OdinBot, *, api_token: str = "", session_manager=None) -> None:
+    def __init__(self, bot: OdinBot, *, api_token: str = "", session_manager=None, web_config=None) -> None:
         self._bot = bot
         self._api_token = api_token
         self._session_manager = session_manager
+        self._web_config = web_config
         self._clients: set[web.WebSocketResponse] = set()
         self._log_subscribers: set[web.WebSocketResponse] = set()
         self._event_subscribers: set[web.WebSocketResponse] = set()
@@ -47,24 +53,52 @@ class WebSocketManager:
     def client_count(self) -> int:
         return len(self._clients)
 
+    def _resolve_identity(self, token: str, request=None):
+        """Resolve an ApiTokenIdentity from a raw token string."""
+        if self._session_manager:
+            if self._session_manager.validate(token):
+                identity = self._session_manager.get_identity(token)
+                if identity is not None:
+                    return identity
+        tm = request.app.get("token_manager") if request else None
+        if tm:
+            identity = tm.resolve(token)
+            if identity is not None:
+                return identity
+        if self._web_config and hasattr(self._web_config, "resolve_api_identity"):
+            identity = self._web_config.resolve_api_identity(token)
+            if identity is not None:
+                return identity
+        return None
+
     async def handle(self, request: web.Request) -> web.WebSocketResponse:
         """Handle a WebSocket connection at /api/ws."""
-        # Authenticate via query param token (if configured)
-        if self._api_token:
+        identity = getattr(request, "_api_identity", None)
+        if self._api_token or self._web_config:
             token = request.query.get("token", "")
-            valid = hmac.compare_digest(token, self._api_token)
-            if not valid and self._session_manager:
+            valid = bool(identity)
+            if not valid and self._api_token and token:
+                valid = hmac.compare_digest(token, self._api_token)
+            if not valid and self._session_manager and token:
                 valid = self._session_manager.validate(token)
+            if not valid and token:
+                resolved = self._resolve_identity(token, request)
+                if resolved is not None:
+                    identity = resolved
+                    valid = True
             if not valid:
                 ws = web.WebSocketResponse()
                 await ws.prepare(request)
                 await ws.close(code=4001, message=b"unauthorized")
                 return ws
+            if identity is None and token:
+                identity = self._resolve_identity(token, request)
 
         ws = web.WebSocketResponse(heartbeat=30.0)
         await ws.prepare(request)
         self._clients.add(ws)
         ws._odin_session_id = getattr(request, "_session_id", None) or "ws-anon"
+        ws._odin_identity = identity
         log.info("WebSocket client connected (%d total)", len(self._clients))
 
         log_task: asyncio.Task | None = None
@@ -137,18 +171,40 @@ class WebSocketManager:
             })
             return
 
+        import time as _time
+        now = _time.monotonic()
+        window_start = getattr(ws, "_chat_window_start", None)
+        if window_start is None or not isinstance(window_start, (int, float)) or now - window_start > _WS_CHAT_RATE_WINDOW:
+            ws._chat_window_start = now
+            ws._chat_count = 0
+        chat_count = getattr(ws, "_chat_count", None)
+        ws._chat_count = (chat_count + 1) if isinstance(chat_count, int) else 1
+        if ws._chat_count > _WS_CHAT_RATE_LIMIT:
+            await ws.send_json({"type": "chat_error", "error": "rate limit exceeded (10/min)"})
+            return
+
         channel_id = (data.get("channel_id") or "").strip()
         if not channel_id:
             ws_session_id = getattr(ws, "_odin_session_id", "ws-anon")
             channel_id = f"ws-{ws_session_id[:16]}"
-        user_id = "web-user"
-        username = "WebUser"
 
-        log.info("WebSocket chat from %s: %s", username, content[:80])
+        identity = getattr(ws, "_odin_identity", None)
+        user_id = identity.user_id if identity else "web-user"
+        username = identity.username if identity else "WebUser"
+        tier = identity.tier if identity else None
+        allowed_tools = identity.allowed_tools if identity and identity.allowed_tools else None
+        token_hosts = identity.allowed_hosts if identity and identity.allowed_hosts else None
+
+        log.info("WebSocket chat from %s (tier=%s): %s", username, tier or "default", content[:80])
         try:
-            result = await process_web_chat(
-                self._bot, content, channel_id,
-                user_id=user_id, username=username,
+            result = await asyncio.wait_for(
+                process_web_chat(
+                    self._bot, content, channel_id,
+                    user_id=user_id, username=username,
+                    allowed_tools=allowed_tools, tier=tier,
+                    token_allowed_hosts=token_hosts,
+                ),
+                timeout=_WS_CHAT_TIMEOUT,
             )
             resp = {
                 "type": "chat_response",
@@ -160,6 +216,11 @@ class WebSocketManager:
             if files:
                 resp["files"] = files
             await ws.send_json(resp)
+        except asyncio.TimeoutError:
+            await ws.send_json({
+                "type": "chat_error",
+                "error": f"Request timed out after {int(_WS_CHAT_TIMEOUT)}s. The operation may still be running.",
+            })
         except Exception as e:
             log.error("WebSocket chat error: %s", e, exc_info=True)
             await ws.send_json({
@@ -181,6 +242,25 @@ class WebSocketManager:
         for ws in dead:
             self._event_subscribers.discard(ws)
             self._clients.discard(ws)
+
+    async def close_by_user_id(self, user_id: str) -> int:
+        """Close all WebSocket connections for a given user_id."""
+        to_close = []
+        for ws in list(self._clients):
+            identity = getattr(ws, "_odin_identity", None)
+            if identity and getattr(identity, "user_id", None) == user_id:
+                to_close.append(ws)
+        for ws in to_close:
+            try:
+                await ws.close(code=4002, message=b"token revoked")
+            except Exception:
+                pass
+            self._clients.discard(ws)
+            self._log_subscribers.discard(ws)
+            self._event_subscribers.discard(ws)
+        if to_close:
+            log.info("Closed %d WebSocket connection(s) for revoked user_id=%s", len(to_close), user_id)
+        return len(to_close)
 
     async def _tail_logs(self, ws: web.WebSocketResponse) -> None:
         """Tail the audit log file and stream new lines to a client."""
@@ -226,11 +306,11 @@ class WebSocketManager:
 
 
 def setup_websocket(
-    app: web.Application, bot: OdinBot, *, api_token: str = "",
+    app: web.Application, bot: OdinBot, *, api_token: str = "", web_config=None,
 ) -> WebSocketManager:
     """Register the WebSocket endpoint and return the manager."""
     session_manager = app.get("session_manager")
-    manager = WebSocketManager(bot, api_token=api_token, session_manager=session_manager)
+    manager = WebSocketManager(bot, api_token=api_token, session_manager=session_manager, web_config=web_config)
     app.router.add_get("/api/ws", manager.handle)
     log.info("WebSocket endpoint registered at /api/ws")
     return manager

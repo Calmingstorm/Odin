@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 from pathlib import Path
 
 from ..odin_log import get_logger
 
 log = get_logger("host_access")
+
+_request_host_scope: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("_request_host_scope", default=None)
 
 
 class HostAccessEntry:
@@ -80,11 +83,26 @@ class HostAccessManager:
     def get_entry(self, user_id: str) -> HostAccessEntry:
         return self._users.get(user_id, self._default_policy)
 
+    @staticmethod
+    def set_request_host_scope(allowed_hosts: list[str]) -> contextvars.Token:
+        """Set a request-scoped host scope (concurrency-safe via contextvars)."""
+        return _request_host_scope.set(allowed_hosts)
+
+    @staticmethod
+    def reset_request_host_scope(token: contextvars.Token) -> None:
+        """Reset the request-scoped host scope."""
+        _request_host_scope.reset(token)
+
     def get_allowed_hosts(self, user_id: str) -> list[str]:
         entry = self.get_entry(user_id)
         if entry.allowed_hosts is None:
-            return list(self._available_hosts)
-        return [h for h in entry.allowed_hosts if h in self._available_hosts]
+            base = list(self._available_hosts)
+        else:
+            base = [h for h in entry.allowed_hosts if h in self._available_hosts]
+        scope = _request_host_scope.get()
+        if scope is not None:
+            base = [h for h in base if h in scope]
+        return base
 
     def get_default_host(self, user_id: str) -> str:
         entry = self.get_entry(user_id)
@@ -96,8 +114,13 @@ class HostAccessManager:
     def is_host_allowed(self, user_id: str, host: str) -> bool:
         entry = self.get_entry(user_id)
         if entry.allowed_hosts is None:
-            return host in self._available_hosts
-        return host in entry.allowed_hosts and host in self._available_hosts
+            allowed = host in self._available_hosts
+        else:
+            allowed = host in entry.allowed_hosts and host in self._available_hosts
+        scope = _request_host_scope.get()
+        if scope is not None:
+            allowed = allowed and host in scope
+        return allowed
 
     def has_user_entry(self, user_id: str) -> bool:
         return user_id in self._users

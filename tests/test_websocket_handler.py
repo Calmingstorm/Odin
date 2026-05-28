@@ -215,6 +215,83 @@ class TestSetupWebsocket:
 
 
 # ---------------------------------------------------------------------------
+# WebSocket revocation
+# ---------------------------------------------------------------------------
+
+class TestCloseByUserId:
+    @pytest.mark.asyncio
+    async def test_closes_matching_user_only(self):
+        bot = _make_bot()
+        mgr = WebSocketManager(bot, api_token="tok")
+        ws_target = _make_ws()
+        ws_target._odin_identity = MagicMock(user_id="ci-bot")
+        ws_other = _make_ws()
+        ws_other._odin_identity = MagicMock(user_id="admin")
+        ws_none = _make_ws()
+        ws_none._odin_identity = None
+        mgr._clients = {ws_target, ws_other, ws_none}
+        mgr._log_subscribers = {ws_target, ws_other}
+        mgr._event_subscribers = {ws_target}
+
+        closed = await mgr.close_by_user_id("ci-bot")
+
+        assert closed == 1
+        ws_target.close.assert_awaited_once()
+        ws_other.close.assert_not_awaited()
+        ws_none.close.assert_not_awaited()
+        assert ws_target not in mgr._clients
+        assert ws_target not in mgr._log_subscribers
+        assert ws_target not in mgr._event_subscribers
+        assert ws_other in mgr._clients
+        assert ws_none in mgr._clients
+
+    @pytest.mark.asyncio
+    async def test_closes_multiple_connections_same_user(self):
+        bot = _make_bot()
+        mgr = WebSocketManager(bot, api_token="tok")
+        ws1 = _make_ws()
+        ws1._odin_identity = MagicMock(user_id="ci-bot")
+        ws2 = _make_ws()
+        ws2._odin_identity = MagicMock(user_id="ci-bot")
+        mgr._clients = {ws1, ws2}
+
+        closed = await mgr.close_by_user_id("ci-bot")
+
+        assert closed == 2
+        ws1.close.assert_awaited_once()
+        ws2.close.assert_awaited_once()
+        assert len(mgr._clients) == 0
+
+    @pytest.mark.asyncio
+    async def test_no_match_returns_zero(self):
+        bot = _make_bot()
+        mgr = WebSocketManager(bot, api_token="tok")
+        ws = _make_ws()
+        ws._odin_identity = MagicMock(user_id="admin")
+        mgr._clients = {ws}
+
+        closed = await mgr.close_by_user_id("nonexistent")
+
+        assert closed == 0
+        ws.close.assert_not_awaited()
+        assert ws in mgr._clients
+
+    @pytest.mark.asyncio
+    async def test_close_exception_does_not_propagate(self):
+        bot = _make_bot()
+        mgr = WebSocketManager(bot, api_token="tok")
+        ws = _make_ws()
+        ws._odin_identity = MagicMock(user_id="ci-bot")
+        ws.close = AsyncMock(side_effect=ConnectionError("already closed"))
+        mgr._clients = {ws}
+
+        closed = await mgr.close_by_user_id("ci-bot")
+
+        assert closed == 1
+        assert ws not in mgr._clients
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 

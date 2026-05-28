@@ -5,6 +5,7 @@ import LogsPage from './logs.js';
 import ConfigPage from './config.js';
 import DiscordConfigPage from './discord-config.js';
 import HostAccessPage from './host-access.js';
+import ApiTokensPage from './api-tokens.js';
 import CodexAuthPage from './codex-auth.js';
 import InternalsPage from './internals.js';
 import UpdatePage from './update.js';
@@ -19,6 +20,7 @@ export default {
       { id: 'config', label: 'Config', component: ConfigPage },
       { id: 'discord', label: 'Discord', component: DiscordConfigPage },
       { id: 'host-access', label: 'Host Access', component: HostAccessPage },
+      { id: 'api-tokens', label: 'API Tokens', component: ApiTokensPage },
       { id: 'codex', label: 'Codex Auth', component: CodexAuthPage },
       { id: 'internals', label: 'Internals', component: InternalsPage },
       { id: 'update', label: 'Update', component: UpdatePage },
