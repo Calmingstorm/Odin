@@ -67,6 +67,8 @@ class _WebChannel:
             try:
                 fp = file.fp
                 filename = getattr(file, "filename", "file")
+                if hasattr(fp, "seek"):
+                    fp.seek(0)
                 data = fp.read(25 * 1024 * 1024 + 1)  # 25MB + 1 byte to detect overflow
                 if len(data) > 25 * 1024 * 1024:
                     log.warning("Web chat file %s exceeds 25MB, skipping", filename)
@@ -173,8 +175,13 @@ async def process_web_chat(
     tier_token = PermissionManager.set_request_tier(tier) if tier else None
     host_token = HostAccessManager.set_request_host_scope(token_allowed_hosts) if token_allowed_hosts else None
 
+    if not hasattr(bot, "_web_channel_locks"):
+        bot._web_channel_locks = {}
+    lock = bot._web_channel_locks.setdefault(channel_id, asyncio.Lock())
+
     try:
-        return await _do_process_web_chat(bot, content, channel_id, user_id, username, allowed_tools)
+        async with lock:
+            return await _do_process_web_chat(bot, content, channel_id, user_id, username, allowed_tools)
     finally:
         if tier_token is not None:
             PermissionManager.reset_request_tier(tier_token)

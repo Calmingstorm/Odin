@@ -1025,9 +1025,23 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         )
         return web.json_response({"query": query, "results": results, "count": len(results)})
 
+    def _check_session_access(request: web.Request, channel_id: str) -> web.Response | None:
+        """Non-admin identities can only access their own session."""
+        identity = getattr(request, "_api_identity", None)
+        if not identity:
+            return None
+        if getattr(identity, "tier", "admin") == "admin":
+            return None
+        if identity.user_id != channel_id:
+            return web.json_response({"error": "access denied"}, status=403)
+        return None
+
     @routes.get("/api/sessions/{channel_id}")
     async def get_session(request: web.Request) -> web.Response:
         cid = request.match_info["channel_id"]
+        denied = _check_session_access(request, cid)
+        if denied:
+            return denied
         session = bot.sessions.get(cid)
         if not session:
             return web.json_response({"error": "session not found"}, status=404)
@@ -1053,6 +1067,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.get("/api/sessions/{channel_id}/export")
     async def export_session(request: web.Request) -> web.Response:
         cid = request.match_info["channel_id"]
+        denied = _check_session_access(request, cid)
+        if denied:
+            return denied
         session = bot.sessions.get(cid)
         if not session:
             return web.json_response({"error": "session not found"}, status=404)
@@ -1100,6 +1117,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.delete("/api/sessions/{channel_id}")
     async def delete_session(request: web.Request) -> web.Response:
         cid = request.match_info["channel_id"]
+        denied = _check_session_access(request, cid)
+        if denied:
+            return denied
         if not bot.sessions.exists(cid):
             return web.json_response({"error": "session not found"}, status=404)
         bot.sessions.reset(cid)
