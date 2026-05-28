@@ -94,12 +94,15 @@ class HostAccessManager:
         _request_host_scope.reset(token)
 
     def get_allowed_hosts(self, user_id: str) -> list[str]:
+        scope = _request_host_scope.get()
+        has_own_entry = user_id in self._users
+        if scope is not None and not has_own_entry:
+            return [h for h in scope if h in self._available_hosts]
         entry = self.get_entry(user_id)
         if entry.allowed_hosts is None:
             base = list(self._available_hosts)
         else:
             base = [h for h in entry.allowed_hosts if h in self._available_hosts]
-        scope = _request_host_scope.get()
         if scope is not None:
             base = [h for h in base if h in scope]
         return base
@@ -112,12 +115,15 @@ class HostAccessManager:
         return allowed[0] if allowed else ""
 
     def is_host_allowed(self, user_id: str, host: str) -> bool:
+        scope = _request_host_scope.get()
+        has_own_entry = user_id in self._users
+        if scope is not None and not has_own_entry:
+            return host in scope and host in self._available_hosts
         entry = self.get_entry(user_id)
         if entry.allowed_hosts is None:
             allowed = host in self._available_hosts
         else:
             allowed = host in entry.allowed_hosts and host in self._available_hosts
-        scope = _request_host_scope.get()
         if scope is not None:
             allowed = allowed and host in scope
         return allowed
