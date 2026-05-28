@@ -58,9 +58,13 @@ class ApiTokenManager:
                     if not isinstance(allowed_tools, list) or not all(isinstance(t, str) for t in allowed_tools):
                         log.warning("Skipping token %s: allowed_tools must be a list of strings", user_id)
                         continue
-                    allowed_hosts = entry.get("allowed_hosts", [])
-                    if not isinstance(allowed_hosts, list) or not all(isinstance(h, str) for h in allowed_hosts):
-                        log.warning("Skipping token %s: allowed_hosts must be a list of strings", user_id)
+                    raw_hosts = entry.get("allowed_hosts")
+                    if raw_hosts is None:
+                        allowed_hosts = None
+                    elif isinstance(raw_hosts, list) and all(isinstance(h, str) for h in raw_hosts):
+                        allowed_hosts = raw_hosts
+                    else:
+                        log.warning("Skipping token %s: allowed_hosts must be a list of strings or null", user_id)
                         continue
                     identity = ApiTokenIdentity(
                         token="",
@@ -135,7 +139,7 @@ class ApiTokenManager:
                 tier=tier,
                 label=label,
                 allowed_tools=allowed_tools or [],
-                allowed_hosts=allowed_hosts or [],
+                allowed_hosts=allowed_hosts,
             )
             self._tokens[user_id] = _StoredToken(
                 token_hash=_hash_token(raw_token),

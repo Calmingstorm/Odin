@@ -73,8 +73,13 @@ export default {
               </div>
             </div>
             <div>
-              <label class="text-xs text-gray-500 block mb-1">Allowed Hosts (leave unchecked for host access default policy)</label>
-              <div class="flex flex-wrap gap-3">
+              <label class="text-xs text-gray-500 block mb-1">Host Access</label>
+              <select v-model="createForm.host_mode" class="hm-input w-full text-sm mb-2">
+                <option value="default">Use default host policy</option>
+                <option value="select">Restrict to selected hosts</option>
+                <option value="none">No host access (chat only)</option>
+              </select>
+              <div v-if="createForm.host_mode === 'select'" class="flex flex-wrap gap-3">
                 <label v-for="host in availableHosts" :key="'ch-'+host"
                        class="flex items-center gap-2 text-sm">
                   <input type="checkbox" :checked="createForm.allowed_hosts.includes(host)"
@@ -124,7 +129,7 @@ export default {
                     <span :class="tierBadge(t.tier)">{{ t.tier }}</span>
                   </td>
                   <td class="text-gray-400 text-xs">
-                    {{ t.allowed_hosts && t.allowed_hosts.length ? t.allowed_hosts.join(', ') : 'default policy' }}
+                    {{ t.allowed_hosts === null || t.allowed_hosts === undefined ? 'default policy' : t.allowed_hosts.length === 0 ? 'no host access' : t.allowed_hosts.join(', ') }}
                   </td>
                   <td class="text-gray-400 text-xs">
                     {{ t.allowed_tools && t.allowed_tools.length ? t.allowed_tools.length + ' tools' : 'tier default' }}
@@ -171,8 +176,13 @@ export default {
                 <input v-model="editForm.label" class="hm-input w-full text-sm" />
               </div>
               <div>
-                <label class="text-xs text-gray-500 block mb-1">Allowed Hosts</label>
-                <div class="flex flex-wrap gap-3">
+                <label class="text-xs text-gray-500 block mb-1">Host Access</label>
+                <select v-model="editForm.host_mode" class="hm-input w-full text-sm mb-2">
+                  <option value="default">Use default host policy</option>
+                  <option value="select">Restrict to selected hosts</option>
+                  <option value="none">No host access (chat only)</option>
+                </select>
+                <div v-if="editForm.host_mode === 'select'" class="flex flex-wrap gap-3">
                   <label v-for="host in availableHosts" :key="'eh-'+host"
                          class="flex items-center gap-2 text-sm">
                     <input type="checkbox" :checked="editForm.allowed_hosts.includes(host)"
@@ -218,12 +228,12 @@ export default {
 
     const createForm = ref({
       user_id: '', username: '', tier: 'admin', label: '',
-      allowed_hosts: [], allowed_tools_str: '',
+      host_mode: 'default', allowed_hosts: [], allowed_tools_str: '',
     });
 
     const editForm = ref({
       username: '', tier: 'admin', label: '',
-      allowed_hosts: [], allowed_tools_str: '',
+      host_mode: 'default', allowed_hosts: [], allowed_tools_str: '',
     });
 
     function showToast(msg, ok = true) {
@@ -278,16 +288,19 @@ export default {
       creating.value = true;
       try {
         const tools = parseTools(createForm.value.allowed_tools_str);
-        const data = await api.post('/api/tokens', {
+        const mode = createForm.value.host_mode;
+        const hostPayload = mode === 'none' ? [] : mode === 'select' ? createForm.value.allowed_hosts : null;
+        const body = {
           user_id: createForm.value.user_id.trim(),
           username: createForm.value.username.trim() || 'API',
           tier: createForm.value.tier,
           label: createForm.value.label.trim(),
           allowed_tools: tools.length ? tools : [],
-          allowed_hosts: createForm.value.allowed_hosts.length ? createForm.value.allowed_hosts : [],
-        });
+        };
+        if (hostPayload !== null) body.allowed_hosts = hostPayload;
+        const data = await api.post('/api/tokens', body);
         newToken.value = data.token;
-        createForm.value = { user_id: '', username: '', tier: 'admin', label: '', allowed_hosts: [], allowed_tools_str: '' };
+        createForm.value = { user_id: '', username: '', tier: 'admin', label: '', host_mode: 'default', allowed_hosts: [], allowed_tools_str: '' };
         showCreate.value = false;
         showToast('Token created');
         await fetchData();
@@ -300,11 +313,17 @@ export default {
 
     function startEdit(t) {
       editing.value = t;
+      const hosts = t.allowed_hosts;
+      let mode = 'default';
+      if (hosts === null || hosts === undefined) mode = 'default';
+      else if (Array.isArray(hosts) && hosts.length === 0) mode = 'none';
+      else if (Array.isArray(hosts)) mode = 'select';
       editForm.value = {
         username: t.username || '',
         tier: t.tier || 'admin',
         label: t.label || '',
-        allowed_hosts: [...(t.allowed_hosts || [])],
+        host_mode: mode,
+        allowed_hosts: Array.isArray(hosts) ? [...hosts] : [],
         allowed_tools_str: (t.allowed_tools || []).join(', '),
       };
     }
@@ -314,13 +333,17 @@ export default {
       saving.value = true;
       try {
         const tools = parseTools(editForm.value.allowed_tools_str);
-        await api.put('/api/tokens/' + encodeURIComponent(editing.value.user_id), {
+        const mode = editForm.value.host_mode;
+        const body = {
           username: editForm.value.username,
           tier: editForm.value.tier,
           label: editForm.value.label,
           allowed_tools: tools,
-          allowed_hosts: editForm.value.allowed_hosts,
-        });
+        };
+        if (mode === 'none') body.allowed_hosts = [];
+        else if (mode === 'select') body.allowed_hosts = editForm.value.allowed_hosts;
+        else body.allowed_hosts = null;
+        await api.put('/api/tokens/' + encodeURIComponent(editing.value.user_id), body);
         editing.value = null;
         showToast('Token updated');
         await fetchData();
