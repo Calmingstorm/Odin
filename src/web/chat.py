@@ -152,6 +152,8 @@ async def process_web_chat(
     user_id: str = "web-user",
     username: str = "WebUser",
     allowed_tools: list[str] | None = None,
+    tier: str | None = None,
+    token_allowed_hosts: list[str] | None = None,
 ) -> dict:
     """Process a web chat message through the Codex tool loop.
 
@@ -160,6 +162,30 @@ async def process_web_chat(
       - tools_used: list[str] — tool names called during processing
       - is_error: bool — whether an error occurred
     """
+    perm_mgr = getattr(bot, "permissions", None)
+    ham = getattr(bot, "host_access_manager", None)
+    if tier and perm_mgr:
+        perm_mgr.set_transient_tier(user_id, tier)
+    if token_allowed_hosts and ham:
+        ham.set_transient_scope(user_id, token_allowed_hosts)
+
+    try:
+        return await _do_process_web_chat(bot, content, channel_id, user_id, username, allowed_tools)
+    finally:
+        if tier and perm_mgr:
+            perm_mgr.clear_transient_tier(user_id)
+        if token_allowed_hosts and ham:
+            ham.clear_transient_scope(user_id)
+
+
+async def _do_process_web_chat(
+    bot: OdinBot,
+    content: str,
+    channel_id: str,
+    user_id: str,
+    username: str,
+    allowed_tools: list[str] | None,
+) -> dict:
     msg = WebMessage(channel_id=channel_id, user_id=user_id, username=username, content=content,
                      allowed_tools=allowed_tools)
     web_channel = msg.channel  # type: _WebChannel

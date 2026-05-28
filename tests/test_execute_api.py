@@ -214,6 +214,7 @@ class TestRealHandler:
         bot.config = MagicMock()
         bot.config.web.api_token = ""
         bot.config.web.resolve_api_identity.return_value = None
+        bot.api_token_manager = None
         mock_result = {
             "response": "ok",
             "tools_used": [],
@@ -241,6 +242,7 @@ class TestRealHandler:
         bot.config = MagicMock()
         bot.config.web.api_token = ""
         bot.config.web.resolve_api_identity.return_value = None
+        bot.api_token_manager = None
         mock_result = {
             "response": "done",
             "tools_used": [],

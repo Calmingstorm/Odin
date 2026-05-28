@@ -167,8 +167,11 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 })
             return web.json_response({"error": "no session manager"}, status=500)
 
-        # Check multi-token identities first
-        identity = bot.config.web.resolve_api_identity(token)
+        # Check dynamic token manager first, then static config tokens
+        tm = getattr(bot, "api_token_manager", None)
+        identity = tm.resolve(token) if tm else None
+        if identity is None:
+            identity = bot.config.web.resolve_api_identity(token)
         if identity is not None:
             sm = request.app.get("session_manager")
             if not sm:
@@ -190,7 +193,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not sm:
             return web.json_response({"error": "no session manager"}, status=500)
 
-        sid, timeout = sm.create()
+        from ..config.schema import ApiTokenIdentity
+        legacy_identity = ApiTokenIdentity(
+            token="", user_id="api-admin",
+            username="Admin", tier="admin", label="default",
+        )
+        sid, timeout = sm.create(identity=legacy_identity)
         return web.json_response({
             "session_id": sid,
             "timeout_seconds": timeout,
@@ -859,16 +867,21 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 {"error": f"content exceeds {MAX_CHAT_CONTENT_LEN} chars"}, status=400
             )
 
-        # Derive channel_id from the authenticated session to isolate web users.
-        # Ignore caller-supplied channel_id — identity must come from server side.
         session_id = getattr(request, "_session_id", None) or "web-anon"
         channel_id = f"web-{session_id[:16]}"
-        user_id = "web-user"
-        username = "WebUser"
+
+        identity = getattr(request, "_api_identity", None)
+        user_id = identity.user_id if identity else "web-user"
+        username = identity.username if identity else "WebUser"
+        tier = identity.tier if identity else None
+        token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
+        token_hosts = identity.allowed_hosts if identity and identity.allowed_hosts else None
 
         result = await process_web_chat(
             bot, content, channel_id,
             user_id=user_id, username=username,
+            allowed_tools=token_tools, tier=tier,
+            token_allowed_hosts=token_hosts,
         )
         status = 200 if not result["is_error"] else 502
         resp = {
@@ -909,15 +922,21 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if identity is None:
             auth_header = request.headers.get("Authorization", "")
             bearer_token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
-            identity = bot.config.web.resolve_api_identity(bearer_token)
+            tm = getattr(bot, "api_token_manager", None)
+            identity = tm.resolve(bearer_token) if tm else None
+            if identity is None:
+                identity = bot.config.web.resolve_api_identity(bearer_token)
         user_id = identity.user_id if identity else "api-user"
         username = identity.username if identity else "API"
-        token_tools = identity.allowed_tools if identity is not None else None
+        token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
+        tier = identity.tier if identity else None
+        token_hosts = identity.allowed_hosts if identity and identity.allowed_hosts else None
 
         result = await process_web_chat(
             bot, content, channel_id,
             user_id=user_id, username=username,
-            allowed_tools=token_tools,
+            allowed_tools=token_tools, tier=tier,
+            token_allowed_hosts=token_hosts,
         )
 
         bot.sessions.reset(channel_id)
@@ -2966,6 +2985,128 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "default_host must be a string"}, status=400)
         await ham.set_default_policy(allowed_hosts, default_host)
         return web.json_response({"status": "updated"})
+
+    # ------------------------------------------------------------------
+    # API Token Management
+    # ------------------------------------------------------------------
+
+    def _require_admin(request: web.Request) -> web.Response | None:
+        identity = getattr(request, "_api_identity", None)
+        if identity and getattr(identity, "tier", "admin") != "admin":
+            return web.json_response({"error": "admin access required"}, status=403)
+        return None
+
+    @routes.get("/api/tokens")
+    async def list_api_tokens(request: web.Request) -> web.Response:
+        denied = _require_admin(request)
+        if denied:
+            return denied
+        tm = getattr(bot, "api_token_manager", None)
+        tokens = tm.list_tokens() if tm else []
+        for t in bot.config.web.api_tokens:
+            d = t.model_dump()
+            d["token"] = d["token"][:8] + "..." if len(d.get("token", "")) > 8 else "***"
+            d["source"] = "config"
+            tokens.append(d)
+        ham = getattr(bot, "host_access_manager", None)
+        available_hosts = ham.available_hosts if ham else []
+        return web.json_response({"tokens": tokens, "available_hosts": available_hosts})
+
+    @routes.post("/api/tokens")
+    async def create_api_token(request: web.Request) -> web.Response:
+        denied = _require_admin(request)
+        if denied:
+            return denied
+        tm = getattr(bot, "api_token_manager", None)
+        if not tm:
+            return web.json_response({"error": "token manager not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        user_id = (data.get("user_id") or "").strip()
+        if not user_id:
+            return web.json_response({"error": "user_id is required"}, status=400)
+        import re as _re
+        if not _re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", user_id):
+            return web.json_response({"error": "user_id must be alphanumeric/dash/underscore, max 64 chars"}, status=400)
+        tier = data.get("tier", "admin")
+        if tier not in ("admin", "user", "guest"):
+            return web.json_response({"error": "tier must be admin, user, or guest"}, status=400)
+        try:
+            identity = await tm.create_token(
+                user_id=user_id,
+                username=data.get("username") or "API",
+                tier=tier,
+                label=data.get("label") or "",
+                allowed_tools=data.get("allowed_tools"),
+                allowed_hosts=data.get("allowed_hosts"),
+            )
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=409)
+        return web.json_response({
+            "user_id": identity.user_id,
+            "token": identity.token,
+            "username": identity.username,
+            "tier": identity.tier,
+            "label": identity.label,
+            "allowed_tools": identity.allowed_tools,
+            "allowed_hosts": identity.allowed_hosts,
+        }, status=201)
+
+    @routes.put("/api/tokens/{user_id}")
+    async def update_api_token(request: web.Request) -> web.Response:
+        denied = _require_admin(request)
+        if denied:
+            return denied
+        tm = getattr(bot, "api_token_manager", None)
+        if not tm:
+            return web.json_response({"error": "token manager not available"}, status=503)
+        uid = request.match_info["user_id"]
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        kwargs = {}
+        for field in ("username", "tier", "label", "allowed_tools", "allowed_hosts"):
+            if field in data:
+                kwargs[field] = data[field]
+        if "tier" in kwargs and kwargs["tier"] not in ("admin", "user", "guest"):
+            return web.json_response({"error": "tier must be admin, user, or guest"}, status=400)
+        if not kwargs:
+            return web.json_response({"error": "no fields to update"}, status=400)
+        identity = await tm.update_token(uid, **kwargs)
+        if identity is None:
+            return web.json_response({"error": "token not found"}, status=404)
+        return web.json_response({"user_id": uid, "status": "updated"})
+
+    @routes.post("/api/tokens/{user_id}/regenerate")
+    async def regenerate_api_token(request: web.Request) -> web.Response:
+        denied = _require_admin(request)
+        if denied:
+            return denied
+        tm = getattr(bot, "api_token_manager", None)
+        if not tm:
+            return web.json_response({"error": "token manager not available"}, status=503)
+        uid = request.match_info["user_id"]
+        new_token = await tm.regenerate_token(uid)
+        if new_token is None:
+            return web.json_response({"error": "token not found"}, status=404)
+        return web.json_response({"user_id": uid, "token": new_token})
+
+    @routes.delete("/api/tokens/{user_id}")
+    async def delete_api_token(request: web.Request) -> web.Response:
+        denied = _require_admin(request)
+        if denied:
+            return denied
+        tm = getattr(bot, "api_token_manager", None)
+        if not tm:
+            return web.json_response({"error": "token manager not available"}, status=503)
+        uid = request.match_info["user_id"]
+        deleted = await tm.delete_token(uid)
+        if not deleted:
+            return web.json_response({"error": "token not found"}, status=404)
+        return web.json_response({"user_id": uid, "status": "deleted"})
 
     # ------------------------------------------------------------------
     # Recovery stats (observability)

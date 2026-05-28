@@ -420,6 +420,9 @@ class OdinBot(commands.Bot):
             overrides_path=config.permissions.overrides_path,
         )
 
+        from ..permissions.token_manager import ApiTokenManager
+        self.api_token_manager = ApiTokenManager("./data/api_tokens.json")
+
         self.tool_memory = ToolMemory("./data/tool_memory.json")
 
         # Wire optional services into skill manager for expanded skill context

@@ -40,6 +40,7 @@ class HostAccessManager:
         self._users: dict[str, HostAccessEntry] = {}
         self._default_policy = HostAccessEntry()
         self._available_hosts: list[str] = available_hosts or []
+        self._transient_scopes: dict[str, list[str]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -80,11 +81,24 @@ class HostAccessManager:
     def get_entry(self, user_id: str) -> HostAccessEntry:
         return self._users.get(user_id, self._default_policy)
 
+    def set_transient_scope(self, user_id: str, allowed_hosts: list[str]) -> None:
+        """Set a non-persisted host scope for API token enforcement."""
+        self._transient_scopes[user_id] = allowed_hosts
+
+    def clear_transient_scope(self, user_id: str) -> None:
+        """Remove a transient host scope."""
+        self._transient_scopes.pop(user_id, None)
+
     def get_allowed_hosts(self, user_id: str) -> list[str]:
         entry = self.get_entry(user_id)
         if entry.allowed_hosts is None:
-            return list(self._available_hosts)
-        return [h for h in entry.allowed_hosts if h in self._available_hosts]
+            base = list(self._available_hosts)
+        else:
+            base = [h for h in entry.allowed_hosts if h in self._available_hosts]
+        scope = self._transient_scopes.get(user_id)
+        if scope is not None:
+            base = [h for h in base if h in scope]
+        return base
 
     def get_default_host(self, user_id: str) -> str:
         entry = self.get_entry(user_id)
@@ -96,8 +110,13 @@ class HostAccessManager:
     def is_host_allowed(self, user_id: str, host: str) -> bool:
         entry = self.get_entry(user_id)
         if entry.allowed_hosts is None:
-            return host in self._available_hosts
-        return host in entry.allowed_hosts and host in self._available_hosts
+            allowed = host in self._available_hosts
+        else:
+            allowed = host in entry.allowed_hosts and host in self._available_hosts
+        scope = self._transient_scopes.get(user_id)
+        if scope is not None:
+            allowed = allowed and host in scope
+        return allowed
 
     def has_user_entry(self, user_id: str) -> bool:
         return user_id in self._users

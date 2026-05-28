@@ -40,6 +40,7 @@ class PermissionManager:
         self._default_tier = default_tier if default_tier in VALID_TIERS else "user"
         self._overrides_path = Path(overrides_path)
         self._overrides: dict[str, str] = {}
+        self._transient_tiers: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._load_overrides()
 
@@ -60,8 +61,19 @@ class PermissionManager:
         tmp.write_text(json.dumps(self._overrides, indent=2))
         tmp.replace(self._overrides_path)
 
+    def set_transient_tier(self, user_id: str, tier: str) -> None:
+        """Set a non-persisted tier for API/web-chat identity scoping."""
+        if tier in VALID_TIERS:
+            self._transient_tiers[user_id] = tier
+
+    def clear_transient_tier(self, user_id: str) -> None:
+        """Remove a transient tier binding."""
+        self._transient_tiers.pop(user_id, None)
+
     def get_tier(self, user_id: str) -> str:
-        """Get the permission tier for a user. Runtime overrides take precedence."""
+        """Get the permission tier for a user. Transient > overrides > config > default."""
+        if user_id in self._transient_tiers:
+            return self._transient_tiers[user_id]
         if user_id in self._overrides:
             return self._overrides[user_id]
         return self._config_tiers.get(user_id, self._default_tier)

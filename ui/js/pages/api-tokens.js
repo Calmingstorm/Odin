@@ -1,0 +1,375 @@
+import { api } from '../api.js';
+
+const { ref, computed, onMounted, nextTick } = Vue;
+
+export default {
+  template: `
+    <div class="p-6 page-fade-in">
+      <div class="flex items-center justify-between mb-4">
+        <h1 class="text-xl font-semibold">API Tokens</h1>
+        <button @click="fetchData" class="btn btn-ghost text-xs" :disabled="loading">
+          {{ loading ? 'Loading...' : 'Refresh' }}
+        </button>
+      </div>
+      <p class="text-xs text-gray-500 mb-6">
+        Manage API tokens for programmatic access, orchestrators, and web-chat identity.
+        Each token has its own user identity, permission tier, and host access scope.
+      </p>
+
+      <div v-if="loading && !tokens" class="space-y-2">
+        <div v-for="n in 3" :key="n" class="skeleton skeleton-row"></div>
+      </div>
+      <div v-else-if="error" class="hm-card border-red-900 error-state">
+        <p class="text-red-400">{{ error }}</p>
+        <button @click="fetchData" class="btn btn-ghost text-xs">Retry</button>
+      </div>
+
+      <div v-else class="space-y-6">
+        <!-- New token created banner -->
+        <div v-if="newToken" class="hm-card border-green-800 bg-green-950/30">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-sm font-semibold text-green-400">Token Created</span>
+            <button @click="newToken = null" class="text-gray-500 hover:text-gray-300 text-xs">Dismiss</button>
+          </div>
+          <p class="text-xs text-gray-400 mb-2">Copy this token now. It will not be shown again.</p>
+          <div class="flex items-center gap-2">
+            <code class="bg-gray-900 px-3 py-1.5 rounded text-sm text-green-300 flex-1 overflow-x-auto">{{ newToken }}</code>
+            <button @click="copyToken" class="btn btn-primary text-xs">Copy</button>
+          </div>
+        </div>
+
+        <!-- Create token form -->
+        <div class="hm-card">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-gray-300">Create Token</h2>
+            <button @click="showCreate = !showCreate" class="btn btn-ghost text-xs">
+              {{ showCreate ? 'Cancel' : '+ New Token' }}
+            </button>
+          </div>
+          <div v-if="showCreate" class="space-y-3">
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-gray-500 block mb-1">User ID (unique identifier)</label>
+                <input v-model="createForm.user_id" class="hm-input w-full text-sm"
+                       placeholder="e.g. orchestrator-1" />
+              </div>
+              <div>
+                <label class="text-xs text-gray-500 block mb-1">Display Name</label>
+                <input v-model="createForm.username" class="hm-input w-full text-sm"
+                       placeholder="e.g. Task Orchestrator" />
+              </div>
+              <div>
+                <label class="text-xs text-gray-500 block mb-1">Permission Tier</label>
+                <select v-model="createForm.tier" class="hm-input w-full text-sm">
+                  <option value="admin">admin — full tool access</option>
+                  <option value="user">user — read-only tools</option>
+                  <option value="guest">guest — chat only, no tools</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-xs text-gray-500 block mb-1">Label (description)</label>
+                <input v-model="createForm.label" class="hm-input w-full text-sm"
+                       placeholder="e.g. CI/CD pipeline" />
+              </div>
+            </div>
+            <div>
+              <label class="text-xs text-gray-500 block mb-1">Allowed Hosts (leave unchecked for host access default policy)</label>
+              <div class="flex flex-wrap gap-3">
+                <label v-for="host in availableHosts" :key="'ch-'+host"
+                       class="flex items-center gap-2 text-sm">
+                  <input type="checkbox" :checked="createForm.allowed_hosts.includes(host)"
+                         @change="toggleCreateHost(host, $event.target.checked)"
+                         class="rounded border-gray-600 bg-gray-800" />
+                  <span class="text-gray-300">{{ host }}</span>
+                </label>
+              </div>
+            </div>
+            <div>
+              <label class="text-xs text-gray-500 block mb-1">Allowed Tools (comma-separated, leave empty for tier default)</label>
+              <input v-model="createForm.allowed_tools_str" class="hm-input w-full text-sm"
+                     placeholder="e.g. run_command, web_search, fetch_url" />
+            </div>
+            <div class="flex justify-end">
+              <button @click="createToken" class="btn btn-primary text-sm" :disabled="!createForm.user_id.trim() || creating">
+                {{ creating ? 'Creating...' : 'Create Token' }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Token list -->
+        <div class="hm-card">
+          <h2 class="text-sm font-semibold text-gray-300 mb-3">Active Tokens</h2>
+          <div v-if="!tokens || tokens.length === 0" class="text-xs text-gray-500 py-4 text-center">
+            No API tokens configured.
+          </div>
+          <div v-else class="overflow-x-auto">
+            <table class="hm-table w-full text-sm">
+              <thead>
+                <tr>
+                  <th class="text-left">User ID</th>
+                  <th class="text-left">Label</th>
+                  <th class="text-left">Tier</th>
+                  <th class="text-left">Hosts</th>
+                  <th class="text-left">Tools</th>
+                  <th class="text-left">Source</th>
+                  <th class="text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="t in tokens" :key="t.user_id">
+                  <td class="font-mono text-xs text-gray-300">{{ t.user_id }}</td>
+                  <td class="text-gray-400">{{ t.label || '—' }}</td>
+                  <td>
+                    <span :class="tierBadge(t.tier)">{{ t.tier }}</span>
+                  </td>
+                  <td class="text-gray-400 text-xs">
+                    {{ t.allowed_hosts && t.allowed_hosts.length ? t.allowed_hosts.join(', ') : 'default policy' }}
+                  </td>
+                  <td class="text-gray-400 text-xs">
+                    {{ t.allowed_tools && t.allowed_tools.length ? t.allowed_tools.length + ' tools' : 'tier default' }}
+                  </td>
+                  <td>
+                    <span class="text-xs px-1.5 py-0.5 rounded"
+                          :class="t.source === 'config' ? 'bg-gray-700 text-gray-400' : 'bg-blue-900/50 text-blue-400'">
+                      {{ t.source === 'config' ? 'config.yml' : 'dynamic' }}
+                    </span>
+                  </td>
+                  <td class="text-right space-x-2" v-if="t.source !== 'config'">
+                    <button @click="startEdit(t)" class="text-blue-400 hover:text-blue-300 text-xs">Edit</button>
+                    <button @click="confirmRegenerate(t)" class="text-yellow-400 hover:text-yellow-300 text-xs">Regen</button>
+                    <button @click="confirmDelete(t)" class="text-red-400 hover:text-red-300 text-xs">Delete</button>
+                  </td>
+                  <td class="text-right text-xs text-gray-600" v-else>read-only</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Edit modal -->
+        <div v-if="editing" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50" @click.self="editing = null">
+          <div class="hm-card w-full max-w-lg mx-4">
+            <h3 class="text-sm font-semibold text-gray-300 mb-4">Edit Token: {{ editing.user_id }}</h3>
+            <div class="space-y-3">
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="text-xs text-gray-500 block mb-1">Display Name</label>
+                  <input v-model="editForm.username" class="hm-input w-full text-sm" />
+                </div>
+                <div>
+                  <label class="text-xs text-gray-500 block mb-1">Tier</label>
+                  <select v-model="editForm.tier" class="hm-input w-full text-sm">
+                    <option value="admin">admin</option>
+                    <option value="user">user</option>
+                    <option value="guest">guest</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label class="text-xs text-gray-500 block mb-1">Label</label>
+                <input v-model="editForm.label" class="hm-input w-full text-sm" />
+              </div>
+              <div>
+                <label class="text-xs text-gray-500 block mb-1">Allowed Hosts</label>
+                <div class="flex flex-wrap gap-3">
+                  <label v-for="host in availableHosts" :key="'eh-'+host"
+                         class="flex items-center gap-2 text-sm">
+                    <input type="checkbox" :checked="editForm.allowed_hosts.includes(host)"
+                           @change="toggleEditHost(host, $event.target.checked)"
+                           class="rounded border-gray-600 bg-gray-800" />
+                    <span class="text-gray-300">{{ host }}</span>
+                  </label>
+                </div>
+              </div>
+              <div>
+                <label class="text-xs text-gray-500 block mb-1">Allowed Tools (comma-separated, empty for tier default)</label>
+                <input v-model="editForm.allowed_tools_str" class="hm-input w-full text-sm" />
+              </div>
+              <div class="flex justify-end gap-2 pt-2">
+                <button @click="editing = null" class="btn btn-ghost text-sm">Cancel</button>
+                <button @click="saveEdit" class="btn btn-primary text-sm" :disabled="saving">
+                  {{ saving ? 'Saving...' : 'Save' }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Toast -->
+      <div v-if="toast" class="fixed bottom-4 right-4 px-4 py-2 rounded shadow-lg text-sm z-50 transition-opacity"
+           :class="toast.ok ? 'bg-green-900 text-green-200' : 'bg-red-900 text-red-200'">
+        {{ toast.msg }}
+      </div>
+    </div>
+  `,
+  setup() {
+    const loading = ref(true);
+    const error = ref('');
+    const tokens = ref(null);
+    const availableHosts = ref([]);
+    const showCreate = ref(false);
+    const creating = ref(false);
+    const newToken = ref(null);
+    const editing = ref(null);
+    const saving = ref(false);
+    const toast = ref(null);
+
+    const createForm = ref({
+      user_id: '', username: '', tier: 'admin', label: '',
+      allowed_hosts: [], allowed_tools_str: '',
+    });
+
+    const editForm = ref({
+      username: '', tier: 'admin', label: '',
+      allowed_hosts: [], allowed_tools_str: '',
+    });
+
+    function showToast(msg, ok = true) {
+      toast.value = { msg, ok };
+      setTimeout(() => { toast.value = null; }, 3000);
+    }
+
+    function tierBadge(tier) {
+      if (tier === 'admin') return 'text-xs px-1.5 py-0.5 rounded bg-red-900/50 text-red-400';
+      if (tier === 'user') return 'text-xs px-1.5 py-0.5 rounded bg-blue-900/50 text-blue-400';
+      return 'text-xs px-1.5 py-0.5 rounded bg-gray-700 text-gray-400';
+    }
+
+    async function fetchData() {
+      loading.value = true;
+      error.value = '';
+      try {
+        const data = await api.get('/api/tokens');
+        tokens.value = data.tokens || [];
+        availableHosts.value = data.available_hosts || [];
+      } catch (e) {
+        error.value = e.message || 'Failed to load tokens';
+      } finally {
+        loading.value = false;
+      }
+    }
+
+    function parseTools(str) {
+      if (!str || !str.trim()) return [];
+      return str.split(',').map(s => s.trim()).filter(Boolean);
+    }
+
+    function toggleCreateHost(host, checked) {
+      const h = createForm.value.allowed_hosts;
+      if (checked && !h.includes(host)) h.push(host);
+      if (!checked) {
+        const i = h.indexOf(host);
+        if (i >= 0) h.splice(i, 1);
+      }
+    }
+
+    function toggleEditHost(host, checked) {
+      const h = editForm.value.allowed_hosts;
+      if (checked && !h.includes(host)) h.push(host);
+      if (!checked) {
+        const i = h.indexOf(host);
+        if (i >= 0) h.splice(i, 1);
+      }
+    }
+
+    async function createToken() {
+      creating.value = true;
+      try {
+        const tools = parseTools(createForm.value.allowed_tools_str);
+        const data = await api.post('/api/tokens', {
+          user_id: createForm.value.user_id.trim(),
+          username: createForm.value.username.trim() || 'API',
+          tier: createForm.value.tier,
+          label: createForm.value.label.trim(),
+          allowed_tools: tools.length ? tools : [],
+          allowed_hosts: createForm.value.allowed_hosts.length ? createForm.value.allowed_hosts : [],
+        });
+        newToken.value = data.token;
+        createForm.value = { user_id: '', username: '', tier: 'admin', label: '', allowed_hosts: [], allowed_tools_str: '' };
+        showCreate.value = false;
+        showToast('Token created');
+        await fetchData();
+      } catch (e) {
+        showToast(e.data?.error || e.message || 'Failed to create token', false);
+      } finally {
+        creating.value = false;
+      }
+    }
+
+    function startEdit(t) {
+      editing.value = t;
+      editForm.value = {
+        username: t.username || '',
+        tier: t.tier || 'admin',
+        label: t.label || '',
+        allowed_hosts: [...(t.allowed_hosts || [])],
+        allowed_tools_str: (t.allowed_tools || []).join(', '),
+      };
+    }
+
+    async function saveEdit() {
+      if (!editing.value) return;
+      saving.value = true;
+      try {
+        const tools = parseTools(editForm.value.allowed_tools_str);
+        await api.put('/api/tokens/' + encodeURIComponent(editing.value.user_id), {
+          username: editForm.value.username,
+          tier: editForm.value.tier,
+          label: editForm.value.label,
+          allowed_tools: tools,
+          allowed_hosts: editForm.value.allowed_hosts,
+        });
+        editing.value = null;
+        showToast('Token updated');
+        await fetchData();
+      } catch (e) {
+        showToast(e.data?.error || e.message || 'Failed to update', false);
+      } finally {
+        saving.value = false;
+      }
+    }
+
+    async function confirmRegenerate(t) {
+      if (!confirm('Regenerate token for ' + t.user_id + '? The old token will stop working immediately.')) return;
+      try {
+        const data = await api.post('/api/tokens/' + encodeURIComponent(t.user_id) + '/regenerate');
+        newToken.value = data.token;
+        showToast('Token regenerated');
+      } catch (e) {
+        showToast(e.data?.error || e.message || 'Failed to regenerate', false);
+      }
+    }
+
+    async function confirmDelete(t) {
+      if (!confirm('Delete token for ' + t.user_id + '? This cannot be undone.')) return;
+      try {
+        await api.del('/api/tokens/' + encodeURIComponent(t.user_id));
+        showToast('Token deleted');
+        await fetchData();
+      } catch (e) {
+        showToast(e.data?.error || e.message || 'Failed to delete', false);
+      }
+    }
+
+    async function copyToken() {
+      if (!newToken.value) return;
+      try {
+        await navigator.clipboard.writeText(newToken.value);
+        showToast('Copied to clipboard');
+      } catch {
+        showToast('Copy failed — select and copy manually', false);
+      }
+    }
+
+    onMounted(fetchData);
+
+    return {
+      loading, error, tokens, availableHosts, showCreate, creating,
+      newToken, editing, saving, toast, createForm, editForm,
+      fetchData, tierBadge, toggleCreateHost, toggleEditHost,
+      createToken, startEdit, saveEdit, confirmRegenerate, confirmDelete, copyToken,
+    };
+  },
+};
