@@ -233,11 +233,15 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 is_authed = True
             elif sm and sm.validate(token):
                 is_authed = True
+        identity = getattr(request, "_api_identity", None)
+        user_id = identity.user_id if identity else "web-user"
         timeout = sm.timeout_seconds if sm else 0
         return web.json_response({
             "authenticated": is_authed,
             "timeout_seconds": timeout,
             "active_sessions": sm.active_count if sm else 0,
+            "user_id": user_id,
+            "channel_id": user_id,
         })
 
     # ------------------------------------------------------------------
@@ -602,7 +606,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     # ------------------------------------------------------------------
 
     @routes.post("/api/sessions/clear-all")
-    async def clear_all_sessions(_request: web.Request) -> web.Response:
+    async def clear_all_sessions(request: web.Request) -> web.Response:
+        denied = _require_admin(request)
+        if denied:
+            return denied
         count = bot.sessions.clear_all()
         return web.json_response({"status": "cleared", "count": count})
 
@@ -868,11 +875,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 {"error": f"content exceeds {MAX_CHAT_CONTENT_LEN} chars"}, status=400
             )
 
-        session_id = getattr(request, "_session_id", None) or "web-anon"
-        channel_id = f"web-{session_id[:16]}"
-
         identity = getattr(request, "_api_identity", None)
         user_id = identity.user_id if identity else "web-user"
+        channel_id = user_id
         username = identity.username if identity else "WebUser"
         tier = identity.tier if identity else None
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
@@ -961,9 +966,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     # ------------------------------------------------------------------
 
     @routes.get("/api/sessions")
-    async def list_sessions(_request: web.Request) -> web.Response:
+    async def list_sessions(request: web.Request) -> web.Response:
+        identity = getattr(request, "_api_identity", None)
+        is_admin = not identity or getattr(identity, "tier", "admin") == "admin"
+        own_id = identity.user_id if identity else None
         sessions = []
         for cid, session in bot.sessions.items_snapshot():
+            if not is_admin and cid != own_id:
+                continue
             # Build preview from last 2 messages
             preview = []
             for m in session.messages[-2:]:
@@ -988,12 +998,18 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return web.json_response(sessions)
 
     @routes.get("/api/sessions/token-usage")
-    async def session_token_usage(_request: web.Request) -> web.Response:
+    async def session_token_usage(request: web.Request) -> web.Response:
+        denied = _require_admin(request)
+        if denied:
+            return denied
         usage = bot.sessions.get_session_token_usage()
         return web.json_response(usage)
 
     @routes.get("/api/sessions/activity")
-    async def session_activity(_request: web.Request) -> web.Response:
+    async def session_activity(request: web.Request) -> web.Response:
+        denied = _require_admin(request)
+        if denied:
+            return denied
         activity = bot.sessions.get_activity_metrics()
         return web.json_response(activity)
 
@@ -1002,8 +1018,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         query = request.query.get("q", "").strip()
         if not query:
             return web.json_response({"error": "q parameter required"}, status=400)
+        identity = getattr(request, "_api_identity", None)
+        is_admin = not identity or getattr(identity, "tier", "admin") == "admin"
         limit = _safe_int_param(request, "limit", 20, hi=50)
         channel_id = request.query.get("channel_id") or None
+        if not is_admin:
+            channel_id = identity.user_id
         user_id = request.query.get("user_id") or None
         after: float | None = None
         before: float | None = None
@@ -1023,9 +1043,23 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         )
         return web.json_response({"query": query, "results": results, "count": len(results)})
 
+    def _check_session_access(request: web.Request, channel_id: str) -> web.Response | None:
+        """Non-admin identities can only access their own session."""
+        identity = getattr(request, "_api_identity", None)
+        if not identity:
+            return None
+        if getattr(identity, "tier", "admin") == "admin":
+            return None
+        if identity.user_id != channel_id:
+            return web.json_response({"error": "access denied"}, status=403)
+        return None
+
     @routes.get("/api/sessions/{channel_id}")
     async def get_session(request: web.Request) -> web.Response:
         cid = request.match_info["channel_id"]
+        denied = _check_session_access(request, cid)
+        if denied:
+            return denied
         session = bot.sessions.get(cid)
         if not session:
             return web.json_response({"error": "session not found"}, status=404)
@@ -1051,6 +1085,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.get("/api/sessions/{channel_id}/export")
     async def export_session(request: web.Request) -> web.Response:
         cid = request.match_info["channel_id"]
+        denied = _check_session_access(request, cid)
+        if denied:
+            return denied
         session = bot.sessions.get(cid)
         if not session:
             return web.json_response({"error": "session not found"}, status=404)
@@ -1098,6 +1135,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.delete("/api/sessions/{channel_id}")
     async def delete_session(request: web.Request) -> web.Response:
         cid = request.match_info["channel_id"]
+        denied = _check_session_access(request, cid)
+        if denied:
+            return denied
         if not bot.sessions.exists(cid):
             return web.json_response({"error": "session not found"}, status=404)
         bot.sessions.reset(cid)
@@ -1105,6 +1145,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/sessions/clear-bulk")
     async def clear_bulk_sessions(request: web.Request) -> web.Response:
+        denied = _require_admin(request)
+        if denied:
+            return denied
         try:
             data = await request.json()
         except Exception:

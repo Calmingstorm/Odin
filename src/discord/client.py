@@ -2848,8 +2848,11 @@ class OdinBot(commands.Bot):
                                     async def _skill_msg(text: str) -> None:
                                         await message.channel.send(scrub_response_secrets(text))
                                     async def _skill_file(data: bytes, filename: str, caption: str = "") -> None:
-                                        channel_id_key = str(message.channel.id)
-                                        self._pending_files.setdefault(channel_id_key, []).append((data, filename))
+                                        import io as _io
+                                        await message.channel.send(
+                                            content=caption or None,
+                                            file=discord.File(_io.BytesIO(data), filename=filename),
+                                        )
                                     result = await self.skill_manager.execute(
                                         target_name, skill_input,
                                         message_callback=_skill_msg,
@@ -2859,8 +2862,11 @@ class OdinBot(commands.Bot):
                         async def _skill_msg(text: str) -> None:
                             await message.channel.send(scrub_response_secrets(text))
                         async def _skill_file(data: bytes, filename: str, caption: str = "") -> None:
-                            channel_id_key = str(message.channel.id)
-                            self._pending_files.setdefault(channel_id_key, []).append((data, filename))
+                            import io as _io
+                            await message.channel.send(
+                                content=caption or None,
+                                file=discord.File(_io.BytesIO(data), filename=filename),
+                            )
                         result = await self.skill_manager.execute(
                             tool_name, tool_input,
                             message_callback=_skill_msg,

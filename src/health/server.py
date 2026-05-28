@@ -178,7 +178,12 @@ def _make_auth_middleware(
             bearer_value = auth_header[len(bearer_prefix):]
             # Check legacy single token
             if token and hmac.compare_digest(bearer_value, token):
-                request._session_id = "admin-token"
+                from ..config.schema import ApiTokenIdentity
+                request._session_id = "api-admin"
+                request._api_identity = ApiTokenIdentity(
+                    token="", user_id="api-admin",
+                    username="Admin", tier="admin", label="default",
+                )
                 return await handler(request)
             # Check dynamic token manager first, then static config tokens
             tm = request.app.get("token_manager")
@@ -201,7 +206,12 @@ def _make_auth_middleware(
         query_token = request.query.get("token", "")
         if query_token:
             if token and hmac.compare_digest(query_token, token):
-                request._session_id = "admin-token"
+                from ..config.schema import ApiTokenIdentity
+                request._session_id = "api-admin"
+                request._api_identity = ApiTokenIdentity(
+                    token="", user_id="api-admin",
+                    username="Admin", tier="admin", label="default",
+                )
                 return await handler(request)
             tm = request.app.get("token_manager")
             identity = tm.resolve(query_token) if tm else None
