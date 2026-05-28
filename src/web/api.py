@@ -881,7 +881,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         username = identity.username if identity else "WebUser"
         tier = identity.tier if identity else None
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
-        token_hosts = identity.allowed_hosts if identity and identity.allowed_hosts else None
+        token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
 
         result = await process_web_chat(
             bot, content, channel_id,
@@ -936,7 +936,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         username = identity.username if identity else "API"
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
         tier = identity.tier if identity else None
-        token_hosts = identity.allowed_hosts if identity and identity.allowed_hosts else None
+        token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
 
         result = await process_web_chat(
             bot, content, channel_id,

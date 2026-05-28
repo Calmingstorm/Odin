@@ -173,7 +173,7 @@ async def process_web_chat(
     from ..permissions.host_access import HostAccessManager
 
     tier_token = PermissionManager.set_request_tier(tier) if tier else None
-    host_token = HostAccessManager.set_request_host_scope(token_allowed_hosts) if token_allowed_hosts else None
+    host_token = HostAccessManager.set_request_host_scope(token_allowed_hosts) if token_allowed_hosts is not None else None
 
     if not hasattr(bot, "_web_channel_locks"):
         bot._web_channel_locks = {}
