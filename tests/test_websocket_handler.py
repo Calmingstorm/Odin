@@ -178,15 +178,26 @@ class TestHandleChat:
         assert resp["type"] == "chat_error"
 
     @pytest.mark.asyncio
-    async def test_chat_uses_session_based_channel_id(self):
+    async def test_chat_uses_identity_scoped_channel_id(self):
         mgr = WebSocketManager(_make_bot())
         ws = _make_ws()
-        ws._odin_session_id = "session-1234567890abcdef-extra"
+        ws._odin_identity = MagicMock(user_id="ci-bot", username="CI", tier="admin", allowed_tools=[], allowed_hosts=[])
         mock_result = {"response": "ok", "tools_used": [], "is_error": False}
         with patch("src.web.websocket.process_web_chat", new_callable=AsyncMock, return_value=mock_result) as mock_fn:
             await mgr._handle_chat(ws, {"content": "hi"})
         call_args = mock_fn.call_args
-        assert call_args[0][2] == "ws-session-12345678"  # first 16 chars of session id
+        assert call_args[0][2] == "ci-bot"
+
+    @pytest.mark.asyncio
+    async def test_chat_defaults_to_web_user_without_identity(self):
+        mgr = WebSocketManager(_make_bot())
+        ws = _make_ws()
+        ws._odin_identity = None
+        mock_result = {"response": "ok", "tools_used": [], "is_error": False}
+        with patch("src.web.websocket.process_web_chat", new_callable=AsyncMock, return_value=mock_result) as mock_fn:
+            await mgr._handle_chat(ws, {"content": "hi"})
+        call_args = mock_fn.call_args
+        assert call_args[0][2] == "web-user"
 
 
 # ---------------------------------------------------------------------------

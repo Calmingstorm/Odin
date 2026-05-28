@@ -67,9 +67,9 @@ class _WebChannel:
             try:
                 fp = file.fp
                 filename = getattr(file, "filename", "file")
-                data = fp.read(10 * 1024 * 1024 + 1)  # 10MB + 1 byte to detect overflow
-                if len(data) > 10 * 1024 * 1024:
-                    log.warning("Web chat file %s exceeds 10MB, skipping", filename)
+                data = fp.read(25 * 1024 * 1024 + 1)  # 25MB + 1 byte to detect overflow
+                if len(data) > 25 * 1024 * 1024:
+                    log.warning("Web chat file %s exceeds 25MB, skipping", filename)
                     data = None
                 if data:
                     # Detect content type from filename
@@ -78,6 +78,11 @@ class _WebChannel:
                         "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
                         "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
                         "pdf": "application/pdf", "txt": "text/plain", "json": "application/json",
+                        "mp4": "video/mp4", "webm": "video/webm", "mp3": "audio/mpeg",
+                        "wav": "audio/wav", "ogg": "audio/ogg", "zip": "application/zip",
+                        "tar": "application/x-tar", "gz": "application/gzip",
+                        "csv": "text/csv", "xml": "application/xml", "yaml": "application/yaml",
+                        "yml": "application/yaml", "md": "text/markdown",
                     }.get(ext, "application/octet-stream")
                     self.captured_files.append({
                         "filename": filename,

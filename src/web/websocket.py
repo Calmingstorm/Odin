@@ -183,13 +183,9 @@ class WebSocketManager:
             await ws.send_json({"type": "chat_error", "error": "rate limit exceeded (10/min)"})
             return
 
-        channel_id = (data.get("channel_id") or "").strip()
-        if not channel_id:
-            ws_session_id = getattr(ws, "_odin_session_id", "ws-anon")
-            channel_id = f"ws-{ws_session_id[:16]}"
-
         identity = getattr(ws, "_odin_identity", None)
         user_id = identity.user_id if identity else "web-user"
+        channel_id = user_id
         username = identity.username if identity else "WebUser"
         tier = identity.tier if identity else None
         allowed_tools = identity.allowed_tools if identity and identity.allowed_tools else None

@@ -226,6 +226,7 @@ export default {
     const messagesEl = ref(null);
     const inputEl = ref(null);
     const typingElapsed = ref(0);
+    const channelId = ref('');
     let typingTimer = null;
     let sentViaWs = false;
     let msgIdCounter = 0;
@@ -383,7 +384,7 @@ export default {
       try {
         const result = await api.post('/api/chat', {
           content,
-          channel_id: 'web-default',
+          channel_id: channelId.value,
         });
         addMessage('bot', result.response, {
           tools_used: result.tools_used || [],
@@ -408,7 +409,7 @@ export default {
       if (inputEl.value) inputEl.value.style.height = 'auto';
 
       if (ws.connected) {
-        const sent = ws.sendChat(content, { channelId: 'web-default' });
+        const sent = ws.sendChat(content, { channelId: channelId.value });
         if (sent) {
           sentViaWs = true;
           startWsTimeout();
@@ -447,7 +448,11 @@ export default {
 
     async function loadHistory() {
       try {
-        const session = await api.get('/api/sessions/web-default');
+        if (!channelId.value) {
+          const sess = await api.get('/api/auth/session');
+          channelId.value = sess.channel_id || sess.user_id || 'web-user';
+        }
+        const session = await api.get('/api/sessions/' + encodeURIComponent(channelId.value));
         if (session && session.messages && session.messages.length > 0) {
           for (const m of session.messages) {
             const role = m.role === 'user' ? 'user' : 'bot';

@@ -233,11 +233,15 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 is_authed = True
             elif sm and sm.validate(token):
                 is_authed = True
+        identity = getattr(request, "_api_identity", None)
+        user_id = identity.user_id if identity else "web-user"
         timeout = sm.timeout_seconds if sm else 0
         return web.json_response({
             "authenticated": is_authed,
             "timeout_seconds": timeout,
             "active_sessions": sm.active_count if sm else 0,
+            "user_id": user_id,
+            "channel_id": user_id,
         })
 
     # ------------------------------------------------------------------
@@ -868,11 +872,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 {"error": f"content exceeds {MAX_CHAT_CONTENT_LEN} chars"}, status=400
             )
 
-        session_id = getattr(request, "_session_id", None) or "web-anon"
-        channel_id = f"web-{session_id[:16]}"
-
         identity = getattr(request, "_api_identity", None)
         user_id = identity.user_id if identity else "web-user"
+        channel_id = user_id
         username = identity.username if identity else "WebUser"
         tier = identity.tier if identity else None
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
