@@ -263,6 +263,31 @@ class TestRealHandler:
                 channel_id = bot.sessions.reset.call_args[0][0]
                 assert channel_id.startswith("api-")
 
+    @pytest.mark.asyncio
+    async def test_execute_opts_out_of_channel_lock(self):
+        """/api/execute must pass persist_channel_lock=False so it does not
+        cache (and leak) a per-request lock in bot._web_channel_locks."""
+        bot = _make_bot()
+        bot.config = MagicMock()
+        bot.config.web.api_token = ""
+        bot.config.web.resolve_api_identity.return_value = None
+        bot.api_token_manager = None
+        mock_result = {
+            "response": "ok",
+            "tools_used": [],
+            "is_error": False,
+            "files": [],
+        }
+        with patch("src.web.api.process_web_chat", new_callable=AsyncMock, return_value=mock_result):
+            from src.web.api import setup_api
+            app = web.Application()
+            setup_api(app, bot)
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/api/execute", json={"prompt": "test"})
+                assert resp.status == 200
+                from src.web.api import process_web_chat
+                assert process_web_chat.call_args.kwargs["persist_channel_lock"] is False
+
 
 class TestCLIScript:
     def test_script_exists(self):

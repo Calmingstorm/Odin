@@ -943,6 +943,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             user_id=user_id, username=username,
             allowed_tools=token_tools, tier=tier,
             token_allowed_hosts=token_hosts,
+            persist_channel_lock=False,  # ephemeral per-request channel — no lock to cache or leak
         )
 
         bot.sessions.reset(channel_id)

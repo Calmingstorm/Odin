@@ -161,8 +161,18 @@ async def process_web_chat(
     allowed_tools: list[str] | None = None,
     tier: str | None = None,
     token_allowed_hosts: list[str] | None = None,
+    persist_channel_lock: bool = True,
 ) -> dict:
     """Process a web chat message through the Codex tool loop.
+
+    persist_channel_lock: when True (default), concurrent calls sharing this
+        channel_id are serialized via a per-channel asyncio.Lock cached in
+        bot._web_channel_locks. Used by /api/chat and the WebSocket chat, where
+        channel_id == user_id and a user's overlapping requests must run one at
+        a time. Set False for single-use/ephemeral channels — e.g.
+        /api/execute's per-request UUID channels — which no other caller can
+        share: caching a lock there is pointless and leaks one permanent dict
+        entry per request, since the channel is reset and never reused.
 
     Returns dict with:
       - response: str — the LLM response text
@@ -175,12 +185,14 @@ async def process_web_chat(
     tier_token = PermissionManager.set_request_tier(tier) if tier else None
     host_token = HostAccessManager.set_request_host_scope(token_allowed_hosts) if token_allowed_hosts is not None else None
 
-    if not hasattr(bot, "_web_channel_locks"):
-        bot._web_channel_locks = {}
-    lock = bot._web_channel_locks.setdefault(channel_id, asyncio.Lock())
-
     try:
-        async with lock:
+        if persist_channel_lock:
+            if not hasattr(bot, "_web_channel_locks"):
+                bot._web_channel_locks = {}
+            lock = bot._web_channel_locks.setdefault(channel_id, asyncio.Lock())
+            async with lock:
+                return await _do_process_web_chat(bot, content, channel_id, user_id, username, allowed_tools)
+        else:
             return await _do_process_web_chat(bot, content, channel_id, user_id, username, allowed_tools)
     finally:
         if tier_token is not None:
