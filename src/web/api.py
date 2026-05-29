@@ -894,7 +894,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         tier = identity.tier if identity else None
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
         token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
-        token_default_host = identity.default_host if identity else ""
+        token_default_host = getattr(identity, "default_host", "") if identity else ""
 
         # Optional caller-supplied session id for multi-request chat continuity.
         # Omitted -> historical behavior (one history per identity). Supplied -> validated
@@ -974,7 +974,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
         tier = identity.tier if identity else None
         token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
-        token_default_host = identity.default_host if identity else ""
+        token_default_host = getattr(identity, "default_host", "") if identity else ""
 
         result = await process_web_chat(
             bot, content, channel_id,

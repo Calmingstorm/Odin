@@ -120,7 +120,8 @@ class HostAccessManager:
         scope = _request_host_scope.get()
         request_default = _request_default_host.get()
         if request_default and request_default in self._available_hosts:
-            if scope is None or request_default in scope:
+            effective = self.get_allowed_hosts(user_id)
+            if request_default in effective:
                 return request_default
         has_own_entry = user_id in self._users
         if scope is not None and not has_own_entry:
