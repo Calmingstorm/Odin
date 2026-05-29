@@ -10,6 +10,7 @@ from ..odin_log import get_logger
 log = get_logger("host_access")
 
 _request_host_scope: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("_request_host_scope", default=None)
+_request_default_host: contextvars.ContextVar[str] = contextvars.ContextVar("_request_default_host", default="")
 
 
 class HostAccessEntry:
@@ -93,6 +94,14 @@ class HostAccessManager:
         """Reset the request-scoped host scope."""
         _request_host_scope.reset(token)
 
+    @staticmethod
+    def set_request_default_host(default_host: str) -> contextvars.Token:
+        return _request_default_host.set(default_host or "")
+
+    @staticmethod
+    def reset_request_default_host(token: contextvars.Token) -> None:
+        _request_default_host.reset(token)
+
     def get_allowed_hosts(self, user_id: str) -> list[str]:
         scope = _request_host_scope.get()
         has_own_entry = user_id in self._users
@@ -109,6 +118,11 @@ class HostAccessManager:
 
     def get_default_host(self, user_id: str) -> str:
         scope = _request_host_scope.get()
+        request_default = _request_default_host.get()
+        if request_default and request_default in self._available_hosts:
+            effective = self.get_allowed_hosts(user_id)
+            if request_default in effective:
+                return request_default
         has_own_entry = user_id in self._users
         if scope is not None and not has_own_entry:
             valid = [h for h in scope if h in self._available_hosts]

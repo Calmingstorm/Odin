@@ -894,6 +894,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         tier = identity.tier if identity else None
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
         token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
+        token_default_host = getattr(identity, "default_host", "") if identity else ""
 
         # Optional caller-supplied session id for multi-request chat continuity.
         # Omitted -> historical behavior (one history per identity). Supplied -> validated
@@ -916,6 +917,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             user_id=user_id, username=username,
             allowed_tools=token_tools, tier=tier,
             token_allowed_hosts=token_hosts,
+            token_default_host=token_default_host,
         )
 
         # Scoped-session locks are cached like the default per-identity lock. We do NOT
@@ -972,12 +974,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
         tier = identity.tier if identity else None
         token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
+        token_default_host = getattr(identity, "default_host", "") if identity else ""
 
         result = await process_web_chat(
             bot, content, channel_id,
             user_id=user_id, username=username,
             allowed_tools=token_tools, tier=tier,
             token_allowed_hosts=token_hosts,
+            token_default_host=token_default_host,
             persist_channel_lock=False,  # ephemeral per-request channel — no lock to cache or leak
         )
 
@@ -3130,6 +3134,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             bad = [h for h in allowed_hosts if h not in valid_hosts]
             if bad:
                 return web.json_response({"error": f"unknown hosts: {', '.join(bad)}"}, status=400)
+        default_host = str(data.get("default_host") or "").strip()
+        if default_host:
+            if ham and default_host not in ham.available_hosts:
+                return web.json_response({"error": f"unknown default_host: {default_host}"}, status=400)
+            if isinstance(allowed_hosts, list) and default_host not in allowed_hosts:
+                return web.json_response({"error": "default_host must be in allowed_hosts"}, status=400)
         try:
             identity = await tm.create_token(
                 user_id=user_id,
@@ -3138,6 +3148,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 label=data.get("label") or "",
                 allowed_tools=allowed_tools,
                 allowed_hosts=allowed_hosts,
+                default_host=default_host,
             )
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=409)
@@ -3149,6 +3160,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "label": identity.label,
             "allowed_tools": identity.allowed_tools,
             "allowed_hosts": identity.allowed_hosts,
+            "default_host": identity.default_host,
         }, status=201)
 
     @routes.put("/api/tokens/{user_id}")
@@ -3165,7 +3177,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON"}, status=400)
         kwargs = {}
-        for field in ("username", "tier", "label", "allowed_tools", "allowed_hosts"):
+        for field in ("username", "tier", "label", "allowed_tools", "allowed_hosts", "default_host"):
             if field in data:
                 kwargs[field] = data[field]
         if "tier" in kwargs and kwargs["tier"] not in ("admin", "user", "guest"):
@@ -3183,6 +3195,19 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 bad = [h for h in kwargs["allowed_hosts"] if h not in valid_hosts]
                 if bad:
                     return web.json_response({"error": f"unknown hosts: {', '.join(bad)}"}, status=400)
+        if "default_host" in kwargs:
+            dh = str(kwargs["default_host"] or "").strip()
+            kwargs["default_host"] = dh
+            if dh:
+                ham = getattr(bot, "host_access_manager", None)
+                if ham and dh not in ham.available_hosts:
+                    return web.json_response({"error": f"unknown default_host: {dh}"}, status=400)
+                ah = kwargs.get("allowed_hosts")
+                if ah is None:
+                    existing = tm.get(uid)
+                    ah = existing.allowed_hosts if existing else None
+                if isinstance(ah, list) and dh not in ah:
+                    return web.json_response({"error": "default_host must be in allowed_hosts"}, status=400)
         if not kwargs:
             return web.json_response({"error": "no fields to update"}, status=400)
         identity = await tm.update_token(uid, **kwargs)

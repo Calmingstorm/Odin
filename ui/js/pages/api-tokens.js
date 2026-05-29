@@ -90,6 +90,17 @@ export default {
               </div>
             </div>
             <div>
+              <label class="text-xs text-gray-500 block mb-1">Default Host</label>
+              <select v-model="createForm.default_host" class="hm-input w-full text-sm"
+                      :disabled="createForm.host_mode === 'none'">
+                <option value="">Use host policy default</option>
+                <option v-for="host in createDefaultHostOptions" :key="'cdh-'+host" :value="host">
+                  {{ host }}
+                </option>
+              </select>
+              <p class="text-xs text-gray-500 mt-1">Used when API requests don't specify a host.</p>
+            </div>
+            <div>
               <label class="text-xs text-gray-500 block mb-1">Allowed Tools (comma-separated, leave empty for tier default)</label>
               <input v-model="createForm.allowed_tools_str" class="hm-input w-full text-sm"
                      placeholder="e.g. run_command, web_search, fetch_url" />
@@ -116,6 +127,7 @@ export default {
                   <th class="text-left">Label</th>
                   <th class="text-left">Tier</th>
                   <th class="text-left">Hosts</th>
+                  <th class="text-left">Default</th>
                   <th class="text-left">Tools</th>
                   <th class="text-left">Source</th>
                   <th class="text-right">Actions</th>
@@ -130,6 +142,9 @@ export default {
                   </td>
                   <td class="text-gray-400 text-xs">
                     {{ t.allowed_hosts === null || t.allowed_hosts === undefined ? 'default policy' : t.allowed_hosts.length === 0 ? 'no host access' : t.allowed_hosts.join(', ') }}
+                  </td>
+                  <td class="text-gray-400 text-xs font-mono">
+                    {{ t.default_host || 'policy' }}
                   </td>
                   <td class="text-gray-400 text-xs">
                     {{ t.allowed_tools && t.allowed_tools.length ? t.allowed_tools.length + ' tools' : 'tier default' }}
@@ -193,6 +208,16 @@ export default {
                 </div>
               </div>
               <div>
+                <label class="text-xs text-gray-500 block mb-1">Default Host</label>
+                <select v-model="editForm.default_host" class="hm-input w-full text-sm"
+                        :disabled="editForm.host_mode === 'none'">
+                  <option value="">Use host policy default</option>
+                  <option v-for="host in editDefaultHostOptions" :key="'edh-'+host" :value="host">
+                    {{ host }}
+                  </option>
+                </select>
+              </div>
+              <div>
                 <label class="text-xs text-gray-500 block mb-1">Allowed Tools (comma-separated, empty for tier default)</label>
                 <input v-model="editForm.allowed_tools_str" class="hm-input w-full text-sm" />
               </div>
@@ -228,12 +253,24 @@ export default {
 
     const createForm = ref({
       user_id: '', username: '', tier: 'admin', label: '',
-      host_mode: 'default', allowed_hosts: [], allowed_tools_str: '',
+      host_mode: 'default', allowed_hosts: [], default_host: '', allowed_tools_str: '',
     });
 
     const editForm = ref({
       username: '', tier: 'admin', label: '',
-      host_mode: 'default', allowed_hosts: [], allowed_tools_str: '',
+      host_mode: 'default', allowed_hosts: [], default_host: '', allowed_tools_str: '',
+    });
+
+    const createDefaultHostOptions = computed(() => {
+      if (createForm.value.host_mode === 'select') return createForm.value.allowed_hosts;
+      if (createForm.value.host_mode === 'none') return [];
+      return availableHosts.value;
+    });
+
+    const editDefaultHostOptions = computed(() => {
+      if (editForm.value.host_mode === 'select') return editForm.value.allowed_hosts;
+      if (editForm.value.host_mode === 'none') return [];
+      return availableHosts.value;
     });
 
     function showToast(msg, ok = true) {
@@ -298,9 +335,10 @@ export default {
           allowed_tools: tools.length ? tools : [],
         };
         if (hostPayload !== null) body.allowed_hosts = hostPayload;
+        body.default_host = createForm.value.default_host || '';
         const data = await api.post('/api/tokens', body);
         newToken.value = data.token;
-        createForm.value = { user_id: '', username: '', tier: 'admin', label: '', host_mode: 'default', allowed_hosts: [], allowed_tools_str: '' };
+        createForm.value = { user_id: '', username: '', tier: 'admin', label: '', host_mode: 'default', allowed_hosts: [], default_host: '', allowed_tools_str: '' };
         showCreate.value = false;
         showToast('Token created');
         await fetchData();
@@ -324,6 +362,7 @@ export default {
         label: t.label || '',
         host_mode: mode,
         allowed_hosts: Array.isArray(hosts) ? [...hosts] : [],
+        default_host: t.default_host || '',
         allowed_tools_str: (t.allowed_tools || []).join(', '),
       };
     }
@@ -343,6 +382,7 @@ export default {
         if (mode === 'none') body.allowed_hosts = [];
         else if (mode === 'select') body.allowed_hosts = editForm.value.allowed_hosts;
         else body.allowed_hosts = null;
+        body.default_host = editForm.value.default_host || '';
         await api.put('/api/tokens/' + encodeURIComponent(editing.value.user_id), body);
         editing.value = null;
         showToast('Token updated');
@@ -391,6 +431,7 @@ export default {
     return {
       loading, error, tokens, availableHosts, showCreate, creating,
       newToken, editing, saving, toast, createForm, editForm,
+      createDefaultHostOptions, editDefaultHostOptions,
       fetchData, tierBadge, toggleCreateHost, toggleEditHost,
       createToken, startEdit, saveEdit, confirmRegenerate, confirmDelete, copyToken,
     };
