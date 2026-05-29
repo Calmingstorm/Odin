@@ -67,6 +67,19 @@ def _safe_filename(name: str, max_len: int = 80) -> str:
     return _SAFE_FILENAME_RE.sub("_", name)[:max_len] or "export"
 
 
+# Caller-supplied chat session ids: opt-in, validated, and namespaced UNDER the
+# authenticated identity so one token can never address another token's history.
+# The charset is filename-safe (no path separators / control / whitespace) because
+# a channel id becomes a persisted session filename.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+def _scoped_chat_channel(user_id: str, session_id: str) -> str:
+    """Internal channel id for an authorized caller chat session. The
+    'web:{user}:session:' prefix keeps it owner-scoped and discoverable."""
+    return f"web:{user_id}:session:{session_id}"
+
+
 def _sanitize_error(msg: str) -> str:
     """Scrub secrets from error messages before returning to clients."""
     return scrub_output_secrets(str(msg))
@@ -877,11 +890,26 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
         identity = getattr(request, "_api_identity", None)
         user_id = identity.user_id if identity else "web-user"
-        channel_id = user_id
         username = identity.username if identity else "WebUser"
         tier = identity.tier if identity else None
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
         token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
+
+        # Optional caller-supplied session id for multi-request chat continuity.
+        # Omitted -> historical behavior (one history per identity). Supplied -> validated
+        # and namespaced UNDER the authenticated identity. It only controls conversation
+        # continuity + lock serialization; permissions, tier, tools/hosts, memory, and
+        # audit identity all stay keyed to the authenticated token, never the session id.
+        channel_id = user_id
+        session_id = data.get("session_id")
+        if session_id is not None:
+            session_id = session_id.strip() if isinstance(session_id, str) else ""
+            if not _SESSION_ID_RE.match(session_id):
+                return web.json_response(
+                    {"error": "invalid session_id (expected 1-128 chars of [A-Za-z0-9._:-])"},
+                    status=400,
+                )
+            channel_id = _scoped_chat_channel(user_id, session_id)
 
         result = await process_web_chat(
             bot, content, channel_id,
@@ -889,12 +917,19 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             allowed_tools=token_tools, tier=tier,
             token_allowed_hosts=token_hosts,
         )
+
+        # Scoped-session locks are cached like the default per-identity lock. We do NOT
+        # clean them up per-request: that races a waiter and can split one session across
+        # two lock objects (concurrent _do_process_web_chat). Bounding _web_channel_locks
+        # via a TTL/max-size sweep is a deliberate follow-up; correct serialization first.
         status = 200 if not result["is_error"] else 502
         resp = {
             "response": result["response"],
             "tools_used": result["tools_used"],
             "is_error": result["is_error"],
         }
+        if session_id is not None:
+            resp["session_id"] = session_id
         files = result.get("files", [])
         if files:
             resp["files"] = files
@@ -973,7 +1008,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         own_id = identity.user_id if identity else None
         sessions = []
         for cid, session in bot.sessions.items_snapshot():
-            if not is_admin and cid != own_id:
+            if not is_admin and cid != own_id and not cid.startswith(f"web:{own_id}:session:"):
                 continue
             # Build preview from last 2 messages
             preview = []
@@ -983,7 +1018,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                     text = text[:120] + "..."
                 preview.append({"role": m.role, "content": text})
             # Determine source type
-            source = "web" if cid.startswith("web-") else "discord"
+            source = "web" if cid.startswith(("web-", "web:")) else "discord"
             sessions.append({
                 "channel_id": cid,
                 "message_count": len(session.messages),
@@ -1051,7 +1086,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return None
         if getattr(identity, "tier", "admin") == "admin":
             return None
-        if identity.user_id != channel_id:
+        own_prefix = f"web:{identity.user_id}:session:"
+        if identity.user_id != channel_id and not channel_id.startswith(own_prefix):
             return web.json_response({"error": "access denied"}, status=403)
         return None
 
