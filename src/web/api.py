@@ -2818,11 +2818,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             path.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write_secure(path, _json.dumps(creds, indent=2))
 
-        # Auto-reload pool if available
-        pool = getattr(bot, "codex_client", None)
-        pool = getattr(pool, "auth", None) if pool else None
-        if pool:
-            pool.reload()
+        await bot.reload_codex_auth()
 
         return web.json_response({
             "status": "authenticated",
@@ -2889,15 +2885,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/codex/reload")
     async def codex_reload(_request: web.Request) -> web.Response:
-        pool = getattr(bot, "codex_client", None)
-        pool = getattr(pool, "auth", None) if pool else None
-        if pool is None:
-            return web.json_response({"error": "codex not configured"}, status=503)
-        pool.reload()
-        return web.json_response({
-            "status": "reloaded",
-            "account_count": pool.account_count,
-        })
+        result = await bot.reload_codex_auth()
+        status = 200 if result.get("configured") else 503
+        return web.json_response(result, status=status)
 
     @routes.put("/api/codex/account/{index}/label")
     async def codex_set_label(request: web.Request) -> web.Response:

@@ -450,8 +450,17 @@ class CodexAuthPool:
             log.info("Active Codex account switched to %s (#%d)", email, index)
 
     def reload(self) -> None:
-        """Reload the pool from the canonical credentials file."""
+        """Reload the pool from the canonical credentials file (sync compat)."""
         self._accounts.clear()
         self._current_index = 0
         self._init_accounts()
         log.info("Codex auth pool reloaded: %d account(s)", len(self._accounts))
+
+    async def reload_async(self) -> int:
+        """Reload under lock to avoid racing in-flight token operations."""
+        async with self._pool_lock:
+            self._accounts.clear()
+            self._init_accounts()
+            self._current_index = min(self._current_index, max(len(self._accounts) - 1, 0))
+            log.info("Codex auth pool reloaded (async): %d account(s)", len(self._accounts))
+            return len(self._accounts)
