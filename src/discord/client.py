@@ -412,45 +412,6 @@ class OdinBot(commands.Bot):
 
         self.scheduler = Scheduler(data_path="./data/schedules.json")
 
-    def _wire_codex_callbacks(self) -> None:
-        """Attach Codex-backed compaction and reflection callbacks."""
-        async def _codex_compaction(messages: list[dict], system: str) -> str:
-            if not self.codex_client:
-                raise RuntimeError("Codex client not configured")
-            return await self.codex_client.chat(messages=messages, system=system, max_tokens=300)
-
-        async def _codex_reflection(messages: list[dict], system: str) -> str:
-            if not self.codex_client:
-                raise RuntimeError("Codex client not configured")
-            return await self.codex_client.chat(messages=messages, system=system, max_tokens=500)
-
-        self.sessions.set_compaction_fn(_codex_compaction)
-        self.reflector.set_text_fn(_codex_reflection)
-
-    async def reload_codex_auth(self) -> dict:
-        """Reload Codex credentials and create the client if it was missing at boot."""
-        if not self.config.openai_codex.enabled:
-            self.codex_client = None
-            return {"configured": False, "reason": "openai_codex disabled in config"}
-
-        if self.codex_client is not None:
-            auth = getattr(self.codex_client, "auth", None)
-            if isinstance(auth, CodexAuthPool):
-                count = await auth.reload_async()
-                return {"configured": True, "reloaded": True, "accounts": count}
-
-        auth = CodexAuthPool(self.config.openai_codex.credentials_path)
-        if not auth.is_configured():
-            return {"configured": False, "reason": "credentials file missing or empty"}
-
-        self.codex_client = CodexChatClient(
-            auth=auth,
-            model=self.config.openai_codex.model,
-            max_tokens=self.config.openai_codex.max_tokens,
-        )
-        self._wire_codex_callbacks()
-        log.info("Codex client created via live reload (model: %s)", self.config.openai_codex.model)
-        return {"configured": True, "created": True, "accounts": len(auth._accounts)}
         # Audit logger — HMAC chain signing is on iff config.audit.hmac_key is set
         _audit_key = config.audit.hmac_key if getattr(config, "audit", None) else ""
         self.audit = AuditLogger(path="./data/audit.jsonl", hmac_key=_audit_key)
@@ -629,6 +590,48 @@ class OdinBot(commands.Bot):
         self._register_commands()
         self._init_allowed_webhook_ids()
         self._log_startup_config()
+
+    # ---------- Live Codex reload -----------------------------------------
+
+    def _wire_codex_callbacks(self) -> None:
+        """Attach Codex-backed compaction and reflection callbacks."""
+        async def _codex_compaction(messages: list[dict], system: str) -> str:
+            if not self.codex_client:
+                raise RuntimeError("Codex client not configured")
+            return await self.codex_client.chat(messages=messages, system=system, max_tokens=300)
+
+        async def _codex_reflection(messages: list[dict], system: str) -> str:
+            if not self.codex_client:
+                raise RuntimeError("Codex client not configured")
+            return await self.codex_client.chat(messages=messages, system=system, max_tokens=500)
+
+        self.sessions.set_compaction_fn(_codex_compaction)
+        self.reflector.set_text_fn(_codex_reflection)
+
+    async def reload_codex_auth(self) -> dict:
+        """Reload Codex credentials and create the client if it was missing at boot."""
+        if not self.config.openai_codex.enabled:
+            self.codex_client = None
+            return {"configured": False, "reason": "openai_codex disabled in config"}
+
+        if self.codex_client is not None:
+            auth = getattr(self.codex_client, "auth", None)
+            if isinstance(auth, CodexAuthPool):
+                count = await auth.reload_async()
+                return {"configured": True, "reloaded": True, "accounts": count}
+
+        auth = CodexAuthPool(self.config.openai_codex.credentials_path)
+        if not auth.is_configured():
+            return {"configured": False, "reason": "credentials file missing or empty"}
+
+        self.codex_client = CodexChatClient(
+            auth=auth,
+            model=self.config.openai_codex.model,
+            max_tokens=self.config.openai_codex.max_tokens,
+        )
+        self._wire_codex_callbacks()
+        log.info("Codex client created via live reload (model: %s)", self.config.openai_codex.model)
+        return {"configured": True, "created": True, "accounts": len(auth._accounts)}
 
     # ---------- Live aliases expected by the health checker / web UI -------
     # These forward to the Heimdall-style internal names. Keeping them as
