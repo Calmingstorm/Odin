@@ -66,6 +66,7 @@ class ApiTokenManager:
                     else:
                         log.warning("Skipping token %s: allowed_hosts must be a list of strings or null", user_id)
                         continue
+                    default_host = str(entry.get("default_host", ""))
                     identity = ApiTokenIdentity(
                         token="",
                         user_id=user_id,
@@ -74,6 +75,7 @@ class ApiTokenManager:
                         label=str(entry.get("label", "")),
                         allowed_tools=allowed_tools,
                         allowed_hosts=allowed_hosts,
+                        default_host=default_host,
                     )
                     self._tokens[user_id] = _StoredToken(token_hash, token_prefix, identity)
                 except Exception as e:
@@ -126,6 +128,7 @@ class ApiTokenManager:
         label: str = "",
         allowed_tools: list[str] | None = None,
         allowed_hosts: list[str] | None = None,
+        default_host: str = "",
     ) -> ApiTokenIdentity:
         """Generate a new token. Returns identity with raw token (shown once)."""
         async with self._lock:
@@ -140,6 +143,7 @@ class ApiTokenManager:
                 label=label,
                 allowed_tools=allowed_tools or [],
                 allowed_hosts=allowed_hosts,
+                default_host=default_host,
             )
             self._tokens[user_id] = _StoredToken(
                 token_hash=_hash_token(raw_token),
@@ -156,7 +160,7 @@ class ApiTokenManager:
             st = self._tokens.get(user_id)
             if st is None:
                 return None
-            for field in ("username", "tier", "label", "allowed_tools", "allowed_hosts"):
+            for field in ("username", "tier", "label", "allowed_tools", "allowed_hosts", "default_host"):
                 if field in kwargs:
                     setattr(st.identity, field, kwargs[field])
             self._save()

@@ -161,6 +161,7 @@ async def process_web_chat(
     allowed_tools: list[str] | None = None,
     tier: str | None = None,
     token_allowed_hosts: list[str] | None = None,
+    token_default_host: str = "",
     persist_channel_lock: bool = True,
 ) -> dict:
     """Process a web chat message through the Codex tool loop.
@@ -184,6 +185,7 @@ async def process_web_chat(
 
     tier_token = PermissionManager.set_request_tier(tier) if tier else None
     host_token = HostAccessManager.set_request_host_scope(token_allowed_hosts) if token_allowed_hosts is not None else None
+    default_host_token = HostAccessManager.set_request_default_host(token_default_host) if token_default_host else None
 
     try:
         if persist_channel_lock:
@@ -199,6 +201,8 @@ async def process_web_chat(
             PermissionManager.reset_request_tier(tier_token)
         if host_token is not None:
             HostAccessManager.reset_request_host_scope(host_token)
+        if default_host_token is not None:
+            HostAccessManager.reset_request_default_host(default_host_token)
 
 
 async def _do_process_web_chat(
