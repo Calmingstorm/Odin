@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -221,6 +221,7 @@ class TestProcessWebChat:
 
         bot._build_system_prompt = MagicMock(return_value="system prompt")
         bot._inject_tool_hints = AsyncMock(return_value="system prompt")
+        bot._set_status = AsyncMock()
         bot._process_with_tools = AsyncMock(return_value=(
             response,
             False,  # already_sent
@@ -272,6 +273,21 @@ class TestProcessWebChat:
         # User-facing error is intentionally generic (no internal details leaked)
         assert "Something went wrong" in result["response"]
         bot.sessions.remove_last_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_web_chat_ends_status_after_tool_processing_success(self):
+        bot = self._make_bot(response="done")
+        result = await process_web_chat(bot, "hello", "ch-1")
+        assert result["is_error"] is False
+        bot._set_status.assert_awaited_once_with(None, task_end=True)
+
+    @pytest.mark.asyncio
+    async def test_web_chat_ends_status_when_tool_processing_raises(self):
+        bot = self._make_bot()
+        bot._process_with_tools = AsyncMock(side_effect=RuntimeError("boom"))
+        result = await process_web_chat(bot, "hello", "ch-1")
+        assert result["is_error"] is True
+        bot._set_status.assert_awaited_once_with(None, task_end=True)
 
     @pytest.mark.asyncio
     async def test_files_returned(self):
