@@ -23,7 +23,7 @@ log = get_logger("web.chat")
 _msg_id_counter = itertools.count(int(time.time() * 1000))
 
 # Max content length for a single chat message
-MAX_CHAT_CONTENT_LEN = 4000
+MAX_CHAT_CONTENT_LEN = 32000
 
 
 class _NoOpContextManager:
