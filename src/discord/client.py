@@ -480,7 +480,7 @@ class OdinBot(commands.Bot):
         # record_failure as they operate.
         from ..health.subsystem_guard import SubsystemGuard
         self.subsystem_guard = SubsystemGuard()
-        for _name in ("codex", "ssh", "knowledge", "voice", "browser", "comfyui"):
+        for _name in ("llm", "codex", "ssh", "knowledge", "voice", "browser", "comfyui"):
             self.subsystem_guard.register(_name)
 
         # Audit signer — exposed as bot.audit_signer for tests/introspection.
@@ -1201,7 +1201,7 @@ class OdinBot(commands.Bot):
             await interaction.response.send_message(
                 f"**Odin Status**\n"
                 f"{llm_status}\n"
-                f"Codex: {codex_configured} | Ollama: {ollama_configured}"
+                f"Codex: {codex_configured} | Ollama: {ollama_configured}\n"
                 f"{voice_status}"
             )
 
@@ -1307,13 +1307,16 @@ class OdinBot(commands.Bot):
         - cost_tracker.record() captures token usage on every successful call
         - subsystem_guard.record_success / record_failure tracks codex health
         """
+        guard_key = "llm"
         if self.subsystem_guard is not None:
-            err = self.subsystem_guard.check("codex")
+            err = self.subsystem_guard.check(guard_key)
             if err:
-                raise RuntimeError(f"Codex subsystem unavailable: {err}")
+                raise RuntimeError(f"LLM subsystem unavailable: {err}")
 
-        # Pick which client to use. Default = strong primary client.
-        client = self.codex_client
+        # Pick which client to use. Default = active provider.
+        client = self.llm_client
+        if client is None:
+            raise RuntimeError("No LLM provider configured")
         if (
             user_message
             and self.model_router is not None
@@ -1336,16 +1339,17 @@ class OdinBot(commands.Bot):
             )
         except Exception as exc:
             if self.subsystem_guard is not None:
-                self.subsystem_guard.record_failure("codex", str(exc))
+                self.subsystem_guard.record_failure(guard_key, str(exc))
             raise
         if self.subsystem_guard is not None:
-            self.subsystem_guard.record_success("codex")
+            self.subsystem_guard.record_success(guard_key)
         if self.cost_tracker is not None:
             try:
+                active_model = getattr(self.llm_client, "model", "unknown")
                 self.cost_tracker.record(
                     int(getattr(resp, "input_tokens", 0) or 0),
                     int(getattr(resp, "output_tokens", 0) or 0),
-                    model=getattr(self.config.openai_codex, "model", ""),
+                    model=active_model,
                     user_id=user_id,
                     channel_id=channel_id,
                     tools_used=tools_used or [],
@@ -1546,13 +1550,20 @@ class OdinBot(commands.Bot):
             except Exception:
                 log.exception("Error closing auxiliary LLM client")
 
-        # Close Codex/LLM HTTP client session
+        # Close LLM HTTP client sessions
         codex = getattr(self, "codex_client", None)
         if codex is not None:
             try:
                 await codex.close()
             except Exception:
                 log.exception("Error closing Codex client")
+
+        ollama = getattr(self, "ollama_client", None)
+        if ollama is not None:
+            try:
+                await ollama.close()
+            except Exception:
+                log.exception("Error closing Ollama client")
 
         # Shut down Playwright browser
         browser = getattr(self, "browser_manager", None)
@@ -2116,18 +2127,18 @@ class OdinBot(commands.Bot):
                             "content": image_blocks + [{"type": "text", "text": text_content}],
                         }
                     log.info("Attached %d image(s) to message for Claude vision", len(image_blocks))
-                if self.codex_client:
+                if self.llm_client:
                     chat_prompt = self._build_chat_system_prompt(channel=message.channel, user_id=user_id)
                     try:
-                        response = await self.codex_client.chat(
+                        response = await self.llm_client.chat(
                             messages=history,
                             system=chat_prompt,
                         )
                         if not response:
                             response = _EMPTY_RESPONSE_FALLBACK
-                        log.info("Codex response: %r", response[:200])
+                        log.info("LLM response: %r", response[:200])
                     except Exception as e:
-                        log.warning("Codex chat failed: %s", e)
+                        log.warning("LLM chat failed: %s", e)
                         response = "Chat is temporarily unavailable. Please try again in a moment."
                         is_error = True
                 else:
@@ -2136,7 +2147,7 @@ class OdinBot(commands.Bot):
                     is_error = True
             else:
                 # Everyone else: Codex with ALL tools
-                if not self.codex_client:
+                if not self.llm_client:
                     await self._send_with_retry(
                         message,
                         "No tool backend available. Please try again later.",
@@ -2179,7 +2190,7 @@ class OdinBot(commands.Bot):
                     is_error = True
                     handoff = False
                 # Skill requested Codex handoff — route skill result to Codex for response
-                if handoff and self.codex_client and not is_error:
+                if handoff and self.llm_client and not is_error:
                     log.info("Skill handoff to Codex for response")
                     _skill_response = response  # Save before overwriting
                     chat_prompt = self._build_chat_system_prompt(channel=message.channel, user_id=user_id)
@@ -2190,7 +2201,7 @@ class OdinBot(commands.Bot):
                         {"role": "user", "content": "Respond to the user based on the tool result above. Be conversational and helpful."},
                     ]
                     try:
-                        response = await self.codex_client.chat(
+                        response = await self.llm_client.chat(
                             messages=codex_messages,
                             system=chat_prompt,
                         )
@@ -2340,7 +2351,7 @@ class OdinBot(commands.Bot):
 
         Returns (is_complete, reason).  reason is non-empty only for INCOMPLETE.
         """
-        if not self.codex_client:
+        if not self.llm_client:
             return True, ""
 
         if "start_loop" in tools_used:
@@ -2358,7 +2369,7 @@ class OdinBot(commands.Bot):
 
         try:
             raw = await asyncio.wait_for(
-                self.codex_client.chat(
+                self.llm_client.chat(
                     messages=[{"role": "user", "content": classifier_user_msg}],
                     system=self._CLASSIFIER_SYSTEM_PROMPT,
                 ),
@@ -3155,7 +3166,7 @@ class OdinBot(commands.Bot):
             # Codex to handle the response instead of another tool-loop iteration.
             tool_names_this_round = [b.name for b in tool_calls]
             if (
-                self.codex_client
+                self.llm_client
                 and all(self.skill_manager.should_handoff_to_codex(n) is True for n in tool_names_this_round)
             ):
                 # Collect skill results as context for Codex
@@ -3589,8 +3600,8 @@ class OdinBot(commands.Bot):
         digest_messages = [{"role": "user", "content": f"Summarize this infrastructure status report concisely. Highlight any issues, warnings, or anomalies. If everything looks healthy, say so briefly.\n\n{raw}"}]
         digest_system = "You are a concise infrastructure report summarizer. Output a short summary with key findings."
         try:
-            if self.codex_client:
-                summary = await self.codex_client.chat(
+            if self.llm_client:
+                summary = await self.llm_client.chat(
                     messages=digest_messages, system=digest_system, max_tokens=500,
                 )
             else:
@@ -3728,9 +3739,9 @@ class OdinBot(commands.Bot):
 
         # Build Codex callback for conversational follow-up
         codex_cb = None
-        if self.codex_client:
+        if self.llm_client:
             async def _codex_followup(messages: list[dict], system: str, max_tokens: int) -> str:
-                return await self.codex_client.chat(
+                return await self.llm_client.chat(
                     messages=messages, system=system, max_tokens=max_tokens,
                 )
             codex_cb = _codex_followup
@@ -3887,7 +3898,7 @@ class OdinBot(commands.Bot):
         if not label or not goal:
             return "Both 'label' and 'goal' are required."
 
-        if not self.codex_client:
+        if not self.llm_client:
             return "Error: Codex client not available."
 
         channel = getattr(message, "channel", message)
@@ -3915,7 +3926,7 @@ class OdinBot(commands.Bot):
         async def _iteration_cb(
             messages: list[dict], sys_prompt: str, tool_defs: list[dict],
         ) -> dict:
-            resp = await self.codex_client.chat_with_tools(
+            resp = await self.llm_client.chat_with_tools(
                 messages=messages, system=sys_prompt, tools=tool_defs,
             )
             return {
@@ -4082,7 +4093,7 @@ class OdinBot(commands.Bot):
         if loop_info.status != "running":
             return f"Error: Loop '{loop_id}' is not running (status: {loop_info.status})."
 
-        if not self.codex_client:
+        if not self.llm_client:
             return "Error: Codex client not available."
 
         channel = getattr(message, "channel", message)
@@ -4097,7 +4108,7 @@ class OdinBot(commands.Bot):
 
         # Build iteration/tool callbacks (same pattern as _handle_spawn_agent)
         async def _iteration_cb(messages, sys, tool_defs):
-            resp = await self.codex_client.chat_with_tools(
+            resp = await self.llm_client.chat_with_tools(
                 messages=messages, system=sys, tools=tool_defs,
             )
             return {
@@ -4177,7 +4188,7 @@ class OdinBot(commands.Bot):
         Simplified version of _process_with_tools for autonomous loops:
         same Codex + tool execution pipeline but without detection retries.
         """
-        if not self.codex_client:
+        if not self.llm_client:
             return "Codex client not available."
 
         # Resolve requester name for audit logging and message proxy
@@ -4213,7 +4224,7 @@ class OdinBot(commands.Bot):
 
         for _iteration in range(loop_cap):
             try:
-                response = await self.codex_client.chat_with_tools(
+                response = await self.llm_client.chat_with_tools(
                     messages=messages, system=system_prompt, tools=tools or [],
                 )
             except Exception as e:

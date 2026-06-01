@@ -65,9 +65,20 @@ class CodexChatClient:
             )
         return self._session
 
+    @property
+    def provider_name(self) -> str:
+        return "codex"
+
+    @property
+    def model_name(self) -> str:
+        return self.model
+
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
+
+    def pool_stats(self) -> dict:
+        return self.get_pool_metrics()
 
     def get_pool_metrics(self) -> dict:
         """Return HTTP connection pool metrics for observability."""

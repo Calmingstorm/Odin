@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 
 import yaml
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
@@ -273,6 +275,13 @@ class OllamaConfig(BaseModel):
     timeout: int = 300
     api_key: str = ""  # Optional bearer token for remote instances
 
+    @field_validator("base_url")
+    @classmethod
+    def _validate_url(cls, v):
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("base_url must start with http:// or https://")
+        return v
+
     @field_validator("timeout")
     @classmethod
     def _timeout_positive(cls, v):
@@ -280,9 +289,23 @@ class OllamaConfig(BaseModel):
             raise ValueError("timeout must be >= 10")
         return v
 
+    @field_validator("max_tokens")
+    @classmethod
+    def _max_tokens_range(cls, v):
+        if v < 1 or v > 128000:
+            raise ValueError("max_tokens must be between 1 and 128000")
+        return v
+
+    @field_validator("model")
+    @classmethod
+    def _model_nonempty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("model must not be empty")
+        return v
+
 
 class LLMProviderConfig(BaseModel):
-    active_provider: str = "codex"  # "codex" or "ollama"
+    active_provider: Literal["codex", "ollama"] = "codex"
 
 
 class WebhookConfig(BaseModel):

@@ -1,15 +1,19 @@
 """Ollama LLM client — local/remote Ollama instances.
 
-Implements the LLMProvider interface for Ollama's /api/chat endpoint.
+Implements the LLMProvider interface for Ollama's native /api/chat endpoint.
+Uses native format (not /v1 compat) for reliable tool calling.
 Supports tool calling for models that advertise it (Qwen, Llama 3.1+, etc.).
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import uuid
 
 import aiohttp
 
 from ..odin_log import get_logger
+from .backoff import compute_backoff, DEFAULT_MAX_RETRIES, DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY
 from .circuit_breaker import CircuitBreaker
 from .cost_tracker import estimate_tokens
 from .provider import LLMProvider
@@ -28,12 +32,18 @@ class OllamaClient(LLMProvider):
         max_tokens: int = 4096,
         timeout: int = 300,
         api_key: str = "",
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_base_delay: float = DEFAULT_BASE_DELAY,
+        retry_max_delay: float = DEFAULT_MAX_DELAY,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.api_key = api_key
+        self.max_retries = max_retries
+        self.retry_base_delay = retry_base_delay
+        self.retry_max_delay = retry_max_delay
         self.breaker = CircuitBreaker("ollama_api")
         self._session: aiohttp.ClientSession | None = None
         self._total_requests: int = 0
@@ -89,12 +99,17 @@ class OllamaClient(LLMProvider):
                 })
                 continue
 
+            images = []
             if isinstance(content, list):
                 text_parts = []
                 for block in content:
                     if isinstance(block, dict):
                         if block.get("type") == "text":
                             text_parts.append(block["text"])
+                        elif block.get("type") == "image":
+                            source = block.get("source", {})
+                            if source.get("type") == "base64":
+                                images.append(source.get("data", ""))
                         elif block.get("type") == "tool_use":
                             pass
                         elif block.get("type") == "tool_result":
@@ -107,7 +122,10 @@ class OllamaClient(LLMProvider):
             if role == "tool":
                 ollama_role = "tool"
 
-            ollama_messages.append({"role": ollama_role, "content": content})
+            entry: dict = {"role": ollama_role, "content": content}
+            if images:
+                entry["images"] = images
+            ollama_messages.append(entry)
 
         return ollama_messages
 
@@ -125,14 +143,48 @@ class OllamaClient(LLMProvider):
             })
         return ollama_tools
 
+    async def _request_with_retry(self, body: dict) -> dict:
+        """Send a request to Ollama with retry logic."""
+        self.breaker.check()
+        session = await self._get_session()
+        self._total_requests += 1
+        url = f"{self.base_url}/api/chat"
+        last_error = None
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                async with session.post(url, json=body, headers=self._headers()) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        self.breaker.record_success()
+                        return data
+                    text = await resp.text()
+                    if resp.status in (500, 502, 503, 504) and attempt < self.max_retries:
+                        last_error = RuntimeError(f"Ollama {resp.status}: {text[:300]}")
+                        delay = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
+                        log.warning("Ollama %d (attempt %d/%d), retrying in %.1fs",
+                                    resp.status, attempt + 1, self.max_retries + 1, delay)
+                        await asyncio.sleep(delay)
+                        continue
+                    self.breaker.record_failure()
+                    raise RuntimeError(f"Ollama {resp.status}: {text[:500]}")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                last_error = e
+                self.breaker.record_failure()
+                if attempt < self.max_retries:
+                    delay = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
+                    log.warning("Ollama connection error (attempt %d/%d): %s, retrying in %.1fs",
+                                attempt + 1, self.max_retries + 1, e, delay)
+                    await asyncio.sleep(delay)
+                    continue
+                raise RuntimeError(f"Ollama connection error after {self.max_retries + 1} attempts: {e}") from e
+
+        raise RuntimeError(f"Ollama request failed after {self.max_retries + 1} attempts: {last_error}")
+
     async def chat(
         self, messages: list[dict], system: str,
         max_tokens: int | None = None,
     ) -> str:
-        self.breaker.check()
-        session = await self._get_session()
-        self._total_requests += 1
-
         body = {
             "model": self.model,
             "messages": self._convert_messages(messages, system),
@@ -141,30 +193,13 @@ class OllamaClient(LLMProvider):
                 "num_predict": max_tokens or self.max_tokens,
             },
         }
-
-        url = f"{self.base_url}/api/chat"
-        try:
-            async with session.post(url, json=body, headers=self._headers()) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    self.breaker.record_failure()
-                    raise RuntimeError(f"Ollama {resp.status}: {text[:500]}")
-
-                data = await resp.json()
-                self.breaker.record_success()
-                return data.get("message", {}).get("content", "")
-        except aiohttp.ClientError as e:
-            self.breaker.record_failure()
-            raise RuntimeError(f"Ollama connection error: {e}") from e
+        data = await self._request_with_retry(body)
+        return data.get("message", {}).get("content", "")
 
     async def chat_with_tools(
         self, messages: list[dict], system: str,
         tools: list[dict],
     ) -> LLMResponse:
-        self.breaker.check()
-        session = await self._get_session()
-        self._total_requests += 1
-
         body = {
             "model": self.model,
             "messages": self._convert_messages(messages, system),
@@ -174,21 +209,8 @@ class OllamaClient(LLMProvider):
                 "num_predict": self.max_tokens,
             },
         }
-
-        url = f"{self.base_url}/api/chat"
-        try:
-            async with session.post(url, json=body, headers=self._headers()) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    self.breaker.record_failure()
-                    raise RuntimeError(f"Ollama {resp.status}: {text[:500]}")
-
-                data = await resp.json()
-                self.breaker.record_success()
-                return self._parse_response(data)
-        except aiohttp.ClientError as e:
-            self.breaker.record_failure()
-            raise RuntimeError(f"Ollama connection error: {e}") from e
+        data = await self._request_with_retry(body)
+        return self._parse_response(data)
 
     def _parse_response(self, data: dict) -> LLMResponse:
         """Parse Ollama response into LLMResponse."""
@@ -197,20 +219,26 @@ class OllamaClient(LLMProvider):
         tool_calls_raw = message.get("tool_calls", [])
 
         tool_calls = []
-        for i, tc in enumerate(tool_calls_raw):
+        for tc in tool_calls_raw:
             fn = tc.get("function", {})
+            args = fn.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    args = {"raw": args}
             tool_calls.append(ToolCall(
-                id=f"ollama_call_{i}",
+                id=f"ollama_{uuid.uuid4().hex[:12]}",
                 name=fn.get("name", ""),
-                input=fn.get("arguments", {}),
+                input=args,
             ))
 
         stop_reason = "tool_use" if tool_calls else "end_turn"
 
-        input_tokens = data.get("prompt_eval_count", 0)
-        output_tokens = data.get("eval_count", 0)
+        input_tokens = data.get("prompt_eval_count", 0) or 0
+        output_tokens = data.get("eval_count", 0) or 0
         if not input_tokens:
-            input_tokens = estimate_tokens(str(data.get("prompt", "")))
+            input_tokens = estimate_tokens(text) * 3
         if not output_tokens:
             output_tokens = estimate_tokens(text)
 
@@ -235,11 +263,15 @@ class OllamaClient(LLMProvider):
                     return {"healthy": False, "error": f"HTTP {resp.status}"}
                 data = await resp.json()
                 models = [m.get("name", "") for m in data.get("models", [])]
+                model_available = self.model in models
+                if not model_available:
+                    base_name = self.model.split(":")[0]
+                    model_available = any(m.startswith(base_name + ":") for m in models)
                 return {
                     "healthy": True,
                     "base_url": self.base_url,
                     "models": models,
-                    "model_available": self.model in models,
+                    "model_available": model_available,
                     "active_model": self.model,
                 }
         except Exception as e:
