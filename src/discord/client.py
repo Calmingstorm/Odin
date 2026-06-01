@@ -26,7 +26,7 @@ from ..agents import AgentManager, LoopAgentBridge
 from ..agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ..tools.autonomous_loop import LoopManager
 from ..learning import ConversationReflector
-from ..llm import CircuitOpenError, CodexAuth, CodexChatClient
+from ..llm import CircuitOpenError, CodexAuth, CodexChatClient, OllamaClient
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..llm.system_prompt import build_system_prompt, build_chat_system_prompt
@@ -393,22 +393,25 @@ class OdinBot(commands.Bot):
                     max_tokens=config.openai_codex.max_tokens,
                 )
                 log.info("Codex backend enabled (model: %s)", config.openai_codex.model)
-
-                # Use Codex for session compaction
-                async def _codex_compaction(messages: list[dict], system: str) -> str:
-                    return await self.codex_client.chat(
-                        messages=messages, system=system, max_tokens=300,
-                    )
-                self.sessions.set_compaction_fn(_codex_compaction)
-
-                # Use Codex for learning reflection
-                async def _codex_reflection(messages: list[dict], system: str) -> str:
-                    return await self.codex_client.chat(
-                        messages=messages, system=system, max_tokens=500,
-                    )
-                self.reflector.set_text_fn(_codex_reflection)
             else:
                 log.warning("Codex enabled in config but no credentials found. Run scripts/codex_login.py")
+
+        # Initialize Ollama client if configured
+        self.ollama_client: OllamaClient | None = None
+        ollama_cfg = getattr(config, "ollama", None)
+        if ollama_cfg and ollama_cfg.enabled:
+            self.ollama_client = OllamaClient(
+                base_url=ollama_cfg.base_url,
+                model=ollama_cfg.model,
+                max_tokens=ollama_cfg.max_tokens,
+                timeout=ollama_cfg.timeout,
+                api_key=ollama_cfg.api_key,
+            )
+            log.info("Ollama backend enabled (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url)
+
+        # Wire LLM callbacks to whichever provider is active
+        if self.llm_client is not None:
+            self._wire_llm_callbacks()
 
         self.scheduler = Scheduler(data_path="./data/schedules.json")
 
@@ -591,22 +594,39 @@ class OdinBot(commands.Bot):
         self._init_allowed_webhook_ids()
         self._log_startup_config()
 
-    # ---------- Live Codex reload -----------------------------------------
+    # ---------- LLM provider abstraction ------------------------------------
+
+    @property
+    def llm_client(self):
+        """Return whichever LLM provider is currently active."""
+        provider_cfg = getattr(self.config, "llm_provider", None)
+        active = provider_cfg.active_provider if provider_cfg else "codex"
+        if active == "ollama" and self.ollama_client is not None:
+            return self.ollama_client
+        return self.codex_client
+
+    def _wire_llm_callbacks(self) -> None:
+        """Attach LLM-backed compaction and reflection callbacks using the active provider."""
+        async def _llm_compaction(messages: list[dict], system: str) -> str:
+            client = self.llm_client
+            if not client:
+                raise RuntimeError("No LLM provider configured")
+            return await client.chat(messages=messages, system=system, max_tokens=300)
+
+        async def _llm_reflection(messages: list[dict], system: str) -> str:
+            client = self.llm_client
+            if not client:
+                raise RuntimeError("No LLM provider configured")
+            return await client.chat(messages=messages, system=system, max_tokens=500)
+
+        self.sessions.set_compaction_fn(_llm_compaction)
+        self.reflector.set_text_fn(_llm_reflection)
 
     def _wire_codex_callbacks(self) -> None:
-        """Attach Codex-backed compaction and reflection callbacks."""
-        async def _codex_compaction(messages: list[dict], system: str) -> str:
-            if not self.codex_client:
-                raise RuntimeError("Codex client not configured")
-            return await self.codex_client.chat(messages=messages, system=system, max_tokens=300)
+        """Legacy alias — routes through provider abstraction."""
+        self._wire_llm_callbacks()
 
-        async def _codex_reflection(messages: list[dict], system: str) -> str:
-            if not self.codex_client:
-                raise RuntimeError("Codex client not configured")
-            return await self.codex_client.chat(messages=messages, system=system, max_tokens=500)
-
-        self.sessions.set_compaction_fn(_codex_compaction)
-        self.reflector.set_text_fn(_codex_reflection)
+    # ---------- Live Codex reload -----------------------------------------
 
     async def reload_codex_auth(self) -> dict:
         """Reload Codex credentials and create the client if it was missing at boot."""
@@ -629,9 +649,54 @@ class OdinBot(commands.Bot):
             model=self.config.openai_codex.model,
             max_tokens=self.config.openai_codex.max_tokens,
         )
-        self._wire_codex_callbacks()
+        self._wire_llm_callbacks()
         log.info("Codex client created via live reload (model: %s)", self.config.openai_codex.model)
         return {"configured": True, "created": True, "accounts": len(auth._accounts)}
+
+    # ---------- Live Ollama reload ----------------------------------------
+
+    async def reload_ollama(self) -> dict:
+        """Reload Ollama client from current config."""
+        ollama_cfg = getattr(self.config, "ollama", None)
+        if not ollama_cfg or not ollama_cfg.enabled:
+            if self.ollama_client:
+                await self.ollama_client.close()
+            self.ollama_client = None
+            return {"configured": False, "reason": "ollama disabled in config"}
+
+        if self.ollama_client:
+            await self.ollama_client.close()
+
+        self.ollama_client = OllamaClient(
+            base_url=ollama_cfg.base_url,
+            model=ollama_cfg.model,
+            max_tokens=ollama_cfg.max_tokens,
+            timeout=ollama_cfg.timeout,
+            api_key=ollama_cfg.api_key,
+        )
+        self._wire_llm_callbacks()
+        log.info("Ollama client reloaded (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url)
+
+        health = await self.ollama_client.health_check()
+        return {"configured": True, "health": health}
+
+    async def switch_llm_provider(self, provider: str) -> dict:
+        """Switch the active LLM provider at runtime."""
+        if provider not in ("codex", "ollama"):
+            return {"error": f"Unknown provider: {provider}"}
+
+        if provider == "codex" and not self.codex_client:
+            return {"error": "Codex not configured — authenticate first"}
+        if provider == "ollama" and not self.ollama_client:
+            return {"error": "Ollama not configured — enable and set base_url first"}
+
+        self.config.llm_provider.active_provider = provider
+        self._wire_llm_callbacks()
+
+        client = self.llm_client
+        model = getattr(client, "model", "unknown") if client else "none"
+        log.info("LLM provider switched to %s (model: %s)", provider, model)
+        return {"active_provider": provider, "model": model}
 
     # ---------- Live aliases expected by the health checker / web UI -------
     # These forward to the Heimdall-style internal names. Keeping them as
@@ -1123,10 +1188,20 @@ class OdinBot(commands.Bot):
                     voice_status = f"\nVoice: Connected to **{ch.name}**" if ch else "\nVoice: Connected"
                 else:
                     voice_status = "\nVoice: Not connected"
-            codex_status = "Codex: " + ("enabled" if self.codex_client else "not configured")
+            provider_cfg = getattr(self.config, "llm_provider", None)
+            active = provider_cfg.active_provider if provider_cfg else "codex"
+            client = self.llm_client
+            if client:
+                model = getattr(client, "model", "unknown")
+                llm_status = f"LLM: **{active}** ({model})"
+            else:
+                llm_status = "LLM: not configured"
+            codex_configured = "yes" if self.codex_client else "no"
+            ollama_configured = "yes" if self.ollama_client else "no"
             await interaction.response.send_message(
                 f"**Odin Status**\n"
-                f"{codex_status}"
+                f"{llm_status}\n"
+                f"Codex: {codex_configured} | Ollama: {ollama_configured}"
                 f"{voice_status}"
             )
 

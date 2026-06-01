@@ -2984,6 +2984,121 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         })
 
     # ------------------------------------------------------------------
+    # LLM provider management
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/llm/status")
+    async def llm_status(_request: web.Request) -> web.Response:
+        provider_cfg = getattr(bot.config, "llm_provider", None)
+        active = provider_cfg.active_provider if provider_cfg else "codex"
+
+        codex_configured = bot.codex_client is not None
+        ollama_configured = bot.ollama_client is not None
+
+        result = {
+            "active_provider": active,
+            "codex": {
+                "configured": codex_configured,
+                "enabled": bot.config.openai_codex.enabled,
+                "model": bot.config.openai_codex.model if codex_configured else None,
+            },
+            "ollama": {
+                "configured": ollama_configured,
+                "enabled": getattr(bot.config, "ollama", None) is not None and bot.config.ollama.enabled,
+                "model": bot.config.ollama.model if ollama_configured else None,
+                "base_url": bot.config.ollama.base_url if ollama_configured else None,
+            },
+        }
+
+        client = bot.llm_client
+        if client:
+            result["active_model"] = getattr(client, "model", "unknown")
+            result["active_provider_name"] = getattr(client, "provider_name", active)
+
+        return web.json_response(result)
+
+    @routes.post("/api/llm/switch")
+    async def llm_switch(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        provider = body.get("provider", "")
+        if provider not in ("codex", "ollama"):
+            return web.json_response({"error": "provider must be 'codex' or 'ollama'"}, status=400)
+
+        result = await bot.switch_llm_provider(provider)
+        if "error" in result:
+            return web.json_response(result, status=400)
+        return web.json_response(result)
+
+    @routes.get("/api/ollama/status")
+    async def ollama_status(_request: web.Request) -> web.Response:
+        client = getattr(bot, "ollama_client", None)
+        if client is None:
+            return web.json_response({"configured": False, "enabled": False})
+
+        health = await client.health_check()
+        return web.json_response({
+            "configured": True,
+            "enabled": True,
+            "model": client.model,
+            "base_url": client.base_url,
+            "health": health,
+            "stats": client.pool_stats(),
+        })
+
+    @routes.post("/api/ollama/reload")
+    async def ollama_reload(_request: web.Request) -> web.Response:
+        result = await bot.reload_ollama()
+        status = 200 if result.get("configured") else 503
+        return web.json_response(result, status=status)
+
+    @routes.get("/api/ollama/models")
+    async def ollama_models(_request: web.Request) -> web.Response:
+        client = getattr(bot, "ollama_client", None)
+        if client is None:
+            return web.json_response({"error": "Ollama not configured"}, status=503)
+
+        try:
+            import aiohttp as _aiohttp
+            session = await client._get_session()
+            async with session.get(
+                f"{client.base_url}/api/tags",
+                headers=client._headers(),
+                timeout=_aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return web.json_response({"error": f"HTTP {resp.status}"}, status=502)
+                data = await resp.json()
+                return web.json_response({
+                    "models": data.get("models", []),
+                    "active_model": client.model,
+                })
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=502)
+
+    @routes.post("/api/ollama/model")
+    async def ollama_set_model(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        model = body.get("model", "")
+        if not model:
+            return web.json_response({"error": "model is required"}, status=400)
+
+        client = getattr(bot, "ollama_client", None)
+        if client is None:
+            return web.json_response({"error": "Ollama not configured"}, status=503)
+
+        client.model = model
+        bot.config.ollama.model = model
+        return web.json_response({"status": "updated", "model": model})
+
+    # ------------------------------------------------------------------
     # Host access control
     # ------------------------------------------------------------------
 

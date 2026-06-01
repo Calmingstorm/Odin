@@ -1,0 +1,468 @@
+import { api } from '../api.js';
+
+const { ref, onMounted, onUnmounted } = Vue;
+
+export default {
+  template: `
+    <div class="p-6 page-fade-in">
+      <div class="flex items-center justify-between mb-4">
+        <h1 class="text-xl font-semibold">LLM Configuration</h1>
+        <button @click="fetchAll" class="btn btn-ghost text-xs" :disabled="loading">
+          {{ loading ? 'Loading...' : 'Refresh' }}
+        </button>
+      </div>
+      <p class="text-xs text-gray-500 mb-6">
+        Configure which LLM backend Odin uses. Switch between OpenAI Codex (ChatGPT subscription)
+        and Ollama (local/remote open-source models) at any time.
+      </p>
+
+      <div v-if="loading && !llmStatus" class="space-y-2">
+        <div v-for="n in 3" :key="n" class="skeleton skeleton-row"></div>
+      </div>
+
+      <div v-else class="space-y-6">
+
+        <!-- ==================== Active Provider ==================== -->
+        <div class="hm-card">
+          <h2 class="text-sm font-semibold text-gray-300 mb-3">Active Provider</h2>
+          <div v-if="llmStatus" class="space-y-3">
+            <div class="flex items-center gap-4">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="radio" value="codex" v-model="selectedProvider"
+                       :disabled="!llmStatus.codex.configured"
+                       class="accent-indigo-500" />
+                <span class="text-sm" :class="llmStatus.codex.configured ? 'text-gray-200' : 'text-gray-500'">
+                  Codex (OpenAI)
+                </span>
+                <span v-if="!llmStatus.codex.configured" class="text-xs text-yellow-500">— not configured</span>
+                <span v-else-if="llmStatus.codex.configured" class="text-xs text-gray-500">
+                  {{ llmStatus.codex.model }}
+                </span>
+                <span v-if="llmStatus.active_provider === 'codex'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">active</span>
+              </label>
+            </div>
+            <div class="flex items-center gap-4">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="radio" value="ollama" v-model="selectedProvider"
+                       :disabled="!llmStatus.ollama.configured"
+                       class="accent-indigo-500" />
+                <span class="text-sm" :class="llmStatus.ollama.configured ? 'text-gray-200' : 'text-gray-500'">
+                  Ollama (Local/Remote)
+                </span>
+                <span v-if="!llmStatus.ollama.configured" class="text-xs text-yellow-500">— not configured</span>
+                <span v-else-if="llmStatus.ollama.configured" class="text-xs text-gray-500">
+                  {{ llmStatus.ollama.model }}
+                </span>
+                <span v-if="llmStatus.active_provider === 'ollama'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">active</span>
+              </label>
+            </div>
+            <div class="flex items-center gap-3 mt-2">
+              <button @click="switchProvider" class="btn btn-primary text-xs"
+                      :disabled="switching || selectedProvider === llmStatus.active_provider">
+                {{ switching ? 'Switching...' : 'Switch Provider' }}
+              </button>
+              <span v-if="llmStatus.active_model" class="text-xs text-gray-400">
+                Current: <code class="bg-gray-800 px-1 rounded">{{ llmStatus.active_model }}</code>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ==================== Ollama Section ==================== -->
+        <div class="hm-card">
+          <h2 class="text-sm font-semibold text-gray-300 mb-3">Ollama</h2>
+          <div class="space-y-4">
+            <!-- Health -->
+            <div class="flex items-center gap-2 text-sm">
+              <template v-if="ollamaStatus.configured">
+                <span v-if="ollamaStatus.health && ollamaStatus.health.healthy" class="text-green-400">● Connected</span>
+                <span v-else class="text-red-400">● Unreachable</span>
+                <span class="text-gray-500 text-xs">({{ ollamaStatus.base_url }})</span>
+              </template>
+              <span v-else class="text-gray-500">● Not configured</span>
+            </div>
+
+            <!-- Model selector -->
+            <div v-if="ollamaStatus.configured && ollamaModels.length" class="space-y-2">
+              <label class="text-xs text-gray-400">Model</label>
+              <div class="flex items-center gap-2">
+                <select v-model="ollamaSelectedModel"
+                        class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200 min-w-48">
+                  <option v-for="m in ollamaModels" :key="m.name" :value="m.name">
+                    {{ m.name }} ({{ formatSize(m.size) }})
+                  </option>
+                </select>
+                <button @click="setOllamaModel" class="btn btn-primary text-xs"
+                        :disabled="settingModel || ollamaSelectedModel === ollamaStatus.model">
+                  {{ settingModel ? 'Setting...' : 'Set' }}
+                </button>
+              </div>
+            </div>
+
+            <!-- Not configured hint -->
+            <div v-if="!ollamaStatus.configured" class="text-sm text-gray-400">
+              Enable Ollama in the <strong>Config</strong> tab under
+              <code class="bg-gray-800 px-1 rounded">ollama</code> section,
+              set <code class="bg-gray-800 px-1 rounded">base_url</code> to your instance, then reload.
+            </div>
+
+            <!-- Model not available -->
+            <div v-if="ollamaStatus.health && ollamaStatus.configured && !ollamaStatus.health.model_available"
+                 class="text-sm text-yellow-400 bg-yellow-900/20 rounded p-2 border border-yellow-800">
+              Model <code class="bg-gray-800 px-1 rounded">{{ ollamaStatus.model }}</code> not pulled.
+              Run <code class="bg-gray-800 px-1 rounded">ollama pull {{ ollamaStatus.model }}</code>
+            </div>
+
+            <!-- Error -->
+            <div v-if="ollamaStatus.health && ollamaStatus.health.error"
+                 class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800">
+              {{ ollamaStatus.health.error }}
+            </div>
+
+            <button @click="reloadOllama" class="btn btn-ghost text-xs" :disabled="reloading">
+              {{ reloading ? 'Reloading...' : 'Reload Ollama Client' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- ==================== Codex Auth Section ==================== -->
+        <div class="hm-card">
+          <h2 class="text-sm font-semibold text-gray-300 mb-3">Codex Authentication (OpenAI)</h2>
+          <p class="text-xs text-gray-500 mb-4">
+            Manage OpenAI Codex OAuth credentials. Uses ChatGPT subscription tokens with automatic refresh and pool rotation.
+          </p>
+
+          <div v-if="codexLoading && !codexData.configured" class="space-y-2">
+            <div v-for="n in 2" :key="n" class="skeleton skeleton-row"></div>
+          </div>
+          <div v-else-if="codexError" class="text-red-400 text-sm">
+            {{ codexError }}
+            <button @click="fetchCodexStatus" class="btn btn-ghost text-xs ml-2">Retry</button>
+          </div>
+
+          <div v-else class="space-y-4">
+            <!-- Status -->
+            <div v-if="!codexData.configured" class="text-yellow-400 text-sm">
+              No Codex credentials configured. Use the device login below or run
+              <code class="bg-gray-800 px-1 rounded">python scripts/codex_login.py</code>
+            </div>
+            <div v-else class="text-sm text-gray-300">
+              {{ codexData.account_count }} account{{ codexData.account_count !== 1 ? 's' : '' }} configured,
+              active: #{{ codexData.current_index + 1 }}
+            </div>
+
+            <!-- Accounts table -->
+            <div v-if="codexData.configured && codexData.accounts.length">
+              <table class="hm-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Label</th>
+                    <th>Email</th>
+                    <th>Plan</th>
+                    <th class="text-center">Status</th>
+                    <th class="text-center">Active</th>
+                    <th class="text-center">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="a in codexData.accounts" :key="a.index">
+                    <td class="text-gray-400">{{ a.index + 1 }}</td>
+                    <td>
+                      <span v-if="editingLabel !== a.index" class="text-gray-200 cursor-pointer hover:text-indigo-300"
+                            @click="startEditLabel(a.index, a.label)">
+                        {{ a.label || '—' }}
+                        <span class="text-gray-600 text-xs ml-1">&#9998;</span>
+                      </span>
+                      <span v-else class="flex items-center gap-1">
+                        <input v-model="labelValue" @keydown.enter="saveLabel(a.index)" @keydown.escape="editingLabel = null"
+                               class="bg-gray-900 border border-gray-600 rounded px-2 py-0.5 text-sm text-gray-300 w-32" />
+                        <button @click="saveLabel(a.index)" class="text-green-400 text-xs">Save</button>
+                        <button @click="editingLabel = null" class="text-gray-500 text-xs">Cancel</button>
+                      </span>
+                    </td>
+                    <td class="text-gray-200">{{ a.email || '—' }}</td>
+                    <td class="text-xs">
+                      <span v-if="a.plan_type" class="px-1.5 py-0.5 rounded"
+                            :class="a.plan_type === 'plus' ? 'bg-green-900 text-green-300' : a.plan_type === 'team' ? 'bg-blue-900 text-blue-300' : 'bg-gray-700 text-gray-300'">
+                        {{ a.plan_type }}
+                      </span>
+                      <span v-else class="text-gray-500">—</span>
+                    </td>
+                    <td class="text-center">
+                      <span v-if="a.error" class="text-red-400 text-xs">Error</span>
+                      <span v-else-if="a.expired" class="text-red-400 text-xs">Expired</span>
+                      <span v-else-if="a.rate_limited" class="text-yellow-400 text-xs">Rate limited</span>
+                      <span v-else class="text-green-400 text-xs">Active</span>
+                    </td>
+                    <td class="text-center">
+                      <span v-if="a.is_current" class="text-xs px-1 rounded bg-indigo-900 text-indigo-300">Current</span>
+                    </td>
+                    <td class="text-center text-xs space-x-2">
+                      <button v-if="!a.is_current" @click="activateAccount(a.index)"
+                              class="text-green-400 hover:text-green-300">Activate</button>
+                      <button @click="refreshAccount(a.index)" :disabled="refreshing === a.index"
+                              class="text-blue-400 hover:text-blue-300">
+                        {{ refreshing === a.index ? '...' : 'Refresh' }}
+                      </button>
+                      <button @click="deleteAccount(a.index, a.label || a.email)"
+                              class="text-red-400 hover:text-red-300">Delete</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Device login -->
+            <div class="mt-4 pt-4 border-t border-gray-700">
+              <h3 class="text-xs font-semibold text-gray-400 mb-2">Add Account (Device Login)</h3>
+              <div v-if="!deviceState">
+                <button @click="startDeviceLogin" class="btn btn-primary text-xs" :disabled="deviceLoading">
+                  {{ deviceLoading ? 'Requesting code...' : 'Start Device Login' }}
+                </button>
+              </div>
+              <div v-else-if="deviceState === 'pending'" class="p-3 bg-gray-800 rounded border border-gray-700">
+                <div class="text-sm text-gray-300 mb-2">
+                  <p class="mb-1">1. Open: <a :href="deviceInfo.verify_url" target="_blank"
+                       class="text-indigo-400 hover:text-indigo-300 underline">{{ deviceInfo.verify_url }}</a></p>
+                  <p>2. Enter code: <code class="bg-gray-900 px-2 py-1 rounded text-lg font-bold text-white">{{ deviceInfo.user_code }}</code></p>
+                </div>
+                <div class="flex items-center gap-3">
+                  <div class="text-xs text-gray-500">Waiting... <span class="inline-block animate-pulse">●</span></div>
+                  <button @click="cancelDeviceLogin" class="btn btn-ghost text-xs">Cancel</button>
+                </div>
+              </div>
+              <div v-else-if="deviceState === 'success'" class="p-3 bg-green-900/30 rounded border border-green-800">
+                <p class="text-green-400 text-sm">Authenticated as {{ deviceResult.email }}.</p>
+                <button @click="deviceState = null" class="btn btn-ghost text-xs mt-1">Done</button>
+              </div>
+              <div v-else-if="deviceState === 'error'" class="p-3 bg-red-900/30 rounded border border-red-800">
+                <p class="text-red-400 text-sm">{{ deviceError }}</p>
+                <button @click="deviceState = null" class="btn btn-ghost text-xs mt-1">Try Again</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Toast -->
+      <div v-if="toast" class="fixed bottom-6 right-6 px-4 py-2 rounded text-sm shadow-lg z-50"
+           :class="toast.type === 'error' ? 'bg-red-900 text-red-200' : 'bg-green-900 text-green-200'">
+        {{ toast.message }}
+      </div>
+    </div>
+  `,
+
+  setup() {
+    const loading = ref(true);
+    const toast = ref(null);
+    let toastTimer = null;
+
+    // --- LLM Provider ---
+    const llmStatus = ref(null);
+    const selectedProvider = ref('codex');
+    const switching = ref(false);
+
+    // --- Ollama ---
+    const ollamaStatus = ref({ configured: false });
+    const ollamaModels = ref([]);
+    const ollamaSelectedModel = ref('');
+    const reloading = ref(false);
+    const settingModel = ref(false);
+
+    // --- Codex ---
+    const codexLoading = ref(true);
+    const codexError = ref('');
+    const codexData = ref({ configured: false, accounts: [] });
+    const refreshing = ref(null);
+    const editingLabel = ref(null);
+    const labelValue = ref('');
+    const deviceState = ref(null);
+    const deviceLoading = ref(false);
+    const deviceInfo = ref(null);
+    const deviceResult = ref(null);
+    const deviceError = ref('');
+    let pollController = null;
+
+    function showToast(message, type = 'success') {
+      toast.value = { message, type };
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { toast.value = null; }, 3000);
+    }
+
+    function formatSize(bytes) {
+      if (!bytes) return '?';
+      const gb = bytes / (1024 * 1024 * 1024);
+      if (gb >= 1) return gb.toFixed(1) + ' GB';
+      return (bytes / (1024 * 1024)).toFixed(0) + ' MB';
+    }
+
+    // --- Fetch all ---
+    async function fetchAll() {
+      loading.value = true;
+      await Promise.all([fetchLLMStatus(), fetchOllamaStatus(), fetchCodexStatus()]);
+      loading.value = false;
+    }
+
+    async function fetchLLMStatus() {
+      try {
+        const data = await api.get('/api/llm/status');
+        llmStatus.value = data;
+        selectedProvider.value = data.active_provider || 'codex';
+      } catch (e) {
+        llmStatus.value = { active_provider: 'codex', codex: { configured: false }, ollama: { configured: false } };
+      }
+    }
+
+    async function fetchOllamaStatus() {
+      try {
+        ollamaStatus.value = await api.get('/api/ollama/status');
+        if (ollamaStatus.value.model) ollamaSelectedModel.value = ollamaStatus.value.model;
+        if (ollamaStatus.value.configured) {
+          try {
+            const m = await api.get('/api/ollama/models');
+            ollamaModels.value = m.models || [];
+          } catch { ollamaModels.value = []; }
+        }
+      } catch {
+        ollamaStatus.value = { configured: false };
+      }
+    }
+
+    async function fetchCodexStatus() {
+      codexLoading.value = true;
+      codexError.value = '';
+      try {
+        codexData.value = await api.get('/api/codex/status');
+      } catch (e) {
+        codexError.value = e.message || 'Failed to fetch Codex status';
+      } finally {
+        codexLoading.value = false;
+      }
+    }
+
+    // --- Provider switch ---
+    async function switchProvider() {
+      switching.value = true;
+      try {
+        const result = await api.post('/api/llm/switch', { provider: selectedProvider.value });
+        if (result.error) { showToast(result.error, 'error'); }
+        else { showToast('Switched to ' + selectedProvider.value + ' (' + result.model + ')'); await fetchAll(); }
+      } catch (e) { showToast(e.message || 'Switch failed', 'error'); }
+      finally { switching.value = false; }
+    }
+
+    // --- Ollama ---
+    async function reloadOllama() {
+      reloading.value = true;
+      try {
+        const r = await api.post('/api/ollama/reload');
+        showToast(r.configured ? 'Ollama reloaded' : (r.reason || 'Ollama not configured'), r.configured ? 'success' : 'error');
+        await fetchAll();
+      } catch (e) { showToast(e.message || 'Reload failed', 'error'); }
+      finally { reloading.value = false; }
+    }
+
+    async function setOllamaModel() {
+      settingModel.value = true;
+      try {
+        await api.post('/api/ollama/model', { model: ollamaSelectedModel.value });
+        showToast('Model set to ' + ollamaSelectedModel.value);
+        await fetchAll();
+      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+      finally { settingModel.value = false; }
+    }
+
+    // --- Codex account management ---
+    async function activateAccount(index) {
+      try {
+        await api.post('/api/codex/account/' + index + '/activate');
+        showToast('Active account switched');
+        await fetchCodexStatus();
+      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+    }
+
+    async function refreshAccount(index) {
+      refreshing.value = index;
+      try {
+        await api.post('/api/codex/account/' + index + '/refresh');
+        showToast('Token refreshed');
+        await fetchCodexStatus();
+      } catch (e) { showToast(e.message || 'Refresh failed', 'error'); }
+      finally { refreshing.value = null; }
+    }
+
+    function startEditLabel(index, current) {
+      editingLabel.value = index;
+      labelValue.value = current || '';
+    }
+
+    async function saveLabel(index) {
+      try {
+        await api.put('/api/codex/account/' + index + '/label', { label: labelValue.value });
+        showToast('Label updated');
+        editingLabel.value = null;
+        await fetchCodexStatus();
+      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+    }
+
+    async function deleteAccount(index, name) {
+      if (!confirm('Delete ' + (name || 'account #' + (index + 1)) + '?')) return;
+      try {
+        await api.del('/api/codex/account/' + index);
+        showToast('Deleted. Pool reloaded.');
+        await fetchCodexStatus();
+      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+    }
+
+    async function startDeviceLogin() {
+      deviceLoading.value = true;
+      try {
+        const info = await api.post('/api/codex/device-code');
+        deviceInfo.value = info;
+        deviceState.value = 'pending';
+        pollForAuth(info);
+      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+      finally { deviceLoading.value = false; }
+    }
+
+    async function pollForAuth(info) {
+      pollController = { cancelled: false };
+      const ctrl = pollController;
+      try {
+        const result = await api.post('/api/codex/device-poll', {
+          device_auth_id: info.device_auth_id,
+          user_code: info.user_code,
+          interval: info.interval,
+        });
+        if (ctrl.cancelled) return;
+        deviceResult.value = result;
+        deviceState.value = 'success';
+        fetchAll();
+      } catch (e) {
+        if (ctrl.cancelled) return;
+        deviceError.value = e.message || 'Device login failed';
+        deviceState.value = 'error';
+      }
+    }
+
+    function cancelDeviceLogin() {
+      if (pollController) pollController.cancelled = true;
+      deviceState.value = null;
+      deviceInfo.value = null;
+    }
+
+    onMounted(fetchAll);
+    onUnmounted(() => { if (pollController) pollController.cancelled = true; });
+
+    return {
+      loading, toast, llmStatus, selectedProvider, switching,
+      ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
+      codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
+      deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,
+      fetchAll, switchProvider, reloadOllama, setOllamaModel,
+      activateAccount, refreshAccount, startEditLabel, saveLabel, deleteAccount,
+      startDeviceLogin, cancelDeviceLogin, formatSize,
+    };
+  },
+};

@@ -263,6 +263,28 @@ class OpenAICodexConfig(BaseModel):
     model_routing: ModelRoutingConfig = ModelRoutingConfig()
 
 
+class OllamaConfig(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    enabled: bool = False
+    base_url: str = "http://127.0.0.1:11434"
+    model: str = "llama3.1:8b"
+    max_tokens: int = 4096
+    timeout: int = 300
+    api_key: str = ""  # Optional bearer token for remote instances
+
+    @field_validator("timeout")
+    @classmethod
+    def _timeout_positive(cls, v):
+        if v < 10:
+            raise ValueError("timeout must be >= 10")
+        return v
+
+
+class LLMProviderConfig(BaseModel):
+    active_provider: str = "codex"  # "codex" or "ollama"
+
+
 class WebhookConfig(BaseModel):
     enabled: bool = False
     secret: str = ""
@@ -531,6 +553,8 @@ class Config(BaseModel):
     timezone: str = "UTC"
     discord: DiscordConfig
     openai_codex: OpenAICodexConfig = OpenAICodexConfig()
+    ollama: OllamaConfig = OllamaConfig()
+    llm_provider: LLMProviderConfig = LLMProviderConfig()
     context: ContextConfig = ContextConfig()
     sessions: SessionsConfig = SessionsConfig()
     tools: ToolsConfig = ToolsConfig()

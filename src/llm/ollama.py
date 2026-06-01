@@ -1,0 +1,246 @@
+"""Ollama LLM client — local/remote Ollama instances.
+
+Implements the LLMProvider interface for Ollama's /api/chat endpoint.
+Supports tool calling for models that advertise it (Qwen, Llama 3.1+, etc.).
+"""
+from __future__ import annotations
+
+import json
+
+import aiohttp
+
+from ..odin_log import get_logger
+from .circuit_breaker import CircuitBreaker
+from .cost_tracker import estimate_tokens
+from .provider import LLMProvider
+from .types import LLMResponse, ToolCall
+
+log = get_logger("ollama")
+
+
+class OllamaClient(LLMProvider):
+    """Chat client for Ollama instances (local or remote)."""
+
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:11434",
+        model: str = "llama3.1:8b",
+        max_tokens: int = 4096,
+        timeout: int = 300,
+        api_key: str = "",
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.max_tokens = max_tokens
+        self.timeout = timeout
+        self.api_key = api_key
+        self.breaker = CircuitBreaker("ollama_api")
+        self._session: aiohttp.ClientSession | None = None
+        self._total_requests: int = 0
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+            )
+        return self._session
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
+    def pool_stats(self) -> dict:
+        return {
+            "provider": "ollama",
+            "base_url": self.base_url,
+            "model": self.model,
+            "total_requests": self._total_requests,
+        }
+
+    @property
+    def provider_name(self) -> str:
+        return "ollama"
+
+    @property
+    def model_name(self) -> str:
+        return self.model
+
+    def _convert_messages(self, messages: list[dict], system: str) -> list[dict]:
+        """Convert internal message format to Ollama /api/chat format."""
+        ollama_messages = []
+        if system:
+            ollama_messages.append({"role": "system", "content": system})
+
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+
+            if role == "tool_result":
+                ollama_messages.append({
+                    "role": "tool",
+                    "content": json.dumps(content) if not isinstance(content, str) else content,
+                })
+                continue
+
+            if isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            text_parts.append(block["text"])
+                        elif block.get("type") == "tool_use":
+                            pass
+                        elif block.get("type") == "tool_result":
+                            text_parts.append(str(block.get("content", "")))
+                    elif isinstance(block, str):
+                        text_parts.append(block)
+                content = "\n".join(text_parts)
+
+            ollama_role = "assistant" if role == "assistant" else "user"
+            if role == "tool":
+                ollama_role = "tool"
+
+            ollama_messages.append({"role": ollama_role, "content": content})
+
+        return ollama_messages
+
+    def _convert_tools(self, tools: list[dict]) -> list[dict]:
+        """Convert internal tool format to Ollama tool format."""
+        ollama_tools = []
+        for tool in tools:
+            ollama_tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool.get("name", ""),
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema", tool.get("parameters", {})),
+                },
+            })
+        return ollama_tools
+
+    async def chat(
+        self, messages: list[dict], system: str,
+        max_tokens: int | None = None,
+    ) -> str:
+        self.breaker.check()
+        session = await self._get_session()
+        self._total_requests += 1
+
+        body = {
+            "model": self.model,
+            "messages": self._convert_messages(messages, system),
+            "stream": False,
+            "options": {
+                "num_predict": max_tokens or self.max_tokens,
+            },
+        }
+
+        url = f"{self.base_url}/api/chat"
+        try:
+            async with session.post(url, json=body, headers=self._headers()) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    self.breaker.record_failure()
+                    raise RuntimeError(f"Ollama {resp.status}: {text[:500]}")
+
+                data = await resp.json()
+                self.breaker.record_success()
+                return data.get("message", {}).get("content", "")
+        except aiohttp.ClientError as e:
+            self.breaker.record_failure()
+            raise RuntimeError(f"Ollama connection error: {e}") from e
+
+    async def chat_with_tools(
+        self, messages: list[dict], system: str,
+        tools: list[dict],
+    ) -> LLMResponse:
+        self.breaker.check()
+        session = await self._get_session()
+        self._total_requests += 1
+
+        body = {
+            "model": self.model,
+            "messages": self._convert_messages(messages, system),
+            "tools": self._convert_tools(tools),
+            "stream": False,
+            "options": {
+                "num_predict": self.max_tokens,
+            },
+        }
+
+        url = f"{self.base_url}/api/chat"
+        try:
+            async with session.post(url, json=body, headers=self._headers()) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    self.breaker.record_failure()
+                    raise RuntimeError(f"Ollama {resp.status}: {text[:500]}")
+
+                data = await resp.json()
+                self.breaker.record_success()
+                return self._parse_response(data)
+        except aiohttp.ClientError as e:
+            self.breaker.record_failure()
+            raise RuntimeError(f"Ollama connection error: {e}") from e
+
+    def _parse_response(self, data: dict) -> LLMResponse:
+        """Parse Ollama response into LLMResponse."""
+        message = data.get("message", {})
+        text = message.get("content", "")
+        tool_calls_raw = message.get("tool_calls", [])
+
+        tool_calls = []
+        for i, tc in enumerate(tool_calls_raw):
+            fn = tc.get("function", {})
+            tool_calls.append(ToolCall(
+                id=f"ollama_call_{i}",
+                name=fn.get("name", ""),
+                input=fn.get("arguments", {}),
+            ))
+
+        stop_reason = "tool_use" if tool_calls else "end_turn"
+
+        input_tokens = data.get("prompt_eval_count", 0)
+        output_tokens = data.get("eval_count", 0)
+        if not input_tokens:
+            input_tokens = estimate_tokens(str(data.get("prompt", "")))
+        if not output_tokens:
+            output_tokens = estimate_tokens(text)
+
+        return LLMResponse(
+            text=text,
+            tool_calls=tool_calls,
+            stop_reason=stop_reason,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+    async def health_check(self) -> dict:
+        """Check if the Ollama instance is reachable and list available models."""
+        try:
+            session = await self._get_session()
+            async with session.get(
+                f"{self.base_url}/api/tags",
+                headers=self._headers(),
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return {"healthy": False, "error": f"HTTP {resp.status}"}
+                data = await resp.json()
+                models = [m.get("name", "") for m in data.get("models", [])]
+                return {
+                    "healthy": True,
+                    "base_url": self.base_url,
+                    "models": models,
+                    "model_available": self.model in models,
+                    "active_model": self.model,
+                }
+        except Exception as e:
+            return {"healthy": False, "error": str(e)}

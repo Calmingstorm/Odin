@@ -18,6 +18,18 @@ openai_codex:
   max_tokens: 4096
   credentials_path: ./data/codex_auth.json
 
+ollama:
+  enabled: false
+  base_url: http://127.0.0.1:11434
+  model: llama3.1:8b
+  max_tokens: 4096
+  timeout: 300
+  # api_key: ""  # Optional bearer token for remote Ollama instances
+
+# Which LLM backend to use: "codex" or "ollama"
+llm_provider:
+  active_provider: codex
+
 context:
   directory: ./data/context
   max_system_prompt_tokens: 32000
