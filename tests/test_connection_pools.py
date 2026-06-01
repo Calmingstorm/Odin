@@ -641,11 +641,12 @@ class TestPoolAPI:
             "http_pool_total_requests": 42,
         }
         bot = _make_bot(codex=codex)
+        bot.ollama_client = None
         async with TestClient(TestServer(_make_app(bot))) as client:
             resp = await client.get("/api/pools/http")
             assert resp.status == 200
             data = await resp.json()
-            assert data["http_pool_total_requests"] == 42
+            assert data["codex"]["http_pool_total_requests"] == 42
 
     async def test_http_pool_unavailable(self):
         from aiohttp.test_utils import TestClient, TestServer

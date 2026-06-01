@@ -1285,10 +1285,16 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/pools/http")
     async def get_http_pool(_request: web.Request) -> web.Response:
+        result = {}
         codex = getattr(bot, "codex", None)
-        if codex is None or not hasattr(codex, "get_pool_metrics"):
-            return web.json_response({"error": "HTTP pool not available"}, status=503)
-        return web.json_response(codex.get_pool_metrics())
+        if codex is not None and hasattr(codex, "get_pool_metrics"):
+            result["codex"] = codex.get_pool_metrics()
+        ollama = getattr(bot, "ollama_client", None)
+        if ollama is not None:
+            result["ollama"] = ollama.pool_stats()
+        if not result:
+            return web.json_response({"error": "No HTTP pools available"}, status=503)
+        return web.json_response(result)
 
     @routes.post("/api/pools/ssh/close")
     async def close_ssh_pool_host(request: web.Request) -> web.Response:

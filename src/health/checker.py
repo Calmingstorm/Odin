@@ -391,10 +391,50 @@ def check_agents(bot: OdinBot) -> ComponentStatus:
         )
 
 
+def check_ollama(bot: OdinBot) -> ComponentStatus:
+    from ..llm.ollama import OllamaClient
+    ollama = getattr(bot, "ollama_client", None)
+    if not isinstance(ollama, OllamaClient):
+        return ComponentStatus(
+            name="ollama", healthy=True, status="unconfigured",
+            detail="Ollama client not configured (optional)",
+        )
+    try:
+        breaker = getattr(ollama, "breaker", None)
+        breaker_state = str(breaker.state) if breaker else "unknown"
+        stats = ollama.pool_stats()
+        healthy = breaker_state in ("closed", "half_open")
+        if breaker_state == "open":
+            status_label = "down"
+            detail = "Circuit breaker OPEN — Ollama API failures detected"
+        elif breaker_state == "half_open":
+            status_label = "degraded"
+            detail = "Circuit breaker half-open — probing recovery"
+        else:
+            status_label = "ok"
+            detail = f"Healthy — {stats.get('total_requests', 0)} total requests"
+        return ComponentStatus(
+            name="ollama", healthy=healthy, status=status_label,
+            detail=detail,
+            metadata={
+                "circuit_breaker": breaker_state,
+                "model": getattr(ollama, "model", "unknown"),
+                "base_url": getattr(ollama, "base_url", ""),
+                **stats,
+            },
+        )
+    except Exception as exc:
+        return ComponentStatus(
+            name="ollama", healthy=False, status="down",
+            detail=f"Error probing Ollama: {exc}",
+        )
+
+
 # Ordered list of all checkers
 _ALL_CHECKERS = [
     check_discord,
     check_codex,
+    check_ollama,
     check_sessions,
     check_knowledge,
     check_ssh_hosts,

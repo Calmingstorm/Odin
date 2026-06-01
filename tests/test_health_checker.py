@@ -625,7 +625,7 @@ class TestCheckAll:
         bot = self._make_healthy_bot()
         result = check_all(bot)
         assert result["overall"] == "healthy"
-        assert result["total"] == 11
+        assert result["total"] == 12
         assert "checked_at" in result
         assert isinstance(result["components"], list)
 
@@ -634,7 +634,7 @@ class TestCheckAll:
         result = check_all(bot)
         names = {c["name"] for c in result["components"]}
         expected = {
-            "discord", "codex", "sessions", "knowledge", "ssh_hosts",
+            "discord", "codex", "ollama", "sessions", "knowledge", "ssh_hosts",
             "voice", "monitoring", "browser", "scheduler", "loops", "agents",
         }
         assert names == expected
@@ -689,7 +689,7 @@ class TestCheckAll:
 
 class TestCheckerList:
     def test_count(self):
-        assert len(_ALL_CHECKERS) == 11
+        assert len(_ALL_CHECKERS) == 12
 
     def test_all_callable(self):
         for checker in _ALL_CHECKERS:
@@ -787,7 +787,7 @@ class TestHealthAPI:
             assert "overall" in data
             assert "components" in data
             assert isinstance(data["components"], list)
-            assert data["total"] == 11
+            assert data["total"] == 12
 
     @pytest.mark.asyncio
     async def test_health_components_has_all_names(self, mock_bot):
@@ -862,4 +862,4 @@ class TestEdgeCases:
         bot = MagicMock(spec=[])
         result = check_all(bot)
         assert "T" in result["checked_at"]
-        assert result["total"] == 11
+        assert result["total"] == 12
