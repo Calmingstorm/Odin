@@ -150,6 +150,8 @@ def _write_env_file(path: Path, content: str) -> None:
 
 def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     """Create all API route handlers bound to the given bot instance."""
+    import asyncio as _asyncio
+    _codex_creds_lock = _asyncio.Lock()
     routes = web.RouteTableDef()
 
     # ------------------------------------------------------------------
@@ -2794,6 +2796,11 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
         creds_path = bot.config.openai_codex.credentials_path
         save_index = body.get("save_index")
+        if save_index is not None:
+            try:
+                save_index = int(save_index)
+            except (TypeError, ValueError):
+                return web.json_response({"error": "save_index must be an integer"}, status=400)
 
         import json as _json
         from pathlib import Path as _Path
@@ -2801,29 +2808,37 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
         path = _Path(creds_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            if path.exists():
-                raw = _json.loads(path.read_text())
-                if save_index is not None:
-                    if isinstance(raw, list) and 0 <= save_index < len(raw):
-                        raw[save_index] = creds
-                    elif isinstance(raw, list):
-                        raw.append(creds)
+        async with _codex_creds_lock:
+            try:
+                if path.exists():
+                    raw = _json.loads(path.read_text())
+                    if save_index is not None:
+                        if isinstance(raw, list) and 0 <= save_index < len(raw):
+                            raw[save_index] = creds
+                        elif isinstance(raw, list):
+                            raw.append(creds)
+                        else:
+                            raw = [raw, creds] if isinstance(raw, dict) else [creds]
                     else:
-                        raw = [raw, creds] if isinstance(raw, dict) else [creds]
+                        if isinstance(raw, list):
+                            raw.append(creds)
+                        elif isinstance(raw, dict):
+                            raw = [raw, creds]
+                        else:
+                            raw = [creds]
+                    _atomic_write_secure(path, _json.dumps(raw, indent=2))
                 else:
-                    if isinstance(raw, list):
-                        raw.append(creds)
-                    elif isinstance(raw, dict):
-                        raw = [raw, creds]
-                    else:
-                        raw = [creds]
-                _atomic_write_secure(path, _json.dumps(raw, indent=2))
-            else:
+                    _atomic_write_secure(path, _json.dumps([creds], indent=2))
+            except Exception as e:
+                bak = path.with_suffix(".bak")
+                if path.exists():
+                    try:
+                        import shutil
+                        shutil.copy2(path, bak)
+                    except Exception:
+                        pass
                 _atomic_write_secure(path, _json.dumps([creds], indent=2))
-        except Exception as e:
-            _atomic_write_secure(path, _json.dumps([creds], indent=2))
-            log.warning("Failed to merge credentials, wrote fresh: %s", e)
+                log.warning("Failed to merge credentials (backup at %s), wrote fresh: %s", bak, e)
 
         await bot.reload_codex_auth()
 
@@ -2963,22 +2978,23 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not path.exists():
             return web.json_response({"error": "no credentials file"}, status=404)
 
-        try:
-            raw = _json.loads(path.read_text())
-        except Exception:
-            return web.json_response({"error": "failed to read credentials"}, status=500)
+        async with _codex_creds_lock:
+            try:
+                raw = _json.loads(path.read_text())
+            except Exception:
+                return web.json_response({"error": "failed to read credentials"}, status=500)
 
-        if isinstance(raw, list):
-            if index < 0 or index >= len(raw):
-                return web.json_response({"error": f"index {index} out of range (0-{len(raw)-1})"}, status=400)
-            removed = raw.pop(index)
-            _atomic_write_secure(path, _json.dumps(raw, indent=2))
-            email = removed.get("email", "unknown")
-        elif isinstance(raw, dict) and index == 0:
-            email = raw.get("email", "unknown")
-            _atomic_write_secure(path, _json.dumps([], indent=2))
-        else:
-            return web.json_response({"error": "invalid index"}, status=400)
+            if isinstance(raw, list):
+                if index < 0 or index >= len(raw):
+                    return web.json_response({"error": f"index {index} out of range (0-{len(raw)-1})"}, status=400)
+                removed = raw.pop(index)
+                _atomic_write_secure(path, _json.dumps(raw, indent=2))
+                email = removed.get("email", "unknown")
+            elif isinstance(raw, dict) and index == 0:
+                email = raw.get("email", "unknown")
+                _atomic_write_secure(path, _json.dumps([], indent=2))
+            else:
+                return web.json_response({"error": "invalid index"}, status=400)
 
         pool = getattr(bot, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
