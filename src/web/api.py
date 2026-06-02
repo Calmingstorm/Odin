@@ -2800,23 +2800,30 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         from ..llm.codex_auth import _atomic_write_secure
 
         path = _Path(creds_path)
-        if save_index is not None and path.exists():
-            try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if path.exists():
                 raw = _json.loads(path.read_text())
-                if isinstance(raw, list) and 0 <= save_index < len(raw):
-                    raw[save_index] = creds
-                    _atomic_write_secure(path, _json.dumps(raw, indent=2))
-                elif isinstance(raw, list):
-                    raw.append(creds)
-                    _atomic_write_secure(path, _json.dumps(raw, indent=2))
+                if save_index is not None:
+                    if isinstance(raw, list) and 0 <= save_index < len(raw):
+                        raw[save_index] = creds
+                    elif isinstance(raw, list):
+                        raw.append(creds)
+                    else:
+                        raw = [raw, creds] if isinstance(raw, dict) else [creds]
                 else:
-                    _atomic_write_secure(path, _json.dumps(creds, indent=2))
-            except Exception as e:
-                return web.json_response({"error": f"Saved but failed to update pool: {e}",
-                                          "email": creds.get("email", "")}, status=207)
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write_secure(path, _json.dumps(creds, indent=2))
+                    if isinstance(raw, list):
+                        raw.append(creds)
+                    elif isinstance(raw, dict):
+                        raw = [raw, creds]
+                    else:
+                        raw = [creds]
+                _atomic_write_secure(path, _json.dumps(raw, indent=2))
+            else:
+                _atomic_write_secure(path, _json.dumps([creds], indent=2))
+        except Exception as e:
+            _atomic_write_secure(path, _json.dumps([creds], indent=2))
+            log.warning("Failed to merge credentials, wrote fresh: %s", e)
 
         await bot.reload_codex_auth()
 
