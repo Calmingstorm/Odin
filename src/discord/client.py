@@ -409,6 +409,8 @@ class OdinBot(commands.Bot):
             )
             log.info("Ollama backend enabled (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url)
 
+        self._llm_provider_lock = asyncio.Lock()
+
         # Wire LLM callbacks to whichever provider is active
         if self.llm_client is not None:
             self._wire_llm_callbacks()
@@ -657,25 +659,27 @@ class OdinBot(commands.Bot):
 
     async def reload_ollama(self) -> dict:
         """Reload Ollama client from current config."""
-        ollama_cfg = getattr(self.config, "ollama", None)
-        if not ollama_cfg or not ollama_cfg.enabled:
-            if self.ollama_client:
-                await self.ollama_client.close()
-            self.ollama_client = None
-            return {"configured": False, "reason": "ollama disabled in config"}
+        async with self._llm_provider_lock:
+            ollama_cfg = getattr(self.config, "ollama", None)
+            if not ollama_cfg or not ollama_cfg.enabled:
+                old = self.ollama_client
+                self.ollama_client = None
+                if old:
+                    asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
+                return {"configured": False, "reason": "ollama disabled in config"}
 
-        if self.ollama_client:
-            await self.ollama_client.close()
-
-        self.ollama_client = OllamaClient(
-            base_url=ollama_cfg.base_url,
-            model=ollama_cfg.model,
-            max_tokens=ollama_cfg.max_tokens,
-            timeout=ollama_cfg.timeout,
-            api_key=ollama_cfg.api_key,
-        )
-        self._wire_llm_callbacks()
-        log.info("Ollama client reloaded (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url)
+            old = self.ollama_client
+            self.ollama_client = OllamaClient(
+                base_url=ollama_cfg.base_url,
+                model=ollama_cfg.model,
+                max_tokens=ollama_cfg.max_tokens,
+                timeout=ollama_cfg.timeout,
+                api_key=ollama_cfg.api_key,
+            )
+            if old:
+                asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
+            self._wire_llm_callbacks()
+            log.info("Ollama client reloaded (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url)
 
         health = await self.ollama_client.health_check()
         return {"configured": True, "health": health}
@@ -685,13 +689,14 @@ class OdinBot(commands.Bot):
         if provider not in ("codex", "ollama"):
             return {"error": f"Unknown provider: {provider}"}
 
-        if provider == "codex" and not self.codex_client:
-            return {"error": "Codex not configured — authenticate first"}
-        if provider == "ollama" and not self.ollama_client:
-            return {"error": "Ollama not configured — enable and set base_url first"}
+        async with self._llm_provider_lock:
+            if provider == "codex" and not self.codex_client:
+                return {"error": "Codex not configured — authenticate first"}
+            if provider == "ollama" and not self.ollama_client:
+                return {"error": "Ollama not configured — enable and set base_url first"}
 
-        self.config.llm_provider.active_provider = provider
-        self._wire_llm_callbacks()
+            self.config.llm_provider.active_provider = provider
+            self._wire_llm_callbacks()
 
         client = self.llm_client
         model = getattr(client, "model", "unknown") if client else "none"

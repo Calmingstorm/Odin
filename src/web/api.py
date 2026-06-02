@@ -3116,7 +3116,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        model = body.get("model", "")
+        model = body.get("model", "").strip()
         if not model:
             return web.json_response({"error": "model is required"}, status=400)
 
@@ -3124,8 +3124,23 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if client is None:
             return web.json_response({"error": "Ollama not configured"}, status=503)
 
-        client.model = model
-        bot.config.ollama.model = model
+        health = await client.health_check()
+        available = health.get("models", [])
+        if available and model not in available:
+            base = model.split(":")[0]
+            if not any(m.startswith(base + ":") for m in available):
+                return web.json_response({
+                    "error": f"Model '{model}' not available. Pulled models: {', '.join(available[:10])}",
+                }, status=400)
+
+        lock = getattr(bot, "_llm_provider_lock", None)
+        if lock:
+            async with lock:
+                client.model = model
+                bot.config.ollama.model = model
+        else:
+            client.model = model
+            bot.config.ollama.model = model
         return web.json_response({"status": "updated", "model": model})
 
     # ------------------------------------------------------------------
