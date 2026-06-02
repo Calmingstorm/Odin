@@ -2872,13 +2872,13 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             await auth._refresh(creds)
             creds = auth._load()
 
-            # Sync refreshed token back to canonical credentials file
-            path = _Path(bot.config.openai_codex.credentials_path)
-            if path.exists():
-                raw = _json.loads(path.read_text())
-                if isinstance(raw, list) and index < len(raw):
-                    raw[index] = creds
-                    _atomic_write_secure(path, _json.dumps(raw, indent=2))
+            async with _codex_creds_lock:
+                path = _Path(bot.config.openai_codex.credentials_path)
+                if path.exists():
+                    raw = _json.loads(path.read_text())
+                    if isinstance(raw, list) and index < len(raw):
+                        raw[index] = creds
+                        _atomic_write_secure(path, _json.dumps(raw, indent=2))
 
             return web.json_response({
                 "status": "refreshed",
@@ -2934,21 +2934,22 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not path.exists():
             return web.json_response({"error": "no credentials file"}, status=404)
 
-        try:
-            raw = _json.loads(path.read_text())
-        except Exception:
-            return web.json_response({"error": "failed to read credentials"}, status=500)
+        async with _codex_creds_lock:
+            try:
+                raw = _json.loads(path.read_text())
+            except Exception:
+                return web.json_response({"error": "failed to read credentials"}, status=500)
 
-        if isinstance(raw, list):
-            if index < 0 or index >= len(raw):
-                return web.json_response({"error": f"index {index} out of range"}, status=400)
-            raw[index]["label"] = label
-        elif isinstance(raw, dict) and index == 0:
-            raw["label"] = label
-        else:
-            return web.json_response({"error": "invalid index"}, status=400)
+            if isinstance(raw, list):
+                if index < 0 or index >= len(raw):
+                    return web.json_response({"error": f"index {index} out of range"}, status=400)
+                raw[index]["label"] = label
+            elif isinstance(raw, dict) and index == 0:
+                raw["label"] = label
+            else:
+                return web.json_response({"error": "invalid index"}, status=400)
 
-        _atomic_write_secure(path, _json.dumps(raw, indent=2))
+            _atomic_write_secure(path, _json.dumps(raw, indent=2))
 
         # Also update the in-memory shadow file so status reflects immediately
         pool = getattr(bot, "codex_client", None)
