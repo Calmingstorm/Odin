@@ -83,10 +83,15 @@ export default {
         <div class="hm-card">
           <div class="flex items-center justify-between mb-3">
             <h2 class="text-sm font-semibold text-gray-300">Codex (OpenAI)</h2>
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" v-model="codexForm.enabled" @change="saveCodexConfig" class="accent-indigo-500" />
-              <span class="text-xs text-gray-400">Enabled</span>
-            </label>
+            <div class="flex items-center gap-3">
+              <div v-if="codexData.configured" class="text-sm">
+                <span class="text-green-400">● Connected</span>
+              </div>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" v-model="codexForm.enabled" @change="saveCodexConfig" class="accent-indigo-500" />
+                <span class="text-xs text-gray-400">Enabled</span>
+              </label>
+            </div>
           </div>
           <div class="grid grid-cols-2 gap-3 mb-3">
             <div>
