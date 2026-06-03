@@ -257,12 +257,11 @@ export default {
             </div>
             <div>
               <label class="text-xs text-gray-400">Model</label>
-              <select v-if="kimiModels.length" v-model="kimiForm.model"
+              <select v-model="kimiForm.model"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
+                <option v-if="!kimiModels.length" value="" disabled>No models available</option>
                 <option v-for="m in kimiModels" :key="m" :value="m">{{ m }}</option>
               </select>
-              <input v-else v-model="kimiForm.model" placeholder="kimi-k2.6"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
             <div>
               <label class="text-xs text-gray-400">Max Tokens</label>
@@ -299,22 +298,16 @@ export default {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-gray-400">Base URL</label>
-              <div class="flex gap-2">
-                <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434"
-                       class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-                <button @click="probeOllamaModels" class="btn btn-ghost text-xs whitespace-nowrap" :disabled="probingOllama">
-                  {{ probingOllama ? '...' : 'Fetch Models' }}
-                </button>
-              </div>
+              <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
             <div>
               <label class="text-xs text-gray-400">Model</label>
-              <select v-if="ollamaModels.length" v-model="ollamaForm.model"
+              <select v-model="ollamaForm.model"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
+                <option v-if="!ollamaModels.length" value="" disabled>No models available</option>
                 <option v-for="m in ollamaModels" :key="m.name" :value="m.name">{{ m.name }} ({{ formatSize(m.size) }})</option>
               </select>
-              <input v-else v-model="ollamaForm.model" placeholder="Enter URL and click Fetch Models"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
             <div>
               <label class="text-xs text-gray-400">API Key <span class="text-gray-600">(optional, for remote)</span></label>
@@ -449,6 +442,11 @@ export default {
         if (ollamaStatus.value.configured) {
           try {
             const m = await api.get('/api/ollama/models');
+            ollamaModels.value = m.models || [];
+          } catch { ollamaModels.value = []; }
+        } else if (ollamaForm.value.base_url) {
+          try {
+            const m = await api.post('/api/ollama/probe-models', { base_url: ollamaForm.value.base_url });
             ollamaModels.value = m.models || [];
           } catch { ollamaModels.value = []; }
         }
