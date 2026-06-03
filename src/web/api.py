@@ -3080,6 +3080,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         result = await bot.switch_llm_provider(provider)
         if "error" in result:
             return web.json_response(result, status=400)
+        await _persist_config()
         return web.json_response(result)
 
     # ------------------------------------------------------------------
@@ -3322,6 +3323,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
             client.model = model
             bot.config.ollama.model = model
+        await _persist_config()
         return web.json_response({"status": "updated", "model": model})
 
     # ------------------------------------------------------------------
@@ -3393,6 +3395,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
             client.model = model
             bot.config.kimi.model = model
+        await _persist_config()
         return web.json_response({"status": "updated", "model": model})
 
     # ------------------------------------------------------------------
