@@ -145,6 +145,8 @@ class KimiClient(LLMProvider):
                     oai_messages.append(tr)
                 continue
 
+            if role == "developer":
+                role = "system"
             oai_messages.append({"role": role, "content": str(content) if content else ""})
 
         return oai_messages
