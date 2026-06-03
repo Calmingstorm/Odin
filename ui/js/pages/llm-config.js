@@ -264,7 +264,7 @@ export default {
               <label class="text-xs text-gray-400">API Key</label>
               <div class="flex items-center gap-2">
                 <span v-if="llmStatus && llmStatus.kimi.has_api_key && !kimiForm.api_key" class="text-xs text-green-400">● Configured</span>
-                <input v-model="kimiForm.api_key" type="password" @keydown.enter="saveKimiConfig"
+                <input v-model="kimiForm.api_key" type="password" @keydown.enter="saveKimiConfig" @input="kimiKeyDirty = true"
                        :placeholder="llmStatus && llmStatus.kimi.has_api_key ? '••••••••  (press Enter to replace)' : 'sk-...'"
                        class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
               </div>
@@ -307,7 +307,7 @@ export default {
             </div>
             <div>
               <label class="text-xs text-gray-400">API Key <span class="text-gray-600">(optional, for remote)</span></label>
-              <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local" @keydown.enter="saveOllamaConfig"
+              <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local" @keydown.enter="saveOllamaConfig" @input="ollamaKeyDirty = true"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
             <div>
@@ -344,6 +344,8 @@ export default {
     const codexForm = ref({ enabled: false, model: 'gpt-5.5', max_tokens: 4096 });
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096 });
     const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 });
+    const ollamaKeyDirty = ref(false);
+    const kimiKeyDirty = ref(false);
     const savingCodex = ref(false);
     const savingOllama = ref(false);
     const savingKimi = ref(false);
@@ -568,9 +570,10 @@ export default {
       savingOllama.value = true;
       try {
         const payload = { ...ollamaForm.value };
-        if (payload.api_key === undefined) delete payload.api_key;
+        if (!ollamaKeyDirty.value) delete payload.api_key;
         await api.put('/api/llm/ollama/config', payload);
         showToast('Ollama config saved');
+        ollamaKeyDirty.value = false;
         await fetchAll();
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingOllama.value = false; }
@@ -580,9 +583,10 @@ export default {
       savingKimi.value = true;
       try {
         const payload = { ...kimiForm.value };
-        if (payload.api_key === undefined) delete payload.api_key;
+        if (!kimiKeyDirty.value) delete payload.api_key;
         await api.put('/api/llm/kimi/config', payload);
         showToast('Kimi config saved');
+        kimiKeyDirty.value = false;
         await fetchAll();
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingKimi.value = false; }
@@ -672,7 +676,7 @@ export default {
 
     return {
       loading, toast, llmStatus, selectedProvider, switching,
-      codexForm, ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama,
+      codexForm, ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
