@@ -140,6 +140,7 @@ class KimiClient(LLMProvider):
                         entry["tool_calls"] = tool_calls
                         if not entry["content"]:
                             entry["content"] = ""
+                        entry["reasoning_content"] = ""
                     oai_messages.append(entry)
                 for tr in tool_results:
                     oai_messages.append(tr)
@@ -147,7 +148,10 @@ class KimiClient(LLMProvider):
 
             if role == "developer":
                 role = "system"
-            oai_messages.append({"role": role, "content": str(content) if content else ""})
+            entry = {"role": role, "content": str(content) if content else ""}
+            if role == "assistant" and msg.get("tool_calls"):
+                entry["reasoning_content"] = ""
+            oai_messages.append(entry)
 
         return oai_messages
 
