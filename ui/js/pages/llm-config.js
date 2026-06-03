@@ -248,15 +248,6 @@ export default {
           </div>
           <div class="grid grid-cols-2 gap-3">
             <div>
-              <label class="text-xs text-gray-400">API Key</label>
-              <div class="flex items-center gap-2">
-                <span v-if="llmStatus && llmStatus.kimi.has_api_key && !kimiForm.api_key" class="text-xs text-green-400">● Configured</span>
-                <input v-model="kimiForm.api_key" type="password" @keydown.enter="saveKimiConfig"
-                       :placeholder="llmStatus && llmStatus.kimi.has_api_key ? '••••••••  (press Enter to replace)' : 'sk-...'"
-                       class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-              </div>
-            </div>
-            <div>
               <label class="text-xs text-gray-400">Model</label>
               <select v-model="kimiForm.model" @change="saveKimiConfig"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
@@ -268,6 +259,15 @@ export default {
               <label class="text-xs text-gray-400">Max Tokens</label>
               <input v-model.number="kimiForm.max_tokens" type="number" @keydown.enter="saveKimiConfig"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">API Key</label>
+              <div class="flex items-center gap-2">
+                <span v-if="llmStatus && llmStatus.kimi.has_api_key && !kimiForm.api_key" class="text-xs text-green-400">● Configured</span>
+                <input v-model="kimiForm.api_key" type="password" @keydown.enter="saveKimiConfig"
+                       :placeholder="llmStatus && llmStatus.kimi.has_api_key ? '••••••••  (press Enter to replace)' : 'sk-...'"
+                       class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+              </div>
             </div>
           </div>
           <div v-if="kimiStatus.health && kimiStatus.health.error"
@@ -293,11 +293,6 @@ export default {
           </div>
           <div class="grid grid-cols-2 gap-3">
             <div>
-              <label class="text-xs text-gray-400">Base URL</label>
-              <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434" @keydown.enter="saveOllamaConfig"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-            <div>
               <label class="text-xs text-gray-400">Model</label>
               <select v-model="ollamaForm.model" @change="saveOllamaConfig"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
@@ -306,13 +301,18 @@ export default {
               </select>
             </div>
             <div>
+              <label class="text-xs text-gray-400">Max Tokens</label>
+              <input v-model.number="ollamaForm.max_tokens" type="number" @keydown.enter="saveOllamaConfig"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+            <div>
               <label class="text-xs text-gray-400">API Key <span class="text-gray-600">(optional, for remote)</span></label>
               <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local" @keydown.enter="saveOllamaConfig"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
             <div>
-              <label class="text-xs text-gray-400">Max Tokens</label>
-              <input v-model.number="ollamaForm.max_tokens" type="number" @keydown.enter="saveOllamaConfig"
+              <label class="text-xs text-gray-400">Base URL</label>
+              <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434" @keydown.enter="saveOllamaConfig"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
           </div>
