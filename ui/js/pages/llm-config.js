@@ -83,110 +83,6 @@ export default {
           </div>
         </div>
 
-        <!-- ==================== Kimi Config ==================== -->
-        <div class="hm-card">
-          <div class="flex items-center justify-between mb-3">
-            <h2 class="text-sm font-semibold text-gray-300">Kimi (Moonshot AI)</h2>
-            <div class="flex items-center gap-3">
-              <div v-if="kimiStatus.configured" class="text-sm">
-                <span v-if="kimiStatus.health && kimiStatus.health.healthy" class="text-green-400">● Connected</span>
-                <span v-else class="text-red-400">● Unreachable</span>
-              </div>
-              <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" v-model="kimiForm.enabled" class="accent-indigo-500" />
-                <span class="text-xs text-gray-400">Enabled</span>
-              </label>
-            </div>
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="text-xs text-gray-400">API Key</label>
-              <input v-model="kimiForm.api_key" type="password" placeholder="sk-..."
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-            <div>
-              <label class="text-xs text-gray-400">Model</label>
-              <select v-if="kimiModels.length" v-model="kimiForm.model"
-                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
-                <option v-for="m in kimiModels" :key="m" :value="m">{{ m }}</option>
-              </select>
-              <input v-else v-model="kimiForm.model" placeholder="kimi-k2.6"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-            <div>
-              <label class="text-xs text-gray-400">Max Tokens</label>
-              <input v-model.number="kimiForm.max_tokens" type="number"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-          </div>
-          <div v-if="kimiStatus.health && kimiStatus.health.error"
-               class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
-            {{ kimiStatus.health.error }}
-          </div>
-          <div class="mt-3">
-            <button @click="saveKimiConfig" class="btn btn-primary text-xs" :disabled="savingKimi">
-              {{ savingKimi ? 'Saving...' : 'Save' }}
-            </button>
-          </div>
-        </div>
-
-        <!-- ==================== Ollama Config ==================== -->
-        <div class="hm-card">
-          <div class="flex items-center justify-between mb-3">
-            <h2 class="text-sm font-semibold text-gray-300">Ollama (Local/Remote)</h2>
-            <div class="flex items-center gap-3">
-              <div v-if="ollamaStatus.configured" class="text-sm">
-                <span v-if="ollamaStatus.health && ollamaStatus.health.healthy" class="text-green-400">● Connected</span>
-                <span v-else class="text-red-400">● Unreachable</span>
-              </div>
-              <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" v-model="ollamaForm.enabled" class="accent-indigo-500" />
-                <span class="text-xs text-gray-400">Enabled</span>
-              </label>
-            </div>
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="text-xs text-gray-400">Base URL</label>
-              <div class="flex gap-2">
-                <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434"
-                       class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-                <button @click="probeOllamaModels" class="btn btn-ghost text-xs whitespace-nowrap" :disabled="probingOllama">
-                  {{ probingOllama ? '...' : 'Fetch Models' }}
-                </button>
-              </div>
-            </div>
-            <div>
-              <label class="text-xs text-gray-400">Model</label>
-              <select v-if="ollamaModels.length" v-model="ollamaForm.model"
-                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
-                <option v-for="m in ollamaModels" :key="m.name" :value="m.name">{{ m.name }} ({{ formatSize(m.size) }})</option>
-              </select>
-              <input v-else v-model="ollamaForm.model" placeholder="Enter URL and click Fetch Models"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-            <div>
-              <label class="text-xs text-gray-400">API Key <span class="text-gray-600">(optional, for remote)</span></label>
-              <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-            <div>
-              <label class="text-xs text-gray-400">Max Tokens</label>
-              <input v-model.number="ollamaForm.max_tokens" type="number"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-          </div>
-          <div v-if="ollamaStatus.health && ollamaStatus.health.error"
-               class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
-            {{ ollamaStatus.health.error }}
-          </div>
-          <div class="mt-3">
-            <button @click="saveOllamaConfig" class="btn btn-primary text-xs" :disabled="savingOllama">
-              {{ savingOllama ? 'Saving...' : 'Save' }}
-            </button>
-          </div>
-        </div>
-
         <!-- ==================== Codex (OpenAI) — Config + Auth ==================== -->
         <div class="hm-card">
           <div class="flex items-center justify-between mb-3">
@@ -337,6 +233,111 @@ export default {
           </div>
         </div>
       </div>
+
+        <!-- ==================== Kimi Config ==================== -->
+        <div class="hm-card">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-gray-300">Kimi (Moonshot AI)</h2>
+            <div class="flex items-center gap-3">
+              <div v-if="kimiStatus.configured" class="text-sm">
+                <span v-if="kimiStatus.health && kimiStatus.health.healthy" class="text-green-400">● Connected</span>
+                <span v-else class="text-red-400">● Unreachable</span>
+              </div>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" v-model="kimiForm.enabled" class="accent-indigo-500" />
+                <span class="text-xs text-gray-400">Enabled</span>
+              </label>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs text-gray-400">API Key</label>
+              <input v-model="kimiForm.api_key" type="password" placeholder="sk-..."
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Model</label>
+              <select v-if="kimiModels.length" v-model="kimiForm.model"
+                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
+                <option v-for="m in kimiModels" :key="m" :value="m">{{ m }}</option>
+              </select>
+              <input v-else v-model="kimiForm.model" placeholder="kimi-k2.6"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Max Tokens</label>
+              <input v-model.number="kimiForm.max_tokens" type="number"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+          </div>
+          <div v-if="kimiStatus.health && kimiStatus.health.error"
+               class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
+            {{ kimiStatus.health.error }}
+          </div>
+          <div class="mt-3">
+            <button @click="saveKimiConfig" class="btn btn-primary text-xs" :disabled="savingKimi">
+              {{ savingKimi ? 'Saving...' : 'Save' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- ==================== Ollama Config ==================== -->
+        <div class="hm-card">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-gray-300">Ollama (Local/Remote)</h2>
+            <div class="flex items-center gap-3">
+              <div v-if="ollamaStatus.configured" class="text-sm">
+                <span v-if="ollamaStatus.health && ollamaStatus.health.healthy" class="text-green-400">● Connected</span>
+                <span v-else class="text-red-400">● Unreachable</span>
+              </div>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" v-model="ollamaForm.enabled" class="accent-indigo-500" />
+                <span class="text-xs text-gray-400">Enabled</span>
+              </label>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs text-gray-400">Base URL</label>
+              <div class="flex gap-2">
+                <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434"
+                       class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+                <button @click="probeOllamaModels" class="btn btn-ghost text-xs whitespace-nowrap" :disabled="probingOllama">
+                  {{ probingOllama ? '...' : 'Fetch Models' }}
+                </button>
+              </div>
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Model</label>
+              <select v-if="ollamaModels.length" v-model="ollamaForm.model"
+                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
+                <option v-for="m in ollamaModels" :key="m.name" :value="m.name">{{ m.name }} ({{ formatSize(m.size) }})</option>
+              </select>
+              <input v-else v-model="ollamaForm.model" placeholder="Enter URL and click Fetch Models"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">API Key <span class="text-gray-600">(optional, for remote)</span></label>
+              <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Max Tokens</label>
+              <input v-model.number="ollamaForm.max_tokens" type="number"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+          </div>
+          <div v-if="ollamaStatus.health && ollamaStatus.health.error"
+               class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
+            {{ ollamaStatus.health.error }}
+          </div>
+          <div class="mt-3">
+            <button @click="saveOllamaConfig" class="btn btn-primary text-xs" :disabled="savingOllama">
+              {{ savingOllama ? 'Saving...' : 'Save' }}
+            </button>
+          </div>
+        </div>
+
 
       <!-- Toast -->
       <div v-if="toast" class="fixed bottom-6 right-6 px-4 py-2 rounded text-sm shadow-lg z-50"
