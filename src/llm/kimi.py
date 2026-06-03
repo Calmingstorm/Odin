@@ -139,13 +139,13 @@ class KimiClient(LLMProvider):
                     if tool_calls and role == "assistant":
                         entry["tool_calls"] = tool_calls
                         if not entry["content"]:
-                            entry["content"] = None
+                            entry["content"] = ""
                     oai_messages.append(entry)
                 for tr in tool_results:
                     oai_messages.append(tr)
                 continue
 
-            oai_messages.append({"role": role, "content": content})
+            oai_messages.append({"role": role, "content": str(content) if content else ""})
 
         return oai_messages
 
@@ -153,14 +153,17 @@ class KimiClient(LLMProvider):
         """Convert internal tool format to OpenAI function calling format."""
         oai_tools = []
         for tool in tools:
-            oai_tools.append({
-                "type": "function",
-                "function": {
-                    "name": tool.get("name", ""),
-                    "description": tool.get("description", ""),
-                    "parameters": tool.get("input_schema", tool.get("parameters", {})),
-                },
-            })
+            params = tool.get("input_schema", tool.get("parameters", {}))
+            if not params or not isinstance(params, dict):
+                params = {"type": "object", "properties": {}}
+            if "type" not in params:
+                params["type"] = "object"
+            fn: dict = {
+                "name": tool.get("name", "unknown"),
+                "description": tool.get("description", "") or tool.get("name", ""),
+                "parameters": params,
+            }
+            oai_tools.append({"type": "function", "function": fn})
         return oai_tools
 
     def _resolve_temperature(self, temperature: float | None) -> float:
@@ -249,14 +252,18 @@ class KimiClient(LLMProvider):
         tools: list[dict],
     ) -> LLMResponse:
         adapted_system = system + KIMI_TOOL_ENFORCEMENT
+        converted_messages = self._convert_messages(messages, adapted_system)
+        converted_tools = self._convert_tools(tools)
         body = {
             "model": self.model,
-            "messages": self._convert_messages(messages, adapted_system),
-            "tools": self._convert_tools(tools),
+            "messages": converted_messages,
+            "tools": converted_tools,
             "tool_choice": "auto",
             "max_tokens": self.max_tokens,
             "temperature": self._resolve_temperature(None),
         }
+        log.debug("Kimi request: %d messages, %d tools, model=%s",
+                  len(converted_messages), len(converted_tools), self.model)
         data = await self._request_with_retry(body)
         return self._parse_response(data)
 
