@@ -425,6 +425,7 @@ class OdinBot(commands.Bot):
             log.warning("Kimi enabled in config but no api_key set")
 
         self._llm_provider_lock = asyncio.Lock()
+        self._llm_active_requests = 0
 
         # Wire LLM callbacks to whichever provider is active
         if self.llm_client is not None:
@@ -497,7 +498,7 @@ class OdinBot(commands.Bot):
         # record_failure as they operate.
         from ..health.subsystem_guard import SubsystemGuard
         self.subsystem_guard = SubsystemGuard()
-        for _name in ("llm", "codex", "ssh", "knowledge", "voice", "browser", "comfyui"):
+        for _name in ("llm_codex", "llm_ollama", "llm_kimi", "codex", "ssh", "knowledge", "voice", "browser", "comfyui"):
             self.subsystem_guard.register(_name)
 
         # Audit signer — exposed as bot.audit_signer for tests/introspection.
@@ -757,6 +758,13 @@ class OdinBot(commands.Bot):
                 return {"error": "Ollama not configured — enable and set base_url first"}
             if provider == "kimi" and not self.kimi_client:
                 return {"error": "Kimi not configured — set api_key first"}
+
+            if self._llm_active_requests > 0:
+                log.warning("Provider switch while %d request(s) in-flight — waiting", self._llm_active_requests)
+                for _ in range(50):
+                    if self._llm_active_requests == 0:
+                        break
+                    await asyncio.sleep(0.1)
 
             self.config.llm_provider.active_provider = provider
             self._wire_llm_callbacks()
@@ -1376,16 +1384,19 @@ class OdinBot(commands.Bot):
         - cost_tracker.record() captures token usage on every successful call
         - subsystem_guard.record_success / record_failure tracks codex health
         """
-        guard_key = "llm"
+        provider_cfg = getattr(self.config, "llm_provider", None)
+        active = provider_cfg.active_provider if provider_cfg else "codex"
+        guard_key = f"llm_{active}"
         if self.subsystem_guard is not None:
             err = self.subsystem_guard.check(guard_key)
             if err:
                 raise RuntimeError(f"LLM subsystem unavailable: {err}")
 
-        # Pick which client to use. Default = active provider.
+        # Pin provider for this request — prevents mid-conversation switches
         client = self.llm_client
         if client is None:
             raise RuntimeError("No LLM provider configured")
+        self._llm_active_requests += 1
         if (
             user_message
             and self.model_router is not None
@@ -1403,29 +1414,32 @@ class OdinBot(commands.Bot):
                 log.exception("model_router.route failed; using strong model (non-fatal)")
 
         try:
-            resp = await client.chat_with_tools(
-                messages=messages, system=system, tools=tools, **kwargs,
-            )
-        except Exception as exc:
-            if self.subsystem_guard is not None:
-                self.subsystem_guard.record_failure(guard_key, str(exc))
-            raise
-        if self.subsystem_guard is not None:
-            self.subsystem_guard.record_success(guard_key)
-        if self.cost_tracker is not None:
             try:
-                active_model = getattr(self.llm_client, "model", "unknown")
-                self.cost_tracker.record(
-                    int(getattr(resp, "input_tokens", 0) or 0),
-                    int(getattr(resp, "output_tokens", 0) or 0),
-                    model=active_model,
-                    user_id=user_id,
-                    channel_id=channel_id,
-                    tools_used=tools_used or [],
+                resp = await client.chat_with_tools(
+                    messages=messages, system=system, tools=tools, **kwargs,
                 )
-            except Exception:
-                log.exception("CostTracker.record failed (non-fatal)")
-        return resp
+            except Exception as exc:
+                if self.subsystem_guard is not None:
+                    self.subsystem_guard.record_failure(guard_key, str(exc))
+                raise
+            if self.subsystem_guard is not None:
+                self.subsystem_guard.record_success(guard_key)
+            if self.cost_tracker is not None:
+                try:
+                    active_model = getattr(client, "model", "unknown")
+                    self.cost_tracker.record(
+                        int(getattr(resp, "input_tokens", 0) or 0),
+                        int(getattr(resp, "output_tokens", 0) or 0),
+                        model=active_model,
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        tools_used=tools_used or [],
+                    )
+                except Exception:
+                    log.exception("CostTracker.record failed (non-fatal)")
+            return resp
+        finally:
+            self._llm_active_requests -= 1
 
     async def _operational_reflection(
         self, user_request: str, tools_used: list[str],

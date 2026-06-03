@@ -3087,6 +3087,38 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     # Provider config update (enable/disable, set keys, endpoints)
     # ------------------------------------------------------------------
 
+    import ipaddress as _ipaddress
+    import urllib.parse as _urlparse
+
+    _ALLOWED_OLLAMA_HOSTS = frozenset({
+        "localhost", "127.0.0.1", "::1", "0.0.0.0",
+    })
+
+    def _validate_ollama_url(url: str) -> str:
+        """Validate Ollama base_url — restrict to local/private networks to prevent SSRF."""
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("base_url must start with http:// or https://")
+        parsed = _urlparse.urlparse(url)
+        host = parsed.hostname or ""
+        if host in _ALLOWED_OLLAMA_HOSTS:
+            return url
+        try:
+            addr = _ipaddress.ip_address(host)
+            if addr.is_private or addr.is_loopback:
+                return url
+        except ValueError:
+            pass
+        try:
+            import socket
+            resolved = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            for _, _, _, _, sockaddr in resolved:
+                addr = _ipaddress.ip_address(sockaddr[0])
+                if addr.is_private or addr.is_loopback:
+                    return url
+        except Exception:
+            pass
+        raise ValueError(f"Ollama base_url must point to a local/private network address, got: {host}")
+
     def _parse_int(val, name: str, lo: int = 1, hi: int = 262000) -> int:
         try:
             v = int(val)
@@ -3096,15 +3128,47 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             raise ValueError(f"{name} must be between {lo} and {hi}")
         return v
 
-    async def _persist_config() -> None:
-        """Write current in-memory config to config.yml."""
+    def _persist_llm_sections_sync() -> None:
+        """Merge only LLM-related sections into config.yml, preserving everything else."""
         config_path = Path("config.yml")
-        current = _redact_free_config_dump(bot.config)
-        await _asyncio.to_thread(_write_config, config_path, current)
+        if not config_path.exists():
+            return
+        raw = config_path.read_text()
+        try:
+            existing = yaml.safe_load(raw) or {}
+        except Exception:
+            return
+        existing["openai_codex"] = {
+            **existing.get("openai_codex", {}),
+            "enabled": bot.config.openai_codex.enabled,
+            "model": bot.config.openai_codex.model,
+            "max_tokens": bot.config.openai_codex.max_tokens,
+        }
+        existing["ollama"] = {
+            "enabled": bot.config.ollama.enabled,
+            "base_url": bot.config.ollama.base_url,
+            "model": bot.config.ollama.model,
+            "max_tokens": bot.config.ollama.max_tokens,
+            "timeout": bot.config.ollama.timeout,
+            "api_key": bot.config.ollama.api_key,
+        }
+        existing["kimi"] = {
+            "enabled": bot.config.kimi.enabled,
+            "api_key": bot.config.kimi.api_key,
+            "base_url": bot.config.kimi.base_url,
+            "model": bot.config.kimi.model,
+            "max_tokens": bot.config.kimi.max_tokens,
+            "timeout": bot.config.kimi.timeout,
+        }
+        existing["llm_provider"] = {
+            "active_provider": bot.config.llm_provider.active_provider,
+        }
+        with open(config_path, "w") as f:
+            yaml.dump(existing, f, default_flow_style=False)
 
-    def _redact_free_config_dump(config) -> dict:
-        """Dump config as dict, preserving secrets for file persistence."""
-        return config.model_dump(mode="python")
+    async def _persist_config() -> None:
+        """Persist LLM config sections without touching env vars or other settings."""
+        await _asyncio.to_thread(_persist_llm_sections_sync)
 
     @routes.put("/api/llm/codex/config")
     async def llm_codex_config(request: web.Request) -> web.Response:
@@ -3162,10 +3226,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                     cfg.enabled = bool(body["enabled"])
                     changed = True
                 if "base_url" in body and body["base_url"]:
-                    url = str(body["base_url"])
-                    if not url.startswith(("http://", "https://")):
-                        return web.json_response({"error": "base_url must start with http:// or https://"}, status=400)
-                    cfg.base_url = url
+                    cfg.base_url = _validate_ollama_url(str(body["base_url"]))
                     changed = True
                 if "model" in body and body["model"]:
                     cfg.model = str(body["model"])
@@ -3213,12 +3274,6 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                     changed = True
                 if "api_key" in body:
                     cfg.api_key = str(body["api_key"])
-                    changed = True
-                if "base_url" in body and body["base_url"]:
-                    url = str(body["base_url"])
-                    if not url.startswith(("http://", "https://")):
-                        return web.json_response({"error": "base_url must start with http:// or https://"}, status=400)
-                    cfg.base_url = url
                     changed = True
                 if "model" in body and body["model"]:
                     cfg.model = str(body["model"])
@@ -3276,6 +3331,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
         base_url = (body.get("base_url") or "").rstrip("/")
+        try:
+            base_url = _validate_ollama_url(base_url)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
         if not base_url.startswith(("http://", "https://")):
             return web.json_response({"error": "base_url must start with http:// or https://"}, status=400)
         try:
@@ -3344,7 +3403,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
             client.model = model
             bot.config.ollama.model = model
-        await _persist_config()
+            await _persist_config()
         return web.json_response({"status": "updated", "model": model})
 
     # ------------------------------------------------------------------
@@ -3416,7 +3475,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
             client.model = model
             bot.config.kimi.model = model
-        await _persist_config()
+            await _persist_config()
         return web.json_response({"status": "updated", "model": model})
 
     # ------------------------------------------------------------------

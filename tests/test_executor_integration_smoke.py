@@ -518,7 +518,7 @@ class TestExecutorHelpers:
         with pytest.raises(RuntimeError, match="boom"):
             await bot._codex_call(messages=[], system="s", tools=[])
         # Failure was recorded against the llm subsystem
-        info = bot.subsystem_guard._subsystems["llm"]
+        info = bot.subsystem_guard._subsystems["llm_codex"]
         assert info.consecutive_failures >= 1
 
     @pytest.mark.asyncio

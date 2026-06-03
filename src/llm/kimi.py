@@ -303,9 +303,8 @@ class KimiClient(LLMProvider):
             data = await self._request_with_retry(body)
         except RuntimeError as e:
             if "tokenization" in str(e).lower():
-                import json as _j
-                log.error("Kimi tokenization failed. Messages: %s",
-                          _j.dumps([{k: (v[:200] if isinstance(v, str) else v) for k, v in m.items()} for m in converted_messages], indent=2, default=str))
+                log.error("Kimi tokenization failed: %d messages, %d tools, model=%s",
+                          len(converted_messages), len(converted_tools), self.model)
             raise
         return self._parse_response(data)
 
