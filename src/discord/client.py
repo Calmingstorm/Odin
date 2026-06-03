@@ -1389,21 +1389,22 @@ class OdinBot(commands.Bot):
         - cost_tracker.record() captures token usage on every successful call
         - subsystem_guard.record_success / record_failure tracks codex health
         """
-        if self._llm_switching:
-            raise RuntimeError("LLM provider switch in progress — retry shortly")
+        async with self._llm_provider_lock:
+            if self._llm_switching:
+                raise RuntimeError("LLM provider switch in progress — retry shortly")
+            client = self.llm_client
+            if client is None:
+                raise RuntimeError("No LLM provider configured")
+            self._llm_active_requests += 1
+            provider_cfg = getattr(self.config, "llm_provider", None)
+            active = provider_cfg.active_provider if provider_cfg else "codex"
 
-        provider_cfg = getattr(self.config, "llm_provider", None)
-        active = provider_cfg.active_provider if provider_cfg else "codex"
         guard_key = f"llm_{active}"
         if self.subsystem_guard is not None:
             err = self.subsystem_guard.check(guard_key)
             if err:
+                self._llm_active_requests -= 1
                 raise RuntimeError(f"LLM subsystem unavailable: {err}")
-
-        client = self.llm_client
-        if client is None:
-            raise RuntimeError("No LLM provider configured")
-        self._llm_active_requests += 1
         if (
             user_message
             and self.model_router is not None

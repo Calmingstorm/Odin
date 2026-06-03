@@ -3104,12 +3104,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return url
         try:
             addr = _ipaddress.ip_address(host)
+            if addr.is_link_local:
+                raise ValueError(f"Link-local addresses not allowed: {host}")
             if addr.is_private or addr.is_loopback:
-                if addr.is_link_local:
-                    raise ValueError(f"Link-local addresses not allowed: {host}")
                 return url
-        except ValueError:
-            raise
+            raise ValueError(f"Public IP not allowed for Ollama: {host}")
+        except ValueError as e:
+            if "not allowed" in str(e) or "Public IP" in str(e):
+                raise
         except Exception:
             pass
         try:
@@ -3139,8 +3141,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             raise ValueError(f"{name} must be between {lo} and {hi}")
         return v
 
-    def _safe_secret(existing_val, memory_val):
-        """Preserve env-var placeholders in config; only overwrite with explicit new values."""
+    _ui_set_secrets: set[str] = set()
+
+    def _safe_secret(key, existing_val, memory_val):
+        """Preserve env-var placeholders unless explicitly set via UI this session."""
+        if key in _ui_set_secrets:
+            return memory_val
         if isinstance(existing_val, str) and "${" in existing_val:
             return existing_val
         return memory_val
@@ -3168,7 +3174,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         ex_ollama["model"] = bot.config.ollama.model
         ex_ollama["max_tokens"] = bot.config.ollama.max_tokens
         ex_ollama["timeout"] = bot.config.ollama.timeout
-        ex_ollama["api_key"] = _safe_secret(ex_ollama.get("api_key", ""), bot.config.ollama.api_key)
+        ex_ollama["api_key"] = _safe_secret("ollama.api_key", ex_ollama.get("api_key", ""), bot.config.ollama.api_key)
         existing["ollama"] = ex_ollama
 
         ex_kimi = existing.get("kimi", {})
@@ -3176,7 +3182,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         ex_kimi["model"] = bot.config.kimi.model
         ex_kimi["max_tokens"] = bot.config.kimi.max_tokens
         ex_kimi["timeout"] = bot.config.kimi.timeout
-        ex_kimi["api_key"] = _safe_secret(ex_kimi.get("api_key", ""), bot.config.kimi.api_key)
+        ex_kimi["api_key"] = _safe_secret("kimi.api_key", ex_kimi.get("api_key", ""), bot.config.kimi.api_key)
         existing["kimi"] = ex_kimi
 
         existing["llm_provider"] = {
@@ -3255,6 +3261,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                     changed = True
                 if "api_key" in body:
                     cfg.api_key = str(body["api_key"])
+                    _ui_set_secrets.add("ollama.api_key")
                     changed = True
                 if "timeout" in body:
                     cfg.timeout = _parse_int(body["timeout"], "timeout", 10, 3600)
@@ -3293,6 +3300,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                     changed = True
                 if "api_key" in body:
                     cfg.api_key = str(body["api_key"])
+                    _ui_set_secrets.add("kimi.api_key")
                     changed = True
                 if "model" in body and body["model"]:
                     cfg.model = str(body["model"])
