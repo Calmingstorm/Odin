@@ -35,7 +35,6 @@ class KimiClient(LLMProvider):
     def __init__(
         self,
         api_key: str,
-        base_url: str = KIMI_API_URL,
         model: str = "kimi-k2.6",
         max_tokens: int = 4096,
         timeout: int = 300,
@@ -44,7 +43,7 @@ class KimiClient(LLMProvider):
         retry_max_delay: float = DEFAULT_MAX_DELAY,
     ) -> None:
         self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
+        self.base_url = KIMI_API_URL
         self.model = model
         self.max_tokens = max_tokens
         self.timeout = timeout

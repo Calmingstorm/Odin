@@ -46,10 +46,10 @@ class TestOllamaURLValidation:
 
 
 class TestKimiConfig:
-    def test_base_url_hardcoded(self):
+    def test_no_base_url_in_config(self):
         from src.config.schema import KimiConfig
         cfg = KimiConfig(enabled=True, api_key="sk-test")
-        assert "moonshot" in cfg.base_url
+        assert not hasattr(cfg, "base_url")
 
     def test_empty_model_rejected(self):
         from src.config.schema import KimiConfig
