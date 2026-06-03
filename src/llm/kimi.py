@@ -149,15 +149,43 @@ class KimiClient(LLMProvider):
 
         return oai_messages
 
+    _MFJS_STRIP_KEYS = frozenset({
+        "title", "$comment", "format", "prefixItems", "$defs",
+        "$ref", "exclusiveMinimum", "exclusiveMaximum",
+    })
+
+    def _sanitize_schema(self, schema: dict) -> dict:
+        """Sanitize a JSON Schema for Kimi's MFJS compliance."""
+        clean: dict = {}
+        for k, v in schema.items():
+            if k in self._MFJS_STRIP_KEYS:
+                continue
+            if isinstance(v, dict):
+                clean[k] = self._sanitize_schema(v)
+            elif isinstance(v, list):
+                clean[k] = [
+                    self._sanitize_schema(item) if isinstance(item, dict) else item
+                    for item in v
+                ]
+            else:
+                clean[k] = v
+        if clean.get("type") == "object":
+            clean.setdefault("properties", {})
+            clean.setdefault("required", [])
+        return clean
+
     def _convert_tools(self, tools: list[dict]) -> list[dict]:
-        """Convert internal tool format to OpenAI function calling format."""
+        """Convert internal tool format to Kimi MFJS-compliant format."""
         oai_tools = []
         for tool in tools:
             params = tool.get("input_schema", tool.get("parameters", {}))
             if not params or not isinstance(params, dict):
-                params = {"type": "object", "properties": {}}
+                params = {"type": "object", "properties": {}, "required": []}
+            params = self._sanitize_schema(params)
             if "type" not in params:
                 params["type"] = "object"
+                params.setdefault("properties", {})
+                params.setdefault("required", [])
             fn: dict = {
                 "name": tool.get("name", "unknown"),
                 "description": tool.get("description", "") or tool.get("name", ""),
