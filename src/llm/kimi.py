@@ -110,6 +110,7 @@ class KimiClient(LLMProvider):
             if isinstance(content, list):
                 text_parts = []
                 tool_calls = []
+                tool_results = []
                 for block in content:
                     if isinstance(block, dict):
                         if block.get("type") == "text":
@@ -124,7 +125,12 @@ class KimiClient(LLMProvider):
                                 },
                             })
                         elif block.get("type") == "tool_result":
-                            text_parts.append(str(block.get("content", "")))
+                            tr_content = block.get("content", "")
+                            tool_results.append({
+                                "role": "tool",
+                                "tool_call_id": block.get("tool_use_id", ""),
+                                "content": json.dumps(tr_content) if not isinstance(tr_content, str) else tr_content,
+                            })
                     elif isinstance(block, str):
                         text_parts.append(block)
 
@@ -134,6 +140,8 @@ class KimiClient(LLMProvider):
                     if not entry["content"]:
                         entry["content"] = None
                 oai_messages.append(entry)
+                for tr in tool_results:
+                    oai_messages.append(tr)
                 continue
 
             oai_messages.append({"role": role, "content": content})
@@ -180,10 +188,16 @@ class KimiClient(LLMProvider):
                     text = await resp.text()
 
                     if resp.status == 429:
+                        if attempt >= self.max_retries:
+                            self.breaker.record_failure()
+                            raise RuntimeError(f"Kimi rate limited after {self.max_retries + 1} attempts: {text[:300]}")
                         retry_after = resp.headers.get("Retry-After")
-                        delay = float(retry_after) if retry_after else compute_backoff(
-                            attempt, self.retry_base_delay, self.retry_max_delay,
-                        )
+                        try:
+                            delay = min(float(retry_after), self.retry_max_delay) if retry_after else compute_backoff(
+                                attempt, self.retry_base_delay, self.retry_max_delay,
+                            )
+                        except (ValueError, TypeError):
+                            delay = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                         log.warning("Kimi rate limited (attempt %d/%d), retrying in %.1fs",
                                     attempt + 1, self.max_retries + 1, delay)
                         await asyncio.sleep(delay)

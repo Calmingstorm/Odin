@@ -41,6 +41,23 @@ class TestConvertMessages:
         assert msgs[0]["tool_calls"][0]["function"]["name"] == "read_file"
         assert json.loads(msgs[0]["tool_calls"][0]["function"]["arguments"]) == {"path": "/tmp"}
 
+    def test_tool_result_in_list_content(self, client):
+        msgs = client._convert_messages([{
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_abc", "content": {"output": "ok"}},
+                {"type": "tool_result", "tool_use_id": "call_def", "content": "done"},
+            ],
+        }], "")
+        assert msgs[0]["role"] == "user"
+        assert msgs[0]["content"] == ""
+        assert msgs[1]["role"] == "tool"
+        assert msgs[1]["tool_call_id"] == "call_abc"
+        assert '"output"' in msgs[1]["content"]
+        assert msgs[2]["role"] == "tool"
+        assert msgs[2]["tool_call_id"] == "call_def"
+        assert msgs[2]["content"] == "done"
+
     def test_multipart_text(self, client):
         msgs = client._convert_messages([{
             "role": "user",
