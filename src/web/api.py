@@ -1294,6 +1294,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         ollama = getattr(bot, "ollama_client", None)
         if ollama is not None:
             result["ollama"] = ollama.pool_stats()
+        kimi = getattr(bot, "kimi_client", None)
+        if kimi is not None:
+            result["kimi"] = kimi.pool_stats()
         if not result:
             return web.json_response({"error": "No HTTP pools available"}, status=503)
         return web.json_response(result)
@@ -3038,6 +3041,11 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 "model": bot.config.ollama.model if ollama_configured else None,
                 "base_url": bot.config.ollama.base_url if ollama_configured else None,
             },
+            "kimi": {
+                "configured": bot.kimi_client is not None,
+                "enabled": getattr(bot.config, "kimi", None) is not None and bot.config.kimi.enabled,
+                "model": bot.config.kimi.model if bot.kimi_client else None,
+            },
         }
 
         client = bot.llm_client
@@ -3055,8 +3063,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
         provider = body.get("provider", "")
-        if provider not in ("codex", "ollama"):
-            return web.json_response({"error": "provider must be 'codex' or 'ollama'"}, status=400)
+        if provider not in ("codex", "ollama", "kimi"):
+            return web.json_response({"error": "provider must be 'codex', 'ollama', or 'kimi'"}, status=400)
 
         result = await bot.switch_llm_provider(provider)
         if "error" in result:
@@ -3140,6 +3148,77 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
             client.model = model
             bot.config.ollama.model = model
+        return web.json_response({"status": "updated", "model": model})
+
+    # ------------------------------------------------------------------
+    # Kimi provider management
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/kimi/status")
+    async def kimi_status(_request: web.Request) -> web.Response:
+        client = getattr(bot, "kimi_client", None)
+        if client is None:
+            return web.json_response({"configured": False, "enabled": False})
+
+        health = await client.health_check()
+        return web.json_response({
+            "configured": True,
+            "enabled": True,
+            "model": client.model,
+            "base_url": client.base_url,
+            "health": health,
+            "stats": client.pool_stats(),
+        })
+
+    @routes.post("/api/kimi/reload")
+    async def kimi_reload(_request: web.Request) -> web.Response:
+        result = await bot.reload_kimi()
+        status = 200 if result.get("configured") else 503
+        return web.json_response(result, status=status)
+
+    @routes.get("/api/kimi/models")
+    async def kimi_models(_request: web.Request) -> web.Response:
+        client = getattr(bot, "kimi_client", None)
+        if client is None:
+            return web.json_response({"error": "Kimi not configured"}, status=503)
+
+        health = await client.health_check()
+        if not health.get("healthy"):
+            return web.json_response({"error": health.get("error", "unhealthy")}, status=502)
+        return web.json_response({
+            "models": health.get("models", []),
+            "active_model": client.model,
+        })
+
+    @routes.post("/api/kimi/model")
+    async def kimi_set_model(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        model = body.get("model", "").strip()
+        if not model:
+            return web.json_response({"error": "model is required"}, status=400)
+
+        lock = getattr(bot, "_llm_provider_lock", None)
+        if lock is None:
+            return web.json_response({"error": "provider lock not available"}, status=503)
+
+        async with lock:
+            client = getattr(bot, "kimi_client", None)
+            if client is None:
+                return web.json_response({"error": "Kimi not configured"}, status=503)
+
+            health = await client.health_check()
+            available = health.get("models", [])
+            if available and model not in available:
+                return web.json_response({
+                    "error": f"Model '{model}' not available. Models: {', '.join(available[:10])}",
+                }, status=400)
+
+            client.model = model
+            bot.config.kimi.model = model
         return web.json_response({"status": "updated", "model": model})
 
     # ------------------------------------------------------------------

@@ -304,8 +304,40 @@ class OllamaConfig(BaseModel):
         return v
 
 
+class KimiConfig(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    enabled: bool = False
+    api_key: str = ""
+    base_url: str = "https://api.moonshot.ai/v1"
+    model: str = "kimi-k2.6"
+    max_tokens: int = 4096
+    timeout: int = 300
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_url(cls, v):
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("base_url must start with http:// or https://")
+        return v
+
+    @field_validator("max_tokens")
+    @classmethod
+    def _max_tokens_range(cls, v):
+        if v < 1 or v > 262000:
+            raise ValueError("max_tokens must be between 1 and 262000")
+        return v
+
+    @field_validator("model")
+    @classmethod
+    def _model_nonempty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("model must not be empty")
+        return v
+
+
 class LLMProviderConfig(BaseModel):
-    active_provider: Literal["codex", "ollama"] = "codex"
+    active_provider: Literal["codex", "ollama", "kimi"] = "codex"
 
 
 class WebhookConfig(BaseModel):
@@ -577,6 +609,7 @@ class Config(BaseModel):
     discord: DiscordConfig
     openai_codex: OpenAICodexConfig = OpenAICodexConfig()
     ollama: OllamaConfig = OllamaConfig()
+    kimi: KimiConfig = KimiConfig()
     llm_provider: LLMProviderConfig = LLMProviderConfig()
     context: ContextConfig = ContextConfig()
     sessions: SessionsConfig = SessionsConfig()

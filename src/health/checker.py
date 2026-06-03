@@ -430,11 +430,50 @@ def check_ollama(bot: OdinBot) -> ComponentStatus:
         )
 
 
+def check_kimi(bot: OdinBot) -> ComponentStatus:
+    from ..llm.kimi import KimiClient
+    kimi = getattr(bot, "kimi_client", None)
+    if not isinstance(kimi, KimiClient):
+        return ComponentStatus(
+            name="kimi", healthy=True, status="unconfigured",
+            detail="Kimi client not configured (optional)",
+        )
+    try:
+        breaker = getattr(kimi, "breaker", None)
+        breaker_state = str(breaker.state) if breaker else "unknown"
+        stats = kimi.pool_stats()
+        healthy = breaker_state in ("closed", "half_open")
+        if breaker_state == "open":
+            status_label = "down"
+            detail = "Circuit breaker OPEN — Kimi API failures detected"
+        elif breaker_state == "half_open":
+            status_label = "degraded"
+            detail = "Circuit breaker half-open — probing recovery"
+        else:
+            status_label = "ok"
+            detail = f"Healthy — {stats.get('total_requests', 0)} total requests"
+        return ComponentStatus(
+            name="kimi", healthy=healthy, status=status_label,
+            detail=detail,
+            metadata={
+                "circuit_breaker": breaker_state,
+                "model": getattr(kimi, "model", "unknown"),
+                **stats,
+            },
+        )
+    except Exception as exc:
+        return ComponentStatus(
+            name="kimi", healthy=False, status="down",
+            detail=f"Error probing Kimi: {exc}",
+        )
+
+
 # Ordered list of all checkers
 _ALL_CHECKERS = [
     check_discord,
     check_codex,
     check_ollama,
+    check_kimi,
     check_sessions,
     check_knowledge,
     check_ssh_hosts,

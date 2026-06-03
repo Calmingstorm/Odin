@@ -56,6 +56,21 @@ export default {
                 <span v-if="llmStatus.active_provider === 'ollama'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">active</span>
               </label>
             </div>
+            <div class="flex items-center gap-4">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="radio" value="kimi" v-model="selectedProvider"
+                       :disabled="!llmStatus.kimi.configured"
+                       class="accent-indigo-500" />
+                <span class="text-sm" :class="llmStatus.kimi.configured ? 'text-gray-200' : 'text-gray-500'">
+                  Kimi (Moonshot AI)
+                </span>
+                <span v-if="!llmStatus.kimi.configured" class="text-xs text-yellow-500">— not configured</span>
+                <span v-else-if="llmStatus.kimi.configured" class="text-xs text-gray-500">
+                  {{ llmStatus.kimi.model }}
+                </span>
+                <span v-if="llmStatus.active_provider === 'kimi'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">active</span>
+              </label>
+            </div>
             <div class="flex items-center gap-3 mt-2">
               <button @click="switchProvider" class="btn btn-primary text-xs"
                       :disabled="switching || selectedProvider === llmStatus.active_provider">
@@ -121,6 +136,53 @@ export default {
 
             <button @click="reloadOllama" class="btn btn-ghost text-xs" :disabled="reloading">
               {{ reloading ? 'Reloading...' : 'Reload Ollama Client' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- ==================== Kimi Section ==================== -->
+        <div class="hm-card">
+          <h2 class="text-sm font-semibold text-gray-300 mb-3">Kimi (Moonshot AI)</h2>
+          <div class="space-y-4">
+            <!-- Health -->
+            <div class="flex items-center gap-2 text-sm">
+              <template v-if="kimiStatus.configured">
+                <span v-if="kimiStatus.health && kimiStatus.health.healthy" class="text-green-400">● Connected</span>
+                <span v-else class="text-red-400">● Unreachable</span>
+              </template>
+              <span v-else class="text-gray-500">● Not configured</span>
+            </div>
+
+            <!-- Model selector -->
+            <div v-if="kimiStatus.configured && kimiModels.length" class="space-y-2">
+              <label class="text-xs text-gray-400">Model</label>
+              <div class="flex items-center gap-2">
+                <select v-model="kimiSelectedModel"
+                        class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200 min-w-48">
+                  <option v-for="m in kimiModels" :key="m" :value="m">{{ m }}</option>
+                </select>
+                <button @click="setKimiModel" class="btn btn-primary text-xs"
+                        :disabled="settingKimiModel || kimiSelectedModel === kimiStatus.model">
+                  {{ settingKimiModel ? 'Setting...' : 'Set' }}
+                </button>
+              </div>
+            </div>
+
+            <!-- Not configured hint -->
+            <div v-if="!kimiStatus.configured" class="text-sm text-gray-400">
+              Enable Kimi in the <strong>Config</strong> tab under
+              <code class="bg-gray-800 px-1 rounded">kimi</code> section
+              and set your <code class="bg-gray-800 px-1 rounded">api_key</code>, then reload.
+            </div>
+
+            <!-- Error -->
+            <div v-if="kimiStatus.health && kimiStatus.health.error"
+                 class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800">
+              {{ kimiStatus.health.error }}
+            </div>
+
+            <button @click="reloadKimi" class="btn btn-ghost text-xs" :disabled="reloadingKimi">
+              {{ reloadingKimi ? 'Reloading...' : 'Reload Kimi Client' }}
             </button>
           </div>
         </div>
@@ -270,6 +332,13 @@ export default {
     const reloading = ref(false);
     const settingModel = ref(false);
 
+    // --- Kimi ---
+    const kimiStatus = ref({ configured: false });
+    const kimiModels = ref([]);
+    const kimiSelectedModel = ref('');
+    const reloadingKimi = ref(false);
+    const settingKimiModel = ref(false);
+
     // --- Codex ---
     const codexLoading = ref(true);
     const codexError = ref('');
@@ -300,7 +369,7 @@ export default {
     // --- Fetch all ---
     async function fetchAll() {
       loading.value = true;
-      await Promise.all([fetchLLMStatus(), fetchOllamaStatus(), fetchCodexStatus()]);
+      await Promise.all([fetchLLMStatus(), fetchOllamaStatus(), fetchKimiStatus(), fetchCodexStatus()]);
       loading.value = false;
     }
 
@@ -371,6 +440,42 @@ export default {
         await fetchAll();
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { settingModel.value = false; }
+    }
+
+    // --- Kimi ---
+    async function fetchKimiStatus() {
+      try {
+        kimiStatus.value = await api.get('/api/kimi/status');
+        if (kimiStatus.value.model) kimiSelectedModel.value = kimiStatus.value.model;
+        if (kimiStatus.value.configured) {
+          try {
+            const m = await api.get('/api/kimi/models');
+            kimiModels.value = m.models || [];
+          } catch { kimiModels.value = []; }
+        }
+      } catch {
+        kimiStatus.value = { configured: false };
+      }
+    }
+
+    async function reloadKimi() {
+      reloadingKimi.value = true;
+      try {
+        const r = await api.post('/api/kimi/reload');
+        showToast(r.configured ? 'Kimi reloaded' : (r.reason || 'Kimi not configured'), r.configured ? 'success' : 'error');
+        await fetchAll();
+      } catch (e) { showToast(e.message || 'Reload failed', 'error'); }
+      finally { reloadingKimi.value = false; }
+    }
+
+    async function setKimiModel() {
+      settingKimiModel.value = true;
+      try {
+        await api.post('/api/kimi/model', { model: kimiSelectedModel.value });
+        showToast('Model set to ' + kimiSelectedModel.value);
+        await fetchAll();
+      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+      finally { settingKimiModel.value = false; }
     }
 
     // --- Codex account management ---
@@ -458,9 +563,11 @@ export default {
     return {
       loading, toast, llmStatus, selectedProvider, switching,
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
+      kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,
       fetchAll, switchProvider, reloadOllama, setOllamaModel,
+      reloadKimi, setKimiModel,
       activateAccount, refreshAccount, startEditLabel, saveLabel, deleteAccount,
       startDeviceLogin, cancelDeviceLogin, formatSize,
     };

@@ -26,7 +26,7 @@ from ..agents import AgentManager, LoopAgentBridge
 from ..agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ..tools.autonomous_loop import LoopManager
 from ..learning import ConversationReflector
-from ..llm import CircuitOpenError, CodexAuth, CodexChatClient, OllamaClient
+from ..llm import CircuitOpenError, CodexAuth, CodexChatClient, KimiClient, OllamaClient
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..llm.system_prompt import build_system_prompt, build_chat_system_prompt
@@ -409,6 +409,21 @@ class OdinBot(commands.Bot):
             )
             log.info("Ollama backend enabled (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url)
 
+        # Initialize Kimi client if configured
+        self.kimi_client: KimiClient | None = None
+        kimi_cfg = getattr(config, "kimi", None)
+        if kimi_cfg and kimi_cfg.enabled and kimi_cfg.api_key:
+            self.kimi_client = KimiClient(
+                api_key=kimi_cfg.api_key,
+                base_url=kimi_cfg.base_url,
+                model=kimi_cfg.model,
+                max_tokens=kimi_cfg.max_tokens,
+                timeout=kimi_cfg.timeout,
+            )
+            log.info("Kimi backend enabled (model: %s)", kimi_cfg.model)
+        elif kimi_cfg and kimi_cfg.enabled and not kimi_cfg.api_key:
+            log.warning("Kimi enabled in config but no api_key set")
+
         self._llm_provider_lock = asyncio.Lock()
 
         # Wire LLM callbacks to whichever provider is active
@@ -605,6 +620,8 @@ class OdinBot(commands.Bot):
         active = provider_cfg.active_provider if provider_cfg else "codex"
         if active == "ollama" and self.ollama_client is not None:
             return self.ollama_client
+        if active == "kimi" and self.kimi_client is not None:
+            return self.kimi_client
         return self.codex_client
 
     def _wire_llm_callbacks(self) -> None:
@@ -684,9 +701,38 @@ class OdinBot(commands.Bot):
         health = await self.ollama_client.health_check()
         return {"configured": True, "health": health}
 
+    async def reload_kimi(self) -> dict:
+        """Reload Kimi client from current config."""
+        async with self._llm_provider_lock:
+            kimi_cfg = getattr(self.config, "kimi", None)
+            if not kimi_cfg or not kimi_cfg.enabled:
+                old = self.kimi_client
+                self.kimi_client = None
+                if old:
+                    asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
+                return {"configured": False, "reason": "kimi disabled in config"}
+            if not kimi_cfg.api_key:
+                return {"configured": False, "reason": "kimi api_key not set"}
+
+            old = self.kimi_client
+            self.kimi_client = KimiClient(
+                api_key=kimi_cfg.api_key,
+                base_url=kimi_cfg.base_url,
+                model=kimi_cfg.model,
+                max_tokens=kimi_cfg.max_tokens,
+                timeout=kimi_cfg.timeout,
+            )
+            if old:
+                asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
+            self._wire_llm_callbacks()
+            log.info("Kimi client reloaded (model: %s)", kimi_cfg.model)
+
+        health = await self.kimi_client.health_check()
+        return {"configured": True, "health": health}
+
     async def switch_llm_provider(self, provider: str) -> dict:
         """Switch the active LLM provider at runtime."""
-        if provider not in ("codex", "ollama"):
+        if provider not in ("codex", "ollama", "kimi"):
             return {"error": f"Unknown provider: {provider}"}
 
         async with self._llm_provider_lock:
@@ -694,6 +740,8 @@ class OdinBot(commands.Bot):
                 return {"error": "Codex not configured — authenticate first"}
             if provider == "ollama" and not self.ollama_client:
                 return {"error": "Ollama not configured — enable and set base_url first"}
+            if provider == "kimi" and not self.kimi_client:
+                return {"error": "Kimi not configured — set api_key first"}
 
             self.config.llm_provider.active_provider = provider
             self._wire_llm_callbacks()
@@ -1203,10 +1251,11 @@ class OdinBot(commands.Bot):
                 llm_status = "LLM: not configured"
             codex_configured = "yes" if self.codex_client else "no"
             ollama_configured = "yes" if self.ollama_client else "no"
+            kimi_configured = "yes" if self.kimi_client else "no"
             await interaction.response.send_message(
                 f"**Odin Status**\n"
                 f"{llm_status}\n"
-                f"Codex: {codex_configured} | Ollama: {ollama_configured}\n"
+                f"Codex: {codex_configured} | Ollama: {ollama_configured} | Kimi: {kimi_configured}\n"
                 f"{voice_status}"
             )
 
@@ -1569,6 +1618,13 @@ class OdinBot(commands.Bot):
                 await ollama.close()
             except Exception:
                 log.exception("Error closing Ollama client")
+
+        kimi = getattr(self, "kimi_client", None)
+        if kimi is not None:
+            try:
+                await kimi.close()
+            except Exception:
+                log.exception("Error closing Kimi client")
 
         # Shut down Playwright browser
         browser = getattr(self, "browser_manager", None)

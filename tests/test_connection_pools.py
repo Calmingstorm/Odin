@@ -642,6 +642,7 @@ class TestPoolAPI:
         }
         bot = _make_bot(codex=codex)
         bot.ollama_client = None
+        bot.kimi_client = None
         async with TestClient(TestServer(_make_app(bot))) as client:
             resp = await client.get("/api/pools/http")
             assert resp.status == 200

@@ -36,7 +36,7 @@ const VALIDATION_RULES = {
 // Section grouping: category -> { label, icon, sections[] }
 const SECTION_GROUPS = [
   { key: 'core', label: 'Core', icon: '\u2699', sections: ['timezone', 'discord', 'logging', 'permissions', 'graceful_degradation'] },
-  { key: 'llm', label: 'LLM & AI', icon: '\uD83E\uDDE0', sections: ['llm_provider', 'openai_codex', 'ollama', 'context', 'agents'] },
+  { key: 'llm', label: 'LLM & AI', icon: '\uD83E\uDDE0', sections: ['llm_provider', 'openai_codex', 'ollama', 'kimi', 'context', 'agents'] },
   { key: 'data', label: 'Data & Storage', icon: '\uD83D\uDCBE', sections: ['sessions', 'learning', 'search', 'usage', 'audit'] },
   { key: 'services', label: 'Services', icon: '\uD83D\uDD17', sections: ['webhook', 'monitoring', 'voice', 'browser', 'comfyui', 'mcp', 'slack'] },
   { key: 'infra', label: 'Infrastructure', icon: '\uD83D\uDEE0', sections: ['tools'] },
