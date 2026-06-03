@@ -134,12 +134,13 @@ class KimiClient(LLMProvider):
                     elif isinstance(block, str):
                         text_parts.append(block)
 
-                entry: dict = {"role": role, "content": "\n".join(text_parts) if text_parts else ""}
-                if tool_calls and role == "assistant":
-                    entry["tool_calls"] = tool_calls
-                    if not entry["content"]:
-                        entry["content"] = None
-                oai_messages.append(entry)
+                if text_parts or tool_calls:
+                    entry: dict = {"role": role, "content": "\n".join(text_parts) if text_parts else ""}
+                    if tool_calls and role == "assistant":
+                        entry["tool_calls"] = tool_calls
+                        if not entry["content"]:
+                            entry["content"] = None
+                    oai_messages.append(entry)
                 for tr in tool_results:
                     oai_messages.append(tr)
                 continue
