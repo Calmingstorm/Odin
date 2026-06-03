@@ -545,7 +545,7 @@ export default {
       try {
         await api.put('/api/llm/codex/config', codexForm.value);
         showToast('Codex config saved');
-        await fetchLLMStatus();
+        await fetchAll();
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingCodex.value = false; }
     }
