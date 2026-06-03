@@ -83,107 +83,121 @@ export default {
           </div>
         </div>
 
-        <!-- ==================== Ollama Section ==================== -->
+        <!-- ==================== Codex Config ==================== -->
         <div class="hm-card">
-          <h2 class="text-sm font-semibold text-gray-300 mb-3">Ollama</h2>
-          <div class="space-y-4">
-            <!-- Health -->
-            <div class="flex items-center gap-2 text-sm">
-              <template v-if="ollamaStatus.configured">
-                <span v-if="ollamaStatus.health && ollamaStatus.health.healthy" class="text-green-400">● Connected</span>
-                <span v-else class="text-red-400">● Unreachable</span>
-                <span class="text-gray-500 text-xs">({{ ollamaStatus.base_url }})</span>
-              </template>
-              <span v-else class="text-gray-500">● Not configured</span>
-            </div>
-
-            <!-- Model selector -->
-            <div v-if="ollamaStatus.configured && ollamaModels.length" class="space-y-2">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-gray-300">Codex (OpenAI)</h2>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" v-model="codexForm.enabled" @change="saveCodexConfig" class="accent-indigo-500" />
+              <span class="text-xs text-gray-400">Enabled</span>
+            </label>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
               <label class="text-xs text-gray-400">Model</label>
-              <div class="flex items-center gap-2">
-                <select v-model="ollamaSelectedModel"
-                        class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200 min-w-48">
-                  <option v-for="m in ollamaModels" :key="m.name" :value="m.name">
-                    {{ m.name }} ({{ formatSize(m.size) }})
-                  </option>
+              <input v-model="codexForm.model" @blur="saveCodexConfig"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Max Tokens</label>
+              <input v-model.number="codexForm.max_tokens" type="number" @blur="saveCodexConfig"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+          </div>
+          <div class="text-xs text-gray-500 mt-2">Authentication managed via Device Login below.</div>
+        </div>
+
+        <!-- ==================== Ollama Config ==================== -->
+        <div class="hm-card">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-gray-300">Ollama (Local/Remote)</h2>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" v-model="ollamaForm.enabled" @change="saveOllamaConfig" class="accent-indigo-500" />
+              <span class="text-xs text-gray-400">Enabled</span>
+            </label>
+          </div>
+          <div v-if="ollamaStatus.configured" class="flex items-center gap-2 text-sm mb-3">
+            <span v-if="ollamaStatus.health && ollamaStatus.health.healthy" class="text-green-400">● Connected</span>
+            <span v-else class="text-red-400">● Unreachable</span>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs text-gray-400">Base URL</label>
+              <input v-model="ollamaForm.base_url" @blur="saveOllamaConfig" placeholder="http://127.0.0.1:11434"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Model</label>
+              <div class="flex gap-2">
+                <select v-if="ollamaModels.length" v-model="ollamaForm.model" @change="saveOllamaConfig"
+                        class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
+                  <option v-for="m in ollamaModels" :key="m.name" :value="m.name">{{ m.name }} ({{ formatSize(m.size) }})</option>
                 </select>
-                <button @click="setOllamaModel" class="btn btn-primary text-xs"
-                        :disabled="settingModel || ollamaSelectedModel === ollamaStatus.model">
-                  {{ settingModel ? 'Setting...' : 'Set' }}
-                </button>
+                <input v-else v-model="ollamaForm.model" @blur="saveOllamaConfig" placeholder="llama3.1:8b"
+                       class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
               </div>
             </div>
-
-            <!-- Not configured hint -->
-            <div v-if="!ollamaStatus.configured" class="text-sm text-gray-400">
-              Enable Ollama in the <strong>Config</strong> tab under
-              <code class="bg-gray-800 px-1 rounded">ollama</code> section,
-              set <code class="bg-gray-800 px-1 rounded">base_url</code> to your instance, then reload.
+            <div>
+              <label class="text-xs text-gray-400">API Key <span class="text-gray-600">(optional, for remote)</span></label>
+              <input v-model="ollamaForm.api_key" @blur="saveOllamaConfig" type="password" placeholder="Leave empty for local"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
-
-            <!-- Model not available -->
-            <div v-if="ollamaStatus.health && ollamaStatus.configured && !ollamaStatus.health.model_available"
-                 class="text-sm text-yellow-400 bg-yellow-900/20 rounded p-2 border border-yellow-800">
-              Model <code class="bg-gray-800 px-1 rounded">{{ ollamaStatus.model }}</code> not pulled.
-              Run <code class="bg-gray-800 px-1 rounded">ollama pull {{ ollamaStatus.model }}</code>
+            <div>
+              <label class="text-xs text-gray-400">Max Tokens</label>
+              <input v-model.number="ollamaForm.max_tokens" type="number" @blur="saveOllamaConfig"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
-
-            <!-- Error -->
-            <div v-if="ollamaStatus.health && ollamaStatus.health.error"
-                 class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800">
-              {{ ollamaStatus.health.error }}
-            </div>
-
-            <button @click="reloadOllama" class="btn btn-ghost text-xs" :disabled="reloading">
-              {{ reloading ? 'Reloading...' : 'Reload Ollama Client' }}
-            </button>
+          </div>
+          <div v-if="ollamaStatus.health && ollamaStatus.health.error"
+               class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
+            {{ ollamaStatus.health.error }}
           </div>
         </div>
 
-        <!-- ==================== Kimi Section ==================== -->
+        <!-- ==================== Kimi Config ==================== -->
         <div class="hm-card">
-          <h2 class="text-sm font-semibold text-gray-300 mb-3">Kimi (Moonshot AI)</h2>
-          <div class="space-y-4">
-            <!-- Health -->
-            <div class="flex items-center gap-2 text-sm">
-              <template v-if="kimiStatus.configured">
-                <span v-if="kimiStatus.health && kimiStatus.health.healthy" class="text-green-400">● Connected</span>
-                <span v-else class="text-red-400">● Unreachable</span>
-              </template>
-              <span v-else class="text-gray-500">● Not configured</span>
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-gray-300">Kimi (Moonshot AI)</h2>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" v-model="kimiForm.enabled" @change="saveKimiConfig" class="accent-indigo-500" />
+              <span class="text-xs text-gray-400">Enabled</span>
+            </label>
+          </div>
+          <div v-if="kimiStatus.configured" class="flex items-center gap-2 text-sm mb-3">
+            <span v-if="kimiStatus.health && kimiStatus.health.healthy" class="text-green-400">● Connected</span>
+            <span v-else class="text-red-400">● Unreachable</span>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs text-gray-400">API Key</label>
+              <input v-model="kimiForm.api_key" @blur="saveKimiConfig" type="password" placeholder="sk-..."
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
-
-            <!-- Model selector -->
-            <div v-if="kimiStatus.configured && kimiModels.length" class="space-y-2">
+            <div>
               <label class="text-xs text-gray-400">Model</label>
-              <div class="flex items-center gap-2">
-                <select v-model="kimiSelectedModel"
-                        class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200 min-w-48">
+              <div class="flex gap-2">
+                <select v-if="kimiModels.length" v-model="kimiForm.model" @change="saveKimiConfig"
+                        class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                   <option v-for="m in kimiModels" :key="m" :value="m">{{ m }}</option>
                 </select>
-                <button @click="setKimiModel" class="btn btn-primary text-xs"
-                        :disabled="settingKimiModel || kimiSelectedModel === kimiStatus.model">
-                  {{ settingKimiModel ? 'Setting...' : 'Set' }}
-                </button>
+                <input v-else v-model="kimiForm.model" @blur="saveKimiConfig" placeholder="kimi-k2.6"
+                       class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
               </div>
             </div>
-
-            <!-- Not configured hint -->
-            <div v-if="!kimiStatus.configured" class="text-sm text-gray-400">
-              Enable Kimi in the <strong>Config</strong> tab under
-              <code class="bg-gray-800 px-1 rounded">kimi</code> section
-              and set your <code class="bg-gray-800 px-1 rounded">api_key</code>, then reload.
+            <div>
+              <label class="text-xs text-gray-400">Base URL</label>
+              <input v-model="kimiForm.base_url" @blur="saveKimiConfig" placeholder="https://api.moonshot.ai/v1"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
-
-            <!-- Error -->
-            <div v-if="kimiStatus.health && kimiStatus.health.error"
-                 class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800">
-              {{ kimiStatus.health.error }}
+            <div>
+              <label class="text-xs text-gray-400">Max Tokens</label>
+              <input v-model.number="kimiForm.max_tokens" type="number" @blur="saveKimiConfig"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
-
-            <button @click="reloadKimi" class="btn btn-ghost text-xs" :disabled="reloadingKimi">
-              {{ reloadingKimi ? 'Reloading...' : 'Reload Kimi Client' }}
-            </button>
+          </div>
+          <div v-if="kimiStatus.health && kimiStatus.health.error"
+               class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
+            {{ kimiStatus.health.error }}
           </div>
         </div>
 
@@ -323,6 +337,11 @@ export default {
     // --- LLM Provider ---
     const llmStatus = ref(null);
     const selectedProvider = ref('codex');
+
+    // --- Config forms ---
+    const codexForm = ref({ enabled: false, model: 'gpt-5.5', max_tokens: 4096 });
+    const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096 });
+    const kimiForm = ref({ enabled: false, api_key: '', model: '', base_url: '', max_tokens: 4096 });
     const switching = ref(false);
 
     // --- Ollama ---
@@ -378,8 +397,26 @@ export default {
         const data = await api.get('/api/llm/status');
         llmStatus.value = data;
         selectedProvider.value = data.active_provider || 'codex';
+        if (data.codex) {
+          codexForm.value.enabled = data.codex.enabled;
+          codexForm.value.model = data.codex.model || 'gpt-5.5';
+          codexForm.value.max_tokens = data.codex.max_tokens || 4096;
+        }
+        if (data.ollama) {
+          ollamaForm.value.enabled = data.ollama.enabled;
+          ollamaForm.value.base_url = data.ollama.base_url || '';
+          ollamaForm.value.model = data.ollama.model || '';
+          ollamaForm.value.max_tokens = data.ollama.max_tokens || 4096;
+          // Don't overwrite api_key from server (it's masked)
+        }
+        if (data.kimi) {
+          kimiForm.value.enabled = data.kimi.enabled;
+          kimiForm.value.model = data.kimi.model || '';
+          kimiForm.value.base_url = data.kimi.base_url || '';
+          kimiForm.value.max_tokens = data.kimi.max_tokens || 4096;
+        }
       } catch (e) {
-        llmStatus.value = { active_provider: 'codex', codex: { configured: false }, ollama: { configured: false } };
+        llmStatus.value = { active_provider: 'codex', codex: { configured: false }, ollama: { configured: false }, kimi: { configured: false } };
       }
     }
 
@@ -478,6 +515,35 @@ export default {
       finally { settingKimiModel.value = false; }
     }
 
+    // --- Provider config saves ---
+    async function saveCodexConfig() {
+      try {
+        await api.put('/api/llm/codex/config', codexForm.value);
+        showToast('Codex config updated');
+        await fetchLLMStatus();
+      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+    }
+
+    async function saveOllamaConfig() {
+      try {
+        const payload = { ...ollamaForm.value };
+        if (!payload.api_key) delete payload.api_key;
+        await api.put('/api/llm/ollama/config', payload);
+        showToast('Ollama config updated');
+        await fetchAll();
+      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+    }
+
+    async function saveKimiConfig() {
+      try {
+        const payload = { ...kimiForm.value };
+        if (!payload.api_key) delete payload.api_key;
+        await api.put('/api/llm/kimi/config', payload);
+        showToast('Kimi config updated');
+        await fetchAll();
+      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+    }
+
     // --- Codex account management ---
     async function activateAccount(index) {
       try {
@@ -562,12 +628,14 @@ export default {
 
     return {
       loading, toast, llmStatus, selectedProvider, switching,
+      codexForm, ollamaForm, kimiForm,
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,
       fetchAll, switchProvider, reloadOllama, setOllamaModel,
       reloadKimi, setKimiModel,
+      saveCodexConfig, saveOllamaConfig, saveKimiConfig,
       activateAccount, refreshAccount, startEditLabel, saveLabel, deleteAccount,
       startDeviceLogin, cancelDeviceLogin, formatSize,
     };

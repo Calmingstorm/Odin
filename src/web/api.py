@@ -3028,23 +3028,34 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         codex_configured = bot.codex_client is not None
         ollama_configured = bot.ollama_client is not None
 
+        ollama_cfg = getattr(bot.config, "ollama", None)
+        kimi_cfg = getattr(bot.config, "kimi", None)
+        kimi_has_key = bool(kimi_cfg and kimi_cfg.api_key)
+
         result = {
             "active_provider": active,
             "codex": {
                 "configured": codex_configured,
                 "enabled": bot.config.openai_codex.enabled,
-                "model": bot.config.openai_codex.model if codex_configured else None,
+                "model": bot.config.openai_codex.model,
+                "max_tokens": bot.config.openai_codex.max_tokens,
             },
             "ollama": {
                 "configured": ollama_configured,
-                "enabled": getattr(bot.config, "ollama", None) is not None and bot.config.ollama.enabled,
-                "model": bot.config.ollama.model if ollama_configured else None,
-                "base_url": bot.config.ollama.base_url if ollama_configured else None,
+                "enabled": ollama_cfg.enabled if ollama_cfg else False,
+                "model": ollama_cfg.model if ollama_cfg else "",
+                "base_url": ollama_cfg.base_url if ollama_cfg else "",
+                "max_tokens": ollama_cfg.max_tokens if ollama_cfg else 4096,
+                "timeout": ollama_cfg.timeout if ollama_cfg else 300,
+                "has_api_key": bool(ollama_cfg and ollama_cfg.api_key),
             },
             "kimi": {
                 "configured": bot.kimi_client is not None,
-                "enabled": getattr(bot.config, "kimi", None) is not None and bot.config.kimi.enabled,
-                "model": bot.config.kimi.model if bot.kimi_client else None,
+                "enabled": kimi_cfg.enabled if kimi_cfg else False,
+                "model": kimi_cfg.model if kimi_cfg else "",
+                "base_url": kimi_cfg.base_url if kimi_cfg else "",
+                "max_tokens": kimi_cfg.max_tokens if kimi_cfg else 4096,
+                "has_api_key": kimi_has_key,
             },
         }
 
@@ -3070,6 +3081,126 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if "error" in result:
             return web.json_response(result, status=400)
         return web.json_response(result)
+
+    # ------------------------------------------------------------------
+    # Provider config update (enable/disable, set keys, endpoints)
+    # ------------------------------------------------------------------
+
+    @routes.put("/api/llm/codex/config")
+    async def llm_codex_config(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        cfg = bot.config.openai_codex
+        changed = False
+        if "enabled" in body:
+            cfg.enabled = bool(body["enabled"])
+            changed = True
+        if "model" in body and body["model"]:
+            cfg.model = str(body["model"])
+            changed = True
+        if "max_tokens" in body:
+            cfg.max_tokens = int(body["max_tokens"])
+            changed = True
+
+        if changed:
+            await bot.reload_codex_auth()
+
+        return web.json_response({
+            "status": "updated",
+            "enabled": cfg.enabled,
+            "model": cfg.model,
+            "configured": bot.codex_client is not None,
+        })
+
+    @routes.put("/api/llm/ollama/config")
+    async def llm_ollama_config(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        cfg = bot.config.ollama
+        changed = False
+        if "enabled" in body:
+            cfg.enabled = bool(body["enabled"])
+            changed = True
+        if "base_url" in body and body["base_url"]:
+            url = str(body["base_url"])
+            if not url.startswith(("http://", "https://")):
+                return web.json_response({"error": "base_url must start with http:// or https://"}, status=400)
+            cfg.base_url = url
+            changed = True
+        if "model" in body and body["model"]:
+            cfg.model = str(body["model"])
+            changed = True
+        if "max_tokens" in body:
+            cfg.max_tokens = int(body["max_tokens"])
+            changed = True
+        if "api_key" in body:
+            cfg.api_key = str(body["api_key"])
+            changed = True
+        if "timeout" in body:
+            cfg.timeout = max(10, int(body["timeout"]))
+            changed = True
+
+        if changed:
+            await bot.reload_ollama()
+
+        return web.json_response({
+            "status": "updated",
+            "enabled": cfg.enabled,
+            "model": cfg.model,
+            "base_url": cfg.base_url,
+            "configured": bot.ollama_client is not None,
+        })
+
+    @routes.put("/api/llm/kimi/config")
+    async def llm_kimi_config(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        cfg = bot.config.kimi
+        changed = False
+        if "enabled" in body:
+            cfg.enabled = bool(body["enabled"])
+            changed = True
+        if "api_key" in body:
+            cfg.api_key = str(body["api_key"])
+            changed = True
+        if "base_url" in body and body["base_url"]:
+            url = str(body["base_url"])
+            if not url.startswith(("http://", "https://")):
+                return web.json_response({"error": "base_url must start with http:// or https://"}, status=400)
+            cfg.base_url = url
+            changed = True
+        if "model" in body and body["model"]:
+            cfg.model = str(body["model"])
+            changed = True
+        if "max_tokens" in body:
+            cfg.max_tokens = int(body["max_tokens"])
+            changed = True
+        if "timeout" in body:
+            cfg.timeout = max(10, int(body["timeout"]))
+            changed = True
+
+        if changed:
+            await bot.reload_kimi()
+
+        return web.json_response({
+            "status": "updated",
+            "enabled": cfg.enabled,
+            "model": cfg.model,
+            "configured": bot.kimi_client is not None,
+        })
+
+    # ------------------------------------------------------------------
+    # Ollama provider management
+    # ------------------------------------------------------------------
 
     @routes.get("/api/ollama/status")
     async def ollama_status(_request: web.Request) -> web.Response:
