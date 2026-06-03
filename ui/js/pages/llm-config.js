@@ -200,9 +200,9 @@ export default {
 
             <!-- Device login -->
             <div class="mt-4 pt-4 border-t border-gray-700">
-              <div class="flex items-center justify-between mb-2">
+              <div v-if="!deviceState" class="flex flex-col items-end gap-1">
                 <h3 class="text-xs font-semibold text-gray-400">Add Account (Device Login)</h3>
-                <button v-if="!deviceState" @click="startDeviceLogin" class="btn btn-primary text-xs" :disabled="deviceLoading">
+                <button @click="startDeviceLogin" class="btn btn-primary text-xs" :disabled="deviceLoading">
                   {{ deviceLoading ? 'Requesting code...' : 'Start Device Login' }}
                 </button>
               </div>
