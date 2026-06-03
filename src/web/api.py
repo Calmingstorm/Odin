@@ -3086,6 +3086,25 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     # Provider config update (enable/disable, set keys, endpoints)
     # ------------------------------------------------------------------
 
+    def _parse_int(val, name: str, lo: int = 1, hi: int = 262000) -> int:
+        try:
+            v = int(val)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be an integer")
+        if v < lo or v > hi:
+            raise ValueError(f"{name} must be between {lo} and {hi}")
+        return v
+
+    async def _persist_config() -> None:
+        """Write current in-memory config to config.yml."""
+        config_path = Path("config.yml")
+        current = _redact_free_config_dump(bot.config)
+        await _asyncio.to_thread(_write_config, config_path, current)
+
+    def _redact_free_config_dump(config) -> dict:
+        """Dump config as dict, preserving secrets for file persistence."""
+        return config.model_dump(mode="python")
+
     @routes.put("/api/llm/codex/config")
     async def llm_codex_config(request: web.Request) -> web.Response:
         try:
@@ -3093,20 +3112,28 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        cfg = bot.config.openai_codex
-        changed = False
-        if "enabled" in body:
-            cfg.enabled = bool(body["enabled"])
-            changed = True
-        if "model" in body and body["model"]:
-            cfg.model = str(body["model"])
-            changed = True
-        if "max_tokens" in body:
-            cfg.max_tokens = int(body["max_tokens"])
-            changed = True
+        lock = getattr(bot, "_llm_provider_lock", None)
+        if lock is None:
+            return web.json_response({"error": "provider lock not available"}, status=503)
 
-        if changed:
-            await bot.reload_codex_auth()
+        try:
+            async with lock:
+                cfg = bot.config.openai_codex
+                changed = False
+                if "enabled" in body:
+                    cfg.enabled = bool(body["enabled"])
+                    changed = True
+                if "model" in body and body["model"]:
+                    cfg.model = str(body["model"])
+                    changed = True
+                if "max_tokens" in body:
+                    cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
+                    changed = True
+                if changed:
+                    await bot._reload_codex_inner()
+                    await _persist_config()
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
 
         return web.json_response({
             "status": "updated",
@@ -3122,32 +3149,40 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        cfg = bot.config.ollama
-        changed = False
-        if "enabled" in body:
-            cfg.enabled = bool(body["enabled"])
-            changed = True
-        if "base_url" in body and body["base_url"]:
-            url = str(body["base_url"])
-            if not url.startswith(("http://", "https://")):
-                return web.json_response({"error": "base_url must start with http:// or https://"}, status=400)
-            cfg.base_url = url
-            changed = True
-        if "model" in body and body["model"]:
-            cfg.model = str(body["model"])
-            changed = True
-        if "max_tokens" in body:
-            cfg.max_tokens = int(body["max_tokens"])
-            changed = True
-        if "api_key" in body:
-            cfg.api_key = str(body["api_key"])
-            changed = True
-        if "timeout" in body:
-            cfg.timeout = max(10, int(body["timeout"]))
-            changed = True
+        lock = getattr(bot, "_llm_provider_lock", None)
+        if lock is None:
+            return web.json_response({"error": "provider lock not available"}, status=503)
 
-        if changed:
-            await bot.reload_ollama()
+        try:
+            async with lock:
+                cfg = bot.config.ollama
+                changed = False
+                if "enabled" in body:
+                    cfg.enabled = bool(body["enabled"])
+                    changed = True
+                if "base_url" in body and body["base_url"]:
+                    url = str(body["base_url"])
+                    if not url.startswith(("http://", "https://")):
+                        return web.json_response({"error": "base_url must start with http:// or https://"}, status=400)
+                    cfg.base_url = url
+                    changed = True
+                if "model" in body and body["model"]:
+                    cfg.model = str(body["model"])
+                    changed = True
+                if "max_tokens" in body:
+                    cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
+                    changed = True
+                if "api_key" in body:
+                    cfg.api_key = str(body["api_key"])
+                    changed = True
+                if "timeout" in body:
+                    cfg.timeout = _parse_int(body["timeout"], "timeout", 10, 3600)
+                    changed = True
+                if changed:
+                    await bot._reload_ollama_inner()
+                    await _persist_config()
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
 
         return web.json_response({
             "status": "updated",
@@ -3164,32 +3199,40 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        cfg = bot.config.kimi
-        changed = False
-        if "enabled" in body:
-            cfg.enabled = bool(body["enabled"])
-            changed = True
-        if "api_key" in body:
-            cfg.api_key = str(body["api_key"])
-            changed = True
-        if "base_url" in body and body["base_url"]:
-            url = str(body["base_url"])
-            if not url.startswith(("http://", "https://")):
-                return web.json_response({"error": "base_url must start with http:// or https://"}, status=400)
-            cfg.base_url = url
-            changed = True
-        if "model" in body and body["model"]:
-            cfg.model = str(body["model"])
-            changed = True
-        if "max_tokens" in body:
-            cfg.max_tokens = int(body["max_tokens"])
-            changed = True
-        if "timeout" in body:
-            cfg.timeout = max(10, int(body["timeout"]))
-            changed = True
+        lock = getattr(bot, "_llm_provider_lock", None)
+        if lock is None:
+            return web.json_response({"error": "provider lock not available"}, status=503)
 
-        if changed:
-            await bot.reload_kimi()
+        try:
+            async with lock:
+                cfg = bot.config.kimi
+                changed = False
+                if "enabled" in body:
+                    cfg.enabled = bool(body["enabled"])
+                    changed = True
+                if "api_key" in body:
+                    cfg.api_key = str(body["api_key"])
+                    changed = True
+                if "base_url" in body and body["base_url"]:
+                    url = str(body["base_url"])
+                    if not url.startswith(("http://", "https://")):
+                        return web.json_response({"error": "base_url must start with http:// or https://"}, status=400)
+                    cfg.base_url = url
+                    changed = True
+                if "model" in body and body["model"]:
+                    cfg.model = str(body["model"])
+                    changed = True
+                if "max_tokens" in body:
+                    cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 262000)
+                    changed = True
+                if "timeout" in body:
+                    cfg.timeout = _parse_int(body["timeout"], "timeout", 10, 3600)
+                    changed = True
+                if changed:
+                    await bot._reload_kimi_inner()
+                    await _persist_config()
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
 
         return web.json_response({
             "status": "updated",

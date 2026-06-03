@@ -647,8 +647,8 @@ class OdinBot(commands.Bot):
 
     # ---------- Live Codex reload -----------------------------------------
 
-    async def reload_codex_auth(self) -> dict:
-        """Reload Codex credentials and create the client if it was missing at boot."""
+    async def _reload_codex_inner(self) -> dict:
+        """Inner reload — caller must hold _llm_provider_lock."""
         if not self.config.openai_codex.enabled:
             self.codex_client = None
             return {"configured": False, "reason": "openai_codex disabled in config"}
@@ -672,63 +672,78 @@ class OdinBot(commands.Bot):
         log.info("Codex client created via live reload (model: %s)", self.config.openai_codex.model)
         return {"configured": True, "created": True, "accounts": len(auth._accounts)}
 
+    async def reload_codex_auth(self) -> dict:
+        """Reload Codex credentials and create the client if it was missing at boot."""
+        async with self._llm_provider_lock:
+            return await self._reload_codex_inner()
+
     # ---------- Live Ollama reload ----------------------------------------
+
+    async def _reload_ollama_inner(self) -> dict:
+        """Inner reload — caller must hold _llm_provider_lock."""
+        ollama_cfg = getattr(self.config, "ollama", None)
+        if not ollama_cfg or not ollama_cfg.enabled:
+            old = self.ollama_client
+            self.ollama_client = None
+            if old:
+                asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
+            return {"configured": False, "reason": "ollama disabled in config"}
+
+        old = self.ollama_client
+        self.ollama_client = OllamaClient(
+            base_url=ollama_cfg.base_url,
+            model=ollama_cfg.model,
+            max_tokens=ollama_cfg.max_tokens,
+            timeout=ollama_cfg.timeout,
+            api_key=ollama_cfg.api_key,
+        )
+        if old:
+            asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
+        self._wire_llm_callbacks()
+        log.info("Ollama client reloaded (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url)
+        return {"configured": True}
 
     async def reload_ollama(self) -> dict:
         """Reload Ollama client from current config."""
         async with self._llm_provider_lock:
-            ollama_cfg = getattr(self.config, "ollama", None)
-            if not ollama_cfg or not ollama_cfg.enabled:
-                old = self.ollama_client
-                self.ollama_client = None
-                if old:
-                    asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
-                return {"configured": False, "reason": "ollama disabled in config"}
+            result = await self._reload_ollama_inner()
+        if result.get("configured") and self.ollama_client:
+            result["health"] = await self.ollama_client.health_check()
+        return result
 
-            old = self.ollama_client
-            self.ollama_client = OllamaClient(
-                base_url=ollama_cfg.base_url,
-                model=ollama_cfg.model,
-                max_tokens=ollama_cfg.max_tokens,
-                timeout=ollama_cfg.timeout,
-                api_key=ollama_cfg.api_key,
-            )
+    async def _reload_kimi_inner(self) -> dict:
+        """Inner reload — caller must hold _llm_provider_lock."""
+        kimi_cfg = getattr(self.config, "kimi", None)
+        if not kimi_cfg or not kimi_cfg.enabled:
+            old = self.kimi_client
+            self.kimi_client = None
             if old:
                 asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
-            self._wire_llm_callbacks()
-            log.info("Ollama client reloaded (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url)
+            return {"configured": False, "reason": "kimi disabled in config"}
+        if not kimi_cfg.api_key:
+            return {"configured": False, "reason": "kimi api_key not set"}
 
-        health = await self.ollama_client.health_check()
-        return {"configured": True, "health": health}
+        old = self.kimi_client
+        self.kimi_client = KimiClient(
+            api_key=kimi_cfg.api_key,
+            base_url=kimi_cfg.base_url,
+            model=kimi_cfg.model,
+            max_tokens=kimi_cfg.max_tokens,
+            timeout=kimi_cfg.timeout,
+        )
+        if old:
+            asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
+        self._wire_llm_callbacks()
+        log.info("Kimi client reloaded (model: %s)", kimi_cfg.model)
+        return {"configured": True}
 
     async def reload_kimi(self) -> dict:
         """Reload Kimi client from current config."""
         async with self._llm_provider_lock:
-            kimi_cfg = getattr(self.config, "kimi", None)
-            if not kimi_cfg or not kimi_cfg.enabled:
-                old = self.kimi_client
-                self.kimi_client = None
-                if old:
-                    asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
-                return {"configured": False, "reason": "kimi disabled in config"}
-            if not kimi_cfg.api_key:
-                return {"configured": False, "reason": "kimi api_key not set"}
-
-            old = self.kimi_client
-            self.kimi_client = KimiClient(
-                api_key=kimi_cfg.api_key,
-                base_url=kimi_cfg.base_url,
-                model=kimi_cfg.model,
-                max_tokens=kimi_cfg.max_tokens,
-                timeout=kimi_cfg.timeout,
-            )
-            if old:
-                asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
-            self._wire_llm_callbacks()
-            log.info("Kimi client reloaded (model: %s)", kimi_cfg.model)
-
-        health = await self.kimi_client.health_check()
-        return {"configured": True, "health": health}
+            result = await self._reload_kimi_inner()
+        if result.get("configured") and self.kimi_client:
+            result["health"] = await self.kimi_client.health_check()
+        return result
 
     async def switch_llm_provider(self, provider: str) -> dict:
         """Switch the active LLM provider at runtime."""
