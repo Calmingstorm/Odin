@@ -66,9 +66,17 @@ def check_discord(bot: OdinBot) -> ComponentStatus:
 def check_codex(bot: OdinBot) -> ComponentStatus:
     codex = getattr(bot, "codex", None)
     if codex is None:
+        cfg = getattr(bot, "config", None)
+        codex_cfg = getattr(cfg, "openai_codex", None) if cfg else None
+        enabled = codex_cfg.enabled if codex_cfg else False
+        if not enabled:
+            return ComponentStatus(
+                name="codex", healthy=True, status="unconfigured",
+                detail="Codex disabled in config (optional)",
+            )
         return ComponentStatus(
             name="codex", healthy=False, status="down",
-            detail="Codex client not initialised",
+            detail="Codex enabled but no credentials configured",
         )
     try:
         breaker = getattr(codex, "breaker", None)

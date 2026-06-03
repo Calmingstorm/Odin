@@ -158,12 +158,19 @@ class TestCheckCodex:
         assert result.status == "degraded"
         assert "session" in result.detail.lower()
 
-    def test_no_codex(self):
+    def test_no_codex_disabled(self):
         bot = MagicMock(spec=[])
+        result = check_codex(bot)
+        assert result.healthy is True
+        assert result.status == "unconfigured"
+
+    def test_no_codex_enabled_no_creds(self):
+        bot = MagicMock(spec=["config"])
+        bot.config.openai_codex.enabled = True
+        bot.codex = None
         result = check_codex(bot)
         assert result.healthy is False
         assert result.status == "down"
-        assert "not initialised" in result.detail
 
     def test_exception(self):
         bot = MagicMock()
