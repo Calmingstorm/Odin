@@ -3105,16 +3105,27 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         try:
             addr = _ipaddress.ip_address(host)
             if addr.is_private or addr.is_loopback:
+                if addr.is_link_local:
+                    raise ValueError(f"Link-local addresses not allowed: {host}")
                 return url
         except ValueError:
+            raise
+        except Exception:
             pass
         try:
             import socket
             resolved = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            if not resolved:
+                raise ValueError(f"Could not resolve hostname: {host}")
             for _, _, _, _, sockaddr in resolved:
                 addr = _ipaddress.ip_address(sockaddr[0])
-                if addr.is_private or addr.is_loopback:
-                    return url
+                if addr.is_link_local:
+                    raise ValueError(f"Link-local address not allowed: {sockaddr[0]}")
+                if not (addr.is_private or addr.is_loopback):
+                    raise ValueError(f"All resolved addresses must be private/local, got public: {sockaddr[0]}")
+            return url
+        except ValueError:
+            raise
         except Exception:
             pass
         raise ValueError(f"Ollama base_url must point to a local/private network address, got: {host}")
@@ -3128,8 +3139,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             raise ValueError(f"{name} must be between {lo} and {hi}")
         return v
 
+    def _safe_secret(existing_val, memory_val):
+        """Preserve env-var placeholders in config; only overwrite with explicit new values."""
+        if isinstance(existing_val, str) and "${" in existing_val:
+            return existing_val
+        return memory_val
+
     def _persist_llm_sections_sync() -> None:
-        """Merge only LLM-related sections into config.yml, preserving everything else."""
+        """Merge only LLM-related sections into config.yml, preserving secrets and structure."""
         config_path = Path("config.yml")
         if not config_path.exists():
             return
@@ -3138,33 +3155,35 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             existing = yaml.safe_load(raw) or {}
         except Exception:
             return
-        existing["openai_codex"] = {
-            **existing.get("openai_codex", {}),
-            "enabled": bot.config.openai_codex.enabled,
-            "model": bot.config.openai_codex.model,
-            "max_tokens": bot.config.openai_codex.max_tokens,
-        }
-        existing["ollama"] = {
-            "enabled": bot.config.ollama.enabled,
-            "base_url": bot.config.ollama.base_url,
-            "model": bot.config.ollama.model,
-            "max_tokens": bot.config.ollama.max_tokens,
-            "timeout": bot.config.ollama.timeout,
-            "api_key": bot.config.ollama.api_key,
-        }
-        existing["kimi"] = {
-            "enabled": bot.config.kimi.enabled,
-            "api_key": bot.config.kimi.api_key,
-            "base_url": bot.config.kimi.base_url,
-            "model": bot.config.kimi.model,
-            "max_tokens": bot.config.kimi.max_tokens,
-            "timeout": bot.config.kimi.timeout,
-        }
+
+        ex_codex = existing.get("openai_codex", {})
+        ex_codex["enabled"] = bot.config.openai_codex.enabled
+        ex_codex["model"] = bot.config.openai_codex.model
+        ex_codex["max_tokens"] = bot.config.openai_codex.max_tokens
+        existing["openai_codex"] = ex_codex
+
+        ex_ollama = existing.get("ollama", {})
+        ex_ollama["enabled"] = bot.config.ollama.enabled
+        ex_ollama["base_url"] = bot.config.ollama.base_url
+        ex_ollama["model"] = bot.config.ollama.model
+        ex_ollama["max_tokens"] = bot.config.ollama.max_tokens
+        ex_ollama["timeout"] = bot.config.ollama.timeout
+        ex_ollama["api_key"] = _safe_secret(ex_ollama.get("api_key", ""), bot.config.ollama.api_key)
+        existing["ollama"] = ex_ollama
+
+        ex_kimi = existing.get("kimi", {})
+        ex_kimi["enabled"] = bot.config.kimi.enabled
+        ex_kimi["model"] = bot.config.kimi.model
+        ex_kimi["max_tokens"] = bot.config.kimi.max_tokens
+        ex_kimi["timeout"] = bot.config.kimi.timeout
+        ex_kimi["api_key"] = _safe_secret(ex_kimi.get("api_key", ""), bot.config.kimi.api_key)
+        existing["kimi"] = ex_kimi
+
         existing["llm_provider"] = {
             "active_provider": bot.config.llm_provider.active_provider,
         }
         with open(config_path, "w") as f:
-            yaml.dump(existing, f, default_flow_style=False)
+            yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
 
     async def _persist_config() -> None:
         """Persist LLM config sections without touching env vars or other settings."""

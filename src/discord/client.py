@@ -426,6 +426,7 @@ class OdinBot(commands.Bot):
 
         self._llm_provider_lock = asyncio.Lock()
         self._llm_active_requests = 0
+        self._llm_switching = False
 
         # Wire LLM callbacks to whichever provider is active
         if self.llm_client is not None:
@@ -759,15 +760,19 @@ class OdinBot(commands.Bot):
             if provider == "kimi" and not self.kimi_client:
                 return {"error": "Kimi not configured — set api_key first"}
 
-            if self._llm_active_requests > 0:
-                log.warning("Provider switch while %d request(s) in-flight — waiting", self._llm_active_requests)
-                for _ in range(50):
-                    if self._llm_active_requests == 0:
-                        break
-                    await asyncio.sleep(0.1)
+            self._llm_switching = True
+            try:
+                if self._llm_active_requests > 0:
+                    log.warning("Provider switch while %d request(s) in-flight — waiting", self._llm_active_requests)
+                    for _ in range(50):
+                        if self._llm_active_requests == 0:
+                            break
+                        await asyncio.sleep(0.1)
 
-            self.config.llm_provider.active_provider = provider
-            self._wire_llm_callbacks()
+                self.config.llm_provider.active_provider = provider
+                self._wire_llm_callbacks()
+            finally:
+                self._llm_switching = False
 
         client = self.llm_client
         model = getattr(client, "model", "unknown") if client else "none"
@@ -1384,6 +1389,9 @@ class OdinBot(commands.Bot):
         - cost_tracker.record() captures token usage on every successful call
         - subsystem_guard.record_success / record_failure tracks codex health
         """
+        if self._llm_switching:
+            raise RuntimeError("LLM provider switch in progress — retry shortly")
+
         provider_cfg = getattr(self.config, "llm_provider", None)
         active = provider_cfg.active_provider if provider_cfg else "codex"
         guard_key = f"llm_{active}"
@@ -1392,7 +1400,6 @@ class OdinBot(commands.Bot):
             if err:
                 raise RuntimeError(f"LLM subsystem unavailable: {err}")
 
-        # Pin provider for this request — prevents mid-conversation switches
         client = self.llm_client
         if client is None:
             raise RuntimeError("No LLM provider configured")
