@@ -200,12 +200,13 @@ export default {
 
             <!-- Device login -->
             <div class="mt-4 pt-4 border-t border-gray-700">
-              <h3 class="text-xs font-semibold text-gray-400 mb-2">Add Account (Device Login)</h3>
-              <div v-if="!deviceState">
-                <button @click="startDeviceLogin" class="btn btn-primary text-xs" :disabled="deviceLoading">
+              <div class="flex items-center justify-between mb-2">
+                <h3 class="text-xs font-semibold text-gray-400">Add Account (Device Login)</h3>
+                <button v-if="!deviceState" @click="startDeviceLogin" class="btn btn-primary text-xs" :disabled="deviceLoading">
                   {{ deviceLoading ? 'Requesting code...' : 'Start Device Login' }}
                 </button>
               </div>
+              <div v-if="false"></div>
               <div v-else-if="deviceState === 'pending'" class="p-3 bg-gray-800 rounded border border-gray-700">
                 <div class="text-sm text-gray-300 mb-2">
                   <p class="mb-1">1. Open: <a :href="deviceInfo.verify_url" target="_blank"
