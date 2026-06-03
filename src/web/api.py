@@ -3152,44 +3152,55 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         return memory_val
 
     def _persist_llm_sections_sync() -> None:
-        """Merge only LLM-related sections into config.yml, preserving secrets and structure."""
+        """Merge only LLM-related sections into config.yml using round-trip YAML.
+
+        Preserves comments, ordering, style, and env-var placeholders.
+        """
         config_path = Path("config.yml")
         if not config_path.exists():
             return
-        raw = config_path.read_text()
+        from ruamel.yaml import YAML as _RuamelYAML
+        ry = _RuamelYAML()
+        ry.preserve_quotes = True
         try:
-            existing = yaml.safe_load(raw) or {}
+            with open(config_path) as f:
+                existing = ry.load(f)
+            if existing is None:
+                return
         except Exception:
             return
 
-        ex_codex = existing.get("openai_codex", {})
-        ex_codex["enabled"] = bot.config.openai_codex.enabled
-        ex_codex["model"] = bot.config.openai_codex.model
-        ex_codex["max_tokens"] = bot.config.openai_codex.max_tokens
-        existing["openai_codex"] = ex_codex
+        if "openai_codex" not in existing:
+            existing["openai_codex"] = {}
+        existing["openai_codex"]["enabled"] = bot.config.openai_codex.enabled
+        existing["openai_codex"]["model"] = bot.config.openai_codex.model
+        existing["openai_codex"]["max_tokens"] = bot.config.openai_codex.max_tokens
 
-        ex_ollama = existing.get("ollama", {})
-        ex_ollama["enabled"] = bot.config.ollama.enabled
-        ex_ollama["base_url"] = bot.config.ollama.base_url
-        ex_ollama["model"] = bot.config.ollama.model
-        ex_ollama["max_tokens"] = bot.config.ollama.max_tokens
-        ex_ollama["timeout"] = bot.config.ollama.timeout
-        ex_ollama["api_key"] = _safe_secret("ollama.api_key", ex_ollama.get("api_key", ""), bot.config.ollama.api_key)
-        existing["ollama"] = ex_ollama
+        if "ollama" not in existing:
+            existing["ollama"] = {}
+        existing["ollama"]["enabled"] = bot.config.ollama.enabled
+        existing["ollama"]["base_url"] = bot.config.ollama.base_url
+        existing["ollama"]["model"] = bot.config.ollama.model
+        existing["ollama"]["max_tokens"] = bot.config.ollama.max_tokens
+        existing["ollama"]["timeout"] = bot.config.ollama.timeout
+        ex_ollama_key = existing["ollama"].get("api_key", "")
+        existing["ollama"]["api_key"] = _safe_secret("ollama.api_key", ex_ollama_key, bot.config.ollama.api_key)
 
-        ex_kimi = existing.get("kimi", {})
-        ex_kimi["enabled"] = bot.config.kimi.enabled
-        ex_kimi["model"] = bot.config.kimi.model
-        ex_kimi["max_tokens"] = bot.config.kimi.max_tokens
-        ex_kimi["timeout"] = bot.config.kimi.timeout
-        ex_kimi["api_key"] = _safe_secret("kimi.api_key", ex_kimi.get("api_key", ""), bot.config.kimi.api_key)
-        existing["kimi"] = ex_kimi
+        if "kimi" not in existing:
+            existing["kimi"] = {}
+        existing["kimi"]["enabled"] = bot.config.kimi.enabled
+        existing["kimi"]["model"] = bot.config.kimi.model
+        existing["kimi"]["max_tokens"] = bot.config.kimi.max_tokens
+        existing["kimi"]["timeout"] = bot.config.kimi.timeout
+        ex_kimi_key = existing["kimi"].get("api_key", "")
+        existing["kimi"]["api_key"] = _safe_secret("kimi.api_key", ex_kimi_key, bot.config.kimi.api_key)
 
-        existing["llm_provider"] = {
-            "active_provider": bot.config.llm_provider.active_provider,
-        }
+        if "llm_provider" not in existing:
+            existing["llm_provider"] = {}
+        existing["llm_provider"]["active_provider"] = bot.config.llm_provider.active_provider
+
         with open(config_path, "w") as f:
-            yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
+            ry.dump(existing, f)
 
     async def _persist_config() -> None:
         """Persist LLM config sections without touching env vars or other settings."""

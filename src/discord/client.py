@@ -2248,7 +2248,7 @@ class OdinBot(commands.Bot):
                 if not self.llm_client:
                     await self._send_with_retry(
                         message,
-                        "No tool backend available. Please try again later.",
+                        "No LLM provider available. Please try again later.",
                     )
                     self.sessions.remove_last_message(channel_id, "user")
                     return
@@ -3997,7 +3997,7 @@ class OdinBot(commands.Bot):
             return "Both 'label' and 'goal' are required."
 
         if not self.llm_client:
-            return "Error: Codex client not available."
+            return "Error: LLM provider not available."
 
         channel = getattr(message, "channel", message)
         channel_id = str(getattr(channel, "id", "0"))
@@ -4192,7 +4192,7 @@ class OdinBot(commands.Bot):
             return f"Error: Loop '{loop_id}' is not running (status: {loop_info.status})."
 
         if not self.llm_client:
-            return "Error: Codex client not available."
+            return "Error: LLM provider not available."
 
         channel = getattr(message, "channel", message)
         channel_id = str(getattr(channel, "id", "0"))
@@ -4287,7 +4287,7 @@ class OdinBot(commands.Bot):
         same Codex + tool execution pipeline but without detection retries.
         """
         if not self.llm_client:
-            return "Codex client not available."
+            return "LLM provider not available."
 
         # Resolve requester name for audit logging and message proxy
         requester_name = "loop"

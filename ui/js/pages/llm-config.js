@@ -12,8 +12,8 @@ export default {
         </button>
       </div>
       <p class="text-xs text-gray-500 mb-6">
-        Configure which LLM backend Odin uses. Switch between OpenAI Codex (ChatGPT subscription)
-        and Ollama (local/remote open-source models) at any time.
+        Configure which LLM backend Odin uses. Switch between OpenAI Codex (ChatGPT subscription),
+        Kimi (Moonshot AI), and Ollama (local/remote open-source models) at any time.
       </p>
 
       <div v-if="loading && !llmStatus" class="space-y-2">
@@ -460,13 +460,21 @@ export default {
 
     // --- Provider switch ---
     async function switchProvider() {
+      const prev = llmStatus.value ? llmStatus.value.active_provider : 'codex';
       switching.value = true;
       try {
         const result = await api.post('/api/llm/switch', { provider: selectedProvider.value });
-        if (result.error) { showToast(result.error, 'error'); }
-        else { showToast('Switched to ' + selectedProvider.value + ' (' + result.model + ')'); await fetchAll(); }
-      } catch (e) { showToast(e.message || 'Switch failed', 'error'); }
-      finally { switching.value = false; }
+        if (result.error) {
+          selectedProvider.value = prev;
+          showToast(result.error, 'error');
+        } else {
+          showToast('Switched to ' + selectedProvider.value + ' (' + result.model + ')');
+          await fetchAll();
+        }
+      } catch (e) {
+        selectedProvider.value = prev;
+        showToast(e.message || 'Switch failed', 'error');
+      } finally { switching.value = false; }
     }
 
     // --- Ollama ---
@@ -560,7 +568,7 @@ export default {
       savingOllama.value = true;
       try {
         const payload = { ...ollamaForm.value };
-        if (!payload.api_key) delete payload.api_key;
+        if (payload.api_key === undefined) delete payload.api_key;
         await api.put('/api/llm/ollama/config', payload);
         showToast('Ollama config saved');
         await fetchAll();
@@ -572,7 +580,7 @@ export default {
       savingKimi.value = true;
       try {
         const payload = { ...kimiForm.value };
-        if (!payload.api_key) delete payload.api_key;
+        if (payload.api_key === undefined) delete payload.api_key;
         await api.put('/api/llm/kimi/config', payload);
         showToast('Kimi config saved');
         await fetchAll();
