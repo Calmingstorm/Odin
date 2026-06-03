@@ -83,35 +83,6 @@ export default {
           </div>
         </div>
 
-        <!-- ==================== Codex Config ==================== -->
-        <div class="hm-card">
-          <div class="flex items-center justify-between mb-3">
-            <h2 class="text-sm font-semibold text-gray-300">Codex (OpenAI)</h2>
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" v-model="codexForm.enabled" class="accent-indigo-500" />
-              <span class="text-xs text-gray-400">Enabled</span>
-            </label>
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="text-xs text-gray-400">Model</label>
-              <input v-model="codexForm.model"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-            <div>
-              <label class="text-xs text-gray-400">Max Tokens</label>
-              <input v-model.number="codexForm.max_tokens" type="number"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-          </div>
-          <div class="flex items-center gap-3 mt-3">
-            <button @click="saveCodexConfig" class="btn btn-primary text-xs" :disabled="savingCodex">
-              {{ savingCodex ? 'Saving...' : 'Save' }}
-            </button>
-            <span class="text-xs text-gray-500">Authentication managed via Device Login below.</span>
-          </div>
-        </div>
-
         <!-- ==================== Ollama Config ==================== -->
         <div class="hm-card">
           <div class="flex items-center justify-between mb-3">
@@ -211,11 +182,42 @@ export default {
           </div>
         </div>
 
-        <!-- ==================== Codex Auth Section ==================== -->
+        <!-- ==================== Codex (OpenAI) — Config + Auth ==================== -->
         <div class="hm-card">
-          <h2 class="text-sm font-semibold text-gray-300 mb-3">Codex Authentication (OpenAI)</h2>
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-gray-300">Codex (OpenAI)</h2>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" v-model="codexForm.enabled" class="accent-indigo-500" />
+              <span class="text-xs text-gray-400">Enabled</span>
+            </label>
+          </div>
+          <div class="grid grid-cols-2 gap-3 mb-3">
+            <div>
+              <label class="text-xs text-gray-400">Model</label>
+              <select v-model="codexForm.model"
+                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
+                <option value="gpt-5.5">gpt-5.5</option>
+                <option value="gpt-5">gpt-5</option>
+                <option value="gpt-5-mini">gpt-5-mini</option>
+                <option value="gpt-4.1">gpt-4.1</option>
+                <option value="gpt-4o">gpt-4o</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Max Tokens</label>
+              <input v-model.number="codexForm.max_tokens" type="number"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+          </div>
+          <div class="mb-4">
+            <button @click="saveCodexConfig" class="btn btn-primary text-xs" :disabled="savingCodex">
+              {{ savingCodex ? 'Saving...' : 'Save' }}
+            </button>
+          </div>
+          <div class="border-t border-gray-700 pt-4">
+          <h3 class="text-xs font-semibold text-gray-400 mb-2">Authentication</h3>
           <p class="text-xs text-gray-500 mb-4">
-            Manage OpenAI Codex OAuth credentials. Uses ChatGPT subscription tokens with automatic refresh and pool rotation.
+            OAuth credentials for ChatGPT subscription. Supports automatic refresh and pool rotation.
           </p>
 
           <div v-if="codexLoading && !codexData.configured" class="space-y-2">
