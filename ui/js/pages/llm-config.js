@@ -573,6 +573,7 @@ export default {
         if (!ollamaKeyDirty.value) delete payload.api_key;
         await api.put('/api/llm/ollama/config', payload);
         showToast('Ollama config saved');
+        ollamaForm.value.api_key = '';
         ollamaKeyDirty.value = false;
         await fetchAll();
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
@@ -586,6 +587,7 @@ export default {
         if (!kimiKeyDirty.value) delete payload.api_key;
         await api.put('/api/llm/kimi/config', payload);
         showToast('Kimi config saved');
+        kimiForm.value.api_key = '';
         kimiKeyDirty.value = false;
         await fetchAll();
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
