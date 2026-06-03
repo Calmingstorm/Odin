@@ -29,10 +29,8 @@ ollama:
 kimi:
   enabled: false
   api_key: ""  # Moonshot AI API key from platform.kimi.ai
-  base_url: https://api.moonshot.ai/v1
   model: kimi-k2.6
   max_tokens: 4096
-  timeout: 300
 
 # Which LLM backend to use: "codex", "ollama", or "kimi"
 llm_provider:

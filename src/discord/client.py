@@ -415,7 +415,6 @@ class OdinBot(commands.Bot):
         if kimi_cfg and kimi_cfg.enabled and kimi_cfg.api_key:
             self.kimi_client = KimiClient(
                 api_key=kimi_cfg.api_key,
-                base_url=kimi_cfg.base_url,
                 model=kimi_cfg.model,
                 max_tokens=kimi_cfg.max_tokens,
                 timeout=kimi_cfg.timeout,
@@ -728,7 +727,6 @@ class OdinBot(commands.Bot):
         old = self.kimi_client
         self.kimi_client = KimiClient(
             api_key=kimi_cfg.api_key,
-            base_url=kimi_cfg.base_url,
             model=kimi_cfg.model,
             max_tokens=kimi_cfg.max_tokens,
             timeout=kimi_cfg.timeout,

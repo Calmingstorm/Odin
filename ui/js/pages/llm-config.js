@@ -420,7 +420,6 @@ export default {
         if (data.kimi) {
           kimiForm.value.enabled = data.kimi.enabled;
           kimiForm.value.model = data.kimi.model || '';
-          kimiForm.value.base_url = data.kimi.base_url || '';
           kimiForm.value.max_tokens = data.kimi.max_tokens || 4096;
         }
       } catch (e) {

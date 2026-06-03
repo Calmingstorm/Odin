@@ -192,6 +192,9 @@ class TestProperties:
         assert stats["model"] == "kimi-k2.6"
         assert "api.moonshot.ai" in stats["base_url"]
 
+    def test_base_url_hardcoded(self, client):
+        assert client.base_url == "https://api.moonshot.ai/v1"
+
 
 class TestKimiConfig:
     def test_defaults(self):
@@ -199,12 +202,7 @@ class TestKimiConfig:
         cfg = KimiConfig()
         assert cfg.enabled is False
         assert cfg.model == "kimi-k2.6"
-        assert "moonshot" in cfg.base_url
-
-    def test_invalid_url(self):
-        from src.config.schema import KimiConfig
-        with pytest.raises(ValueError, match="http"):
-            KimiConfig(base_url="ftp://bad")
+        assert not hasattr(cfg, "base_url")
 
     def test_empty_model(self):
         from src.config.schema import KimiConfig

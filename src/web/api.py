@@ -3053,7 +3053,6 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 "configured": bot.kimi_client is not None,
                 "enabled": kimi_cfg.enabled if kimi_cfg else False,
                 "model": kimi_cfg.model if kimi_cfg else "",
-                "base_url": kimi_cfg.base_url if kimi_cfg else "",
                 "max_tokens": kimi_cfg.max_tokens if kimi_cfg else 4096,
                 "has_api_key": kimi_has_key,
             },

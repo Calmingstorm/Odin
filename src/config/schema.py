@@ -309,17 +309,9 @@ class KimiConfig(BaseModel):
 
     enabled: bool = False
     api_key: str = ""
-    base_url: str = "https://api.moonshot.ai/v1"
     model: str = "kimi-k2.6"
     max_tokens: int = 4096
     timeout: int = 300
-
-    @field_validator("base_url")
-    @classmethod
-    def _validate_url(cls, v):
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("base_url must start with http:// or https://")
-        return v
 
     @field_validator("max_tokens")
     @classmethod
