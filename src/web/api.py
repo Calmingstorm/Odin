@@ -3268,6 +3268,27 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         status = 200 if result.get("configured") else 503
         return web.json_response(result, status=status)
 
+    @routes.post("/api/ollama/probe-models")
+    async def ollama_probe_models(request: web.Request) -> web.Response:
+        """Fetch models from an arbitrary Ollama base_url — works even when client is disabled."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        base_url = (body.get("base_url") or "").rstrip("/")
+        if not base_url.startswith(("http://", "https://")):
+            return web.json_response({"error": "base_url must start with http:// or https://"}, status=400)
+        try:
+            import aiohttp as _aio
+            async with _aio.ClientSession(timeout=_aio.ClientTimeout(total=10)) as sess:
+                async with sess.get(f"{base_url}/api/tags") as resp:
+                    if resp.status != 200:
+                        return web.json_response({"error": f"HTTP {resp.status}"}, status=502)
+                    data = await resp.json()
+                    return web.json_response({"models": data.get("models", [])})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=502)
+
     @routes.get("/api/ollama/models")
     async def ollama_models(_request: web.Request) -> web.Response:
         client = getattr(bot, "ollama_client", None)

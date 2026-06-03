@@ -83,58 +83,6 @@ export default {
           </div>
         </div>
 
-        <!-- ==================== Ollama Config ==================== -->
-        <div class="hm-card">
-          <div class="flex items-center justify-between mb-3">
-            <h2 class="text-sm font-semibold text-gray-300">Ollama (Local/Remote)</h2>
-            <div class="flex items-center gap-3">
-              <div v-if="ollamaStatus.configured" class="text-sm">
-                <span v-if="ollamaStatus.health && ollamaStatus.health.healthy" class="text-green-400">● Connected</span>
-                <span v-else class="text-red-400">● Unreachable</span>
-              </div>
-              <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" v-model="ollamaForm.enabled" class="accent-indigo-500" />
-                <span class="text-xs text-gray-400">Enabled</span>
-              </label>
-            </div>
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="text-xs text-gray-400">Base URL</label>
-              <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-            <div>
-              <label class="text-xs text-gray-400">Model</label>
-              <select v-if="ollamaModels.length" v-model="ollamaForm.model"
-                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
-                <option v-for="m in ollamaModels" :key="m.name" :value="m.name">{{ m.name }} ({{ formatSize(m.size) }})</option>
-              </select>
-              <input v-else v-model="ollamaForm.model" placeholder="llama3.1:8b"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-            <div>
-              <label class="text-xs text-gray-400">API Key <span class="text-gray-600">(optional, for remote)</span></label>
-              <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-            <div>
-              <label class="text-xs text-gray-400">Max Tokens</label>
-              <input v-model.number="ollamaForm.max_tokens" type="number"
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
-            </div>
-          </div>
-          <div v-if="ollamaStatus.health && ollamaStatus.health.error"
-               class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
-            {{ ollamaStatus.health.error }}
-          </div>
-          <div class="mt-3">
-            <button @click="saveOllamaConfig" class="btn btn-primary text-xs" :disabled="savingOllama">
-              {{ savingOllama ? 'Saving...' : 'Save' }}
-            </button>
-          </div>
-        </div>
-
         <!-- ==================== Kimi Config ==================== -->
         <div class="hm-card">
           <div class="flex items-center justify-between mb-3">
@@ -178,6 +126,63 @@ export default {
           <div class="mt-3">
             <button @click="saveKimiConfig" class="btn btn-primary text-xs" :disabled="savingKimi">
               {{ savingKimi ? 'Saving...' : 'Save' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- ==================== Ollama Config ==================== -->
+        <div class="hm-card">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-gray-300">Ollama (Local/Remote)</h2>
+            <div class="flex items-center gap-3">
+              <div v-if="ollamaStatus.configured" class="text-sm">
+                <span v-if="ollamaStatus.health && ollamaStatus.health.healthy" class="text-green-400">● Connected</span>
+                <span v-else class="text-red-400">● Unreachable</span>
+              </div>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" v-model="ollamaForm.enabled" class="accent-indigo-500" />
+                <span class="text-xs text-gray-400">Enabled</span>
+              </label>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs text-gray-400">Base URL</label>
+              <div class="flex gap-2">
+                <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434"
+                       class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+                <button @click="probeOllamaModels" class="btn btn-ghost text-xs whitespace-nowrap" :disabled="probingOllama">
+                  {{ probingOllama ? '...' : 'Fetch Models' }}
+                </button>
+              </div>
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Model</label>
+              <select v-if="ollamaModels.length" v-model="ollamaForm.model"
+                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
+                <option v-for="m in ollamaModels" :key="m.name" :value="m.name">{{ m.name }} ({{ formatSize(m.size) }})</option>
+              </select>
+              <input v-else v-model="ollamaForm.model" placeholder="Enter URL and click Fetch Models"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">API Key <span class="text-gray-600">(optional, for remote)</span></label>
+              <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Max Tokens</label>
+              <input v-model.number="ollamaForm.max_tokens" type="number"
+                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+            </div>
+          </div>
+          <div v-if="ollamaStatus.health && ollamaStatus.health.error"
+               class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
+            {{ ollamaStatus.health.error }}
+          </div>
+          <div class="mt-3">
+            <button @click="saveOllamaConfig" class="btn btn-primary text-xs" :disabled="savingOllama">
+              {{ savingOllama ? 'Saving...' : 'Save' }}
             </button>
           </div>
         </div>
@@ -357,6 +362,7 @@ export default {
     const savingCodex = ref(false);
     const savingOllama = ref(false);
     const savingKimi = ref(false);
+    const probingOllama = ref(false);
     const switching = ref(false);
 
     // --- Ollama ---
@@ -495,6 +501,25 @@ export default {
     }
 
     // --- Kimi ---
+    async function probeOllamaModels() {
+      const url = ollamaForm.value.base_url;
+      if (!url) { showToast('Enter a base URL first', 'error'); return; }
+      probingOllama.value = true;
+      try {
+        const r = await api.post('/api/ollama/probe-models', { base_url: url });
+        ollamaModels.value = r.models || [];
+        if (ollamaModels.value.length) {
+          showToast(ollamaModels.value.length + ' model(s) found');
+          if (!ollamaForm.value.model && ollamaModels.value.length) {
+            ollamaForm.value.model = ollamaModels.value[0].name;
+          }
+        } else {
+          showToast('No models found at ' + url, 'error');
+        }
+      } catch (e) { showToast(e.message || 'Could not reach Ollama', 'error'); }
+      finally { probingOllama.value = false; }
+    }
+
     async function fetchKimiStatus() {
       try {
         kimiStatus.value = await api.get('/api/kimi/status');
@@ -649,13 +674,13 @@ export default {
 
     return {
       loading, toast, llmStatus, selectedProvider, switching,
-      codexForm, ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi,
+      codexForm, ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama,
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,
       fetchAll, switchProvider, reloadOllama, setOllamaModel,
-      reloadKimi, setKimiModel,
+      reloadKimi, setKimiModel, probeOllamaModels,
       saveCodexConfig, saveOllamaConfig, saveKimiConfig,
       activateAccount, refreshAccount, startEditLabel, saveLabel, deleteAccount,
       startDeviceLogin, cancelDeviceLogin, formatSize,
