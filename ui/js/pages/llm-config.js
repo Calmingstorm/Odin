@@ -28,7 +28,7 @@ export default {
           <div v-if="llmStatus" class="space-y-3">
             <div class="flex items-center gap-4">
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="radio" value="codex" v-model="selectedProvider"
+                <input type="radio" value="codex" v-model="selectedProvider" @change="switchProvider"
                        :disabled="!llmStatus.codex.configured"
                        class="accent-indigo-500" />
                 <span class="text-sm" :class="llmStatus.codex.configured ? 'text-gray-200' : 'text-gray-500'">
@@ -43,7 +43,7 @@ export default {
             </div>
             <div class="flex items-center gap-4">
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="radio" value="ollama" v-model="selectedProvider"
+                <input type="radio" value="ollama" v-model="selectedProvider" @change="switchProvider"
                        :disabled="!llmStatus.ollama.configured"
                        class="accent-indigo-500" />
                 <span class="text-sm" :class="llmStatus.ollama.configured ? 'text-gray-200' : 'text-gray-500'">
@@ -58,7 +58,7 @@ export default {
             </div>
             <div class="flex items-center gap-4">
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="radio" value="kimi" v-model="selectedProvider"
+                <input type="radio" value="kimi" v-model="selectedProvider" @change="switchProvider"
                        :disabled="!llmStatus.kimi.configured"
                        class="accent-indigo-500" />
                 <span class="text-sm" :class="llmStatus.kimi.configured ? 'text-gray-200' : 'text-gray-500'">
@@ -71,12 +71,8 @@ export default {
                 <span v-if="llmStatus.active_provider === 'kimi'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">active</span>
               </label>
             </div>
-            <div class="flex items-center gap-3 mt-2">
-              <button @click="switchProvider" class="btn btn-primary text-xs"
-                      :disabled="switching || selectedProvider === llmStatus.active_provider">
-                {{ switching ? 'Switching...' : 'Switch Provider' }}
-              </button>
-              <span v-if="llmStatus.active_model" class="text-xs text-gray-400">
+            <div v-if="llmStatus.active_model" class="mt-2">
+              <span class="text-xs text-gray-400">
                 Current: <code class="bg-gray-800 px-1 rounded">{{ llmStatus.active_model }}</code>
               </span>
             </div>
@@ -88,14 +84,14 @@ export default {
           <div class="flex items-center justify-between mb-3">
             <h2 class="text-sm font-semibold text-gray-300">Codex (OpenAI)</h2>
             <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" v-model="codexForm.enabled" class="accent-indigo-500" />
+              <input type="checkbox" v-model="codexForm.enabled" @change="saveCodexConfig" class="accent-indigo-500" />
               <span class="text-xs text-gray-400">Enabled</span>
             </label>
           </div>
           <div class="grid grid-cols-2 gap-3 mb-3">
             <div>
               <label class="text-xs text-gray-400">Model</label>
-              <select v-model="codexForm.model"
+              <select v-model="codexForm.model" @change="saveCodexConfig"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                 <option value="gpt-5.5">gpt-5.5</option>
                 <option value="gpt-5">gpt-5</option>
@@ -106,14 +102,9 @@ export default {
             </div>
             <div>
               <label class="text-xs text-gray-400">Max Tokens</label>
-              <input v-model.number="codexForm.max_tokens" type="number"
+              <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfig"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
-          </div>
-          <div class="mb-4">
-            <button @click="saveCodexConfig" class="btn btn-primary text-xs" :disabled="savingCodex">
-              {{ savingCodex ? 'Saving...' : 'Save' }}
-            </button>
           </div>
           <div class="border-t border-gray-700 pt-4">
           <h3 class="text-xs font-semibold text-gray-400 mb-2">Authentication</h3>
@@ -244,7 +235,7 @@ export default {
                 <span v-else class="text-red-400">● Unreachable</span>
               </div>
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" v-model="kimiForm.enabled" class="accent-indigo-500" />
+                <input type="checkbox" v-model="kimiForm.enabled" @change="saveKimiConfig" class="accent-indigo-500" />
                 <span class="text-xs text-gray-400">Enabled</span>
               </label>
             </div>
@@ -252,12 +243,16 @@ export default {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-gray-400">API Key</label>
-              <input v-model="kimiForm.api_key" type="password" placeholder="sk-..."
-                     class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+              <div class="flex items-center gap-2">
+                <span v-if="llmStatus && llmStatus.kimi.has_api_key && !kimiForm.api_key" class="text-xs text-green-400">● Configured</span>
+                <input v-model="kimiForm.api_key" type="password" @keydown.enter="saveKimiConfig"
+                       :placeholder="llmStatus && llmStatus.kimi.has_api_key ? '••••••••  (press Enter to replace)' : 'sk-...'"
+                       class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
+              </div>
             </div>
             <div>
               <label class="text-xs text-gray-400">Model</label>
-              <select v-model="kimiForm.model"
+              <select v-model="kimiForm.model" @change="saveKimiConfig"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                 <option v-if="!kimiModels.length" value="" disabled>No models available</option>
                 <option v-for="m in kimiModels" :key="m" :value="m">{{ m }}</option>
@@ -265,18 +260,13 @@ export default {
             </div>
             <div>
               <label class="text-xs text-gray-400">Max Tokens</label>
-              <input v-model.number="kimiForm.max_tokens" type="number"
+              <input v-model.number="kimiForm.max_tokens" type="number" @keydown.enter="saveKimiConfig"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
           </div>
           <div v-if="kimiStatus.health && kimiStatus.health.error"
                class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
             {{ kimiStatus.health.error }}
-          </div>
-          <div class="mt-3">
-            <button @click="saveKimiConfig" class="btn btn-primary text-xs" :disabled="savingKimi">
-              {{ savingKimi ? 'Saving...' : 'Save' }}
-            </button>
           </div>
         </div>
 
@@ -290,7 +280,7 @@ export default {
                 <span v-else class="text-red-400">● Unreachable</span>
               </div>
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" v-model="ollamaForm.enabled" class="accent-indigo-500" />
+                <input type="checkbox" v-model="ollamaForm.enabled" @change="saveOllamaConfig" class="accent-indigo-500" />
                 <span class="text-xs text-gray-400">Enabled</span>
               </label>
             </div>
@@ -298,12 +288,12 @@ export default {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-gray-400">Base URL</label>
-              <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434"
+              <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434" @keydown.enter="saveOllamaConfig"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
             <div>
               <label class="text-xs text-gray-400">Model</label>
-              <select v-model="ollamaForm.model"
+              <select v-model="ollamaForm.model" @change="saveOllamaConfig"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                 <option v-if="!ollamaModels.length" value="" disabled>No models available</option>
                 <option v-for="m in ollamaModels" :key="m.name" :value="m.name">{{ m.name }} ({{ formatSize(m.size) }})</option>
@@ -311,23 +301,18 @@ export default {
             </div>
             <div>
               <label class="text-xs text-gray-400">API Key <span class="text-gray-600">(optional, for remote)</span></label>
-              <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local"
+              <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local" @keydown.enter="saveOllamaConfig"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
             <div>
               <label class="text-xs text-gray-400">Max Tokens</label>
-              <input v-model.number="ollamaForm.max_tokens" type="number"
+              <input v-model.number="ollamaForm.max_tokens" type="number" @keydown.enter="saveOllamaConfig"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
           </div>
           <div v-if="ollamaStatus.health && ollamaStatus.health.error"
                class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
             {{ ollamaStatus.health.error }}
-          </div>
-          <div class="mt-3">
-            <button @click="saveOllamaConfig" class="btn btn-primary text-xs" :disabled="savingOllama">
-              {{ savingOllama ? 'Saving...' : 'Save' }}
-            </button>
           </div>
         </div>
 
