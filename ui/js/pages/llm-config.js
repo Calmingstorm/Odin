@@ -654,7 +654,7 @@ export default {
         if (ctrl.cancelled) return;
         deviceResult.value = result;
         deviceState.value = 'success';
-        fetchAll();
+        await fetchAll();
       } catch (e) {
         if (ctrl.cancelled) return;
         deviceError.value = e.message || 'Device login failed';
