@@ -163,9 +163,10 @@ class KimiClient(LLMProvider):
             })
         return oai_tools
 
-    @staticmethod
-    def _clamp_temperature(temperature: float | None) -> float:
-        """Kimi only supports temperature in [0, 1]."""
+    def _resolve_temperature(self, temperature: float | None) -> float:
+        """Kimi temperature: K2.6 requires 1.0, others accept [0, 1]."""
+        if "k2.6" in self.model:
+            return 1.0
         if temperature is None:
             return 0.6
         return max(0.0, min(1.0, temperature))
@@ -235,7 +236,7 @@ class KimiClient(LLMProvider):
             "model": self.model,
             "messages": self._convert_messages(messages, system),
             "max_tokens": max_tokens or self.max_tokens,
-            "temperature": self._clamp_temperature(None),
+            "temperature": self._resolve_temperature(None),
         }
         data = await self._request_with_retry(body)
         choices = data.get("choices", [])
@@ -254,7 +255,7 @@ class KimiClient(LLMProvider):
             "tools": self._convert_tools(tools),
             "tool_choice": "auto",
             "max_tokens": self.max_tokens,
-            "temperature": self._clamp_temperature(None),
+            "temperature": self._resolve_temperature(None),
         }
         data = await self._request_with_retry(body)
         return self._parse_response(data)

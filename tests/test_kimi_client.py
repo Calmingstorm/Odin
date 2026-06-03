@@ -92,18 +92,24 @@ class TestConvertTools:
         assert tools[0]["function"]["name"] == "run_command"
 
 
-class TestTemperatureClamping:
-    def test_none_returns_default(self):
-        assert KimiClient._clamp_temperature(None) == 0.6
+class TestTemperature:
+    def test_k26_forces_1(self):
+        c = KimiClient(api_key="k", model="kimi-k2.6")
+        assert c._resolve_temperature(None) == 1.0
+        assert c._resolve_temperature(0.5) == 1.0
 
-    def test_high_value_clamped(self):
-        assert KimiClient._clamp_temperature(1.5) == 1.0
+    def test_other_model_default(self):
+        c = KimiClient(api_key="k", model="kimi-k2.5")
+        assert c._resolve_temperature(None) == 0.6
 
-    def test_negative_clamped(self):
-        assert KimiClient._clamp_temperature(-0.5) == 0.0
+    def test_other_model_clamped(self):
+        c = KimiClient(api_key="k", model="kimi-k2.5")
+        assert c._resolve_temperature(1.5) == 1.0
+        assert c._resolve_temperature(-0.5) == 0.0
 
-    def test_valid_passes_through(self):
-        assert KimiClient._clamp_temperature(0.7) == 0.7
+    def test_other_model_passthrough(self):
+        c = KimiClient(api_key="k", model="kimi-k2.5")
+        assert c._resolve_temperature(0.7) == 0.7
 
 
 class TestParseResponse:
