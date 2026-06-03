@@ -33,7 +33,7 @@ Tell Odin things like:
 
 **AI & Code**
 - Claude Code delegation for code generation, review, and analysis
-- Codex (GPT-5.5) conversation with full tool use
+- Multi-LLM: Codex (GPT-5.5), Kimi (K2.6), Ollama (local) — switchable at runtime
 - ComfyUI image generation
 - PDF analysis, image analysis, web search, browser automation
 
@@ -111,9 +111,21 @@ python -m src
 
 The web UI starts automatically at the configured port (default 3000). Set `web.api_token` in config.yml to require authentication.
 
-## Codex Authentication
+## LLM Configuration
 
-Odin uses OpenAI Codex (ChatGPT subscription) for its LLM backend. Authentication requires a one-time OAuth login that generates tokens stored in `data/codex_auth.json`.
+Odin supports three LLM backends, switchable at runtime from the WebUI (System > LLM Config):
+
+| Provider | Auth | Best For |
+|----------|------|----------|
+| **Codex** (OpenAI) | OAuth device flow | Primary — GPT-5 family via ChatGPT subscription |
+| **Kimi** (Moonshot AI) | API key | Alternative cloud — K2.6, 262K context, competitive pricing |
+| **Ollama** (Local/Remote) | None / bearer token | Self-hosted open-source models (Qwen, Llama, etc.) |
+
+All providers are configured from the WebUI with inline auto-save — no config file editing or restarts required. Enable/disable, set API keys, select models, and switch the active provider live.
+
+### Codex Authentication
+
+Codex uses OpenAI OAuth tokens stored in `data/codex_auth.json`.
 
 **Browser login** (machine with a browser):
 ```bash
@@ -126,11 +138,23 @@ python scripts/codex_login.py --device
 ```
 This displays a code to enter at `https://auth.openai.com/codex/device` — no local browser needed.
 
-**WebUI**: System > Codex Auth tab shows account status and supports device flow login.
+**WebUI**: System > LLM Config shows account status and supports device flow login.
 
 **Multi-account**: Store multiple credential sets as a JSON array in `data/codex_auth.json`. Odin rotates between them on rate limits automatically.
 
 Tokens auto-refresh at runtime. Re-run the login script if the bot is offline for more than ~8 days (refresh token expiry).
+
+### Kimi Setup
+
+1. Get an API key from [platform.kimi.ai](https://platform.kimi.ai)
+2. In WebUI > LLM Config > Kimi: enable, paste API key, press Enter
+3. Select model from dropdown (kimi-k2.6 recommended)
+
+### Ollama Setup
+
+1. Install [Ollama](https://ollama.com) and pull a model (`ollama pull qwen3:14b`)
+2. In WebUI > LLM Config > Ollama: enable, set base URL, select model from dropdown
+3. For remote instances: set the API key if your reverse proxy requires one
 
 ## Configuration
 
