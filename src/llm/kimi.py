@@ -278,6 +278,7 @@ class KimiClient(LLMProvider):
     async def chat_with_tools(
         self, messages: list[dict], system: str,
         tools: list[dict],
+        **kwargs,
     ) -> LLMResponse:
         adapted_system = system + KIMI_TOOL_ENFORCEMENT
         converted_messages = self._convert_messages(messages, adapted_system)
@@ -292,7 +293,14 @@ class KimiClient(LLMProvider):
         }
         log.debug("Kimi request: %d messages, %d tools, model=%s",
                   len(converted_messages), len(converted_tools), self.model)
-        data = await self._request_with_retry(body)
+        try:
+            data = await self._request_with_retry(body)
+        except RuntimeError as e:
+            if "tokenization" in str(e).lower():
+                import json as _j
+                log.error("Kimi tokenization failed. Messages: %s",
+                          _j.dumps([{k: (v[:200] if isinstance(v, str) else v) for k, v in m.items()} for m in converted_messages], indent=2, default=str))
+            raise
         return self._parse_response(data)
 
     def _parse_response(self, data: dict) -> LLMResponse:
