@@ -36,10 +36,6 @@ htmlcov/
 .env
 .env.local
 .env.production
-# Runtime config holds live secrets (Kimi key, web admin token, etc.). The repo
-# tracks config.example.yml as the template; the real config.yml is local-only so
-# it can never be staged by `git add -A`.
-config.yml
 
 # Database
 *.db
