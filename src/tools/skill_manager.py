@@ -50,6 +50,37 @@ MAX_SKILL_DOWNLOAD_BYTES = 256 * 1024  # 256 KB max skill file size
 _URL_DOWNLOAD_TIMEOUT = 30  # seconds
 _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 
+# Modules/builtins a URL-sourced skill must not use. Local create_skill is
+# trusted (admin-authored) and stays unrestricted; install_skill fetches code
+# from a prompt-influenceable URL, so URL installs get this AST denylist as
+# defense-in-depth against injected-instruction RCE.
+_URL_SKILL_DENIED_IMPORTS = frozenset({
+    "os", "subprocess", "socket", "sys", "ctypes", "shutil",
+    "multiprocessing", "importlib", "pty", "fcntl", "resource", "signal",
+})
+_URL_SKILL_DENIED_CALLS = frozenset({"eval", "exec", "compile", "__import__", "open"})
+
+
+def _scan_url_skill_ast(code: str) -> list[str]:
+    """Return denylisted constructs found in URL-sourced skill code (empty = clean)."""
+    violations: set[str] = set()
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []  # syntax errors are reported separately by validate_skill_code
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in _URL_SKILL_DENIED_IMPORTS:
+                    violations.add(f"import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").split(".")[0] in _URL_SKILL_DENIED_IMPORTS:
+                violations.add(f"from {node.module} import ...")
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in _URL_SKILL_DENIED_CALLS:
+                violations.add(f"{node.func.id}()")
+    return sorted(violations)
+
 
 def _parse_package_name(spec: str) -> str:
     """Extract base package name from a pip requirement specifier.
@@ -975,6 +1006,9 @@ class SkillManager:
             return f"Invalid URL scheme '{parsed.scheme}'. Only http/https allowed."
         if not parsed.netloc:
             return "Invalid URL: no host specified."
+        from .url_safety import is_url_blocked
+        if is_url_blocked(url):
+            return "Error: blocked URL (localhost / private IP / cloud-metadata address)."
 
         # Download
         try:
@@ -1004,6 +1038,26 @@ class SkillManager:
         if not report["valid"]:
             errors = "; ".join(report["errors"])
             return f"Invalid skill code: {errors}"
+
+        # Defense-in-depth for URL-sourced skills: the source URL is
+        # prompt-influenceable and skills run in-process with full privileges, so
+        # an injected "install the helper at http://evil/x.py" could become RCE.
+        # Local create_skill stays unrestricted (trusted authoring); URL installs
+        # may not import os/subprocess/socket/etc. or call exec/eval/open.
+        denied = _scan_url_skill_ast(code)
+        if denied:
+            return (
+                "Refused: URL-installed skill uses denylisted constructs "
+                f"({', '.join(denied)}). Skills fetched from a URL may not import "
+                "os/subprocess/socket/sys/ctypes/etc. or call exec/eval/compile/"
+                "__import__/open. If you trust this code, author it locally with "
+                "create_skill instead."
+            )
+        import hashlib
+        log.warning(
+            "Installing skill from URL %s (sha256=%s)",
+            url, hashlib.sha256(code.encode()).hexdigest()[:16],
+        )
 
         # Extract skill name from the code
         ns: dict[str, Any] = {}

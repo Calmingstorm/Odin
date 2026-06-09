@@ -224,7 +224,7 @@ class TestMCPServerConnectionProtocol:
             },
         }
         conn._send_request = AsyncMock(return_value=resp)
-        conn._send_notification = MagicMock()
+        conn._send_notification = AsyncMock()
 
         await conn._initialize()
         assert conn.server_info["name"] == "test-server"
@@ -779,13 +779,13 @@ class TestMCPServerConnectionSendRequest:
         with pytest.raises(MCPError, match="not connected"):
             await conn._send_stdio_request("tools/list")
 
-    def test_send_notification_not_connected(self):
+    async def test_send_notification_not_connected(self):
         conn = MCPServerConnection("test", "http", url="http://x")
-        conn._send_notification("notifications/initialized")
+        await conn._send_notification("notifications/initialized")
 
-    def test_send_notification_no_process(self):
+    async def test_send_notification_no_process(self):
         conn = MCPServerConnection("test", "stdio")
-        conn._send_notification("notifications/initialized")
+        await conn._send_notification("notifications/initialized")
 
 
 # ---------------------------------------------------------------------------
@@ -1519,7 +1519,7 @@ class TestEdgeCases:
         conn = MCPServerConnection("test", "http", url="http://localhost:8080")
         resp = {"jsonrpc": "2.0", "id": 1, "result": {}}
         conn._send_request = AsyncMock(return_value=resp)
-        conn._send_notification = MagicMock()
+        conn._send_notification = AsyncMock()
 
         # HTTP init path
         mock_resp_obj = AsyncMock()
@@ -1549,7 +1549,7 @@ class TestEdgeCases:
             "result": {"protocolVersion": PROTOCOL_VERSION},
         }
         conn._send_request = AsyncMock(return_value=resp)
-        conn._send_notification = MagicMock()
+        conn._send_notification = AsyncMock()
 
         await conn._initialize()
         assert conn.server_info == {}

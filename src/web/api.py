@@ -2038,6 +2038,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         err = _validate_string(description, "description", _MAX_DESCRIPTION_LEN)
         if err:
             return web.json_response({"error": err}, status=400)
+        # Web API schedule creation is gated by the admin web token (auth
+        # middleware), so schedules created here carry system/admin authority:
+        # requester_id is intentionally left empty, so scheduled execution runs
+        # with user_id=None (unrestricted), matching the admin nature of the
+        # dashboard. Discord-created schedules instead persist the creator's id
+        # for per-user host/tier scoping. The API token identity is NOT a
+        # Discord-user-scoped principal, so passing it through would not map onto
+        # the permission/host-access namespace.
         try:
             schedule = await bot.scheduler.add(
                 description=description,

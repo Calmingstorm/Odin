@@ -83,8 +83,15 @@ class OllamaClient(LLMProvider):
         return self.model
 
     def _convert_messages(self, messages: list[dict], system: str) -> list[dict]:
-        """Convert internal message format to Ollama /api/chat format."""
-        ollama_messages = []
+        """Convert internal (Anthropic-style block) messages to Ollama /api/chat format.
+
+        Assistant ``tool_use`` blocks become native Ollama ``tool_calls`` and
+        ``tool_result`` blocks become ``role:"tool"`` messages, so multi-turn tool
+        loops preserve the assistant's prior tool calls and their results across
+        iterations. (Previously tool_use blocks were dropped and tool results were
+        flattened to plain user text, so the second tool iteration lost all history.)
+        """
+        ollama_messages: list[dict] = []
         if system:
             ollama_messages.append({"role": "system", "content": system})
 
@@ -92,40 +99,68 @@ class OllamaClient(LLMProvider):
             role = msg.get("role", "user")
             content = msg.get("content", "")
 
-            if role == "tool_result":
-                ollama_messages.append({
-                    "role": "tool",
-                    "content": json.dumps(content) if not isinstance(content, str) else content,
-                })
+            # Plain (non-block) content.
+            if not isinstance(content, list):
+                if role in ("tool", "tool_result"):
+                    ollama_messages.append({
+                        "role": "tool",
+                        "content": content if isinstance(content, str) else json.dumps(content),
+                    })
+                else:
+                    ollama_messages.append({
+                        "role": "assistant" if role == "assistant" else "user",
+                        "content": content,
+                    })
                 continue
 
-            images = []
-            if isinstance(content, list):
-                text_parts = []
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "text":
-                            text_parts.append(block["text"])
-                        elif block.get("type") == "image":
-                            source = block.get("source", {})
-                            if source.get("type") == "base64":
-                                images.append(source.get("data", ""))
-                        elif block.get("type") == "tool_use":
-                            pass
-                        elif block.get("type") == "tool_result":
-                            text_parts.append(str(block.get("content", "")))
-                    elif isinstance(block, str):
-                        text_parts.append(block)
-                content = "\n".join(text_parts)
+            # Anthropic-style block content.
+            text_parts: list[str] = []
+            images: list[str] = []
+            tool_calls: list[dict] = []
+            tool_result_msgs: list[dict] = []
+            for block in content:
+                if isinstance(block, str):
+                    text_parts.append(block)
+                    continue
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    text_parts.append(block.get("text", ""))
+                elif btype == "image":
+                    source = block.get("source", {})
+                    if source.get("type") == "base64":
+                        images.append(source.get("data", ""))
+                elif btype == "tool_use":
+                    args = block.get("input", {})
+                    tool_calls.append({
+                        "function": {
+                            "name": block.get("name", ""),
+                            "arguments": args if isinstance(args, dict) else {"raw": args},
+                        }
+                    })
+                elif btype == "tool_result":
+                    rc = block.get("content", "")
+                    tool_result_msgs.append({
+                        "role": "tool",
+                        "content": rc if isinstance(rc, str) else json.dumps(rc),
+                    })
 
-            ollama_role = "assistant" if role == "assistant" else "user"
-            if role == "tool":
-                ollama_role = "tool"
-
-            entry: dict = {"role": ollama_role, "content": content}
-            if images:
-                entry["images"] = images
-            ollama_messages.append(entry)
+            if role == "assistant":
+                entry: dict = {"role": "assistant", "content": "\n".join(text_parts)}
+                if tool_calls:
+                    entry["tool_calls"] = tool_calls
+                if images:
+                    entry["images"] = images
+                ollama_messages.append(entry)
+            else:
+                # User turn: tool results first (as role:"tool" messages), then text.
+                ollama_messages.extend(tool_result_msgs)
+                if text_parts or images:
+                    entry = {"role": "user", "content": "\n".join(text_parts)}
+                    if images:
+                        entry["images"] = images
+                    ollama_messages.append(entry)
 
         return ollama_messages
 

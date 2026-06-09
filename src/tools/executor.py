@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import json
 import os
 import shlex
@@ -41,6 +42,19 @@ from .ssh import is_local_address, run_local_command, run_ssh_command
 from .ssh_pool import SSHConnectionPool
 
 log = get_logger("tools")
+
+# Request-scoped caller identity, backed by contextvars. asyncio gives each
+# message-handling task (and each gather()-wrapped tool call) its own context
+# copy, so these are isolated across concurrent channels/requests. This replaces
+# the old instance attributes, which were shared mutable state on the single
+# ToolExecutor and could leak one channel's identity into another channel's
+# host-access check across await points.
+_user_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "odin_tool_user_id", default=None
+)
+_user_tier_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "odin_tool_user_tier", default=None
+)
 
 # Maximum lines of output from run_command / run_command_multi before
 # truncation.  The LLM can always re-run with head/tail/grep to see
@@ -124,6 +138,16 @@ class ToolExecutor:
             else None
         )
 
+    @property
+    def _current_user_id(self) -> str | None:
+        """Caller id for the in-flight tool call (contextvar-backed, task-isolated)."""
+        return _user_id_ctx.get()
+
+    @property
+    def _current_user_tier(self) -> str | None:
+        """Caller tier for the in-flight tool call (contextvar-backed, task-isolated)."""
+        return _user_tier_ctx.get()
+
     def _resolve_host(self, alias: str) -> tuple[str, str, str] | None:
         """Resolve host alias to (address, ssh_user, os). Returns None if not allowed."""
         host = self.config.hosts.get(alias)
@@ -166,8 +190,8 @@ class ToolExecutor:
         if handler is None:
             return ToolResult(output=f"Unknown tool: {tool_name}", ok=False, error="unknown_tool", tool_name=tool_name)
 
-        self._current_user_id = user_id
-        self._current_user_tier = (
+        _user_id_ctx.set(user_id)
+        _user_tier_ctx.set(
             self._permission_manager.get_tier(user_id) if self._permission_manager and user_id else None
         )
 
@@ -727,6 +751,13 @@ class ToolExecutor:
         # Validate URL scheme early (before heavy imports) to prevent SSRF
         if url and not url.startswith(("http://", "https://")):
             return "Only http:// and https:// URLs are supported."
+        # Block private/loopback/link-local/metadata targets (DNS-rebinding aware) —
+        # the same guard fetch_url/browser/skill HTTP use. The scheme check alone is
+        # NOT SSRF-safe (e.g. http://169.254.169.254/... passes it).
+        if url:
+            from .url_safety import is_url_blocked
+            if is_url_blocked(url):
+                return "Error: blocked URL (localhost / private IP / cloud-metadata address)."
 
         import fitz
 
@@ -1022,7 +1053,7 @@ class ToolExecutor:
         Kept for backward compatibility with tests. Prefer passing user_id
         as a keyword argument to execute() instead.
         """
-        self._current_user_id = user_id
+        _user_id_ctx.set(user_id)
 
     def _load_all_memory(self) -> dict[str, dict[str, str]]:
         """Load the full scoped memory structure.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 
 from ..odin_log import get_logger
 
@@ -24,9 +25,21 @@ class FullTextIndex:
 
     def __init__(self, db_path: str) -> None:
         self._conn: sqlite3.Connection | None = None
+        # The shared connection uses ``check_same_thread=False`` and is
+        # written concurrently from ``asyncio.to_thread`` call sites
+        # (knowledge ingest, session archival, channel-log indexing).
+        # Mirrors the fix already applied to KnowledgeStore:
+        #  1. ``busy_timeout`` lets SQLite wait for contended locks
+        #     instead of failing immediately.
+        #  2. ``_write_lock`` serializes writers. These write methods are
+        #     synchronous (callers wrap them in ``asyncio.to_thread``), so
+        #     a ``threading.Lock`` is used rather than an ``asyncio.Lock``.
+        #     WAL mode still allows concurrent reads, so reads stay unlocked.
+        self._write_lock = threading.Lock()
         try:
             conn = sqlite3.connect(db_path, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             # Verify FTS5 is available
             conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_test USING fts5(x)")
             conn.execute("DROP TABLE _fts5_test")
@@ -71,15 +84,16 @@ class FullTextIndex:
         if not self._conn:
             return False
         try:
-            # Delete existing then insert (FTS5 doesn't support upsert)
-            self._conn.execute(
-                "DELETE FROM session_fts WHERE doc_id = ?", (doc_id,),
-            )
-            self._conn.execute(
-                "INSERT INTO session_fts (doc_id, content, channel_id, last_active) VALUES (?, ?, ?, ?)",
-                (doc_id, content, channel_id, str(last_active)),
-            )
-            self._conn.commit()
+            with self._write_lock:
+                # Delete existing then insert (FTS5 doesn't support upsert)
+                self._conn.execute(
+                    "DELETE FROM session_fts WHERE doc_id = ?", (doc_id,),
+                )
+                self._conn.execute(
+                    "INSERT INTO session_fts (doc_id, content, channel_id, last_active) VALUES (?, ?, ?, ?)",
+                    (doc_id, content, channel_id, str(last_active)),
+                )
+                self._conn.commit()
             return True
         except Exception as e:
             log.error("FTS session index failed for %s: %s", doc_id, e)
@@ -142,14 +156,15 @@ class FullTextIndex:
         if not self._conn:
             return False
         try:
-            self._conn.execute(
-                "DELETE FROM knowledge_fts WHERE chunk_id = ?", (chunk_id,),
-            )
-            self._conn.execute(
-                "INSERT INTO knowledge_fts (chunk_id, content, source, chunk_index) VALUES (?, ?, ?, ?)",
-                (chunk_id, content, source, str(chunk_index)),
-            )
-            self._conn.commit()
+            with self._write_lock:
+                self._conn.execute(
+                    "DELETE FROM knowledge_fts WHERE chunk_id = ?", (chunk_id,),
+                )
+                self._conn.execute(
+                    "INSERT INTO knowledge_fts (chunk_id, content, source, chunk_index) VALUES (?, ?, ?, ?)",
+                    (chunk_id, content, source, str(chunk_index)),
+                )
+                self._conn.commit()
             return True
         except Exception as e:
             log.error("FTS knowledge index failed for %s: %s", chunk_id, e)
@@ -188,11 +203,13 @@ class FullTextIndex:
         if not self._conn:
             return 0
         try:
-            cursor = self._conn.execute(
-                "DELETE FROM knowledge_fts WHERE source = ?", (source,),
-            )
-            self._conn.commit()
-            return cursor.rowcount
+            with self._write_lock:
+                cursor = self._conn.execute(
+                    "DELETE FROM knowledge_fts WHERE source = ?", (source,),
+                )
+                self._conn.commit()
+                rowcount = cursor.rowcount
+            return rowcount
         except Exception as e:
             log.error("FTS knowledge delete failed for '%s': %s", source, e)
             return 0
@@ -215,8 +232,9 @@ class FullTextIndex:
         if not self._conn:
             return False
         try:
-            self._conn.execute("DELETE FROM channel_log_fts")
-            self._conn.commit()
+            with self._write_lock:
+                self._conn.execute("DELETE FROM channel_log_fts")
+                self._conn.commit()
             return True
         except Exception as e:
             log.error("FTS channel log clear failed: %s", e)
@@ -243,12 +261,13 @@ class FullTextIndex:
             ]
             if not rows:
                 return 0
-            self._conn.executemany(
-                "INSERT INTO channel_log_fts (content, author, channel_id, timestamp) "
-                "VALUES (?, ?, ?, ?)",
-                rows,
-            )
-            self._conn.commit()
+            with self._write_lock:
+                self._conn.executemany(
+                    "INSERT INTO channel_log_fts (content, author, channel_id, timestamp) "
+                    "VALUES (?, ?, ?, ?)",
+                    rows,
+                )
+                self._conn.commit()
             return len(rows)
         except Exception as e:
             log.error("FTS channel log index failed: %s", e)

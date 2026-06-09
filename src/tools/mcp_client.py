@@ -84,6 +84,23 @@ class MCPServerConnection:
         return self._connected
 
     @property
+    def is_alive(self) -> bool:
+        """True if the connection is usable.
+
+        For stdio transport, a subprocess that has exited (``returncode`` set)
+        is considered dead even if ``_connected`` has not yet been flipped by
+        the reader task.
+        """
+        if not self._connected:
+            return False
+        # Only a subprocess that actually started and then exited is "dead". A
+        # None process (HTTP transport, or not yet spawned / test harness) is not
+        # treated as dead here — _connected governs that case.
+        if self.transport == "stdio" and self._process is not None:
+            return self._process.returncode is None
+        return True
+
+    @property
     def tools(self) -> list[dict]:
         return list(self._tools)
 
@@ -139,32 +156,46 @@ class MCPServerConnection:
     async def _stdio_reader(self) -> None:
         """Background task that reads JSON-RPC messages from stdout."""
         assert self._process and self._process.stdout
-        while True:
-            try:
-                line = await self._process.stdout.readline()
-                if not line:
-                    break
-                line_str = line.decode("utf-8", errors="replace").strip()
-                if not line_str:
-                    continue
+        try:
+            while True:
                 try:
-                    msg = json.loads(line_str)
-                except json.JSONDecodeError:
-                    log.debug("MCP %s: non-JSON stdout: %s", self.name, line_str[:200])
-                    continue
+                    line = await self._process.stdout.readline()
+                    if not line:
+                        break
+                    line_str = line.decode("utf-8", errors="replace").strip()
+                    if not line_str:
+                        continue
+                    try:
+                        msg = json.loads(line_str)
+                    except json.JSONDecodeError:
+                        log.debug("MCP %s: non-JSON stdout: %s", self.name, line_str[:200])
+                        continue
 
-                msg_id = msg.get("id")
-                if msg_id is not None and msg_id in self._pending:
-                    self._pending[msg_id].set_result(msg)
-                # Notifications (no id) are logged but not dispatched
-                elif msg_id is None:
-                    method = msg.get("method", "")
-                    log.debug("MCP %s: notification: %s", self.name, method)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                log.exception("MCP %s: reader error", self.name)
-                break
+                    msg_id = msg.get("id")
+                    if msg_id is not None and msg_id in self._pending:
+                        self._pending[msg_id].set_result(msg)
+                    # Notifications (no id) are logged but not dispatched
+                    elif msg_id is None:
+                        method = msg.get("method", "")
+                        log.debug("MCP %s: notification: %s", self.name, method)
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    log.exception("MCP %s: reader error", self.name)
+                    break
+        finally:
+            # Reader has stopped: the subprocess pipe is dead. Mark the
+            # connection down and fail any in-flight requests so callers fail
+            # fast instead of blocking until self.timeout.
+            self._connected = False
+            self._fail_pending(MCPError(f"Server {self.name}: MCP connection closed"))
+
+    def _fail_pending(self, exc: Exception) -> None:
+        """Resolve every pending request future with ``exc`` and clear them."""
+        for fut in list(self._pending.values()):
+            if not fut.done():
+                fut.set_exception(exc)
+        self._pending.clear()
 
     async def _send_request(self, method: str, params: dict | None = None) -> dict:
         """Send a JSON-RPC request and wait for the response."""
@@ -235,7 +266,7 @@ class MCPServerConnection:
         except aiohttp.ClientError as e:
             raise MCPError(f"Server {self.name}: HTTP error: {e}")
 
-    def _send_notification(self, method: str, params: dict | None = None) -> None:
+    async def _send_notification(self, method: str, params: dict | None = None) -> None:
         """Send a JSON-RPC notification (no response expected)."""
         if self.transport != "stdio" or not self._process or not self._process.stdin:
             return
@@ -243,7 +274,9 @@ class MCPServerConnection:
         if params is not None:
             msg["params"] = params
         line = json.dumps(msg) + "\n"
-        self._process.stdin.write(line.encode("utf-8"))
+        async with self._write_lock:
+            self._process.stdin.write(line.encode("utf-8"))
+            await self._process.stdin.drain()
 
     async def _initialize(self) -> None:
         """Perform the MCP initialize handshake."""
@@ -263,7 +296,7 @@ class MCPServerConnection:
 
         result = resp.get("result", {})
         self._server_info = result.get("serverInfo", {})
-        self._send_notification("notifications/initialized")
+        await self._send_notification("notifications/initialized")
         log.info(
             "MCP %s: initialized (server: %s)",
             self.name,
@@ -323,6 +356,11 @@ class MCPServerConnection:
         """Invoke a tool on the server and return the result as text."""
         if not self._connected:
             raise MCPError(f"Server {self.name}: not connected")
+        if not self.is_alive:
+            # Subprocess has exited; mark down and fail fast rather than
+            # dispatching into a dead pipe and blocking until self.timeout.
+            self._connected = False
+            raise MCPError(f"Server {self.name}: connection is dead (subprocess exited)")
 
         resp = await self._send_request("tools/call", {
             "name": tool_name,
@@ -494,6 +532,8 @@ class MCPManager:
         conn = self._servers.get(server_name)
         if conn is None or not conn.connected:
             return f"MCP server '{server_name}' is not connected"
+        if not conn.is_alive:
+            return f"MCP server '{server_name}' connection is dead (subprocess exited)"
 
         try:
             return await asyncio.wait_for(

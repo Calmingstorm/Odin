@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 import uuid
@@ -64,6 +65,14 @@ class Scheduler:
                 self._advance_stale_cron()
             except Exception as e:
                 log.error("Failed to load schedules: %s", e)
+                # Preserve the corrupt file instead of silently discarding every
+                # schedule — a truncated/partial write must not erase persistence.
+                try:
+                    backup = self.data_path.with_suffix(self.data_path.suffix + ".corrupt")
+                    self.data_path.replace(backup)
+                    log.error("Backed up corrupt schedules file to %s", backup)
+                except Exception:
+                    log.exception("Could not back up corrupt schedules file")
                 self._schedules = []
 
     def _advance_stale_cron(self) -> None:
@@ -95,7 +104,15 @@ class Scheduler:
             log.info("Advanced %d stale cron schedule(s) to next future run", advanced)
 
     def _save(self) -> None:
-        self.data_path.write_text(json.dumps(self._schedules, indent=2))
+        # Atomic write: serialize to a temp file, fsync, then replace. A crash
+        # mid-write must never truncate schedules.json (which _load would then
+        # treat as corrupt). Mirrors the tmp+replace pattern used elsewhere.
+        tmp = self.data_path.with_suffix(self.data_path.suffix + ".tmp")
+        with open(tmp, "w") as f:
+            json.dump(self._schedules, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.data_path)
 
     async def add(
         self,
@@ -112,6 +129,7 @@ class Scheduler:
         max_retries: int | None = None,
         retry_backoff_seconds: int | None = None,
         webhook_config: dict | None = None,
+        requester_id: str = "",
     ) -> dict:
         if action == "digest":
             # Digest is a predefined action, no tool validation needed
@@ -145,6 +163,7 @@ class Scheduler:
             "description": description,
             "action": action,
             "channel_id": channel_id,
+            "requester_id": requester_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "last_run": None,
         }

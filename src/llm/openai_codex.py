@@ -436,8 +436,7 @@ class CodexChatClient:
 
                     if resp.status == 401 and attempt == 0:
                         log.warning("Codex auth expired, forcing token refresh...")
-                        if hasattr(self.auth, '_credentials'):
-                            self.auth._credentials = None
+                        await self.auth.invalidate_current()
                         new_token = await self.auth.get_access_token()
                         headers["Authorization"] = f"Bearer {new_token}"
                         account_id = self.auth.get_account_id()
@@ -668,8 +667,7 @@ class CodexChatClient:
 
                     if resp.status == 401 and attempt == 0:
                         log.warning("Codex auth expired, forcing token refresh...")
-                        if hasattr(self.auth, '_credentials'):
-                            self.auth._credentials = None
+                        await self.auth.invalidate_current()
                         new_token = await self.auth.get_access_token()
                         headers["Authorization"] = f"Bearer {new_token}"
                         account_id = self.auth.get_account_id()
