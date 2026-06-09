@@ -129,6 +129,7 @@ class Scheduler:
         max_retries: int | None = None,
         retry_backoff_seconds: int | None = None,
         webhook_config: dict | None = None,
+        requester_id: str = "",
     ) -> dict:
         if action == "digest":
             # Digest is a predefined action, no tool validation needed
@@ -162,6 +163,7 @@ class Scheduler:
             "description": description,
             "action": action,
             "channel_id": channel_id,
+            "requester_id": requester_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "last_run": None,
         }

@@ -61,10 +61,22 @@ class TestOllamaConformance:
         assert first["tool_calls"][0]["function"]["arguments"] == {"command": "df -h"}
 
         # Both tool results appear as role:"tool" messages with the result text.
+        # NOTE: native Ollama pairs tool results to calls by SEQUENCE/order, not by
+        # a tool_call_id (unlike OpenAI/Kimi/Codex). So we assert ordering and that
+        # these messages carry no id — do not imply OpenAI-style id pairing here.
         tool_msgs = [m for m in out if m.get("role") == "tool"]
         assert len(tool_msgs) == 2
         assert "50%" in tool_msgs[0]["content"]
         assert "30000 used" in tool_msgs[1]["content"]
+        assert all("tool_call_id" not in m for m in tool_msgs)
+
+        # Sequence must be: assistant(call1) -> tool(result1) -> assistant(call2)
+        # -> tool(result2), so order-based pairing is unambiguous.
+        roles = [
+            ("assistant_tc" if (m.get("role") == "assistant" and m.get("tool_calls")) else m.get("role"))
+            for m in out
+        ]
+        assert roles == ["system", "user", "assistant_tc", "tool", "assistant_tc", "tool", "assistant"]
 
     def test_tool_use_not_silently_dropped(self):
         # Regression for the old converter that did `pass` on tool_use blocks.

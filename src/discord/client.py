@@ -3458,6 +3458,7 @@ class OdinBot(commands.Bot):
                 tool_input=inp.get("tool_input"),
                 steps=inp.get("steps"),
                 trigger=inp.get("trigger"),
+                requester_id=str(message.author.id),
             )
             if schedule.get("trigger"):
                 trigger_desc = ", ".join(
@@ -4921,6 +4922,9 @@ class OdinBot(commands.Bot):
         desc = schedule.get("description", "Workflow")
         results: list[str] = []
         prev_output = ""
+        # Scheduled work runs under the identity of whoever created the schedule, so
+        # host-access scoping / tier limits apply (None = unrestricted system task).
+        req_id = schedule.get("requester_id") or None
 
         for i, step in enumerate(steps):
             tool_name = step["tool_name"]
@@ -4942,8 +4946,12 @@ class OdinBot(commands.Bot):
                         continue
 
             try:
+                # Central RBAC gate for scheduled steps (skills bypass execute()).
+                _denial = self.tool_executor.check_permission(tool_name, req_id) if req_id else None
+                if isinstance(_denial, str) and _denial:
+                    output = _denial
                 # Check if this is a skill or built-in tool
-                if tool_name == "invoke_skill":
+                elif tool_name == "invoke_skill":
                     target_name = tool_input.get("name")
                     skill_input = tool_input.get("input") or {}
                     if not target_name or not self.skill_manager.has_skill(target_name):
@@ -4955,7 +4963,7 @@ class OdinBot(commands.Bot):
                 elif self.skill_manager.has_skill(tool_name):
                     output = await self.skill_manager.execute(tool_name, tool_input)
                 else:
-                    output = await self.tool_executor.execute(tool_name, tool_input)
+                    output = await self.tool_executor.execute(tool_name, tool_input, user_id=req_id)
                 prev_output = str(output)
                 results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{str(output)[:400]}\n```")
             except Exception as e:
@@ -5017,7 +5025,9 @@ class OdinBot(commands.Bot):
             tool_name = schedule.get("tool_name")
             tool_input = schedule.get("tool_input", {})
             try:
-                result = await self.tool_executor.execute(tool_name, tool_input)
+                result = await self.tool_executor.execute(
+                    tool_name, tool_input, user_id=schedule.get("requester_id") or None,
+                )
                 text = f"**Scheduled: {schedule['description']}**\n```\n{str(result)[:1800]}\n```"
                 await channel.send(scrub_response_secrets(text))
             except (discord.HTTPException, discord.Forbidden, discord.NotFound) as e:

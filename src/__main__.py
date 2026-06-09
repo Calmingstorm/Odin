@@ -143,6 +143,8 @@ def main() -> None:
         if hasattr(bot, "scheduler") and hasattr(health, "set_trigger_callback"):
             health.set_trigger_callback(bot.scheduler.fire_triggers)
 
+        _wire_observability(health, bot, log)
+
         def handle_signal() -> None:
             log.info("Shutdown signal received")
             loop.create_task(shutdown())
