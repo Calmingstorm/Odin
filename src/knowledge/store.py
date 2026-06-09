@@ -281,8 +281,13 @@ class KnowledgeStore:
                     self._fts.index_knowledge_chunk(chunk_id, chunk, source, i)
                 if vectors[i] is not None:
                     vec_bytes = serialize_vector(vectors[i])
+                    # vec0 tables don't honor INSERT OR REPLACE (same issue as
+                    # session_vec) — delete-then-insert keeps re-ingest idempotent.
                     self._conn.execute(
-                        "INSERT OR REPLACE INTO knowledge_vec (chunk_id, embedding) VALUES (?, ?)",
+                        "DELETE FROM knowledge_vec WHERE chunk_id = ?", (chunk_id,)
+                    )
+                    self._conn.execute(
+                        "INSERT INTO knowledge_vec (chunk_id, embedding) VALUES (?, ?)",
                         (chunk_id, vec_bytes),
                     )
                 indexed += 1
