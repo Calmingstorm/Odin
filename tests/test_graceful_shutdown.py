@@ -60,10 +60,10 @@ class TestOdinBotClose:
     @pytest.mark.asyncio
     async def test_close_stops_watcher(self):
         bot = _make_bot()
-        bot.watcher = AsyncMock()
+        bot.infra_watcher = AsyncMock()
         with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
             await bot.close()
-        bot.watcher.stop.assert_awaited_once()
+        bot.infra_watcher.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_close_stops_health_server(self):
@@ -125,8 +125,8 @@ class TestOdinBotClose:
         bot.scheduler.stop = AsyncMock(
             side_effect=lambda: call_order.append("scheduler")
         )
-        bot.watcher = AsyncMock()
-        bot.watcher.stop = AsyncMock(
+        bot.infra_watcher = AsyncMock()
+        bot.infra_watcher.stop = AsyncMock(
             side_effect=lambda: call_order.append("watcher")
         )
         bot.health_server = AsyncMock()

@@ -159,6 +159,7 @@ async def run_background_task(
                 tool_name, tool_input, executor, skill_manager,
                 knowledge_store, embedder, task.requester,
                 step_desc=step_desc,
+                requester_id=task.requester_id,
             )
             elapsed_ms = int((time.monotonic() - t0) * 1000)
             output = scrub_output_secrets(output)
@@ -298,8 +299,19 @@ async def _execute_tool(
     requester: str,
     step_desc: str = "",
     mcp_manager: MCPManager | None = None,
+    requester_id: str = "",
 ) -> str:
     """Execute a single tool, routing to the right handler."""
+    # Central RBAC gate for deferred/background execution. Skills, MCP, and the
+    # knowledge tools below bypass ToolExecutor.execute() (the only place
+    # check_permission runs), and even the final execute() call only enforces
+    # once requester_id is threaded through. Enforce for EVERY tool when we know
+    # who requested it, so a scoped token's tier/host limits still apply to work
+    # deferred to a background task or schedule.
+    if requester_id:
+        _denial = executor.check_permission(tool_name, requester_id)
+        if isinstance(_denial, str) and _denial:  # denial is a str message; None = allowed
+            return _denial
     # Knowledge base tools need special handling (not in executor)
     if tool_name == "ingest_document" and knowledge_store and embedder:
         source = tool_input.get("source", "")
@@ -365,7 +377,7 @@ async def _execute_tool(
         tool_input = {**tool_input, "host": _get_default_host(executor)}
     # run_command/run_script: if 'command'/'script' missing, let executor handle it
     # (it will return an error that _is_error_output catches)
-    return str(await executor.execute(tool_name, tool_input))
+    return str(await executor.execute(tool_name, tool_input, user_id=requester_id or None))
 
 
 def _substitute_vars(

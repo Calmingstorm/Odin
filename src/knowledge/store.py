@@ -310,7 +310,11 @@ class KnowledgeStore:
 
         try:
             vec_bytes = serialize_vector(vector)
-            rows = await asyncio.to_thread(self._search_vec_sync, vec_bytes, limit)
+            # Over-fetch candidates: the KNN k-cap and the >0.8 distance filter
+            # compound, so fetching exactly `limit` rows often returns far fewer
+            # (or none) after filtering. Fetch a wider pool, then trim to `limit`.
+            candidate_k = max(limit * 4, 20)
+            rows = await asyncio.to_thread(self._search_vec_sync, vec_bytes, candidate_k)
         except Exception as e:
             log.warning("Knowledge search failed: %s", e)
             return []
@@ -328,7 +332,7 @@ class KnowledgeStore:
                 "chunk_index": row[4],
             })
 
-        return out
+        return out[:limit]
 
     def _search_vec_sync(self, vec_bytes: bytes, limit: int) -> list:
         """Execute vector similarity search (sync, for use with asyncio.to_thread)."""

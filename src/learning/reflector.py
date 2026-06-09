@@ -358,7 +358,7 @@ class ConversationReflector:
                 merged = await self._consolidate(merged)
 
             data["entries"] = merged
-            data["last_reflection"] = now
+            data["last_reflection"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             await asyncio.to_thread(self._save, data)
             log.info(
                 "Reflection complete: %d new insights, %d total entries",

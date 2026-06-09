@@ -436,6 +436,12 @@ class OdinBot(commands.Bot):
         # Audit logger — HMAC chain signing is on iff config.audit.hmac_key is set
         _audit_key = config.audit.hmac_key if getattr(config, "audit", None) else ""
         self.audit = AuditLogger(path="./data/audit.jsonl", hmac_key=_audit_key)
+        if getattr(config, "audit", None) is not None and not _audit_key:
+            log.warning(
+                "Audit HMAC signing is DISABLED (config.audit.hmac_key is empty): "
+                "audit.jsonl is NOT tamper-evident and verify_integrity() will fail. "
+                "Set audit.hmac_key to enable the integrity chain."
+            )
         self.permissions = PermissionManager(
             config_tiers=config.permissions.tiers,
             default_tier=config.permissions.default_tier,
@@ -1403,8 +1409,14 @@ class OdinBot(commands.Bot):
             if err:
                 self._llm_active_requests -= 1
                 raise RuntimeError(f"LLM subsystem unavailable: {err}")
+        # Auxiliary cheap-model routing is Codex-only (the aux client is always a
+        # CodexChatClient). When the operator has switched the active provider to
+        # ollama/kimi, do NOT divert "cheap" turns back to Codex — that defeats the
+        # provider switch and fails if Codex isn't authed. Let the active provider
+        # handle everything.
         if (
             user_message
+            and active == "codex"
             and self.model_router is not None
             and self.auxiliary_llm_client is not None
         ):
@@ -1566,7 +1578,7 @@ class OdinBot(commands.Bot):
             except Exception:
                 log.exception("Error stopping scheduler")
 
-        watcher = getattr(self, "watcher", None)
+        watcher = getattr(self, "infra_watcher", None)
         if watcher is not None:
             try:
                 await watcher.stop()
@@ -2354,7 +2366,7 @@ class OdinBot(commands.Bot):
             except Exception as save_err:
                 log.warning("Session save failed: %s", save_err)
 
-            # Record tool use pattern for future hints
+            # Record tool use pattern for future hints (successes only)
             if tools_used:
                 try:
                     await self.tool_memory.record(
@@ -2362,11 +2374,6 @@ class OdinBot(commands.Bot):
                     )
                 except Exception:
                     pass  # Non-critical
-
-                # Post-operation reflection — learn from what actually happened
-                fire_and_forget(self._operational_reflection(
-                    content, tools_used, response, is_error, user_id,
-                ), name="operational_reflection")
         else:
             # Save a sanitized error marker instead of the full error response.
             # The user sees the full error on Discord, but raw refusals and
@@ -2384,6 +2391,14 @@ class OdinBot(commands.Bot):
                 await asyncio.to_thread(self.sessions.save)
             except Exception as save_err:
                 log.warning("Session save failed: %s", save_err)
+
+        # Post-operation reflection — learn from what actually happened, including
+        # failures. Must run for both the success and error paths (previously this
+        # was nested under the success branch, so is_error was never observed).
+        if tools_used:
+            fire_and_forget(self._operational_reflection(
+                content, tools_used, response, is_error, user_id,
+            ), name="operational_reflection")
 
         if voice_callback:
             await voice_callback(response)
@@ -2904,6 +2919,15 @@ class OdinBot(commands.Bot):
                 tool_name = block.name
                 tool_input = block.input
                 log.info("Tool call: %s(%s)", tool_name, tool_input)
+                # Central RBAC gate: Discord-native tools, skills, and MCP tools are
+                # dispatched below WITHOUT going through ToolExecutor.execute() (the only
+                # place check_permission runs). permissions.filter_tools is advisory
+                # (offer-time) only, so enforce permission here for EVERY tool.
+                _uid = str(message.author.id)
+                _rbac_denial = self.tool_executor.check_permission(tool_name, _uid)
+                if isinstance(_rbac_denial, str) and _rbac_denial:  # str = deny, None = allow
+                    log.warning("RBAC gate denied tool %s for user %s", tool_name, _uid)
+                    return {"type": "tool_result", "tool_use_id": block.id, "content": _rbac_denial}
                 await self._set_status(self._TOOL_STATUS_LABELS.get(tool_name, f"Running: {tool_name}"))
 
                 try:
@@ -4478,6 +4502,12 @@ class OdinBot(commands.Bot):
         msg_proxy: _LoopMessageProxy,
         user_id: str,
     ) -> str | dict:
+        # Central RBAC gate: same enforcement as the message tool loop — these
+        # handlers bypass ToolExecutor.execute(), so check permission for EVERY tool.
+        _rbac_denial = self.tool_executor.check_permission(tool_name, user_id)
+        if isinstance(_rbac_denial, str) and _rbac_denial:  # str = deny, None = allow
+            log.warning("RBAC gate denied loop tool %s for user %s", tool_name, user_id)
+            return _rbac_denial
         # --- Discord-native tools (message + input) ---
         if tool_name == "purge_messages":
             return await self._handle_purge(msg_proxy, tool_input)

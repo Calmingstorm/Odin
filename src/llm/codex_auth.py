@@ -138,6 +138,17 @@ class CodexAuth:
         creds = self._load()
         return creds.get("account_id")
 
+    async def invalidate_current(self) -> None:
+        """Drop the in-memory cached credentials so the next
+        get_access_token() reloads from disk (and re-checks expiry/refresh).
+
+        Used to force a token refresh after a reactive 401. Safe to call
+        when nothing is cached yet — it is then a no-op. Held under the
+        refresh lock so it doesn't race an in-flight refresh.
+        """
+        async with self._refresh_lock:
+            self._credentials = None
+
     async def _refresh(self, creds: dict) -> None:
         """Refresh the access token using the refresh token."""
         refresh_token = creds.get("refresh_token")
@@ -433,6 +444,23 @@ class CodexAuthPool:
                             email, self._current_index + 1, len(self._accounts))
             else:
                 log.warning("Codex %s hit rate limit (only account, no rotation)", email)
+
+    async def invalidate_current(self) -> None:
+        """Force a token refresh for the *currently active* account.
+
+        Clears that account's in-memory credentials so the next
+        get_access_token() reloads from disk and re-checks expiry. Does
+        NOT rotate — used for reactive 401 handling where the cached
+        bearer is stale but the account itself is still usable. Safe to
+        call when no account is configured or nothing is cached (no-op).
+        """
+        if not self._accounts:
+            return
+        async with self._pool_lock:
+            current = self._accounts[self._current_index]
+        # invalidate_current() takes the inner account's own refresh lock;
+        # call it outside the pool lock to keep lock ordering simple.
+        await current.invalidate_current()
 
     def _rotate(self) -> None:
         self._current_index = (self._current_index + 1) % len(self._accounts)

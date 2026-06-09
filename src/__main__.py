@@ -15,6 +15,74 @@ import sys
 from pathlib import Path
 
 
+def _wire_observability(health, bot, log) -> None:
+    """Register Prometheus metric sources and component health checks.
+
+    HealthServer wires only an "active sessions" gauge by default, so without
+    this /metrics exposes liveness only and /health/ready can never reflect a
+    degraded subsystem — even though MetricsCollector and the component registry
+    already support all of the below. Every source/check is guarded so a missing
+    optional subsystem is skipped rather than fatal, and every check is cheap and
+    synchronous (called on each health/metrics request).
+    """
+    metrics = health.metrics
+
+    tool_executor = getattr(bot, "tool_executor", None)
+    if tool_executor is not None and hasattr(tool_executor, "get_metrics"):
+        metrics.register_source("tools", tool_executor.get_metrics)
+
+    cost_tracker = getattr(bot, "cost_tracker", None)
+    if cost_tracker is not None and hasattr(cost_tracker, "get_prometheus_metrics"):
+        metrics.register_source("cost_tracker", cost_tracker.get_prometheus_metrics)
+
+    trajectory_saver = getattr(bot, "trajectory_saver", None)
+    if trajectory_saver is not None and hasattr(trajectory_saver, "get_prometheus_metrics"):
+        metrics.register_source("trajectories", trajectory_saver.get_prometheus_metrics)
+
+    scheduler = getattr(bot, "scheduler", None)
+    if scheduler is not None:
+        metrics.register_source("scheduler", lambda: len(getattr(scheduler, "_schedules", [])))
+
+    loop_manager = getattr(bot, "loop_manager", None)
+    if loop_manager is not None:
+        metrics.register_source("loops", lambda: len(getattr(loop_manager, "_loops", {})))
+
+    def _discord_health() -> tuple[bool, str]:
+        try:
+            latency = bot.latency
+            # latency == latency filters out NaN (discord.py before first heartbeat)
+            if latency and latency == latency:
+                detail = f"latency={latency * 1000:.0f}ms"
+            else:
+                detail = "connecting"
+            return (bot.is_ready(), detail)
+        except Exception as exc:
+            return (False, f"error: {exc}")
+
+    health.register_component("discord", _discord_health)
+
+    if scheduler is not None:
+        def _scheduler_health() -> tuple[bool, str]:
+            task = getattr(scheduler, "_task", None)
+            alive = task is not None and not task.done()
+            return (alive, f"{len(getattr(scheduler, '_schedules', []))} schedules")
+
+        health.register_component("scheduler", _scheduler_health)
+
+    watcher = getattr(bot, "infra_watcher", None)
+    if watcher is not None:
+        def _watcher_health() -> tuple[bool, str]:
+            tasks = getattr(watcher, "_check_tasks", {})
+            if not tasks:
+                return (True, "no active checks")
+            dead = [n for n, t in tasks.items() if t.done()]
+            return (not dead, f"{len(tasks)} checks ok" if not dead else f"{len(dead)} dead checks")
+
+        health.register_component("watcher", _watcher_health)
+
+    log.info("Observability wired: metric sources and component health checks registered")
+
+
 def main() -> None:
     # ``--version`` short-circuit
     if "--version" in sys.argv or "-V" in sys.argv:
