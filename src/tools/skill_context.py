@@ -346,6 +346,9 @@ class SkillContext:
         """
         if not self._scheduler:
             return None
+        # Skills are trusted, admin-authored code; schedules they create carry
+        # system authority (requester_id unset -> unrestricted execution) unless
+        # the skill explicitly passes requester_id via **kwargs.
         return await self._scheduler.add(description, action, channel_id, **kwargs)
 
     def list_schedules(self) -> list[dict]:
