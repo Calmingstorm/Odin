@@ -327,6 +327,10 @@ class OdinBot(commands.Bot):
             reflector=self.reflector,
             vector_store=self._vector_store,
             embedder=self._embedder,
+            token_budget=config.sessions.token_budget,
+            adaptive_compaction=config.sessions.adaptive_compaction,
+            archive_max_bytes=config.sessions.archive_max_bytes,
+            archive_max_files=config.sessions.archive_max_files,
         )
         self.sessions.load()
 

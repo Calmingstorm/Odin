@@ -44,6 +44,11 @@ sessions:
   max_history: 50
   max_age_hours: 24
   persist_directory: ./data/sessions
+  token_budget: 256000
+  adaptive_compaction: true
+  # Archives are kept indefinitely; pruned oldest-first only past these caps
+  archive_max_bytes: 2147483648
+  archive_max_files: 10000
 
 tools:
   enabled: true
@@ -78,8 +83,8 @@ webhook:
 
 learning:
   enabled: true
-  max_entries: 30
-  consolidation_target: 20
+  max_entries: 150
+  consolidation_target: 120
 
 search:
   enabled: true

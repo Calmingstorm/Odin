@@ -48,10 +48,14 @@ RELEVANCE_KEEP_RECENT = 5  # always include the most recent N messages
 RELEVANCE_MIN_SCORE = 0.10  # minimum overlap score to include an older message
 RELEVANCE_MAX_OLDER = 10  # max older messages to include beyond recent window
 
-# Tool output summarization constants
+# Tool output summarization constants. These cap what the bot REMEMBERS of
+# its own responses after an operation ends (the user always sees the full
+# response on Discord). Raised from 500/1500 — the old caps meant a long
+# investigation survived in history as a half-KB stub, forcing tools to
+# rediscover results on follow-up requests.
 TOOL_SUMMARY_THRESHOLD = 10  # summarize when this many tool calls occurred
-TOOL_SUMMARY_MAX_CHARS = 500  # max chars for summarized tool response in history
-CHAT_RESPONSE_MAX_CHARS = 1500  # max chars for text-only (no-tool) response in history
+TOOL_SUMMARY_MAX_CHARS = 2000  # max chars for summarized tool response in history
+CHAT_RESPONSE_MAX_CHARS = 4000  # max chars for text-only (no-tool) response in history
 
 # Context budget constants
 CONTEXT_TOKEN_BUDGET = 16000  # max estimated tokens for history sent to LLM
@@ -320,14 +324,22 @@ def _estimate_session_tokens(messages: list[Message], summary: str) -> int:
     return total
 
 
+SESSION_SCHEMA_VERSION = 2
+
+
 @dataclass(slots=True)
 class Session:
     channel_id: str
     messages: list[Message] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
-    summary: str = ""  # compacted summary of older messages
+    summary: str = ""  # legacy single-summary; folded into segments on first compaction
     last_user_id: str | None = None  # Discord user ID of most recent human message
+    # Rolling summary segments (schema v2): list of dicts with summary text
+    # plus metadata (time range, participants, topics, entities, decisions,
+    # open_threads, validation, source message provenance).
+    summary_segments: list = field(default_factory=list)
+    schema_version: int = SESSION_SCHEMA_VERSION
 
     @property
     def estimated_tokens(self) -> int:
@@ -346,6 +358,8 @@ class SessionManager:
         embedder: LocalEmbedder | None = None,
         token_budget: int = DEFAULT_SESSION_TOKEN_BUDGET,
         adaptive_compaction: bool = True,
+        archive_max_bytes: int = 2 * 1024**3,
+        archive_max_files: int = 10_000,
     ) -> None:
         self.max_history = max_history
         self.max_age_seconds = max_age_hours * 3600
@@ -353,6 +367,8 @@ class SessionManager:
         self.persist_dir.mkdir(parents=True, exist_ok=True)
         self.token_budget = token_budget
         self.adaptive_compaction = adaptive_compaction
+        self.archive_max_bytes = archive_max_bytes
+        self.archive_max_files = archive_max_files
         self._sessions: dict[str, Session] = {}
         self._dirty: set[str] = set()
         self._reflector = reflector
@@ -947,9 +963,6 @@ class SessionManager:
             log.info("Pruned and archived %d expired sessions", len(expired))
         return len(expired)
 
-    ARCHIVE_MAX_AGE_SECONDS = 7 * 86400  # 7 days
-    ARCHIVE_MAX_FILES = 500
-
     def _archive_session(self, channel_id: str) -> None:
         """Save a session to the archive before pruning."""
         session = self._sessions.get(channel_id)
@@ -984,25 +997,30 @@ class SessionManager:
             task.add_done_callback(self._indexing_tasks.discard)
 
     def _prune_old_archives(self, archive_dir: Path) -> None:
-        """Remove archives older than ARCHIVE_MAX_AGE_SECONDS and enforce ARCHIVE_MAX_FILES."""
+        """Enforce size/count caps on the archive directory.
+
+        Archives are knowledge, not garbage: there is deliberately NO
+        time-based deletion (restore-on-demand depends on old archives
+        surviving). Oldest files are removed only when the directory
+        exceeds the configured byte or file-count caps.
+        """
         try:
-            now = time.time()
             files = sorted(archive_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
             pruned = 0
-            for f in files:
-                age = now - f.stat().st_mtime
-                if age > self.ARCHIVE_MAX_AGE_SECONDS:
-                    f.unlink()
-                    pruned += 1
-            remaining = list(archive_dir.glob("*.json"))
-            if len(remaining) > self.ARCHIVE_MAX_FILES:
-                by_mtime = sorted(remaining, key=lambda p: p.stat().st_mtime)
-                excess = len(remaining) - self.ARCHIVE_MAX_FILES
-                for f in by_mtime[:excess]:
-                    f.unlink()
-                    pruned += 1
+            total_bytes = sum(f.stat().st_size for f in files)
+            while files and (
+                total_bytes > self.archive_max_bytes
+                or len(files) > self.archive_max_files
+            ):
+                oldest = files.pop(0)
+                total_bytes -= oldest.stat().st_size
+                oldest.unlink()
+                pruned += 1
             if pruned:
-                log.info("Pruned %d old archive(s) from %s", pruned, archive_dir)
+                log.info(
+                    "Pruned %d oldest archive(s) from %s (caps: %d bytes / %d files)",
+                    pruned, archive_dir, self.archive_max_bytes, self.archive_max_files,
+                )
         except Exception as e:
             log.warning("Archive pruning failed: %s", e)
 
@@ -1259,18 +1277,26 @@ class SessionManager:
             tmp.replace(path)
         self._dirty.clear()
 
+    @staticmethod
+    def _session_from_dict(data: dict) -> Session:
+        """Build a Session from persisted JSON, accepting v1 files (no
+        schema_version / summary_segments) transparently."""
+        messages = [Message(**m) for m in data.get("messages", [])]
+        return Session(
+            channel_id=data["channel_id"],
+            messages=messages,
+            created_at=data.get("created_at", time.time()),
+            last_active=data.get("last_active", time.time()),
+            summary=data.get("summary", ""),
+            last_user_id=data.get("last_user_id"),
+            summary_segments=data.get("summary_segments", []),
+            schema_version=SESSION_SCHEMA_VERSION,
+        )
+
     def load(self) -> None:
         for path in self.persist_dir.glob("*.json"):
             try:
                 data = json.loads(path.read_text())
-                messages = [Message(**m) for m in data.get("messages", [])]
-                self._sessions[data["channel_id"]] = Session(
-                    channel_id=data["channel_id"],
-                    messages=messages,
-                    created_at=data.get("created_at", time.time()),
-                    last_active=data.get("last_active", time.time()),
-                    summary=data.get("summary", ""),
-                    last_user_id=data.get("last_user_id"),
-                )
+                self._sessions[data["channel_id"]] = self._session_from_dict(data)
             except Exception as e:
                 log.error("Failed to load session from %s: %s", path, e)

@@ -17,13 +17,29 @@ TextFn = Callable[[list[dict], str], Awaitable[str]]
 
 log = get_logger("learning")
 
-_MAX_CONTENT_CHARS = 800
+# Content length policy. The soft limit is prompt guidance to the LLM; the
+# hard limit is enforced at storage time — but never as a silent chop.
+# Oversized content is clipped at a sentence boundary, suffixed with
+# _TRUNCATION_MARKER, and flagged damaged=True so it can be resummarized
+# rather than degrading further through future consolidation cycles.
+_SOFT_CONTENT_CHARS = 700
+_HARD_CONTENT_CHARS = 1000
+_TRUNCATION_MARKER = " [truncated: needs resummary]"
+_SENTENCE_TERMINATORS = (".", "!", "?", "…", '"', "'", ")", "]", "`")
+
+_LEARNED_SCHEMA_VERSION = 2
+
+# Category-aware expiry: corrections and preferences never auto-expire
+# (removed only via supersession); operational/fact entries go stale when
+# neither used nor updated within the window.
+_CATEGORY_EXPIRY_DAYS: dict[str, int] = {"operational": 180, "fact": 180}
 
 _REFLECTION_HEADER = """\
 Extract clear, explicit lessons from this conversation. Return a JSON array.
-Each element: {"key": "snake_case_id", "category": "correction|preference|operational|fact", "content": "max 800 chars"}
+Each element: {"key": "snake_case_id", "category": "correction|preference|operational|fact", "content": "ONE lesson, max 700 chars", "topic": "short-project-or-area-slug", "tags": ["optional", "keywords"]}
 Rules:
 - Max 5 insights per reflection
+- ONE lesson per entry — never combine unrelated lessons into a single entry
 - Reuse existing keys when updating a known fact
 - Return [] if nothing worth learning
 - Categories: correction (user corrected the bot), preference (how user likes things done), operational (system/infra knowledge), fact (general truth)
@@ -36,6 +52,49 @@ Anti-hallucination rules:
 
 _CONSOLIDATION_HEADER = """\
 Consolidate these learned entries to """
+
+
+def _clip_content(entry: dict) -> dict:
+    """Enforce the hard content limit without silent data loss.
+
+    Content over _HARD_CONTENT_CHARS is clipped at the latest sentence
+    boundary, suffixed with an explicit marker, and the entry is flagged
+    damaged=True so consolidation leaves it alone until resummarized.
+    """
+    content = entry.get("content", "")
+    if len(content) <= _HARD_CONTENT_CHARS:
+        return entry
+    limit = _HARD_CONTENT_CHARS - len(_TRUNCATION_MARKER)
+    clipped = content[:limit]
+    boundary = -1
+    for term in _SENTENCE_TERMINATORS:
+        boundary = max(boundary, clipped.rfind(term))
+    if boundary > limit // 2:
+        clipped = clipped[: boundary + 1]
+    else:
+        last_space = clipped.rfind(" ")
+        if last_space > 0:
+            clipped = clipped[:last_space]
+    entry["content"] = clipped.rstrip() + _TRUNCATION_MARKER
+    entry["damaged"] = True
+    log.warning(
+        "Learned entry %r exceeded %d chars; clipped at sentence boundary and flagged damaged",
+        entry.get("key"), _HARD_CONTENT_CHARS,
+    )
+    return entry
+
+
+def _looks_chopped(content: str) -> bool:
+    """Heuristic for legacy entries damaged by the old silent [:800] chop."""
+    stripped = content.rstrip()
+    if len(stripped) < 780:
+        return False
+    return not stripped.endswith(_SENTENCE_TERMINATORS)
+
+
+def _default_confidence(category: str) -> str:
+    """Explicit user signals are high-confidence; inferred lessons are medium."""
+    return "high" if category in ("correction", "preference") else "medium"
 
 
 class ConversationReflector:
@@ -68,10 +127,46 @@ class ConversationReflector:
     def _load(self) -> dict:
         if self._path.exists():
             try:
-                return json.loads(self._path.read_text())
+                data = json.loads(self._path.read_text())
+                return self._migrate(data)
             except (json.JSONDecodeError, OSError) as e:
                 log.error("Failed to load learned.json: %s", e)
-        return {"version": 1, "last_reflection": None, "entries": []}
+        return {
+            "version": _LEARNED_SCHEMA_VERSION,
+            "last_reflection": None,
+            "entries": [],
+        }
+
+    def _migrate(self, data: dict) -> dict:
+        """One-time v1→v2 migration: flag legacy chop damage, backfill metadata.
+
+        Idempotent — guarded by the stored schema version. Entries silently
+        truncated by the old [:800] policy are detected heuristically (long
+        content not ending at a sentence boundary), marked damaged, and given
+        an explicit truncation marker so the loss is visible and they are
+        excluded from further consolidation until resummarized.
+        """
+        if data.get("version", 1) >= _LEARNED_SCHEMA_VERSION:
+            return data
+        damaged_count = 0
+        for entry in data.get("entries", []):
+            content = entry.get("content", "")
+            if not entry.get("damaged") and _looks_chopped(content):
+                entry["content"] = content.rstrip() + _TRUNCATION_MARKER
+                entry["damaged"] = True
+                damaged_count += 1
+            entry.setdefault("confidence", _default_confidence(entry.get("category", "")))
+            entry.setdefault("source", {"created_by": "legacy"})
+        data["version"] = _LEARNED_SCHEMA_VERSION
+        try:
+            self._save(data)
+        except OSError as e:
+            log.error("Failed to persist learned.json migration: %s", e)
+        log.info(
+            "Migrated learned.json to schema v%d (%d entries, %d flagged damaged)",
+            _LEARNED_SCHEMA_VERSION, len(data.get("entries", [])), damaged_count,
+        )
+        return data
 
     def _save(self, data: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,7 +291,9 @@ class ConversationReflector:
             "- Generic knowledge the bot already has\n\n"
             "Return a JSON array. Each entry: {\"key\": \"snake_case_id\", "
             "\"category\": \"correction|operational|preference\", "
-            "\"content\": \"concise lesson\"}\n"
+            "\"content\": \"ONE concise lesson, max 700 chars\", "
+            "\"topic\": \"short-project-or-area-slug\", \"tags\": [\"optional\"]}\n"
+            "ONE lesson per entry — never combine unrelated lessons.\n"
             "Return [] if nothing worth remembering.\n\n"
             "Currently known:\n" + existing_text + "\n\n"
             "Operation:\n" + operation_summary
@@ -215,6 +312,7 @@ class ConversationReflector:
 
             single_user = user_ids[0] if len(user_ids) == 1 else None
             for entry in new_entries:
+                entry.setdefault("source", {"created_by": "operation"})
                 if entry["category"] in ("preference", "correction") and single_user:
                     if "user_id" not in entry:
                         entry["user_id"] = single_user
@@ -344,6 +442,7 @@ class ConversationReflector:
             effective_ids = user_ids or []
             single_user = effective_ids[0] if len(effective_ids) == 1 else None
             for entry in new_entries:
+                entry.setdefault("source", {"created_by": "reflection"})
                 if entry["category"] in ("preference", "correction"):
                     if single_user and "user_id" not in entry:
                         entry["user_id"] = single_user
@@ -370,89 +469,148 @@ class ConversationReflector:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         by_key = {e["key"]: e for e in existing}
         for entry in new_entries:
-            entry["content"] = entry["content"][:_MAX_CONTENT_CHARS]
+            _clip_content(entry)
+            entry.setdefault("confidence", _default_confidence(entry.get("category", "")))
+            # A new entry may explicitly supersede older ones — remove them,
+            # keeping the list on the new entry for provenance.
+            for superseded_key in entry.get("supersedes", []):
+                if superseded_key in by_key and superseded_key != entry["key"]:
+                    by_key.pop(superseded_key)
+                    log.info(
+                        "Learned entry %r superseded by %r", superseded_key, entry["key"],
+                    )
             if entry["key"] in by_key:
-                by_key[entry["key"]]["content"] = entry["content"]
-                by_key[entry["key"]]["category"] = entry["category"]
-                by_key[entry["key"]]["updated_at"] = now
-                if "user_id" in entry:
-                    by_key[entry["key"]]["user_id"] = entry["user_id"]
+                current = by_key[entry["key"]]
+                current["content"] = entry["content"]
+                current["category"] = entry["category"]
+                current["updated_at"] = now
+                # Fresh full-length content repairs a previously damaged entry
+                if entry.get("damaged"):
+                    current["damaged"] = True
+                else:
+                    current.pop("damaged", None)
+                for field in ("user_id", "topic", "tags", "confidence", "source", "supersedes"):
+                    if field in entry:
+                        current[field] = entry[field]
             else:
                 entry["created_at"] = now
                 entry["updated_at"] = now
                 by_key[entry["key"]] = entry
         return list(by_key.values())
 
-    _MAX_ENTRY_AGE_DAYS = 90
+    def _expire_entries(self, entries: list[dict]) -> list[dict]:
+        """Category-aware expiry.
+
+        Corrections and preferences never auto-expire (only supersession
+        removes them). Operational and fact entries go stale when neither
+        used nor updated within their _CATEGORY_EXPIRY_DAYS window.
+        """
+        now = datetime.now(timezone.utc)
+        kept = []
+        expired = 0
+        for e in entries:
+            days = _CATEGORY_EXPIRY_DAYS.get(e.get("category", ""))
+            if days is None:
+                kept.append(e)
+                continue
+            ref = e.get("last_used_at") or e.get("updated_at") or e.get("created_at")
+            if not ref:
+                kept.append(e)
+                continue
+            try:
+                ref_dt = datetime.fromisoformat(ref)
+            except ValueError:
+                kept.append(e)
+                continue
+            if now - ref_dt <= timedelta(days=days):
+                kept.append(e)
+            else:
+                expired += 1
+        if expired:
+            log.info("Reflector: expired %d stale operational/fact entries", expired)
+        return kept
 
     async def _consolidate(self, entries: list[dict]) -> list[dict]:
-        """Ask the LLM to merge entries down to the consolidation target."""
-        now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(days=self._MAX_ENTRY_AGE_DAYS)
-        before = len(entries)
-        entries = [
-            e for e in entries
-            if not e.get("created_at") or datetime.fromisoformat(e["created_at"]) > cutoff
-        ]
-        if len(entries) < before:
-            log.info("Reflector: expired %d entries older than %d days", before - len(entries), self._MAX_ENTRY_AGE_DAYS)
+        """Ask the LLM to merge same-topic duplicates down to the target.
+
+        Damaged entries are passed through unmerged — consolidating already
+        clipped text compounds the damage. Unrelated topics are never packed
+        together to hit the target count; dropping low-value entries is the
+        sanctioned way to shrink.
+        """
+        entries = self._expire_entries(entries)
         if not entries:
             return []
-        entries_text = json.dumps(entries, indent=2)
+
+        damaged = [e for e in entries if e.get("damaged")]
+        candidates = [e for e in entries if not e.get("damaged")]
+        if not candidates:
+            return damaged
+
+        target = max(1, self._consolidation_target - len(damaged))
+        entries_text = json.dumps(candidates, indent=2)
         prompt = (
-            _CONSOLIDATION_HEADER + str(self._consolidation_target)
-            + ' or fewer. Merge duplicates, drop stale or low-value items.'
-            ' Return a JSON array with the same schema:'
-            ' [{"key": ..., "category": ..., "content": ..., "user_id": ...}]'
-            ' Preserve the user_id field exactly as-is for each entry (null if absent).'
+            _CONSOLIDATION_HEADER + str(target)
+            + " or fewer.\nSTRICT RULES:\n"
+            "- Merge ONLY entries that cover the same topic/key/meaning (true duplicates or updates of the same fact).\n"
+            "- NEVER combine unrelated lessons into one entry to reduce the count — one lesson per entry.\n"
+            "- Prefer DROPPING stale or low-value entries over merging unrelated ones.\n"
+            "- If the target cannot be reached without merging unrelated topics, return more entries than the target instead.\n"
+            f"- Keep each content under {_SOFT_CONTENT_CHARS} characters.\n"
+            "- Preserve key, user_id, topic, tags, and confidence fields exactly as-is (null if absent).\n"
+            " Return a JSON array with the same schema:"
+            ' [{"key": ..., "category": ..., "content": ..., "user_id": ..., "topic": ..., "tags": ..., "confidence": ...}]'
             "\n\nEntries:\n" + entries_text
         )
 
         system_instruction = "You consolidate learned entries. Return only valid JSON array."
 
+        def _fallback() -> list[dict]:
+            candidates.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
+            return candidates[:target] + damaged
+
         try:
             if not self._text_fn:
                 log.warning("No text completion backend configured for consolidation")
-                entries.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
-                return entries[: self._consolidation_target]
+                return _fallback()
             raw_text = await self._text_fn(
                 [{"role": "user", "content": prompt}],
                 system_instruction,
             )
         except Exception as e:
             log.error("Consolidation API call failed: %s", e)
-            # Fallback: just keep the most recently updated entries
-            entries.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
-            return entries[: self._consolidation_target]
+            return _fallback()
 
         raw = raw_text.strip()
         consolidated = self._parse_entries(raw)
         if not consolidated:
             log.warning("Consolidation returned no entries, keeping originals trimmed")
-            entries.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
-            return entries[: self._consolidation_target]
+            return _fallback()
 
-        # Preserve timestamps from originals where possible
-        orig_by_key = {e["key"]: e for e in entries}
+        # Preserve timestamps and metadata from originals where possible
+        orig_by_key = {e["key"]: e for e in candidates}
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         for entry in consolidated:
-            entry["content"] = entry["content"][:_MAX_CONTENT_CHARS]
+            _clip_content(entry)
             if entry["key"] in orig_by_key:
                 orig = orig_by_key[entry["key"]]
                 entry["created_at"] = orig.get("created_at", now)
                 entry["updated_at"] = now
-                # Preserve user_id from original if consolidation dropped it
-                if "user_id" not in entry and "user_id" in orig:
-                    entry["user_id"] = orig["user_id"]
+                # Consolidation must not invent or upgrade metadata it dropped
+                for field in ("user_id", "topic", "tags", "confidence", "source", "last_used_at"):
+                    if field not in entry and field in orig:
+                        entry[field] = orig[field]
             else:
                 entry["created_at"] = now
                 entry["updated_at"] = now
+                entry.setdefault("confidence", _default_confidence(entry.get("category", "")))
+                entry.setdefault("source", {"created_by": "consolidation"})
 
         log.info(
-            "Consolidated %d entries down to %d",
-            len(entries), len(consolidated),
+            "Consolidated %d entries down to %d (+%d damaged passed through)",
+            len(candidates), len(consolidated), len(damaged),
         )
-        return consolidated
+        return consolidated + damaged
 
     @staticmethod
     def _parse_entries(raw: str) -> list[dict]:
@@ -505,5 +663,13 @@ class ConversationReflector:
                 }
                 if item.get("user_id"):
                     entry["user_id"] = str(item["user_id"])
+                if item.get("topic"):
+                    entry["topic"] = str(item["topic"])
+                if isinstance(item.get("tags"), list):
+                    entry["tags"] = [str(t) for t in item["tags"] if t][:8]
+                if item.get("confidence") in ("high", "medium", "low"):
+                    entry["confidence"] = item["confidence"]
+                if isinstance(item.get("supersedes"), list):
+                    entry["supersedes"] = [str(k) for k in item["supersedes"] if k]
                 valid.append(entry)
         return valid

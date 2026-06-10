@@ -32,6 +32,10 @@ class SessionsConfig(BaseModel):
     persist_directory: str = "./data/sessions"
     token_budget: int = 256_000
     adaptive_compaction: bool = True
+    # Session archives are retained indefinitely by default; pruned oldest-first
+    # only past these caps (restore-on-demand depends on archives surviving).
+    archive_max_bytes: int = 2 * 1024**3
+    archive_max_files: int = 10_000
 
 
 class ToolHost(BaseModel):
@@ -344,8 +348,8 @@ class WebhookConfig(BaseModel):
 
 class LearningConfig(BaseModel):
     enabled: bool = True
-    max_entries: int = 30
-    consolidation_target: int = 20
+    max_entries: int = 150
+    consolidation_target: int = 120
 
 
 class SearchConfig(BaseModel):
