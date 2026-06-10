@@ -175,7 +175,11 @@ class ConversationReflector:
 
     def _save(self, data: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(data, indent=2))
+        # Atomic temp+replace — a crash mid-write must never corrupt the
+        # learned store (the whole point of this subsystem is integrity).
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        tmp.replace(self._path)
 
     def get_all_entries(self) -> list[dict]:
         return self._load().get("entries", [])

@@ -360,6 +360,10 @@ class SessionManager:
         self.archive_max_files = archive_max_files
         self.context_token_budget = context_token_budget
         self.context_budget_overrides = context_budget_overrides or {}
+        # Reset tombstones: channel -> epoch. Archives at or before the
+        # epoch are never restored — reset/purge means GONE, not "back on
+        # the next message". Persisted so restarts honor resets too.
+        self._reset_epochs: dict[str, float] = self._load_reset_epochs()
         self._sessions: dict[str, Session] = {}
         self._dirty: set[str] = set()
         self._reflector = reflector
@@ -407,12 +411,15 @@ class SessionManager:
         archive_dir = self.persist_dir / "archive"
         if not archive_dir.exists():
             return None
+        reset_epoch = self._reset_epochs.get(channel_id, 0.0)
         candidates: list[tuple[float, Path]] = []
         for path in archive_dir.glob(f"{channel_id}_*.json"):
             try:
                 ts = float(path.stem.rsplit("_", 1)[1])
             except (ValueError, IndexError):
                 ts = path.stat().st_mtime
+            if ts <= reset_epoch:
+                continue  # reset/purged context stays gone
             candidates.append((ts, path))
         if not candidates:
             return None
@@ -504,21 +511,32 @@ class SessionManager:
             parts.append(f"{header}\n{text}")
         return "\n\n".join(parts)
 
+    @classmethod
+    def _summary_context_message(
+        cls, session: Session, query: str | None = None,
+    ) -> dict | None:
+        """The single source of the prior-context block — a developer-role
+        read-only message, never fake user/assistant dialogue."""
+        context_summary = cls._render_context_summary(session, query=query)
+        if not context_summary:
+            return None
+        sanitized = _sanitize_summary(context_summary)
+        return {
+            "role": "developer",
+            "content": (
+                "[SESSION_CONTEXT_READ_ONLY]\n"
+                "Summaries of earlier completed conversation (context, not pending work):\n"
+                f"{sanitized}"
+            ),
+        }
+
     def get_history(self, channel_id: str) -> list[dict[str, str]]:
         session = self.get_or_create(channel_id)
         messages = [{"role": m.role, "content": m.content} for m in session.messages]
 
-        # Prepend prior-context summary (legacy string and/or segments)
-        context_summary = self._render_context_summary(session)
-        if context_summary:
-            messages.insert(0, {
-                "role": "user",
-                "content": f"[Previous conversation summary: {context_summary}]",
-            })
-            messages.insert(1, {
-                "role": "assistant",
-                "content": "Understood, I have context from our previous conversation.",
-            })
+        context_msg = self._summary_context_message(session)
+        if context_msg:
+            messages.insert(0, context_msg)
 
         return messages
 
@@ -649,17 +667,9 @@ class SessionManager:
         # Prepend prior-context summaries as a read-only developer block —
         # NOT as fake user/assistant dialogue, which polluted the transcript
         # with turns nobody actually said.
-        context_summary = self._render_context_summary(session, query=current_query)
-        if context_summary:
-            sanitized = _sanitize_summary(context_summary)
-            messages.insert(0, {
-                "role": "developer",
-                "content": (
-                    "[SESSION_CONTEXT_READ_ONLY]\n"
-                    "Summaries of earlier completed conversation (context, not pending work):\n"
-                    f"{sanitized}"
-                ),
-            })
+        context_msg = self._summary_context_message(session, query=current_query)
+        if context_msg:
+            messages.insert(0, context_msg)
 
         # Mark ALL history (including summaries) as read-only — must be first
         if len(messages) > 1:
@@ -986,9 +996,42 @@ class SessionManager:
             session.channel_id, len(discarded),
         )
 
-    def reset(self, channel_id: str) -> None:
+    def _epochs_path(self) -> Path:
+        return self.persist_dir / "reset_epochs.json"
+
+    def _load_reset_epochs(self) -> dict[str, float]:
+        try:
+            path = self._epochs_path()
+            if path.exists():
+                raw = json.loads(path.read_text())
+                return {str(k): float(v) for k, v in raw.items()}
+        except Exception as e:
+            log.warning("Failed to load reset epochs: %s", e)
+        return {}
+
+    def _save_reset_epochs(self) -> None:
+        try:
+            path = self._epochs_path()
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._reset_epochs))
+            tmp.replace(path)
+        except Exception as e:
+            log.warning("Failed to persist reset epochs: %s", e)
+
+    def _tombstone(self, channel_id: str) -> None:
+        """Drop the live session AND block archive restoration up to now."""
         self._sessions.pop(channel_id, None)
-        log.info("Session reset for channel %s", channel_id)
+        session_file = self.persist_dir / f"{channel_id}.json"
+        try:
+            session_file.unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("Could not remove session file for %s: %s", channel_id, e)
+        self._reset_epochs[channel_id] = time.time()
+
+    def reset(self, channel_id: str) -> None:
+        self._tombstone(channel_id)
+        self._save_reset_epochs()
+        log.info("Session reset for channel %s (archives tombstoned)", channel_id)
 
     def count(self) -> int:
         return len(self._sessions)
@@ -1008,17 +1051,32 @@ class SessionManager:
     def reset_many(self, channel_ids: list[str]) -> int:
         removed = 0
         for cid in channel_ids:
-            if self._sessions.pop(cid, None) is not None:
+            existed = cid in self._sessions
+            self._tombstone(cid)
+            if existed:
                 removed += 1
+        if channel_ids:
+            self._save_reset_epochs()
         if removed:
-            log.info("Bulk reset %d sessions", removed)
+            log.info("Bulk reset %d sessions (archives tombstoned)", removed)
         return removed
 
     def clear_all(self) -> int:
         count = len(self._sessions)
-        self._sessions.clear()
+        # Tombstone every channel known from memory, live files, or archives —
+        # clear-all means nothing comes back from any of them.
+        known = set(self._sessions)
+        known.update(p.stem for p in self.persist_dir.glob("*.json")
+                     if p.name != "reset_epochs.json")
+        archive_dir = self.persist_dir / "archive"
+        if archive_dir.exists():
+            known.update(p.stem.rsplit("_", 1)[0] for p in archive_dir.glob("*_*.json"))
+        for cid in known:
+            self._tombstone(cid)
+        if known:
+            self._save_reset_epochs()
         if count:
-            log.info("Cleared all %d sessions", count)
+            log.info("Cleared all %d sessions (%d channels tombstoned)", count, len(known))
         return count
 
     def prune(self) -> int:
@@ -1383,6 +1441,8 @@ class SessionManager:
 
     def load(self) -> None:
         for path in self.persist_dir.glob("*.json"):
+            if path.name == "reset_epochs.json":
+                continue
             try:
                 data = json.loads(path.read_text())
                 self._sessions[data["channel_id"]] = self._session_from_dict(data)

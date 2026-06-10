@@ -1492,14 +1492,11 @@ class OdinBot(commands.Bot):
     async def _operational_reflection(
         self, user_request: str, tools_used: list[str],
         response: str, is_error: bool, user_id: str | None,
-        channel_id: str | None = None,
+        tool_details: list[dict] | None = None,
     ) -> None:
         """Fire-and-forget post-operation reflection — selective, with real
         tool inputs/results from the operation instead of bare tool names."""
         try:
-            tool_details = (
-                self._last_op_details.pop(channel_id, None) if channel_id else None
-            )
             if not tool_details:
                 tool_details = [{"tool": t} for t in tools_used[:20]]
             if not self._should_reflect_on_operation(
@@ -2440,9 +2437,13 @@ class OdinBot(commands.Bot):
         # failures. Must run for both the success and error paths (previously this
         # was nested under the success branch, so is_error was never observed).
         if tools_used:
+            # Pop synchronously inside the channel-locked request body so a
+            # fast follow-up request can never swap details under the
+            # fire-and-forget reflection task.
+            op_details = self._last_op_details.pop(channel_id, None)
             fire_and_forget(self._operational_reflection(
                 content, tools_used, response, is_error, user_id,
-                channel_id=channel_id,
+                tool_details=op_details,
             ), name="operational_reflection")
 
         if voice_callback:

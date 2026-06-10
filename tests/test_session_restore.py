@@ -251,3 +251,121 @@ class TestSegmentClip:
 
     def test_short_text_untouched(self):
         assert SessionManager._clip_segment_text("short") == "short"
+
+
+class TestResetTombstones:
+    """Odin's PR #103 review blocker: reset/purge must not be undone by
+    restore-on-demand pulling the abandoned context back from the archive."""
+
+    def test_reset_blocks_archive_restoration(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+        _fill_session(mgr, "ch1", count=8, age_hours=2)
+        mgr.prune()  # archived
+        mgr.reset("ch1")
+        session = mgr.get_or_create("ch1")
+        assert session.messages == []
+
+    def test_reset_deletes_live_file(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+        _fill_session(mgr, "ch1", count=4)
+        mgr.save()
+        assert (tmp_path / "ch1.json").exists()
+        mgr.reset("ch1")
+        assert not (tmp_path / "ch1.json").exists()
+
+    def test_tombstone_survives_restart(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+        _fill_session(mgr, "ch1", count=8, age_hours=2)
+        mgr.prune()
+        mgr.reset("ch1")
+        # Fresh manager over the same persist dir (process restart)
+        mgr2 = _make_manager(tmp_path)
+        mgr2.load()
+        session = mgr2.get_or_create("ch1")
+        assert session.messages == []
+
+    def test_new_conversation_after_reset_archives_and_restores(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+        _fill_session(mgr, "ch1", count=8, age_hours=4)
+        mgr.prune()
+        mgr.reset("ch1")
+        # Model reality: the reset happened 3h ago, the NEW conversation 2h
+        # ago (post-reset activity always postdates the reset epoch).
+        mgr._reset_epochs["ch1"] = time.time() - 3 * 3600
+        mgr._save_reset_epochs()
+        for i in range(4):
+            mgr.add_message("ch1", "user", f"post-reset {i}")
+        mgr.get("ch1").last_active = time.time() - 2 * 3600
+        mgr.prune()  # …new conversation gets archived…
+        restored = mgr.get_or_create("ch1")
+        # …and IS restorable (only pre-reset context stays gone)
+        assert [m.content for m in restored.messages] == [
+            "post-reset 0", "post-reset 1", "post-reset 2", "post-reset 3",
+        ]
+        # The original pre-reset 8-message archive must NOT be the restored one
+        assert all("post-reset" in m.content for m in restored.messages)
+
+    def test_clear_all_tombstones_archived_channels(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+        _fill_session(mgr, "live-ch", count=4)
+        _fill_session(mgr, "archived-ch", count=6, age_hours=2)
+        mgr.prune()  # archived-ch leaves live state
+        assert mgr.clear_all() == 1
+        assert mgr.get_or_create("live-ch").messages == []
+        assert mgr.get_or_create("archived-ch").messages == []
+
+    def test_reset_many_tombstones(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+        _fill_session(mgr, "a", count=6, age_hours=2)
+        _fill_session(mgr, "b", count=6, age_hours=2)
+        mgr.prune()
+        mgr.get_or_create("a")  # restore both
+        mgr.get_or_create("b")
+        assert mgr.reset_many(["a", "b"]) == 2
+        assert mgr.get_or_create("a").messages == []
+        assert mgr.get_or_create("b").messages == []
+
+
+class TestGetHistoryContextBlock:
+    """Odin's PR #103 review blocker: the full-history path also must not
+    fabricate user/assistant dialogue for summaries."""
+
+    def test_get_history_uses_developer_block(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+        session = mgr.get_or_create("ch1")
+        session.summary = "deploy completed on host-1"
+        mgr.add_message("ch1", "user", "hello")
+
+        messages = mgr.get_history("ch1")
+        assert messages[0]["role"] == "developer"
+        assert "[SESSION_CONTEXT_READ_ONLY]" in messages[0]["content"]
+        assert "deploy completed on host-1" in messages[0]["content"]
+        # The fabricated pair is gone everywhere
+        assert not any(
+            m["content"] == "Understood, I have context from our previous conversation."
+            for m in messages
+        )
+
+    def test_get_history_includes_segments(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+        session = mgr.get_or_create("ch1")
+        session.summary_segments.append({
+            "id": "s1", "summary": "segment about nginx", "start_ts": 1.0,
+            "end_ts": 2.0, "participants": [], "source_count": 5,
+            "created_at": 3.0, "topics": [], "entities": [],
+            "decisions": [], "open_threads": [],
+        })
+        mgr.add_message("ch1", "user", "hi")
+        messages = mgr.get_history("ch1")
+        assert "segment about nginx" in messages[0]["content"]
+
+
+class TestLearnedAtomicSave:
+    def test_no_tmp_residue_and_valid_json(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+        path = tmp_path / "learned.json"
+        r = ConversationReflector(str(path))
+        r._save({"version": 2, "last_reflection": None, "entries": []})
+        assert path.exists()
+        assert not path.with_suffix(".tmp").exists()
+        json.loads(path.read_text())
