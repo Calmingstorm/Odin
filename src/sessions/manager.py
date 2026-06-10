@@ -5,6 +5,7 @@ import copy
 import json
 import re
 import time
+from datetime import datetime
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -22,26 +23,28 @@ if TYPE_CHECKING:
 CompactionFn = Callable[[list[dict], str], Awaitable[str]]
 
 log = get_logger("sessions")
-COMPACTION_THRESHOLD = 40  # compact when history exceeds this
-CONTINUITY_MAX_AGE = 48 * 3600  # carry forward summaries from archives < 48 hours old
-COMPACTION_MAX_CHARS = 800  # target max chars per compacted summary block
+COMPACTION_THRESHOLD = 100  # compact when history exceeds this many messages
+COMPACTION_MAX_CHARS = 2000  # default target chars per summary segment
 
 # Adaptive compaction — thresholds scale with channel message rate
 ACTIVITY_LOW = 5.0       # msgs/hr below this = low activity
 ACTIVITY_HIGH = 20.0     # msgs/hr above this = high activity
-ADAPTIVE_THRESHOLD_LOW = 60   # low-activity channels compact later
-ADAPTIVE_THRESHOLD_HIGH = 25  # high-activity channels compact sooner
-ADAPTIVE_SUMMARY_LOW = 1200   # low-activity channels get richer summaries
-ADAPTIVE_SUMMARY_HIGH = 500   # high-activity channels get tighter summaries
+ADAPTIVE_THRESHOLD_LOW = 120  # low-activity channels compact later
+ADAPTIVE_THRESHOLD_HIGH = 80  # high-activity channels compact sooner
+ADAPTIVE_SUMMARY_LOW = 2500   # low-activity channels get richer segments
+ADAPTIVE_SUMMARY_HIGH = 1500  # high-activity channels get tighter segments
 ADAPTIVE_KEEP_LOW = 0.60      # low-activity channels keep more after compaction
 ADAPTIVE_KEEP_HIGH = 0.35     # high-activity channels keep less
 ADAPTIVE_KEEP_DEFAULT = 0.50  # normal activity keep ratio
 ACTIVITY_WINDOW = 3600        # measure activity over last hour of messages
 
-# Topic change detection constants
-TOPIC_CHANGE_SCORE_THRESHOLD = 0.05  # below this overlap = topic change
-TOPIC_CHANGE_TIME_GAP = 300  # 5 minutes in seconds
-TOPIC_CHANGE_RECENT_WINDOW = 5  # check overlap against this many recent messages
+# Rolling summary segments
+SEGMENT_HARD_CHARS = 4000     # absolute segment size — clipped WITH marker, never silently
+SEGMENT_TRUNCATION_MARKER = "\n[segment truncated: source messages exceeded budget]"
+SEGMENT_IDLE_GAP_SECONDS = 6 * 3600  # idle gap that closes a conversation segment
+SEGMENT_MIN_MESSAGES = 15     # minimum messages before a gap-triggered segment closes
+MAX_STORED_SEGMENTS = 100     # per-session cap on stored segments (oldest dropped)
+KEEP_TAIL_MIN = 20            # always retain at least this many raw recent messages
 
 # Relevance scoring constants
 RELEVANCE_KEEP_RECENT = 5  # always include the most recent N messages
@@ -314,11 +317,15 @@ class Message:
     user_id: str | None = None
 
 
-def _estimate_session_tokens(messages: list[Message], summary: str) -> int:
-    """Estimate total token count for a session's messages and summary."""
+def _estimate_session_tokens(
+    messages: list[Message], summary: str, segments: list | None = None,
+) -> int:
+    """Estimate total token count for a session's messages, summary and segments."""
     total = 0
     if summary:
         total += estimate_tokens(summary)
+    for seg in segments or []:
+        total += estimate_tokens(seg.get("summary", ""))
     for m in messages:
         total += estimate_tokens(m.content if isinstance(m.content, str) else str(m.content))
     return total
@@ -344,7 +351,7 @@ class Session:
     @property
     def estimated_tokens(self) -> int:
         """Current estimated token count for this session's full content."""
-        return _estimate_session_tokens(self.messages, self.summary)
+        return _estimate_session_tokens(self.messages, self.summary, self.summary_segments)
 
 
 class SessionManager:
@@ -396,36 +403,48 @@ class SessionManager:
 
     def get_or_create(self, channel_id: str) -> Session:
         if channel_id not in self._sessions:
-            session = Session(channel_id=channel_id)
-            summary = self._find_recent_summary(channel_id)
-            if summary:
-                session.summary = f"[Continuing from previous conversation] {summary}"
-                log.info("Carried forward summary for channel %s", channel_id)
+            session = self._restore_from_archive(channel_id)
+            if session is None:
+                session = Session(channel_id=channel_id)
             self._sessions[channel_id] = session
             self._dirty.add(channel_id)
         session = self._sessions[channel_id]
         session.last_active = time.time()
         return session
 
-    def _find_recent_summary(self, channel_id: str) -> str:
-        """Find the most recent archived summary for a channel within the continuity window."""
+    def _restore_from_archive(self, channel_id: str) -> Session | None:
+        """Rehydrate the most recent archived session for this channel, any age.
+
+        Continuity no longer depends on wall-clock survival: a pruned session
+        comes back in full (messages + summary segments) the moment the
+        channel is active again. Compaction and relevance selection — not
+        restoration — decide what actually reaches the prompt.
+        """
         archive_dir = self.persist_dir / "archive"
         if not archive_dir.exists():
-            return ""
-        now = time.time()
-        best_summary = ""
-        best_time = 0.0
+            return None
+        candidates: list[tuple[float, Path]] = []
         for path in archive_dir.glob(f"{channel_id}_*.json"):
             try:
-                data = json.loads(path.read_text())
-                last_active = data.get("last_active", 0)
-                summary = data.get("summary", "")
-                if summary and now - last_active < CONTINUITY_MAX_AGE and last_active > best_time:
-                    best_summary = summary
-                    best_time = last_active
-            except Exception:
-                continue
-        return best_summary
+                ts = float(path.stem.rsplit("_", 1)[1])
+            except (ValueError, IndexError):
+                ts = path.stat().st_mtime
+            candidates.append((ts, path))
+        if not candidates:
+            return None
+        candidates.sort()
+        _, latest = candidates[-1]
+        try:
+            data = json.loads(latest.read_text())
+            session = self._session_from_dict(data)
+        except Exception as e:
+            log.error("Failed to restore archive %s: %s", latest, e)
+            return None
+        log.info(
+            "Restored session for channel %s from archive %s (%d messages, %d segments)",
+            channel_id, latest.name, len(session.messages), len(session.summary_segments),
+        )
+        return session
 
     def add_message(
         self, channel_id: str, role: str, content: str,
@@ -456,15 +475,36 @@ class SessionManager:
             return True
         return False
 
+    @staticmethod
+    def _render_context_summary(session: Session, max_segments: int = 5) -> str:
+        """Render prior-context text from the legacy summary and/or the most
+        recent summary segments (chronological), for prompt injection."""
+        parts: list[str] = []
+        if session.summary:
+            parts.append(session.summary)
+        for seg in session.summary_segments[-max_segments:]:
+            text = seg.get("summary", "")
+            if not text:
+                continue
+            try:
+                start = datetime.fromtimestamp(seg.get("start_ts", 0)).strftime("%b %d %H:%M")
+                end = datetime.fromtimestamp(seg.get("end_ts", 0)).strftime("%b %d %H:%M")
+                header = f"[Segment {start} – {end}]"
+            except (OSError, OverflowError, ValueError):
+                header = "[Segment]"
+            parts.append(f"{header}\n{text}")
+        return "\n\n".join(parts)
+
     def get_history(self, channel_id: str) -> list[dict[str, str]]:
         session = self.get_or_create(channel_id)
         messages = [{"role": m.role, "content": m.content} for m in session.messages]
 
-        # Prepend summary if we have one
-        if session.summary:
+        # Prepend prior-context summary (legacy string and/or segments)
+        context_summary = self._render_context_summary(session)
+        if context_summary:
             messages.insert(0, {
                 "role": "user",
-                "content": f"[Previous conversation summary: {session.summary}]",
+                "content": f"[Previous conversation summary: {context_summary}]",
             })
             messages.insert(1, {
                 "role": "assistant",
@@ -491,13 +531,36 @@ class SessionManager:
         }
 
     def _needs_compaction(self, session: Session) -> bool:
-        """Check if a session needs compaction (message count or token budget)."""
+        """Check if a session needs compaction.
+
+        Triggers: message count over the (adaptive) threshold, estimated
+        tokens over the session budget, or a closed conversation segment —
+        an idle gap of SEGMENT_IDLE_GAP_SECONDS with enough material before
+        it to be worth summarizing.
+        """
         params = self._get_compaction_params(session)
         if len(session.messages) > params["threshold"]:
             return True
         if session.estimated_tokens > self.token_budget:
             return True
+        if self._find_idle_split(session.messages) is not None:
+            return True
         return False
+
+    @staticmethod
+    def _find_idle_split(messages: list[Message]) -> int | None:
+        """Find the index that closes a conversation segment at an idle gap.
+
+        Returns the index of the first message AFTER the most recent idle
+        gap longer than SEGMENT_IDLE_GAP_SECONDS, provided at least
+        SEGMENT_MIN_MESSAGES precede the gap (so trivial exchanges don't
+        churn segments). Returns None when no qualifying gap exists.
+        """
+        for i in range(len(messages) - 1, 0, -1):
+            gap = messages[i].timestamp - messages[i - 1].timestamp
+            if gap > SEGMENT_IDLE_GAP_SECONDS and i >= SEGMENT_MIN_MESSAGES:
+                return i
+        return None
 
     async def get_history_with_compaction(
         self, channel_id: str,
@@ -517,72 +580,9 @@ class SessionManager:
 
         return self.get_history(channel_id)
 
-    def detect_topic_change(
-        self, channel_id: str, current_query: str,
-    ) -> dict:
-        """Detect whether the current query represents a topic change.
-
-        Returns a dict with:
-        - ``is_topic_change``: whether a topic change was detected
-        - ``time_gap``: seconds since last message (0 if no history)
-        - ``has_time_gap``: whether the time gap exceeds TOPIC_CHANGE_TIME_GAP
-        - ``max_overlap``: highest relevance score against recent messages
-
-        A topic change is detected when the keyword overlap between the current
-        query and recent history messages is below TOPIC_CHANGE_SCORE_THRESHOLD.
-        A time gap >5 min combined with low overlap strengthens the signal.
-        """
-        session = self._sessions.get(channel_id)
-        if not session or not session.messages:
-            return {
-                "is_topic_change": False,
-                "time_gap": 0.0,
-                "has_time_gap": False,
-                "max_overlap": 0.0,
-            }
-
-        # Time gap from last message
-        last_msg = session.messages[-1]
-        time_gap = time.time() - last_msg.timestamp
-
-        # Score overlap against recent messages
-        recent = session.messages[-TOPIC_CHANGE_RECENT_WINDOW:]
-        scores = []
-        for msg in recent:
-            content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            s = score_relevance(current_query, content)
-            scores.append(s)
-
-        max_overlap = max(scores) if scores else 0.0
-        has_time_gap = time_gap > TOPIC_CHANGE_TIME_GAP
-
-        # Topic change: low overlap with all recent messages AND a time gap.
-        # Both conditions required — prevents false triggers on casual follow-ups
-        # like "thanks" or "what about X" that have low keyword overlap but are
-        # clearly part of the same conversation.
-        is_topic_change = (
-            max_overlap < TOPIC_CHANGE_SCORE_THRESHOLD
-            and has_time_gap
-            and len(recent) >= 2
-        )
-
-        if is_topic_change:
-            log.info(
-                "Topic change detected for channel %s (max_overlap=%.3f, time_gap=%.0fs)",
-                channel_id, max_overlap, time_gap,
-            )
-
-        return {
-            "is_topic_change": is_topic_change,
-            "time_gap": time_gap,
-            "has_time_gap": has_time_gap,
-            "max_overlap": max_overlap,
-        }
-
     async def get_task_history(
         self, channel_id: str, max_messages: int = 10,
         current_query: str | None = None,
-        topic_change: bool = False,
     ) -> list[dict[str, str]]:
         """Get abbreviated history for the tool-calling path.
 
@@ -594,11 +594,6 @@ class SessionManager:
         recent ``RELEVANCE_KEEP_RECENT``) are scored for keyword relevance
         and only the most relevant ones are included.  This prevents stale
         context from unrelated earlier conversations from bleeding in.
-
-        When *topic_change* is True, the history window is reduced to only
-        the most recent message (the current one) — previous context is
-        mostly irrelevant for a new topic.  The summary is still included
-        for broad continuity.
         """
         session = self.get_or_create(channel_id)
 
@@ -606,18 +601,10 @@ class SessionManager:
         if self._needs_compaction(session):
             await self._compact(session)
 
-        # On topic change, shrink to just the most recent message
-        if topic_change:
-            candidate_msgs = session.messages[-1:] if session.messages else []
-            log.info(
-                "Topic change: reduced history to %d message(s) for channel %s",
-                len(candidate_msgs), channel_id,
-            )
-        else:
-            # Take only the most recent messages as the candidate pool
-            candidate_msgs = session.messages[-max_messages:]
+        # Take only the most recent messages as the candidate pool
+        candidate_msgs = session.messages[-max_messages:]
 
-        if current_query and not topic_change and len(candidate_msgs) > RELEVANCE_KEEP_RECENT:
+        if current_query and len(candidate_msgs) > RELEVANCE_KEEP_RECENT:
             # Always include the most recent messages unconditionally
             recent = candidate_msgs[-RELEVANCE_KEEP_RECENT:]
             older = candidate_msgs[:-RELEVANCE_KEEP_RECENT]
@@ -650,9 +637,10 @@ class SessionManager:
 
         messages = [{"role": m.role, "content": m.content} for m in filtered]
 
-        # Prepend summary if available
-        if session.summary:
-            sanitized = _sanitize_summary(session.summary)
+        # Prepend prior-context summary if available
+        context_summary = self._render_context_summary(session)
+        if context_summary:
+            sanitized = _sanitize_summary(context_summary)
             messages.insert(0, {
                 "role": "user",
                 "content": f"[COMPLETED SUMMARY] {sanitized}",
@@ -733,58 +721,150 @@ class SessionManager:
             }
         return result
 
-    async def _compact(self, session: Session) -> None:
-        """Summarize older messages and keep only recent ones.
+    def _split_for_compaction(self, session: Session) -> tuple[list[Message], list[Message]]:
+        """Decide which messages close into a segment vs stay as raw tail.
 
-        When adaptive compaction is enabled, the keep count and summary char
-        budget scale with channel activity — busy channels compact more
-        aggressively to prevent context bloat.
+        An idle gap takes priority — it is a natural conversation boundary,
+        so everything before the gap becomes the segment and everything
+        after stays raw. Otherwise the adaptive keep-ratio applies, floored
+        at KEEP_TAIL_MIN and capped at max_history so technical threads keep
+        a substantial raw tail.
         """
-        params = self._get_compaction_params(session)
-        keep_ratio = params["keep_ratio"]
-        summary_chars = params["summary_chars"]
+        idle_split = self._find_idle_split(session.messages)
+        if idle_split is not None:
+            return session.messages[:idle_split], session.messages[idle_split:]
 
-        keep_count = max(2, round(len(session.messages) * keep_ratio))
-        # Clamp to at most max_history // 2 (original behaviour ceiling)
-        keep_count = min(keep_count, self.max_history // 2)
+        params = self._get_compaction_params(session)
+        keep_count = max(KEEP_TAIL_MIN, round(len(session.messages) * params["keep_ratio"]))
+        keep_count = min(keep_count, self.max_history)
         # When token budget triggers compaction with fewer messages than
         # keep_count, reduce keep_count so there's actually something to compact
         if len(session.messages) <= keep_count and len(session.messages) > 2:
             keep_count = max(2, len(session.messages) // 2)
-        to_summarize = session.messages[:-keep_count] if keep_count < len(session.messages) else []
-        to_keep = session.messages[-keep_count:]
+        if keep_count >= len(session.messages):
+            return [], session.messages
+        return session.messages[:-keep_count], session.messages[-keep_count:]
 
+    @staticmethod
+    def _clip_segment_text(text: str) -> str:
+        """Enforce the hard segment size at a line boundary, with an explicit
+        marker — stored summaries are never silently chopped."""
+        if len(text) <= SEGMENT_HARD_CHARS:
+            return text
+        limit = SEGMENT_HARD_CHARS - len(SEGMENT_TRUNCATION_MARKER)
+        clipped = text[:limit]
+        last_newline = clipped.rfind("\n")
+        if last_newline > limit // 2:
+            clipped = clipped[:last_newline]
+        return clipped.rstrip() + SEGMENT_TRUNCATION_MARKER
+
+    @staticmethod
+    def _parse_segment_metadata(summary_text: str) -> dict:
+        """Best-effort extraction of the structured header lines the
+        compaction prompt requests. The raw summary is kept regardless."""
+        meta: dict = {"topics": [], "entities": [], "decisions": [], "open_threads": []}
+        patterns = {
+            "topics": re.compile(r"^\[Topics:\s*(.*?)\]\s*$", re.IGNORECASE),
+            "entities": re.compile(r"^\[Entities:\s*(.*?)\]\s*$", re.IGNORECASE),
+            "decisions": re.compile(r"^\[Decisions:\s*(.*?)\]\s*$", re.IGNORECASE),
+            "open_threads": re.compile(r"^\[Open:\s*(.*?)\]\s*$", re.IGNORECASE),
+        }
+        for line in summary_text.splitlines()[:6]:
+            line = line.strip()
+            for field_name, pattern in patterns.items():
+                m = pattern.match(line)
+                if m:
+                    raw = m.group(1).strip()
+                    if raw and raw.lower() != "none":
+                        sep = ";" if field_name in ("decisions", "open_threads") else ","
+                        meta[field_name] = [p.strip() for p in raw.split(sep) if p.strip()][:12]
+        return meta
+
+    def _append_segment(self, session: Session, summary_text: str, source_messages: list[Message], *, fallback: bool = False) -> dict:
+        """Build a summary segment with provenance and append it to the session."""
+        summary_text = self._clip_segment_text(summary_text.strip())
+        participants = sorted({m.user_id for m in source_messages if m.user_id})
+        start_ts = source_messages[0].timestamp if source_messages else time.time()
+        end_ts = source_messages[-1].timestamp if source_messages else time.time()
+        segment = {
+            "id": f"seg_{int(end_ts)}_{len(session.summary_segments)}",
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "participants": participants,
+            "summary": summary_text,
+            "source_count": len(source_messages),
+            "created_at": time.time(),
+            **self._parse_segment_metadata(summary_text),
+        }
+        if fallback:
+            segment["fallback"] = True
+        session.summary_segments.append(segment)
+        if len(session.summary_segments) > MAX_STORED_SEGMENTS:
+            dropped = len(session.summary_segments) - MAX_STORED_SEGMENTS
+            session.summary_segments = session.summary_segments[-MAX_STORED_SEGMENTS:]
+            log.info(
+                "Dropped %d oldest summary segment(s) for channel %s (cap %d)",
+                dropped, session.channel_id, MAX_STORED_SEGMENTS,
+            )
+        return segment
+
+    def _fold_legacy_summary(self, session: Session) -> None:
+        """Convert a pre-segment summary string into the first stored segment."""
+        if not session.summary:
+            return
+        legacy = {
+            "id": "seg_legacy",
+            "start_ts": session.created_at,
+            "end_ts": session.last_active,
+            "participants": [],
+            "summary": session.summary,
+            "source_count": 0,
+            "created_at": time.time(),
+            "legacy": True,
+            **self._parse_segment_metadata(session.summary),
+        }
+        session.summary_segments.insert(0, legacy)
+        session.summary = ""
+        log.info("Folded legacy summary into segment for channel %s", session.channel_id)
+
+    async def _compact(self, session: Session) -> None:
+        """Close older messages into a rolling summary segment.
+
+        Each compaction produces a NEW segment (older segments are kept,
+        never re-merged into one paragraph), preserving sequence, decisions,
+        and identifiers across long-running channels. A substantial raw tail
+        always survives — see _split_for_compaction.
+        """
+        to_summarize, to_keep = self._split_for_compaction(session)
         if not to_summarize:
             return
 
+        params = self._get_compaction_params(session)
+        summary_chars = params["summary_chars"]
         if params["activity_rate"] > 0:
             log.info(
                 "Adaptive compaction for %s: rate=%.1f msg/hr, threshold=%d, "
-                "keep=%d/%d, summary_budget=%d chars",
+                "keep=%d/%d, segment_budget=%d chars",
                 session.channel_id, params["activity_rate"],
-                params["threshold"], keep_count, len(session.messages),
+                params["threshold"], len(to_keep), len(session.messages),
                 summary_chars,
             )
 
-        # Build conversation text for summarization
-        convo_text = "\n".join(
-            f"{m.role}: {m.content[:500]}" for m in to_summarize
-        )
-
-        # If there's an existing summary, include it so the LLM merges
-        # everything into one concise summary instead of concatenating
-        if session.summary:
-            convo_text = (
-                f"[Previous summary]: {session.summary[:1000]}\n\n"
-                f"[New messages to incorporate]:\n{convo_text}"
-            )
+        # Build conversation text for summarization, attributing speakers
+        convo_lines = []
+        for m in to_summarize:
+            speaker = f"{m.role}[{m.user_id}]" if m.user_id else m.role
+            convo_lines.append(f"{speaker}: {m.content[:500]}")
+        convo_text = "\n".join(convo_lines)
 
         system_instruction = (
-            "Summarize the following conversation into a concise context summary. "
-            "If a previous summary is provided, merge it with the new messages.\n\n"
+            "Summarize the following conversation slice into a context segment.\n\n"
             "FORMAT:\n"
             "Line 1: [Topics: comma-separated topic tags, e.g. nginx, dns, server-a]\n"
-            "Line 2+: Bullet points of key facts.\n\n"
+            "Line 2: [Entities: comma-separated identifiers — file paths, PR numbers, SHAs, hosts, services]\n"
+            "Line 3: [Decisions: semicolon-separated decisions made, or none]\n"
+            "Line 4: [Open: semicolon-separated unresolved threads, or none]\n"
+            "Line 5+: Bullet points of key facts.\n\n"
             "RULES:\n"
             "1. PRESERVE VERBATIM: Hostnames, IPs, UUIDs, file paths, container names, "
             "service names, port numbers, usernames. Never paraphrase identifiers.\n"
@@ -794,12 +874,13 @@ class SessionManager:
             "3. PRESERVE: Error messages, failures, retries, and their outcomes — "
             "these are critical for debugging. Summarize them as: what failed, why, "
             "and whether it was resolved.\n"
-            "4. OMIT: Intermediate tool iteration details (keep only final outcomes), "
-            "conversational filler, greetings, acknowledgments, "
-            "'I can\\'t' or 'unable to' statements without useful context.\n"
-            "5. OMIT: Any data not confirmed by actual tool results.\n"
-            f"6. Keep the ENTIRE summary under {summary_chars} characters.\n"
-            "7. Each bullet: WHAT happened → OUTCOME (host/path/service if applicable)."
+            "4. PRESERVE: WHO said or decided what — attribute by the speaker tags "
+            "given (e.g. user[1234]), especially with multiple participants.\n"
+            "5. OMIT: Intermediate tool iteration details (keep only final outcomes), "
+            "conversational filler, greetings, acknowledgments.\n"
+            "6. OMIT: Any data not confirmed by actual tool results.\n"
+            f"7. Keep the ENTIRE segment under {summary_chars} characters.\n"
+            "8. Each bullet: WHAT happened → OUTCOME (host/path/service if applicable)."
         )
 
         try:
@@ -809,37 +890,18 @@ class SessionManager:
                 [{"role": "user", "content": convo_text}],
                 system_instruction,
             )
-            summary_text = summary_text.strip()
 
-            # Enforce max summary length — truncate at last complete line
-            if len(summary_text) > summary_chars:
-                truncated = summary_text[:summary_chars]
-                last_newline = truncated.rfind("\n")
-                if last_newline > 0:
-                    truncated = truncated[:last_newline]
-                else:
-                    # No newline — fall back to last space to avoid mid-word cut
-                    last_space = truncated.rfind(" ")
-                    if last_space > 0:
-                        truncated = truncated[:last_space]
-                summary_text = truncated.rstrip()
-                log.info(
-                    "Compaction summary truncated to %d chars for channel %s",
-                    len(summary_text), session.channel_id,
-                )
-
-            session.summary = summary_text
+            self._fold_legacy_summary(session)
+            segment = self._append_segment(session, summary_text, to_summarize)
 
             # Trigger reflection on discarded messages before replacing
             discarded = list(to_summarize)
-            summary_snapshot = session.summary
-
             session.messages = to_keep
             self._dirty.add(session.channel_id)
             log.info(
-                "Compacted %d messages into summary for channel %s",
-                len(to_summarize),
-                session.channel_id,
+                "Compacted %d messages into segment %s for channel %s (%d segments total)",
+                len(discarded), segment["id"], session.channel_id,
+                len(session.summary_segments),
             )
 
             if self._reflector and len(discarded) >= 5:
@@ -849,7 +911,7 @@ class SessionManager:
                 ))
                 task = asyncio.create_task(
                     self._safe_reflect_compacted(
-                        discarded, summary_snapshot,
+                        discarded, segment["summary"],
                         user_ids=participant_ids,
                     )
                 )
@@ -862,10 +924,9 @@ class SessionManager:
     def _fallback_compact(self, session) -> None:
         """Deterministic local compaction when LLM summarization fails.
 
-        Instead of blindly truncating and losing context, build a simple
-        extractive summary from the discarded messages: who spoke, what
-        tools were used, and the first line of each message. Preserves
-        existing summary and appends the new extract.
+        Builds an extractive segment from the discarded messages — who
+        spoke, what tools were used, first lines — clearly marked as a
+        fallback so it can be distinguished from LLM-quality segments.
         """
         keep = self.max_history
         if len(session.messages) <= keep:
@@ -890,23 +951,21 @@ class SessionManager:
                     tools_mentioned.add(marker.rstrip("_"))
                     break
 
-        parts = []
-        if session.summary:
-            parts.append(session.summary)
-        parts.append(f"[compaction fallback: {len(discarded)} messages trimmed]")
+        parts = [f"[compaction fallback: {len(discarded)} messages trimmed]"]
         if user_ids:
             parts.append(f"Participants: {', '.join(sorted(user_ids))}")
         if tools_mentioned:
             parts.append(f"Tools used: {', '.join(sorted(tools_mentioned))}")
         if snippets:
-            sample = snippets[:5]
+            sample = snippets[:8]
             parts.append("Recent topics: " + " | ".join(sample))
 
-        session.summary = "\n".join(parts)[-1200:]
+        self._fold_legacy_summary(session)
+        self._append_segment(session, "\n".join(parts), discarded, fallback=True)
         self._dirty.add(session.channel_id)
         log.warning(
-            "Fallback compaction for %s: trimmed %d messages, built extractive summary (%d chars)",
-            session.channel_id, len(discarded), len(session.summary),
+            "Fallback compaction for %s: trimmed %d messages into extractive segment",
+            session.channel_id, len(discarded),
         )
 
     def reset(self, channel_id: str) -> None:
@@ -1128,6 +1187,17 @@ class SessionManager:
                         "timestamp": session.last_active,
                         "channel_id": session.channel_id,
                     })
+            for seg in session.summary_segments:
+                seg_text = seg.get("summary", "")
+                if seg_text and query_lower in seg_text.lower():
+                    ts = seg.get("end_ts", session.last_active)
+                    if _ts_ok(ts):
+                        results.append({
+                            "type": "summary",
+                            "content": seg_text[:500],
+                            "timestamp": ts,
+                            "channel_id": session.channel_id,
+                        })
             for msg in reversed(session.messages):
                 if user_id and msg.user_id != user_id:
                     continue

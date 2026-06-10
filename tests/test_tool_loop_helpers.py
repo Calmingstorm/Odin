@@ -61,9 +61,12 @@ class TestBuildRequestPreamble:
         assert "Channel: #ops" in body
         assert "HISTORY ABOVE | REQUEST BELOW" in body
 
-    def test_topic_change_block(self):
-        p = build_request_preamble(**self._base_kwargs(), topic_change=True)
-        assert "TOPIC CHANGE DETECTED" in p["content"]
+    def test_topic_change_parameter_removed(self):
+        # Topic-change detection was removed entirely (memory overhaul):
+        # the preamble builder must not accept the old parameter.
+        import pytest as _pytest
+        with _pytest.raises(TypeError):
+            build_request_preamble(**self._base_kwargs(), topic_change=True)
 
     def test_bot_message_block(self):
         p = build_request_preamble(**self._base_kwargs(), from_another_bot=True)
@@ -71,7 +74,7 @@ class TestBuildRequestPreamble:
         assert "from ANOTHER BOT" in body
         assert "EXECUTE immediately" in body
 
-    def test_default_has_neither_extra_block(self):
+    def test_default_has_no_extra_block(self):
         body = build_request_preamble(**self._base_kwargs())["content"]
         assert "TOPIC CHANGE" not in body
         assert "ANOTHER BOT" not in body
@@ -99,7 +102,6 @@ class TestBehaviorPreservedByRefactor:
         message_id = kw["message_id"]
         channel_description = kw["channel_description"]
         has_history = kw["has_history"]
-        topic_change = kw.get("topic_change", False)
         from_another_bot = kw.get("from_another_bot", False)
 
         msg_id_note = f"Current message ID: {message_id}"
@@ -122,13 +124,6 @@ class TestBehaviorPreservedByRefactor:
             "being referenced — do not sweep through history re-executing everything. "
             "Evaluate tools fresh. Do not repeat prior refusals."
         )
-        if topic_change:
-            sep_text += (
-                "\n\nTOPIC CHANGE DETECTED. The user has switched to a new subject. "
-                "History above is from a DIFFERENT topic — do NOT carry over "
-                "assumptions, hosts, files, or context from the previous topic. "
-                "Treat this as a fresh request."
-            )
         if from_another_bot:
             sep_text += (
                 "\n\nIMPORTANT: This message is from ANOTHER BOT. "
@@ -154,16 +149,14 @@ class TestBehaviorPreservedByRefactor:
         base.update(override)
         return base
 
-    def test_all_four_combinations_match_reference(self):
+    def test_all_combinations_match_reference(self):
         for has_history in (True, False):
-            for topic_change in (True, False):
-                for from_another_bot in (True, False):
-                    kw = self._kwargs(
-                        has_history=has_history,
-                        topic_change=topic_change,
-                        from_another_bot=from_another_bot,
-                    )
-                    assert build_request_preamble(**kw) == self._reference_preamble(**kw), (
-                        f"mismatch at has_history={has_history} "
-                        f"topic_change={topic_change} from_another_bot={from_another_bot}"
-                    )
+            for from_another_bot in (True, False):
+                kw = self._kwargs(
+                    has_history=has_history,
+                    from_another_bot=from_another_bot,
+                )
+                assert build_request_preamble(**kw) == self._reference_preamble(**kw), (
+                    f"mismatch at has_history={has_history} "
+                    f"from_another_bot={from_another_bot}"
+                )

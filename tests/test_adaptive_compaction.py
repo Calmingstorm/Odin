@@ -312,9 +312,9 @@ class TestNeedsCompactionAdaptive:
 
     def test_above_adaptive_threshold_high_activity(self, tmp_path):
         mgr = _make_manager(tmp_path, adaptive_compaction=True)
-        # High activity → threshold = 25, so 30 messages should trigger
+        # High activity → threshold = ADAPTIVE_THRESHOLD_HIGH (80), so 85 should trigger
         now = time.time()
-        msgs = _make_timed_messages(30, interval_seconds=30, start=now - 900)
+        msgs = _make_timed_messages(85, interval_seconds=30, start=now - 2550)
         session = _make_session(messages=msgs)
         assert mgr._needs_compaction(session)
 
@@ -364,9 +364,13 @@ class TestCompactAdaptive:
         session = _make_session(messages=msgs)
         mgr._sessions["ch1"] = session
         await mgr._compact(session)
-        # High activity: keep_ratio ~0.35 → keep ~18, compact ~32
-        assert len(session.messages) < 25
-        assert session.summary == "compacted summary"
+        # High activity: keep_ratio ~0.35 → 18, floored at KEEP_TAIL_MIN (20)
+        assert len(session.messages) == 20
+        # Compaction now produces a segment, not a single summary string
+        assert session.summary == ""
+        assert len(session.summary_segments) == 1
+        assert session.summary_segments[0]["summary"] == "compacted summary"
+        assert session.summary_segments[0]["source_count"] == 30
 
     async def test_low_activity_keeps_more(self, mgr_adaptive):
         mgr, fn = mgr_adaptive
@@ -375,8 +379,8 @@ class TestCompactAdaptive:
         session = _make_session(messages=msgs)
         mgr._sessions["ch1"] = session
         await mgr._compact(session)
-        # Low activity: keep_ratio ~0.60, clamped to max_history//2 = 25
-        assert len(session.messages) == 25
+        # Low activity: keep_ratio ~0.60 → 30 (clamp is now max_history, not //2)
+        assert len(session.messages) == 30
 
     async def test_adaptive_disabled_uses_fixed_keep(self, mgr_fixed):
         mgr, fn = mgr_fixed
@@ -384,7 +388,7 @@ class TestCompactAdaptive:
         session = _make_session(messages=msgs)
         mgr._sessions["ch1"] = session
         await mgr._compact(session)
-        # Fixed mode: max_history // 2 = 25
+        # Fixed mode: default keep_ratio 0.50 → 25
         assert len(session.messages) == 25
 
     async def test_summary_chars_scales_with_activity(self, mgr_adaptive):
@@ -400,17 +404,20 @@ class TestCompactAdaptive:
         system_instruction = call_args[0][1]
         assert f"under {ADAPTIVE_SUMMARY_HIGH}" in system_instruction or "under 5" in system_instruction
 
-    async def test_summary_truncation_uses_adaptive_budget(self, mgr_adaptive):
+    async def test_oversized_segment_clipped_with_marker(self, mgr_adaptive):
+        from src.sessions.manager import SEGMENT_HARD_CHARS, SEGMENT_TRUNCATION_MARKER
         mgr, fn = mgr_adaptive
-        # Return a long summary that needs truncation
-        fn.return_value = "x " * 1000
+        # Return a summary exceeding the hard segment cap
+        fn.return_value = "line of segment text\n" * 400
         now = time.time()
-        # High activity → summary budget ~500 chars
         msgs = _make_timed_messages(50, interval_seconds=30, start=now - 1500)
         session = _make_session(messages=msgs)
         mgr._sessions["ch1"] = session
         await mgr._compact(session)
-        assert len(session.summary) <= ADAPTIVE_SUMMARY_HIGH
+        seg = session.summary_segments[0]
+        assert len(seg["summary"]) <= SEGMENT_HARD_CHARS
+        # Never silently chopped — the clip is marked
+        assert seg["summary"].endswith(SEGMENT_TRUNCATION_MARKER)
 
     async def test_compaction_fn_failure_fallback(self, mgr_adaptive):
         mgr, fn = mgr_adaptive
@@ -427,18 +434,18 @@ class TestCompactAdaptive:
     async def test_compaction_via_get_history_with_compaction(self, mgr_adaptive):
         mgr, fn = mgr_adaptive
         now = time.time()
-        # High activity: 30 msgs at 30s intervals → rate > 20
-        msgs = _make_timed_messages(30, interval_seconds=30, start=now - 900)
+        # High activity: 85 msgs at 30s intervals → rate > 20, threshold 80
+        msgs = _make_timed_messages(85, interval_seconds=30, start=now - 2550)
         session = _make_session(channel_id="ch2", messages=msgs)
         mgr._sessions["ch2"] = session
         history = await mgr.get_history_with_compaction("ch2")
-        # Should have compacted (threshold ~25) since we have 30 msgs
+        # Should have compacted (threshold 80) since we have 85 msgs
         assert fn.called
 
     async def test_compaction_via_get_task_history(self, mgr_adaptive):
         mgr, fn = mgr_adaptive
         now = time.time()
-        msgs = _make_timed_messages(30, interval_seconds=30, start=now - 900)
+        msgs = _make_timed_messages(85, interval_seconds=30, start=now - 2550)
         session = _make_session(channel_id="ch3", messages=msgs)
         mgr._sessions["ch3"] = session
         history = await mgr.get_task_history("ch3")
@@ -655,10 +662,13 @@ class TestEdgeCases:
         session = _make_session(messages=msgs, summary="old summary context")
         mgr._sessions["ch1"] = session
         await mgr._compact(session)
-        assert session.summary == "new summary"
-        # Verify the previous summary was included in the compaction input
-        call_args = compaction_fn.call_args[0][0]
-        assert "old summary" in call_args[0]["content"]
+        # Legacy summary is folded into the FIRST segment; the new compaction
+        # output becomes the second. The single-summary field is retired.
+        assert session.summary == ""
+        assert len(session.summary_segments) == 2
+        assert session.summary_segments[0]["summary"] == "old summary context"
+        assert session.summary_segments[0].get("legacy") is True
+        assert session.summary_segments[1]["summary"] == "new summary"
 
     async def test_manager_constructor_default_adaptive(self, tmp_path):
         mgr = SessionManager(
@@ -686,10 +696,10 @@ class TestEdgeCases:
         fn = AsyncMock(return_value="compacted")
         mgr.set_compaction_fn(fn)
         now = time.time()
-        # 30 messages at high rate → threshold ~25 → should compact
-        msgs = _make_timed_messages(30, interval_seconds=30, start=now - 900)
+        # 85 messages at high rate → threshold 80 → should compact
+        msgs = _make_timed_messages(85, interval_seconds=30, start=now - 2550)
         session = _make_session(channel_id="ch1", messages=msgs)
         mgr._sessions["ch1"] = session
         await mgr.get_history_with_compaction("ch1")
         assert fn.called
-        assert session.summary == "compacted"
+        assert session.summary_segments[-1]["summary"] == "compacted"
