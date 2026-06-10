@@ -877,7 +877,7 @@ class OdinBot(commands.Bot):
         """Learned Context for the prompt — query-aware relevance selection.
 
         File parsing is mtime-cached inside the reflector, so calling per
-        message is cheap; selection math is microseconds over <=150 entries.
+        message is cheap; selection is fast over <=150 entries.
         """
         if not hasattr(self, "reflector"):
             return ""
@@ -1497,7 +1497,9 @@ class OdinBot(commands.Bot):
         """Fire-and-forget post-operation reflection — selective, with real
         tool inputs/results from the operation instead of bare tool names."""
         try:
-            tool_details = self._last_op_details.pop(channel_id, None) if channel_id else None
+            tool_details = (
+                self._last_op_details.pop(channel_id, None) if channel_id else None
+            )
             if not tool_details:
                 tool_details = [{"tool": t} for t in tools_used[:20]]
             if not self._should_reflect_on_operation(
@@ -2278,7 +2280,9 @@ class OdinBot(commands.Bot):
                         }
                     log.info("Attached %d image(s) to message for Claude vision", len(image_blocks))
                 if self.llm_client:
-                    chat_prompt = self._build_chat_system_prompt(channel=message.channel, user_id=user_id, query=content)
+                    chat_prompt = self._build_chat_system_prompt(
+                        channel=message.channel, user_id=user_id, query=content,
+                    )
                     try:
                         response = await self.llm_client.chat(
                             messages=history,
@@ -2339,7 +2343,9 @@ class OdinBot(commands.Bot):
                 if handoff and self.llm_client and not is_error:
                     log.info("Skill handoff to Codex for response")
                     _skill_response = response  # Save before overwriting
-                    chat_prompt = self._build_chat_system_prompt(channel=message.channel, user_id=user_id, query=content)
+                    chat_prompt = self._build_chat_system_prompt(
+                        channel=message.channel, user_id=user_id, query=content,
+                    )
                     # Fetch full history for handoff (compaction already ran in get_task_history)
                     history = self.sessions.get_history(channel_id)
                     codex_messages = list(history) + [
@@ -3297,7 +3303,8 @@ class OdinBot(commands.Bot):
                     "tool": _tc.name,
                     "input": _tc.input,
                     "result": _rcontent[:300],
-                    "error": _rcontent.lstrip().lower().startswith(("error", "[error", "failed", "traceback")),
+                    "error": _rcontent.lstrip().lower().startswith(
+                        ("error", "[error", "failed", "traceback")),
                 })
             self._last_op_details[str(message.channel.id)] = _op_tool_details
 

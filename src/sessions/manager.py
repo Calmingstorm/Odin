@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from ..llm.cost_tracker import estimate_tokens
 from ..odin_log import get_logger
-from ..relevance import rank as relevance_rank, score as relevance_score, tokenize as _tokenize
+from ..relevance import rank as relevance_rank, score as relevance_score
 if TYPE_CHECKING:
     from ..learning.reflector import ConversationReflector
     from ..search.embedder import LocalEmbedder
@@ -255,7 +255,9 @@ def apply_token_budget(
     protected_count = 0
     for m in older:
         text = _content_text(m)
-        if any(text.startswith(p) for p in _PROTECTED_PREFIXES) or text == "Understood, I have context from our previous conversation.":  # legacy pair tolerated in flight
+        # ("Understood…" tolerates the legacy summary pair while in flight)
+        if (any(text.startswith(p) for p in _PROTECTED_PREFIXES)
+                or text == "Understood, I have context from our previous conversation."):
             protected_count += 1
         else:
             break
@@ -792,7 +794,10 @@ class SessionManager:
                         meta[field_name] = [p.strip() for p in raw.split(sep) if p.strip()][:12]
         return meta
 
-    def _append_segment(self, session: Session, summary_text: str, source_messages: list[Message], *, fallback: bool = False) -> dict:
+    def _append_segment(
+        self, session: Session, summary_text: str,
+        source_messages: list[Message], *, fallback: bool = False,
+    ) -> dict:
         """Build a summary segment with provenance and append it to the session."""
         summary_text = self._clip_segment_text(summary_text.strip())
         participants = sorted({m.user_id for m in source_messages if m.user_id})
@@ -873,7 +878,8 @@ class SessionManager:
             "Summarize the following conversation slice into a context segment.\n\n"
             "FORMAT:\n"
             "Line 1: [Topics: comma-separated topic tags, e.g. nginx, dns, server-a]\n"
-            "Line 2: [Entities: comma-separated identifiers — file paths, PR numbers, SHAs, hosts, services]\n"
+            "Line 2: [Entities: comma-separated identifiers — file paths, "
+            "PR numbers, SHAs, hosts, services]\n"
             "Line 3: [Decisions: semicolon-separated decisions made, or none]\n"
             "Line 4: [Open: semicolon-separated unresolved threads, or none]\n"
             "Line 5+: Bullet points of key facts.\n\n"

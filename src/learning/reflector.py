@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -36,7 +36,8 @@ _CATEGORY_EXPIRY_DAYS: dict[str, int] = {"operational": 180, "fact": 180}
 
 _REFLECTION_HEADER = """\
 Extract clear, explicit lessons from this conversation. Return a JSON array.
-Each element: {"key": "snake_case_id", "category": "correction|preference|operational|fact", "content": "ONE lesson, max 700 chars", "topic": "short-project-or-area-slug", "tags": ["optional", "keywords"]}
+Each element: {"key": "snake_case_id", "category": "correction|preference|operational|fact",
+"content": "ONE lesson, max 700 chars", "topic": "short-project-or-area-slug", "tags": ["optional"]}
 Rules:
 - Max 5 insights per reflection
 - ONE lesson per entry — never combine unrelated lessons into a single entry
@@ -341,7 +342,7 @@ class ConversationReflector:
         """Record injection usage in memory; persisted opportunistically by
         the next locked write (merge/consolidation). last_used_at only feeds
         the 180-day staleness window, so eventual persistence is fine."""
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = datetime.now(UTC).isoformat(timespec="seconds")
         for e in entries:
             self._use_stamps[e.get("key", "")] = now
 
@@ -673,14 +674,19 @@ class ConversationReflector:
         prompt = (
             _CONSOLIDATION_HEADER + str(target)
             + " or fewer.\nSTRICT RULES:\n"
-            "- Merge ONLY entries that cover the same topic/key/meaning (true duplicates or updates of the same fact).\n"
-            "- NEVER combine unrelated lessons into one entry to reduce the count — one lesson per entry.\n"
+            "- Merge ONLY entries that cover the same topic/key/meaning "
+            "(true duplicates or updates of the same fact).\n"
+            "- NEVER combine unrelated lessons into one entry to reduce "
+            "the count — one lesson per entry.\n"
             "- Prefer DROPPING stale or low-value entries over merging unrelated ones.\n"
-            "- If the target cannot be reached without merging unrelated topics, return more entries than the target instead.\n"
+            "- If the target cannot be reached without merging unrelated "
+            "topics, return more entries than the target instead.\n"
             f"- Keep each content under {_SOFT_CONTENT_CHARS} characters.\n"
-            "- Preserve key, user_id, topic, tags, and confidence fields exactly as-is (null if absent).\n"
+            "- Preserve key, user_id, topic, tags, and confidence fields "
+            "exactly as-is (null if absent).\n"
             " Return a JSON array with the same schema:"
-            ' [{"key": ..., "category": ..., "content": ..., "user_id": ..., "topic": ..., "tags": ..., "confidence": ...}]'
+            ' [{"key": ..., "category": ..., "content": ..., "user_id": ...,'
+            ' "topic": ..., "tags": ..., "confidence": ...}]'
             "\n\nEntries:\n" + entries_text
         )
 

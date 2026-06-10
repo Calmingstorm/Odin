@@ -15,7 +15,6 @@ import time
 import pytest
 
 from src.sessions.manager import (
-    KEEP_TAIL_MIN,
     SEGMENT_HARD_CHARS,
     SEGMENT_IDLE_GAP_SECONDS,
     SEGMENT_MIN_MESSAGES,
@@ -227,10 +226,12 @@ class TestIdleSplit:
         base_ts = time.time() - SEGMENT_IDLE_GAP_SECONDS * 2
         session = Session(channel_id="ch1")
         for i in range(20):
-            session.messages.append(Message(role="user", content=f"old {i}", timestamp=base_ts + i * 60))
+            session.messages.append(
+                Message(role="user", content=f"old {i}", timestamp=base_ts + i * 60))
         # New conversation after a long gap
         for i in range(3):
-            session.messages.append(Message(role="user", content=f"new {i}", timestamp=time.time() + i))
+            session.messages.append(
+                Message(role="user", content=f"new {i}", timestamp=time.time() + i))
         mgr._sessions["ch1"] = session
 
         assert mgr._needs_compaction(session)
