@@ -451,6 +451,8 @@ class CodexChatClient:
                             account_id = self.auth.get_account_id()
                             if account_id:
                                 headers["ChatGPT-Account-Id"] = account_id
+                            else:
+                                headers.pop("ChatGPT-Account-Id", None)
                             continue
                         # Invalidated, or a 401 that survived the refresh: this
                         # account can't authenticate. Skip it and rotate to the
@@ -465,6 +467,8 @@ class CodexChatClient:
                             account_id = self.auth.get_account_id()
                             if account_id:
                                 headers["ChatGPT-Account-Id"] = account_id
+                            else:
+                                headers.pop("ChatGPT-Account-Id", None)
                             continue
                         self.breaker.record_failure()
                         raise RuntimeError(
@@ -709,6 +713,8 @@ class CodexChatClient:
                             account_id = self.auth.get_account_id()
                             if account_id:
                                 headers["ChatGPT-Account-Id"] = account_id
+                            else:
+                                headers.pop("ChatGPT-Account-Id", None)
                             continue
                         # Invalidated, or a 401 that survived the refresh: this
                         # account can't authenticate. Skip it and rotate to the
@@ -723,6 +729,8 @@ class CodexChatClient:
                             account_id = self.auth.get_account_id()
                             if account_id:
                                 headers["ChatGPT-Account-Id"] = account_id
+                            else:
+                                headers.pop("ChatGPT-Account-Id", None)
                             continue
                         self.breaker.record_failure()
                         raise RuntimeError(
