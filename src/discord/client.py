@@ -247,6 +247,10 @@ class OdinBot(commands.Bot):
         # Recent tool executions for conversational context (injected into system prompt)
         # Per-channel: {channel_id: [(timestamp, entry_text), ...]}
         self._recent_actions: dict[str, list[tuple[float, str]]] = {}
+        # Per-channel tool input/result details from the most recent tool
+        # loop — consumed by post-operation reflection so it learns from
+        # what actually happened, not just tool names.
+        self._last_op_details: dict[str, list[dict]] = {}
         self._recent_actions_max = 10
         self._recent_actions_expiry = 3600  # seconds (1 hour)
         # Background task tracking
@@ -268,8 +272,6 @@ class OdinBot(commands.Bot):
         self._memory_cache: dict[str | None, tuple[float, dict[str, str]]] = {}
         self._memory_cache_ttl: float = 60.0  # seconds
         # TTL cache for reflector prompt section (avoids file I/O per message)
-        self._reflector_cache: dict[str | None, tuple[float, str]] = {}
-        self._reflector_cache_ttl: float = 60.0  # seconds
         # Throttled cache cleanup
         self._last_cache_cleanup: float = 0.0
         self._cache_cleanup_interval: float = 300.0  # every 5 minutes
@@ -281,6 +283,7 @@ class OdinBot(commands.Bot):
             learned_path="./data/learned.json",
             max_entries=config.learning.max_entries,
             consolidation_target=config.learning.consolidation_target,
+            injection_token_budget=config.learning.injection_token_budget,
             enabled=config.learning.enabled,
         )
 
@@ -327,6 +330,12 @@ class OdinBot(commands.Bot):
             reflector=self.reflector,
             vector_store=self._vector_store,
             embedder=self._embedder,
+            token_budget=config.sessions.token_budget,
+            adaptive_compaction=config.sessions.adaptive_compaction,
+            archive_max_bytes=config.sessions.archive_max_bytes,
+            archive_max_files=config.sessions.archive_max_files,
+            context_token_budget=config.sessions.context_token_budget,
+            context_budget_overrides=config.sessions.context_budget_overrides,
         )
         self.sessions.load()
 
@@ -864,24 +873,23 @@ class OdinBot(commands.Bot):
         self._memory_cache[user_id] = (now, memory)
         return memory
 
-    def _get_cached_reflector(self, user_id: str | None) -> str:
-        """Return cached reflector prompt section with TTL to avoid file I/O per message."""
+    def _get_reflector_section(self, user_id: str | None, query: str | None = None) -> str:
+        """Learned Context for the prompt — query-aware relevance selection.
+
+        File parsing is mtime-cached inside the reflector, so calling per
+        message is cheap; selection is fast over <=150 entries.
+        """
         if not hasattr(self, "reflector"):
             return ""
-        now = time.time()
-        cached = self._reflector_cache.get(user_id)
-        if cached and now - cached[0] < self._reflector_cache_ttl:
-            return cached[1]
-        learned = self.reflector.get_prompt_section(user_id=user_id)
-        self._reflector_cache[user_id] = (now, learned)
-        return learned
+        return self.reflector.get_prompt_section(user_id=user_id, query=query)
 
     def _invalidate_prompt_caches(self) -> None:
         """Invalidate all prompt-related caches. Called on config/context reload."""
         self._cached_hosts = None
         self._cached_skills_text = None
         self._memory_cache.clear()
-        self._reflector_cache.clear()
+        if hasattr(self, "reflector"):
+            self.reflector.invalidate_cache()
 
     def _invoke_skill_missing_required(self, name: str, payload: dict) -> list[str]:
         """Return required input fields the payload omits, or [] if complete.
@@ -1012,8 +1020,9 @@ class OdinBot(commands.Bot):
             memory_text = "\n".join(f"- **{k}**: {v}" for k, v in memory.items())
             prompt += f"\n\n## Persistent Memory\n{memory_text}"
 
-        # Inject learned context from cross-conversation reflection (per-user filtered)
-        learned = self._get_cached_reflector(user_id)
+        # Inject learned context from cross-conversation reflection
+        # (per-user filtered, relevance-ranked against the current query)
+        learned = self._get_reflector_section(user_id, query)
         if learned:
             prompt += f"\n\n{learned}"
 
@@ -1076,6 +1085,7 @@ class OdinBot(commands.Bot):
     def _build_chat_system_prompt(
         self, channel: discord.abc.GuildChannel | None = None,
         user_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         """Build a lightweight system prompt for chat-routed messages.
 
@@ -1110,8 +1120,8 @@ class OdinBot(commands.Bot):
             memory_text = "\n".join(f"- **{k}**: {v}" for k, v in memory.items())
             prompt += f"\n\n## Persistent Memory\n{memory_text}"
 
-        # Inject learned context (per-user filtered, personality from past conversations)
-        learned = self._get_cached_reflector(user_id)
+        # Inject learned context (per-user filtered, relevance-ranked)
+        learned = self._get_reflector_section(user_id, query)
         if learned:
             prompt += f"\n\n{learned}"
 
@@ -1165,11 +1175,6 @@ class OdinBot(commands.Bot):
         ttl = getattr(self, "_memory_cache_ttl", 60.0)
         self._memory_cache = {
             k: v for k, v in getattr(self, "_memory_cache", {}).items()
-            if now - v[0] < ttl
-        }
-        ttl = getattr(self, "_reflector_cache_ttl", 60.0)
-        self._reflector_cache = {
-            k: v for k, v in getattr(self, "_reflector_cache", {}).items()
             if now - v[0] < ttl
         }
 
@@ -1459,13 +1464,49 @@ class OdinBot(commands.Bot):
         finally:
             self._llm_active_requests -= 1
 
+    # Successful operations below this tool count are routine — reflection
+    # is reserved for failures, corrections, explicit asks, and substantive work.
+    _REFLECT_MIN_TOOLS = 5
+    _REFLECT_CORRECTION_MARKERS = (
+        "remember this", "remember that", "that's wrong", "thats wrong",
+        "that is wrong", "not what i asked", "you should have", "incorrect,",
+        "no, ", "actually,",
+    )
+
+    def _should_reflect_on_operation(
+        self, user_request: str, tools_used: list[str],
+        is_error: bool, tool_details: list[dict],
+    ) -> bool:
+        """Reflection triggers: failure, mid-operation tool errors (recovery),
+        user corrections, explicit remember-this, or substantive operations.
+        Routine successes (ls/git-status class) skip reflection entirely."""
+        if is_error:
+            return True
+        if any(d.get("error") for d in tool_details):
+            return True
+        req = user_request.lower()
+        if any(marker in req for marker in self._REFLECT_CORRECTION_MARKERS):
+            return True
+        return len(tools_used) >= self._REFLECT_MIN_TOOLS
+
     async def _operational_reflection(
         self, user_request: str, tools_used: list[str],
         response: str, is_error: bool, user_id: str | None,
+        tool_details: list[dict] | None = None,
     ) -> None:
-        """Fire-and-forget post-operation reflection."""
+        """Fire-and-forget post-operation reflection — selective, with real
+        tool inputs/results from the operation instead of bare tool names."""
         try:
-            tool_details = [{"tool": t} for t in tools_used[:20]]
+            if not tool_details:
+                tool_details = [{"tool": t} for t in tools_used[:20]]
+            if not self._should_reflect_on_operation(
+                user_request, tools_used, is_error, tool_details,
+            ):
+                log.debug(
+                    "Skipping reflection for routine operation (%d tools, no errors)",
+                    len(tools_used),
+                )
+                return
             await self.reflector.reflect_on_operation(
                 user_request=user_request,
                 tools_used=tools_used,
@@ -2236,7 +2277,9 @@ class OdinBot(commands.Bot):
                         }
                     log.info("Attached %d image(s) to message for Claude vision", len(image_blocks))
                 if self.llm_client:
-                    chat_prompt = self._build_chat_system_prompt(channel=message.channel, user_id=user_id)
+                    chat_prompt = self._build_chat_system_prompt(
+                        channel=message.channel, user_id=user_id, query=content,
+                    )
                     try:
                         response = await self.llm_client.chat(
                             messages=history,
@@ -2265,15 +2308,12 @@ class OdinBot(commands.Bot):
                 _sp = self._build_system_prompt(channel=message.channel, user_id=user_id, query=content)
                 _sp = await self._inject_tool_hints(_sp, content, user_id)
                 log.info("Routing to Codex with tools")
-                # Detect topic change before fetching history
-                topic_info = self.sessions.detect_topic_change(channel_id, content)
                 # Use abbreviated history to reduce poisoning from stale responses
                 # (get_task_history handles compaction internally)
                 # Pass current message content for relevance scoring —
                 # older messages unrelated to the current query are dropped
                 task_history = await self.sessions.get_task_history(
-                    channel_id, max_messages=40, current_query=content,
-                    topic_change=topic_info["is_topic_change"],
+                    channel_id, max_messages=160, current_query=content,
                 )
                 if image_blocks and task_history and task_history[-1]["role"] == "user":
                     last = task_history[-1]
@@ -2286,7 +2326,6 @@ class OdinBot(commands.Bot):
                 try:
                     response, already_sent, is_error, tools_used, handoff = await self._process_with_tools(
                         message, task_history, system_prompt_override=_sp,
-                        topic_change=topic_info["is_topic_change"],
                     )
                 except asyncio.TimeoutError as codex_err:
                     log.warning("Codex tool loop timed out: %s", codex_err)
@@ -2301,7 +2340,9 @@ class OdinBot(commands.Bot):
                 if handoff and self.llm_client and not is_error:
                     log.info("Skill handoff to Codex for response")
                     _skill_response = response  # Save before overwriting
-                    chat_prompt = self._build_chat_system_prompt(channel=message.channel, user_id=user_id)
+                    chat_prompt = self._build_chat_system_prompt(
+                        channel=message.channel, user_id=user_id, query=content,
+                    )
                     # Fetch full history for handoff (compaction already ran in get_task_history)
                     history = self.sessions.get_history(channel_id)
                     codex_messages = list(history) + [
@@ -2396,8 +2437,13 @@ class OdinBot(commands.Bot):
         # failures. Must run for both the success and error paths (previously this
         # was nested under the success branch, so is_error was never observed).
         if tools_used:
+            # Pop synchronously inside the channel-locked request body so a
+            # fast follow-up request can never swap details under the
+            # fire-and-forget reflection task.
+            op_details = self._last_op_details.pop(channel_id, None)
             fire_and_forget(self._operational_reflection(
                 content, tools_used, response, is_error, user_id,
+                tool_details=op_details,
             ), name="operational_reflection")
 
         if voice_callback:
@@ -2531,7 +2577,6 @@ class OdinBot(commands.Bot):
         message: discord.Message,
         history: list[dict],
         system_prompt_override: str | None = None,
-        topic_change: bool = False,
     ) -> tuple[str, bool, bool, list[str], bool]:
         """Process a message with Codex tool loop.
 
@@ -2575,7 +2620,6 @@ class OdinBot(commands.Bot):
             message_id=message.id,
             channel_description=channel_ctx,
             has_history=len(messages) > 1,
-            topic_change=topic_change,
             from_another_bot=is_bot_message,
         )
         if len(messages) > 1:
@@ -2632,6 +2676,7 @@ class OdinBot(commands.Bot):
 
         # Per-turn trajectory accumulator — populated each iteration, saved at end.
         from ..trajectories.saver import TrajectoryTurn, ToolIteration
+        _op_tool_details: list[dict] = []
         _trajectory = TrajectoryTurn(
             message_id=str(getattr(message, "id", "")),
             channel_id=str(getattr(message.channel, "id", "")),
@@ -3247,6 +3292,22 @@ class OdinBot(commands.Bot):
                     *[_run_tool_with_timeout(b) for b in tool_calls],
                 )
             messages.append({"role": "user", "content": list(tool_results)})
+
+            # Pair calls with results for post-operation reflection. Stashed
+            # per iteration so every loop exit path leaves the latest state.
+            _results_by_id = {
+                r.get("tool_use_id"): r for r in tool_results if isinstance(r, dict)
+            }
+            for _tc in tool_calls:
+                _rcontent = str(_results_by_id.get(_tc.id, {}).get("content", ""))
+                _op_tool_details.append({
+                    "tool": _tc.name,
+                    "input": _tc.input,
+                    "result": _rcontent[:300],
+                    "error": _rcontent.lstrip().lower().startswith(
+                        ("error", "[error", "failed", "traceback")),
+                })
+            self._last_op_details[str(message.channel.id)] = _op_tool_details
 
             if _cancel.is_set():
                 return _stopped("after_tools")

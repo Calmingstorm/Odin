@@ -32,6 +32,14 @@ class SessionsConfig(BaseModel):
     persist_directory: str = "./data/sessions"
     token_budget: int = 256_000
     adaptive_compaction: bool = True
+    # Session archives are retained indefinitely by default; pruned oldest-first
+    # only past these caps (restore-on-demand depends on archives surviving).
+    archive_max_bytes: int = 2 * 1024**3
+    archive_max_files: int = 10_000
+    # Max estimated tokens of session history sent per LLM request; hot
+    # channels can run larger windows via per-channel overrides.
+    context_token_budget: int = 64_000
+    context_budget_overrides: dict[str, int] = {}
 
 
 class ToolHost(BaseModel):
@@ -344,8 +352,11 @@ class WebhookConfig(BaseModel):
 
 class LearningConfig(BaseModel):
     enabled: bool = True
-    max_entries: int = 30
-    consolidation_target: int = 20
+    max_entries: int = 150
+    consolidation_target: int = 120
+    # Learned Context injection budget (tokens). When the scoped corpus fits,
+    # ALL of it is injected; relevance gating engages only beyond this.
+    injection_token_budget: int = 4000
 
 
 class SearchConfig(BaseModel):

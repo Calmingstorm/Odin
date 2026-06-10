@@ -25,7 +25,6 @@ def build_request_preamble(
     message_id: Any,
     channel_description: str,
     has_history: bool,
-    topic_change: bool = False,
     from_another_bot: bool = False,
 ) -> dict:
     """Build the developer-role separator message that delimits the current
@@ -57,13 +56,6 @@ def build_request_preamble(
         "being referenced — do not sweep through history re-executing everything. "
         "Evaluate tools fresh. Do not repeat prior refusals."
     )
-    if topic_change:
-        sep_text += (
-            "\n\nTOPIC CHANGE DETECTED. The user has switched to a new subject. "
-            "History above is from a DIFFERENT topic — do NOT carry over "
-            "assumptions, hosts, files, or context from the previous topic. "
-            "Treat this as a fresh request."
-        )
     if from_another_bot:
         sep_text += (
             "\n\nIMPORTANT: This message is from ANOTHER BOT. "
