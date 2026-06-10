@@ -78,7 +78,9 @@ class TestHistoryReadOnlyMarker:
         mgr.add_message("ch1", "user", "what happened earlier?")
 
         messages = await mgr.get_task_history("ch1")
-        summary_msgs = [m for m in messages if "COMPLETED SUMMARY" in m.get("content", "")]
+        summary_msgs = [m for m in messages if "SESSION_CONTEXT_READ_ONLY" in m.get("content", "")]
+        # Summaries are a developer-scoped block now, not fake user dialogue
+        assert all(m["role"] == "developer" for m in summary_msgs)
         assert any("[completed]" in m["content"] for m in summary_msgs)
 
     @pytest.mark.asyncio
@@ -102,7 +104,7 @@ class TestHistoryReadOnlyMarker:
             content = m.get("content", "")
             if "HISTORY_READ_ONLY" in content:
                 marker_idx = i
-            if "COMPLETED SUMMARY" in content:
+            if "SESSION_CONTEXT_READ_ONLY" in content:
                 summary_idx = i
         assert marker_idx is not None, "HISTORY_READ_ONLY marker missing"
         assert summary_idx is not None, "Summary missing"

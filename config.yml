@@ -49,6 +49,9 @@ sessions:
   # Archives are kept indefinitely; pruned oldest-first only past these caps
   archive_max_bytes: 2147483648
   archive_max_files: 10000
+  # Max estimated tokens of session history per LLM request (per-channel
+  # overrides: context_budget_overrides: {"<channel_id>": 131072})
+  context_token_budget: 64000
 
 tools:
   enabled: true
@@ -85,6 +88,7 @@ learning:
   enabled: true
   max_entries: 150
   consolidation_target: 120
+  injection_token_budget: 4000
 
 search:
   enabled: true

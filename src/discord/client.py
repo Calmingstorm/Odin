@@ -268,8 +268,6 @@ class OdinBot(commands.Bot):
         self._memory_cache: dict[str | None, tuple[float, dict[str, str]]] = {}
         self._memory_cache_ttl: float = 60.0  # seconds
         # TTL cache for reflector prompt section (avoids file I/O per message)
-        self._reflector_cache: dict[str | None, tuple[float, str]] = {}
-        self._reflector_cache_ttl: float = 60.0  # seconds
         # Throttled cache cleanup
         self._last_cache_cleanup: float = 0.0
         self._cache_cleanup_interval: float = 300.0  # every 5 minutes
@@ -281,6 +279,7 @@ class OdinBot(commands.Bot):
             learned_path="./data/learned.json",
             max_entries=config.learning.max_entries,
             consolidation_target=config.learning.consolidation_target,
+            injection_token_budget=config.learning.injection_token_budget,
             enabled=config.learning.enabled,
         )
 
@@ -331,6 +330,8 @@ class OdinBot(commands.Bot):
             adaptive_compaction=config.sessions.adaptive_compaction,
             archive_max_bytes=config.sessions.archive_max_bytes,
             archive_max_files=config.sessions.archive_max_files,
+            context_token_budget=config.sessions.context_token_budget,
+            context_budget_overrides=config.sessions.context_budget_overrides,
         )
         self.sessions.load()
 
@@ -868,24 +869,23 @@ class OdinBot(commands.Bot):
         self._memory_cache[user_id] = (now, memory)
         return memory
 
-    def _get_cached_reflector(self, user_id: str | None) -> str:
-        """Return cached reflector prompt section with TTL to avoid file I/O per message."""
+    def _get_reflector_section(self, user_id: str | None, query: str | None = None) -> str:
+        """Learned Context for the prompt — query-aware relevance selection.
+
+        File parsing is mtime-cached inside the reflector, so calling per
+        message is cheap; selection math is microseconds over <=150 entries.
+        """
         if not hasattr(self, "reflector"):
             return ""
-        now = time.time()
-        cached = self._reflector_cache.get(user_id)
-        if cached and now - cached[0] < self._reflector_cache_ttl:
-            return cached[1]
-        learned = self.reflector.get_prompt_section(user_id=user_id)
-        self._reflector_cache[user_id] = (now, learned)
-        return learned
+        return self.reflector.get_prompt_section(user_id=user_id, query=query)
 
     def _invalidate_prompt_caches(self) -> None:
         """Invalidate all prompt-related caches. Called on config/context reload."""
         self._cached_hosts = None
         self._cached_skills_text = None
         self._memory_cache.clear()
-        self._reflector_cache.clear()
+        if hasattr(self, "reflector"):
+            self.reflector.invalidate_cache()
 
     def _invoke_skill_missing_required(self, name: str, payload: dict) -> list[str]:
         """Return required input fields the payload omits, or [] if complete.
@@ -1016,8 +1016,9 @@ class OdinBot(commands.Bot):
             memory_text = "\n".join(f"- **{k}**: {v}" for k, v in memory.items())
             prompt += f"\n\n## Persistent Memory\n{memory_text}"
 
-        # Inject learned context from cross-conversation reflection (per-user filtered)
-        learned = self._get_cached_reflector(user_id)
+        # Inject learned context from cross-conversation reflection
+        # (per-user filtered, relevance-ranked against the current query)
+        learned = self._get_reflector_section(user_id, query)
         if learned:
             prompt += f"\n\n{learned}"
 
@@ -1080,6 +1081,7 @@ class OdinBot(commands.Bot):
     def _build_chat_system_prompt(
         self, channel: discord.abc.GuildChannel | None = None,
         user_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         """Build a lightweight system prompt for chat-routed messages.
 
@@ -1114,8 +1116,8 @@ class OdinBot(commands.Bot):
             memory_text = "\n".join(f"- **{k}**: {v}" for k, v in memory.items())
             prompt += f"\n\n## Persistent Memory\n{memory_text}"
 
-        # Inject learned context (per-user filtered, personality from past conversations)
-        learned = self._get_cached_reflector(user_id)
+        # Inject learned context (per-user filtered, relevance-ranked)
+        learned = self._get_reflector_section(user_id, query)
         if learned:
             prompt += f"\n\n{learned}"
 
@@ -1169,11 +1171,6 @@ class OdinBot(commands.Bot):
         ttl = getattr(self, "_memory_cache_ttl", 60.0)
         self._memory_cache = {
             k: v for k, v in getattr(self, "_memory_cache", {}).items()
-            if now - v[0] < ttl
-        }
-        ttl = getattr(self, "_reflector_cache_ttl", 60.0)
-        self._reflector_cache = {
-            k: v for k, v in getattr(self, "_reflector_cache", {}).items()
             if now - v[0] < ttl
         }
 
@@ -2240,7 +2237,7 @@ class OdinBot(commands.Bot):
                         }
                     log.info("Attached %d image(s) to message for Claude vision", len(image_blocks))
                 if self.llm_client:
-                    chat_prompt = self._build_chat_system_prompt(channel=message.channel, user_id=user_id)
+                    chat_prompt = self._build_chat_system_prompt(channel=message.channel, user_id=user_id, query=content)
                     try:
                         response = await self.llm_client.chat(
                             messages=history,
@@ -2274,7 +2271,7 @@ class OdinBot(commands.Bot):
                 # Pass current message content for relevance scoring —
                 # older messages unrelated to the current query are dropped
                 task_history = await self.sessions.get_task_history(
-                    channel_id, max_messages=40, current_query=content,
+                    channel_id, max_messages=160, current_query=content,
                 )
                 if image_blocks and task_history and task_history[-1]["role"] == "user":
                     last = task_history[-1]
@@ -2301,7 +2298,7 @@ class OdinBot(commands.Bot):
                 if handoff and self.llm_client and not is_error:
                     log.info("Skill handoff to Codex for response")
                     _skill_response = response  # Save before overwriting
-                    chat_prompt = self._build_chat_system_prompt(channel=message.channel, user_id=user_id)
+                    chat_prompt = self._build_chat_system_prompt(channel=message.channel, user_id=user_id, query=content)
                     # Fetch full history for handoff (compaction already ran in get_task_history)
                     history = self.sessions.get_history(channel_id)
                     codex_messages = list(history) + [

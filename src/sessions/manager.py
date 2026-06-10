@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from ..llm.cost_tracker import estimate_tokens
 from ..odin_log import get_logger
+from ..relevance import rank as relevance_rank, score as relevance_score, tokenize as _tokenize
 if TYPE_CHECKING:
     from ..learning.reflector import ConversationReflector
     from ..search.embedder import LocalEmbedder
@@ -47,9 +48,9 @@ MAX_STORED_SEGMENTS = 100     # per-session cap on stored segments (oldest dropp
 KEEP_TAIL_MIN = 20            # always retain at least this many raw recent messages
 
 # Relevance scoring constants
-RELEVANCE_KEEP_RECENT = 5  # always include the most recent N messages
-RELEVANCE_MIN_SCORE = 0.10  # minimum overlap score to include an older message
-RELEVANCE_MAX_OLDER = 10  # max older messages to include beyond recent window
+RELEVANCE_KEEP_RECENT = 12  # always include the most recent N messages
+RELEVANCE_MIN_SCORE = 0.08  # minimum overlap score to include an older message
+RELEVANCE_MAX_OLDER = 40  # max older messages to include beyond recent window
 
 # Tool output summarization constants. These cap what the bot REMEMBERS of
 # its own responses after an operation ends (the user always sees the full
@@ -60,29 +61,13 @@ TOOL_SUMMARY_THRESHOLD = 10  # summarize when this many tool calls occurred
 TOOL_SUMMARY_MAX_CHARS = 2000  # max chars for summarized tool response in history
 CHAT_RESPONSE_MAX_CHARS = 4000  # max chars for text-only (no-tool) response in history
 
-# Context budget constants
-CONTEXT_TOKEN_BUDGET = 16000  # max estimated tokens for history sent to LLM
-BUDGET_KEEP_RECENT = 5  # always keep the most recent N messages regardless of budget
+# Context budget constants. The send budget is configurable
+# (sessions.context_token_budget, per-channel overrides) — this is the default.
+CONTEXT_TOKEN_BUDGET = 64_000  # max estimated tokens for history sent to LLM
+BUDGET_KEEP_RECENT = 12  # always keep the most recent N messages regardless of budget
 
 # Session token budget — auto-compact when a session's estimated tokens exceed this
 DEFAULT_SESSION_TOKEN_BUDGET = 256_000
-
-# Common stop words to ignore when scoring relevance
-_STOP_WORDS = frozenset({
-    "a", "an", "the", "is", "it", "in", "on", "to", "of", "and", "or",
-    "for", "that", "this", "with", "was", "are", "be", "has", "have",
-    "had", "do", "does", "did", "but", "not", "you", "i", "me", "my",
-    "we", "he", "she", "they", "what", "how", "can", "will", "just",
-    "so", "if", "no", "yes", "at", "by", "from", "up", "out", "as",
-})
-
-_TOKEN_RE = re.compile(r"[a-z0-9_./:-]+")
-
-
-def _tokenize(text: str) -> set[str]:
-    """Extract meaningful lowercase tokens from text, filtering stop words."""
-    return {t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOP_WORDS and len(t) > 1}
-
 
 _IMPERATIVE_RE = re.compile(
     r"^(?:run|execute|restart|deploy|check|install|update|delete|create|stop|start|kill|push|merge|build)\s+",
@@ -155,19 +140,12 @@ def adaptive_keep_ratio(rate: float) -> float:
 
 
 def score_relevance(query: str, message_content: str) -> float:
-    """Score how relevant a message is to the current query.
+    """Score how relevant a message is to the current query (0.0-1.0).
 
-    Returns a float between 0.0 and 1.0 based on keyword overlap.
-    Uses Jaccard-like scoring: |intersection| / |query_tokens|.
+    Thin alias over the shared relevance module so all memory surfaces
+    rank with one implementation.
     """
-    query_tokens = _tokenize(query)
-    if not query_tokens:
-        return 0.0
-    msg_tokens = _tokenize(message_content)
-    if not msg_tokens:
-        return 0.0
-    overlap = query_tokens & msg_tokens
-    return len(overlap) / len(query_tokens)
+    return relevance_score(query, message_content)
 
 
 def summarize_tool_response(
@@ -238,7 +216,7 @@ def summarize_tool_response(
 
 
 _SUMMARY_PREFIX = "[Previous conversation summary:"
-_PROTECTED_PREFIXES = ("[HISTORY_READ_ONLY]", "[COMPLETED SUMMARY]", _SUMMARY_PREFIX)
+_PROTECTED_PREFIXES = ("[HISTORY_READ_ONLY]", "[SESSION_CONTEXT_READ_ONLY]", _SUMMARY_PREFIX)
 
 
 def _content_text(m: dict) -> str:
@@ -277,7 +255,7 @@ def apply_token_budget(
     protected_count = 0
     for m in older:
         text = _content_text(m)
-        if any(text.startswith(p) for p in _PROTECTED_PREFIXES) or text == "Understood, I have context from our previous conversation.":
+        if any(text.startswith(p) for p in _PROTECTED_PREFIXES) or text == "Understood, I have context from our previous conversation.":  # legacy pair tolerated in flight
             protected_count += 1
         else:
             break
@@ -367,6 +345,8 @@ class SessionManager:
         adaptive_compaction: bool = True,
         archive_max_bytes: int = 2 * 1024**3,
         archive_max_files: int = 10_000,
+        context_token_budget: int = CONTEXT_TOKEN_BUDGET,
+        context_budget_overrides: dict[str, int] | None = None,
     ) -> None:
         self.max_history = max_history
         self.max_age_seconds = max_age_hours * 3600
@@ -376,6 +356,8 @@ class SessionManager:
         self.adaptive_compaction = adaptive_compaction
         self.archive_max_bytes = archive_max_bytes
         self.archive_max_files = archive_max_files
+        self.context_token_budget = context_token_budget
+        self.context_budget_overrides = context_budget_overrides or {}
         self._sessions: dict[str, Session] = {}
         self._dirty: set[str] = set()
         self._reflector = reflector
@@ -476,13 +458,38 @@ class SessionManager:
         return False
 
     @staticmethod
-    def _render_context_summary(session: Session, max_segments: int = 5) -> str:
-        """Render prior-context text from the legacy summary and/or the most
-        recent summary segments (chronological), for prompt injection."""
+    def _render_context_summary(
+        session: Session, query: str | None = None, max_segments: int = 5,
+    ) -> str:
+        """Render prior-context text from the legacy summary and/or summary
+        segments for prompt injection.
+
+        The newest segment is always included (it is the immediate past);
+        when a *query* is given, the remaining slots go to the most relevant
+        older segments instead of simple recency. Rendering stays
+        chronological regardless of how segments were selected.
+        """
         parts: list[str] = []
         if session.summary:
             parts.append(session.summary)
-        for seg in session.summary_segments[-max_segments:]:
+        segments = session.summary_segments
+        if not query or len(segments) <= max_segments:
+            selected = segments[-max_segments:]
+        else:
+            newest = segments[-1]
+            older = segments[:-1]
+            ranked = relevance_rank(
+                query, list(reversed(older)),
+                lambda s: " ".join([
+                    s.get("summary", ""),
+                    " ".join(s.get("topics", [])),
+                    " ".join(s.get("entities", [])),
+                ]),
+                top_k=max_segments - 1,
+            )
+            chosen = {id(s) for s in ranked}
+            selected = [s for s in older if id(s) in chosen] + [newest]
+        for seg in selected:
             text = seg.get("summary", "")
             if not text:
                 continue
@@ -637,20 +644,22 @@ class SessionManager:
 
         messages = [{"role": m.role, "content": m.content} for m in filtered]
 
-        # Prepend prior-context summary if available
-        context_summary = self._render_context_summary(session)
+        # Prepend prior-context summaries as a read-only developer block —
+        # NOT as fake user/assistant dialogue, which polluted the transcript
+        # with turns nobody actually said.
+        context_summary = self._render_context_summary(session, query=current_query)
         if context_summary:
             sanitized = _sanitize_summary(context_summary)
             messages.insert(0, {
-                "role": "user",
-                "content": f"[COMPLETED SUMMARY] {sanitized}",
-            })
-            messages.insert(1, {
-                "role": "assistant",
-                "content": "Understood, I have context from our previous conversation.",
+                "role": "developer",
+                "content": (
+                    "[SESSION_CONTEXT_READ_ONLY]\n"
+                    "Summaries of earlier completed conversation (context, not pending work):\n"
+                    f"{sanitized}"
+                ),
             })
 
-        # Mark ALL history (including summary) as read-only — must be first
+        # Mark ALL history (including summaries) as read-only — must be first
         if len(messages) > 1:
             messages.insert(0, {
                 "role": "developer",
@@ -661,8 +670,11 @@ class SessionManager:
                 ),
             })
 
-        # Enforce token budget — drop oldest first, keep recent BUDGET_KEEP_RECENT
-        messages, budget_dropped = apply_token_budget(messages)
+        # Enforce the send budget — drop oldest first, keep recent
+        # BUDGET_KEEP_RECENT. Per-channel overrides allow hot ops channels
+        # to run with a larger window than the default.
+        budget = self.context_budget_overrides.get(channel_id, self.context_token_budget)
+        messages, budget_dropped = apply_token_budget(messages, budget=budget)
         if budget_dropped > 0:
             log.info(
                 "Token budget: dropped %d message(s) for channel %s",

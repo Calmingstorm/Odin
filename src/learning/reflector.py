@@ -104,16 +104,20 @@ class ConversationReflector:
         self,
         learned_path: str,
         *,
-        max_entries: int = 30,
-        consolidation_target: int = 20,
+        max_entries: int = 150,
+        consolidation_target: int = 120,
+        injection_token_budget: int = 4000,
         enabled: bool = True,
     ) -> None:
         self._path = Path(learned_path)
         self._lock = asyncio.Lock()
         self._max_entries = max_entries
         self._consolidation_target = consolidation_target
+        self._injection_token_budget = injection_token_budget
         self._enabled = enabled
         self._text_fn: TextFn | None = None
+        self._injection_cache: tuple[float, dict] | None = None
+        self._use_stamps: dict[str, str] = {}
 
     def set_text_fn(self, fn: TextFn) -> None:
         """Register an async callable for LLM text generation.
@@ -206,14 +210,51 @@ class ConversationReflector:
                 return e
         return None
 
-    def get_prompt_section(self, user_id: str | None = None) -> str:
+    # Injection selection caps, applied only when the corpus exceeds the
+    # token budget. Corrections and the requester's preferences are pinned;
+    # operational/fact entries compete on relevance to the current query.
+    _PIN_CORRECTIONS_CAP = 30
+    _PIN_PREFERENCES_CAP = 25
+    _OPERATIONAL_TOP_K = 12
+    _FACTS_TOP_K = 5
+
+    def _read_for_injection(self) -> dict:
+        """mtime-cached read for the hot injection path.
+
+        Write paths always use _load() directly for fresh data; this cache
+        only avoids re-parsing the file on every message.
+        """
+        try:
+            mtime = self._path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        cached = getattr(self, "_injection_cache", None)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        data = self._load()
+        self._injection_cache = (mtime, data)
+        return data
+
+    def invalidate_cache(self) -> None:
+        self._injection_cache = None
+
+    def get_prompt_section(
+        self, user_id: str | None = None, query: str | None = None,
+    ) -> str:
         """Format learned entries for injection into the system prompt.
 
-        If *user_id* is provided, includes global entries (no user_id) plus
-        entries tagged for that specific user.  Entries tagged for *other*
-        users are excluded.
+        Scope: global entries plus entries tagged for *user_id*; other
+        users' entries are excluded.
+
+        Selection: when the whole scoped corpus fits the injection token
+        budget, ALL of it is included — relevance gating only engages when
+        the corpus outgrows the budget. Gated selection pins corrections
+        and the requester's preferences, then fills with the operational
+        and fact entries most relevant to *query*.
         """
-        data = self._load()
+        from ..relevance import rank as relevance_rank
+
+        data = self._read_for_injection()
         entries = data.get("entries", [])
         if not entries:
             return ""
@@ -229,8 +270,63 @@ class ConversationReflector:
             # else: entry belongs to another user — skip
         if not filtered:
             return ""
-        lines = [f"- [{e['category']}] {e['content']}" for e in filtered]
+
+        def fmt(e: dict) -> str:
+            return f"- [{e['category']}] {e['content']}"
+
+        total_tokens = sum(len(fmt(e)) for e in filtered) // 4
+        if total_tokens <= self._injection_token_budget or not query:
+            selected = filtered
+        else:
+            def entry_text(e: dict) -> str:
+                return " ".join([
+                    e.get("content", ""), e.get("topic", ""),
+                    " ".join(e.get("tags", [])), e.get("key", ""),
+                ])
+
+            corrections = [e for e in filtered if e["category"] == "correction"]
+            corrections = corrections[-self._PIN_CORRECTIONS_CAP:]
+            preferences = [e for e in filtered if e["category"] == "preference"]
+            preferences = preferences[-self._PIN_PREFERENCES_CAP:]
+            operational = relevance_rank(
+                query,
+                [e for e in filtered if e["category"] == "operational"],
+                entry_text, top_k=self._OPERATIONAL_TOP_K,
+            )
+            facts = relevance_rank(
+                query,
+                [e for e in filtered if e["category"] == "fact"],
+                entry_text, top_k=self._FACTS_TOP_K,
+            )
+            # Preserve original corpus order for stable prompts
+            chosen = {id(e) for e in (*corrections, *preferences, *operational, *facts)}
+            selected = [e for e in filtered if id(e) in chosen]
+            log.debug(
+                "Learned injection gated: %d/%d entries selected",
+                len(selected), len(filtered),
+            )
+
+        self._note_used(selected)
+        lines = [fmt(e) for e in selected]
         return "## Learned Context\n" + "\n".join(lines)
+
+    def _note_used(self, entries: list[dict]) -> None:
+        """Record injection usage in memory; persisted opportunistically by
+        the next locked write (merge/consolidation). last_used_at only feeds
+        the 180-day staleness window, so eventual persistence is fine."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for e in entries:
+            self._use_stamps[e.get("key", "")] = now
+
+    def _apply_use_stamps(self, entries: list[dict]) -> None:
+        """Fold pending in-memory usage stamps into entries (call under lock)."""
+        if not self._use_stamps:
+            return
+        for e in entries:
+            stamp = self._use_stamps.get(e.get("key", ""))
+            if stamp:
+                e["last_used_at"] = stamp
+        self._use_stamps.clear()
 
     async def reflect_on_operation(
         self,
@@ -320,12 +416,14 @@ class ConversationReflector:
             async with self._lock:
                 data = await asyncio.to_thread(self._load)
                 existing = data.get("entries", [])
+                self._apply_use_stamps(existing)
                 merged = self._merge_entries(existing, new_entries)
                 if len(merged) > self._max_entries:
                     merged = await self._consolidate(merged)
                 data["entries"] = merged
                 data["last_reflection"] = datetime.now(timezone.utc).isoformat()
                 await asyncio.to_thread(self._save, data)
+                self.invalidate_cache()
                 log.info("Operational reflection: %d new entries merged", len(new_entries))
         except Exception as e:
             log.error("Operational reflection failed: %s", e)
@@ -450,6 +548,7 @@ class ConversationReflector:
                     # If it didn't and we have multiple users, leave untagged (global)
                 # operational and fact entries stay global (no user_id)
 
+            self._apply_use_stamps(existing)
             merged = self._merge_entries(existing, new_entries)
 
             # Consolidate if over limit
@@ -459,6 +558,7 @@ class ConversationReflector:
             data["entries"] = merged
             data["last_reflection"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             await asyncio.to_thread(self._save, data)
+            self.invalidate_cache()
             log.info(
                 "Reflection complete: %d new insights, %d total entries",
                 len(new_entries), len(merged),
