@@ -3,6 +3,9 @@
  * Live agent status cards with real-time updates, tool usage, kill controls
  */
 import { api } from '../api.js';
+import { toast } from '../toast.js';
+import { confirmDialog } from '../confirm.js';
+import { formatTs, formatDuration } from '../utils.js';
 
 const { ref, computed, onMounted, onUnmounted } = Vue;
 
@@ -16,7 +19,7 @@ export default {
             <input type="checkbox" v-model="autoRefresh" class="ag-checkbox" />
             Auto-refresh
           </label>
-          <button @click="fetchAgents" class="btn btn-ghost text-xs" :disabled="loading">
+          <button @click="fetchAgents()" class="btn btn-ghost text-xs" :disabled="loading">
             {{ loading ? 'Loading...' : 'Refresh' }}
           </button>
         </div>
@@ -60,7 +63,7 @@ export default {
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
         <span class="error-icon" aria-hidden="true">\u26A0</span>
         <p class="text-red-400">{{ error }}</p>
-        <button @click="fetchAgents" class="btn btn-ghost text-xs">Retry</button>
+        <button @click="fetchAgents()" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="agents.length === 0" class="hm-card empty-state">
         <span class="empty-state-icon">\u{1F916}</span>
@@ -98,7 +101,7 @@ export default {
             </div>
             <div class="ag-card-stat">
               <span class="ag-card-stat-label">Runtime</span>
-              <span class="ag-card-stat-value">{{ formatRuntime(agent.runtime_seconds) }}</span>
+              <span class="ag-card-stat-value">{{ formatDuration(agent.runtime_seconds) }}</span>
             </div>
             <div class="ag-card-stat">
               <span class="ag-card-stat-label">Tools</span>
@@ -117,7 +120,7 @@ export default {
               by {{ agent.requester_name }}
             </span>
             <span v-if="agent.created_at" class="text-gray-600 text-xs">
-              {{ formatDate(agent.created_at) }}
+              {{ formatTs(agent.created_at) }}
             </span>
           </div>
 
@@ -170,45 +173,41 @@ export default {
       return agents.value.filter(a => a.status === statusFilter.value);
     });
 
-    function formatRuntime(seconds) {
-      if (!seconds && seconds !== 0) return '—';
-      if (seconds < 60) return `${Math.round(seconds)}s`;
-      const mins = Math.floor(seconds / 60);
-      const secs = Math.round(seconds % 60);
-      return `${mins}m ${secs}s`;
-    }
-
-    function formatDate(ts) {
-      if (!ts) return '';
-      try {
-        const d = new Date(ts * 1000);
-        return d.toLocaleString();
-      } catch { return ''; }
-    }
-
     function progressPercent(agent) {
       const max = 30;
       return Math.min(100, Math.round((agent.iteration_count / max) * 100));
     }
 
-    async function fetchAgents() {
-      loading.value = true;
-      error.value = null;
+    async function fetchAgents(silent = false) {
+      silent = silent === true;
+      if (!silent) loading.value = true;
       try {
         const data = await api.get('/api/agents');
         agents.value = Array.isArray(data) ? data : [];
+        error.value = null;
       } catch (e) {
-        error.value = e.message;
+        if (!silent) error.value = e.message;
       }
-      loading.value = false;
+      if (!silent) loading.value = false;
     }
 
     async function killAgent(agentId) {
+      const agent = agents.value.find(a => a.id === agentId);
+      const ok = await confirmDialog({
+        title: 'Kill agent',
+        message: `Kill agent "${agent?.label || agentId}"? Its current work will be lost.`,
+        confirmLabel: 'Kill',
+        danger: true,
+      });
+      if (!ok) return;
       killing.value = agentId;
       try {
         await api.del(`/api/agents/${encodeURIComponent(agentId)}`);
+        toast.success('Agent killed');
         await fetchAgents();
-      } catch (e) { error.value = e.message || 'Failed to kill agent'; }
+      } catch (e) {
+        toast.error(e.message || 'Failed to kill agent');
+      }
       killing.value = null;
     }
 
@@ -217,7 +216,7 @@ export default {
       if (autoRefresh.value) {
         refreshInterval = setInterval(() => {
           if (autoRefresh.value && runningCount.value > 0) {
-            fetchAgents();
+            fetchAgents(true);
           }
         }, 5000);
       }
@@ -243,7 +242,7 @@ export default {
       agents, loading, error, killing, autoRefresh, statusFilter,
       runningCount, completedCount, failedCount,
       statusFilters, filteredAgents,
-      formatRuntime, formatDate, progressPercent,
+      formatTs, formatDuration, progressPercent,
       fetchAgents, killAgent, startAutoRefresh, stopAutoRefresh,
     };
   },

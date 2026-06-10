@@ -4,6 +4,7 @@
  * risk stats, recovery stats, freshness stats, context compression, model routing.
  */
 import { api } from '../api.js';
+import { formatTime } from '../utils.js';
 
 const { ref, onMounted, onUnmounted } = Vue;
 
@@ -60,7 +61,7 @@ export default {
               </div>
               <div class="text-xs text-gray-500 mt-1">
                 {{ s.total_successes || 0 }} ok / {{ s.total_failures || 0 }} fail
-                <span v-if="s.last_failure_at"> &mdash; last fail: {{ shortTime(s.last_failure_at) }}</span>
+                <span v-if="s.last_failure_at"> &mdash; last fail: {{ formatTime(s.last_failure_at) }}</span>
               </div>
             </div>
           </div>
@@ -188,11 +189,6 @@ export default {
     const governorStats = ref(null);
     let timer = null;
 
-    function shortTime(iso) {
-      if (!iso) return '';
-      try { return new Date(iso).toLocaleTimeString(); } catch { return iso; }
-    }
-
     async function fetchAll() {
       const results = await Promise.allSettled([
         api.get('/api/startup/diagnostics'),
@@ -230,7 +226,7 @@ export default {
     return {
       loading, startup, subsystems, sshPool, httpPool,
       riskStats, recoveryStats, compressionStats, routingStats, freshnessStats,
-      governorStats, statusColor, shortTime,
+      governorStats, statusColor, formatTime,
     };
   },
 };

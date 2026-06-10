@@ -1,4 +1,6 @@
 import { api } from '../api.js';
+import { toast } from '../toast.js';
+import { confirmDialog } from '../confirm.js';
 
 const { ref, computed, onMounted, nextTick } = Vue;
 
@@ -145,11 +147,6 @@ export default {
         </div>
       </div>
 
-      <!-- Status toast -->
-      <div v-if="toast" class="fixed bottom-6 right-6 px-4 py-2 rounded text-sm shadow-lg z-50"
-           :class="toast.type === 'error' ? 'bg-red-900 text-red-200' : 'bg-green-900 text-green-200'">
-        {{ toast.message }}
-      </div>
     </div>
   `,
 
@@ -164,16 +161,8 @@ export default {
     const searchQuery = ref('');
     const showDropdown = ref(false);
     const highlightIdx = ref(0);
-    const toast = ref(null);
     const members = ref([]);
     const searchInput = ref(null);
-
-    let toastTimer = null;
-    function showToast(message, type = 'success') {
-      toast.value = { message, type };
-      clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => { toast.value = null; }, 3000);
-    }
 
     const membersById = computed(() => {
       const map = {};
@@ -239,9 +228,9 @@ export default {
           allowed_hosts: hosts,
           default_host: defaultPolicy.value.default_host,
         });
-        showToast('Default policy updated');
+        toast.success('Default policy updated');
       } catch (e) {
-        showToast(e.message || 'Failed to save', 'error');
+        toast.error(e.message || 'Failed to save');
       }
     }
 
@@ -268,9 +257,9 @@ export default {
           default_host: entry.default_host,
         });
         const m = getMember(uid);
-        showToast(`Updated access for ${m ? m.display_name : uid}`);
+        toast.success(`Updated access for ${m ? m.display_name : uid}`);
       } catch (e) {
-        showToast(e.message || 'Failed to save', 'error');
+        toast.error(e.message || 'Failed to save');
       }
     }
 
@@ -349,13 +338,20 @@ export default {
     }
 
     async function deleteUser(uid) {
+      const m = getMember(uid);
+      const ok = await confirmDialog({
+        title: 'Remove user override',
+        message: `Remove the host access override for ${m ? m.display_name : uid}? They will fall back to the default policy.`,
+        confirmLabel: 'Remove',
+        danger: true,
+      });
+      if (!ok) return;
       try {
         await api.del(`/api/host-access/user/${uid}`);
         delete users.value[uid];
-        const m = getMember(uid);
-        showToast(`Removed override for ${m ? m.display_name : uid}`);
+        toast.success(`Removed override for ${m ? m.display_name : uid}`);
       } catch (e) {
-        showToast(e.message || 'Failed to delete', 'error');
+        toast.error(e.message || 'Failed to delete');
       }
     }
 
@@ -363,7 +359,7 @@ export default {
 
     return {
       loading, error, data, availableHosts, defaultPolicy, users,
-      showAddUser, searchQuery, showDropdown, highlightIdx, toast,
+      showAddUser, searchQuery, showDropdown, highlightIdx,
       members, filteredMembers, isRawId, searchInput,
       fetchData, saveDefaultPolicy, toggleDefaultHost, getMember,
       toggleUserHost, setUserDefault, openAddUser, deleteUser,

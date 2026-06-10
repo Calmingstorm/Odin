@@ -2,6 +2,9 @@
  * Learned Context page — view and manage reflector entries.
  */
 import { api } from '../api.js';
+import { toast } from '../toast.js';
+import { confirmDialog } from '../confirm.js';
+import { formatTs } from '../utils.js';
 
 const { ref, computed, onMounted } = Vue;
 
@@ -12,7 +15,7 @@ export default {
         <div>
           <h1 class="text-xl font-semibold">Learned Context</h1>
           <p class="text-xs text-gray-500 mt-1" v-if="meta">
-            {{ entries.length }} entries | Last reflection: {{ formatTime(meta.last_reflection) }}
+            {{ entries.length }} entries | Last reflection: {{ formatTs(meta.last_reflection) }}
           </p>
         </div>
         <button @click="fetchEntries" class="btn btn-ghost text-xs" :disabled="loading">
@@ -63,8 +66,8 @@ export default {
               </div>
               <p v-else class="text-sm text-gray-300 mt-1">{{ entry.content }}</p>
               <div class="text-xs text-gray-600 mt-1">
-                Created: {{ formatTime(entry.created_at) }}
-                <span v-if="entry.updated_at !== entry.created_at"> | Updated: {{ formatTime(entry.updated_at) }}</span>
+                Created: {{ formatTs(entry.created_at) }}
+                <span v-if="entry.updated_at !== entry.created_at"> | Updated: {{ formatTs(entry.updated_at) }}</span>
               </div>
             </div>
             <div class="flex gap-1 shrink-0">
@@ -109,14 +112,6 @@ export default {
       return 'badge-info';
     }
 
-    function formatTime(ts) {
-      if (!ts) return '—';
-      try {
-        const d = new Date(ts);
-        return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-      } catch { return ts; }
-    }
-
     function startEdit(entry) {
       editing.value = entry.key;
       editContent.value = entry.content;
@@ -126,18 +121,27 @@ export default {
       try {
         await api.put('/api/learned/' + encodeURIComponent(key), { content: editContent.value });
         editing.value = null;
+        toast.success('Entry updated');
         await fetchEntries();
       } catch (e) {
-        error.value = e.message;
+        toast.error(e.message || 'Failed to save entry');
       }
     }
 
     async function deleteEntry(key) {
+      const ok = await confirmDialog({
+        title: 'Delete learned entry',
+        message: `Delete "${key}"? Odin will no longer apply this learned context.`,
+        confirmLabel: 'Delete',
+        danger: true,
+      });
+      if (!ok) return;
       try {
         await api.del('/api/learned/' + encodeURIComponent(key));
+        toast.success('Entry deleted');
         await fetchEntries();
       } catch (e) {
-        error.value = e.message;
+        toast.error(e.message || 'Failed to delete entry');
       }
     }
 
@@ -159,7 +163,7 @@ export default {
     return {
       entries, meta, loading, error, filterCat, editing, editContent,
       categories, catCounts, filtered,
-      catBadge, formatTime, startEdit, saveEdit, deleteEntry, fetchEntries,
+      catBadge, formatTs, startEdit, saveEdit, deleteEntry, fetchEntries,
     };
   },
 };

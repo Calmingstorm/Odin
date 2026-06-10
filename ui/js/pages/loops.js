@@ -3,6 +3,9 @@
  * View/start/stop autonomous loops, view iteration history
  */
 import { api, ws } from '../api.js';
+import { toast } from '../toast.js';
+import { confirmDialog } from '../confirm.js';
+import { formatAge, formatDuration } from '../utils.js';
 
 const { ref, computed, onMounted, onUnmounted } = Vue;
 
@@ -15,7 +18,7 @@ export default {
           <button @click="showCreate = !showCreate" class="btn btn-primary text-xs">
             {{ showCreate ? 'Cancel' : 'Start Loop' }}
           </button>
-          <button @click="fetchLoops" class="btn btn-ghost text-xs" :disabled="loading">
+          <button @click="fetchLoops()" class="btn btn-ghost text-xs" :disabled="loading">
             {{ loading ? 'Loading...' : 'Refresh' }}
           </button>
         </div>
@@ -66,7 +69,6 @@ export default {
         </div>
 
         <div v-if="createError" class="mb-3 text-red-400 text-sm">{{ createError }}</div>
-        <div v-if="createSuccess" class="mb-3 text-green-400 text-sm">{{ createSuccess }}</div>
 
         <button @click="doCreate" class="btn btn-primary text-xs" :disabled="creating">
           {{ creating ? 'Starting...' : 'Start Loop' }}
@@ -80,7 +82,7 @@ export default {
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
         <span class="error-icon" aria-hidden="true">\u26A0</span>
         <p class="text-red-400">{{ error }}</p>
-        <button @click="fetchLoops" class="btn btn-ghost text-xs">Retry</button>
+        <button @click="fetchLoops()" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="loops.length === 0 && !showCreate" class="hm-card empty-state">
         <span class="empty-state-icon">\u{1F504}</span>
@@ -121,7 +123,10 @@ export default {
                   {{ restartingId === loop.id ? 'Restarting...' : 'Restart' }}
                 </button>
                 <button v-if="loop.status === 'running'"
-                        @click="confirmStop(loop.id)" class="btn btn-danger text-xs">Stop</button>
+                        @click="doStop(loop.id)" class="btn btn-danger text-xs"
+                        :disabled="stoppingId === loop.id">
+                  {{ stoppingId === loop.id ? 'Stopping...' : 'Stop' }}
+                </button>
               </div>
             </div>
 
@@ -130,7 +135,7 @@ export default {
             <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-gray-400">
               <div>
                 <span class="text-gray-500">Interval:</span>
-                {{ formatInterval(loop.interval_seconds) }}
+                {{ formatDuration(loop.interval_seconds) }}
               </div>
               <div>
                 <span class="text-gray-500">Iterations:</span>
@@ -175,22 +180,6 @@ export default {
         </div>
       </div>
 
-      <!-- Stop confirmation -->
-      <div v-if="stopTarget" class="modal-overlay" @click.self="stopTarget = null" role="dialog" aria-modal="true" aria-labelledby="loop-stop-title">
-        <div class="modal-content">
-          <h3 id="loop-stop-title" class="text-lg font-semibold mb-2">Stop Loop</h3>
-          <p class="text-gray-400 text-sm mb-4">
-            Stop loop <span class="font-mono font-semibold text-gray-200">{{ stopTarget }}</span>?
-            The current iteration will finish before stopping.
-          </p>
-          <div class="flex gap-2 justify-end">
-            <button @click="stopTarget = null" class="btn btn-ghost">Cancel</button>
-            <button @click="doStop" class="btn btn-danger" :disabled="stopping">
-              {{ stopping ? 'Stopping...' : 'Stop Loop' }}
-            </button>
-          </div>
-        </div>
-      </div>
     </div>`,
 
   setup() {
@@ -210,11 +199,9 @@ export default {
     });
     const creating = ref(false);
     const createError = ref(null);
-    const createSuccess = ref(null);
 
     // Stop
-    const stopTarget = ref(null);
-    const stopping = ref(false);
+    const stoppingId = ref(null);
 
     // Restart
     const restartingId = ref(null);
@@ -249,24 +236,6 @@ export default {
       return 'badge-success';
     }
 
-    function formatInterval(seconds) {
-      if (!seconds) return '-';
-      if (seconds < 60) return `${seconds}s`;
-      if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-      return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-    }
-
-    function formatAge(ts) {
-      if (!ts) return '-';
-      const now = Date.now() / 1000;
-      const t = typeof ts === 'number' ? ts : new Date(ts).getTime() / 1000;
-      const diff = now - t;
-      if (diff < 60) return 'just now';
-      if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-      if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-      return `${Math.floor(diff / 86400)}d ago`;
-    }
-
     function toggleHistory(loopId) {
       expandedHistory.value = {
         ...expandedHistory.value,
@@ -274,20 +243,20 @@ export default {
       };
     }
 
-    async function fetchLoops() {
-      loading.value = true;
-      error.value = null;
+    async function fetchLoops(silent = false) {
+      silent = silent === true;
+      if (!silent) loading.value = true;
       try {
         loops.value = await api.get('/api/loops');
+        error.value = null;
       } catch (e) {
-        error.value = e.message;
+        if (!silent) error.value = e.message;
       }
-      loading.value = false;
+      if (!silent) loading.value = false;
     }
 
     async function doCreate() {
       createError.value = null;
-      createSuccess.value = null;
       const f = form.value;
       if (!f.goal.trim()) { createError.value = 'Goal is required'; return; }
       if (!f.channel_id.trim()) { createError.value = 'Channel ID is required'; return; }
@@ -304,68 +273,82 @@ export default {
       creating.value = true;
       try {
         const result = await api.post('/api/loops', payload);
-        createSuccess.value = `Loop started: ${result.loop_id}`;
+        toast.success(`Loop started: ${result.loop_id}`);
         form.value = {
           goal: '', interval_seconds: 60, mode: 'notify',
           max_iterations: 50, stop_condition: '', channel_id: '',
         };
+        showCreate.value = false;
         await fetchLoops();
-        setTimeout(() => { showCreate.value = false; createSuccess.value = null; }, 800);
       } catch (e) {
         createError.value = e.message;
       }
       creating.value = false;
     }
 
-    function confirmStop(id) {
-      stopTarget.value = id;
-    }
-
-    async function doStop() {
-      if (!stopTarget.value) return;
-      stopping.value = true;
+    async function doStop(loopId) {
+      const ok = await confirmDialog({
+        title: 'Stop loop',
+        message: `Stop loop ${loopId}? The current iteration will finish before stopping.`,
+        confirmLabel: 'Stop Loop',
+        danger: true,
+      });
+      if (!ok) return;
+      stoppingId.value = loopId;
       try {
-        await api.del(`/api/loops/${encodeURIComponent(stopTarget.value)}`);
+        await api.del(`/api/loops/${encodeURIComponent(loopId)}`);
+        toast.success('Loop stopped');
         await fetchLoops();
-      } catch (e) { error.value = e.message || 'Failed to stop loop'; }
-      stopping.value = false;
-      stopTarget.value = null;
+      } catch (e) {
+        toast.error(e.message || 'Failed to stop loop');
+      }
+      stoppingId.value = null;
     }
 
     async function doRestart(loopId) {
       restartingId.value = loopId;
       try {
         await api.post(`/api/loops/${encodeURIComponent(loopId)}/restart`);
+        toast.success('Loop restarted');
         await fetchLoops();
-      } catch (e) { error.value = e.message || 'Failed to restart loop'; }
+      } catch (e) {
+        toast.error(e.message || 'Failed to restart loop');
+      }
       restartingId.value = null;
     }
 
     // WebSocket: refresh on loop events
     function onEvent(data) {
       if (data.payload && (data.payload.loop_id || data.payload.type === 'loop')) {
-        fetchLoops();
+        fetchLoops(true);
       }
     }
+
+    // Background poll so iteration counts stay current while loops run
+    let refreshInterval = null;
 
     onMounted(() => {
       fetchLoops();
       ws.subscribe('events', onEvent);
+      refreshInterval = setInterval(() => {
+        if (runningCount.value > 0) fetchLoops(true);
+      }, 5000);
     });
 
     onUnmounted(() => {
       ws.unsubscribe('events', onEvent);
+      if (refreshInterval) clearInterval(refreshInterval);
     });
 
     return {
       loops, loading, error,
-      showCreate, form, creating, createError, createSuccess,
-      stopTarget, stopping,
+      showCreate, form, creating, createError,
+      stoppingId,
       restartingId, expandedHistory,
       totalIterations, runningCount,
       statusDotClass, statusBadge, modeBadge,
-      formatInterval, formatAge, toggleHistory,
-      fetchLoops, doCreate, confirmStop, doStop, doRestart,
+      formatDuration, formatAge, toggleHistory,
+      fetchLoops, doCreate, doStop, doRestart,
     };
   },
 };

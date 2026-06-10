@@ -3,6 +3,7 @@
  * Displays LLM token usage and estimated cost per user, channel, and tool.
  */
 import { api } from '../api.js';
+import { fmtNum, formatTime } from '../utils.js';
 
 const { ref, computed, onMounted, onUnmounted } = Vue;
 
@@ -138,7 +139,7 @@ export default {
             </tr></thead>
             <tbody>
               <tr v-for="(r, i) in recentReversed" :key="i" class="border-t border-slate-700">
-                <td class="py-1 text-slate-400 text-xs">{{ fmtTime(r.timestamp) }}</td>
+                <td class="py-1 text-slate-400 text-xs">{{ formatTime(r.timestamp) }}</td>
                 <td class="py-1 text-slate-200 text-xs">{{ r.user_id || '-' }}</td>
                 <td class="py-1 text-right">{{ fmtNum(r.input_tokens) }}</td>
                 <td class="py-1 text-right">{{ fmtNum(r.output_tokens) }}</td>
@@ -178,16 +179,6 @@ export default {
       return [...(data.value.recent || [])].reverse();
     });
 
-    const fmtNum = (n) => {
-      if (n == null) return '0';
-      return n.toLocaleString();
-    };
-
-    const fmtTime = (ts) => {
-      if (!ts) return '-';
-      return new Date(ts * 1000).toLocaleTimeString();
-    };
-
     const fetchData = async () => {
       try {
         const resp = await api.get('/api/usage');
@@ -215,6 +206,6 @@ export default {
       if (timer) clearInterval(timer);
     });
 
-    return { loading, error, data, totals, activeTab, tabs, recentReversed, fmtNum, fmtTime, retry };
+    return { loading, error, data, totals, activeTab, tabs, recentReversed, fmtNum, formatTime, retry };
   }
 };

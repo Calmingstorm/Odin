@@ -1,4 +1,6 @@
 import { api } from '../api.js';
+import { toast } from '../toast.js';
+import { confirmDialog } from '../confirm.js';
 
 const { ref, computed, onMounted, nextTick } = Vue;
 
@@ -232,11 +234,6 @@ export default {
         </div>
       </div>
 
-      <!-- Toast -->
-      <div v-if="toast" class="fixed bottom-4 right-4 px-4 py-2 rounded shadow-lg text-sm z-50 transition-opacity"
-           :class="toast.ok ? 'bg-green-900 text-green-200' : 'bg-red-900 text-red-200'">
-        {{ toast.msg }}
-      </div>
     </div>
   `,
   setup() {
@@ -249,7 +246,6 @@ export default {
     const newToken = ref(null);
     const editing = ref(null);
     const saving = ref(false);
-    const toast = ref(null);
 
     const createForm = ref({
       user_id: '', username: '', tier: 'admin', label: '',
@@ -272,11 +268,6 @@ export default {
       if (editForm.value.host_mode === 'none') return [];
       return availableHosts.value;
     });
-
-    function showToast(msg, ok = true) {
-      toast.value = { msg, ok };
-      setTimeout(() => { toast.value = null; }, 3000);
-    }
 
     function tierBadge(tier) {
       if (tier === 'admin') return 'text-xs px-1.5 py-0.5 rounded bg-red-900/50 text-red-400';
@@ -340,10 +331,10 @@ export default {
         newToken.value = data.token;
         createForm.value = { user_id: '', username: '', tier: 'admin', label: '', host_mode: 'default', allowed_hosts: [], default_host: '', allowed_tools_str: '' };
         showCreate.value = false;
-        showToast('Token created');
+        toast.success('Token created');
         await fetchData();
       } catch (e) {
-        showToast(e.data?.error || e.message || 'Failed to create token', false);
+        toast.error(e.data?.error || e.message || 'Failed to create token');
       } finally {
         creating.value = false;
       }
@@ -385,34 +376,46 @@ export default {
         body.default_host = editForm.value.default_host || '';
         await api.put('/api/tokens/' + encodeURIComponent(editing.value.user_id), body);
         editing.value = null;
-        showToast('Token updated');
+        toast.success('Token updated');
         await fetchData();
       } catch (e) {
-        showToast(e.data?.error || e.message || 'Failed to update', false);
+        toast.error(e.data?.error || e.message || 'Failed to update');
       } finally {
         saving.value = false;
       }
     }
 
     async function confirmRegenerate(t) {
-      if (!confirm('Regenerate token for ' + t.user_id + '? The old token will stop working immediately.')) return;
+      const ok = await confirmDialog({
+        title: 'Regenerate token',
+        message: `Regenerate token for ${t.username || t.user_id}? The old token will stop working immediately.`,
+        confirmLabel: 'Regenerate',
+        danger: true,
+      });
+      if (!ok) return;
       try {
         const data = await api.post('/api/tokens/' + encodeURIComponent(t.user_id) + '/regenerate');
         newToken.value = data.token;
-        showToast('Token regenerated');
+        toast.success('Token regenerated');
       } catch (e) {
-        showToast(e.data?.error || e.message || 'Failed to regenerate', false);
+        toast.error(e.data?.error || e.message || 'Failed to regenerate');
       }
     }
 
     async function confirmDelete(t) {
-      if (!confirm('Delete token for ' + t.user_id + '? This cannot be undone.')) return;
+      const ok = await confirmDialog({
+        title: 'Delete token',
+        message: `Delete token for ${t.username || t.user_id}? This cannot be undone.`,
+        confirmLabel: 'Delete',
+        danger: true,
+      });
+      if (!ok) return;
       try {
         await api.del('/api/tokens/' + encodeURIComponent(t.user_id));
-        showToast('Token deleted');
+        toast.success('Token deleted');
         await fetchData();
       } catch (e) {
-        showToast(e.data?.error || e.message || 'Failed to delete', false);
+        toast.error(e.data?.error || e.message || 'Failed to delete');
       }
     }
 
@@ -420,9 +423,9 @@ export default {
       if (!newToken.value) return;
       try {
         await navigator.clipboard.writeText(newToken.value);
-        showToast('Copied to clipboard');
+        toast.success('Copied to clipboard');
       } catch {
-        showToast('Copy failed — select and copy manually', false);
+        toast.error('Copy failed — select and copy manually');
       }
     }
 
@@ -430,7 +433,7 @@ export default {
 
     return {
       loading, error, tokens, availableHosts, showCreate, creating,
-      newToken, editing, saving, toast, createForm, editForm,
+      newToken, editing, saving, createForm, editForm,
       createDefaultHostOptions, editDefaultHostOptions,
       fetchData, tierBadge, toggleCreateHost, toggleEditHost,
       createToken, startEdit, saveEdit, confirmRegenerate, confirmDelete, copyToken,

@@ -3,6 +3,9 @@
  * Vue 3 + Vue Router (CDN globals) + Tailwind CSS
  */
 import { api, ws } from './api.js';
+import { ToastContainer } from './toast.js';
+import { ConfirmHost } from './confirm.js';
+import { CommandPalette, openPalette } from './palette.js';
 import DashboardPage from './pages/dashboard.js';
 import ChatPage from './pages/chat.js';
 import OperationsPage from './pages/operations.js';
@@ -158,7 +161,8 @@ const App = {
             <span v-if="wsLatency >= 0" class="text-gray-600" style="font-size:0.5625rem;">{{ wsLatency }}ms</span>
           </div>
           <div class="text-gray-600 mobile-hide" style="font-size:0.625rem;" aria-label="Keyboard shortcuts">
-            <kbd class="px-1 py-0.5 bg-gray-800 rounded">/</kbd> search
+            <kbd class="px-1 py-0.5 bg-gray-800 rounded">Ctrl K</kbd> jump
+            <kbd class="px-1 py-0.5 bg-gray-800 rounded ml-1">/</kbd> search
             <kbd class="px-1 py-0.5 bg-gray-800 rounded ml-1">Esc</kbd> close
           </div>
         </div>
@@ -190,7 +194,10 @@ const App = {
         </header>
         <router-view />
       </main>
-    </div>`,
+    </div>
+    <toast-container />
+    <confirm-host />
+    <command-palette />`,
   setup() {
     const authState = ref('checking'); // 'checking' | 'login' | 'ready'
     const sessionExpired = ref(false);
@@ -216,6 +223,14 @@ const App = {
 
     // Global keyboard shortcuts
     function onKeydown(e) {
+      // Ctrl+K / Cmd+K: open command palette (only when authenticated)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        if (authState.value === 'ready') {
+          e.preventDefault();
+          openPalette();
+        }
+        return;
+      }
       // Esc: close mobile sidebar, or modals (modals handle their own Esc via @click.self)
       if (e.key === 'Escape') {
         if (mobileOpen.value) { mobileOpen.value = false; e.preventDefault(); return; }
@@ -333,5 +348,8 @@ const App = {
 // ---------------------------------------------------------------------------
 const app = createApp(App);
 app.component('login-screen', LoginScreen);
+app.component('toast-container', ToastContainer);
+app.component('confirm-host', ConfirmHost);
+app.component('command-palette', CommandPalette);
 app.use(router);
 app.mount('#app');

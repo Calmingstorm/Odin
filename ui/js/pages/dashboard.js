@@ -3,6 +3,9 @@
  * Real-time stats, agent panel, health indicators, activity feed
  */
 import { api, ws } from '../api.js';
+import { toast } from '../toast.js';
+import { confirmDialog } from '../confirm.js';
+import { formatTime, formatDuration } from '../utils.js';
 
 const { ref, computed, onMounted, onUnmounted, nextTick } = Vue;
 
@@ -66,9 +69,6 @@ export default {
             <button @click="stopAllLoops" class="btn btn-ghost text-xs" :disabled="actionLoading.stopLoops || (status.loop_count || 0) === 0">
               {{ actionLoading.stopLoops ? '...' : '\u25a0 Stop Loops' }}
             </button>
-          </div>
-          <div v-if="actionMessage" class="dash-hero-toast" :class="actionMessage.ok ? 'text-green-400' : 'text-red-400'" role="status" aria-live="polite">
-            {{ actionMessage.text }}
           </div>
         </div>
 
@@ -211,7 +211,6 @@ export default {
     const agents = ref([]);
     const newEventCount = ref(0);
     const actionLoading = ref({ reload: false, clearSessions: false, stopLoops: false });
-    const actionMessage = ref(null);
     let eventKeyCounter = 0;
 
     const uptime = computed(() => {
@@ -336,27 +335,6 @@ export default {
       return items;
     });
 
-    function formatTime(ts) {
-      if (!ts) return '\u2014';
-      try {
-        const d = new Date(ts);
-        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      } catch { return ts; }
-    }
-
-    function formatDuration(secs) {
-      if (!secs) return '0s';
-      if (secs < 60) return `${Math.round(secs)}s`;
-      const m = Math.floor(secs / 60);
-      const s = Math.round(secs % 60);
-      return s > 0 ? `${m}m ${s}s` : `${m}m`;
-    }
-
-    function showAction(text, ok = true) {
-      actionMessage.value = { text, ok };
-      setTimeout(() => { actionMessage.value = null; }, 4000);
-    }
-
     async function fetchStatus() {
       try {
         status.value = await api.get('/api/status');
@@ -396,45 +374,57 @@ export default {
       actionLoading.value = { ...actionLoading.value, reload: true };
       try {
         await api.post('/api/reload');
-        showAction('Config reloaded');
+        toast.success('Config reloaded');
       } catch (e) {
-        showAction(e.message, false);
+        toast.error(e.message);
       }
       actionLoading.value = { ...actionLoading.value, reload: false };
     }
 
     async function clearSessions() {
-      if (!confirm('Clear all conversation sessions? This cannot be undone.')) return;
+      const ok = await confirmDialog({
+        title: 'Clear all sessions',
+        message: 'Clear all conversation sessions? This cannot be undone.',
+        confirmLabel: 'Clear All',
+        danger: true,
+      });
+      if (!ok) return;
       actionLoading.value = { ...actionLoading.value, clearSessions: true };
       // Optimistic: immediately set sessions to 0
       const prevSessions = status.value.session_count;
       status.value = { ...status.value, session_count: 0 };
       try {
         const res = await api.post('/api/sessions/clear-all');
-        showAction(`Cleared ${res.count} session${res.count !== 1 ? 's' : ''}`);
+        toast.success(`Cleared ${res.count} session${res.count !== 1 ? 's' : ''}`);
         await fetchStatus();
       } catch (e) {
         // Rollback on failure
         status.value = { ...status.value, session_count: prevSessions };
-        showAction(e.message, false);
+        toast.error(e.message);
       }
       actionLoading.value = { ...actionLoading.value, clearSessions: false };
     }
 
     async function stopAllLoops() {
-      if (!confirm('Stop all running loops?')) return;
+      const ok = await confirmDialog({
+        title: 'Stop all loops',
+        message: 'Stop all running loops?',
+        confirmLabel: 'Stop Loops',
+        danger: true,
+      });
+      if (!ok) return;
       actionLoading.value = { ...actionLoading.value, stopLoops: true };
       // Optimistic: immediately set loops to 0
       const prevLoops = status.value.loop_count;
       status.value = { ...status.value, loop_count: 0 };
       try {
         const res = await api.post('/api/loops/stop-all');
-        showAction(res.result);
+        toast.success(res.result);
         await fetchStatus();
       } catch (e) {
         // Rollback on failure
         status.value = { ...status.value, loop_count: prevLoops };
-        showAction(e.message, false);
+        toast.error(e.message);
       }
       actionLoading.value = { ...actionLoading.value, stopLoops: false };
     }
@@ -451,6 +441,7 @@ export default {
     // Auto-refresh
     let statusInterval = null;
     let agentInterval = null;
+    let eventResetTimer = null;
 
     function onEvent(data) {
       if (data.payload && data.payload.tool_name) {
@@ -463,8 +454,8 @@ export default {
           if (errors.value.length > 5) errors.value.pop();
         }
         setTimeout(() => { entry._isNew = false; }, 1500);
-        clearTimeout(onEvent._resetTimer);
-        onEvent._resetTimer = setTimeout(() => { newEventCount.value = 0; }, 10000);
+        clearTimeout(eventResetTimer);
+        eventResetTimer = setTimeout(() => { newEventCount.value = 0; }, 10000);
       }
     }
 
@@ -478,6 +469,7 @@ export default {
     onUnmounted(() => {
       if (statusInterval) clearInterval(statusInterval);
       if (agentInterval) clearInterval(agentInterval);
+      clearTimeout(eventResetTimer);
       ws.unsubscribe('events', onEvent);
     });
 
@@ -487,7 +479,7 @@ export default {
       activity, activityLoading, newEventCount,
       errors, errorsLoading,
       agents,
-      actionLoading, actionMessage,
+      actionLoading,
       fetchActivity, fetchStatus, formatTime, formatDuration, retry,
       reloadConfig, clearSessions, stopAllLoops,
     };

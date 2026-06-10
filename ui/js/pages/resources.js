@@ -3,6 +3,7 @@
  * Displays session count, knowledge DB size, and trajectory volume.
  */
 import { api } from '../api.js';
+import { fmtNum } from '../utils.js';
 
 const { ref, computed, onMounted, onUnmounted } = Vue;
 
@@ -302,11 +303,6 @@ export default {
         },
       ];
     });
-
-    function fmtNum(n) {
-      if (n == null) return '0';
-      return Number(n).toLocaleString();
-    }
 
     async function fetchData() {
       try {
