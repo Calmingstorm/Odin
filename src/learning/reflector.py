@@ -310,6 +310,33 @@ class ConversationReflector:
         lines = [fmt(e) for e in selected]
         return "## Learned Context\n" + "\n".join(lines)
 
+    _REFLECTION_CONTEXT_TOP_K = 30
+
+    @staticmethod
+    def _relevant_existing_text(entries: list[dict], context_text: str) -> str:
+        """Render the existing entries most relevant to *context_text* for a
+        reflection prompt. Embedding the whole corpus made every reflection
+        pay for (and be biased by) all stored knowledge; the model only
+        needs nearby entries to reuse keys and avoid duplicates."""
+        if not entries:
+            return "(none)"
+        if len(entries) > ConversationReflector._REFLECTION_CONTEXT_TOP_K:
+            from ..relevance import rank as relevance_rank
+            ranked = relevance_rank(
+                context_text, entries,
+                lambda e: " ".join([
+                    e.get("content", ""), e.get("topic", ""),
+                    " ".join(e.get("tags", [])), e.get("key", ""),
+                ]),
+                top_k=ConversationReflector._REFLECTION_CONTEXT_TOP_K,
+            )
+            chosen = {id(e) for e in ranked}
+            entries = [e for e in entries if id(e) in chosen]
+        return "\n".join(
+            f"- [{e['category']}] {e['key']}: {e['content']}"
+            for e in entries
+        )
+
     def _note_used(self, entries: list[dict]) -> None:
         """Record injection usage in memory; persisted opportunistically by
         the next locked write (merge/consolidation). last_used_at only feeds
@@ -369,10 +396,7 @@ class ConversationReflector:
         )
 
         existing = self._load().get("entries", [])
-        existing_text = "\n".join(
-            f"- [{e['category']}] {e['key']}: {e['content']}"
-            for e in existing
-        ) if existing else "(none)"
+        existing_text = self._relevant_existing_text(existing, operation_summary)
 
         prompt = (
             "Review this completed operation and extract ONLY durable operational "
@@ -481,10 +505,7 @@ class ConversationReflector:
             data = await asyncio.to_thread(self._load)
             existing = data.get("entries", [])
 
-            existing_text = "\n".join(
-                f"- [{e['category']}] {e['key']}: {e['content']}"
-                for e in existing
-            ) if existing else "(none)"
+            existing_text = self._relevant_existing_text(existing, conversation)
 
             # When multiple users participated, instruct the LLM to attribute entries
             user_hint = ""

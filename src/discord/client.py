@@ -247,6 +247,10 @@ class OdinBot(commands.Bot):
         # Recent tool executions for conversational context (injected into system prompt)
         # Per-channel: {channel_id: [(timestamp, entry_text), ...]}
         self._recent_actions: dict[str, list[tuple[float, str]]] = {}
+        # Per-channel tool input/result details from the most recent tool
+        # loop — consumed by post-operation reflection so it learns from
+        # what actually happened, not just tool names.
+        self._last_op_details: dict[str, list[dict]] = {}
         self._recent_actions_max = 10
         self._recent_actions_expiry = 3600  # seconds (1 hour)
         # Background task tracking
@@ -1460,13 +1464,50 @@ class OdinBot(commands.Bot):
         finally:
             self._llm_active_requests -= 1
 
+    # Successful operations below this tool count are routine — reflection
+    # is reserved for failures, corrections, explicit asks, and substantive work.
+    _REFLECT_MIN_TOOLS = 5
+    _REFLECT_CORRECTION_MARKERS = (
+        "remember this", "remember that", "that's wrong", "thats wrong",
+        "that is wrong", "not what i asked", "you should have", "incorrect,",
+        "no, ", "actually,",
+    )
+
+    def _should_reflect_on_operation(
+        self, user_request: str, tools_used: list[str],
+        is_error: bool, tool_details: list[dict],
+    ) -> bool:
+        """Reflection triggers: failure, mid-operation tool errors (recovery),
+        user corrections, explicit remember-this, or substantive operations.
+        Routine successes (ls/git-status class) skip reflection entirely."""
+        if is_error:
+            return True
+        if any(d.get("error") for d in tool_details):
+            return True
+        req = user_request.lower()
+        if any(marker in req for marker in self._REFLECT_CORRECTION_MARKERS):
+            return True
+        return len(tools_used) >= self._REFLECT_MIN_TOOLS
+
     async def _operational_reflection(
         self, user_request: str, tools_used: list[str],
         response: str, is_error: bool, user_id: str | None,
+        channel_id: str | None = None,
     ) -> None:
-        """Fire-and-forget post-operation reflection."""
+        """Fire-and-forget post-operation reflection — selective, with real
+        tool inputs/results from the operation instead of bare tool names."""
         try:
-            tool_details = [{"tool": t} for t in tools_used[:20]]
+            tool_details = self._last_op_details.pop(channel_id, None) if channel_id else None
+            if not tool_details:
+                tool_details = [{"tool": t} for t in tools_used[:20]]
+            if not self._should_reflect_on_operation(
+                user_request, tools_used, is_error, tool_details,
+            ):
+                log.debug(
+                    "Skipping reflection for routine operation (%d tools, no errors)",
+                    len(tools_used),
+                )
+                return
             await self.reflector.reflect_on_operation(
                 user_request=user_request,
                 tools_used=tools_used,
@@ -2395,6 +2436,7 @@ class OdinBot(commands.Bot):
         if tools_used:
             fire_and_forget(self._operational_reflection(
                 content, tools_used, response, is_error, user_id,
+                channel_id=channel_id,
             ), name="operational_reflection")
 
         if voice_callback:
@@ -2627,6 +2669,7 @@ class OdinBot(commands.Bot):
 
         # Per-turn trajectory accumulator — populated each iteration, saved at end.
         from ..trajectories.saver import TrajectoryTurn, ToolIteration
+        _op_tool_details: list[dict] = []
         _trajectory = TrajectoryTurn(
             message_id=str(getattr(message, "id", "")),
             channel_id=str(getattr(message.channel, "id", "")),
@@ -3242,6 +3285,21 @@ class OdinBot(commands.Bot):
                     *[_run_tool_with_timeout(b) for b in tool_calls],
                 )
             messages.append({"role": "user", "content": list(tool_results)})
+
+            # Pair calls with results for post-operation reflection. Stashed
+            # per iteration so every loop exit path leaves the latest state.
+            _results_by_id = {
+                r.get("tool_use_id"): r for r in tool_results if isinstance(r, dict)
+            }
+            for _tc in tool_calls:
+                _rcontent = str(_results_by_id.get(_tc.id, {}).get("content", ""))
+                _op_tool_details.append({
+                    "tool": _tc.name,
+                    "input": _tc.input,
+                    "result": _rcontent[:300],
+                    "error": _rcontent.lstrip().lower().startswith(("error", "[error", "failed", "traceback")),
+                })
+            self._last_op_details[str(message.channel.id)] = _op_tool_details
 
             if _cancel.is_set():
                 return _stopped("after_tools")
