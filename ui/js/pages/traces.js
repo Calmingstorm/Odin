@@ -3,6 +3,7 @@
  * Browse and inspect full tool-chain trajectories with timings and outputs
  */
 import { api } from '../api.js';
+import { formatTs, formatTokens, truncateBlock } from '../utils.js';
 
 const { ref, computed, onMounted, watch, nextTick } = Vue;
 
@@ -186,7 +187,7 @@ export default {
                       Result: <span class="font-mono" :class="tr.error ? 'text-red-400' : 'text-green-400'">{{ tr.name || 'result ' + tri }}</span>
                     </div>
                     <pre class="p-2 rounded text-xs font-mono max-h-40 overflow-y-auto whitespace-pre-wrap break-all"
-                         :class="tr.error ? 'bg-red-950/30 text-red-300' : 'bg-gray-900 text-gray-300'">{{ truncate(formatJSON(tr.output || tr.result || tr.error || tr), 5000) }}</pre>
+                         :class="tr.error ? 'bg-red-950/30 text-red-300' : 'bg-gray-900 text-gray-300'">{{ truncateBlock(formatJSON(tr.output || tr.result || tr.error || tr), 5000) }}</pre>
                   </div>
                 </div>
               </div>
@@ -196,7 +197,7 @@ export default {
           <!-- Final response -->
           <div v-if="singleTrace.final_response" class="mb-3">
             <div class="text-gray-400 text-xs mb-1">Final Response</div>
-            <pre class="p-2 rounded bg-gray-900 text-xs text-gray-300 font-mono max-h-40 overflow-y-auto whitespace-pre-wrap break-words">{{ truncate(singleTrace.final_response, 5000) }}</pre>
+            <pre class="p-2 rounded bg-gray-900 text-xs text-gray-300 font-mono max-h-40 overflow-y-auto whitespace-pre-wrap break-words">{{ truncateBlock(singleTrace.final_response, 5000) }}</pre>
           </div>
 
           <!-- Tools used summary -->
@@ -363,7 +364,7 @@ export default {
                           Result: <span class="font-mono" :class="tr.error ? 'text-red-400' : 'text-green-400'">{{ tr.name || 'result ' + tri }}</span>
                         </div>
                         <pre class="p-2 rounded text-xs font-mono max-h-40 overflow-y-auto whitespace-pre-wrap break-all"
-                             :class="tr.error ? 'bg-red-950/30 text-red-300' : 'bg-gray-900 text-gray-300'">{{ truncate(formatJSON(tr.output || tr.result || tr.error || tr), 5000) }}</pre>
+                             :class="tr.error ? 'bg-red-950/30 text-red-300' : 'bg-gray-900 text-gray-300'">{{ truncateBlock(formatJSON(tr.output || tr.result || tr.error || tr), 5000) }}</pre>
                       </div>
                     </div>
                   </div>
@@ -373,7 +374,7 @@ export default {
               <!-- Final response -->
               <div v-if="entries[expandedIdx].final_response">
                 <div class="text-gray-400 text-xs mb-1">Final Response</div>
-                <pre class="p-2 rounded bg-gray-900 text-xs text-gray-300 font-mono max-h-40 overflow-y-auto whitespace-pre-wrap break-words">{{ truncate(entries[expandedIdx].final_response, 5000) }}</pre>
+                <pre class="p-2 rounded bg-gray-900 text-xs text-gray-300 font-mono max-h-40 overflow-y-auto whitespace-pre-wrap break-words">{{ truncateBlock(entries[expandedIdx].final_response, 5000) }}</pre>
               </div>
             </div>
           </div>
@@ -432,11 +433,6 @@ export default {
       }
     }
 
-    function truncate(text, max) {
-      if (!text) return '';
-      return text.length > max ? text.slice(0, max) + '\n... (truncated)' : text;
-    }
-
     function toggleExpand(idx) {
       if (expandedIdx.value === idx) {
         expandedIdx.value = null;
@@ -474,7 +470,10 @@ export default {
       } catch { /* ignore */ }
     }
 
+    let fetchEpoch = 0;
+
     async function fetchTraces() {
+      const epoch = ++fetchEpoch;
       loading.value = true;
       error.value = null;
       expandedIdx.value = null;
@@ -483,6 +482,7 @@ export default {
       try {
         if (selectedFile.value) {
           const data = await api.get(`/api/trajectories/${encodeURIComponent(selectedFile.value)}?limit=${filters.value.limit}`);
+          if (epoch !== fetchEpoch) return;
           let results = data.entries || [];
           if (filters.value.tool_name) {
             results = results.filter(e => (e.tools_used || []).includes(filters.value.tool_name));
@@ -506,26 +506,31 @@ export default {
           params.set('limit', String(filters.value.limit));
           const qs = params.toString();
           const data = await api.get(`/api/trajectories/search/query?${qs}`);
+          if (epoch !== fetchEpoch) return;
           entries.value = data.results || [];
         }
       } catch (e) {
+        if (epoch !== fetchEpoch) return;
         error.value = e.message;
       }
-      loading.value = false;
+      if (epoch === fetchEpoch) loading.value = false;
     }
 
     async function lookupMessage() {
       if (!messageIdQuery.value.trim()) return;
+      const epoch = ++fetchEpoch;
       loading.value = true;
       error.value = null;
       expandedIterations.value = {};
       try {
         const data = await api.get(`/api/trajectories/message/${encodeURIComponent(messageIdQuery.value.trim())}`);
+        if (epoch !== fetchEpoch) return;
         singleTrace.value = data.entry || null;
         if (!singleTrace.value) {
           error.value = 'No trace found for this message ID';
         }
       } catch (e) {
+        if (epoch !== fetchEpoch) return;
         if (e.status === 404) {
           singleTrace.value = null;
           error.value = 'No trace found for message ID: ' + messageIdQuery.value;
@@ -533,7 +538,7 @@ export default {
           error.value = e.message;
         }
       }
-      loading.value = false;
+      if (epoch === fetchEpoch) loading.value = false;
     }
 
     onMounted(async () => {
@@ -544,7 +549,7 @@ export default {
     return {
       files, entries, loading, error, expandedIdx, singleTrace,
       messageIdQuery, selectedFile, totalSaved, filters, expandedIterations,
-      formatTs, formatDuration, formatTokens, formatJSON, truncate,
+      formatTs, formatDuration, formatTokens, formatJSON, truncateBlock,
       toggleExpand, toggleIteration, isIterationExpanded,
       clearFilters, fetchFiles, fetchTraces, lookupMessage,
     };

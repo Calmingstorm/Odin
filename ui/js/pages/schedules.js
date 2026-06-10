@@ -3,6 +3,9 @@
  * View/create/delete scheduled tasks (cron, one-time, webhook)
  */
 import { api } from '../api.js';
+import { toast } from '../toast.js';
+import { confirmDialog } from '../confirm.js';
+import { formatTs, formatAge } from '../utils.js';
 
 const { ref, computed, onMounted } = Vue;
 
@@ -64,7 +67,7 @@ export default {
               <div v-if="cronResult.valid" class="text-green-400">
                 Valid. Next runs:
                 <div v-for="(run, i) in cronResult.next_runs" :key="i" class="text-gray-400 ml-2">
-                  {{ formatIso(run) }} ({{ formatFuture(run) }})
+                  {{ formatTs(run) }} ({{ formatFuture(run) }})
                 </div>
               </div>
               <div v-else class="text-red-400">{{ cronResult.error }}</div>
@@ -105,7 +108,6 @@ export default {
         </div>
 
         <div v-if="createError" class="mb-3 text-red-400 text-sm">{{ createError }}</div>
-        <div v-if="createSuccess" class="mb-3 text-green-400 text-sm">{{ createSuccess }}</div>
 
         <button @click="doCreate" class="btn btn-primary text-xs" :disabled="creating">
           {{ creating ? 'Creating...' : 'Create' }}
@@ -171,12 +173,12 @@ export default {
               <td class="font-mono text-xs text-gray-400 mobile-hide">{{ s.action }}</td>
               <td class="text-sm text-gray-400 font-mono mobile-hide">
                 <span v-if="s.cron">{{ s.cron }}</span>
-                <span v-else-if="s.run_at">{{ formatIso(s.run_at) }}</span>
+                <span v-else-if="s.run_at">{{ formatTs(s.run_at) }}</span>
                 <span v-else-if="s.trigger">{{ s.trigger.type || 'webhook' }}</span>
                 <span v-else>-</span>
               </td>
               <td class="text-sm mobile-hide">
-                <span v-if="s.next_run" class="text-indigo-300" :title="formatIso(s.next_run)">
+                <span v-if="s.next_run" class="text-indigo-300" :title="formatTs(s.next_run)">
                   {{ formatFuture(s.next_run) }}
                 </span>
                 <span v-else class="text-gray-600">-</span>
@@ -189,7 +191,10 @@ export default {
                           title="Trigger this schedule immediately">
                     {{ runningId === s.id ? 'Running...' : 'Run Now' }}
                   </button>
-                  <button @click="confirmDelete(s.id)" class="btn btn-danger text-xs">Delete</button>
+                  <button @click="doDelete(s.id)" class="btn btn-danger text-xs"
+                          :disabled="deletingId === s.id">
+                    {{ deletingId === s.id ? 'Deleting...' : 'Delete' }}
+                  </button>
                 </div>
               </td>
             </tr>
@@ -198,33 +203,12 @@ export default {
         </div>
       </div>
 
-      <!-- Toast -->
-      <div v-if="toast" class="toast" :class="toast.type === 'success' ? 'toast-success' : 'toast-error'">
-        {{ toast.message }}
-      </div>
-
-      <!-- Delete confirmation -->
-      <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null" role="dialog" aria-modal="true" aria-labelledby="sched-delete-title">
-        <div class="modal-content">
-          <h3 id="sched-delete-title" class="text-lg font-semibold mb-2">Delete Schedule</h3>
-          <p class="text-gray-400 text-sm mb-4">
-            Delete this scheduled task? This cannot be undone.
-          </p>
-          <div class="flex gap-2 justify-end">
-            <button @click="deleteTarget = null" class="btn btn-ghost">Cancel</button>
-            <button @click="doDelete" class="btn btn-danger" :disabled="deleting">
-              {{ deleting ? 'Deleting...' : 'Delete' }}
-            </button>
-          </div>
-        </div>
-      </div>
     </div>`,
 
   setup() {
     const schedules = ref([]);
     const loading = ref(true);
     const error = ref(null);
-    const toast = ref(null);
 
     // Create form
     const showCreate = ref(false);
@@ -240,7 +224,6 @@ export default {
     });
     const creating = ref(false);
     const createError = ref(null);
-    const createSuccess = ref(null);
 
     // Cron validation
     const cronResult = ref(null);
@@ -257,36 +240,11 @@ export default {
     const runningId = ref(null);
 
     // Delete
-    const deleteTarget = ref(null);
-    const deleting = ref(false);
+    const deletingId = ref(null);
 
     const cronCount = computed(() => schedules.value.filter(s => s.cron && !s.one_time).length);
     const oneTimeCount = computed(() => schedules.value.filter(s => s.one_time).length);
     const webhookCount = computed(() => schedules.value.filter(s => s.trigger).length);
-
-    function showToast(message, type = 'success') {
-      toast.value = { message, type };
-      setTimeout(() => { toast.value = null; }, 3000);
-    }
-
-    function formatIso(iso) {
-      if (!iso) return '';
-      try {
-        const d = new Date(iso);
-        return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-      } catch { return iso; }
-    }
-
-    function formatAge(ts) {
-      if (!ts) return '-';
-      const now = Date.now();
-      const t = new Date(ts).getTime();
-      const diff = (now - t) / 1000;
-      if (diff < 60) return 'just now';
-      if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-      if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-      return `${Math.floor(diff / 86400)}d ago`;
-    }
 
     function formatFuture(ts) {
       if (!ts) return '-';
@@ -334,7 +292,6 @@ export default {
 
     async function doCreate() {
       createError.value = null;
-      createSuccess.value = null;
       const f = form.value;
       if (!f.description.trim()) { createError.value = 'Description is required'; return; }
       if (!f.channel_id.trim()) { createError.value = 'Channel ID is required'; return; }
@@ -363,15 +320,15 @@ export default {
       creating.value = true;
       try {
         await api.post('/api/schedules', payload);
-        createSuccess.value = 'Schedule created';
+        toast.success('Schedule created');
         // Reset form
         form.value = {
           description: '', action: 'reminder', channel_id: '',
           cron: '', run_at: '', message: '', tool_name: '', tool_input_str: '',
         };
         cronResult.value = null;
+        showCreate.value = false;
         await fetchSchedules();
-        setTimeout(() => { showCreate.value = false; createSuccess.value = null; }, 800);
       } catch (e) {
         createError.value = e.message;
       }
@@ -382,41 +339,46 @@ export default {
       runningId.value = scheduleId;
       try {
         await api.post(`/api/schedules/${encodeURIComponent(scheduleId)}/run`);
-        showToast('Schedule triggered');
+        toast.success('Schedule triggered');
         await fetchSchedules();
       } catch (e) {
-        showToast(e.message || 'Failed to trigger', 'error');
+        toast.error(e.message || 'Failed to trigger');
       }
       runningId.value = null;
     }
 
-    function confirmDelete(id) {
-      deleteTarget.value = id;
-    }
-
-    async function doDelete() {
-      if (!deleteTarget.value) return;
-      deleting.value = true;
+    async function doDelete(scheduleId) {
+      const sched = schedules.value.find(s => s.id === scheduleId);
+      const ok = await confirmDialog({
+        title: 'Delete schedule',
+        message: `Delete "${sched?.description || scheduleId}"? This cannot be undone.`,
+        confirmLabel: 'Delete',
+        danger: true,
+      });
+      if (!ok) return;
+      deletingId.value = scheduleId;
       try {
-        await api.del(`/api/schedules/${encodeURIComponent(deleteTarget.value)}`);
+        await api.del(`/api/schedules/${encodeURIComponent(scheduleId)}`);
+        toast.success('Schedule deleted');
         await fetchSchedules();
-      } catch { /* ignore */ }
-      deleting.value = false;
-      deleteTarget.value = null;
+      } catch (e) {
+        toast.error(e.message || 'Failed to delete schedule');
+      }
+      deletingId.value = null;
     }
 
     onMounted(() => { fetchSchedules(); });
 
     return {
-      schedules, loading, error, toast,
-      showCreate, form, creating, createError, createSuccess,
+      schedules, loading, error,
+      showCreate, form, creating, createError,
       cronResult, validatingCron, cronPresets,
       runningId,
-      deleteTarget, deleting,
+      deletingId,
       cronCount, oneTimeCount, webhookCount,
-      showToast, formatIso, formatAge, formatFuture,
+      formatTs, formatAge, formatFuture,
       onCronInput, validateCron,
-      fetchSchedules, doCreate, doRunNow, confirmDelete, doDelete,
+      fetchSchedules, doCreate, doRunNow, doDelete,
     };
   },
 };

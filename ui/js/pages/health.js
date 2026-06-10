@@ -3,6 +3,7 @@
  * All component health at a glance: Codex, SSH hosts, DB, knowledge, voice, etc.
  */
 import { api } from '../api.js';
+import { formatTime } from '../utils.js';
 
 const { ref, computed, onMounted, onUnmounted } = Vue;
 

@@ -4,6 +4,7 @@
  * skill status indicators, search/filter
  */
 import { api } from '../api.js';
+import { truncate, formatTs } from '../utils.js';
 
 const { ref, computed, onMounted, nextTick, watch, onUnmounted } = Vue;
 
@@ -134,7 +135,7 @@ export default {
             <div class="sk-card-body">
               <div class="sk-card-desc">{{ s.description || 'No description' }}</div>
               <div class="sk-card-meta">
-                <span class="sk-card-date">Loaded: {{ formatDate(s.loaded_at) }}</span>
+                <span class="sk-card-date">Loaded: {{ formatTs(s.loaded_at) }}</span>
                 <span v-if="s.code" class="sk-card-lines">{{ countLines(s.code) }} lines</span>
               </div>
             </div>
@@ -305,11 +306,6 @@ export default {
       return highlightPython(code);
     }
 
-    function truncate(text, max) {
-      if (!text) return '';
-      return text.length > max ? text.slice(0, max) + '...' : text;
-    }
-
     function formatDate(iso) {
       if (!iso) return '\u2014';
       try {
@@ -459,7 +455,7 @@ export default {
       deleteTarget, deleting,
       enabledCount, totalExecutions, totalLines, displayedSkills,
       editLineCount, editorLineNums, editValidation,
-      highlight, truncate, formatDate, countLines, getLineNumbers,
+      highlight, truncate, formatTs, countLines, getLineNumbers,
       toggleCode, copyCode, handleEditorKey, syncScroll,
       fetchSkills, testSkill, showCreate, editSkill, cancelEdit, saveSkill,
       confirmDelete, doDelete,

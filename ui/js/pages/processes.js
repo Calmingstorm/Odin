@@ -3,6 +3,9 @@
  * View/kill background processes, poll output, auto-refresh
  */
 import { api, ws } from '../api.js';
+import { toast } from '../toast.js';
+import { confirmDialog } from '../confirm.js';
+import { formatDuration } from '../utils.js';
 
 const { ref, computed, onMounted, onUnmounted, watch } = Vue;
 
@@ -22,7 +25,7 @@ export default {
             Auto-refresh
             <span v-if="autoRefresh" class="text-green-400">(5s)</span>
           </label>
-          <button @click="fetchProcesses" class="btn btn-ghost text-xs" :disabled="loading">
+          <button @click="fetchProcesses()" class="btn btn-ghost text-xs" :disabled="loading">
             {{ loading ? 'Loading...' : 'Refresh' }}
           </button>
         </div>
@@ -34,7 +37,7 @@ export default {
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
         <span class="error-icon" aria-hidden="true">\u26A0</span>
         <p class="text-red-400">{{ error }}</p>
-        <button @click="fetchProcesses" class="btn btn-ghost text-xs">Retry</button>
+        <button @click="fetchProcesses()" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="processes.length === 0" class="hm-card empty-state">
         <span class="empty-state-icon">\u{2699}\u{FE0F}</span>
@@ -70,10 +73,13 @@ export default {
                       class="text-xs text-gray-500">(exit {{ p.exit_code }})</span>
               </div>
               <div class="flex items-center gap-2">
-                <span class="text-xs text-gray-500">{{ formatUptime(p.uptime_seconds) }}</span>
+                <span class="text-xs text-gray-500">{{ formatDuration(p.uptime_seconds) }}</span>
                 <button v-if="p.status === 'running'"
-                        @click="confirmKill(p.pid)"
-                        class="btn btn-danger text-xs">Kill</button>
+                        @click="doKill(p.pid)"
+                        class="btn btn-danger text-xs"
+                        :disabled="killingPid === p.pid">
+                  {{ killingPid === p.pid ? 'Killing...' : 'Kill' }}
+                </button>
               </div>
             </div>
 
@@ -94,21 +100,6 @@ export default {
         </div>
       </div>
 
-      <!-- Kill confirmation -->
-      <div v-if="killTarget !== null" class="modal-overlay" @click.self="killTarget = null" role="dialog" aria-modal="true" aria-labelledby="proc-kill-title">
-        <div class="modal-content">
-          <h3 id="proc-kill-title" class="text-lg font-semibold mb-2">Kill Process</h3>
-          <p class="text-gray-400 text-sm mb-4">
-            Kill process <span class="font-mono font-semibold text-gray-200">{{ killTarget }}</span>?
-          </p>
-          <div class="flex gap-2 justify-end">
-            <button @click="killTarget = null" class="btn btn-ghost">Cancel</button>
-            <button @click="doKill" class="btn btn-danger" :disabled="killing">
-              {{ killing ? 'Killing...' : 'Kill' }}
-            </button>
-          </div>
-        </div>
-      </div>
     </div>`,
 
   setup() {
@@ -119,8 +110,7 @@ export default {
     let refreshTimer = null;
 
     // Kill
-    const killTarget = ref(null);
-    const killing = ref(false);
+    const killingPid = ref(null);
 
     const runningCount = computed(() => processes.value.filter(p => p.status === 'running').length);
     const completedCount = computed(() => processes.value.filter(p => p.status !== 'running').length);
@@ -138,36 +128,23 @@ export default {
       return 'badge-warning';
     }
 
-    function formatUptime(seconds) {
-      if (seconds == null) return '-';
-      const s = Math.round(seconds);
-      if (s < 60) return `${s} seconds`;
-      if (s < 3600) {
-        const m = Math.floor(s / 60);
-        const rem = s % 60;
-        return rem > 0 ? `${m} min, ${rem}s` : `${m} min`;
-      }
-      const h = Math.floor(s / 3600);
-      const m = Math.floor((s % 3600) / 60);
-      return m > 0 ? `${h} hour${h !== 1 ? 's' : ''}, ${m} min` : `${h} hour${h !== 1 ? 's' : ''}`;
-    }
-
-    async function fetchProcesses() {
-      loading.value = true;
-      error.value = null;
+    async function fetchProcesses(silent = false) {
+      silent = silent === true;
+      if (!silent) loading.value = true;
       try {
         processes.value = await api.get('/api/processes');
+        error.value = null;
       } catch (e) {
-        error.value = e.message;
+        if (!silent) error.value = e.message;
       }
-      loading.value = false;
+      if (!silent) loading.value = false;
     }
 
     function startAutoRefresh() {
       stopAutoRefresh();
       if (autoRefresh.value) {
         refreshTimer = setInterval(() => {
-          if (!loading.value) fetchProcesses();
+          if (!loading.value) fetchProcesses(true);
         }, 5000);
       }
     }
@@ -185,25 +162,29 @@ export default {
       else stopAutoRefresh();
     });
 
-    function confirmKill(pid) {
-      killTarget.value = pid;
-    }
-
-    async function doKill() {
-      if (killTarget.value === null) return;
-      killing.value = true;
+    async function doKill(pid) {
+      const ok = await confirmDialog({
+        title: 'Kill process',
+        message: `Kill process ${pid}?`,
+        confirmLabel: 'Kill',
+        danger: true,
+      });
+      if (!ok) return;
+      killingPid.value = pid;
       try {
-        await api.del(`/api/processes/${killTarget.value}`);
+        await api.del(`/api/processes/${pid}`);
+        toast.success(`Process ${pid} killed`);
         await fetchProcesses();
-      } catch (e) { error.value = e.message || 'Failed to kill process'; }
-      killing.value = false;
-      killTarget.value = null;
+      } catch (e) {
+        toast.error(e.message || 'Failed to kill process');
+      }
+      killingPid.value = null;
     }
 
     // WebSocket: refresh on process events
     function onEvent(data) {
       if (data.payload && (data.payload.pid || data.payload.type === 'process')) {
-        fetchProcesses();
+        fetchProcesses(true);
       }
     }
 
@@ -220,10 +201,10 @@ export default {
 
     return {
       processes, loading, error, autoRefresh,
-      killTarget, killing,
+      killingPid,
       runningCount, completedCount,
-      procStatusDot, statusBadge, formatUptime,
-      fetchProcesses, confirmKill, doKill,
+      procStatusDot, statusBadge, formatDuration,
+      fetchProcesses, doKill,
     };
   },
 };

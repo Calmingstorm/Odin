@@ -291,18 +291,17 @@ export default {
       }
       expanded.value[scopeName] = true;
       const scope = scopes.value.find(s => s.name === scopeName);
-      if (!scope || scopeEntries.value[scopeName]) return;
+      if (!scope || scopeEntries.value[scopeName] || loadingScope.value === scopeName) return;
 
       loadingScope.value = scopeName;
-      const entries = [];
-      for (const key of scope.keys) {
+      const entries = await Promise.all(scope.keys.map(async (key) => {
         try {
           const data = await api.get(`/api/memory/${encodeURIComponent(scopeName)}/${encodeURIComponent(key)}`);
-          entries.push({ key, value: data.value || '' });
+          return { key, value: data.value || '' };
         } catch {
-          entries.push({ key, value: '(error loading)' });
+          return { key, value: '(error loading)' };
         }
-      }
+      }));
       scopeEntries.value[scopeName] = entries;
       loadingScope.value = null;
     }

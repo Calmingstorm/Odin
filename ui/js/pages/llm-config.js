@@ -1,4 +1,6 @@
 import { api } from '../api.js';
+import { toast } from '../toast.js';
+import { confirmDialog } from '../confirm.js';
 
 const { ref, onMounted, onUnmounted } = Vue;
 
@@ -323,18 +325,11 @@ export default {
         </div>
 
 
-      <!-- Toast -->
-      <div v-if="toast" class="fixed bottom-6 right-6 px-4 py-2 rounded text-sm shadow-lg z-50"
-           :class="toast.type === 'error' ? 'bg-red-900 text-red-200' : 'bg-green-900 text-green-200'">
-        {{ toast.message }}
-      </div>
     </div>
   `,
 
   setup() {
     const loading = ref(true);
-    const toast = ref(null);
-    let toastTimer = null;
 
     // --- LLM Provider ---
     const llmStatus = ref(null);
@@ -381,9 +376,7 @@ export default {
     let pollController = null;
 
     function showToast(message, type = 'success') {
-      toast.value = { message, type };
-      clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => { toast.value = null; }, 3000);
+      toast(message, type === 'error' ? 'error' : 'success');
     }
 
     function formatSize(bytes) {
@@ -627,7 +620,13 @@ export default {
     }
 
     async function deleteAccount(index, name) {
-      if (!confirm('Delete ' + (name || 'account #' + (index + 1)) + '?')) return;
+      const ok = await confirmDialog({
+        title: 'Delete Codex account',
+        message: `Delete ${name || 'account #' + (index + 1)}? The pool will reload without it.`,
+        confirmLabel: 'Delete',
+        danger: true,
+      });
+      if (!ok) return;
       try {
         await api.del('/api/codex/account/' + index);
         showToast('Deleted. Pool reloaded.');
@@ -676,7 +675,7 @@ export default {
     onUnmounted(() => { if (pollController) pollController.cancelled = true; });
 
     return {
-      loading, toast, llmStatus, selectedProvider, switching,
+      loading, llmStatus, selectedProvider, switching,
       codexForm, ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,

@@ -3,12 +3,10 @@
  * Visual chunk browser with tree view, search highlighting, ingest/delete
  */
 import { api } from '../api.js';
+import { truncate, escapeHtml, formatTs } from '../utils.js';
+import { toast } from '../toast.js';
 
 const { ref, computed, onMounted } = Vue;
-
-function escapeHtml(text) {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
 
 function highlightTerms(text, query) {
   if (!text || !query) return escapeHtml(text);
@@ -153,7 +151,7 @@ export default {
 
             <!-- Source metadata -->
             <div v-if="s.ingested_at && !expanded[s.source || s.name || s]" class="kb-tree-meta">
-              Ingested: {{ formatDate(s.ingested_at) }}
+              Ingested: {{ formatTs(s.ingested_at) }}
             </div>
             <div v-if="s.preview && !expanded[s.source || s.name || s]" class="kb-tree-preview">{{ s.preview }}</div>
 
@@ -172,7 +170,7 @@ export default {
               <div v-else-if="sourceChunks[s.source || s.name || s]" class="kb-chunk-list">
                 <div class="kb-chunk-header">
                   <span class="text-gray-400 text-xs">{{ sourceChunks[s.source || s.name || s].length }} chunks</span>
-                  <span class="text-gray-600 text-xs">Ingested: {{ formatDate(s.ingested_at) }}</span>
+                  <span class="text-gray-600 text-xs">Ingested: {{ formatTs(s.ingested_at) }}</span>
                 </div>
                 <div v-for="chunk in sourceChunks[s.source || s.name || s]" :key="chunk.chunk_id"
                      class="kb-chunk-item" :class="{ 'kb-chunk-selected': selectedChunk === chunk.chunk_id }"
@@ -253,19 +251,6 @@ export default {
       return set.size;
     });
 
-    function truncate(text, max) {
-      if (!text) return '';
-      return text.length > max ? text.slice(0, max) + '...' : text;
-    }
-
-    function formatDate(iso) {
-      if (!iso) return '';
-      try {
-        const d = new Date(iso);
-        return d.toLocaleString();
-      } catch { return iso; }
-    }
-
     function chunkBarWidth(chunk, source) {
       const chunks = sourceChunks.value[source];
       if (!chunks || chunks.length === 0) return 0;
@@ -293,14 +278,15 @@ export default {
         return;
       }
       expanded.value[source] = true;
-      if (sourceChunks.value[source]) return;
+      if (sourceChunks.value[source] || loadingChunks.value === source) return;
 
       loadingChunks.value = source;
       try {
         const chunks = await api.get(`/api/knowledge/${encodeURIComponent(source)}/chunks`);
         sourceChunks.value[source] = Array.isArray(chunks) ? chunks : [];
-      } catch {
+      } catch (e) {
         sourceChunks.value[source] = [];
+        toast.error(`Failed to load chunks: ${e.message}`);
       }
       loadingChunks.value = null;
     }
@@ -400,7 +386,7 @@ export default {
       deleteTarget, deleting,
       expanded, sourceChunks, loadingChunks, selectedChunk,
       totalChunks, uploaderCount,
-      truncate, formatDate, highlightTerms, chunkBarWidth,
+      truncate, formatTs, highlightTerms, chunkBarWidth,
       fetchSources, toggleSource, doSearch, clearSearch,
       doIngest, doReingest, confirmDelete, doDelete,
     };

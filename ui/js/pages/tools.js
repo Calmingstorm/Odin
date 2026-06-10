@@ -3,6 +3,7 @@
  * Card layout, categorized tool grid
  */
 import { api } from '../api.js';
+import { truncate } from '../utils.js';
 
 const { ref, computed, onMounted } = Vue;
 
@@ -254,11 +255,6 @@ export default {
       }
       return groups;
     });
-
-    function truncate(text, max) {
-      if (!text) return '';
-      return text.length > max ? text.slice(0, max) + '...' : text;
-    }
 
     function toggleExpand(name) {
       expanded.value = { ...expanded.value, [name]: !expanded.value[name] };

@@ -3,6 +3,7 @@
  * Searchable tool execution audit log with filters and pagination
  */
 import { api } from '../api.js';
+import { formatTs, truncateBlock } from '../utils.js';
 
 const { ref, computed, onMounted } = Vue;
 
@@ -119,7 +120,7 @@ export default {
 
           <div v-if="entries[expandedIdx].output || entries[expandedIdx].result">
             <div class="text-gray-400 text-xs mb-1">Output</div>
-            <pre class="p-2 rounded bg-gray-900 text-xs text-gray-300 overflow-x-auto font-mono max-h-60 overflow-y-auto whitespace-pre-wrap break-all">{{ truncate(formatDetail(entries[expandedIdx].output || entries[expandedIdx].result), 5000) }}</pre>
+            <pre class="p-2 rounded bg-gray-900 text-xs text-gray-300 overflow-x-auto font-mono max-h-60 overflow-y-auto whitespace-pre-wrap break-all">{{ truncateBlock(formatDetail(entries[expandedIdx].output || entries[expandedIdx].result), 5000) }}</pre>
           </div>
 
           <div v-if="entries[expandedIdx].error" class="mt-2">
@@ -144,15 +145,6 @@ export default {
       limit: 50,
     });
 
-    function formatTs(ts) {
-      if (!ts) return '—';
-      try {
-        const d = new Date(ts);
-        if (isNaN(d.getTime())) return ts;
-        return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      } catch { return ts; }
-    }
-
     function formatDetail(obj) {
       if (!obj) return '';
       if (typeof obj === 'string') return obj;
@@ -161,11 +153,6 @@ export default {
       } catch {
         return String(obj);
       }
-    }
-
-    function truncate(text, max) {
-      if (!text) return '';
-      return text.length > max ? text.slice(0, max) + '\n... (truncated)' : text;
     }
 
     function toggleExpand(idx) {
@@ -201,7 +188,7 @@ export default {
 
     return {
       entries, loading, error, expandedIdx, filters,
-      formatTs, formatDetail, truncate, toggleExpand, clearFilters, fetchAudit,
+      formatTs, formatDetail, truncateBlock, toggleExpand, clearFilters, fetchAudit,
     };
   },
 };
