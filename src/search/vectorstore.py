@@ -133,8 +133,15 @@ class SessionVectorStore:
             self._fts.index_session(doc_id, doc_text, channel_id, last_active)
         if vector is not None:
             vec_bytes = serialize_vector(vector)
+            # vec0 virtual tables do NOT honor INSERT OR REPLACE conflict
+            # resolution: re-inserting an existing doc_id raises "UNIQUE
+            # constraint failed on session_vec primary key" instead of replacing.
+            # Delete-then-insert makes re-indexing idempotent. (The backfill
+            # existence check is keyed on session_archives, so a doc_id present
+            # only in session_vec would otherwise error on every startup.)
+            self._conn.execute("DELETE FROM session_vec WHERE doc_id = ?", (doc_id,))
             self._conn.execute(
-                "INSERT OR REPLACE INTO session_vec (doc_id, embedding) VALUES (?, ?)",
+                "INSERT INTO session_vec (doc_id, embedding) VALUES (?, ?)",
                 (doc_id, vec_bytes),
             )
         self._conn.commit()
