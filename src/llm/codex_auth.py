@@ -15,6 +15,11 @@ from ..odin_log import get_logger
 
 log = get_logger("codex_auth")
 
+# A 401/invalidated-token account can't recover until the user re-auths, so the
+# pool sets it aside for this long (vs the 60s rate-limit window) before retrying
+# it — avoids thrashing a known-bad account, while still recovering on its own.
+AUTH_FAILED_BACKOFF_SECONDS = 600
+
 
 def _atomic_write_secure(path: Path, content: str) -> None:
     """Write content to a file atomically with 0600 permissions."""
@@ -149,6 +154,11 @@ class CodexAuth:
         async with self._refresh_lock:
             self._credentials = None
 
+    async def mark_current_auth_failed(self) -> bool:
+        """Single-account auth has nothing to rotate to — returns False so the
+        caller surfaces the 401 (this account must be re-authed)."""
+        return False
+
     async def _refresh(self, creds: dict) -> None:
         """Refresh the access token using the refresh token."""
         refresh_token = creds.get("refresh_token")
@@ -207,9 +217,9 @@ class CodexAuth:
         self._save(new_creds)
         log.info("Codex tokens refreshed successfully")
 
-    def mark_rate_limited(self) -> None:
-        """Mark this credential set as rate-limited."""
-        self._rate_limited_until = time.time() + 60  # Back off 60s minimum
+    def mark_rate_limited(self, seconds: float = 60) -> None:
+        """Mark this credential set as unavailable for ``seconds`` (default 60s)."""
+        self._rate_limited_until = time.time() + seconds
 
     def is_rate_limited(self) -> bool:
         return time.time() < getattr(self, "_rate_limited_until", 0)
@@ -461,6 +471,34 @@ class CodexAuthPool:
         # invalidate_current() takes the inner account's own refresh lock;
         # call it outside the pool lock to keep lock ordering simple.
         await current.invalidate_current()
+
+    async def mark_current_auth_failed(self) -> bool:
+        """Mark the current account as auth-failed (401/invalidated) and rotate.
+
+        Distinct from rate-limit rotation: an invalidated token won't recover
+        until re-auth, so set the account aside for a longer window
+        (AUTH_FAILED_BACKOFF_SECONDS) rather than retrying it every minute, then
+        rotate to the next account. Returns True if it rotated to a *different*
+        account, False if this is the only one (caller should surface the error).
+        """
+        if not self._accounts:
+            return False
+        async with self._pool_lock:
+            current = self._accounts[self._current_index]
+            current.mark_rate_limited(AUTH_FAILED_BACKOFF_SECONDS)
+            try:
+                email = current._load().get("email", f"account {self._current_index}")
+            except Exception:
+                email = f"account {self._current_index}"
+            if len(self._accounts) > 1:
+                self._rotate()
+                log.warning(
+                    "Codex %s auth failed (401/invalidated), skipped to account %d/%d",
+                    email, self._current_index + 1, len(self._accounts),
+                )
+                return True
+            log.warning("Codex %s auth failed (401), only account — cannot rotate", email)
+            return False
 
     def _rotate(self) -> None:
         self._current_index = (self._current_index + 1) % len(self._accounts)

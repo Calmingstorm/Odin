@@ -434,15 +434,46 @@ class CodexChatClient:
 
                     error_body = (await resp.read()).decode("utf-8", errors="replace")
 
-                    if resp.status == 401 and attempt == 0:
-                        log.warning("Codex auth expired, forcing token refresh...")
-                        await self.auth.invalidate_current()
-                        new_token = await self.auth.get_access_token()
-                        headers["Authorization"] = f"Bearer {new_token}"
-                        account_id = self.auth.get_account_id()
-                        if account_id:
-                            headers["ChatGPT-Account-Id"] = account_id
-                        continue
+                    if resp.status == 401:
+                        body_l = error_body.lower()
+                        invalidated = (
+                            "token_invalidated" in body_l
+                            or "invalidated" in body_l
+                            or "sign in again" in body_l
+                        )
+                        # Likely-stale cached bearer (generic 401, first try):
+                        # clear + refresh and retry the SAME account once.
+                        if attempt == 0 and not invalidated:
+                            log.warning("Codex auth 401, forcing token refresh...")
+                            await self.auth.invalidate_current()
+                            new_token = await self.auth.get_access_token()
+                            headers["Authorization"] = f"Bearer {new_token}"
+                            account_id = self.auth.get_account_id()
+                            if account_id:
+                                headers["ChatGPT-Account-Id"] = account_id
+                            else:
+                                headers.pop("ChatGPT-Account-Id", None)
+                            continue
+                        # Invalidated, or a 401 that survived the refresh: this
+                        # account can't authenticate. Skip it and rotate to the
+                        # next account — only on this error, never routine traffic.
+                        rotated = False
+                        if hasattr(self.auth, "mark_current_auth_failed"):
+                            rotated = await self.auth.mark_current_auth_failed()
+                        if rotated and attempt < self.max_retries - 1:
+                            log.warning("Codex 401: skipped failed account, retrying on next...")
+                            new_token = await self.auth.get_access_token()
+                            headers["Authorization"] = f"Bearer {new_token}"
+                            account_id = self.auth.get_account_id()
+                            if account_id:
+                                headers["ChatGPT-Account-Id"] = account_id
+                            else:
+                                headers.pop("ChatGPT-Account-Id", None)
+                            continue
+                        self.breaker.record_failure()
+                        raise RuntimeError(
+                            f"Codex 401 (auth failed, no healthy account): {error_body[:200]}"
+                        )
 
                     if resp.status == 429:
                         if hasattr(self.auth, "mark_current_limited"):
@@ -665,15 +696,46 @@ class CodexChatClient:
 
                     error_body = (await resp.read()).decode("utf-8", errors="replace")
 
-                    if resp.status == 401 and attempt == 0:
-                        log.warning("Codex auth expired, forcing token refresh...")
-                        await self.auth.invalidate_current()
-                        new_token = await self.auth.get_access_token()
-                        headers["Authorization"] = f"Bearer {new_token}"
-                        account_id = self.auth.get_account_id()
-                        if account_id:
-                            headers["ChatGPT-Account-Id"] = account_id
-                        continue
+                    if resp.status == 401:
+                        body_l = error_body.lower()
+                        invalidated = (
+                            "token_invalidated" in body_l
+                            or "invalidated" in body_l
+                            or "sign in again" in body_l
+                        )
+                        # Likely-stale cached bearer (generic 401, first try):
+                        # clear + refresh and retry the SAME account once.
+                        if attempt == 0 and not invalidated:
+                            log.warning("Codex auth 401, forcing token refresh...")
+                            await self.auth.invalidate_current()
+                            new_token = await self.auth.get_access_token()
+                            headers["Authorization"] = f"Bearer {new_token}"
+                            account_id = self.auth.get_account_id()
+                            if account_id:
+                                headers["ChatGPT-Account-Id"] = account_id
+                            else:
+                                headers.pop("ChatGPT-Account-Id", None)
+                            continue
+                        # Invalidated, or a 401 that survived the refresh: this
+                        # account can't authenticate. Skip it and rotate to the
+                        # next account — only on this error, never routine traffic.
+                        rotated = False
+                        if hasattr(self.auth, "mark_current_auth_failed"):
+                            rotated = await self.auth.mark_current_auth_failed()
+                        if rotated and attempt < self.max_retries - 1:
+                            log.warning("Codex 401: skipped failed account, retrying on next...")
+                            new_token = await self.auth.get_access_token()
+                            headers["Authorization"] = f"Bearer {new_token}"
+                            account_id = self.auth.get_account_id()
+                            if account_id:
+                                headers["ChatGPT-Account-Id"] = account_id
+                            else:
+                                headers.pop("ChatGPT-Account-Id", None)
+                            continue
+                        self.breaker.record_failure()
+                        raise RuntimeError(
+                            f"Codex 401 (auth failed, no healthy account): {error_body[:200]}"
+                        )
 
                     if resp.status == 429:
                         if hasattr(self.auth, "mark_current_limited"):
