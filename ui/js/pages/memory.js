@@ -3,8 +3,8 @@
  * Tree-organized persistent memory with scope grouping, inline edit, search, bulk ops
  */
 import { api } from '../api.js';
+import { computed, onMounted, ref } from 'vue';
 
-const { ref, computed, onMounted } = Vue;
 
 export default {
   template: `

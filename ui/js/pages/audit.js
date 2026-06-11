@@ -4,8 +4,8 @@
  */
 import { api } from '../api.js';
 import { formatTs, truncateBlock } from '../utils.js';
+import { computed, onMounted, ref } from 'vue';
 
-const { ref, computed, onMounted } = Vue;
 
 export default {
   template: `
@@ -85,8 +85,8 @@ export default {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(e, i) in entries" :key="i"
-                @click="toggleExpand(i)" style="cursor:pointer;"
+            <template v-for="(e, i) in entries" :key="i">
+            <tr @click="toggleExpand(i)" style="cursor:pointer;"
                 :class="expandedIdx === i ? 'bg-gray-800/50' : ''">
               <td class="text-xs text-gray-400 font-mono whitespace-nowrap">{{ formatTs(e.timestamp) }}</td>
               <td class="font-mono text-xs">{{ e.tool || e.tool_name || '—' }}</td>
@@ -103,12 +103,10 @@ export default {
                 <span v-if="!e.error" class="badge badge-success">ok</span>
               </td>
             </tr>
-          </tbody>
-        </table>
-        </div>
-
-        <!-- Expanded detail -->
-        <div v-if="expandedIdx !== null && entries[expandedIdx]" class="mt-3 hm-card">
+            <!-- Inline expanded detail: renders directly under the clicked row -->
+            <tr v-if="expandedIdx === i">
+              <td colspan="6" class="!p-0">
+                <div class="m-2 hm-card">
           <div class="flex items-center justify-between mb-2">
             <span class="text-sm font-medium font-mono">{{ entries[expandedIdx].tool || entries[expandedIdx].tool_name }}</span>
             <button @click="expandedIdx = null" class="btn btn-ghost text-xs">Close</button>
@@ -128,7 +126,21 @@ export default {
             <div class="text-red-400 text-xs mb-1">Error</div>
             <pre class="p-2 rounded bg-red-950/30 text-xs text-red-300 overflow-x-auto font-mono">{{ entries[expandedIdx].error }}</pre>
           </div>
+
+          <div v-if="entries[expandedIdx].failure" class="mt-2 text-xs text-gray-500">
+            Failure class: <span class="badge badge-warning">{{ entries[expandedIdx].failure.class }}</span>
+            <span class="ml-1">{{ entries[expandedIdx].failure.subclass }}</span>
+            <span class="ml-1 text-gray-600">rule {{ entries[expandedIdx].failure.matched_rule || '\u2014' }},
+              confidence {{ entries[expandedIdx].failure.confidence }}</span>
+          </div>
+                </div>
+              </td>
+            </tr>
+            </template>
+          </tbody>
+        </table>
         </div>
+
       </div>
     </div>`,
 

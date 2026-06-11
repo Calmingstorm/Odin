@@ -6,6 +6,9 @@ __pycache__/
 *.egg-info/
 *.egg
 dist/
+# The WebUI build IS committed (production serves it; .deb needs no Node)
+!ui/dist/
+!ui/dist/**
 build/
 .eggs/
 
@@ -43,7 +46,6 @@ htmlcov/
 
 # Node / JS
 node_modules/
-package-lock.json
 
 # OS
 .DS_Store

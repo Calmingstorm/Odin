@@ -1,8 +1,8 @@
 import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
+import { computed, nextTick, onMounted, ref } from 'vue';
 
-const { ref, computed, onMounted, nextTick } = Vue;
 
 export default {
   template: `

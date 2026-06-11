@@ -4,8 +4,8 @@
  */
 import { api } from '../api.js';
 import { fmtNum } from '../utils.js';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 
-const { ref, computed, onMounted, onUnmounted } = Vue;
 
 export default {
   template: `

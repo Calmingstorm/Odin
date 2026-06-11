@@ -4,8 +4,8 @@
  */
 import { api } from '../api.js';
 import { truncate } from '../utils.js';
+import { computed, onMounted, ref } from 'vue';
 
-const { ref, computed, onMounted } = Vue;
 
 /** Category mapping for tools — groups tools by functional area */
 const TOOL_CATEGORIES = [

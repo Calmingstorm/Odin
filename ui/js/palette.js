@@ -8,7 +8,8 @@
  * The <command-palette> component is mounted once in app.js, which also
  * owns the Ctrl+K keybinding (calls openPalette()).
  */
-const { reactive, computed, nextTick } = Vue;
+import { computed, nextTick, reactive, ref, watch } from 'vue';
+import { useRouter } from 'vue-router';
 
 // Group › Label → route. Keep in sync with app.js routes and group tabs.
 const DESTINATIONS = [
@@ -68,9 +69,8 @@ function score(dest, q) {
 
 export const CommandPalette = {
   setup() {
-    const { useRouter } = VueRouter;
     const router = useRouter();
-    const inputEl = Vue.ref(null);
+    const inputEl = ref(null);
 
     const results = computed(() => {
       const q = state.query.trim().toLowerCase();
@@ -80,14 +80,14 @@ export const CommandPalette = {
         .sort((a, b) => b._score - a._score);
     });
 
-    Vue.watch(() => state.open, async (open) => {
+    watch(() => state.open, async (open) => {
       if (open) {
         await nextTick();
         inputEl.value?.focus();
       }
     });
 
-    Vue.watch(() => state.query, () => { state.selected = 0; });
+    watch(() => state.query, () => { state.selected = 0; });
 
     function go(dest) {
       closePalette();

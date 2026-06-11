@@ -5,8 +5,8 @@
  */
 import { api } from '../api.js';
 import { truncate, formatTs } from '../utils.js';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 
-const { ref, computed, onMounted, nextTick, watch, onUnmounted } = Vue;
 
 // Python syntax highlighting (no external dependency)
 function highlightPython(code) {

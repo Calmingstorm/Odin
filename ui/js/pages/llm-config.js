@@ -1,8 +1,8 @@
 import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
+import { onMounted, onUnmounted, ref } from 'vue';
 
-const { ref, onMounted, onUnmounted } = Vue;
 
 export default {
   template: `
@@ -323,7 +323,7 @@ export default {
             {{ ollamaStatus.health.error }}
           </div>
         </div>
-
+      </div>
 
     </div>
   `,

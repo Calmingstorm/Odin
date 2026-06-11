@@ -1,6 +1,7 @@
 import { api } from '../api.js';
+import { confirmDialog } from '../confirm.js';
+import { computed, onMounted, ref } from 'vue';
 
-const { ref, computed, onMounted } = Vue;
 
 export default {
   setup() {
@@ -100,7 +101,13 @@ export default {
     }
 
     async function deletePreset() {
-      if (!confirm(`Delete preset "${preset.value}"?`)) return;
+      const ok = await confirmDialog({
+        title: 'Delete preset',
+        message: `Delete preset "${preset.value}"? This cannot be undone.`,
+        confirmLabel: 'Delete',
+        danger: true,
+      });
+      if (!ok) return;
       error.value = null;
       try {
         await api.del(`/api/personality/presets/${encodeURIComponent(preset.value)}`);

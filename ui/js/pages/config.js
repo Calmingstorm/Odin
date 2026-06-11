@@ -3,8 +3,8 @@
  * Grouped sections, inline validation, undo/redo, diff view.
  */
 import { api } from '../api.js';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 
-const { ref, computed, onMounted, onUnmounted, watch } = Vue;
 
 // Keys whose values are redacted by the server and must not be editable
 const SENSITIVE_KEYS = new Set([

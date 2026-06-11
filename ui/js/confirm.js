@@ -15,7 +15,7 @@
  *
  * The <confirm-host> component is mounted once in app.js.
  */
-const { reactive } = Vue;
+import { onMounted, onUnmounted, reactive } from 'vue';
 
 const state = reactive({
   open: false,
@@ -55,8 +55,8 @@ export const ConfirmHost = {
       if (e.key === 'Escape') { e.stopPropagation(); settle(false); }
       if (e.key === 'Enter') { e.stopPropagation(); settle(true); }
     }
-    Vue.onMounted(() => document.addEventListener('keydown', onKeydown, true));
-    Vue.onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
+    onMounted(() => document.addEventListener('keydown', onKeydown, true));
+    onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
     return { state, settle };
   },
   template: `

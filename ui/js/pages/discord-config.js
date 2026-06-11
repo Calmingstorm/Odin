@@ -3,8 +3,8 @@
  * Toggle response enabled + require_mention per guild and channel.
  */
 import { api } from '../api.js';
+import { computed, onMounted, ref } from 'vue';
 
-const { ref, computed, onMounted } = Vue;
 
 export default {
   template: `

@@ -1,6 +1,7 @@
 import { api } from '../api.js';
+import { confirmDialog } from '../confirm.js';
+import { onMounted, ref } from 'vue';
 
-const { ref, onMounted } = Vue;
 
 export default {
   setup() {
@@ -34,7 +35,13 @@ export default {
     }
 
     async function applyUpdate() {
-      if (!confirm('Update Odin and restart? Active tasks will be interrupted.')) return;
+      const ok = await confirmDialog({
+        title: 'Update & restart',
+        message: 'Update Odin and restart? Active tasks will be interrupted.',
+        confirmLabel: 'Update & Restart',
+        danger: true,
+      });
+      if (!ok) return;
       applying.value = true;
       error.value = null;
       try {

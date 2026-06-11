@@ -2,8 +2,8 @@
  * Execution Viewer — Live tool execution dashboard
  * Shows active tool calls, streaming output, and execution history
  */
-const { ref, computed, onMounted, onUnmounted } = Vue;
 import { api, ws } from '../api.js';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 
 export default {
   setup() {
