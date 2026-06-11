@@ -210,6 +210,7 @@ export default {
     const errorsLoading = ref(false);
     const agents = ref([]);
     const newEventCount = ref(0);
+    const knowledgeChunks = ref(null);
     const actionLoading = ref({ reload: false, clearSessions: false, stopLoops: false });
     let eventKeyCounter = 0;
 
@@ -276,10 +277,11 @@ export default {
           label: 'Users', value: s.user_count ?? 0,
           icon: '\u263a', iconColor: 'text-indigo-400',
         },
-        {
-          label: 'Knowledge', value: '-',
+        ...(knowledgeChunks.value !== null ? [{
+          label: 'Knowledge', value: knowledgeChunks.value,
           icon: '\u2261', iconColor: 'text-teal-400',
-        },
+          sub: 'chunks', subColor: 'text-gray-500',
+        }] : []),
         {
           label: 'Alerts', value: (s.monitoring && s.monitoring.active_alerts) || 0,
           icon: '\u2691', iconColor: 'text-red-400',
@@ -361,6 +363,15 @@ export default {
         errors.value = await api.get('/api/audit?error_only=1&limit=5');
       } catch { /* ignore */ }
       errorsLoading.value = false;
+    }
+
+    async function fetchKnowledgeCount() {
+      // One-time on mount — cheap source list; card hides when unavailable
+      try {
+        const sources = await api.get('/api/knowledge');
+        knowledgeChunks.value = (Array.isArray(sources) ? sources : [])
+          .reduce((sum, s) => sum + (s.chunks || 0), 0);
+      } catch { knowledgeChunks.value = null; }
     }
 
     async function fetchAgents() {
@@ -460,7 +471,7 @@ export default {
     }
 
     onMounted(async () => {
-      await Promise.all([fetchStatus(), fetchActivity(), fetchErrors(), fetchAgents()]);
+      await Promise.all([fetchStatus(), fetchActivity(), fetchErrors(), fetchAgents(), fetchKnowledgeCount()]);
       statusInterval = setInterval(fetchStatus, 15000);
       agentInterval = setInterval(fetchAgents, 10000);
       ws.subscribe('events', onEvent);

@@ -323,7 +323,7 @@ export default {
             {{ ollamaStatus.health.error }}
           </div>
         </div>
-
+      </div>
 
     </div>
   `,
