@@ -1289,7 +1289,7 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
             </tr>
             <!-- Inline expanded detail: renders directly under the clicked row -->
             <tr v-if="expandedIdx === i">
-              <td colspan="7" class="!p-0">
+              <td colspan="6" class="!p-0">
                 <div class="m-2 hm-card">
           <div class="flex items-center justify-between mb-2">
             <span class="text-sm font-medium font-mono">{{ entries[expandedIdx].tool || entries[expandedIdx].tool_name }}</span>
