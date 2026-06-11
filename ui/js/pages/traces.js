@@ -376,6 +376,51 @@ export default {
                 <div class="text-gray-400 text-xs mb-1">Final Response</div>
                 <pre class="p-2 rounded bg-gray-900 text-xs text-gray-300 font-mono max-h-40 overflow-y-auto whitespace-pre-wrap break-words">{{ truncateBlock(entries[expandedIdx].final_response, 5000) }}</pre>
               </div>
+
+              <!-- Context trace (observability): what the prompt assembler did -->
+              <div v-if="entries[expandedIdx].context_trace" class="mt-3">
+                <div class="text-gray-400 text-xs mb-1">Context Assembly</div>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-2">
+                  <div class="p-2 rounded bg-gray-900 text-xs">
+                    <span class="text-gray-500 block">System tokens</span>
+                    <span class="font-semibold">{{ formatTokens(entries[expandedIdx].context_trace.summary?.system_tokens) }}</span>
+                  </div>
+                  <div class="p-2 rounded bg-gray-900 text-xs">
+                    <span class="text-gray-500 block">History tokens</span>
+                    <span class="font-semibold">{{ formatTokens(entries[expandedIdx].context_trace.summary?.history_used_tokens) }}</span>
+                  </div>
+                  <div class="p-2 rounded bg-gray-900 text-xs">
+                    <span class="text-gray-500 block">Learned injected</span>
+                    <span class="font-semibold">{{ entries[expandedIdx].context_trace.summary?.learned_injected ?? '—' }}
+                      <span class="text-gray-500">({{ entries[expandedIdx].context_trace.learned?.mode || '?' }})</span>
+                    </span>
+                  </div>
+                  <div class="p-2 rounded bg-gray-900 text-xs">
+                    <span class="text-gray-500 block">Continuity</span>
+                    <span class="font-semibold">{{ entries[expandedIdx].context_trace.continuity_source || '—' }}</span>
+                  </div>
+                </div>
+                <table v-if="(entries[expandedIdx].context_trace.sections || []).length" class="hm-table text-xs mb-2">
+                  <thead><tr><th>Section</th><th class="text-right">Tokens</th></tr></thead>
+                  <tbody>
+                    <tr v-for="s in entries[expandedIdx].context_trace.sections" :key="s.section">
+                      <td class="font-mono">{{ s.section }}</td>
+                      <td class="text-right">{{ formatTokens(s.tokens) }}</td>
+                    </tr>
+                    <tr v-if="entries[expandedIdx].context_trace.history?.used">
+                      <td class="font-mono">history ({{ entries[expandedIdx].context_trace.history.kept_recent }} recent + {{ entries[expandedIdx].context_trace.history.kept_relevant }} relevant of {{ entries[expandedIdx].context_trace.history.candidates }})</td>
+                      <td class="text-right">{{ formatTokens(entries[expandedIdx].context_trace.history.used) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-if="(entries[expandedIdx].context_trace.warnings || []).length" class="mt-1">
+                  <span v-for="w in entries[expandedIdx].context_trace.warnings" :key="w.code"
+                        class="badge badge-danger mr-1" :title="w.detail">{{ w.code }}</span>
+                </div>
+                <div v-if="entries[expandedIdx].context_trace.summary?.trace_truncated" class="text-xs text-amber-400 mt-1">
+                  trace truncated ({{ entries[expandedIdx].context_trace.truncation_reason }})
+                </div>
+              </div>
             </div>
           </div>
         </div>

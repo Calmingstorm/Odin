@@ -90,6 +90,17 @@ learning:
   consolidation_target: 120
   injection_token_budget: 4000
 
+# Pure instrumentation — records prompt assembly + failure metadata,
+# never influences behavior. Safe to disable per piece.
+observability:
+  context_trace:
+    enabled: true
+    memory_key_mode: hash   # raw | hash | redacted
+    include_segment_ids: true
+    max_trace_bytes: 16384
+  audit_failure_classification: true
+  prompt_budget_accounting: true
+
 search:
   enabled: true
   search_db_path: ./data/search

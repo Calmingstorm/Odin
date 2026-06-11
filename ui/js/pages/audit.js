@@ -99,7 +99,8 @@ export default {
               </td>
               <td>
                 <span v-if="e.error" class="badge badge-danger">error</span>
-                <span v-else class="badge badge-success">ok</span>
+                <span v-if="e.failure && e.failure.class" class="badge badge-warning" :title="e.failure.subclass">{{ e.failure.class }}</span>
+                <span v-if="!e.error" class="badge badge-success">ok</span>
               </td>
             </tr>
           </tbody>
