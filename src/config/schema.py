@@ -598,6 +598,22 @@ class MCPServerConfig(BaseModel):
         return v
 
 
+class ContextTraceConfig(BaseModel):
+    enabled: bool = True
+    # raw | hash | redacted — how learned/memory keys appear in traces
+    memory_key_mode: Literal["raw", "hash", "redacted"] = "hash"
+    include_segment_ids: bool = True
+    max_trace_bytes: int = 16384
+
+
+class ObservabilityConfig(BaseModel):
+    """Pure instrumentation — records prompt assembly and failure metadata,
+    never influences behavior. Each piece has its own kill-switch."""
+    context_trace: ContextTraceConfig = ContextTraceConfig()
+    audit_failure_classification: bool = True
+    prompt_budget_accounting: bool = True
+
+
 class MCPConfig(BaseModel):
     enabled: bool = False
     servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
@@ -621,6 +637,7 @@ class Config(BaseModel):
     usage: UsageConfig = UsageConfig()
     webhook: WebhookConfig = WebhookConfig()
     learning: LearningConfig = LearningConfig()
+    observability: ObservabilityConfig = ObservabilityConfig()
     search: SearchConfig = SearchConfig()
     voice: VoiceConfig = VoiceConfig()
     monitoring: MonitoringConfig = MonitoringConfig()

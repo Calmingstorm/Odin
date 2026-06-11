@@ -58,6 +58,9 @@ class TrajectoryTurn:
     tools_used: list[str] = field(default_factory=list)
     is_error: bool = False
     handoff: bool = False
+    # Observability: prompt-assembly decision metadata (PR #104) — counters,
+    # reasons, hashed keys; never content. None when tracing is disabled.
+    context_trace: dict | None = None
 
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -119,6 +122,8 @@ class TrajectoryTurn:
             "total_duration_ms": self.total_duration_ms,
             "iteration_count": len(self.iterations),
         }
+        if self.context_trace is not None:
+            d["context_trace"] = self.context_trace
         return d
 
 

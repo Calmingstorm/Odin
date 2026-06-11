@@ -444,7 +444,13 @@ class OdinBot(commands.Bot):
 
         # Audit logger — HMAC chain signing is on iff config.audit.hmac_key is set
         _audit_key = config.audit.hmac_key if getattr(config, "audit", None) else ""
-        self.audit = AuditLogger(path="./data/audit.jsonl", hmac_key=_audit_key)
+        self.audit = AuditLogger(
+            path="./data/audit.jsonl", hmac_key=_audit_key,
+            classify_failures=getattr(
+                getattr(config, "observability", None),
+                "audit_failure_classification", True,
+            ),
+        )
         if getattr(config, "audit", None) is not None and not _audit_key:
             log.warning(
                 "Audit HMAC signing is DISABLED (config.audit.hmac_key is empty): "
@@ -873,7 +879,29 @@ class OdinBot(commands.Bot):
         self._memory_cache[user_id] = (now, memory)
         return memory
 
-    def _get_reflector_section(self, user_id: str | None, query: str | None = None) -> str:
+    def _new_context_trace(self):
+        """Create a context-trace collector when observability is enabled.
+
+        Returns None when disabled — every consumer treats None as
+        "record nothing", leaving the request path byte-identical.
+        """
+        try:
+            obs = getattr(self.config, "observability", None)
+            ct = getattr(obs, "context_trace", None)
+            if ct is None or not ct.enabled:
+                return None
+            from ..observability import ContextTraceCollector
+            return ContextTraceCollector(
+                memory_key_mode=ct.memory_key_mode,
+                include_segment_ids=ct.include_segment_ids,
+                max_trace_bytes=ct.max_trace_bytes,
+            )
+        except Exception:  # noqa: BLE001 — tracing must never block a turn
+            return None
+
+    def _get_reflector_section(
+        self, user_id: str | None, query: str | None = None, trace=None,
+    ) -> str:
         """Learned Context for the prompt — query-aware relevance selection.
 
         File parsing is mtime-cached inside the reflector, so calling per
@@ -881,7 +909,9 @@ class OdinBot(commands.Bot):
         """
         if not hasattr(self, "reflector"):
             return ""
-        return self.reflector.get_prompt_section(user_id=user_id, query=query)
+        return self.reflector.get_prompt_section(
+            user_id=user_id, query=query, trace=trace,
+        )
 
     def _invalidate_prompt_caches(self) -> None:
         """Invalidate all prompt-related caches. Called on config/context reload."""
@@ -982,6 +1012,7 @@ class OdinBot(commands.Bot):
         self, channel: discord.abc.GuildChannel | None = None,
         user_id: str | None = None,
         query: str | None = None,
+        trace=None,
     ) -> str:
         voice_info = "Voice support is not enabled."
         if self.voice_manager:
@@ -1014,15 +1045,22 @@ class OdinBot(commands.Bot):
             personality_voice=p_cfg.custom_voice if p_cfg else "",
         )
 
+        if trace is not None:
+            trace.section("base", tokens=len(prompt) // 4)
+
         # Inject persistent memory into the system prompt (per-user + global)
         memory = self._get_cached_memory(user_id)
         if memory:
             memory_text = "\n".join(f"- **{k}**: {v}" for k, v in memory.items())
             prompt += f"\n\n## Persistent Memory\n{memory_text}"
+            if trace is not None:
+                trace.section("persistent_memory", tokens=len(memory_text) // 4,
+                              keys=len(memory))
 
         # Inject learned context from cross-conversation reflection
-        # (per-user filtered, relevance-ranked against the current query)
-        learned = self._get_reflector_section(user_id, query)
+        # (per-user filtered, relevance-ranked against the current query).
+        # The reflector records its own selection decisions on the trace.
+        learned = self._get_reflector_section(user_id, query, trace=trace)
         if learned:
             prompt += f"\n\n{learned}"
 
@@ -1030,6 +1068,8 @@ class OdinBot(commands.Bot):
         skills_text = self._get_cached_skills_text()
         if skills_text:
             prompt += f"\n\n## User-Created Skills\n{skills_text}"
+            if trace is not None:
+                trace.section("skills_list", tokens=len(skills_text) // 4)
 
         # Inject recent tool executions for this channel only
         if channel is not None:
@@ -1043,6 +1083,9 @@ class OdinBot(commands.Bot):
             if channel_actions:
                 actions_text = "\n".join(channel_actions[-10:])
                 prompt += f"\n\n## Recent Actions\n{actions_text}"
+                if trace is not None:
+                    trace.section("recent_actions", tokens=len(actions_text) // 4,
+                                  entries=len(channel_actions[-10:]))
 
         # Tool use pattern hints injected separately via _inject_tool_hints()
         # because format_hints is async (needs embedder).
@@ -1058,6 +1101,8 @@ class OdinBot(commands.Bot):
                 degradation_notes.append("LLM backend circuit breaker is recovering (half-open) — requests may be slow or fail.")
         if degradation_notes:
             prompt += "\n\n## System Health Warnings\n" + "\n".join(f"- {n}" for n in degradation_notes)
+            if trace is not None:
+                trace.section("health_warnings", tokens=20, notes=len(degradation_notes))
 
         return prompt
 
@@ -1520,12 +1565,14 @@ class OdinBot(commands.Bot):
 
     async def _save_turn_trajectory(
         self, trajectory, *, error: str = "", final_response: str = "",
-        tools_used: list[str] | None = None,
+        tools_used: list[str] | None = None, trace=None,
     ) -> None:
         """Persist the turn trajectory as JSONL. Non-fatal on error."""
         if self.trajectory_saver is None:
             return
         try:
+            if trace is not None:
+                trajectory.context_trace = trace.finalize()
             from datetime import datetime, timezone
             trajectory.timestamp = datetime.now(timezone.utc).isoformat()
             if error:
@@ -2305,16 +2352,33 @@ class OdinBot(commands.Bot):
                     )
                     self.sessions.remove_last_message(channel_id, "user")
                     return
-                _sp = self._build_system_prompt(channel=message.channel, user_id=user_id, query=content)
+                _trace = self._new_context_trace()
+                if _trace is not None:
+                    with _trace.phase("system_prompt"):
+                        _sp = self._build_system_prompt(
+                            channel=message.channel, user_id=user_id,
+                            query=content, trace=_trace,
+                        )
+                else:
+                    _sp = self._build_system_prompt(
+                        channel=message.channel, user_id=user_id, query=content,
+                    )
                 _sp = await self._inject_tool_hints(_sp, content, user_id)
                 log.info("Routing to Codex with tools")
                 # Use abbreviated history to reduce poisoning from stale responses
                 # (get_task_history handles compaction internally)
                 # Pass current message content for relevance scoring —
                 # older messages unrelated to the current query are dropped
-                task_history = await self.sessions.get_task_history(
-                    channel_id, max_messages=160, current_query=content,
-                )
+                if _trace is not None:
+                    with _trace.phase("history"):
+                        task_history = await self.sessions.get_task_history(
+                            channel_id, max_messages=160, current_query=content,
+                            trace=_trace,
+                        )
+                else:
+                    task_history = await self.sessions.get_task_history(
+                        channel_id, max_messages=160, current_query=content,
+                    )
                 if image_blocks and task_history and task_history[-1]["role"] == "user":
                     last = task_history[-1]
                     text = last["content"] if isinstance(last["content"], str) else str(last["content"])
@@ -2325,7 +2389,7 @@ class OdinBot(commands.Bot):
                     log.info("Attached %d image(s) to message for Claude vision", len(image_blocks))
                 try:
                     response, already_sent, is_error, tools_used, handoff = await self._process_with_tools(
-                        message, task_history, system_prompt_override=_sp,
+                        message, task_history, system_prompt_override=_sp, trace=_trace,
                     )
                 except asyncio.TimeoutError as codex_err:
                     log.warning("Codex tool loop timed out: %s", codex_err)
@@ -2577,6 +2641,7 @@ class OdinBot(commands.Bot):
         message: discord.Message,
         history: list[dict],
         system_prompt_override: str | None = None,
+        trace=None,
     ) -> tuple[str, bool, bool, list[str], bool]:
         """Process a message with Codex tool loop.
 
@@ -2676,6 +2741,12 @@ class OdinBot(commands.Bot):
 
         # Per-turn trajectory accumulator — populated each iteration, saved at end.
         from ..trajectories.saver import TrajectoryTurn, ToolIteration
+        if trace is not None:
+            provider_cfg = getattr(self.config, "llm_provider", None)
+            trace.provider(
+                name=getattr(provider_cfg, "active_provider", "codex") if provider_cfg else "codex",
+                model=getattr(self.llm_client, "model", "") or "",
+            )
         _op_tool_details: list[dict] = []
         _trajectory = TrajectoryTurn(
             message_id=str(getattr(message, "id", "")),
@@ -2758,13 +2829,13 @@ class OdinBot(commands.Bot):
                         user_id=user_id, channel_id=_channel_id, tools_used=tools_used_in_loop,
                     )
                 except Exception as retry_err:
-                    await self._save_turn_trajectory(_trajectory, error=str(retry_err))
+                    await self._save_turn_trajectory(_trajectory, error=str(retry_err), trace=trace)
                     _clear_active()
                     return f"LLM API error (circuit breaker recovery failed): {retry_err}", False, True, tools_used_in_loop, False
             except Exception as api_err:
                 err_msg = str(api_err) or f"{type(api_err).__name__} (no message)"
                 log.error("LLM API call failed: %s", err_msg, exc_info=True)
-                await self._save_turn_trajectory(_trajectory, error=err_msg)
+                await self._save_turn_trajectory(_trajectory, error=err_msg, trace=trace)
                 _clear_active()
                 return f"LLM API error: {err_msg}", False, True, tools_used_in_loop, False
             finally:
@@ -2793,7 +2864,7 @@ class OdinBot(commands.Bot):
             if stuck_tracker.check():
                 if stuck_tracker.warned:
                     log.warning("Stuck loop confirmed after warning — terminating tool loop")
-                    await self._save_turn_trajectory(_trajectory)
+                    await self._save_turn_trajectory(_trajectory, trace=trace)
                     await self._emit_lifecycle_event("loop.stuck", {
                         "channel_id": str(message.channel.id),
                         "iteration": iteration,
@@ -2940,6 +3011,7 @@ class OdinBot(commands.Bot):
                 _final = llm_resp.text or _EMPTY_RESPONSE_FALLBACK
                 await self._save_turn_trajectory(
                     _trajectory, final_response=_final, tools_used=tools_used_in_loop,
+                    trace=trace,
                 )
                 _clear_active()
                 return _final, False, False, tools_used_in_loop, False
@@ -3299,6 +3371,11 @@ class OdinBot(commands.Bot):
                 r.get("tool_use_id"): r for r in tool_results if isinstance(r, dict)
             }
             for _tc in tool_calls:
+                if trace is not None and _tc.id not in _results_by_id:
+                    trace.warning(
+                        "TOOL_RESULT_CONTINUATION_MISMATCH", "error",
+                        f"tool {_tc.name} call has no paired result",
+                    )
                 _rcontent = str(_results_by_id.get(_tc.id, {}).get("content", ""))
                 _op_tool_details.append({
                     "tool": _tc.name,
@@ -3370,6 +3447,7 @@ class OdinBot(commands.Bot):
         )
         await self._save_turn_trajectory(
             _trajectory, final_response=_cap_msg, tools_used=tools_used_in_loop,
+            trace=trace,
         )
         return _cap_msg, False, True, tools_used_in_loop, False
 

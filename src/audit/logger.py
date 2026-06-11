@@ -8,6 +8,7 @@ from typing import Literal
 
 import aiofiles
 
+from ..observability.failure_classes import classify_failure
 from ..odin_log import get_logger
 from .signer import AuditSigner, verify_log
 
@@ -17,11 +18,15 @@ log = get_logger("audit")
 class AuditLogger:
     """Append-only JSON Lines audit log for tool executions."""
 
-    def __init__(self, path: str = "./data/audit.jsonl", *, hmac_key: str = "") -> None:
+    def __init__(
+        self, path: str = "./data/audit.jsonl", *,
+        hmac_key: str = "", classify_failures: bool = True,
+    ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._event_callback: Callable | None = None
         self._signer: AuditSigner | None = AuditSigner(hmac_key) if hmac_key else None
+        self._classify_failures = classify_failures
 
     def set_event_callback(self, callback: Callable) -> None:
         """Set a callback to be invoked with each audit entry (for live WS events)."""
@@ -55,6 +60,10 @@ class AuditLogger:
             "execution_time_ms": execution_time_ms,
             "error": error,
         }
+        if error and self._classify_failures:
+            # Write-time heuristic classification (observability). The raw
+            # error string is classified here; aggregates never re-store it.
+            entry["failure"] = classify_failure(error)
         if diff:
             entry["diff"] = diff
         if risk_level:

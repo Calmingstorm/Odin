@@ -364,6 +364,9 @@ class SessionManager:
         # epoch are never restored — reset/purge means GONE, not "back on
         # the next message". Persisted so restarts honor resets too.
         self._reset_epochs: dict[str, float] = self._load_reset_epochs()
+        # Observability metadata only: how each live session came to exist
+        # (fresh | archive_restore | loaded_live). Read by context tracing.
+        self._continuity_source: dict[str, str] = {}
         self._sessions: dict[str, Session] = {}
         self._dirty: set[str] = set()
         self._reflector = reflector
@@ -394,6 +397,9 @@ class SessionManager:
             session = self._restore_from_archive(channel_id)
             if session is None:
                 session = Session(channel_id=channel_id)
+                self._continuity_source[channel_id] = "fresh"
+            else:
+                self._continuity_source[channel_id] = "archive_restore"
             self._sessions[channel_id] = session
             self._dirty.add(channel_id)
         session = self._sessions[channel_id]
@@ -469,6 +475,7 @@ class SessionManager:
     @staticmethod
     def _render_context_summary(
         session: Session, query: str | None = None, max_segments: int = 5,
+        trace=None,
     ) -> str:
         """Render prior-context text from the legacy summary and/or summary
         segments for prompt injection.
@@ -484,6 +491,7 @@ class SessionManager:
         segments = session.summary_segments
         if not query or len(segments) <= max_segments:
             selected = segments[-max_segments:]
+            selection_reason = "recency"
         else:
             newest = segments[-1]
             older = segments[:-1]
@@ -498,6 +506,20 @@ class SessionManager:
             )
             chosen = {id(s) for s in ranked}
             selected = [s for s in older if id(s) in chosen] + [newest]
+            selection_reason = "semantic_match"
+        if trace is not None:
+            selected_ids = {id(s) for s in selected}
+            for seg in segments:
+                seg_tokens = len(seg.get("summary", "")) // 4
+                if id(seg) in selected_ids:
+                    reason = ("newest" if segments and seg is segments[-1]
+                              else selection_reason)
+                    trace.segment(seg.get("id", "?"), decision="injected",
+                                  reason=reason, tokens=seg_tokens)
+                else:
+                    trace.segment(seg.get("id", "?"), decision="skipped",
+                                  reason="low_relevance" if query else "older_than_window",
+                                  tokens=seg_tokens)
         for seg in selected:
             text = seg.get("summary", "")
             if not text:
@@ -513,11 +535,11 @@ class SessionManager:
 
     @classmethod
     def _summary_context_message(
-        cls, session: Session, query: str | None = None,
+        cls, session: Session, query: str | None = None, trace=None,
     ) -> dict | None:
         """The single source of the prior-context block — a developer-role
         read-only message, never fake user/assistant dialogue."""
-        context_summary = cls._render_context_summary(session, query=query)
+        context_summary = cls._render_context_summary(session, query=query, trace=trace)
         if not context_summary:
             return None
         sanitized = _sanitize_summary(context_summary)
@@ -610,6 +632,7 @@ class SessionManager:
     async def get_task_history(
         self, channel_id: str, max_messages: int = 10,
         current_query: str | None = None,
+        trace=None,
     ) -> list[dict[str, str]]:
         """Get abbreviated history for the tool-calling path.
 
@@ -659,15 +682,21 @@ class SessionManager:
             # Preserve original ordering among the kept older messages
             kept_set = {id(m) for _, m in relevant}
             filtered = [m for m in older if id(m) in kept_set] + list(recent)
+            kept_recent_n, kept_relevant_n = len(recent), len(relevant)
+            dropped_relevance_n = dropped if dropped > 0 else 0
         else:
             filtered = list(candidate_msgs)
+            kept_recent_n, kept_relevant_n = len(filtered), 0
+            dropped_relevance_n = 0
 
         messages = [{"role": m.role, "content": m.content} for m in filtered]
 
         # Prepend prior-context summaries as a read-only developer block —
         # NOT as fake user/assistant dialogue, which polluted the transcript
         # with turns nobody actually said.
-        context_msg = self._summary_context_message(session, query=current_query)
+        context_msg = self._summary_context_message(
+            session, query=current_query, trace=trace,
+        )
         if context_msg:
             messages.insert(0, context_msg)
 
@@ -692,6 +721,18 @@ class SessionManager:
                 "Token budget: dropped %d message(s) for channel %s",
                 budget_dropped, channel_id,
             )
+
+        if trace is not None:
+            trace.history(
+                budget=budget,
+                used=sum(estimate_tokens(_content_text(m)) for m in messages),
+                candidates=len(candidate_msgs),
+                kept_recent=kept_recent_n,
+                kept_relevant=kept_relevant_n,
+                dropped_relevance=dropped_relevance_n,
+                dropped_budget=budget_dropped,
+            )
+            trace.continuity(self._continuity_source.get(channel_id, "live"))
 
         return messages
 
@@ -1446,5 +1487,6 @@ class SessionManager:
             try:
                 data = json.loads(path.read_text())
                 self._sessions[data["channel_id"]] = self._session_from_dict(data)
+                self._continuity_source[data["channel_id"]] = "loaded_live"
             except Exception as e:
                 log.error("Failed to load session from %s: %s", path, e)

@@ -228,15 +228,20 @@ async def _do_process_web_chat(
         }
 
     try:
-        sp = bot._build_system_prompt(channel=None, user_id=user_id, query=content)
+        trace = bot._new_context_trace()
+        sp = bot._build_system_prompt(
+            channel=None, user_id=user_id, query=content, trace=trace,
+        )
         sp = await bot._inject_tool_hints(sp, content, user_id)
         history = await bot.sessions.get_task_history(
-            channel_id, max_messages=160, current_query=content,
+            channel_id, max_messages=160, current_query=content, trace=trace,
         )
 
         try:
             response, _already_sent, is_error, tools_used, handoff = (
-                await bot._process_with_tools(msg, history, system_prompt_override=sp)
+                await bot._process_with_tools(
+                    msg, history, system_prompt_override=sp, trace=trace,
+                )
             )
         finally:
             await bot._set_status(None, task_end=True)

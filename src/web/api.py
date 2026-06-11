@@ -1329,6 +1329,37 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "cost tracking not available"}, status=503)
         return web.json_response(tracker.get_summary())
 
+    # ------------------------------------------------------------------
+    # Observability aggregates — passive exposure only (no alert delivery)
+    # ------------------------------------------------------------------
+
+    def _obs_window(request: web.Request) -> int:
+        try:
+            return max(1, min(int(request.query.get("window", "24")), 24 * 14))
+        except ValueError:
+            return 24
+
+    @routes.get("/api/observability/context")
+    async def get_observability_context(request: web.Request) -> web.Response:
+        obs_cfg = getattr(bot.config, "observability", None)
+        if obs_cfg is not None and not obs_cfg.prompt_budget_accounting:
+            return web.json_response({"error": "prompt budget accounting disabled"}, status=503)
+        from ..observability.aggregates import context_aggregates
+        directory = getattr(bot.config.tools, "trajectory_path", "./data/trajectories")
+        data = await asyncio.to_thread(
+            context_aggregates, directory, _obs_window(request),
+        )
+        return web.json_response(data)
+
+    @routes.get("/api/observability/failures")
+    async def get_observability_failures(request: web.Request) -> web.Response:
+        from ..observability.aggregates import failure_aggregates
+        audit_path = getattr(bot.config.tools, "audit_log_path", "./data/audit.jsonl")
+        data = await asyncio.to_thread(
+            failure_aggregates, audit_path, _obs_window(request),
+        )
+        return web.json_response(data)
+
     @routes.get("/api/usage/totals")
     async def get_usage_totals(_request: web.Request) -> web.Response:
         tracker = getattr(bot, "cost_tracker", None)

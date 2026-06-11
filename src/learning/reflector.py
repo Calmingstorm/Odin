@@ -245,6 +245,7 @@ class ConversationReflector:
 
     def get_prompt_section(
         self, user_id: str | None = None, query: str | None = None,
+        trace=None,
     ) -> str:
         """Format learned entries for injection into the system prompt.
 
@@ -279,9 +280,14 @@ class ConversationReflector:
         def fmt(e: dict) -> str:
             return f"- [{e['category']}] {e['content']}"
 
+        corrections_available = [
+            e["key"] for e in filtered if e["category"] == "correction"
+        ]
         total_tokens = sum(len(fmt(e)) for e in filtered) // 4
         if total_tokens <= self._injection_token_budget or not query:
             selected = filtered
+            selection_mode = "include_all"
+            gated_records: list[dict] = []
         else:
             def entry_text(e: dict) -> str:
                 return " ".join([
@@ -306,6 +312,16 @@ class ConversationReflector:
             # Preserve original corpus order for stable prompts
             chosen = {id(e) for e in (*corrections, *preferences, *operational, *facts)}
             selected = [e for e in filtered if id(e) in chosen]
+            selection_mode = "gated"
+            gated_records = []
+            if trace is not None:
+                pin_capped = {id(e) for e in filtered
+                              if e["category"] in ("correction", "preference")} - chosen
+                for e in filtered:
+                    if id(e) in chosen:
+                        continue
+                    reason = "pin_cap" if id(e) in pin_capped else "low_relevance"
+                    gated_records.append({"key": trace.key(e["key"]), "reason": reason})
             log.debug(
                 "Learned injection gated: %d/%d entries selected",
                 len(selected), len(filtered),
@@ -313,7 +329,21 @@ class ConversationReflector:
 
         self._note_used(selected)
         lines = [fmt(e) for e in selected]
-        return "## Learned Context\n" + "\n".join(lines)
+        section_text = "## Learned Context\n" + "\n".join(lines)
+        if trace is not None:
+            injected_correction_keys = [
+                e["key"] for e in selected if e["category"] == "correction"
+            ]
+            trace.learned(
+                available=len(filtered),
+                injected_keys=[trace.key(e["key"]) for e in selected],
+                pinned_available=[trace.key(k) for k in corrections_available],
+                pinned_injected=[trace.key(k) for k in injected_correction_keys],
+                gated_out=gated_records,
+                tokens=len(section_text) // 4,
+                mode=selection_mode,
+            )
+        return section_text
 
     _REFLECTION_CONTEXT_TOP_K = 30
 
