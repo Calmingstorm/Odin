@@ -4,8 +4,8 @@
  */
 import { api } from '../api.js';
 import { formatTime } from '../utils.js';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 
-const { ref, computed, onMounted, onUnmounted } = Vue;
 
 const STATUS_COLORS = {
   ok: 'text-green-400',

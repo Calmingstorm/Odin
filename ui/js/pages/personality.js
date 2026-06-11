@@ -1,7 +1,7 @@
 import { api } from '../api.js';
 import { confirmDialog } from '../confirm.js';
+import { computed, onMounted, ref } from 'vue';
 
-const { ref, computed, onMounted } = Vue;
 
 export default {
   setup() {

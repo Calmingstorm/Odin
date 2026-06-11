@@ -4,8 +4,8 @@
  */
 import { api } from '../api.js';
 import { formatTs, truncateBlock } from '../utils.js';
+import { computed, onMounted, ref } from 'vue';
 
-const { ref, computed, onMounted } = Vue;
 
 export default {
   template: `

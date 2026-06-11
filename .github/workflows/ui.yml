@@ -1,0 +1,45 @@
+name: WebUI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'ui/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.mjs'
+      - 'tailwind.config.mjs'
+      - 'postcss.config.mjs'
+      - 'scripts/check-vue-templates.mjs'
+      - '.github/workflows/ui.yml'
+  pull_request:
+    paths:
+      - 'ui/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.mjs'
+      - 'tailwind.config.mjs'
+      - 'postcss.config.mjs'
+      - 'scripts/check-vue-templates.mjs'
+      - '.github/workflows/ui.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Strict template validation
+        run: npm run check:templates
+      - name: Build
+        run: npm run build
+      - name: Committed dist must match source
+        run: |
+          git diff --exit-code ui/dist || {
+            echo "::error::ui/dist is stale — run 'npm run build' and commit the result"
+            exit 1
+          }

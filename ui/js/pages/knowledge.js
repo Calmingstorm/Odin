@@ -5,8 +5,8 @@
 import { api } from '../api.js';
 import { truncate, escapeHtml, formatTs } from '../utils.js';
 import { toast } from '../toast.js';
+import { computed, onMounted, ref } from 'vue';
 
-const { ref, computed, onMounted } = Vue;
 
 function highlightTerms(text, query) {
   if (!text || !query) return escapeHtml(text);

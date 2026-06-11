@@ -2,6 +2,10 @@
  * Odin Management UI — Main App
  * Vue 3 + Vue Router (CDN globals) + Tailwind CSS
  */
+import '../css/fonts.css';
+import '../css/tailwind.css';
+import '../css/style.css';
+
 import { api, ws } from './api.js';
 import { ToastContainer } from './toast.js';
 import { ConfirmHost } from './confirm.js';
@@ -13,9 +17,9 @@ import HistoryPage from './pages/history.js';
 import CapabilitiesPage from './pages/capabilities.js';
 import PersonalityPage from './pages/personality.js';
 import SystemPage from './pages/system.js';
+import { computed, createApp, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { createRouter, createWebHashHistory } from 'vue-router';
 
-const { createApp, ref, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
-const { createRouter, createWebHashHistory } = VueRouter;
 
 // ---------------------------------------------------------------------------
 // Router — 6 top-level items, sub-pages rendered as tabs within each

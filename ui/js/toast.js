@@ -12,7 +12,7 @@
  *
  * The <toast-container> component is mounted once in app.js.
  */
-const { reactive } = Vue;
+import { reactive } from 'vue';
 
 const state = reactive({ items: [] });
 let nextId = 1;

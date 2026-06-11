@@ -52,14 +52,19 @@ _AUTH_SKIP_PATHS = AUTH_PUBLIC_EXACT
 _RATE_LIMIT_MAX = 120
 _RATE_LIMIT_WINDOW = 60  # seconds
 
-# Content-Security-Policy for the web UI
+# Content-Security-Policy for the web UI.
+# All assets are self-hosted since the Vite migration — no external script,
+# style, or font origins. 'unsafe-eval' remains ONLY because the UI uses
+# runtime-compiled Vue template strings; remove it when/if pages migrate to
+# precompiled SFC templates (tracked follow-up).
 _CSP_POLICY = "; ".join([
     "default-src 'self'",
-    "script-src 'self' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com https://cdn.jsdelivr.net",
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.tailwindcss.com",
-    "font-src 'self' https://fonts.gstatic.com",
+    "script-src 'self' 'unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self' data:",
     "connect-src 'self' ws: wss:",
     "img-src 'self' data: https://cdn.discordapp.com",
+    "object-src 'none'",
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -466,7 +471,11 @@ class HealthServer:
             log.info("Webhook endpoints enabled")
         # Serve static UI files if the directory exists
         if self._web_config.enabled:
-            ui_dir = Path(__file__).resolve().parent.parent.parent / "ui"
+            ui_root = Path(__file__).resolve().parent.parent.parent / "ui"
+            # Production serves the committed Vite build; the source tree is
+            # the fallback so dev boxes work before their first build.
+            dist_dir = ui_root / "dist"
+            ui_dir = dist_dir if (dist_dir / "index.html").is_file() else ui_root
             if ui_dir.is_dir():
                 self._app.router.add_get("/", self._redirect_to_ui)
                 self._ui_dir = ui_dir

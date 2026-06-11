@@ -3,8 +3,8 @@
  * Tab state persisted in query param (?tab=agents) for deep-linking,
  * back/forward support, and refresh survival.
  */
-const { computed, watch, onMounted } = Vue;
-const { useRoute, useRouter } = VueRouter;
+import { computed, onMounted, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 
 export default {
   props: {

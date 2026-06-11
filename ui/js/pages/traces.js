@@ -4,8 +4,8 @@
  */
 import { api } from '../api.js';
 import { formatTs, formatTokens, truncateBlock } from '../utils.js';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 
-const { ref, computed, onMounted, watch, nextTick } = Vue;
 
 const ContextAssemblyPanel = {
   props: ['trace'],

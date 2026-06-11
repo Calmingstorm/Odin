@@ -4,8 +4,8 @@
  * + server-side search/history mode (Round 5)
  */
 import { api, ws } from '../api.js';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 
-const { ref, computed, onMounted, onUnmounted, nextTick, watch } = Vue;
 
 const LOG_LEVELS = ['INFO', 'WARNING', 'ERROR'];
 

@@ -3,8 +3,8 @@
  * Conversation threading, filter presets, sort options, visual improvements
  */
 import { api, ws } from '../api.js';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 
-const { ref, computed, onMounted, onUnmounted, nextTick, watch } = Vue;
 
 const FILTER_PRESETS = [
   { id: 'all', name: 'All Sessions', icon: '\u2630', filters: {} },

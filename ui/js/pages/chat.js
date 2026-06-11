@@ -3,9 +3,12 @@
  * Polished messaging interface with bubbles, timestamps, tool cards,
  * markdown code-copy, inline images, and typing indicator.
  */
-import { api, ws } from '../api.js';
+import DOMPurify from 'dompurify';
+import { marked } from 'marked';
 
-const { ref, computed, onMounted, onUnmounted, nextTick, watch } = Vue;
+import { api, ws } from '../api.js';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+
 
 // Configure marked for safe rendering
 const markedOpts = { breaks: true, gfm: true };
