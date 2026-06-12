@@ -627,12 +627,6 @@ class ObservabilityConfig(BaseModel):
     max_tool_result_chars: int = 2000
 
 
-class ToolMemoryConfig(BaseModel):
-    # Kill-switch for "## Tool Use Patterns" prompt hints — pending an
-    # eval-harness A/B verdict on whether they help, hurt, or neither.
-    inject_hints: bool = True
-
-
 class MCPConfig(BaseModel):
     enabled: bool = False
     servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
@@ -657,7 +651,6 @@ class Config(BaseModel):
     webhook: WebhookConfig = WebhookConfig()
     learning: LearningConfig = LearningConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
-    tool_memory: ToolMemoryConfig = ToolMemoryConfig()
     search: SearchConfig = SearchConfig()
     voice: VoiceConfig = VoiceConfig()
     monitoring: MonitoringConfig = MonitoringConfig()

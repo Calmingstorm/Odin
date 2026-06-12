@@ -493,7 +493,6 @@ class TestImportSweep:
         "src.tools.http_probe_ops",
         "src.tools.bulkhead",
         "src.tools.ssh_pool",
-        "src.tools.tool_memory",
         "src.tools.process_manager",
         "src.tools.risk_classifier",
         "src.tools.recovery",
