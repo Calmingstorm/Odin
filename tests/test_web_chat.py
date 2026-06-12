@@ -220,7 +220,6 @@ class TestProcessWebChat:
             bot.codex_client = None
 
         bot._build_system_prompt = MagicMock(return_value="system prompt")
-        bot._inject_tool_hints = AsyncMock(return_value="system prompt")
         bot._set_status = AsyncMock()
         bot._process_with_tools = AsyncMock(return_value=(
             response,

@@ -234,7 +234,6 @@ async def _do_process_web_chat(
         sp = bot._build_system_prompt(
             channel=None, user_id=user_id, query=content, trace=trace,
         )
-        sp = await bot._inject_tool_hints(sp, content, user_id, trace=trace)
         history = await bot.sessions.get_task_history(
             channel_id, max_messages=160, current_query=content, trace=trace,
         )

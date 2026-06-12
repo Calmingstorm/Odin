@@ -109,10 +109,6 @@ class TestHelperMethods:
         bot = _make_bot()
         assert callable(bot._build_system_prompt)
 
-    def test_inject_tool_hints_callable(self):
-        bot = _make_bot()
-        assert callable(bot._inject_tool_hints)
-
     def test_classify_completion_callable(self):
         bot = _make_bot()
         assert callable(bot._classify_completion)
@@ -223,11 +219,11 @@ class TestWebChatContract:
         # The web chat endpoint expects bot.sessions.add_message,
         # bot.sessions.remove_last_message, bot.sessions.get_task_history,
         # bot.codex_client (may be None), bot._build_system_prompt,
-        # bot._inject_tool_hints, bot._process_with_tools.
+        # bot._process_with_tools.
         bot = _make_bot()
         for attr in (
             "sessions", "codex_client",
-            "_build_system_prompt", "_inject_tool_hints",
+            "_build_system_prompt",
             "_process_with_tools",
         ):
             assert hasattr(bot, attr), f"web/chat.py needs bot.{attr}"

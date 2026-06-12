@@ -36,7 +36,6 @@ from ..scheduler import Scheduler
 from ..sessions import SessionManager
 from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
 from ..tools import ToolExecutor, SkillManager, get_tool_definitions
-from ..tools.tool_memory import ToolMemory
 from ..search import LocalEmbedder, SessionVectorStore
 from ..permissions import PermissionManager
 from ..permissions.host_access import HostAccessManager
@@ -481,8 +480,6 @@ class OdinBot(commands.Bot):
 
         from ..permissions.token_manager import ApiTokenManager
         self.api_token_manager = ApiTokenManager("./data/api_tokens.json")
-
-        self.tool_memory = ToolMemory("./data/tool_memory.json")
 
         # Wire optional services into skill manager for expanded skill context
         self.skill_manager.set_services(
@@ -1116,9 +1113,6 @@ class OdinBot(commands.Bot):
                     trace.section("recent_actions", tokens=len(actions_text) // 4,
                                   entries=len(channel_actions[-10:]))
 
-        # Tool use pattern hints injected separately via _inject_tool_hints()
-        # because format_hints is async (needs embedder).
-
         # Surface degradation state so the LLM can adapt
         degradation_notes = []
         codex = getattr(self, "codex_client", None)
@@ -1134,44 +1128,6 @@ class OdinBot(commands.Bot):
                 trace.section("health_warnings", tokens=20, notes=len(degradation_notes))
 
         return prompt
-
-    async def _inject_tool_hints(
-        self, system_prompt: str, query: str, user_id: str | None = None,
-        trace=None,
-    ) -> str:
-        """Return system_prompt with tool use pattern hints appended (async, needs embedder).
-
-        Returns the original prompt unchanged if hints are unavailable or an error occurs.
-        Recorded on the context trace as a prompt section — hints were the one
-        prompt input invisible to observability because injection happens after
-        _build_system_prompt.
-        """
-        try:
-            tm_cfg = getattr(self.config, "tool_memory", None)
-            if tm_cfg is not None and not tm_cfg.inject_hints:
-                return system_prompt
-            tm = getattr(self, "tool_memory", None)
-            if not tm or not hasattr(tm, "format_hints"):
-                return system_prompt
-            perms = getattr(self, "permissions", None)
-            allowed = perms.allowed_tool_names(user_id) if perms and user_id else None
-            embedder = getattr(self, "_embedder", None)
-            hints = await tm.format_hints(
-                query, allowed_tools=allowed, embedder=embedder,
-            )
-            if hints:
-                if trace is not None:
-                    trace.section(
-                        "tool_hints", tokens=len(hints) // 4,
-                        sequences=hints.count("\n- "),
-                        max_sequence_len=max(
-                            (line.count("->") + 1 for line in hints.splitlines()
-                             if line.startswith("- ")), default=0),
-                    )
-                return system_prompt + f"\n\n{hints}"
-        except Exception as e:
-            log.warning("Tool selection hints failed: %s", e)
-        return system_prompt
 
     def _build_chat_system_prompt(
         self, channel: discord.abc.GuildChannel | None = None,
@@ -2450,7 +2406,6 @@ class OdinBot(commands.Bot):
                     _sp = self._build_system_prompt(
                         channel=message.channel, user_id=user_id, query=content,
                     )
-                _sp = await self._inject_tool_hints(_sp, content, user_id, trace=_trace)
                 log.info("Routing to Codex with tools")
                 # Use abbreviated history to reduce poisoning from stale responses
                 # (get_task_history handles compaction internally)
@@ -2557,15 +2512,6 @@ class OdinBot(commands.Bot):
                 await asyncio.to_thread(self.sessions.save)
             except Exception as save_err:
                 log.warning("Session save failed: %s", save_err)
-
-            # Record tool use pattern for future hints (successes only)
-            if tools_used:
-                try:
-                    await self.tool_memory.record(
-                        content, tools_used, success=True, embedder=self._embedder,
-                    )
-                except Exception:
-                    pass  # Non-critical
         else:
             # Save a sanitized error marker instead of the full error response.
             # The user sees the full error on Discord, but raw refusals and

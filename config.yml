@@ -112,10 +112,6 @@ observability:
   # Storage cap per tool result persisted into trajectory iterations
   max_tool_result_chars: 2000
 
-# Kill-switch for "## Tool Use Patterns" prompt hints (pending eval verdict)
-tool_memory:
-  inject_hints: true
-
 search:
   enabled: true
   search_db_path: ./data/search
