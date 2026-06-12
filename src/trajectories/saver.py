@@ -24,6 +24,10 @@ log = get_logger("trajectories")
 
 DEFAULT_TRAJECTORY_DIR = "./data/trajectories"
 MAX_TOOL_OUTPUT_CHARS = 12_000
+# Storage-side cap per stored tool result (model-facing content is already
+# capped at TOOL_OUTPUT_MAX_CHARS=12000); keeps heavy turns from bloating
+# the daily JSONL files the WebUI reads whole.
+TOOL_RESULT_STORE_CAP = 2_000
 
 
 @dataclass(slots=True)
@@ -36,6 +40,32 @@ class ToolIteration:
     input_tokens: int = 0
     output_tokens: int = 0
     duration_ms: int = 0
+
+
+def stored_tool_results(
+    tool_results: list | None,
+    max_chars: int = TOOL_RESULT_STORE_CAP,
+) -> list[dict]:
+    """Shape tool_result continuation blocks for trajectory storage.
+
+    Content arriving here is already secret-scrubbed and capped to what the
+    model itself saw; this applies the smaller storage cap with truncation
+    metadata so replay tooling knows when it is looking at a prefix.
+    """
+    out: list[dict] = []
+    for r in tool_results or []:
+        if not isinstance(r, dict):
+            continue
+        content = str(r.get("content", ""))
+        entry: dict = {
+            "tool_use_id": str(r.get("tool_use_id", "")),
+            "content": content[:max_chars],
+        }
+        if len(content) > max_chars:
+            entry["truncated"] = True
+            entry["original_chars"] = len(content)
+        out.append(entry)
+    return out
 
 
 @dataclass
@@ -61,6 +91,9 @@ class TrajectoryTurn:
     # Observability: prompt-assembly decision metadata (PR #104) — counters,
     # reasons, hashed keys; never content. None when tracing is disabled.
     context_trace: dict | None = None
+    # user_content truncation metadata (set when the request exceeded the cap)
+    user_content_truncated: bool = False
+    user_content_original_chars: int = 0
 
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -124,6 +157,9 @@ class TrajectoryTurn:
         }
         if self.context_trace is not None:
             d["context_trace"] = self.context_trace
+        if self.user_content_truncated:
+            d["user_content_truncated"] = True
+            d["user_content_original_chars"] = self.user_content_original_chars
         return d
 
 

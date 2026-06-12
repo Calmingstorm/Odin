@@ -29,6 +29,7 @@ from ..learning import ConversationReflector
 from ..llm import CircuitOpenError, CodexAuth, CodexChatClient, KimiClient, OllamaClient
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.secret_scrubber import scrub_output_secrets
+from ..observability.correlation import get_turn, set_turn
 from ..llm.system_prompt import build_system_prompt, build_chat_system_prompt
 from ..odin_log import get_logger
 from ..scheduler import Scheduler
@@ -260,8 +261,23 @@ class OdinBot(commands.Bot):
         self.agent_manager = AgentManager()
         # Autonomous loop manager (agent-aware)
         self.loop_manager = LoopManager(agents_enabled=True)
+        # Trajectory savers — constructed before the loop bridge, which
+        # forwards the agent saver into loop-spawned agents
+        from ..agents.trajectory import AgentTrajectorySaver
+        from ..trajectories.saver import TrajectorySaver
+        self.trajectory_saver = TrajectorySaver()
+        self.agent_trajectory_saver = AgentTrajectorySaver()
         # Loop-agent bridge for spawning agents from loop iterations
-        self.loop_agent_bridge = LoopAgentBridge(self.agent_manager)
+        self.loop_agent_bridge = LoopAgentBridge(
+            self.agent_manager, trajectory_saver=self.agent_trajectory_saver,
+        )
+        # Reflection gate for loop iterations — dedup/cooldown so repeated
+        # identical failures teach one lesson, not one per minute
+        from ..learning.loop_reflection import LoopReflectionGate
+        self._loop_reflection_gate = LoopReflectionGate(
+            cooldown_hours=getattr(config.learning, "loop_reflection_cooldown_hours", 12.0),
+            max_per_hour=getattr(config.learning, "loop_reflection_max_per_hour", 10),
+        )
         # Cached merged tool definitions — invalidated on skill create/edit/delete
         self._cached_merged_tools: list[dict] | None = None
         # Cached host string dict — invalidated on context reload
@@ -504,10 +520,6 @@ class OdinBot(commands.Bot):
 
         # Trajectory savers — message-level + agent-level. Always on; writes
         # to date-partitioned JSONL under data/trajectories/.
-        from ..trajectories.saver import TrajectorySaver
-        from ..agents.trajectory import AgentTrajectorySaver
-        self.trajectory_saver = TrajectorySaver()
-        self.agent_trajectory_saver = AgentTrajectorySaver()
 
         # Stuck-loop tracker — instantiated per-iteration in the tool loop, but
         # store the class on the bot for tests and external introspection.
@@ -879,6 +891,23 @@ class OdinBot(commands.Bot):
         self._memory_cache[user_id] = (now, memory)
         return memory
 
+    def _record_user_content(self, trajectory, content: str) -> None:
+        """Store the request on the trajectory turn — capped, secret-scrubbed,
+        with explicit truncation metadata. Config-gated; never raises."""
+        try:
+            obs = getattr(self.config, "observability", None)
+            if obs is not None and not obs.trajectory_user_content:
+                return
+            cap = getattr(obs, "max_user_content_chars", 4000) if obs else 4000
+            scrubbed = scrub_output_secrets(content)
+            if len(scrubbed) > cap:
+                trajectory.user_content_truncated = True
+                trajectory.user_content_original_chars = len(scrubbed)
+                scrubbed = scrubbed[:cap]
+            trajectory.user_content = scrubbed
+        except Exception:  # noqa: BLE001 — recording must never break the turn
+            log.debug("user_content recording failed (non-fatal)", exc_info=True)
+
     def _new_context_trace(self):
         """Create a context-trace collector when observability is enabled.
 
@@ -1106,12 +1135,21 @@ class OdinBot(commands.Bot):
 
         return prompt
 
-    async def _inject_tool_hints(self, system_prompt: str, query: str, user_id: str | None = None) -> str:
+    async def _inject_tool_hints(
+        self, system_prompt: str, query: str, user_id: str | None = None,
+        trace=None,
+    ) -> str:
         """Return system_prompt with tool use pattern hints appended (async, needs embedder).
 
         Returns the original prompt unchanged if hints are unavailable or an error occurs.
+        Recorded on the context trace as a prompt section — hints were the one
+        prompt input invisible to observability because injection happens after
+        _build_system_prompt.
         """
         try:
+            tm_cfg = getattr(self.config, "tool_memory", None)
+            if tm_cfg is not None and not tm_cfg.inject_hints:
+                return system_prompt
             tm = getattr(self, "tool_memory", None)
             if not tm or not hasattr(tm, "format_hints"):
                 return system_prompt
@@ -1122,6 +1160,14 @@ class OdinBot(commands.Bot):
                 query, allowed_tools=allowed, embedder=embedder,
             )
             if hints:
+                if trace is not None:
+                    trace.section(
+                        "tool_hints", tokens=len(hints) // 4,
+                        sequences=hints.count("\n- "),
+                        max_sequence_len=max(
+                            (line.count("->") + 1 for line in hints.splitlines()
+                             if line.startswith("- ")), default=0),
+                    )
                 return system_prompt + f"\n\n{hints}"
         except Exception as e:
             log.warning("Tool selection hints failed: %s", e)
@@ -1533,6 +1579,47 @@ class OdinBot(commands.Bot):
         if any(marker in req for marker in self._REFLECT_CORRECTION_MARKERS):
             return True
         return len(tools_used) >= self._REFLECT_MIN_TOOLS
+
+    def _maybe_loop_reflect(
+        self, *, loop_id: str, prompt: str, outcome: str, is_error: bool,
+        failure_class: str, error_text: str, tool_details: list[dict],
+        user_id: str | None,
+    ) -> None:
+        """Gated reflection for loop iterations (fire-and-forget)."""
+        try:
+            if not getattr(self.config.learning, "loop_reflection_enabled", True):
+                return
+            if not hasattr(self, "reflector") or not tool_details:
+                return
+            if is_error or any(d.get("error") for d in tool_details):
+                effective_error = error_text or next(
+                    (d["result"] for d in tool_details if d.get("error")), "",
+                )
+                if not failure_class:
+                    from ..observability.failure_classes import classify_failure
+                    failure_class = classify_failure(effective_error)["class"]
+                should, reason = self._loop_reflection_gate.evaluate(
+                    loop_id, is_error=True,
+                    failure_class=failure_class, error_text=effective_error,
+                )
+            else:
+                should, reason = self._loop_reflection_gate.evaluate(
+                    loop_id, is_error=False,
+                )
+            if not should:
+                log.debug("Loop reflection suppressed (%s) for %s", reason, loop_id)
+                return
+            log.info("Loop reflection triggered (%s) for %s", reason, loop_id)
+            fire_and_forget(self.reflector.reflect_on_operation(
+                user_request=f"[autonomous loop {loop_id}] {prompt[:300]}",
+                tools_used=[d["tool"] for d in tool_details][:20],
+                tool_details=tool_details,
+                final_response=outcome,
+                is_error=is_error,
+                user_id=user_id,
+            ), name="loop_reflection")
+        except Exception:  # noqa: BLE001 — reflection must never break a loop
+            log.debug("Loop reflection wiring failed (non-fatal)", exc_info=True)
 
     async def _operational_reflection(
         self, user_request: str, tools_used: list[str],
@@ -2363,7 +2450,7 @@ class OdinBot(commands.Bot):
                     _sp = self._build_system_prompt(
                         channel=message.channel, user_id=user_id, query=content,
                     )
-                _sp = await self._inject_tool_hints(_sp, content, user_id)
+                _sp = await self._inject_tool_hints(_sp, content, user_id, trace=_trace)
                 log.info("Routing to Codex with tools")
                 # Use abbreviated history to reduce poisoning from stale responses
                 # (get_task_history handles compaction internally)
@@ -2740,7 +2827,10 @@ class OdinBot(commands.Bot):
         stuck_tracker = self.stuck_loop_tracker_cls()
 
         # Per-turn trajectory accumulator — populated each iteration, saved at end.
-        from ..trajectories.saver import TrajectoryTurn, ToolIteration
+        from ..trajectories.saver import TrajectoryTurn, ToolIteration, stored_tool_results
+        _result_store_cap = int(getattr(
+            getattr(self.config, "observability", None), "max_tool_result_chars", 2000,
+        ) or 2000)
         if trace is not None:
             provider_cfg = getattr(self.config, "llm_provider", None)
             trace.provider(
@@ -2748,11 +2838,23 @@ class OdinBot(commands.Bot):
                 model=getattr(self.llm_client, "model", "") or "",
             )
         _op_tool_details: list[dict] = []
+        _turn_ctx = get_turn() or {}
         _trajectory = TrajectoryTurn(
             message_id=str(getattr(message, "id", "")),
             channel_id=str(getattr(message.channel, "id", "")),
             user_id=user_id,
             user_name=str(getattr(message.author, "display_name", "")),
+            source=str(_turn_ctx.get("source") or getattr(message, "_odin_source", "discord")),
+        )
+        self._record_user_content(_trajectory, getattr(message, "content", "") or "")
+        # No explicit reset — each message handler runs in its own asyncio
+        # task, so the context var dies with the task. (The loop manager
+        # resets its own stamp explicitly around each iteration callback.)
+        set_turn(
+            turn_id=_trajectory.message_id or None,
+            source=_trajectory.source,
+            channel_id=_trajectory.channel_id,
+            **{k: v for k, v in _turn_ctx.items() if k in ("loop_id", "loop_iteration")},
         )
 
         # Post-mutation validation state — persists across iterations
@@ -3385,6 +3487,13 @@ class OdinBot(commands.Bot):
                         ("error", "[error", "failed", "traceback")),
                 })
             self._last_op_details[str(message.channel.id)] = _op_tool_details
+
+            # Persist results onto the iteration recorded before execution —
+            # without this the saved trajectory has calls but no outcomes.
+            if _trajectory.iterations:
+                _trajectory.iterations[-1].tool_results = stored_tool_results(
+                    tool_results, _result_store_cap,
+                )
 
             if _cancel.is_set():
                 return _stopped("after_tools")
@@ -4235,6 +4344,9 @@ class OdinBot(commands.Bot):
             parent_id=parent_id_arg,
             max_depth=max_depth,
             tool_timeouts=self.config.tools.tool_timeouts,
+            # The saver existed since the feature shipped but was never passed —
+            # data/trajectories/agents/ has been empty in production forever.
+            trajectory_saver=self.agent_trajectory_saver,
         )
 
         if agent_id.startswith("Error"):
@@ -4459,6 +4571,29 @@ class OdinBot(commands.Bot):
                 break
         msg_proxy = _LoopMessageProxy(channel, user_id, requester_name)
 
+        # Observability: loop iterations get the same trajectory + context
+        # trace coverage as chat turns (they were previously invisible —
+        # 10% of all tool executions had no recorded narrative).
+        _turn_ctx = get_turn() or {}
+        _loop_id = str(_turn_ctx.get("loop_id", ""))
+        _loop_iter = int(_turn_ctx.get("loop_iteration", 0) or 0)
+        from ..trajectories.saver import ToolIteration, TrajectoryTurn, stored_tool_results
+        _obs = getattr(self.config, "observability", None)
+        _loop_trace_on = _obs is None or getattr(_obs, "loop_trace", True)
+        _result_store_cap = int(getattr(_obs, "max_tool_result_chars", 2000) or 2000)
+        _trace = self._new_context_trace() if _loop_trace_on else None
+        _trajectory = None
+        _loop_details: list[dict] = []
+        if _loop_trace_on:
+            _trajectory = TrajectoryTurn(
+                message_id=str(_turn_ctx.get("turn_id", "")),
+                channel_id=str(getattr(channel, "id", "")),
+                user_id=user_id,
+                user_name=requester_name,
+                source="loop",
+            )
+            self._record_user_content(_trajectory, prompt)
+
         # Build messages for the iteration
         messages: list[dict] = []
         if prev_context:
@@ -4473,8 +4608,40 @@ class OdinBot(commands.Bot):
         messages.append({"role": "user", "content": prompt})
 
         # Build system prompt and tool definitions
-        system_prompt = self._build_system_prompt(channel=channel, user_id=user_id)
+        if _trace is not None:
+            with _trace.phase("system_prompt"):
+                system_prompt = self._build_system_prompt(
+                    channel=channel, user_id=user_id, trace=_trace,
+                )
+            _trace.continuity("loop")
+            if prev_context:
+                _trace.section("loop_prev_context", tokens=len(prev_context) // 4)
+        else:
+            system_prompt = self._build_system_prompt(channel=channel, user_id=user_id)
         tools = self._merged_tool_definitions() if self.config.tools.enabled else None
+
+        async def _finish(outcome_text: str, *, is_error: bool = False,
+                          failure_class: str = "", error_text: str = "") -> str:
+            """Persist the loop turn and run gated reflection at every exit."""
+            if _trajectory is not None:
+                await self._save_turn_trajectory(
+                    _trajectory,
+                    error=error_text if is_error else "",
+                    final_response=outcome_text if not is_error else "",
+                    tools_used=[d["tool"] for d in _loop_details],
+                    trace=_trace,
+                )
+            self._maybe_loop_reflect(
+                loop_id=_loop_id or channel_id_str,
+                prompt=prompt,
+                outcome=outcome_text,
+                is_error=is_error,
+                failure_class=failure_class,
+                error_text=error_text,
+                tool_details=_loop_details,
+                user_id=user_id,
+            )
+            return outcome_text
 
         final_text = ""
         tool_timeout = self.config.tools.tool_timeout_seconds
@@ -4489,7 +4656,22 @@ class OdinBot(commands.Bot):
                 )
             except Exception as e:
                 log.warning("Loop iteration Codex call failed: %s", e)
-                return f"LLM call failed: {e}"
+                return await _finish(
+                    f"LLM call failed: {e}", is_error=True,
+                    failure_class="provider", error_text=str(e),
+                )
+
+            if _trajectory is not None:
+                _trajectory.iterations.append(ToolIteration(
+                    iteration=_iteration,
+                    tool_calls=[
+                        {"id": tc.id, "name": tc.name, "input": tc.input}
+                        for tc in (response.tool_calls or [])
+                    ],
+                    llm_text=response.text or "",
+                    input_tokens=getattr(response, "input_tokens", 0) or 0,
+                    output_tokens=getattr(response, "output_tokens", 0) or 0,
+                ))
 
             if response.text:
                 final_text = response.text
@@ -4582,12 +4764,49 @@ class OdinBot(commands.Bot):
             )
             messages.append({"role": "user", "content": list(tool_results)})
 
+            _results_by_id = {
+                r.get("tool_use_id"): r for r in tool_results if isinstance(r, dict)
+            }
+            for _tc in response.tool_calls:
+                if _trace is not None and _tc.id not in _results_by_id:
+                    _trace.warning(
+                        "TOOL_RESULT_CONTINUATION_MISMATCH", "error",
+                        f"loop tool {_tc.name} call has no paired result",
+                    )
+                _rcontent = str(_results_by_id.get(_tc.id, {}).get("content", ""))
+                _loop_details.append({
+                    "tool": _tc.name,
+                    "input": _tc.input,
+                    "result": _rcontent[:300],
+                    "error": _rcontent.lstrip().lower().startswith(
+                        ("error", "[error", "failed", "traceback",
+                         "script failed", "command failed")),
+                })
+
+            # Persist results onto the iteration recorded before execution —
+            # without this the saved trajectory has calls but no outcomes.
+            if _trajectory is not None and _trajectory.iterations:
+                _trajectory.iterations[-1].tool_results = stored_tool_results(
+                    tool_results, _result_store_cap,
+                )
+
         # Scrub final text; posting is handled by _post_response in LoopManager
         if final_text:
             final_text = scrub_output_secrets(final_text)
             if len(final_text) > DISCORD_MAX_LEN:
                 final_text = final_text[:DISCORD_MAX_LEN - 50] + "\n... (truncated)"
-            return final_text
+            _had_tool_errors = any(d.get("error") for d in _loop_details)
+            _first_err = next((d for d in _loop_details if d.get("error")), None)
+            # Iteration succeeded after a mid-flight tool error: the turn is
+            # saved as a success (is_error=False), but the failure detail is
+            # passed through so the reflection gate can learn from recovered
+            # errors without marking the trajectory failed.
+            return await _finish(
+                final_text,
+                is_error=False,
+                failure_class="command_failed" if _had_tool_errors else "",
+                error_text=_first_err["result"] if _first_err else "",
+            )
 
         # No final text produced. If we exhausted the cap without Codex ever
         # returning a tool-free response, say so — the previous "(no response)"
@@ -4598,14 +4817,16 @@ class OdinBot(commands.Bot):
                 "Loop tool-iteration cap hit (%d) after %d tool calls; no final summary from Codex",
                 loop_cap, tool_calls_made,
             )
-            return (
+            return await _finish(
                 f"Iteration hit the loop tool-iteration cap ({loop_cap}) "
                 f"after {tool_calls_made} tool calls. No final summary was "
                 f"produced by Codex. Raise `tools.max_tool_iterations_loop` "
-                f"in config (or via the web UI) if this happens repeatedly."
+                f"in config (or via the web UI) if this happens repeatedly.",
+                is_error=True, failure_class="cancelled",
+                error_text=f"loop iteration cap {loop_cap} reached",
             )
 
-        return "(no response)"
+        return await _finish("(no response)")
 
     async def _dispatch_loop_tool(
         self,

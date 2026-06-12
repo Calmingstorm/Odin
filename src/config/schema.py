@@ -357,6 +357,11 @@ class LearningConfig(BaseModel):
     # Learned Context injection budget (tokens). When the scoped corpus fits,
     # ALL of it is injected; relevance gating engages only beyond this.
     injection_token_budget: int = 4000
+    # Reflection on autonomous loop iterations — gated by signature dedup so
+    # a loop failing identically all night produces ONE lesson, not sixty.
+    loop_reflection_enabled: bool = True
+    loop_reflection_cooldown_hours: float = 12.0
+    loop_reflection_max_per_hour: int = 10
 
 
 class SearchConfig(BaseModel):
@@ -612,6 +617,20 @@ class ObservabilityConfig(BaseModel):
     context_trace: ContextTraceConfig = ContextTraceConfig()
     audit_failure_classification: bool = True
     prompt_budget_accounting: bool = True
+    # Record the user request on trajectory turns (capped + secret-scrubbed)
+    trajectory_user_content: bool = True
+    max_user_content_chars: int = 4000
+    # Trajectory + context trace coverage for autonomous loop iterations
+    loop_trace: bool = True
+    # Storage cap per tool result persisted into trajectory iterations
+    # (model-facing content is separately capped at 12000)
+    max_tool_result_chars: int = 2000
+
+
+class ToolMemoryConfig(BaseModel):
+    # Kill-switch for "## Tool Use Patterns" prompt hints — pending an
+    # eval-harness A/B verdict on whether they help, hurt, or neither.
+    inject_hints: bool = True
 
 
 class MCPConfig(BaseModel):
@@ -638,6 +657,7 @@ class Config(BaseModel):
     webhook: WebhookConfig = WebhookConfig()
     learning: LearningConfig = LearningConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
+    tool_memory: ToolMemoryConfig = ToolMemoryConfig()
     search: SearchConfig = SearchConfig()
     voice: VoiceConfig = VoiceConfig()
     monitoring: MonitoringConfig = MonitoringConfig()

@@ -8,6 +8,7 @@ from typing import Literal
 
 import aiofiles
 
+from ..observability.correlation import get_turn
 from ..observability.failure_classes import classify_failure
 from ..odin_log import get_logger
 from .signer import AuditSigner, verify_log
@@ -64,6 +65,11 @@ class AuditLogger:
             # Write-time heuristic classification (observability). The raw
             # error string is classified here; aggregates never re-store it.
             entry["failure"] = classify_failure(error)
+        turn = get_turn()
+        if turn:
+            # Correlation: join audit entries to the trajectory turn (and
+            # loop iteration) they belong to. Metadata only.
+            entry["turn"] = turn
         if diff:
             entry["diff"] = diff
         if risk_level:

@@ -131,6 +131,8 @@ class WebMessage:
     from a discord.Message object.
     """
 
+    _odin_source = "web"  # trajectory source marker (was recorded as "discord")
+
     def __init__(self, channel_id: str, user_id: str, username: str, content: str = "",
                  allowed_tools: list[str] | None = None):
         self.id = next(_msg_id_counter)
@@ -232,7 +234,7 @@ async def _do_process_web_chat(
         sp = bot._build_system_prompt(
             channel=None, user_id=user_id, query=content, trace=trace,
         )
-        sp = await bot._inject_tool_hints(sp, content, user_id)
+        sp = await bot._inject_tool_hints(sp, content, user_id, trace=trace)
         history = await bot.sessions.get_task_history(
             channel_id, max_messages=160, current_query=content, trace=trace,
         )
