@@ -89,6 +89,10 @@ learning:
   max_entries: 150
   consolidation_target: 120
   injection_token_budget: 4000
+  # Loop reflection: dedup/cooldown so repeated identical failures teach once
+  loop_reflection_enabled: true
+  loop_reflection_cooldown_hours: 12.0
+  loop_reflection_max_per_hour: 10
 
 # Pure instrumentation — records prompt assembly + failure metadata,
 # never influences behavior. Safe to disable per piece.
@@ -100,6 +104,15 @@ observability:
     max_trace_bytes: 16384
   audit_failure_classification: true
   prompt_budget_accounting: true
+  # Record the user request on trajectory turns (capped + secret-scrubbed)
+  trajectory_user_content: true
+  max_user_content_chars: 4000
+  # Trajectory + context-trace coverage for autonomous loop iterations
+  loop_trace: true
+
+# Kill-switch for "## Tool Use Patterns" prompt hints (pending eval verdict)
+tool_memory:
+  inject_hints: true
 
 search:
   enabled: true

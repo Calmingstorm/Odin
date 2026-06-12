@@ -41,8 +41,9 @@ class LoopAgentRecord:
 class LoopAgentBridge:
     """Bridges LoopManager and AgentManager for agent-aware loops."""
 
-    def __init__(self, agent_manager: object) -> None:
+    def __init__(self, agent_manager: object, trajectory_saver: object | None = None) -> None:
         self._agent_manager = agent_manager
+        self._trajectory_saver = trajectory_saver
         # loop_id → list of LoopAgentRecords
         self._loop_agents: dict[str, list[LoopAgentRecord]] = {}
 
@@ -122,6 +123,7 @@ class LoopAgentBridge:
                 tools=tools,
                 system_prompt=system_prompt,
                 tool_timeouts=tool_timeouts,
+                trajectory_saver=self._trajectory_saver,
             )
 
             if not agent_id.startswith("Error"):

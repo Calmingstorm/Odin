@@ -30,6 +30,7 @@ FAILURE_CLASSES = (
     "remote_state",
     "network",
     "bad_input",
+    "command_failed",
     "provider",
     "unknown",
 )
@@ -51,8 +52,9 @@ _RULES: tuple[tuple[str, str, str, re.Pattern, float], ...] = (
     # -- auth ----------------------------------------------------------------
     ("auth_401_v1", "auth", "unauthorized",
      re.compile(
-         r"\b401\b|unauthorized|invalid[ _]token|token.{0,20}(expired|"
-         r"invalidated)|authentication failed|sign in again|"
+         r"\b401\b|\b403\b|forbidden|unauthorized|invalid[ _]token|"
+         r"token.{0,20}(expired|invalidated)|"
+         r"authentication failed|sign in again|"
          r"invalid credentials|oauth",
          re.I), 0.88),
     # -- rate limit / quota --------------------------------------------------
@@ -121,6 +123,12 @@ _RULES: tuple[tuple[str, str, str, re.Pattern, float], ...] = (
          r"expecting value|unrecognized arguments|usage:|missing required|"
          r"valueerror|typeerror",
          re.I), 0.8),
+    # -- plain nonzero exit (the bulk of real-world failures) ---------------
+    ("cmd_exit_v1", "command_failed", "nonzero_exit",
+     re.compile(
+         r"(script|command) failed \(exit|exited with (code|status) [1-9]|"
+         r"non-zero exit|returned exit code [1-9]",
+         re.I), 0.85),
     # -- provider/upstream --------------------------------------------------------------
     ("provider_5xx_v1", "provider", "upstream_error",
      re.compile(

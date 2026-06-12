@@ -61,6 +61,9 @@ class TrajectoryTurn:
     # Observability: prompt-assembly decision metadata (PR #104) — counters,
     # reasons, hashed keys; never content. None when tracing is disabled.
     context_trace: dict | None = None
+    # user_content truncation metadata (set when the request exceeded the cap)
+    user_content_truncated: bool = False
+    user_content_original_chars: int = 0
 
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -124,6 +127,9 @@ class TrajectoryTurn:
         }
         if self.context_trace is not None:
             d["context_trace"] = self.context_trace
+        if self.user_content_truncated:
+            d["user_content_truncated"] = True
+            d["user_content_original_chars"] = self.user_content_original_chars
         return d
 
 
