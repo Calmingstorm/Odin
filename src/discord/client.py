@@ -2827,7 +2827,10 @@ class OdinBot(commands.Bot):
         stuck_tracker = self.stuck_loop_tracker_cls()
 
         # Per-turn trajectory accumulator — populated each iteration, saved at end.
-        from ..trajectories.saver import TrajectoryTurn, ToolIteration
+        from ..trajectories.saver import TrajectoryTurn, ToolIteration, stored_tool_results
+        _result_store_cap = int(getattr(
+            getattr(self.config, "observability", None), "max_tool_result_chars", 2000,
+        ) or 2000)
         if trace is not None:
             provider_cfg = getattr(self.config, "llm_provider", None)
             trace.provider(
@@ -2844,8 +2847,9 @@ class OdinBot(commands.Bot):
             source=str(_turn_ctx.get("source") or getattr(message, "_odin_source", "discord")),
         )
         self._record_user_content(_trajectory, getattr(message, "content", "") or "")
-        # No explicit reset — each message/loop handler runs in its own
-        # asyncio task, so the context var dies with the task.
+        # No explicit reset — each message handler runs in its own asyncio
+        # task, so the context var dies with the task. (The loop manager
+        # resets its own stamp explicitly around each iteration callback.)
         set_turn(
             turn_id=_trajectory.message_id or None,
             source=_trajectory.source,
@@ -3483,6 +3487,13 @@ class OdinBot(commands.Bot):
                         ("error", "[error", "failed", "traceback")),
                 })
             self._last_op_details[str(message.channel.id)] = _op_tool_details
+
+            # Persist results onto the iteration recorded before execution —
+            # without this the saved trajectory has calls but no outcomes.
+            if _trajectory.iterations:
+                _trajectory.iterations[-1].tool_results = stored_tool_results(
+                    tool_results, _result_store_cap,
+                )
 
             if _cancel.is_set():
                 return _stopped("after_tools")
@@ -4566,9 +4577,10 @@ class OdinBot(commands.Bot):
         _turn_ctx = get_turn() or {}
         _loop_id = str(_turn_ctx.get("loop_id", ""))
         _loop_iter = int(_turn_ctx.get("loop_iteration", 0) or 0)
-        from ..trajectories.saver import ToolIteration, TrajectoryTurn
+        from ..trajectories.saver import ToolIteration, TrajectoryTurn, stored_tool_results
         _obs = getattr(self.config, "observability", None)
         _loop_trace_on = _obs is None or getattr(_obs, "loop_trace", True)
+        _result_store_cap = int(getattr(_obs, "max_tool_result_chars", 2000) or 2000)
         _trace = self._new_context_trace() if _loop_trace_on else None
         _trajectory = None
         _loop_details: list[dict] = []
@@ -4771,6 +4783,13 @@ class OdinBot(commands.Bot):
                          "script failed", "command failed")),
                 })
 
+            # Persist results onto the iteration recorded before execution —
+            # without this the saved trajectory has calls but no outcomes.
+            if _trajectory is not None and _trajectory.iterations:
+                _trajectory.iterations[-1].tool_results = stored_tool_results(
+                    tool_results, _result_store_cap,
+                )
+
         # Scrub final text; posting is handled by _post_response in LoopManager
         if final_text:
             final_text = scrub_output_secrets(final_text)
@@ -4778,6 +4797,10 @@ class OdinBot(commands.Bot):
                 final_text = final_text[:DISCORD_MAX_LEN - 50] + "\n... (truncated)"
             _had_tool_errors = any(d.get("error") for d in _loop_details)
             _first_err = next((d for d in _loop_details if d.get("error")), None)
+            # Iteration succeeded after a mid-flight tool error: the turn is
+            # saved as a success (is_error=False), but the failure detail is
+            # passed through so the reflection gate can learn from recovered
+            # errors without marking the trajectory failed.
             return await _finish(
                 final_text,
                 is_error=False,

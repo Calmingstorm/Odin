@@ -109,6 +109,8 @@ observability:
   max_user_content_chars: 4000
   # Trajectory + context-trace coverage for autonomous loop iterations
   loop_trace: true
+  # Storage cap per tool result persisted into trajectory iterations
+  max_tool_result_chars: 2000
 
 # Kill-switch for "## Tool Use Patterns" prompt hints (pending eval verdict)
 tool_memory:

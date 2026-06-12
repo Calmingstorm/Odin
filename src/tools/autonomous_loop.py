@@ -210,17 +210,22 @@ class LoopManager:
                 # Run the LLM iteration. The correlation context lets the
                 # iteration runner, audit logger, and trajectory saver stamp
                 # which loop+iteration the work belongs to without threading
-                # parameters through the callback signature.
+                # parameters through the callback signature. iteration_count
+                # was already incremented above, so it IS the 1-based number
+                # of the iteration about to run.
                 try:
-                    from ..observability.correlation import set_turn
-                    set_turn(
+                    from ..observability.correlation import reset_turn, set_turn
+                    _turn_token = set_turn(
                         source="loop",
                         loop_id=info.id,
-                        loop_iteration=info.iteration_count + 1,
-                        turn_id=f"loop:{info.id}:{info.iteration_count + 1}",
+                        loop_iteration=info.iteration_count,
+                        turn_id=f"loop:{info.id}:{info.iteration_count}",
                         channel_id=info.channel_id,
                     )
-                    response = await iteration_callback(prompt, channel, prev_context)
+                    try:
+                        response = await iteration_callback(prompt, channel, prev_context)
+                    finally:
+                        reset_turn(_turn_token)
                     response = scrub_output_secrets(response.strip()) if response else ""
                     consecutive_errors = 0  # Reset on success
                 except Exception as e:

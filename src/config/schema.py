@@ -622,6 +622,9 @@ class ObservabilityConfig(BaseModel):
     max_user_content_chars: int = 4000
     # Trajectory + context trace coverage for autonomous loop iterations
     loop_trace: bool = True
+    # Storage cap per tool result persisted into trajectory iterations
+    # (model-facing content is separately capped at 12000)
+    max_tool_result_chars: int = 2000
 
 
 class ToolMemoryConfig(BaseModel):

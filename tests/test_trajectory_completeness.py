@@ -217,6 +217,206 @@ class TestUserContentRecording:
 
 
 # ---------------------------------------------------------------------------
+# Tool results persisted into trajectory iterations
+# ---------------------------------------------------------------------------
+
+class TestStoredToolResults:
+    def test_under_cap_passthrough(self):
+        from src.trajectories.saver import stored_tool_results
+        out = stored_tool_results(
+            [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+        )
+        assert out == [{"tool_use_id": "t1", "content": "ok"}]
+
+    def test_caps_with_metadata(self):
+        from src.trajectories.saver import stored_tool_results
+        out = stored_tool_results(
+            [{"tool_use_id": "t1", "content": "x" * 5000}], max_chars=100,
+        )
+        assert len(out[0]["content"]) == 100
+        assert out[0]["truncated"] is True
+        assert out[0]["original_chars"] == 5000
+
+    def test_skips_non_dicts_and_tolerates_missing_keys(self):
+        from src.trajectories.saver import stored_tool_results
+        out = stored_tool_results(["garbage", None, {}])
+        assert out == [{"tool_use_id": "", "content": ""}]
+        assert stored_tool_results(None) == []
+
+
+class _LoopIterClient:
+    """Fake client binding the REAL _run_loop_iteration + _record_user_content."""
+    from src.discord.client import OdinBot as _C  # noqa: N814
+    _run_loop_iteration = _C._run_loop_iteration
+    _record_user_content = _C._record_user_content
+
+    def __init__(self, responses, tool_output="hi out", result_cap=2000):
+        from types import SimpleNamespace
+
+        class _Obs:
+            loop_trace = True
+            trajectory_user_content = True
+            max_user_content_chars = 4000
+            max_tool_result_chars = result_cap
+
+        class _Tools:
+            enabled = True
+            tool_timeout_seconds = 5
+            max_tool_iterations_loop = 4
+
+        class _Cfg:
+            observability = _Obs()
+            tools = _Tools()
+
+        self.config = _Cfg()
+        self.loop_manager = SimpleNamespace(_loops={})
+        self._responses = list(responses)
+        self._tool_output = tool_output
+        self.saved = []          # (trajectory, kwargs) per _save_turn_trajectory
+        self.reflected = []      # kwargs per _maybe_loop_reflect
+
+        async def _chat_with_tools(**kwargs):
+            return self._responses.pop(0)
+
+        async def _log_execution(**kwargs):
+            pass
+
+        self.llm_client = SimpleNamespace(chat_with_tools=_chat_with_tools)
+        self.audit = SimpleNamespace(log_execution=_log_execution)
+
+    def _new_context_trace(self):
+        return None
+
+    def _build_system_prompt(self, **kwargs):
+        return "sys"
+
+    def _merged_tool_definitions(self):
+        return [{"name": "run_command"}]
+
+    async def _dispatch_loop_tool(self, tool_name, tool_input, msg_proxy, user_id):
+        return self._tool_output
+
+    async def _save_turn_trajectory(self, trajectory, **kwargs):
+        self.saved.append((trajectory, kwargs))
+
+    def _maybe_loop_reflect(self, **kwargs):
+        self.reflected.append(kwargs)
+
+
+def _tool_call_response(text="", calls=()):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        text=text,
+        tool_calls=[
+            SimpleNamespace(id=i, name=n, input=inp) for (i, n, inp) in calls
+        ],
+        input_tokens=10,
+        output_tokens=5,
+    )
+
+
+class TestLoopIterationTrajectory:
+    @pytest.mark.asyncio
+    async def test_persists_tool_calls_and_results(self):
+        from types import SimpleNamespace
+        fake = _LoopIterClient([
+            _tool_call_response(calls=[("t1", "run_command", {"command": "echo hi"})]),
+            _tool_call_response(text="done"),
+        ])
+        token = set_turn(source="loop", loop_id="l1", loop_iteration=1,
+                         turn_id="loop:l1:1", channel_id="c1")
+        try:
+            out = await fake._run_loop_iteration(
+                "do the thing", SimpleNamespace(id="c1"), None, "42",
+            )
+        finally:
+            reset_turn(token)
+
+        assert out == "done"
+        assert len(fake.saved) == 1
+        traj, save_kwargs = fake.saved[0]
+        assert traj.source == "loop"
+        assert traj.message_id == "loop:l1:1"
+        assert traj.user_content == "do the thing"
+        assert save_kwargs["final_response"] == "done"
+        # The iteration must hold BOTH halves: the call and its result
+        assert traj.iterations[0].tool_calls[0]["name"] == "run_command"
+        assert traj.iterations[0].tool_results[0]["tool_use_id"] == "t1"
+        assert traj.iterations[0].tool_results[0]["content"] == "hi out"
+        assert fake.reflected and fake.reflected[0]["is_error"] is False
+
+    @pytest.mark.asyncio
+    async def test_results_respect_storage_cap(self):
+        from types import SimpleNamespace
+        fake = _LoopIterClient(
+            [
+                _tool_call_response(calls=[("t1", "run_command", {"command": "x"})]),
+                _tool_call_response(text="done"),
+            ],
+            tool_output="y" * 5000,
+            result_cap=100,
+        )
+        token = set_turn(source="loop", loop_id="l1", loop_iteration=1,
+                         turn_id="loop:l1:1", channel_id="c1")
+        try:
+            await fake._run_loop_iteration(
+                "go", SimpleNamespace(id="c1"), None, "42",
+            )
+        finally:
+            reset_turn(token)
+        stored = fake.saved[0][0].iterations[0].tool_results[0]
+        assert len(stored["content"]) == 100
+        assert stored["truncated"] is True
+        assert stored["original_chars"] == 5000
+
+
+# ---------------------------------------------------------------------------
+# Loop manager correlation stamp — first iteration must be :1, not :2
+# ---------------------------------------------------------------------------
+
+class TestLoopManagerStamp:
+    @pytest.mark.asyncio
+    async def test_first_iteration_stamped_one_and_reset_after(self):
+        import asyncio
+
+        from src.tools.autonomous_loop import LoopManager
+
+        mgr = LoopManager()
+        stamps = []
+        holder = {}
+
+        class _Chan:
+            id = "c9"
+            def __init__(self):
+                self.send_stamps = []
+            async def send(self, *a, **k):
+                self.send_stamps.append(get_turn())
+
+        chan = _Chan()
+
+        async def callback(prompt, channel, prev_context):
+            stamps.append(dict(get_turn() or {}))
+            mgr._loops[holder["lid"]]._cancel_event.set()
+            return "ok"
+
+        lid = mgr.start_loop(
+            goal="g", channel=chan, requester_id="1", requester_name="n",
+            iteration_callback=callback, interval_seconds=10,
+            mode="silent", max_iterations=1,
+        )
+        assert not lid.startswith("Error")
+        holder["lid"] = lid
+        await asyncio.wait_for(mgr._loops[lid]._task, timeout=5)
+
+        assert stamps and stamps[0]["loop_iteration"] == 1
+        assert stamps[0]["turn_id"] == f"loop:{lid}:1"
+        assert stamps[0]["source"] == "loop"
+        # The manager resets the stamp after the callback, so post-iteration
+        # sends (completion notices etc.) carry no stale turn context.
+        assert chan.send_stamps and all(s is None for s in chan.send_stamps)
+
+
+# ---------------------------------------------------------------------------
 # Agent trajectory saver wiring — the production-orphaned saver
 # ---------------------------------------------------------------------------
 

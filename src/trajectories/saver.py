@@ -24,6 +24,10 @@ log = get_logger("trajectories")
 
 DEFAULT_TRAJECTORY_DIR = "./data/trajectories"
 MAX_TOOL_OUTPUT_CHARS = 12_000
+# Storage-side cap per stored tool result (model-facing content is already
+# capped at TOOL_OUTPUT_MAX_CHARS=12000); keeps heavy turns from bloating
+# the daily JSONL files the WebUI reads whole.
+TOOL_RESULT_STORE_CAP = 2_000
 
 
 @dataclass(slots=True)
@@ -36,6 +40,32 @@ class ToolIteration:
     input_tokens: int = 0
     output_tokens: int = 0
     duration_ms: int = 0
+
+
+def stored_tool_results(
+    tool_results: list | None,
+    max_chars: int = TOOL_RESULT_STORE_CAP,
+) -> list[dict]:
+    """Shape tool_result continuation blocks for trajectory storage.
+
+    Content arriving here is already secret-scrubbed and capped to what the
+    model itself saw; this applies the smaller storage cap with truncation
+    metadata so replay tooling knows when it is looking at a prefix.
+    """
+    out: list[dict] = []
+    for r in tool_results or []:
+        if not isinstance(r, dict):
+            continue
+        content = str(r.get("content", ""))
+        entry: dict = {
+            "tool_use_id": str(r.get("tool_use_id", "")),
+            "content": content[:max_chars],
+        }
+        if len(content) > max_chars:
+            entry["truncated"] = True
+            entry["original_chars"] = len(content)
+        out.append(entry)
+    return out
 
 
 @dataclass
