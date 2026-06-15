@@ -20,6 +20,21 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..tools.risk_classifier import classify_tool
 
+_EMAIL_BODY_TOOLS = frozenset({"email_send"})
+
+
+def _scrub_email_input(tool_name: str, tool_input: dict) -> dict:
+    if tool_name not in _EMAIL_BODY_TOOLS or not isinstance(tool_input, dict):
+        return tool_input
+    cleaned = dict(tool_input)
+    body = cleaned.get("body", "")
+    cleaned["body"] = f"[redacted email body: {len(body)} chars]"
+    if "attachments" in cleaned and cleaned["attachments"]:
+        from pathlib import Path
+        cleaned["attachments"] = [Path(p).name for p in cleaned["attachments"]]
+    return cleaned
+
+
 if TYPE_CHECKING:
     from ..audit.logger import AuditLogger
     from ..tools.executor import ToolExecutor
@@ -192,7 +207,9 @@ async def run_background_task(
                     log_kwargs: dict = dict(
                         user_id=task.requester_id, user_name=task.requester,
                         channel_id=str(getattr(task.channel, "id", "")),
-                        tool_name=tool_name, tool_input=tool_input, approved=True,
+                        tool_name=tool_name,
+                        tool_input=_scrub_email_input(tool_name, tool_input),
+                        approved=True,
                         result_summary=output[:500],
                         execution_time_ms=elapsed_ms,
                         risk_level=risk_assessment.level.value,
@@ -226,7 +243,9 @@ async def run_background_task(
                     await audit_logger.log_execution(
                         user_id=task.requester_id, user_name=task.requester,
                         channel_id=str(getattr(task.channel, "id", "")),
-                        tool_name=tool_name, tool_input=tool_input, approved=True,
+                        tool_name=tool_name,
+                        tool_input=_scrub_email_input(tool_name, tool_input),
+                        approved=True,
                         result_summary=error_msg[:500],
                         execution_time_ms=elapsed_ms, error=error_msg[:500],
                         risk_level=err_risk.level.value,
