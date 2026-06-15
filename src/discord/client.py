@@ -87,6 +87,21 @@ SEND_MAX_RETRIES = 3
 # Pre-compiled regex for merging adjacent code blocks in combine_bot_messages
 _ADJACENT_FENCE_RE = re.compile(r"\n```[ \t]*\n\n```(\w*)[ \t]*\n")
 
+_EMAIL_BODY_TOOLS = frozenset({"email_send"})
+
+
+def _scrub_tool_input_for_storage(tool_name: str, tool_input: dict) -> dict:
+    """Redact privacy-sensitive fields from tool input before any storage path."""
+    if tool_name not in _EMAIL_BODY_TOOLS or not isinstance(tool_input, dict):
+        return tool_input
+    cleaned = dict(tool_input)
+    body = cleaned.get("body", "")
+    cleaned["body"] = f"[redacted email body: {len(body)} chars]"
+    if "attachments" in cleaned and cleaned["attachments"]:
+        from pathlib import Path
+        cleaned["attachments"] = [Path(p).name for p in cleaned["attachments"]]
+    return cleaned
+
 
 class _LoopMessageProxy:
     """Lightweight proxy providing a discord.Message-like interface for loop iterations.
@@ -393,6 +408,7 @@ class OdinBot(commands.Bot):
             browser_manager=self.browser_manager,
             output_streamer=output_streamer,
             host_access_manager=self.host_access_manager,
+            email_config=getattr(config, "email", None),
         )
         self.skill_manager = SkillManager(
             skills_dir="./data/skills",
@@ -1187,6 +1203,9 @@ class OdinBot(commands.Bot):
         # Filter out tools that require unconfigured backends
         if not self.config.tools.claude_code_host:
             builtin = [t for t in builtin if t["name"] != "claude_code"]
+        _email_tools = {"email_send", "email_search", "email_read", "email_list_recent"}
+        if not getattr(self.config, "email", None) or not self.config.email.enabled:
+            builtin = [t for t in builtin if t["name"] not in _email_tools]
         builtin_names = {t["name"] for t in builtin}
         skill_defs = [
             t for t in self.skill_manager.get_tool_definitions()
@@ -1300,7 +1319,8 @@ class OdinBot(commands.Bot):
 
         from datetime import datetime
         ts = datetime.now().strftime("%H:%M")
-        inp_summary = ", ".join(f"{k}={v}" for k, v in tool_input.items() if isinstance(v, str))
+        safe_input = _scrub_tool_input_for_storage(tool_name, tool_input)
+        inp_summary = ", ".join(f"{k}={v}" for k, v in safe_input.items() if isinstance(v, str))
         if len(inp_summary) > 100:
             inp_summary = inp_summary[:100] + "..."
         status = "OK" if "error" not in result_preview.lower()[:50] else "ERROR"
@@ -3322,10 +3342,10 @@ class OdinBot(commands.Bot):
 
                 # Audit log — never crash tool execution on audit failure
                 try:
-                    scrubbed_input = {
+                    scrubbed_input = _scrub_tool_input_for_storage(tool_name, {
                         k: scrub_output_secrets(str(v)) if isinstance(v, str) else v
                         for k, v in (tool_input or {}).items()
-                    }
+                    })
                     await self.audit.log_execution(
                         user_id=str(message.author.id),
                         user_name=str(message.author),
@@ -3393,7 +3413,7 @@ class OdinBot(commands.Bot):
                             user_name=str(message.author),
                             channel_id=str(message.channel.id),
                             tool_name=block.name,
-                            tool_input=block.input,
+                            tool_input=_scrub_tool_input_for_storage(block.name, block.input),
                             approved=True,
                             result_summary=error_msg,
                             execution_time_ms=int(tool_timeout * 1000),
@@ -3427,7 +3447,7 @@ class OdinBot(commands.Bot):
                 _rcontent = str(_results_by_id.get(_tc.id, {}).get("content", ""))
                 _op_tool_details.append({
                     "tool": _tc.name,
-                    "input": _tc.input,
+                    "input": _scrub_tool_input_for_storage(_tc.name, _tc.input),
                     "result": _rcontent[:300],
                     "error": _rcontent.lstrip().lower().startswith(
                         ("error", "[error", "failed", "traceback")),
@@ -4688,7 +4708,7 @@ class OdinBot(commands.Bot):
                         user_name=requester_name,
                         channel_id=channel_id_str,
                         tool_name=tool_name,
-                        tool_input=tool_input,
+                        tool_input=_scrub_tool_input_for_storage(tool_name, tool_input),
                         approved=True,
                         result_summary=result,
                         execution_time_ms=elapsed_ms,
@@ -4722,7 +4742,7 @@ class OdinBot(commands.Bot):
                 _rcontent = str(_results_by_id.get(_tc.id, {}).get("content", ""))
                 _loop_details.append({
                     "tool": _tc.name,
-                    "input": _tc.input,
+                    "input": _scrub_tool_input_for_storage(_tc.name, _tc.input),
                     "result": _rcontent[:300],
                     "error": _rcontent.lstrip().lower().startswith(
                         ("error", "[error", "failed", "traceback",
