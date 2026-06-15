@@ -9,6 +9,7 @@ host and used transparently when available.
 from __future__ import annotations
 
 import email as email_lib
+import email.encoders
 import email.mime.base
 import email.mime.multipart
 import email.mime.text
@@ -224,7 +225,8 @@ def search_email(
         conn.select(f'"{folder}"', readonly=True)
 
         if _GMAIL_HOST_MARKER in imap_host.lower():
-            status, data = conn.uid("SEARCH", None, "X-GM-RAW", query)
+            escaped = query.replace("\\", "\\\\").replace('"', '\\"')
+            status, data = conn.uid("SEARCH", None, "X-GM-RAW", f'"{escaped}"')
         else:
             status, data = conn.uid("SEARCH", None, query)
 

@@ -1739,7 +1739,7 @@ class ToolExecutor:
         query = inp.get("query", "")
         if not query:
             return "Error: 'query' is required"
-        limit = min(int(inp.get("limit", 20)), cfg.max_results)
+        limit = max(1, min(int(inp.get("limit", 20)), cfg.max_results))
         try:
             results = search_email(
                 imap_host=cfg.imap.host,
@@ -1804,7 +1804,7 @@ class ToolExecutor:
         cfg = self._email_cfg()
         if cfg is None:
             return "Error: email tools are not configured (email.enabled is false)"
-        limit = min(int(inp.get("limit", 10)), cfg.max_results)
+        limit = max(1, min(int(inp.get("limit", 10)), cfg.max_results))
         try:
             results = list_recent(
                 imap_host=cfg.imap.host,

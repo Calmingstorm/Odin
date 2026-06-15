@@ -3330,6 +3330,14 @@ class OdinBot(commands.Bot):
                         k: scrub_output_secrets(str(v)) if isinstance(v, str) else v
                         for k, v in (tool_input or {}).items()
                     }
+                    if tool_name == "email_send":
+                        _body = scrubbed_input.get("body", "")
+                        scrubbed_input["body"] = f"[redacted email body: {len(_body)} chars]"
+                        if "attachments" in scrubbed_input:
+                            from pathlib import Path
+                            scrubbed_input["attachments"] = [
+                                Path(p).name for p in (scrubbed_input["attachments"] or [])
+                            ]
                     await self.audit.log_execution(
                         user_id=str(message.author.id),
                         user_name=str(message.author),
@@ -4686,13 +4694,23 @@ class OdinBot(commands.Bot):
                 result = truncate_tool_output(scrub_output_secrets(str(raw)))
 
                 # Audit log
+                _audit_input = tool_input
+                if tool_name == "email_send" and isinstance(_audit_input, dict):
+                    _audit_input = dict(_audit_input)
+                    _body = _audit_input.get("body", "")
+                    _audit_input["body"] = f"[redacted email body: {len(_body)} chars]"
+                    if "attachments" in _audit_input:
+                        from pathlib import Path as _P
+                        _audit_input["attachments"] = [
+                            _P(p).name for p in (_audit_input["attachments"] or [])
+                        ]
                 try:
                     await self.audit.log_execution(
                         user_id=user_id,
                         user_name=requester_name,
                         channel_id=channel_id_str,
                         tool_name=tool_name,
-                        tool_input=tool_input,
+                        tool_input=_audit_input,
                         approved=True,
                         result_summary=result,
                         execution_time_ms=elapsed_ms,

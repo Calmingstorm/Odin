@@ -165,7 +165,28 @@ class TestSearchEmail:
         )
 
         calls = mock_conn.uid.call_args_list
-        assert calls[0][0] == ("SEARCH", None, "X-GM-RAW", "from:alice")
+        assert calls[0][0] == ("SEARCH", None, "X-GM-RAW", '"from:alice"')
+
+    @patch("src.tools.email_client.imaplib.IMAP4_SSL")
+    def test_gmail_multiword_query_quoted(self, mock_imap_cls):
+        mock_conn = MagicMock()
+        mock_imap_cls.return_value = mock_conn
+        mock_conn.login.return_value = ("OK", [])
+        mock_conn.select.return_value = ("OK", [b"5"])
+        mock_conn.uid.return_value = ("OK", [b""])
+
+        search_email(
+            imap_host="imap.gmail.com", imap_port=993,
+            username="u", password="p",
+            query="from:alice newer_than:7d has:attachment",
+        )
+
+        call_args = mock_conn.uid.call_args_list[0][0]
+        assert call_args[0] == "SEARCH"
+        assert call_args[2] == "X-GM-RAW"
+        raw_arg = call_args[3]
+        assert raw_arg.startswith('"') and raw_arg.endswith('"')
+        assert "from:alice newer_than:7d has:attachment" in raw_arg
 
     @patch("src.tools.email_client.imaplib.IMAP4_SSL")
     def test_non_gmail_uses_standard_search(self, mock_imap_cls):
