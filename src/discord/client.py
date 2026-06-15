@@ -393,6 +393,7 @@ class OdinBot(commands.Bot):
             browser_manager=self.browser_manager,
             output_streamer=output_streamer,
             host_access_manager=self.host_access_manager,
+            email_config=getattr(config, "email", None),
         )
         self.skill_manager = SkillManager(
             skills_dir="./data/skills",
@@ -1187,6 +1188,9 @@ class OdinBot(commands.Bot):
         # Filter out tools that require unconfigured backends
         if not self.config.tools.claude_code_host:
             builtin = [t for t in builtin if t["name"] != "claude_code"]
+        _email_tools = {"email_send", "email_search", "email_read", "email_list_recent"}
+        if not getattr(self.config, "email", None) or not self.config.email.enabled:
+            builtin = [t for t in builtin if t["name"] not in _email_tools]
         builtin_names = {t["name"] for t in builtin}
         skill_defs = [
             t for t in self.skill_manager.get_tool_definitions()

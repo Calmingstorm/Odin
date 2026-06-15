@@ -179,6 +179,15 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     ("spawn_loop_agents", Affordance(Cost.VERY_HIGH, Risk.HIGH, Latency.UNBOUNDED,
         ("agent tool enabled",))),
     ("collect_loop_agents", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS, ())),
+    # Email tools (SMTP/IMAP)
+    ("email_send", Affordance(Cost.LOW, Risk.MEDIUM, Latency.SECONDS,
+        ("email.enabled", "SMTP credentials configured"))),
+    ("email_search", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS,
+        ("email.enabled", "IMAP credentials configured"))),
+    ("email_read", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS,
+        ("email.enabled", "IMAP credentials configured"))),
+    ("email_list_recent", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS,
+        ("email.enabled", "IMAP credentials configured"))),
 ]
 
 # Default when no prefix matches. Deliberately conservative: unknown

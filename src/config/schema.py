@@ -627,6 +627,32 @@ class ObservabilityConfig(BaseModel):
     max_tool_result_chars: int = 2000
 
 
+class EmailSmtpConfig(BaseModel):
+    host: str = "smtp.gmail.com"
+    port: int = 587
+    username: str = ""
+    password: str = ""
+    from_address: str = ""
+
+
+class EmailImapConfig(BaseModel):
+    host: str = "imap.gmail.com"
+    port: int = 993
+    username: str = ""
+    password: str = ""
+
+
+class EmailConfig(BaseModel):
+    enabled: bool = False
+    smtp: EmailSmtpConfig = EmailSmtpConfig()
+    imap: EmailImapConfig = EmailImapConfig()
+    max_body_chars: int = 50_000
+    max_results: int = 50
+    max_attachment_bytes: int = 10 * 1024 * 1024
+    connect_timeout_seconds: int = 30
+    allowed_attachment_dirs: list[str] = Field(default_factory=list)
+
+
 class MCPConfig(BaseModel):
     enabled: bool = False
     servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
@@ -651,6 +677,7 @@ class Config(BaseModel):
     webhook: WebhookConfig = WebhookConfig()
     learning: LearningConfig = LearningConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
+    email: EmailConfig = EmailConfig()
     search: SearchConfig = SearchConfig()
     voice: VoiceConfig = VoiceConfig()
     monitoring: MonitoringConfig = MonitoringConfig()

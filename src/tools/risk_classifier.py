@@ -124,6 +124,10 @@ _TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "browser_fill": RiskLevel.MEDIUM,
     "browser_evaluate": RiskLevel.MEDIUM,
     "manage_process": RiskLevel.MEDIUM,
+    "email_send": RiskLevel.MEDIUM,
+    "email_search": RiskLevel.LOW,
+    "email_read": RiskLevel.LOW,
+    "email_list_recent": RiskLevel.LOW,
     "generate_image": RiskLevel.MEDIUM,
     "ingest_knowledge": RiskLevel.MEDIUM,
     # High — arbitrary code execution
