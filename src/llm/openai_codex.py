@@ -62,6 +62,7 @@ class CodexChatClient:
                 connector=connector,
                 auto_decompress=False,
                 headers={"Accept-Encoding": "identity"},
+                read_bufsize=2**20,
             )
         return self._session
 
