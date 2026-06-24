@@ -17,6 +17,22 @@ openai_codex:
   model: gpt-5.5
   max_tokens: 4096
   credentials_path: ./data/codex_auth.json
+  retry:
+    max_retries: 3
+    base_delay: 1.0
+    max_delay: 30.0
+  connection_pool:
+    max_connections: 10
+    keepalive_timeout: 30
+  context_compression:
+    enabled: true
+    max_context_chars: 750000
+    keep_recent_iterations: 30
+  model_routing:
+    enabled: false
+    confidence_threshold: 0.6
+    max_cheap_length: 200
+    strong_intents: ["task", "complex"]
 
 ollama:
   enabled: false
@@ -68,6 +84,13 @@ tools:
       address: 127.0.0.1
       ssh_user: root
   command_timeout_seconds: 300
+  tool_timeouts: {}
+  audit_log_path: ./data/audit.jsonl
+  trajectory_path: ./data/trajectories
+  max_tool_iterations_chat: 500
+  max_tool_iterations_loop: 500
+  branch_freshness:
+    enabled: true
   skill_allowed_urls:
     - "http://localhost:8188"
   # Hostname or IP where Claude Code is accessible; leave empty if not used
@@ -83,6 +106,8 @@ webhook:
   channel_id: ''
   gitea_channel_id: ''
   grafana_channel_id: ''
+  github_channel_id: ''
+  gitlab_channel_id: ''
 
 # Agent autonomy limits — controls spawned sub-agents and scheduled agents
 agents:
@@ -94,6 +119,33 @@ agents:
   hard_max_iterations: 300         # absolute ceiling for per-spawn overrides
   # Inject budget warnings at these remaining-iteration counts
   final_warning_iterations: [20, 10, 5, 1]
+
+# Bot personality — preset or custom identity/voice
+personality:
+  preset: odin                  # Built-in: "odin", "heimdall", "mist", "syn"
+  custom_name: ''               # Override display name (empty = use preset)
+  custom_identity: ''           # Override identity description
+  custom_voice: ''              # Override voice/tone description
+  user_presets: {}              # Named custom presets: { name: { identity: ..., voice: ... } }
+
+# Attachment handling limits
+attachments:
+  temp_directory: /tmp/odin-attachments
+  inline_text_max_bytes: 100000
+  preview_max_chars: 12000
+  large_preview_chars: 4000
+  archive_max_bytes: 52428800         # 50 MB
+  archive_max_files: 500
+  archive_extract_max_bytes: 209715200  # 200 MB
+  archive_preview_total_chars: 20000
+  archive_preview_file_max_bytes: 64000
+  image_max_bytes: 5242880            # 5 MB
+  pdf_max_bytes: 26214400             # 25 MB
+  retention_hours: 24
+
+# Audit log integrity — HMAC signing for audit.jsonl entries
+audit:
+  hmac_key: ''  # Set a secret to enable HMAC-SHA256 signing; empty = disabled
 
 learning:
   enabled: true
@@ -177,6 +229,8 @@ web:
   enabled: true
   port: 3000        # Web UI and API port (default: 3000)
   api_token: ''     # Set a token to require auth; empty = no auth (dev mode)
+  session_timeout_minutes: 0  # 0 = no timeout
+  api_tokens: []              # List of per-token identities; see docs
 
 # Discord reaction triggers — fire scheduler triggers when users react with emoji
 reaction_triggers:
@@ -195,3 +249,65 @@ message_triggers:
   channel_ids: []
   # Restrict to specific users (empty = all users)
   allowed_user_ids: []
+
+# --- Optional integrations (uncomment and configure to enable) ---
+
+# # Slack webhook forwarding
+# slack:
+#   enabled: false
+#   webhook_urls: {}            # { "channel-name": "https://hooks.slack.com/..." }
+#   default_webhook_url: ''
+#   scrub_secrets: true
+#   rate_limit_seconds: 1
+#   forward_alerts: true
+#   forward_webhooks: false
+
+# # Issue tracker integration (Linear or Jira)
+# issue_tracker:
+#   enabled: false
+#   provider: linear            # "linear" or "jira"
+#   api_token: ''
+#   base_url: ''                # Required for Jira (e.g. https://yourorg.atlassian.net)
+#   project_key: ''             # Default Jira project key
+#   default_team_id: ''         # Default Linear team ID
+#   scrub_secrets: true
+
+# # Grafana alert auto-remediation
+# grafana_alerts:
+#   enabled: false
+#   auto_remediate: false
+#   rules: []
+#   cooldown_seconds: 300
+#   max_concurrent_remediations: 5
+
+# # Outbound webhooks — notify external services on events
+# outbound_webhooks:
+#   enabled: false
+#   scrub_secrets: true
+#   rate_limit_seconds: 0.5
+#   targets: []
+
+# # MCP (Model Context Protocol) servers
+# mcp:
+#   enabled: false
+#   servers: {}
+#   # Example stdio server:
+#   #   my-server:
+#   #     transport: stdio
+#   #     command: /usr/local/bin/my-mcp-server
+#   #     args: ["--flag"]
+#   #     env: { "API_KEY": "..." }
+#   #     timeout_seconds: 120
+
+# # Graceful degradation thresholds
+# graceful_degradation:
+#   enabled: true
+#   degraded_threshold: 3       # consecutive failures before DEGRADED state
+#   unavailable_threshold: 10   # consecutive failures before UNAVAILABLE state
+
+# # Infrastructure monitoring checks
+# monitoring:
+#   enabled: false
+#   checks: []
+#   alert_channel_id: ''
+#   cooldown_minutes: 60
