@@ -19,6 +19,16 @@ from .history import ScheduleHistory
 
 log = get_logger("scheduler")
 
+
+def _utc_iso(dt: datetime) -> str:
+    """Ensure datetime is serialized with explicit UTC offset."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat()
+
+
 # Tools that can be scheduled for "check" actions
 ALLOWED_CHECK_TOOLS = {
     "run_command", "run_command_multi", "run_script",
@@ -96,7 +106,7 @@ class Scheduler:
                     next_run = next_run.replace(tzinfo=None)
                 if next_run < now:
                     cr = croniter(cron_expr, now)
-                    schedule["next_run"] = cr.get_next(datetime).isoformat()
+                    schedule["next_run"] = _utc_iso(cr.get_next(datetime))
                     advanced += 1
             except Exception:
                 continue
@@ -178,15 +188,16 @@ class Scheduler:
             schedule["cron"] = cron
             schedule["one_time"] = False
             cr = croniter(cron, datetime.now(timezone.utc))
-            schedule["next_run"] = cr.get_next(datetime).isoformat()
+            schedule["next_run"] = _utc_iso(cr.get_next(datetime))
         else:
             if run_at:
                 try:
                     datetime.fromisoformat(run_at)
                 except (ValueError, TypeError):
                     raise ValueError(f"Invalid ISO datetime for run_at: {run_at!r}")
-            schedule["run_at"] = run_at
-            schedule["next_run"] = run_at
+            normalized = _utc_iso(datetime.fromisoformat(run_at))
+            schedule["run_at"] = normalized
+            schedule["next_run"] = normalized
             schedule["one_time"] = True
 
         if action == "reminder":
@@ -563,14 +574,15 @@ class Scheduler:
                     target["cron"] = cron
                     target["one_time"] = False
                     cr = croniter(cron, datetime.now(timezone.utc))
-                    target["next_run"] = cr.get_next(datetime).isoformat()
+                    target["next_run"] = _utc_iso(cr.get_next(datetime))
                 elif run_at is not None:
                     try:
                         datetime.fromisoformat(run_at)
                     except (ValueError, TypeError):
                         raise ValueError(f"Invalid ISO datetime for run_at: {run_at!r}")
-                    target["run_at"] = run_at
-                    target["next_run"] = run_at
+                    normalized = _utc_iso(datetime.fromisoformat(run_at))
+                    target["run_at"] = normalized
+                    target["next_run"] = normalized
                     target["one_time"] = True
 
             await asyncio.to_thread(self._save)
@@ -814,7 +826,7 @@ class Scheduler:
 
                 if schedule.get("cron"):
                     cr = croniter(schedule["cron"], now.replace(tzinfo=None))
-                    schedule["next_run"] = cr.get_next(datetime).isoformat()
+                    schedule["next_run"] = _utc_iso(cr.get_next(datetime))
 
             for sid in to_remove:
                 self._schedules = [s for s in self._schedules if s["id"] != sid]

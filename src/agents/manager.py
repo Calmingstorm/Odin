@@ -24,7 +24,7 @@ log = get_logger("agents")
 # --- Constants ---
 MAX_CONCURRENT_AGENTS = 5        # per channel
 MAX_AGENT_LIFETIME = 3600        # 1 hour
-MAX_AGENT_ITERATIONS = 30        # LLM turns per agent
+MAX_AGENT_ITERATIONS = 120       # LLM turns per agent (default, overridable via config/spawn)
 STALE_WARN_SECONDS = 120         # 2 min no activity → log warning
 CLEANUP_DELAY = 300              # 5 min after terminal state → remove
 WAIT_DEFAULT_TIMEOUT = 300       # default timeout for wait_for_agents
@@ -321,6 +321,8 @@ class AgentManager:
         trajectory_saver: AgentTrajectorySaver | None = None,
         parent_id: str | None = None,
         max_depth: int = MAX_NESTING_DEPTH,
+        max_iterations: int | None = None,
+        budget_warnings: list[int] | None = None,
     ) -> str:
         """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string."""
         # Check per-channel limit
@@ -398,6 +400,7 @@ class AgentManager:
         agent.messages = [{"role": "user", "content": goal}]
 
         # Start the async task
+        effective_max_iter = max_iterations or MAX_AGENT_ITERATIONS
         task = asyncio.ensure_future(
             _run_agent(
                 agent=agent,
@@ -408,6 +411,8 @@ class AgentManager:
                 announce_callback=announce_callback,
                 tool_timeouts=tool_timeouts or {},
                 trajectory_saver=trajectory_saver,
+                max_iterations=effective_max_iter,
+                budget_warnings=budget_warnings or [20, 10, 5, 1],
             )
         )
         agent._task = task
@@ -730,6 +735,8 @@ async def _run_agent(
     announce_callback: AnnounceCallback | None = None,
     tool_timeouts: dict[str, int] | None = None,
     trajectory_saver: AgentTrajectorySaver | None = None,
+    max_iterations: int = MAX_AGENT_ITERATIONS,
+    budget_warnings: list[int] | None = None,
 ) -> None:
     """Execute an agent's tool loop until completion, error, or timeout.
 
@@ -777,7 +784,9 @@ async def _run_agent(
         # Transition from SPAWNING → READY
         agent.transition(AgentState.READY, "initialization complete")
 
-        for iteration in range(MAX_AGENT_ITERATIONS):
+        _budget_warn_set = set(budget_warnings or [])
+
+        for iteration in range(max_iterations):
             if _check_kill():
                 return
             if _check_lifetime():
@@ -794,6 +803,17 @@ async def _run_agent(
                     log.debug("Agent %s received inbox message", agent.id)
                 except asyncio.QueueEmpty:
                     break
+
+            # Budget warning: inject remaining-iterations notice before LLM call
+            remaining = max_iterations - iteration
+            if remaining in _budget_warn_set:
+                if remaining == 1:
+                    warn_text = "[Agent budget: FINAL iteration. Produce your final summary NOW.]"
+                elif remaining <= 5:
+                    warn_text = f"[Agent budget: {remaining} iterations remaining. Commit any changes, run validation, and produce your final summary.]"
+                else:
+                    warn_text = f"[Agent budget: {remaining} iterations remaining. Begin wrapping up — finish the smallest useful change, validate, and prepare your final summary.]"
+                agent.messages.append({"role": "user", "content": warn_text})
 
             # Transition READY → EXECUTING for LLM call
             agent.transition(AgentState.EXECUTING, f"iteration {iteration + 1}")
@@ -884,11 +904,13 @@ async def _run_agent(
                 )
 
         # Exhausted iterations — transition from READY → COMPLETED
-        agent.transition(AgentState.COMPLETED, f"max iterations ({MAX_AGENT_ITERATIONS}) reached")
+        agent.transition(AgentState.COMPLETED, f"max iterations ({max_iterations}) reached")
         agent.result = _get_last_progress(agent)
+        if agent.result == "(no output)":
+            agent.result = _synthesize_fallback(agent, max_iterations)
         agent.ended_at = time.time()
         elapsed = time.time() - agent.created_at
-        log.info("Agent %s (%s) completed in %ds after %d iterations (max reached), %d tool calls", agent.id, agent.label, int(elapsed), MAX_AGENT_ITERATIONS, len(agent.tools_used))
+        log.info("Agent %s (%s) completed in %ds after %d iterations (max reached), %d tool calls", agent.id, agent.label, int(elapsed), max_iterations, len(agent.tools_used))
 
     except asyncio.CancelledError:
         if not agent._sm.is_terminal:
@@ -978,3 +1000,23 @@ def _get_last_progress(agent: AgentInfo) -> str:
         if msg["role"] == "assistant" and msg.get("content"):
             return msg["content"]
     return "(no output)"
+
+
+def _synthesize_fallback(agent: AgentInfo, max_iterations: int) -> str:
+    """Build a summary from tool activity when the agent produced no text output."""
+    parts = [f"Agent reached max iterations ({max_iterations}) without producing a final response."]
+    if agent.tools_used:
+        parts.append(f"Tools used: {', '.join(agent.tools_used)}")
+    # Extract last few tool results from messages
+    tool_results = []
+    for msg in reversed(agent.messages):
+        content = msg.get("content", "")
+        if msg["role"] == "user" and content.startswith("[Tool result:"):
+            tool_results.append(content[:300])
+            if len(tool_results) >= 3:
+                break
+    if tool_results:
+        parts.append("Last tool results:")
+        for tr in reversed(tool_results):
+            parts.append(f"  {tr}")
+    return "\n".join(parts)

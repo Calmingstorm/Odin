@@ -4297,6 +4297,15 @@ class OdinBot(commands.Bot):
             )
             return str(result) if result is not None else ""
 
+        # Determine iteration cap from config — scheduled spawns get a higher budget
+        agents_cfg = getattr(self.config, "agents", None)
+        hard_max = getattr(agents_cfg, "hard_max_iterations", 300) if agents_cfg else 300
+        if inp.get("_scheduled"):
+            iter_cap = min(getattr(agents_cfg, "scheduled_max_iterations", 180) if agents_cfg else 180, hard_max)
+        else:
+            iter_cap = min(getattr(agents_cfg, "max_iterations", 120) if agents_cfg else 120, hard_max)
+        warnings = list(getattr(agents_cfg, "final_warning_iterations", [20, 10, 5, 1])) if agents_cfg else [20, 10, 5, 1]
+
         agent_id = self.agent_manager.spawn(
             label=label,
             goal=goal,
@@ -4310,9 +4319,9 @@ class OdinBot(commands.Bot):
             parent_id=parent_id_arg,
             max_depth=max_depth,
             tool_timeouts=self.config.tools.tool_timeouts,
-            # The saver existed since the feature shipped but was never passed —
-            # data/trajectories/agents/ has been empty in production forever.
             trajectory_saver=self.agent_trajectory_saver,
+            max_iterations=iter_cap,
+            budget_warnings=warnings,
         )
 
         if agent_id.startswith("Error"):
@@ -4324,7 +4333,7 @@ class OdinBot(commands.Bot):
             f"Working on: {goal[:100]}"
         )
 
-    async def _collect_agent_result(self, agent_id: str, timeout: float = 1500) -> str:
+    async def _collect_agent_result(self, agent_id: str, timeout: float = 3660) -> str:
         """Wait for an agent to complete and return formatted results."""
         results = await self.agent_manager.wait_for_agents([agent_id], timeout=timeout)
         r = results.get(agent_id, {})
@@ -5327,6 +5336,10 @@ class OdinBot(commands.Bot):
 
             try:
                 req_name = schedule.get("requester") or schedule.get("created_by") or "scheduler"
+                # Signal to spawn_agent handler that this is a scheduled context
+                if tool_name == "spawn_agent":
+                    tool_input = {**tool_input, "_scheduled": True}
+
                 result = await self._execute_scheduled_tool(
                     tool_name, tool_input, channel, req_id, req_name,
                 )
@@ -5340,8 +5353,8 @@ class OdinBot(commands.Bot):
                     id_end = result_str.find("`", id_start)
                     if 0 < id_start < id_end:
                         agent_id = result_str[id_start:id_end]
-                        timeout = float(step.get("timeout", 1500))
-                        agent_result = await self._collect_agent_result(agent_id, timeout=min(timeout, 3600))
+                        timeout = float(step.get("timeout", 3660))
+                        agent_result = await self._collect_agent_result(agent_id, timeout=min(timeout, 3660))
                         result = ToolResult(output=agent_result, ok=True, tool_name="spawn_agent")
 
                 prev_output = str(result)

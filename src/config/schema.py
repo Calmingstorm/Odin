@@ -109,12 +109,24 @@ class StreamingConfig(BaseModel):
 class AgentsConfig(BaseModel):
     max_nesting_depth: int = 2
     max_children_per_agent: int = 3
+    max_iterations: int = 120
+    scheduled_max_iterations: int = 180
+    hard_max_iterations: int = 300
+    final_warning_iterations: list[int] = Field(default_factory=lambda: [20, 10, 5, 1])
 
-    @field_validator("max_nesting_depth", "max_children_per_agent")
+    @field_validator("max_nesting_depth", "max_children_per_agent", "max_iterations", "scheduled_max_iterations", "hard_max_iterations")
     @classmethod
     def _agents_non_negative(cls, v):
-        if v < 0:
-            raise ValueError("agent limits must be >= 0")
+        if v < 1:
+            raise ValueError("agent limits must be >= 1")
+        return v
+
+    @field_validator("final_warning_iterations")
+    @classmethod
+    def _validate_warnings(cls, v):
+        for item in v:
+            if item < 1:
+                raise ValueError(f"warning threshold must be >= 1, got {item}")
         return v
 
 
