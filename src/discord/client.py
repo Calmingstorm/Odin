@@ -4322,6 +4322,9 @@ class OdinBot(commands.Bot):
             trajectory_saver=self.agent_trajectory_saver,
             max_iterations=iter_cap,
             budget_warnings=warnings,
+            context_compression_enabled=bool(self.context_compressor),
+            max_context_chars=self.context_compressor.max_context_chars if self.context_compressor else 750000,
+            keep_recent_iterations=self.context_compressor.keep_recent_iterations if self.context_compressor else 30,
         )
 
         if agent_id.startswith("Error"):

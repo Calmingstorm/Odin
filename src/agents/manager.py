@@ -323,6 +323,9 @@ class AgentManager:
         max_depth: int = MAX_NESTING_DEPTH,
         max_iterations: int | None = None,
         budget_warnings: list[int] | None = None,
+        context_compression_enabled: bool = False,
+        max_context_chars: int = 750000,
+        keep_recent_iterations: int = 30,
     ) -> str:
         """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string."""
         # Check per-channel limit
@@ -413,6 +416,9 @@ class AgentManager:
                 trajectory_saver=trajectory_saver,
                 max_iterations=effective_max_iter,
                 budget_warnings=budget_warnings or [20, 10, 5, 1],
+                context_compression_enabled=context_compression_enabled,
+                max_context_chars=max_context_chars,
+                keep_recent_iterations=keep_recent_iterations,
             )
         )
         agent._task = task
@@ -737,6 +743,9 @@ async def _run_agent(
     trajectory_saver: AgentTrajectorySaver | None = None,
     max_iterations: int = MAX_AGENT_ITERATIONS,
     budget_warnings: list[int] | None = None,
+    context_compression_enabled: bool = False,
+    max_context_chars: int = 750000,
+    keep_recent_iterations: int = 30,
 ) -> None:
     """Execute an agent's tool loop until completion, error, or timeout.
 
@@ -803,6 +812,20 @@ async def _run_agent(
                     log.debug("Agent %s received inbox message", agent.id)
                 except asyncio.QueueEmpty:
                     break
+
+            # Context compression: summarize older tool iterations when context grows too large
+            if context_compression_enabled and iteration > 0:
+                try:
+                    from ..llm.context_compressor import compress_tool_context, estimate_message_chars
+                    if estimate_message_chars(agent.messages) > max_context_chars:
+                        agent.messages, saved = compress_tool_context(
+                            agent.messages,
+                            max_context_chars=max_context_chars,
+                            keep_recent=keep_recent_iterations,
+                        )
+                        log.info("agent context_compressor: agent=%s trimmed %d chars", agent.id, saved)
+                except Exception:
+                    log.exception("agent context_compressor failed (non-fatal); continuing with full context")
 
             # Budget warning: inject remaining-iterations notice before LLM call
             remaining = max_iterations - iteration

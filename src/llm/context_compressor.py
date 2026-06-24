@@ -112,34 +112,39 @@ def _hash_prefix(system: str, messages: list[dict]) -> str:
 # ------------------------------------------------------------------
 
 def _is_tool_message(msg: dict) -> bool:
-    """True if a message contains tool_use or tool_result content blocks."""
+    """True if a message contains tool_use or tool_result content blocks,
+    or agent-style string tool result messages."""
     content = msg.get("content")
-    if not isinstance(content, list):
-        return False
-    return any(
-        isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result")
-        for b in content
-    )
+    if isinstance(content, list):
+        return any(
+            isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result")
+            for b in content
+        )
+    if isinstance(content, str) and content.startswith("[Tool result:"):
+        return True
+    return False
 
 
 def _is_tool_use_message(msg: dict) -> bool:
     content = msg.get("content")
-    if not isinstance(content, list):
-        return False
-    return any(
-        isinstance(b, dict) and b.get("type") == "tool_use"
-        for b in content
-    )
+    if isinstance(content, list):
+        return any(
+            isinstance(b, dict) and b.get("type") == "tool_use"
+            for b in content
+        )
+    return False
 
 
 def _is_tool_result_message(msg: dict) -> bool:
     content = msg.get("content")
-    if not isinstance(content, list):
-        return False
-    return any(
-        isinstance(b, dict) and b.get("type") == "tool_result"
-        for b in content
-    )
+    if isinstance(content, list):
+        return any(
+            isinstance(b, dict) and b.get("type") == "tool_result"
+            for b in content
+        )
+    if isinstance(content, str) and content.startswith("[Tool result:"):
+        return True
+    return False
 
 
 # ------------------------------------------------------------------
@@ -162,6 +167,13 @@ def split_prefix_and_iterations(
         if _is_tool_message(msg):
             prefix_end = i
             break
+        # Agent-style: assistant message followed by [Tool result:] is the
+        # start of a tool iteration
+        if msg.get("role") == "assistant" and i + 1 < len(messages):
+            next_msg = messages[i + 1]
+            if _is_tool_result_message(next_msg):
+                prefix_end = i
+                break
 
     prefix = messages[:prefix_end]
     remaining = messages[prefix_end:]
@@ -173,7 +185,14 @@ def split_prefix_and_iterations(
     current: list[dict] = []
 
     for msg in remaining:
-        if _is_tool_use_message(msg) and current:
+        # Start new iteration on structured tool_use or agent-style assistant
+        # message that begins a tool call cycle
+        is_boundary = _is_tool_use_message(msg)
+        if not is_boundary and msg.get("role") == "assistant":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                is_boundary = True
+        if is_boundary and current:
             iterations.append(current)
             current = [msg]
         else:
@@ -229,28 +248,40 @@ def summarize_iteration(iteration: list[dict]) -> str:
 
     for msg in iteration:
         content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            btype = block.get("type", "")
-            if btype == "tool_use":
-                tool_names.append(block.get("name", "?"))
-            elif btype == "tool_result":
-                result = block.get("content", "")
-                if isinstance(result, list):
-                    result = " ".join(
-                        b.get("text", "")
-                        for b in result
-                        if isinstance(b, dict) and b.get("type") == "text"
-                    )
-                elif not isinstance(result, str):
-                    result = str(result)
-                if result.startswith(_ERROR_PREFIXES):
-                    outcomes.append("ERR")
-                else:
-                    outcomes.append("OK")
+        # Structured content blocks (main loop format)
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                if btype == "tool_use":
+                    tool_names.append(block.get("name", "?"))
+                elif btype == "tool_result":
+                    result = block.get("content", "")
+                    if isinstance(result, list):
+                        result = " ".join(
+                            b.get("text", "")
+                            for b in result
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    elif not isinstance(result, str):
+                        result = str(result)
+                    if result.startswith(_ERROR_PREFIXES):
+                        outcomes.append("ERR")
+                    else:
+                        outcomes.append("OK")
+        # Agent-style string tool results: "[Tool result: tool_name]\n..."
+        elif isinstance(content, str) and content.startswith("[Tool result:"):
+            # Extract tool name from "[Tool result: tool_name]"
+            end = content.find("]")
+            if end > 14:
+                name = content[14:end].strip()
+                tool_names.append(name)
+            result_body = content[end + 1:].strip() if end > 0 else content
+            if result_body.startswith(_ERROR_PREFIXES):
+                outcomes.append("ERR")
+            else:
+                outcomes.append("OK")
 
     parts = []
     for i, name in enumerate(tool_names):
