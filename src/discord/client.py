@@ -5347,6 +5347,7 @@ class OdinBot(commands.Bot):
                 # Auto-collect agent results for spawn_agent steps in scheduled workflows.
                 # Extract agent_id from spawn confirmation and wait for completion so the
                 # workflow reports what the agent did, not just that it was spawned.
+                render_markdown = False
                 if tool_name == "spawn_agent" and isinstance(result, ToolResult) and result.ok:
                     result_str = str(result)
                     id_start = result_str.find("`") + 1
@@ -5356,6 +5357,7 @@ class OdinBot(commands.Bot):
                         timeout = float(step.get("timeout", 3660))
                         agent_result = await self._collect_agent_result(agent_id, timeout=min(timeout, 3660))
                         result = ToolResult(output=agent_result, ok=True, tool_name="spawn_agent")
+                        render_markdown = True
 
                 prev_output = str(result)
 
@@ -5365,6 +5367,8 @@ class OdinBot(commands.Bot):
                     if on_failure == "abort":
                         results.append("Workflow aborted due to step failure.")
                         break
+                elif render_markdown:
+                    results.append(f"**Step {i+1}** (`{step_desc}`): OK\n\n{str(result)[:1600]}")
                 else:
                     results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{str(result)[:1600]}\n```")
             except Exception as e:
