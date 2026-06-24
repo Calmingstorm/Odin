@@ -400,7 +400,7 @@ class AgentManager:
         agent.messages = [{"role": "user", "content": goal}]
 
         # Start the async task
-        effective_max_iter = min(max_iterations or MAX_AGENT_ITERATIONS, 300)
+        effective_max_iter = max_iterations or MAX_AGENT_ITERATIONS
         task = asyncio.ensure_future(
             _run_agent(
                 agent=agent,

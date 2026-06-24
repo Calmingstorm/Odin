@@ -195,8 +195,9 @@ class Scheduler:
                     datetime.fromisoformat(run_at)
                 except (ValueError, TypeError):
                     raise ValueError(f"Invalid ISO datetime for run_at: {run_at!r}")
-            schedule["run_at"] = run_at
-            schedule["next_run"] = run_at
+            normalized = _utc_iso(datetime.fromisoformat(run_at))
+            schedule["run_at"] = normalized
+            schedule["next_run"] = normalized
             schedule["one_time"] = True
 
         if action == "reminder":
@@ -579,8 +580,9 @@ class Scheduler:
                         datetime.fromisoformat(run_at)
                     except (ValueError, TypeError):
                         raise ValueError(f"Invalid ISO datetime for run_at: {run_at!r}")
-                    target["run_at"] = run_at
-                    target["next_run"] = run_at
+                    normalized = _utc_iso(datetime.fromisoformat(run_at))
+                    target["run_at"] = normalized
+                    target["next_run"] = normalized
                     target["one_time"] = True
 
             await asyncio.to_thread(self._save)

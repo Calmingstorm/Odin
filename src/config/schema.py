@@ -114,11 +114,11 @@ class AgentsConfig(BaseModel):
     hard_max_iterations: int = 300
     final_warning_iterations: list[int] = Field(default_factory=lambda: [20, 10, 5, 1])
 
-    @field_validator("max_nesting_depth", "max_children_per_agent")
+    @field_validator("max_nesting_depth", "max_children_per_agent", "max_iterations", "scheduled_max_iterations", "hard_max_iterations")
     @classmethod
     def _agents_non_negative(cls, v):
-        if v < 0:
-            raise ValueError("agent limits must be >= 0")
+        if v < 1:
+            raise ValueError("agent limits must be >= 1")
         return v
 
 
