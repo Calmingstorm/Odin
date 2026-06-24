@@ -121,6 +121,14 @@ class AgentsConfig(BaseModel):
             raise ValueError("agent limits must be >= 1")
         return v
 
+    @field_validator("final_warning_iterations")
+    @classmethod
+    def _validate_warnings(cls, v):
+        for item in v:
+            if item < 1:
+                raise ValueError(f"warning threshold must be >= 1, got {item}")
+        return v
+
 
 class SSHPoolConfig(BaseModel):
     enabled: bool = True
