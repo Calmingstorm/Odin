@@ -4324,6 +4324,29 @@ class OdinBot(commands.Bot):
             f"Working on: {goal[:100]}"
         )
 
+    async def _collect_agent_result(self, agent_id: str, timeout: float = 1500) -> str:
+        """Wait for an agent to complete and return formatted results."""
+        results = await self.agent_manager.wait_for_agents([agent_id], timeout=timeout)
+        r = results.get(agent_id, {})
+        status = r.get("status", "unknown")
+        label = r.get("label", agent_id)
+        runtime = r.get("runtime_seconds", 0)
+        iterations = r.get("iteration_count", 0)
+        tools_used = r.get("tools_used", [])
+        result_text = r.get("result", "")
+        error_text = r.get("error", "")
+
+        parts = [f"**Agent: {label}** ({status})", f"Runtime: {runtime}s, Iterations: {iterations}"]
+        if tools_used:
+            parts.append(f"Tools: {', '.join(tools_used[:15])}")
+        if result_text:
+            if len(result_text) > 1500:
+                result_text = result_text[:1500] + "..."
+            parts.append(f"Result:\n{result_text}")
+        if error_text:
+            parts.append(f"Error: {error_text}")
+        return "\n".join(parts)
+
     def _handle_send_to_agent(self, inp: dict) -> str:
         """Send a message to a running agent."""
         agent_id = inp.get("agent_id", "")
@@ -5307,16 +5330,30 @@ class OdinBot(commands.Bot):
                 result = await self._execute_scheduled_tool(
                     tool_name, tool_input, channel, req_id, req_name,
                 )
+
+                # Auto-collect agent results for spawn_agent steps in scheduled workflows.
+                # Extract agent_id from spawn confirmation and wait for completion so the
+                # workflow reports what the agent did, not just that it was spawned.
+                if tool_name == "spawn_agent" and isinstance(result, ToolResult) and result.ok:
+                    result_str = str(result)
+                    id_start = result_str.find("`") + 1
+                    id_end = result_str.find("`", id_start)
+                    if 0 < id_start < id_end:
+                        agent_id = result_str[id_start:id_end]
+                        timeout = float(step.get("timeout", 1500))
+                        agent_result = await self._collect_agent_result(agent_id, timeout=min(timeout, 3600))
+                        result = ToolResult(output=agent_result, ok=True, tool_name="spawn_agent")
+
                 prev_output = str(result)
 
                 if isinstance(result, ToolResult) and not result.ok:
-                    results.append(f"**Step {i+1}** (`{step_desc}`): FAILED\n```\n{str(result)[:400]}\n```")
+                    results.append(f"**Step {i+1}** (`{step_desc}`): FAILED\n```\n{str(result)[:1600]}\n```")
                     on_failure = step.get("on_failure", "abort")
                     if on_failure == "abort":
                         results.append("Workflow aborted due to step failure.")
                         break
                 else:
-                    results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{str(result)[:400]}\n```")
+                    results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{str(result)[:1600]}\n```")
             except Exception as e:
                 results.append(f"**Step {i+1}** (`{step_desc}`): FAILED — {e}")
                 on_failure = step.get("on_failure", "abort")
