@@ -4998,8 +4998,7 @@ class OdinBot(commands.Bot):
             )
 
         # --- Executor-routed tools (run_command, run_script, SSH, etc.) ---
-        result = await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
-        return str(result)
+        return await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
 
     async def _handle_read_channel(self, message: discord.Message, inp: dict) -> str:
         """Read recent messages from a Discord channel.
@@ -5253,6 +5252,13 @@ class OdinBot(commands.Bot):
         Routes through the same client-level dispatch as live messages and
         autonomous loops, so scheduled tasks have full tool parity.
         """
+        # Pre-check RBAC so we can return a structured failure — the dispatch
+        # also checks, but returns a plain denial string we'd have to guess at.
+        if requester_id:
+            denial = self.tool_executor.check_permission(tool_name, requester_id)
+            if isinstance(denial, str) and denial:
+                return ToolResult(output=denial, ok=False, error="permission_denied", tool_name=tool_name)
+
         msg_proxy = _LoopMessageProxy(channel, requester_id or "0", requester_name)
         try:
             result = await self._dispatch_loop_tool_inner(
