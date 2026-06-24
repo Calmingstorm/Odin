@@ -35,7 +35,7 @@ from ..odin_log import get_logger
 from ..scheduler import Scheduler
 from ..sessions import SessionManager
 from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
-from ..tools import ToolExecutor, SkillManager, get_tool_definitions
+from ..tools import ToolExecutor, SkillManager, ToolResult, get_tool_definitions
 from ..search import LocalEmbedder, SessionVectorStore
 from ..permissions import PermissionManager
 from ..permissions.host_access import HostAccessManager
@@ -5240,6 +5240,31 @@ class OdinBot(commands.Bot):
         except discord.HTTPException as e:
             return f"Failed to upload generated image to Discord: {e}"
 
+    async def _execute_scheduled_tool(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        channel: discord.abc.Messageable,
+        requester_id: str | None,
+        requester_name: str = "scheduler",
+    ) -> ToolResult:
+        """Unified dispatch for scheduled task tool execution.
+
+        Routes through the same client-level dispatch as live messages and
+        autonomous loops, so scheduled tasks have full tool parity.
+        """
+        msg_proxy = _LoopMessageProxy(channel, requester_id or "0", requester_name)
+        try:
+            result = await self._dispatch_loop_tool_inner(
+                tool_name, tool_input, msg_proxy, requester_id or "",
+            )
+        except Exception as e:
+            return ToolResult(output=f"Error executing {tool_name}: {e}", ok=False, error="execution_error", tool_name=tool_name)
+
+        if isinstance(result, ToolResult):
+            return result
+        return ToolResult(output=str(result), ok=True, tool_name=tool_name)
+
     async def _run_scheduled_workflow(
         self, channel: discord.abc.Messageable, schedule: dict,
     ) -> None:
@@ -5272,33 +5297,26 @@ class OdinBot(commands.Bot):
                         continue
 
             try:
-                # Central RBAC gate for scheduled steps (skills bypass execute()).
-                _denial = self.tool_executor.check_permission(tool_name, req_id) if req_id else None
-                if isinstance(_denial, str) and _denial:
-                    output = _denial
-                # Check if this is a skill or built-in tool
-                elif tool_name == "invoke_skill":
-                    target_name = tool_input.get("name")
-                    skill_input = tool_input.get("input") or {}
-                    if not target_name or not self.skill_manager.has_skill(target_name):
-                        output = f"Error: skill '{target_name}' not found or disabled."
-                    elif not isinstance(skill_input, dict):
-                        output = "Error: invoke_skill 'input' must be an object."
-                    else:
-                        output = await self.skill_manager.execute(target_name, skill_input)
-                elif self.skill_manager.has_skill(tool_name):
-                    output = await self.skill_manager.execute(tool_name, tool_input)
+                req_name = schedule.get("requester") or schedule.get("created_by") or "scheduler"
+                result = await self._execute_scheduled_tool(
+                    tool_name, tool_input, channel, req_id, req_name,
+                )
+                prev_output = str(result)
+
+                if isinstance(result, ToolResult) and not result.ok:
+                    results.append(f"**Step {i+1}** (`{step_desc}`): FAILED\n```\n{str(result)[:400]}\n```")
+                    on_failure = step.get("on_failure", "abort")
+                    if on_failure == "abort":
+                        results.append("Workflow aborted due to step failure.")
+                        break
                 else:
-                    output = await self.tool_executor.execute(tool_name, tool_input, user_id=req_id)
-                prev_output = str(output)
-                results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{str(output)[:400]}\n```")
+                    results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{str(result)[:400]}\n```")
             except Exception as e:
                 results.append(f"**Step {i+1}** (`{step_desc}`): FAILED — {e}")
                 on_failure = step.get("on_failure", "abort")
                 if on_failure == "abort":
                     results.append("Workflow aborted due to step failure.")
                     break
-                # "continue" keeps going
 
         summary = "\n".join(results)
         text = f"**Workflow: {desc}**\n{summary}"
@@ -5350,11 +5368,16 @@ class OdinBot(commands.Bot):
         elif schedule["action"] == "check":
             tool_name = schedule.get("tool_name")
             tool_input = schedule.get("tool_input", {})
+            req_id = schedule.get("requester_id") or None
+            req_name = schedule.get("requester") or schedule.get("created_by") or "scheduler"
             try:
-                result = await self.tool_executor.execute(
-                    tool_name, tool_input, user_id=schedule.get("requester_id") or None,
+                result = await self._execute_scheduled_tool(
+                    tool_name, tool_input, channel, req_id, req_name,
                 )
-                text = f"**Scheduled: {schedule['description']}**\n```\n{str(result)[:1800]}\n```"
+                if isinstance(result, ToolResult) and not result.ok:
+                    text = f"**Scheduled check failed:** {schedule['description']}\n```\n{str(result)[:1800]}\n```"
+                else:
+                    text = f"**Scheduled: {schedule['description']}**\n```\n{str(result)[:1800]}\n```"
                 await channel.send(scrub_response_secrets(text))
             except (discord.HTTPException, discord.Forbidden, discord.NotFound) as e:
                 log.warning("Scheduled task Discord error: %s", e)
