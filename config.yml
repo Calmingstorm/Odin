@@ -84,6 +84,17 @@ webhook:
   gitea_channel_id: ''
   grafana_channel_id: ''
 
+# Agent autonomy limits — controls spawned sub-agents and scheduled agents
+agents:
+  max_nesting_depth: 2
+  max_children_per_agent: 3
+  # LLM iterations (turns) per agent before forced completion
+  max_iterations: 120              # interactive spawns
+  scheduled_max_iterations: 180    # scheduled workflow spawns (higher for autonomous coding)
+  hard_max_iterations: 300         # absolute ceiling for per-spawn overrides
+  # Inject budget warnings at these remaining-iteration counts
+  final_warning_iterations: [20, 10, 5, 1]
+
 learning:
   enabled: true
   max_entries: 150
