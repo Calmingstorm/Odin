@@ -1268,7 +1268,7 @@ TOOLS: list[dict] = [
             "Spawns an autonomous agent for a sub-task. Runs silently in background with "
             "isolated context (cannot spawn sub-agents). Results are NOT posted to Discord — "
             "use wait_for_agents to collect results, then deliver a cohesive summary yourself. "
-            "Max 5/channel, 1hr lifetime, 30 LLM turns."
+            "Max 5/channel, 1hr lifetime. Budget warnings injected near iteration limit."
         ),
         "input_schema": {
             "type": "object",

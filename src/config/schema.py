@@ -109,6 +109,10 @@ class StreamingConfig(BaseModel):
 class AgentsConfig(BaseModel):
     max_nesting_depth: int = 2
     max_children_per_agent: int = 3
+    max_iterations: int = 120
+    scheduled_max_iterations: int = 180
+    hard_max_iterations: int = 300
+    final_warning_iterations: list[int] = Field(default_factory=lambda: [20, 10, 5, 1])
 
     @field_validator("max_nesting_depth", "max_children_per_agent")
     @classmethod

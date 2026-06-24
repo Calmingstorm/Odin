@@ -200,15 +200,16 @@ class TestSchedulerTick:
         sched = await s.add("cron job", "reminder", "chan1", cron="*/5 * * * *")
         old_next = sched["next_run"]
 
-        # Force next_run into the past
+        # Force next_run far enough into the past that the next cron fire differs
         async with s._lock:
             s._schedules[0]["next_run"] = (
-                datetime.now(timezone.utc) - timedelta(minutes=1)
+                datetime.now(timezone.utc) - timedelta(minutes=10)
             ).isoformat()
+        forced_next = s.list_all()[0]["next_run"]
 
         await s._tick()
         new_next = s.list_all()[0]["next_run"]
-        assert new_next != old_next  # next_run was advanced
+        assert new_next != forced_next  # next_run was advanced past the forced value
         assert s._callback.called
 
     async def test_tick_skips_future_schedules(self, tmp_path):
