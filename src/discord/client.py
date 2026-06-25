@@ -4342,8 +4342,15 @@ class OdinBot(commands.Bot):
             f"Working on: {goal[:100]}"
         )
 
-    async def _collect_agent_result(self, agent_id: str, timeout: float = 3660) -> str:
-        """Wait for an agent to complete and return formatted results."""
+    async def _collect_agent_result(
+        self, agent_id: str, timeout: float = 3660,
+    ) -> tuple[str, dict]:
+        """Wait for an agent to complete and return (formatted_text, raw_data).
+
+        The raw_data dict contains status, error, result, and empty_result
+        so callers can make ok/fail decisions based on structured state
+        rather than parsing markdown.
+        """
         results = await self.agent_manager.wait_for_agents([agent_id], timeout=timeout)
         r = results.get(agent_id, {})
         status = r.get("status", "unknown")
@@ -4363,7 +4370,14 @@ class OdinBot(commands.Bot):
             parts.append(f"Result:\n{result_text}")
         if error_text:
             parts.append(f"Error: {error_text}")
-        return "\n".join(parts)
+
+        raw = {
+            "status": status,
+            "error": error_text,
+            "result": r.get("result", ""),
+            "empty_result": not r.get("result"),
+        }
+        return "\n".join(parts), raw
 
     def _handle_send_to_agent(self, inp: dict) -> str:
         """Send a message to a running agent."""
@@ -5318,12 +5332,16 @@ class OdinBot(commands.Bot):
 
     async def _run_scheduled_workflow(
         self, channel: discord.abc.Messageable, schedule: dict,
-    ) -> None:
-        """Execute a multi-step workflow from a scheduled task."""
+    ) -> bool:
+        """Execute a multi-step workflow from a scheduled task.
+
+        Returns True if all steps succeeded, False if any step failed.
+        """
         steps = schedule.get("steps", [])
         desc = schedule.get("description", "Workflow")
         results: list[str] = []
         prev_output = ""
+        workflow_ok = True
         # Scheduled work runs under the identity of whoever created the schedule, so
         # host-access scoping / tier limits apply (None = unrestricted system task).
         req_id = schedule.get("requester_id") or None
@@ -5363,18 +5381,26 @@ class OdinBot(commands.Bot):
                 render_markdown = False
                 if tool_name == "spawn_agent" and isinstance(result, ToolResult) and result.ok:
                     result_str = str(result)
-                    id_start = result_str.find("`") + 1
-                    id_end = result_str.find("`", id_start)
-                    if 0 < id_start < id_end:
-                        agent_id = result_str[id_start:id_end]
+                    id_match = re.search(r"\(ID:\s*`([^`]+)`\)", result_str)
+                    if id_match:
+                        agent_id = id_match.group(1)
                         timeout = float(step.get("timeout", 3660))
-                        agent_result = await self._collect_agent_result(agent_id, timeout=min(timeout, 3660))
-                        result = ToolResult(output=agent_result, ok=True, tool_name="spawn_agent")
+                        agent_text, agent_data = await self._collect_agent_result(
+                            agent_id, timeout=min(timeout, 3660),
+                        )
+                        agent_ok = agent_data["status"] == "completed"
+                        result = ToolResult(output=agent_text, ok=agent_ok, tool_name="spawn_agent")
+                        if agent_ok and agent_data["empty_result"]:
+                            result = ToolResult(
+                                output=agent_text + "\n\n⚠️ Agent completed but produced no output.",
+                                ok=True, tool_name="spawn_agent",
+                            )
                         render_markdown = True
 
                 prev_output = str(result)
 
                 if isinstance(result, ToolResult) and not result.ok:
+                    workflow_ok = False
                     results.append(f"**Step {i+1}** (`{step_desc}`): FAILED\n```\n{str(result)[:1600]}\n```")
                     on_failure = step.get("on_failure", "abort")
                     if on_failure == "abort":
@@ -5385,6 +5411,7 @@ class OdinBot(commands.Bot):
                 else:
                     results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{str(result)[:1600]}\n```")
             except Exception as e:
+                workflow_ok = False
                 results.append(f"**Step {i+1}** (`{step_desc}`): FAILED — {e}")
                 on_failure = step.get("on_failure", "abort")
                 if on_failure == "abort":
@@ -5393,7 +5420,6 @@ class OdinBot(commands.Bot):
 
         summary = "\n".join(results)
         text = f"**Workflow: {desc}**\n{summary}"
-        # Truncate if needed
         if len(text) > 1900:
             text = text[:1900] + "\n... (truncated)"
 
@@ -5401,6 +5427,8 @@ class OdinBot(commands.Bot):
             await channel.send(scrub_response_secrets(text))
         except Exception as e:
             log.error("Failed to post workflow results: %s", e)
+
+        return workflow_ok
 
     async def _on_scheduled_task(self, schedule: dict) -> None:
         """Callback fired by the scheduler when a task is due."""
@@ -5449,28 +5477,30 @@ class OdinBot(commands.Bot):
                 )
                 if isinstance(result, ToolResult) and not result.ok:
                     text = f"**Scheduled check failed:** {schedule['description']}\n```\n{str(result)[:1800]}\n```"
+                    try:
+                        await channel.send(scrub_response_secrets(text))
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"Scheduled check failed: {str(result)[:200]}")
                 else:
                     text = f"**Scheduled: {schedule['description']}**\n```\n{str(result)[:1800]}\n```"
-                await channel.send(scrub_response_secrets(text))
-            except (discord.HTTPException, discord.Forbidden, discord.NotFound) as e:
-                log.warning("Scheduled task Discord error: %s", e)
-                try:
-                    await channel.send(
-                        scrub_response_secrets(f"**Scheduled task failed:** {schedule['description']}\nError: {e}")
-                    )
-                except Exception:
-                    pass
+                    await channel.send(scrub_response_secrets(text))
+            except RuntimeError:
+                raise
             except Exception as e:
-                log.error("Scheduled task unexpected error: %s", e, exc_info=True)
+                log.error("Scheduled task error: %s", e, exc_info=True)
                 try:
                     await channel.send(
                         scrub_response_secrets(f"**Scheduled task failed:** {schedule['description']}\nError: {e}")
                     )
                 except Exception:
                     pass
+                raise
 
         elif schedule["action"] == "workflow":
-            await self._run_scheduled_workflow(channel, schedule)
+            ok = await self._run_scheduled_workflow(channel, schedule)
+            if not ok:
+                raise RuntimeError(f"Scheduled workflow failed: {schedule.get('description', '')[:200]}")
 
         else:
             log.warning("Unknown scheduled action type: %s (schedule %s)", schedule["action"], schedule.get("id"))
