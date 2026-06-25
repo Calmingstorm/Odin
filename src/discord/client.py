@@ -3891,12 +3891,21 @@ class OdinBot(commands.Bot):
 
     async def _handle_search_audit(self, inp: dict) -> str:
         """Search the audit log."""
+        has_error = inp.get("has_error")
+        if has_error is not None:
+            has_error = bool(has_error)
+        min_dur = inp.get("min_duration_ms")
+        if min_dur is not None:
+            min_dur = int(min_dur)
         results = await self.audit.search(
             tool_name=inp.get("tool_name"),
             user=inp.get("user"),
             host=inp.get("host"),
             keyword=inp.get("keyword"),
             date=inp.get("date"),
+            status=inp.get("status"),
+            has_error=has_error,
+            min_duration_ms=min_dur,
             limit=min(inp.get("limit", 20), 50),
         )
         if not results:
@@ -4679,6 +4688,8 @@ class OdinBot(commands.Bot):
                 response = await self.llm_client.chat_with_tools(
                     messages=messages, system=system_prompt, tools=tools or [],
                 )
+            except CircuitOpenError:
+                raise
             except Exception as e:
                 log.warning("Loop iteration Codex call failed: %s", e)
                 return await _finish(

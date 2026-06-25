@@ -1006,8 +1006,11 @@ async def _call_llm_with_recovery(
             agent.transition(AgentState.RECOVERING, err_desc)
             log.warning("Agent %s recovering (attempt %d): %s", agent.id, agent.recovery_attempts, err_desc)
 
-            # Brief pause before retry
-            await asyncio.sleep(1)
+            retry_delay = 1
+            if hasattr(first_err, "retry_after"):
+                retry_delay = min(first_err.retry_after, 90.0)
+                log.info("Agent %s: circuit breaker wait %.0fs", agent.id, retry_delay)
+            await asyncio.sleep(retry_delay)
 
             agent.transition(AgentState.EXECUTING, "retry after recovery")
 

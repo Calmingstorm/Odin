@@ -1114,6 +1114,7 @@ class TestMCPManagerExecute:
     async def test_execute_server_disconnected(self):
         tools = [{"name": "greet", "description": "Hi", "inputSchema": {}}]
         mock_conn = _make_mock_connection("srv", tools=tools, connected=False)
+        mock_conn.call_tool = AsyncMock(side_effect=MCPError("Server srv: not connected"))
 
         with patch("src.tools.mcp_client.MCPServerConnection", return_value=mock_conn):
             mgr = MCPManager()

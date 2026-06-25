@@ -200,9 +200,18 @@ class AuditLogger:
         host: str | None = None,
         keyword: str | None = None,
         date: str | None = None,
+        status: str | None = None,
+        has_error: bool | None = None,
+        min_duration_ms: int | None = None,
         limit: int = 20,
     ) -> list[dict]:
-        """Search audit log (most recent first). Filters are ANDed."""
+        """Search audit log (most recent first). Filters are ANDed.
+
+        New filters:
+        - status: match entries with this status value (e.g. "error", "success")
+        - has_error: True = only entries with non-empty error field
+        - min_duration_ms: only entries with duration_ms >= this value
+        """
         if not self.path.exists():
             return []
 
@@ -214,7 +223,6 @@ class AuditLogger:
             log.error("Failed to read audit log: %s", e)
             return []
 
-        # Read in reverse for most-recent-first
         for line in reversed(lines):
             line = line.strip()
             if not line:
@@ -239,6 +247,24 @@ class AuditLogger:
             if keyword:
                 blob = json.dumps(entry).lower()
                 if keyword.lower() not in blob:
+                    continue
+            if status:
+                entry_status = entry.get("status") or entry.get("metadata", {}).get("status", "")
+                if status.lower() != str(entry_status).lower():
+                    continue
+            if has_error is True:
+                err = entry.get("error") or entry.get("metadata", {}).get("error", "")
+                if not err:
+                    continue
+            if min_duration_ms is not None:
+                dur = (
+                    entry.get("execution_time_ms")
+                    or entry.get("metadata", {}).get("duration_ms")
+                    or entry.get("duration_ms")
+                    or entry.get("metadata", {}).get("elapsed_ms")
+                    or 0
+                )
+                if dur < min_duration_ms:
                     continue
 
             results.append(entry)
