@@ -327,7 +327,7 @@ export default {
         items.push({
           label: 'Schedules',
           status: 'ok',
-          detail: `${s.schedule_count} active`,
+          detail: `${s.schedule_count} configured`,
         });
       }
       // Loops health
