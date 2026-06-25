@@ -272,6 +272,12 @@ export default {
         {
           label: 'Schedules', value: s.schedule_count ?? 0,
           icon: '\u23f0', iconColor: 'text-amber-400',
+          sub: (s.schedule_failing > 0 ? `${s.schedule_failing} failing` : '') +
+               (s.schedule_failing > 0 && s.schedule_paused > 0 ? ', ' : '') +
+               (s.schedule_paused > 0 ? `${s.schedule_paused} paused` : '') || undefined,
+          subColor: s.schedule_failing > 0 ? 'text-red-400' : 'text-yellow-400',
+          color: s.schedule_failing > 0 ? 'text-red-400' : '',
+          highlight: s.schedule_failing > 0,
         },
         {
           label: 'Users', value: s.user_count ?? 0,
@@ -308,6 +314,20 @@ export default {
           label: 'Monitoring',
           status: hasAlerts ? 'error' : 'ok',
           detail: hasAlerts ? `${mon.active_alerts} alert${mon.active_alerts > 1 ? 's' : ''}` : `${mon.checks} checks`,
+        });
+      }
+      // Schedules health
+      if ((s.schedule_failing || 0) > 0) {
+        items.push({
+          label: 'Schedules',
+          status: 'error',
+          detail: `${s.schedule_failing} failing`,
+        });
+      } else if ((s.schedule_count || 0) > 0) {
+        items.push({
+          label: 'Schedules',
+          status: 'ok',
+          detail: `${s.schedule_count} configured`,
         });
       }
       // Loops health
