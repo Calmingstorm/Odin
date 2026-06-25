@@ -618,9 +618,16 @@ class Scheduler:
                 log.error("Schedule save failed after manual run: %s", e)
 
         log.info("Manual run: schedule %s (%s)", schedule_id, schedule.get("description", ""))
+        failures_before = schedule.get("consecutive_failures", 0)
         await self._execute_and_record(schedule)
 
-        result: dict = {"status": "triggered", "schedule_id": schedule_id}
+        failed = schedule.get("consecutive_failures", 0) > failures_before
+        result: dict = {
+            "status": "failure" if failed else "success",
+            "schedule_id": schedule_id,
+        }
+        if failed:
+            result["error"] = schedule.get("last_error", "unknown error")
         if schedule.get("paused"):
             result["warning"] = "schedule is paused — this was a manual override"
         return result

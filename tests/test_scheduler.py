@@ -1171,8 +1171,9 @@ class TestSchedulerRunNow:
         sched = await s.add("manual run", "reminder", "chan1", cron="0 * * * *")
         result = await s.run_now(sched["id"])
 
-        assert result["status"] == "triggered"
+        assert result["status"] == "success"
         assert result["schedule_id"] == sched["id"]
+        assert "error" not in result
         cb.assert_called_once()
 
     async def test_run_now_updates_last_run(self, tmp_path):
@@ -1193,7 +1194,7 @@ class TestSchedulerRunNow:
         await s.update(sched["id"], paused=True)
 
         result = await s.run_now(sched["id"])
-        assert result["status"] == "triggered"
+        assert result["status"] == "success"
         assert "paused" in result.get("warning", "")
 
     async def test_run_now_no_warning_when_active(self, tmp_path):
@@ -1228,3 +1229,18 @@ class TestSchedulerRunNow:
         entries = await s.history.query(sched["id"])
         assert len(entries) == 1
         assert entries[0]["status"] == "success"
+
+    async def test_run_now_reports_failure(self, tmp_path):
+        """run_now returns failure status when callback raises."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock(side_effect=RuntimeError("broke"))
+
+        sched = await s.add("failing manual", "reminder", "chan1", cron="0 * * * *")
+        result = await s.run_now(sched["id"])
+
+        assert result["status"] == "failure"
+        assert "broke" in result["error"]
+
+        entries = await s.history.query(sched["id"])
+        assert len(entries) == 1
+        assert entries[0]["status"] == "failure"
