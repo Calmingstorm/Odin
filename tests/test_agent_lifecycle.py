@@ -1022,6 +1022,41 @@ class TestSpawnGroupWithStates:
             assert not aid.startswith("Error")
             mgr.kill(aid)
 
+    async def test_spawn_group_forwards_kwargs(self):
+        """spawn_group must forward trajectory_saver, max_iterations, etc."""
+        mgr = AgentManager()
+        iter_cb = AsyncMock(return_value={"text": "done", "tool_calls": []})
+        tool_cb = AsyncMock()
+        traj_saver = AsyncMock()
+
+        with patch.object(mgr, "spawn", wraps=mgr.spawn) as spy:
+            ids = mgr.spawn_group(
+                tasks=[{"label": "a", "goal": "g1"}],
+                channel_id="c1",
+                requester_id="u1",
+                requester_name="user",
+                iteration_callback=iter_cb,
+                tool_executor_callback=tool_cb,
+                trajectory_saver=traj_saver,
+                max_iterations=42,
+                budget_warnings=[10, 5, 1],
+                context_compression_enabled=True,
+                max_context_chars=100000,
+                keep_recent_iterations=10,
+            )
+            assert len(ids) == 1
+            assert not ids[0].startswith("Error")
+
+            call_kwargs = spy.call_args
+            assert call_kwargs.kwargs.get("trajectory_saver") is traj_saver
+            assert call_kwargs.kwargs.get("max_iterations") == 42
+            assert call_kwargs.kwargs.get("budget_warnings") == [10, 5, 1]
+            assert call_kwargs.kwargs.get("context_compression_enabled") is True
+            assert call_kwargs.kwargs.get("max_context_chars") == 100000
+            assert call_kwargs.kwargs.get("keep_recent_iterations") == 10
+
+            mgr.kill(ids[0])
+
 
 # ---------------------------------------------------------------------------
 # Tool execution within agent lifecycle

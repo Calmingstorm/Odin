@@ -441,6 +441,8 @@ class Scheduler:
         async with self._lock:
             now = datetime.now(timezone.utc)
             for schedule in self._schedules:
+                if schedule.get("paused"):
+                    continue
                 trigger = schedule.get("trigger")
                 if not trigger:
                     continue
@@ -498,6 +500,7 @@ class Scheduler:
         max_retries: int | None = None,
         retry_backoff_seconds: int | None = None,
         webhook_config: dict | None = None,
+        paused: bool | None = None,
     ) -> dict | None:
         """Update mutable fields on an existing schedule.
 
@@ -524,6 +527,8 @@ class Scheduler:
                 target["message"] = message
             if channel_id is not None:
                 target["channel_id"] = channel_id
+            if paused is not None:
+                target["paused"] = paused
 
             # --- action-specific payload fields ---
             action = target["action"]
@@ -789,13 +794,15 @@ class Scheduler:
 
     async def _tick(self) -> None:
         to_fire: list[dict] = []
-        to_remove: list[str] = []
 
         async with self._lock:
             now = datetime.now(timezone.utc)
             now_naive = now.replace(tzinfo=None)
 
             for schedule in self._schedules:
+                if schedule.get("paused"):
+                    continue
+
                 retry_at_str = schedule.get("retry_at")
                 if retry_at_str:
                     retry_at = datetime.fromisoformat(retry_at_str)
@@ -828,10 +835,7 @@ class Scheduler:
                     cr = croniter(schedule["cron"], now.replace(tzinfo=None))
                     schedule["next_run"] = _utc_iso(cr.get_next(datetime))
 
-            for sid in to_remove:
-                self._schedules = [s for s in self._schedules if s["id"] != sid]
-
-            if to_fire or to_remove:
+            if to_fire:
                 try:
                     await asyncio.to_thread(self._save)
                 except Exception as e:

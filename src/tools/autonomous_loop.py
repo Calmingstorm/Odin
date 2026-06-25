@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -57,7 +58,9 @@ class LoopInfo:
     status: str = "running"  # running, stopped, completed, error
     _task: asyncio.Task | None = field(default=None, repr=False)
     _cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
-    _iteration_history: list[str] = field(default_factory=list)
+    _iteration_history: deque[str] = field(
+        default_factory=lambda: deque(maxlen=MAX_CONTEXT_HISTORY * 2),
+    )
 
 
 class LoopManager:
@@ -256,9 +259,6 @@ class LoopManager:
                 info._iteration_history.append(
                     f"Iteration {info.iteration_count}: {summary}"
                 )
-                # Trim history to prevent unbounded growth
-                if len(info._iteration_history) > MAX_CONTEXT_HISTORY * 2:
-                    info._iteration_history = info._iteration_history[-MAX_CONTEXT_HISTORY:]
 
                 # Check for LOOP_STOP sentinel
                 if LOOP_STOP_SENTINEL in response:
