@@ -3711,8 +3711,9 @@ class OdinBot(commands.Bot):
                 stype = "one-time"
             next_run = s.get("next_run", "on trigger" if s.get("trigger") else "N/A")
             last_run = s.get("last_run", "never")
+            paused_tag = " **[PAUSED]**" if s.get("paused") else ""
             lines.append(
-                f"- **{s['id']}**: {s['description']} ({stype}) "
+                f"- **{s['id']}**: {s['description']} ({stype}){paused_tag} "
                 f"| next: {next_run} | last: {last_run}"
             )
         return f"**Scheduled tasks ({len(schedules)}):**\n" + "\n".join(lines)
@@ -3730,6 +3731,11 @@ class OdinBot(commands.Bot):
         trigger = inp.get("trigger")
         if trigger is not None:
             kwargs["trigger"] = trigger
+        if "paused" in inp:
+            val = inp["paused"]
+            if not isinstance(val, bool):
+                return "Error: 'paused' must be a boolean (true/false)."
+            kwargs["paused"] = val
         if not kwargs:
             return "Error: no fields to update."
         try:

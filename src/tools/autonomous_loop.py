@@ -208,7 +208,7 @@ class LoopManager:
                 # Build previous context from iteration history
                 prev_context = None
                 if info._iteration_history:
-                    prev_context = "\n---\n".join(info._iteration_history[-MAX_CONTEXT_HISTORY:])
+                    prev_context = "\n---\n".join(list(info._iteration_history)[-MAX_CONTEXT_HISTORY:])
 
                 # Run the LLM iteration. The correlation context lets the
                 # iteration runner, audit logger, and trajectory saver stamp

@@ -2110,6 +2110,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             err = _validate_string(desc, "description", _MAX_DESCRIPTION_LEN)
             if err:
                 return web.json_response({"error": err}, status=400)
+        paused = data.get("paused")
+        if paused is not None and not isinstance(paused, bool):
+            return web.json_response({"error": "'paused' must be a boolean"}, status=400)
         try:
             updated = await bot.scheduler.update(
                 sid,
@@ -2124,6 +2127,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 channel_id=data.get("channel_id"),
                 max_retries=data.get("max_retries"),
                 retry_backoff_seconds=data.get("retry_backoff_seconds"),
+                paused=paused,
             )
         except (ValueError, TypeError) as e:
             return web.json_response({"error": _sanitize_error(e)}, status=400)
@@ -2221,7 +2225,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         loops = []
         for lid, info in bot.loop_manager._loops.items():
             # Include last 5 iteration history entries
-            history = list(info._iteration_history[-5:]) if info._iteration_history else []
+            history = list(info._iteration_history)[-5:] if info._iteration_history else []
             loops.append({
                 "id": lid,
                 "goal": info.goal,
