@@ -215,7 +215,7 @@ export default {
       stopAutoRefresh();
       if (autoRefresh.value) {
         refreshInterval = setInterval(() => {
-          if (autoRefresh.value && runningCount.value > 0) {
+          if (autoRefresh.value) {
             fetchAgents(true);
           }
         }, 5000);

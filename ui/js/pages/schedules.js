@@ -1,11 +1,11 @@
 /**
  * Odin Management UI — Schedules Page
- * View/create/delete scheduled tasks (cron, one-time, webhook)
+ * View/create/delete scheduled tasks with execution history and failure tracking
  */
 import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
-import { formatTs, formatAge } from '../utils.js';
+import { formatTs, formatAge, formatDuration } from '../utils.js';
 import { computed, onMounted, ref } from 'vue';
 
 
@@ -119,7 +119,7 @@ export default {
         <div v-for="n in 4" :key="n" class="skeleton skeleton-row"></div>
       </div>
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true">⚠</span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="fetchSchedules" class="btn btn-ghost text-xs">Retry</button>
       </div>
@@ -143,13 +143,13 @@ export default {
             <div class="text-2xl font-bold">{{ oneTimeCount }}</div>
             <div class="text-gray-400 text-xs">One-Time</div>
           </div>
-          <div class="hm-card text-center">
-            <div class="text-2xl font-bold">{{ webhookCount }}</div>
-            <div class="text-gray-400 text-xs">Webhook</div>
-          </div>
           <div v-if="pausedCount > 0" class="hm-card text-center">
             <div class="text-2xl font-bold text-yellow-400">{{ pausedCount }}</div>
             <div class="text-gray-400 text-xs">Paused</div>
+          </div>
+          <div v-if="failingCount > 0" class="hm-card text-center">
+            <div class="text-2xl font-bold text-red-400">{{ failingCount }}</div>
+            <div class="text-gray-400 text-xs">Failing</div>
           </div>
         </div>
 
@@ -157,38 +157,49 @@ export default {
         <table class="hm-table">
           <thead>
             <tr>
+              <th></th>
               <th>Description</th>
               <th>Type</th>
-              <th class="mobile-hide">Action</th>
               <th class="mobile-hide">Schedule</th>
-              <th class="mobile-hide">Next Run</th>
               <th class="mobile-hide">Last Run</th>
+              <th class="mobile-hide">Status</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="s in schedules" :key="s.id">
-              <td class="text-sm">{{ s.description }}</td>
+            <template v-for="s in schedules" :key="s.id">
+            <tr :class="{ 'opacity-50': s.paused }">
+              <td class="text-center" style="width:30px;cursor:pointer;" @click="toggleExpand(s.id)">
+                <span class="text-gray-500 text-xs">{{ expandedId === s.id ? '▼' : '▶' }}</span>
+              </td>
+              <td class="text-sm">
+                {{ s.description }}
+                <span v-if="s.consecutive_failures > 0" class="ml-1 text-red-400 text-xs font-mono">
+                  ({{ s.consecutive_failures }} fail{{ s.consecutive_failures > 1 ? 's' : '' }})
+                </span>
+              </td>
               <td>
                 <span v-if="s.paused" class="badge badge-danger mr-1">paused</span>
+                <span v-if="s.retry_at" class="badge badge-warning mr-1">retrying</span>
                 <span v-if="s.trigger" class="badge badge-warning">webhook</span>
                 <span v-else-if="s.one_time" class="badge badge-info">one-time</span>
                 <span v-else class="badge badge-success">cron</span>
               </td>
-              <td class="font-mono text-xs text-gray-400 mobile-hide">{{ s.action }}</td>
               <td class="text-sm text-gray-400 font-mono mobile-hide">
                 <span v-if="s.cron">{{ s.cron }}</span>
                 <span v-else-if="s.run_at">{{ formatTs(s.run_at) }}</span>
-                <span v-else-if="s.trigger">{{ s.trigger.type || 'webhook' }}</span>
+                <span v-else-if="s.trigger">{{ s.trigger.source || 'webhook' }}</span>
                 <span v-else>-</span>
               </td>
               <td class="text-sm mobile-hide">
-                <span v-if="s.next_run" class="text-indigo-300" :title="formatTs(s.next_run)">
-                  {{ formatFuture(s.next_run) }}
-                </span>
+                <span v-if="s.last_run" class="text-gray-300">{{ formatAge(s.last_run) }}</span>
+                <span v-else class="text-gray-600">never</span>
+              </td>
+              <td class="text-sm mobile-hide">
+                <span v-if="s.last_error" class="text-red-400" :title="s.last_error">failed</span>
+                <span v-else-if="s.last_run" class="text-green-400">ok</span>
                 <span v-else class="text-gray-600">-</span>
               </td>
-              <td class="text-sm text-gray-400 mobile-hide">{{ s.last_run ? formatAge(s.last_run) : 'never' }}</td>
               <td class="whitespace-nowrap">
                 <div class="flex gap-1">
                   <button @click="doTogglePause(s)" class="btn btn-ghost text-xs"
@@ -199,15 +210,78 @@ export default {
                   <button @click="doRunNow(s.id)" class="btn btn-ghost text-xs"
                           :disabled="runningId === s.id"
                           title="Trigger this schedule immediately">
-                    {{ runningId === s.id ? 'Running...' : 'Run Now' }}
+                    {{ runningId === s.id ? '...' : 'Run' }}
+                  </button>
+                  <button v-if="s.consecutive_failures > 0"
+                          @click="doResetFailures(s.id)" class="btn btn-ghost text-xs"
+                          :disabled="resettingId === s.id"
+                          title="Reset failure counters and pending retries">
+                    {{ resettingId === s.id ? '...' : 'Reset' }}
                   </button>
                   <button @click="doDelete(s.id)" class="btn btn-danger text-xs"
                           :disabled="deletingId === s.id">
-                    {{ deletingId === s.id ? 'Deleting...' : 'Delete' }}
+                    {{ deletingId === s.id ? '...' : 'Del' }}
                   </button>
                 </div>
               </td>
             </tr>
+            <!-- Expanded detail row -->
+            <tr v-if="expandedId === s.id">
+              <td :colspan="7" class="p-0">
+                <div class="p-4" style="background: rgba(255,255,255,0.02);">
+                  <!-- Failure detail -->
+                  <div v-if="s.last_error" class="mb-3 p-2 rounded" style="background: rgba(239,68,68,0.1);">
+                    <div class="text-xs text-red-400 font-medium mb-1">Last Error</div>
+                    <div class="text-xs text-red-300 font-mono">{{ s.last_error }}</div>
+                    <div class="text-xs text-gray-500 mt-1">
+                      {{ s.last_error_at ? formatAge(s.last_error_at) : '' }}
+                      <span v-if="s.retry_at"> · Next retry: {{ formatFuture(s.retry_at) }}</span>
+                      <span v-if="s.retry_count > 0"> · Retry {{ s.retry_count }}/{{ s.max_retries }}</span>
+                    </div>
+                  </div>
+
+                  <!-- Schedule details -->
+                  <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 text-xs">
+                    <div><span class="text-gray-500">ID:</span> <span class="font-mono">{{ s.id }}</span></div>
+                    <div><span class="text-gray-500">Action:</span> {{ s.action }}</div>
+                    <div><span class="text-gray-500">Next run:</span>
+                      <span v-if="s.next_run">{{ formatFuture(s.next_run) }}</span>
+                      <span v-else>on trigger</span>
+                    </div>
+                    <div><span class="text-gray-500">Created:</span> {{ formatTs(s.created_at) }}</div>
+                  </div>
+
+                  <!-- Execution history -->
+                  <div class="text-xs font-medium text-gray-400 mb-2">Execution History</div>
+                  <div v-if="historyLoading" class="text-xs text-gray-500">Loading...</div>
+                  <div v-else-if="history.length === 0" class="text-xs text-gray-600">No execution history yet.</div>
+                  <table v-else class="hm-table text-xs">
+                    <thead>
+                      <tr>
+                        <th>Time</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>Error</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(h, i) in history" :key="i">
+                        <td>{{ formatAge(h.timestamp) }}</td>
+                        <td>
+                          <span v-if="h.status === 'success'" class="text-green-400">success</span>
+                          <span v-else class="text-red-400">failure</span>
+                        </td>
+                        <td class="font-mono">{{ formatMs(h.duration_ms) }}</td>
+                        <td class="text-red-300 font-mono" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;">
+                          {{ h.error || '-' }}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </td>
+            </tr>
+            </template>
           </tbody>
         </table>
         </div>
@@ -246,19 +320,21 @@ export default {
       { label: 'Every 30m', expr: '*/30 * * * *' },
     ];
 
-    // Run now
+    // Action states
     const runningId = ref(null);
-
-    // Delete
     const deletingId = ref(null);
-
-    // Pause toggle
     const togglingId = ref(null);
+    const resettingId = ref(null);
+
+    // Expanded row
+    const expandedId = ref(null);
+    const history = ref([]);
+    const historyLoading = ref(false);
 
     const cronCount = computed(() => schedules.value.filter(s => s.cron && !s.one_time).length);
     const oneTimeCount = computed(() => schedules.value.filter(s => s.one_time).length);
-    const webhookCount = computed(() => schedules.value.filter(s => s.trigger).length);
     const pausedCount = computed(() => schedules.value.filter(s => s.paused).length);
+    const failingCount = computed(() => schedules.value.filter(s => s.consecutive_failures > 0).length);
 
     function formatFuture(ts) {
       if (!ts) return '-';
@@ -275,6 +351,13 @@ export default {
       }
       const d = Math.floor(diff / 86400);
       return `in ${d} day${d !== 1 ? 's' : ''}`;
+    }
+
+    function formatMs(ms) {
+      if (ms == null) return '-';
+      if (ms < 1000) return `${ms}ms`;
+      if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+      return formatDuration(ms / 1000);
     }
 
     function onCronInput() {
@@ -302,6 +385,23 @@ export default {
         error.value = e.message;
       }
       loading.value = false;
+    }
+
+    async function toggleExpand(scheduleId) {
+      if (expandedId.value === scheduleId) {
+        expandedId.value = null;
+        history.value = [];
+        return;
+      }
+      expandedId.value = scheduleId;
+      historyLoading.value = true;
+      history.value = [];
+      try {
+        history.value = await api.get(`/api/schedules/${encodeURIComponent(scheduleId)}/history?limit=10`);
+      } catch (e) {
+        history.value = [];
+      }
+      historyLoading.value = false;
     }
 
     async function doCreate() {
@@ -335,7 +435,6 @@ export default {
       try {
         await api.post('/api/schedules', payload);
         toast.success('Schedule created');
-        // Reset form
         form.value = {
           description: '', action: 'reminder', channel_id: '',
           cron: '', run_at: '', message: '', tool_name: '', tool_input_str: '',
@@ -379,6 +478,18 @@ export default {
       togglingId.value = null;
     }
 
+    async function doResetFailures(scheduleId) {
+      resettingId.value = scheduleId;
+      try {
+        await api.post(`/api/schedules/${encodeURIComponent(scheduleId)}/reset-failures`);
+        toast.success('Failure counters reset');
+        await fetchSchedules();
+      } catch (e) {
+        toast.error(e.message || 'Failed to reset');
+      }
+      resettingId.value = null;
+    }
+
     async function doDelete(scheduleId) {
       const sched = schedules.value.find(s => s.id === scheduleId);
       const ok = await confirmDialog({
@@ -405,13 +516,12 @@ export default {
       schedules, loading, error,
       showCreate, form, creating, createError,
       cronResult, validatingCron, cronPresets,
-      runningId,
-      deletingId,
-      togglingId,
-      cronCount, oneTimeCount, webhookCount, pausedCount,
-      formatTs, formatAge, formatFuture,
-      onCronInput, validateCron,
-      fetchSchedules, doCreate, doRunNow, doTogglePause, doDelete,
+      runningId, deletingId, togglingId, resettingId,
+      expandedId, history, historyLoading,
+      cronCount, oneTimeCount, pausedCount, failingCount,
+      formatTs, formatAge, formatFuture, formatMs, formatDuration,
+      onCronInput, validateCron, toggleExpand,
+      fetchSchedules, doCreate, doRunNow, doTogglePause, doResetFailures, doDelete,
     };
   },
 };
