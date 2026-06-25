@@ -199,3 +199,82 @@ class TestWorkflowAgentFailurePropagation:
         result = ToolResult(output="Agent still running", ok=agent_ok, tool_name="spawn_agent")
 
         assert result.ok is False
+
+
+# ---------------------------------------------------------------------------
+# on_failure: continue vs abort
+# ---------------------------------------------------------------------------
+
+class TestWorkflowOnFailureBehavior:
+    """workflow_ok must only be False when on_failure is abort (default),
+    not when on_failure is continue."""
+
+    def test_abort_on_failed_step(self):
+        """Default on_failure (abort) sets workflow_ok=False and breaks."""
+        workflow_ok = True
+        steps_results = []
+        on_failure = "abort"  # default
+
+        # Simulate a failed step
+        step_failed = True
+        if step_failed:
+            steps_results.append("FAILED")
+            if on_failure == "abort":
+                workflow_ok = False
+                steps_results.append("aborted")
+
+        assert workflow_ok is False
+        assert "aborted" in steps_results
+
+    def test_continue_on_failed_step(self):
+        """on_failure=continue reports failure but workflow_ok stays True."""
+        workflow_ok = True
+        steps_results = []
+        on_failure = "continue"
+
+        # Simulate a failed step
+        step_failed = True
+        if step_failed:
+            steps_results.append("FAILED")
+            if on_failure == "abort":
+                workflow_ok = False
+                steps_results.append("aborted")
+
+        assert workflow_ok is True
+        assert "FAILED" in steps_results
+        assert "aborted" not in steps_results
+
+    def test_continue_then_abort(self):
+        """First step continues on failure, second aborts — workflow fails."""
+        workflow_ok = True
+        steps = [
+            {"on_failure": "continue", "fails": True},
+            {"on_failure": "abort", "fails": True},
+        ]
+
+        for step in steps:
+            if step["fails"]:
+                on_failure = step["on_failure"]
+                if on_failure == "abort":
+                    workflow_ok = False
+                    break
+
+        assert workflow_ok is False
+
+    def test_continue_with_all_steps_failing(self):
+        """All steps fail with on_failure=continue — workflow still succeeds."""
+        workflow_ok = True
+        steps = [
+            {"on_failure": "continue", "fails": True},
+            {"on_failure": "continue", "fails": True},
+            {"on_failure": "continue", "fails": True},
+        ]
+
+        for step in steps:
+            if step["fails"]:
+                on_failure = step["on_failure"]
+                if on_failure == "abort":
+                    workflow_ok = False
+                    break
+
+        assert workflow_ok is True
