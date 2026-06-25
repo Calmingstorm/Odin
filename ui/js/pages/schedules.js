@@ -147,6 +147,10 @@ export default {
             <div class="text-2xl font-bold">{{ webhookCount }}</div>
             <div class="text-gray-400 text-xs">Webhook</div>
           </div>
+          <div v-if="pausedCount > 0" class="hm-card text-center">
+            <div class="text-2xl font-bold text-yellow-400">{{ pausedCount }}</div>
+            <div class="text-gray-400 text-xs">Paused</div>
+          </div>
         </div>
 
         <div class="table-responsive">
@@ -166,6 +170,7 @@ export default {
             <tr v-for="s in schedules" :key="s.id">
               <td class="text-sm">{{ s.description }}</td>
               <td>
+                <span v-if="s.paused" class="badge badge-danger mr-1">paused</span>
                 <span v-if="s.trigger" class="badge badge-warning">webhook</span>
                 <span v-else-if="s.one_time" class="badge badge-info">one-time</span>
                 <span v-else class="badge badge-success">cron</span>
@@ -186,6 +191,11 @@ export default {
               <td class="text-sm text-gray-400 mobile-hide">{{ s.last_run ? formatAge(s.last_run) : 'never' }}</td>
               <td class="whitespace-nowrap">
                 <div class="flex gap-1">
+                  <button @click="doTogglePause(s)" class="btn btn-ghost text-xs"
+                          :disabled="togglingId === s.id"
+                          :title="s.paused ? 'Resume this schedule' : 'Pause this schedule'">
+                    {{ togglingId === s.id ? '...' : (s.paused ? 'Resume' : 'Pause') }}
+                  </button>
                   <button @click="doRunNow(s.id)" class="btn btn-ghost text-xs"
                           :disabled="runningId === s.id"
                           title="Trigger this schedule immediately">
@@ -242,9 +252,13 @@ export default {
     // Delete
     const deletingId = ref(null);
 
+    // Pause toggle
+    const togglingId = ref(null);
+
     const cronCount = computed(() => schedules.value.filter(s => s.cron && !s.one_time).length);
     const oneTimeCount = computed(() => schedules.value.filter(s => s.one_time).length);
     const webhookCount = computed(() => schedules.value.filter(s => s.trigger).length);
+    const pausedCount = computed(() => schedules.value.filter(s => s.paused).length);
 
     function formatFuture(ts) {
       if (!ts) return '-';
@@ -347,6 +361,19 @@ export default {
       runningId.value = null;
     }
 
+    async function doTogglePause(schedule) {
+      togglingId.value = schedule.id;
+      const newState = !schedule.paused;
+      try {
+        await api.put(`/api/schedules/${encodeURIComponent(schedule.id)}`, { paused: newState });
+        toast.success(newState ? 'Schedule paused' : 'Schedule resumed');
+        await fetchSchedules();
+      } catch (e) {
+        toast.error(e.message || 'Failed to update schedule');
+      }
+      togglingId.value = null;
+    }
+
     async function doDelete(scheduleId) {
       const sched = schedules.value.find(s => s.id === scheduleId);
       const ok = await confirmDialog({
@@ -375,10 +402,11 @@ export default {
       cronResult, validatingCron, cronPresets,
       runningId,
       deletingId,
-      cronCount, oneTimeCount, webhookCount,
+      togglingId,
+      cronCount, oneTimeCount, webhookCount, pausedCount,
       formatTs, formatAge, formatFuture,
       onCronInput, validateCron,
-      fetchSchedules, doCreate, doRunNow, doDelete,
+      fetchSchedules, doCreate, doRunNow, doTogglePause, doDelete,
     };
   },
 };
