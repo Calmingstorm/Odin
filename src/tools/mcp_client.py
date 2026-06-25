@@ -546,10 +546,8 @@ class MCPManager:
 
         server_name, original_name = mapping
         conn = self._servers.get(server_name)
-        if conn is None or not conn.connected:
-            return f"MCP server '{server_name}' is not connected"
-        if not conn.is_alive:
-            return f"MCP server '{server_name}' connection is dead (subprocess exited)"
+        if conn is None:
+            return f"MCP server '{server_name}' is not configured"
 
         try:
             return await asyncio.wait_for(
