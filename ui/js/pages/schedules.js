@@ -143,6 +143,10 @@ export default {
             <div class="text-2xl font-bold">{{ oneTimeCount }}</div>
             <div class="text-gray-400 text-xs">One-Time</div>
           </div>
+          <div v-if="webhookCount > 0" class="hm-card text-center">
+            <div class="text-2xl font-bold">{{ webhookCount }}</div>
+            <div class="text-gray-400 text-xs">Webhook</div>
+          </div>
           <div v-if="pausedCount > 0" class="hm-card text-center">
             <div class="text-2xl font-bold text-yellow-400">{{ pausedCount }}</div>
             <div class="text-gray-400 text-xs">Paused</div>
@@ -333,6 +337,7 @@ export default {
 
     const cronCount = computed(() => schedules.value.filter(s => s.cron && !s.one_time).length);
     const oneTimeCount = computed(() => schedules.value.filter(s => s.one_time).length);
+    const webhookCount = computed(() => schedules.value.filter(s => s.trigger).length);
     const pausedCount = computed(() => schedules.value.filter(s => s.paused).length);
     const failingCount = computed(() => schedules.value.filter(s => s.consecutive_failures > 0).length);
 
@@ -518,7 +523,7 @@ export default {
       cronResult, validatingCron, cronPresets,
       runningId, deletingId, togglingId, resettingId,
       expandedId, history, historyLoading,
-      cronCount, oneTimeCount, pausedCount, failingCount,
+      cronCount, oneTimeCount, webhookCount, pausedCount, failingCount,
       formatTs, formatAge, formatFuture, formatMs, formatDuration,
       onCronInput, validateCron, toggleExpand,
       fetchSchedules, doCreate, doRunNow, doTogglePause, doResetFailures, doDelete,
