@@ -233,6 +233,13 @@ class LoopManager:
                     consecutive_errors = 0  # Reset on success
                 except Exception as e:
                     consecutive_errors += 1
+                    if hasattr(e, "retry_after"):
+                        circuit_wait = min(e.retry_after, MAX_BACKOFF_SECONDS)
+                        info.interval_seconds = max(info.interval_seconds, int(circuit_wait))
+                        log.info(
+                            "Loop %s: circuit breaker open, wait %.0fs",
+                            info.id, circuit_wait,
+                        )
                     log.warning(
                         "Loop %s iteration %d failed (%d consecutive): %s",
                         info.id, info.iteration_count, consecutive_errors, e,

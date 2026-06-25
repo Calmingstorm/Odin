@@ -326,8 +326,7 @@ class MCPServerConnection:
 
     async def discover_tools(self) -> list[dict]:
         """Fetch the tool list from the server."""
-        if not self._connected:
-            raise MCPError(f"Server {self.name}: not connected")
+        await self._ensure_connected()
 
         resp = await self._send_request("tools/list")
 
@@ -352,15 +351,26 @@ class MCPServerConnection:
         log.info("MCP %s: discovered %d tools", self.name, len(self._tools))
         return self._tools
 
+    async def _ensure_connected(self) -> None:
+        """Reconnect if the connection is dead. Raises MCPError on failure."""
+        if self._connected and self.is_alive:
+            return
+        if not self._connected or not self.is_alive:
+            self._connected = False
+            log.warning("MCP %s: connection dead, attempting reconnect", self.name)
+            try:
+                await self.disconnect()
+            except Exception:
+                pass
+            try:
+                await self.connect()
+                log.info("MCP %s: reconnected successfully", self.name)
+            except Exception as e:
+                raise MCPError(f"Server {self.name}: reconnect failed: {e}") from e
+
     async def call_tool(self, tool_name: str, arguments: dict) -> str:
         """Invoke a tool on the server and return the result as text."""
-        if not self._connected:
-            raise MCPError(f"Server {self.name}: not connected")
-        if not self.is_alive:
-            # Subprocess has exited; mark down and fail fast rather than
-            # dispatching into a dead pipe and blocking until self.timeout.
-            self._connected = False
-            raise MCPError(f"Server {self.name}: connection is dead (subprocess exited)")
+        await self._ensure_connected()
 
         resp = await self._send_request("tools/call", {
             "name": tool_name,

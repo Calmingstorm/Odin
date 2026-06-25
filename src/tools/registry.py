@@ -437,7 +437,7 @@ TOOLS: list[dict] = [
     {
         "name": "search_audit",
         "is_core": True,
-        "description": "Searches audit log of tool executions. Returns '[date] tool_name by user (status, Nms)'. Filterable by tool, user, host, keyword, date.",
+        "description": "Searches audit log of tool executions. Returns '[date] tool_name by user (status, Nms)'. Filterable by tool, user, host, keyword, date, status, errors, duration.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -460,6 +460,18 @@ TOOLS: list[dict] = [
                 "date": {
                     "type": "string",
                     "description": "Filter by date prefix (e.g. '2026-03-12')",
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Filter by status (e.g. 'error', 'success')",
+                },
+                "has_error": {
+                    "type": "boolean",
+                    "description": "If true, only return entries with non-empty error fields",
+                },
+                "min_duration_ms": {
+                    "type": "integer",
+                    "description": "Only return entries that took at least this many milliseconds",
                 },
                 "limit": {
                     "type": "integer",
