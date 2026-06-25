@@ -331,7 +331,7 @@ export default {
       fetchLoops();
       ws.subscribe('events', onEvent);
       refreshInterval = setInterval(() => {
-        if (runningCount.value > 0) fetchLoops(true);
+        fetchLoops(true);
       }, 5000);
     });
 

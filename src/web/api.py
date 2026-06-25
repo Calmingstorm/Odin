@@ -438,6 +438,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "session_count": bot.sessions.count(),
             "loop_count": bot.loop_manager.active_count,
             "schedule_count": len(bot.scheduler.list_all()),
+            "schedule_failing": sum(1 for s in bot.scheduler.list_all() if s.get("consecutive_failures", 0) > 0),
+            "schedule_paused": sum(1 for s in bot.scheduler.list_all() if s.get("paused")),
             "agent_count": agent_count,
             "agent_running": agent_running,
             "process_count": process_count,
