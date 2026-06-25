@@ -1189,6 +1189,45 @@ class TestLoopBridgeCompat:
         assert active[0]["status"] in {"running", "spawning", "ready", "executing"}
         mgr.kill(ids[0])
 
+    async def test_bridge_forwards_spawn_kwargs(self):
+        """spawn_agents_for_loop must forward runtime config to AgentManager.spawn."""
+        from src.agents.loop_bridge import LoopAgentBridge
+
+        mgr = AgentManager()
+        bridge = LoopAgentBridge(mgr)
+
+        iter_cb = AsyncMock(return_value={"text": "done", "tool_calls": []})
+        tool_cb = AsyncMock()
+
+        with patch.object(mgr, "spawn", wraps=mgr.spawn) as spy:
+            ids = bridge.spawn_agents_for_loop(
+                loop_id="loop-fwd",
+                iteration=1,
+                loop_goal="test",
+                tasks=[{"label": "a", "goal": "g"}],
+                channel_id="c1",
+                requester_id="u1",
+                requester_name="user",
+                iteration_callback=iter_cb,
+                tool_executor_callback=tool_cb,
+                max_iterations=42,
+                budget_warnings=[10, 5, 1],
+                context_compression_enabled=True,
+                max_context_chars=100000,
+                keep_recent_iterations=10,
+            )
+            assert len(ids) == 1
+            assert not ids[0].startswith("Error")
+
+            call_kwargs = spy.call_args
+            assert call_kwargs.kwargs.get("max_iterations") == 42
+            assert call_kwargs.kwargs.get("budget_warnings") == [10, 5, 1]
+            assert call_kwargs.kwargs.get("context_compression_enabled") is True
+            assert call_kwargs.kwargs.get("max_context_chars") == 100000
+            assert call_kwargs.kwargs.get("keep_recent_iterations") == 10
+
+            mgr.kill(ids[0])
+
 
 # ---------------------------------------------------------------------------
 # Module exports

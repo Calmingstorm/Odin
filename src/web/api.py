@@ -2145,24 +2145,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.post("/api/schedules/{schedule_id}/run")
     async def run_schedule_now(request: web.Request) -> web.Response:
         sid = request.match_info["schedule_id"]
-        schedule = None
-        for s in bot.scheduler._schedules:
-            if s["id"] == sid:
-                schedule = s
-                break
-        if not schedule:
-            return web.json_response({"error": "schedule not found"}, status=404)
-        if not bot.scheduler._callback:
-            return web.json_response(
-                {"error": "scheduler callback not configured"}, status=503
-            )
         try:
-            schedule["last_run"] = datetime.now().isoformat()
-            await bot.scheduler._callback(schedule)
-            resp = {"status": "triggered", "schedule_id": sid}
-            if schedule.get("paused"):
-                resp["warning"] = "schedule is paused — this was a manual override"
-            return web.json_response(resp)
+            result = await bot.scheduler.run_now(sid)
+            return web.json_response(result)
+        except ValueError as e:
+            err = str(e)
+            if "not found" in err:
+                return web.json_response({"error": err}, status=404)
+            return web.json_response({"error": err}, status=503)
         except Exception as e:
             return web.json_response({"error": _sanitize_error(e)}, status=500)
 

@@ -594,6 +594,37 @@ class Scheduler:
             log.info("Updated schedule %s", schedule_id)
             return dict(target)
 
+    async def run_now(self, schedule_id: str) -> dict:
+        """Manually trigger a schedule immediately.
+
+        Returns a result dict with status, schedule info, and optional warning.
+        Raises ValueError if the schedule is not found or callback is not set.
+        """
+        if not self._callback:
+            raise ValueError("Scheduler callback not configured")
+
+        schedule: dict | None = None
+        async with self._lock:
+            for s in self._schedules:
+                if s["id"] == schedule_id:
+                    schedule = s
+                    break
+            if schedule is None:
+                raise ValueError(f"Schedule '{schedule_id}' not found")
+            schedule["last_run"] = datetime.now(timezone.utc).isoformat()
+            try:
+                await asyncio.to_thread(self._save)
+            except Exception as e:
+                log.error("Schedule save failed after manual run: %s", e)
+
+        log.info("Manual run: schedule %s (%s)", schedule_id, schedule.get("description", ""))
+        await self._execute_and_record(schedule)
+
+        result: dict = {"status": "triggered", "schedule_id": schedule_id}
+        if schedule.get("paused"):
+            result["warning"] = "schedule is paused — this was a manual override"
+        return result
+
     async def delete(self, schedule_id: str) -> bool:
         async with self._lock:
             before = len(self._schedules)

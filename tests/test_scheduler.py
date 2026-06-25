@@ -1154,3 +1154,77 @@ class TestSchedulerPause:
         await s.update(sched["id"], paused=False)
         await s._tick()
         cb.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests — run_now()
+# ---------------------------------------------------------------------------
+
+class TestSchedulerRunNow:
+    """Test manual schedule execution via run_now()."""
+
+    async def test_run_now_fires_callback(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+
+        sched = await s.add("manual run", "reminder", "chan1", cron="0 * * * *")
+        result = await s.run_now(sched["id"])
+
+        assert result["status"] == "triggered"
+        assert result["schedule_id"] == sched["id"]
+        cb.assert_called_once()
+
+    async def test_run_now_updates_last_run(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+
+        sched = await s.add("track time", "reminder", "chan1", cron="0 * * * *")
+        assert sched["last_run"] is None
+
+        await s.run_now(sched["id"])
+        assert s.list_all()[0]["last_run"] is not None
+
+    async def test_run_now_warns_when_paused(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+
+        sched = await s.add("paused manual", "reminder", "chan1", cron="0 * * * *")
+        await s.update(sched["id"], paused=True)
+
+        result = await s.run_now(sched["id"])
+        assert result["status"] == "triggered"
+        assert "paused" in result.get("warning", "")
+
+    async def test_run_now_no_warning_when_active(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+
+        sched = await s.add("active", "reminder", "chan1", cron="0 * * * *")
+        result = await s.run_now(sched["id"])
+        assert "warning" not in result
+
+    async def test_run_now_not_found_raises(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+
+        with pytest.raises(ValueError, match="not found"):
+            await s.run_now("nonexistent")
+
+    async def test_run_now_no_callback_raises(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("no cb", "reminder", "chan1", cron="0 * * * *")
+
+        with pytest.raises(ValueError, match="callback not configured"):
+            await s.run_now(sched["id"])
+
+    async def test_run_now_records_history(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+
+        sched = await s.add("with history", "reminder", "chan1", cron="0 * * * *")
+        await s.run_now(sched["id"])
+
+        entries = await s.history.query(sched["id"])
+        assert len(entries) == 1
+        assert entries[0]["status"] == "success"
