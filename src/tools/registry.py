@@ -286,8 +286,9 @@ TOOLS: list[dict] = [
         "is_core": True,
         "description": (
             "Updates an existing schedule by ID. Only provided fields are changed. "
-            "Can change description, cron, run_at, trigger, message, tool_name, tool_input, steps, or channel_id. "
-            "Changing timing (cron/run_at/trigger) replaces the previous timing mode."
+            "Can change description, cron, run_at, trigger, message, tool_name, tool_input, steps, channel_id, or paused. "
+            "Changing timing (cron/run_at/trigger) replaces the previous timing mode. "
+            "Set paused=true to suspend a schedule without deleting it; paused=false to resume."
         ),
         "input_schema": {
             "type": "object",
@@ -340,6 +341,10 @@ TOOLS: list[dict] = [
                 "channel_id": {
                     "type": "string",
                     "description": "New channel ID for notifications",
+                },
+                "paused": {
+                    "type": "boolean",
+                    "description": "Pause (true) or resume (false) the schedule",
                 },
             },
             "required": ["schedule_id"],

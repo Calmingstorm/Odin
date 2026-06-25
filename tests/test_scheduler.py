@@ -1039,3 +1039,208 @@ class TestSchedulerAdaptiveTickDelay:
         past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
         s._schedules.append({"next_run": past, "id": "x", "action": "reminder"})
         assert s._compute_tick_delay() == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Tests — pause / resume
+# ---------------------------------------------------------------------------
+
+class TestSchedulerPause:
+    """Test that paused schedules are skipped by _tick and fire_triggers."""
+
+    async def test_update_pause(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("pausable", "reminder", "chan1", cron="*/5 * * * *")
+        updated = await s.update(sched["id"], paused=True)
+        assert updated["paused"] is True
+
+    async def test_update_unpause(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("pausable", "reminder", "chan1", cron="*/5 * * * *")
+        await s.update(sched["id"], paused=True)
+        updated = await s.update(sched["id"], paused=False)
+        assert updated["paused"] is False
+
+    async def test_pause_persists(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("persist pause", "reminder", "chan1", cron="*/5 * * * *")
+        await s.update(sched["id"], paused=True)
+        s2 = _make_scheduler(tmp_path)
+        assert s2.list_all()[0].get("paused") is True
+
+    async def test_tick_skips_paused_cron(self, tmp_path):
+        """Paused cron schedule must not fire even when next_run is past."""
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+
+        sched = await s.add("paused cron", "reminder", "chan1", cron="*/5 * * * *")
+        await s.update(sched["id"], paused=True)
+
+        async with s._lock:
+            s._schedules[0]["next_run"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=5)
+            ).isoformat()
+
+        await s._tick()
+        cb.assert_not_called()
+
+    async def test_tick_skips_paused_one_time(self, tmp_path):
+        """Paused one-time schedule must not fire."""
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+
+        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        sched = await s.add("paused one-time", "reminder", "chan1", run_at=past)
+        await s.update(sched["id"], paused=True)
+
+        await s._tick()
+        cb.assert_not_called()
+        assert len(s.list_all()) == 1  # not removed
+
+    async def test_tick_skips_paused_retry(self, tmp_path):
+        """Paused schedule with pending retry must not fire."""
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+
+        sched = await s.add(
+            "paused retry", "reminder", "chan1",
+            cron="*/5 * * * *", max_retries=3,
+        )
+        await s.update(sched["id"], paused=True)
+
+        async with s._lock:
+            s._schedules[0]["retry_at"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).isoformat()
+            s._schedules[0]["retry_count"] = 1
+
+        await s._tick()
+        cb.assert_not_called()
+
+    async def test_trigger_skips_paused(self, tmp_path):
+        """Paused trigger-based schedule must not fire on matching webhook."""
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+
+        trigger = {"source": "github", "event": "push"}
+        sched = await s.add("paused trigger", "reminder", "chan1", trigger=trigger)
+        await s.update(sched["id"], paused=True)
+
+        fired = await s.fire_triggers("github", {"event": "push"})
+        assert fired == 0
+        cb.assert_not_called()
+
+    async def test_unpause_allows_firing(self, tmp_path):
+        """Unpausing a schedule allows it to fire normally."""
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+
+        sched = await s.add("toggle", "reminder", "chan1", cron="*/5 * * * *")
+        await s.update(sched["id"], paused=True)
+
+        async with s._lock:
+            s._schedules[0]["next_run"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).isoformat()
+
+        await s._tick()
+        cb.assert_not_called()
+
+        await s.update(sched["id"], paused=False)
+        await s._tick()
+        cb.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests — run_now()
+# ---------------------------------------------------------------------------
+
+class TestSchedulerRunNow:
+    """Test manual schedule execution via run_now()."""
+
+    async def test_run_now_fires_callback(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+
+        sched = await s.add("manual run", "reminder", "chan1", cron="0 * * * *")
+        result = await s.run_now(sched["id"])
+
+        assert result["status"] == "success"
+        assert result["schedule_id"] == sched["id"]
+        assert "error" not in result
+        cb.assert_called_once()
+
+    async def test_run_now_updates_last_run(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+
+        sched = await s.add("track time", "reminder", "chan1", cron="0 * * * *")
+        assert sched["last_run"] is None
+
+        await s.run_now(sched["id"])
+        assert s.list_all()[0]["last_run"] is not None
+
+    async def test_run_now_warns_when_paused(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+
+        sched = await s.add("paused manual", "reminder", "chan1", cron="0 * * * *")
+        await s.update(sched["id"], paused=True)
+
+        result = await s.run_now(sched["id"])
+        assert result["status"] == "success"
+        assert "paused" in result.get("warning", "")
+
+    async def test_run_now_no_warning_when_active(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+
+        sched = await s.add("active", "reminder", "chan1", cron="0 * * * *")
+        result = await s.run_now(sched["id"])
+        assert "warning" not in result
+
+    async def test_run_now_not_found_raises(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+
+        with pytest.raises(ValueError, match="not found"):
+            await s.run_now("nonexistent")
+
+    async def test_run_now_no_callback_raises(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("no cb", "reminder", "chan1", cron="0 * * * *")
+
+        with pytest.raises(ValueError, match="callback not configured"):
+            await s.run_now(sched["id"])
+
+    async def test_run_now_records_history(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+
+        sched = await s.add("with history", "reminder", "chan1", cron="0 * * * *")
+        await s.run_now(sched["id"])
+
+        entries = await s.history.query(sched["id"])
+        assert len(entries) == 1
+        assert entries[0]["status"] == "success"
+
+    async def test_run_now_reports_failure(self, tmp_path):
+        """run_now returns failure status when callback raises."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock(side_effect=RuntimeError("broke"))
+
+        sched = await s.add("failing manual", "reminder", "chan1", cron="0 * * * *")
+        result = await s.run_now(sched["id"])
+
+        assert result["status"] == "failure"
+        assert "broke" in result["error"]
+
+        entries = await s.history.query(sched["id"])
+        assert len(entries) == 1
+        assert entries[0]["status"] == "failure"

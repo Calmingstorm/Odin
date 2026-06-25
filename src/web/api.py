@@ -2110,6 +2110,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             err = _validate_string(desc, "description", _MAX_DESCRIPTION_LEN)
             if err:
                 return web.json_response({"error": err}, status=400)
+        paused = data.get("paused")
+        if paused is not None and not isinstance(paused, bool):
+            return web.json_response({"error": "'paused' must be a boolean"}, status=400)
         try:
             updated = await bot.scheduler.update(
                 sid,
@@ -2124,6 +2127,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 channel_id=data.get("channel_id"),
                 max_retries=data.get("max_retries"),
                 retry_backoff_seconds=data.get("retry_backoff_seconds"),
+                paused=paused,
             )
         except (ValueError, TypeError) as e:
             return web.json_response({"error": _sanitize_error(e)}, status=400)
@@ -2141,21 +2145,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.post("/api/schedules/{schedule_id}/run")
     async def run_schedule_now(request: web.Request) -> web.Response:
         sid = request.match_info["schedule_id"]
-        schedule = None
-        for s in bot.scheduler._schedules:
-            if s["id"] == sid:
-                schedule = s
-                break
-        if not schedule:
-            return web.json_response({"error": "schedule not found"}, status=404)
-        if not bot.scheduler._callback:
-            return web.json_response(
-                {"error": "scheduler callback not configured"}, status=503
-            )
         try:
-            schedule["last_run"] = datetime.now().isoformat()
-            await bot.scheduler._callback(schedule)
-            return web.json_response({"status": "triggered", "schedule_id": sid})
+            result = await bot.scheduler.run_now(sid)
+            return web.json_response(result)
+        except ValueError as e:
+            err = str(e)
+            if "not found" in err:
+                return web.json_response({"error": err}, status=404)
+            return web.json_response({"error": err}, status=503)
         except Exception as e:
             return web.json_response({"error": _sanitize_error(e)}, status=500)
 
@@ -2221,7 +2218,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         loops = []
         for lid, info in bot.loop_manager._loops.items():
             # Include last 5 iteration history entries
-            history = list(info._iteration_history[-5:]) if info._iteration_history else []
+            history = list(info._iteration_history)[-5:] if info._iteration_history else []
             loops.append({
                 "id": lid,
                 "goal": info.goal,

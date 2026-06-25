@@ -71,6 +71,11 @@ class LoopAgentBridge:
         tools: list[dict] | None = None,
         system_prompt: str = "",
         tool_timeouts: dict[str, int] | None = None,
+        max_iterations: int | None = None,
+        budget_warnings: list[int] | None = None,
+        context_compression_enabled: bool = False,
+        max_context_chars: int = 750000,
+        keep_recent_iterations: int = 30,
     ) -> list[str]:
         """Spawn agents for a loop iteration.
 
@@ -124,6 +129,11 @@ class LoopAgentBridge:
                 system_prompt=system_prompt,
                 tool_timeouts=tool_timeouts,
                 trajectory_saver=self._trajectory_saver,
+                max_iterations=max_iterations,
+                budget_warnings=budget_warnings,
+                context_compression_enabled=context_compression_enabled,
+                max_context_chars=max_context_chars,
+                keep_recent_iterations=keep_recent_iterations,
             )
 
             if not agent_id.startswith("Error"):

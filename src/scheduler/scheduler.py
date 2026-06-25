@@ -441,6 +441,8 @@ class Scheduler:
         async with self._lock:
             now = datetime.now(timezone.utc)
             for schedule in self._schedules:
+                if schedule.get("paused"):
+                    continue
                 trigger = schedule.get("trigger")
                 if not trigger:
                     continue
@@ -498,6 +500,7 @@ class Scheduler:
         max_retries: int | None = None,
         retry_backoff_seconds: int | None = None,
         webhook_config: dict | None = None,
+        paused: bool | None = None,
     ) -> dict | None:
         """Update mutable fields on an existing schedule.
 
@@ -524,6 +527,8 @@ class Scheduler:
                 target["message"] = message
             if channel_id is not None:
                 target["channel_id"] = channel_id
+            if paused is not None:
+                target["paused"] = paused
 
             # --- action-specific payload fields ---
             action = target["action"]
@@ -588,6 +593,44 @@ class Scheduler:
             await asyncio.to_thread(self._save)
             log.info("Updated schedule %s", schedule_id)
             return dict(target)
+
+    async def run_now(self, schedule_id: str) -> dict:
+        """Manually trigger a schedule immediately.
+
+        Returns a result dict with status, schedule info, and optional warning.
+        Raises ValueError if the schedule is not found or callback is not set.
+        """
+        if not self._callback:
+            raise ValueError("Scheduler callback not configured")
+
+        schedule: dict | None = None
+        async with self._lock:
+            for s in self._schedules:
+                if s["id"] == schedule_id:
+                    schedule = s
+                    break
+            if schedule is None:
+                raise ValueError(f"Schedule '{schedule_id}' not found")
+            schedule["last_run"] = datetime.now(timezone.utc).isoformat()
+            try:
+                await asyncio.to_thread(self._save)
+            except Exception as e:
+                log.error("Schedule save failed after manual run: %s", e)
+
+        log.info("Manual run: schedule %s (%s)", schedule_id, schedule.get("description", ""))
+        failures_before = schedule.get("consecutive_failures", 0)
+        await self._execute_and_record(schedule)
+
+        failed = schedule.get("consecutive_failures", 0) > failures_before
+        result: dict = {
+            "status": "failure" if failed else "success",
+            "schedule_id": schedule_id,
+        }
+        if failed:
+            result["error"] = schedule.get("last_error", "unknown error")
+        if schedule.get("paused"):
+            result["warning"] = "schedule is paused — this was a manual override"
+        return result
 
     async def delete(self, schedule_id: str) -> bool:
         async with self._lock:
@@ -789,13 +832,15 @@ class Scheduler:
 
     async def _tick(self) -> None:
         to_fire: list[dict] = []
-        to_remove: list[str] = []
 
         async with self._lock:
             now = datetime.now(timezone.utc)
             now_naive = now.replace(tzinfo=None)
 
             for schedule in self._schedules:
+                if schedule.get("paused"):
+                    continue
+
                 retry_at_str = schedule.get("retry_at")
                 if retry_at_str:
                     retry_at = datetime.fromisoformat(retry_at_str)
@@ -828,10 +873,7 @@ class Scheduler:
                     cr = croniter(schedule["cron"], now.replace(tzinfo=None))
                     schedule["next_run"] = _utc_iso(cr.get_next(datetime))
 
-            for sid in to_remove:
-                self._schedules = [s for s in self._schedules if s["id"] != sid]
-
-            if to_fire or to_remove:
+            if to_fire:
                 try:
                     await asyncio.to_thread(self._save)
                 except Exception as e:

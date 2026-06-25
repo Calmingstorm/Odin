@@ -3711,8 +3711,9 @@ class OdinBot(commands.Bot):
                 stype = "one-time"
             next_run = s.get("next_run", "on trigger" if s.get("trigger") else "N/A")
             last_run = s.get("last_run", "never")
+            paused_tag = " **[PAUSED]**" if s.get("paused") else ""
             lines.append(
-                f"- **{s['id']}**: {s['description']} ({stype}) "
+                f"- **{s['id']}**: {s['description']} ({stype}){paused_tag} "
                 f"| next: {next_run} | last: {last_run}"
             )
         return f"**Scheduled tasks ({len(schedules)}):**\n" + "\n".join(lines)
@@ -3730,6 +3731,11 @@ class OdinBot(commands.Bot):
         trigger = inp.get("trigger")
         if trigger is not None:
             kwargs["trigger"] = trigger
+        if "paused" in inp:
+            val = inp["paused"]
+            if not isinstance(val, bool):
+                return "Error: 'paused' must be a boolean (true/false)."
+            kwargs["paused"] = val
         if not kwargs:
             return "Error: no fields to update."
         try:
@@ -4500,6 +4506,7 @@ class OdinBot(commands.Bot):
                 loop_info.requester_id,
             )
 
+        cc = self.config.context_compression
         agent_ids = self.loop_agent_bridge.spawn_agents_for_loop(
             loop_id=loop_id,
             iteration=loop_info.iteration_count,
@@ -4513,6 +4520,9 @@ class OdinBot(commands.Bot):
             tools=tools,
             system_prompt=system_prompt,
             tool_timeouts=self.config.tools.tool_timeouts,
+            context_compression_enabled=cc.enabled,
+            max_context_chars=cc.max_context_chars,
+            keep_recent_iterations=cc.keep_recent_iterations,
         )
 
         # Format response
