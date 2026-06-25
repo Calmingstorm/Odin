@@ -5400,10 +5400,10 @@ class OdinBot(commands.Bot):
                 prev_output = str(result)
 
                 if isinstance(result, ToolResult) and not result.ok:
-                    workflow_ok = False
                     results.append(f"**Step {i+1}** (`{step_desc}`): FAILED\n```\n{str(result)[:1600]}\n```")
                     on_failure = step.get("on_failure", "abort")
                     if on_failure == "abort":
+                        workflow_ok = False
                         results.append("Workflow aborted due to step failure.")
                         break
                 elif render_markdown:
@@ -5411,10 +5411,10 @@ class OdinBot(commands.Bot):
                 else:
                     results.append(f"**Step {i+1}** (`{step_desc}`): OK\n```\n{str(result)[:1600]}\n```")
             except Exception as e:
-                workflow_ok = False
                 results.append(f"**Step {i+1}** (`{step_desc}`): FAILED — {e}")
                 on_failure = step.get("on_failure", "abort")
                 if on_failure == "abort":
+                    workflow_ok = False
                     results.append("Workflow aborted due to step failure.")
                     break
 
