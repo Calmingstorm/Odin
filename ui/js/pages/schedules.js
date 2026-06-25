@@ -352,8 +352,13 @@ export default {
     async function doRunNow(scheduleId) {
       runningId.value = scheduleId;
       try {
-        await api.post(`/api/schedules/${encodeURIComponent(scheduleId)}/run`);
-        toast.success('Schedule triggered');
+        const result = await api.post(`/api/schedules/${encodeURIComponent(scheduleId)}/run`);
+        if (result.status === 'failure') {
+          toast.error(`Execution failed: ${result.error || 'unknown error'}`);
+        } else {
+          const msg = result.warning ? `Executed (${result.warning})` : 'Executed successfully';
+          toast.success(msg);
+        }
         await fetchSchedules();
       } catch (e) {
         toast.error(e.message || 'Failed to trigger');
