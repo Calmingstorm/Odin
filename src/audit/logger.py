@@ -257,7 +257,13 @@ class AuditLogger:
                 if not err:
                     continue
             if min_duration_ms is not None:
-                dur = entry.get("metadata", {}).get("duration_ms", 0) or entry.get("duration_ms", 0)
+                dur = (
+                    entry.get("execution_time_ms")
+                    or entry.get("metadata", {}).get("duration_ms")
+                    or entry.get("duration_ms")
+                    or entry.get("metadata", {}).get("elapsed_ms")
+                    or 0
+                )
                 if dur < min_duration_ms:
                     continue
 

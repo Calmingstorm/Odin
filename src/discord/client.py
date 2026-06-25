@@ -4688,6 +4688,8 @@ class OdinBot(commands.Bot):
                 response = await self.llm_client.chat_with_tools(
                     messages=messages, system=system_prompt, tools=tools or [],
                 )
+            except CircuitOpenError:
+                raise
             except Exception as e:
                 log.warning("Loop iteration Codex call failed: %s", e)
                 return await _finish(

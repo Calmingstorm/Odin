@@ -352,21 +352,27 @@ class MCPServerConnection:
         return self._tools
 
     async def _ensure_connected(self) -> None:
-        """Reconnect if the connection is dead. Raises MCPError on failure."""
+        """Reconnect if the connection died after being established.
+
+        Only attempts reconnect if the server was previously connected
+        (has a process or had a successful connection). A server that was
+        never connected raises MCPError immediately — use connect() first.
+        """
         if self._connected and self.is_alive:
             return
-        if not self._connected or not self.is_alive:
-            self._connected = False
-            log.warning("MCP %s: connection dead, attempting reconnect", self.name)
-            try:
-                await self.disconnect()
-            except Exception:
-                pass
-            try:
-                await self.connect()
-                log.info("MCP %s: reconnected successfully", self.name)
-            except Exception as e:
-                raise MCPError(f"Server {self.name}: reconnect failed: {e}") from e
+        if self._process is None and not self._connected:
+            raise MCPError(f"Server {self.name}: not connected")
+        self._connected = False
+        log.warning("MCP %s: connection dead, attempting reconnect", self.name)
+        try:
+            await self.disconnect()
+        except Exception:
+            pass
+        try:
+            await self.connect()
+            log.info("MCP %s: reconnected successfully", self.name)
+        except Exception as e:
+            raise MCPError(f"Server {self.name}: reconnect failed: {e}") from e
 
     async def call_tool(self, tool_name: str, arguments: dict) -> str:
         """Invoke a tool on the server and return the result as text."""
