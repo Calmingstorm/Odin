@@ -2159,7 +2159,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         try:
             schedule["last_run"] = datetime.now().isoformat()
             await bot.scheduler._callback(schedule)
-            return web.json_response({"status": "triggered", "schedule_id": sid})
+            resp = {"status": "triggered", "schedule_id": sid}
+            if schedule.get("paused"):
+                resp["warning"] = "schedule is paused — this was a manual override"
+            return web.json_response(resp)
         except Exception as e:
             return web.json_response({"error": _sanitize_error(e)}, status=500)
 

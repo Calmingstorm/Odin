@@ -4506,6 +4506,7 @@ class OdinBot(commands.Bot):
                 loop_info.requester_id,
             )
 
+        cc = self.config.context_compression
         agent_ids = self.loop_agent_bridge.spawn_agents_for_loop(
             loop_id=loop_id,
             iteration=loop_info.iteration_count,
@@ -4519,6 +4520,9 @@ class OdinBot(commands.Bot):
             tools=tools,
             system_prompt=system_prompt,
             tool_timeouts=self.config.tools.tool_timeouts,
+            context_compression_enabled=cc.enabled,
+            max_context_chars=cc.max_context_chars,
+            keep_recent_iterations=cc.keep_recent_iterations,
         )
 
         # Format response
