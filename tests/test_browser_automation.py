@@ -170,9 +170,12 @@ class TestEnsureConnected:
     @pytest.mark.asyncio
     async def test_playwright_not_installed_raises(self):
         """When playwright is not installed, _ensure_connected raises RuntimeError."""
+        try:
+            import playwright  # noqa: F401
+            pytest.skip("playwright is installed — cannot test missing-import path")
+        except ImportError:
+            pass
         mgr = BrowserManager()
-        # playwright is genuinely not installed in this test env,
-        # so _ensure_connected will hit the ImportError branch
         with pytest.raises(RuntimeError, match="playwright is not installed"):
             await mgr._ensure_connected()
 

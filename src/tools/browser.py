@@ -31,10 +31,10 @@ DEFAULT_USER_AGENT = (
 )
 
 
-def _validate_url(url: str) -> None:
+def _validate_url(url: str, allowed_urls: list[str] | None = None) -> None:
     """Reject dangerous URL schemes and SSRF targets."""
     from .url_safety import validate_url_safe
-    validate_url_safe(url)
+    validate_url_safe(url, allowed_urls=allowed_urls)
 
 
 class BrowserManager:
@@ -46,6 +46,7 @@ class BrowserManager:
         default_timeout_ms: int = 30000,
         viewport_width: int = 1920,
         viewport_height: int = 1080,
+        allow_private_targets: list[str] | None = None,
     ) -> None:
         self._cdp_url = cdp_url
         self._default_timeout_ms = default_timeout_ms
@@ -54,6 +55,7 @@ class BrowserManager:
         self._browser = None
         self._lock = asyncio.Lock()
         self._native = not bool(cdp_url)
+        self.allowed_urls = allow_private_targets or []
 
     @staticmethod
     def _is_connection_error(exc: Exception) -> bool:
@@ -195,7 +197,7 @@ async def handle_browser_screenshot(
     full_page = inp.get("full_page", False)
     wait_seconds = min(inp.get("wait_seconds", 0), 10)
 
-    _validate_url(url)
+    _validate_url(url, allowed_urls=manager.allowed_urls)
 
     async with manager.new_page() as page:
         response = await page.goto(url, wait_until="domcontentloaded")
@@ -219,7 +221,7 @@ async def handle_browser_read_page(
     max_chars = min(inp.get("max_chars", 16000), 32000)
     wait_seconds = min(inp.get("wait_seconds", 0), 10)
 
-    _validate_url(url)
+    _validate_url(url, allowed_urls=manager.allowed_urls)
 
     async with manager.new_page() as page:
         await page.goto(url, wait_until="domcontentloaded")
@@ -250,7 +252,7 @@ async def handle_browser_read_table(
     table_index = inp.get("table_index", 0)
     wait_seconds = min(inp.get("wait_seconds", 0), 10)
 
-    _validate_url(url)
+    _validate_url(url, allowed_urls=manager.allowed_urls)
 
     async with manager.new_page() as page:
         await page.goto(url, wait_until="domcontentloaded")
@@ -305,7 +307,7 @@ async def handle_browser_click(
     selector = inp["selector"]
     wait_seconds = min(inp.get("wait_seconds", 0), 10)
 
-    _validate_url(url)
+    _validate_url(url, allowed_urls=manager.allowed_urls)
 
     async with manager.new_page() as page:
         await page.goto(url, wait_until="domcontentloaded")
@@ -334,7 +336,7 @@ async def handle_browser_fill(
     value = inp["value"]
     submit = inp.get("submit", False)
 
-    _validate_url(url)
+    _validate_url(url, allowed_urls=manager.allowed_urls)
 
     async with manager.new_page() as page:
         await page.goto(url, wait_until="domcontentloaded")
@@ -368,7 +370,7 @@ async def handle_browser_evaluate(
     expression = inp["expression"]
     wait_seconds = min(inp.get("wait_seconds", 0), 10)
 
-    _validate_url(url)
+    _validate_url(url, allowed_urls=manager.allowed_urls)
 
     async with manager.new_page() as page:
         await page.goto(url, wait_until="domcontentloaded")

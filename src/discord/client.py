@@ -385,6 +385,7 @@ class OdinBot(commands.Bot):
                 default_timeout_ms=config.browser.default_timeout_ms,
                 viewport_width=config.browser.viewport_width,
                 viewport_height=config.browser.viewport_height,
+                allow_private_targets=config.browser.allow_private_targets,
             )
 
         from ..tools.output_streamer import ToolOutputStreamer

@@ -215,6 +215,11 @@ browser:
   # Set a ws:// URL to connect to a remote CDP browser instead.
   # cdp_url: ws://some-browserless-host:3000?token=secret
   cdp_url: ""
+  # Allow browser tools to access specific local/private URLs (bypasses SSRF block).
+  # Use for validating local WebUI, dev servers, etc.
+  allow_private_targets:
+    - "http://127.0.0.1:3002"
+    - "http://localhost:3002"
 
 permissions:
   default_tier: admin

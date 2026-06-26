@@ -30,12 +30,42 @@ def _is_ip_blocked(addr_str: str) -> bool:
     return False
 
 
+_METADATA_HOSTS = frozenset({"169.254.169.254", "metadata.google.internal"})
+
+
+def _matches_allowlist(parsed, allowed_urls: list[str]) -> bool:
+    """Check if a parsed URL matches any allowlist entry by scheme, host, and port."""
+    if parsed.username is not None:
+        return False
+    for entry in allowed_urls:
+        try:
+            allowed = urlparse(entry)
+        except Exception:
+            continue
+        if parsed.scheme != allowed.scheme:
+            continue
+        if (parsed.hostname or "") != (allowed.hostname or ""):
+            continue
+        req_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        allow_port = allowed.port or (443 if allowed.scheme == "https" else 80)
+        if req_port != allow_port:
+            continue
+        if allowed.path and allowed.path != "/":
+            if not (parsed.path or "/").startswith(allowed.path):
+                continue
+        return True
+    return False
+
+
 def is_url_blocked(url: str, allowed_urls: list[str] | None = None, resolve_dns: bool = True) -> bool:
     """Return True if a URL targets localhost, private IPs, or metadata endpoints.
 
     When resolve_dns is True (default), also resolves the hostname and
     checks resolved IPs — prevents DNS rebinding attacks where a public
     domain resolves to a private IP.
+
+    Cloud metadata endpoints are ALWAYS blocked, even if listed in
+    allowed_urls.
     """
     try:
         parsed = urlparse(url)
@@ -46,15 +76,13 @@ def is_url_blocked(url: str, allowed_urls: list[str] | None = None, resolve_dns:
     if not host:
         return True
 
-    if allowed_urls:
-        url_base = f"{parsed.scheme}://{host}:{parsed.port}" if parsed.port else f"{parsed.scheme}://{host}"
-        if any(url_base.rstrip("/") == a or url.startswith(a) for a in allowed_urls):
-            return False
-
-    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+    if host in _METADATA_HOSTS:
         return True
 
-    if host in ("169.254.169.254", "metadata.google.internal"):
+    if allowed_urls and _matches_allowlist(parsed, allowed_urls):
+        return False
+
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
         return True
 
     if _is_ip_blocked(host):

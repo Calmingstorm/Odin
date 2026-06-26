@@ -398,6 +398,7 @@ class BrowserConfig(BaseModel):
     default_timeout_ms: int = 30000
     viewport_width: int = 1920
     viewport_height: int = 1080
+    allow_private_targets: list[str] = Field(default_factory=list)
 
     @field_validator("default_timeout_ms")
     @classmethod
