@@ -686,6 +686,31 @@ class ConversationReflector:
             log.info("Reflector: expired %d stale operational/fact entries", expired)
         return kept
 
+    @staticmethod
+    def _compact_for_prompt(entries: list[dict]) -> str:
+        """Serialize entries with only the fields the LLM needs for consolidation.
+
+        Strips timestamps, source, last_used_at, and other metadata that
+        bloats the prompt without helping the LLM make merge/drop decisions.
+        """
+        compact = []
+        for e in entries:
+            item: dict = {
+                "key": e.get("key", ""),
+                "category": e.get("category", ""),
+                "content": e.get("content", ""),
+            }
+            if e.get("topic"):
+                item["topic"] = e["topic"]
+            if e.get("tags"):
+                item["tags"] = e["tags"]
+            if e.get("confidence"):
+                item["confidence"] = e["confidence"]
+            if e.get("user_id"):
+                item["user_id"] = e["user_id"]
+            compact.append(item)
+        return json.dumps(compact, indent=2)
+
     async def _consolidate(self, entries: list[dict]) -> list[dict]:
         """Ask the LLM to merge same-topic duplicates down to the target.
 
@@ -694,6 +719,9 @@ class ConversationReflector:
         together to hit the target count; dropping low-value entries is the
         sanctioned way to shrink.
         """
+        import time as _time
+        t0 = _time.monotonic()
+
         entries = self._expire_entries(entries)
         if not entries:
             return []
@@ -704,7 +732,16 @@ class ConversationReflector:
             return damaged
 
         target = max(1, self._consolidation_target - len(damaged))
-        entries_text = json.dumps(candidates, indent=2)
+
+        if len(candidates) <= target:
+            log.info(
+                "Consolidation skipped: %d candidates already within target %d (+%d damaged)",
+                len(candidates), target, len(damaged),
+            )
+            return candidates + damaged
+
+        entries_text = self._compact_for_prompt(candidates)
+        prompt_chars = len(entries_text)
         prompt = (
             _CONSOLIDATION_HEADER + str(target)
             + " or fewer.\nSTRICT RULES:\n"
@@ -717,7 +754,7 @@ class ConversationReflector:
             "topics, return more entries than the target instead.\n"
             f"- Keep each content under {_SOFT_CONTENT_CHARS} characters.\n"
             "- Preserve key, user_id, topic, tags, and confidence fields "
-            "exactly as-is (null if absent).\n"
+            "when present.\n"
             " Return a JSON array with the same schema:"
             ' [{"key": ..., "category": ..., "content": ..., "user_id": ...,'
             ' "topic": ..., "tags": ..., "confidence": ...}]'
@@ -728,6 +765,12 @@ class ConversationReflector:
 
         def _fallback() -> list[dict]:
             candidates.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
+            elapsed = _time.monotonic() - t0
+            log.warning(
+                "Consolidation fallback: kept newest %d of %d candidates "
+                "(prompt was %d chars, elapsed %.1fs, %d damaged passed through)",
+                target, len(candidates), prompt_chars, elapsed, len(damaged),
+            )
             return candidates[:target] + damaged
 
         try:
@@ -739,7 +782,10 @@ class ConversationReflector:
                 system_instruction,
             )
         except Exception as e:
-            log.error("Consolidation API call failed: %s", e)
+            log.error(
+                "Consolidation API call failed (%s): %s",
+                type(e).__name__, e,
+            )
             return _fallback()
 
         raw = raw_text.strip()
@@ -757,7 +803,6 @@ class ConversationReflector:
                 orig = orig_by_key[entry["key"]]
                 entry["created_at"] = orig.get("created_at", now)
                 entry["updated_at"] = now
-                # Consolidation must not invent or upgrade metadata it dropped
                 for field in ("user_id", "topic", "tags", "confidence", "source", "last_used_at"):
                     if field not in entry and field in orig:
                         entry[field] = orig[field]
@@ -767,9 +812,10 @@ class ConversationReflector:
                 entry.setdefault("confidence", _default_confidence(entry.get("category", "")))
                 entry.setdefault("source", {"created_by": "consolidation"})
 
+        elapsed = _time.monotonic() - t0
         log.info(
-            "Consolidated %d entries down to %d (+%d damaged passed through)",
-            len(candidates), len(consolidated), len(damaged),
+            "Consolidated %d entries down to %d (+%d damaged) in %.1fs (prompt %d chars)",
+            len(candidates), len(consolidated), len(damaged), elapsed, prompt_chars,
         )
         return consolidated + damaged
 
