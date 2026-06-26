@@ -587,8 +587,7 @@ class TestRunAgentLifecycle:
 
         tool_cb = AsyncMock(return_value="data")
 
-        with patch("src.agents.manager.MAX_AGENT_ITERATIONS", 3):
-            await _run_agent(agent, "sys", [], iter_cb, tool_cb)
+        await _run_agent(agent, "sys", [], iter_cb, tool_cb, max_iterations=3)
 
         assert agent.state == AgentState.COMPLETED
         assert agent.iteration_count == 3

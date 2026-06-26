@@ -1077,6 +1077,7 @@ class TestEdgeCases:
             iteration_callback=iter_cb,
             tool_executor_callback=tool_cb,
             trajectory_saver=saver,
+            max_iterations=30,
         )
 
         entry = await saver.find_by_agent_id("e4")

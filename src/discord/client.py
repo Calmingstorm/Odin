@@ -3971,7 +3971,7 @@ class OdinBot(commands.Bot):
             tool_name="digest",
             tool_input={"schedule_id": schedule.get("id")},
             approved=True,
-            result_summary=summary[:500],
+            result_summary=summary,
             execution_time_ms=0,
         )
 

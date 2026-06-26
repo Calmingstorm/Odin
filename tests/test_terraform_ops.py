@@ -648,6 +648,7 @@ class TestHandleTerraformOps:
         exec_inst.config = config
         exec_inst._metrics = {}
         exec_inst._permission_manager = None
+        exec_inst._host_access = None
         exec_inst._recovery_enabled = False
         exec_inst._branch_freshness_enabled = False
         from src.tools.recovery import RecoveryStats

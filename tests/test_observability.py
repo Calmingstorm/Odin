@@ -254,7 +254,7 @@ class TestAuditClassification:
         from src.audit.logger import AuditLogger
         path = tmp_path / "audit.jsonl"
         logger = AuditLogger(path=str(path), classify_failures=classify)
-        asyncio.get_event_loop().run_until_complete(logger.log_execution(
+        asyncio.run(logger.log_execution(
             user_id="42", user_name="aaron", channel_id="ch1",
             tool_name="run_command", tool_input={"command": "x"},
             approved=True, result_summary="failed", execution_time_ms=10,

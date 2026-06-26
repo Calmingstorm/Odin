@@ -16,18 +16,23 @@ from .signer import AuditSigner, verify_log
 log = get_logger("audit")
 
 
+DEFAULT_RESULT_CAP = 4000
+
+
 class AuditLogger:
     """Append-only JSON Lines audit log for tool executions."""
 
     def __init__(
         self, path: str = "./data/audit.jsonl", *,
         hmac_key: str = "", classify_failures: bool = True,
+        result_cap: int = DEFAULT_RESULT_CAP,
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._event_callback: Callable | None = None
         self._signer: AuditSigner | None = AuditSigner(hmac_key) if hmac_key else None
         self._classify_failures = classify_failures
+        self._result_cap = result_cap
 
     def set_event_callback(self, callback: Callable) -> None:
         """Set a callback to be invoked with each audit entry (for live WS events)."""
@@ -57,7 +62,7 @@ class AuditLogger:
             "tool_name": tool_name,
             "tool_input": tool_input,
             "approved": approved,
-            "result_summary": result_summary[:500],
+            "result_summary": result_summary[:self._result_cap],
             "execution_time_ms": execution_time_ms,
             "error": error,
         }
@@ -108,7 +113,7 @@ class AuditLogger:
             "type": event_type,
             "action": action,
             "actor": actor,
-            "detail": detail[:500],
+            "detail": detail[:self._result_cap],
             "tool_name": action,
             "user_id": actor,
         }
@@ -142,17 +147,30 @@ class AuditLogger:
         ip: str = "",
         execution_time_ms: int = 0,
         diff: str | None = None,
+        user_id: str = "",
+        username: str = "",
+        label: str = "",
     ) -> None:
         """Log a web UI API action (state-changing requests)."""
-        entry = {
+        entry: dict = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": "web_action",
             "method": method,
             "path": path,
             "status": status,
+            "success": status < 400,
             "ip": ip,
             "execution_time_ms": execution_time_ms,
         }
+        if status >= 400:
+            entry["error"] = f"HTTP {status}"
+        if user_id:
+            entry["user_id"] = user_id
+            entry["actor"] = f"web:{user_id}"
+        if username:
+            entry["user_name"] = username
+        if label:
+            entry["label"] = label
         if diff:
             entry["diff"] = diff
         if self._signer:

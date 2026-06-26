@@ -131,7 +131,7 @@ class TestHandleChat:
     async def test_content_too_long(self):
         mgr = WebSocketManager(_make_bot())
         ws = _make_ws()
-        await mgr._handle_chat(ws, {"content": "x" * 5000})
+        await mgr._handle_chat(ws, {"content": "x" * 33000})
         resp = ws.send_json.call_args[0][0]
         assert resp["type"] == "chat_error"
         assert "exceeds" in resp["error"]
