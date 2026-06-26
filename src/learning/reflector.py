@@ -754,7 +754,7 @@ class ConversationReflector:
             "topics, return more entries than the target instead.\n"
             f"- Keep each content under {_SOFT_CONTENT_CHARS} characters.\n"
             "- Preserve key, user_id, topic, tags, and confidence fields "
-            "exactly as-is (null if absent).\n"
+            "when present.\n"
             " Return a JSON array with the same schema:"
             ' [{"key": ..., "category": ..., "content": ..., "user_id": ...,'
             ' "topic": ..., "tags": ..., "confidence": ...}]'

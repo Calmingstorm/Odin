@@ -197,6 +197,85 @@ class TestConsolidationDamagePassThrough:
         assert len(result) == 3
 
 
+class TestConsolidationSkipAndCompact:
+    @pytest.mark.asyncio
+    async def test_skip_when_candidates_within_target(self, tmp_path):
+        """When candidates <= target, _text_fn must NOT be called."""
+        r = ConversationReflector(str(tmp_path / "l.json"),
+                                  max_entries=10, consolidation_target=8)
+        call_count = 0
+
+        async def spy_text_fn(messages, system):
+            nonlocal call_count
+            call_count += 1
+            return "[]"
+
+        r.set_text_fn(spy_text_fn)
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        entries = [
+            _entry(f"k{i}", content=f"lesson {i}.", created_at=now, updated_at=now)
+            for i in range(5)
+        ]
+        # 5 candidates, target 8 → skip
+        result = await r._consolidate(entries)
+        assert call_count == 0
+        assert len(result) == 5
+        assert {e["key"] for e in result} == {f"k{i}" for i in range(5)}
+
+    @pytest.mark.asyncio
+    async def test_skip_preserves_damaged(self, tmp_path):
+        """Skip path must preserve both candidates and damaged entries."""
+        r = ConversationReflector(str(tmp_path / "l.json"),
+                                  max_entries=10, consolidation_target=8)
+        r.set_text_fn(None)
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        entries = [
+            _entry("a", content="lesson a.", created_at=now, updated_at=now),
+            _entry("b", content="lesson b.", created_at=now, updated_at=now),
+            _entry("hurt", content="chopped" + _TRUNCATION_MARKER,
+                   damaged=True, created_at=now, updated_at=now),
+        ]
+        # 2 candidates, target 7 (8-1 damaged) → skip
+        result = await r._consolidate(entries)
+        keys = {e["key"] for e in result}
+        assert keys == {"a", "b", "hurt"}
+
+    def test_compact_for_prompt_strips_metadata(self):
+        entries = [
+            _entry("k1", content="lesson one.",
+                   topic="infra", tags=["ssh"], confidence="high",
+                   user_id="42",
+                   created_at="2026-01-01T00:00:00", updated_at="2026-06-01T00:00:00",
+                   last_used_at="2026-06-20T00:00:00",
+                   source={"created_by": "reflection"}),
+        ]
+        compact_json = ConversationReflector._compact_for_prompt(entries)
+        compact = json.loads(compact_json)
+        assert len(compact) == 1
+        item = compact[0]
+        # Preserved
+        assert item["key"] == "k1"
+        assert item["category"] == "operational"
+        assert item["content"] == "lesson one."
+        assert item["topic"] == "infra"
+        assert item["tags"] == ["ssh"]
+        assert item["confidence"] == "high"
+        assert item["user_id"] == "42"
+        # Stripped
+        assert "created_at" not in item
+        assert "updated_at" not in item
+        assert "last_used_at" not in item
+        assert "source" not in item
+
+    def test_compact_for_prompt_omits_absent_optional_fields(self):
+        entries = [_entry("bare", content="minimal.")]
+        compact = json.loads(ConversationReflector._compact_for_prompt(entries))
+        item = compact[0]
+        assert "topic" not in item
+        assert "tags" not in item
+        assert "user_id" not in item
+
+
 class TestInjection:
     def _store(self, tmp_path, entries):
         path = tmp_path / "learned.json"
