@@ -1134,6 +1134,7 @@ class TestEdgeCases:
         finally:
             _cleanup(store)
 
+    @pytest.mark.skipif(os.getuid() == 0, reason="root ignores filesystem permissions")
     async def test_directory_read_error_handled(self):
         importer, store = _make_importer()
         try:

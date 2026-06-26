@@ -1,6 +1,15 @@
 """Tests for HttpRequestTool."""
 
 import pytest
+
+import aiohttp
+_aiohttp_major_minor = tuple(int(x) for x in aiohttp.__version__.split(".")[:2])
+
+pytestmark = pytest.mark.skipif(
+    _aiohttp_major_minor >= (3, 11),
+    reason="aioresponses 0.7.x incompatible with aiohttp >= 3.11 (stream_writer kwarg)",
+)
+
 from aioresponses import aioresponses
 
 from src.odin.context import ExecutionContext

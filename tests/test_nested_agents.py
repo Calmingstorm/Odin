@@ -173,7 +173,7 @@ class TestAgentInfoNesting:
 # ---------------------------------------------------------------------------
 
 class TestSpawnNesting:
-    def test_root_spawn_depth_zero(self):
+    async def test_root_spawn_depth_zero(self):
         mgr = AgentManager()
         aid = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -186,7 +186,7 @@ class TestSpawnNesting:
         assert agent.depth == 0
         assert agent.parent_id is None
 
-    def test_child_spawn_depth_one(self):
+    async def test_child_spawn_depth_one(self):
         mgr = AgentManager()
         parent_id = mgr.spawn(
             label="parent", goal="go", channel_id="c1",
@@ -206,7 +206,7 @@ class TestSpawnNesting:
         assert child.depth == 1
         assert child.parent_id == parent_id
 
-    def test_grandchild_spawn_depth_two(self):
+    async def test_grandchild_spawn_depth_two(self):
         mgr = AgentManager()
         parent_id = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -233,7 +233,7 @@ class TestSpawnNesting:
         assert gc.depth == 2
         assert gc.parent_id == child_id
 
-    def test_depth_exceeds_max(self):
+    async def test_depth_exceeds_max(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -266,7 +266,7 @@ class TestSpawnNesting:
         assert result.startswith("Error")
         assert "nesting depth" in result.lower()
 
-    def test_custom_max_depth(self):
+    async def test_custom_max_depth(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -294,7 +294,7 @@ class TestSpawnNesting:
         )
         assert result.startswith("Error")
 
-    def test_parent_not_found(self):
+    async def test_parent_not_found(self):
         mgr = AgentManager()
         result = mgr.spawn(
             label="orphan", goal="go", channel_id="c1",
@@ -306,7 +306,7 @@ class TestSpawnNesting:
         assert result.startswith("Error")
         assert "not found" in result.lower()
 
-    def test_max_children_per_agent(self):
+    async def test_max_children_per_agent(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -334,7 +334,7 @@ class TestSpawnNesting:
         assert result.startswith("Error")
         assert "maximum" in result.lower()
 
-    def test_parent_registers_child(self):
+    async def test_parent_registers_child(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="parent", goal="go", channel_id="c1",
@@ -357,7 +357,7 @@ class TestSpawnNesting:
 # ---------------------------------------------------------------------------
 
 class TestSystemPromptNesting:
-    def test_root_can_nest_prompt(self):
+    async def test_root_can_nest_prompt(self):
         mgr = AgentManager()
         aid = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -369,7 +369,7 @@ class TestSystemPromptNesting:
         # Check that task was started (system prompt goes to _run_agent)
         assert agent._task is not None
 
-    def test_deep_agent_no_spawn_prompt(self):
+    async def test_deep_agent_no_spawn_prompt(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -399,7 +399,7 @@ class TestSystemPromptNesting:
 # ---------------------------------------------------------------------------
 
 class TestHierarchyMethods:
-    def test_get_children_empty(self):
+    async def test_get_children_empty(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -409,7 +409,7 @@ class TestHierarchyMethods:
         )
         assert mgr.get_children(p) == []
 
-    def test_get_children_with_children(self):
+    async def test_get_children_with_children(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -440,7 +440,7 @@ class TestHierarchyMethods:
         mgr = AgentManager()
         assert mgr.get_children("nonexistent") == []
 
-    def test_get_lineage_root(self):
+    async def test_get_lineage_root(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -451,7 +451,7 @@ class TestHierarchyMethods:
         lineage = mgr.get_lineage(p)
         assert lineage == [p]
 
-    def test_get_lineage_three_levels(self):
+    async def test_get_lineage_three_levels(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -480,7 +480,7 @@ class TestHierarchyMethods:
         mgr = AgentManager()
         assert mgr.get_lineage("nope") == ["nope"]
 
-    def test_get_descendants_empty(self):
+    async def test_get_descendants_empty(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -490,7 +490,7 @@ class TestHierarchyMethods:
         )
         assert mgr.get_descendants(p) == []
 
-    def test_get_descendants_multi_level(self):
+    async def test_get_descendants_multi_level(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -526,7 +526,7 @@ class TestHierarchyMethods:
 # ---------------------------------------------------------------------------
 
 class TestKillCascade:
-    def test_kill_cascades_to_children(self):
+    async def test_kill_cascades_to_children(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -546,7 +546,7 @@ class TestKillCascade:
         assert mgr._agents[p]._cancel_event.is_set()
         assert mgr._agents[c]._cancel_event.is_set()
 
-    def test_kill_no_cascade(self):
+    async def test_kill_no_cascade(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -566,7 +566,7 @@ class TestKillCascade:
         assert mgr._agents[p]._cancel_event.is_set()
         assert not mgr._agents[c]._cancel_event.is_set()
 
-    def test_kill_cascade_multi_level(self):
+    async def test_kill_cascade_multi_level(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -592,7 +592,7 @@ class TestKillCascade:
         assert "2 descendant" in result
         assert mgr._agents[gc]._cancel_event.is_set()
 
-    def test_kill_no_children_same_message(self):
+    async def test_kill_no_children_same_message(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -610,7 +610,7 @@ class TestKillCascade:
 # ---------------------------------------------------------------------------
 
 class TestListAndResults:
-    def test_list_includes_depth(self):
+    async def test_list_includes_depth(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -621,7 +621,7 @@ class TestListAndResults:
         entries = mgr.list()
         assert any(e["id"] == p and e["depth"] == 0 for e in entries)
 
-    def test_list_includes_parent_id(self):
+    async def test_list_includes_parent_id(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -641,7 +641,7 @@ class TestListAndResults:
         assert child_entry["parent_id"] == p
         assert child_entry["depth"] == 1
 
-    def test_list_includes_children_count(self):
+    async def test_list_includes_children_count(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -660,7 +660,7 @@ class TestListAndResults:
         parent_entry = next(e for e in entries if e["id"] == p)
         assert parent_entry["children_count"] == 1
 
-    def test_get_results_includes_nesting(self):
+    async def test_get_results_includes_nesting(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -680,7 +680,7 @@ class TestListAndResults:
         assert results["parent_id"] == p
         assert results["children_ids"] == []
 
-    def test_get_results_parent_children(self):
+    async def test_get_results_parent_children(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -946,7 +946,7 @@ class TestExports:
 # ---------------------------------------------------------------------------
 
 class TestEdgeCases:
-    def test_spawn_with_max_depth_zero(self):
+    async def test_spawn_with_max_depth_zero(self):
         """max_depth=0 means even root agents can't spawn children."""
         mgr = AgentManager()
         p = mgr.spawn(
@@ -966,7 +966,7 @@ class TestEdgeCases:
         )
         assert result.startswith("Error")
 
-    def test_children_ids_list_is_independent(self):
+    async def test_children_ids_list_is_independent(self):
         mgr = AgentManager()
         p1 = mgr.spawn(
             label="p1", goal="go", channel_id="c1",
@@ -1012,7 +1012,7 @@ class TestEdgeCases:
         desc = mgr.get_descendants("a1")
         assert len(desc) == 2
 
-    def test_kill_cascade_skips_terminal_children(self):
+    async def test_kill_cascade_skips_terminal_children(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -1034,7 +1034,7 @@ class TestEdgeCases:
         # Child is terminal so only parent killed
         assert "descendant" not in result
 
-    def test_max_depth_high_allows_deep_nesting(self):
+    async def test_max_depth_high_allows_deep_nesting(self):
         mgr = AgentManager()
         current = mgr.spawn(
             label="d0", goal="go", channel_id="c1",
@@ -1057,7 +1057,7 @@ class TestEdgeCases:
             assert mgr._agents[child].depth == depth
             current = child
 
-    def test_spawn_no_parent_id_backward_compat(self):
+    async def test_spawn_no_parent_id_backward_compat(self):
         """Existing callers that don't pass parent_id still work."""
         mgr = AgentManager()
         aid = mgr.spawn(
@@ -1070,7 +1070,7 @@ class TestEdgeCases:
         assert mgr._agents[aid].depth == 0
         assert mgr._agents[aid].parent_id is None
 
-    def test_concurrent_children_tracking(self):
+    async def test_concurrent_children_tracking(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",
@@ -1091,7 +1091,7 @@ class TestEdgeCases:
             children.append(c)
         assert mgr._agents[p].children_ids == children
 
-    def test_get_results_children_ids_is_copy(self):
+    async def test_get_results_children_ids_is_copy(self):
         mgr = AgentManager()
         p = mgr.spawn(
             label="root", goal="go", channel_id="c1",

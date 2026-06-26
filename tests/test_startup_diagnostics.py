@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 
@@ -397,6 +398,7 @@ class TestCheckSessionsDirectory:
         assert result.metadata.get("created") is True
         assert new_dir.is_dir()
 
+    @pytest.mark.skipif(os.getuid() == 0, reason="root ignores filesystem permissions")
     def test_read_only_dir(self, tmp_path):
         ro_dir = tmp_path / "readonly"
         ro_dir.mkdir()
@@ -409,6 +411,7 @@ class TestCheckSessionsDirectory:
         # Cleanup
         ro_dir.chmod(0o755)
 
+    @pytest.mark.skipif(os.getuid() == 0, reason="root ignores filesystem permissions")
     def test_cannot_create_dir(self, tmp_path):
         # Parent directory that doesn't allow creation
         blocked = tmp_path / "blocked"

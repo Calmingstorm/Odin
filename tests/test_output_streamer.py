@@ -655,6 +655,7 @@ class TestHandleRunCommandStreaming:
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
         executor._branch_freshness_enabled = False
+        executor._host_access = None
 
         streamer = MagicMock(spec=ToolOutputStreamer)
         streamer.is_enabled.return_value = True
@@ -683,6 +684,7 @@ class TestHandleRunCommandStreaming:
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
         executor._branch_freshness_enabled = False
+        executor._host_access = None
 
         streamer = MagicMock(spec=ToolOutputStreamer)
         streamer.is_enabled.return_value = False
@@ -709,6 +711,7 @@ class TestHandleRunCommandStreaming:
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
         executor._branch_freshness_enabled = False
+        executor._host_access = None
         executor.output_streamer = None
 
         with patch("src.tools.executor.is_local_address", return_value=True), \
@@ -725,6 +728,7 @@ class TestHandleRunCommandStreaming:
         executor.config = MagicMock()
         executor.config.hosts = {}
         executor._branch_freshness_enabled = False
+        executor._host_access = None
 
         streamer = MagicMock(spec=ToolOutputStreamer)
         streamer.is_enabled.return_value = True
@@ -755,6 +759,7 @@ class TestHandleRunScriptStreaming:
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
         executor._branch_freshness_enabled = False
+        executor._host_access = None
 
         streamer = MagicMock(spec=ToolOutputStreamer)
         streamer.is_enabled.return_value = True
@@ -784,6 +789,7 @@ class TestHandleRunScriptStreaming:
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
         executor._branch_freshness_enabled = False
+        executor._host_access = None
         executor.output_streamer = None
 
         with patch("src.tools.executor.is_local_address", return_value=True), \

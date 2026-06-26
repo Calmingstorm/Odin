@@ -324,4 +324,4 @@ class TestProcessWebChat:
 
 class TestConstants:
     def test_max_chat_content_len(self):
-        assert MAX_CHAT_CONTENT_LEN == 4000
+        assert MAX_CHAT_CONTENT_LEN == 32000
