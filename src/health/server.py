@@ -365,6 +365,7 @@ def _make_web_audit_middleware() -> web.middleware:
         if audit:
             try:
                 config_diff = request.get("_config_diff")
+                identity = getattr(request, "_api_identity", None)
                 await audit.log_web_action(
                     method=request.method,
                     path=request.path,
@@ -372,6 +373,9 @@ def _make_web_audit_middleware() -> web.middleware:
                     ip=request.remote or "",
                     execution_time_ms=elapsed_ms,
                     diff=config_diff,
+                    user_id=getattr(identity, "user_id", "") if identity else "",
+                    username=getattr(identity, "username", "") if identity else "",
+                    label=getattr(identity, "label", "") if identity else "",
                 )
             except Exception:
                 pass  # Never block the response for audit failures
