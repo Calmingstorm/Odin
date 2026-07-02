@@ -85,6 +85,25 @@ async def test_search_reads_across_rotation(tmp_path):
     assert recent[0]["tool_name"] == "t149"
 
 
+async def test_hmac_chain_valid_after_rotation(tmp_path):
+    """Rotation resets the signer chain to genesis so verify_integrity() (which
+    reads the current file from genesis) stays valid — the chain no longer runs
+    across the rotation boundary (Odin's PR#129 blocker)."""
+    path = tmp_path / "audit.jsonl"
+    logger = AuditLogger(str(path), hmac_key="secret-key", max_bytes=600, max_files=2)
+    for i in range(60):
+        await logger.log_execution(
+            user_id="u", user_name="U", channel_id="c",
+            tool_name=f"t{i}", tool_input={"i": i},
+            approved=True, result_summary="r" * 30, execution_time_ms=1,
+        )
+    # Rotation must have happened.
+    assert (tmp_path / "audit.jsonl.1").exists()
+    report = await logger.verify_integrity()
+    assert report["valid"] is True, report
+    assert report["verified"] == report["total"]
+
+
 async def test_search_is_bounded_by_limit(tmp_path):
     logger = AuditLogger(str(tmp_path / "audit.jsonl"))
     for i in range(100):

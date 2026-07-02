@@ -13,7 +13,7 @@ import aiofiles
 from ..observability.correlation import get_turn
 from ..observability.failure_classes import classify_failure
 from ..odin_log import get_logger
-from .signer import AuditSigner, verify_log
+from .signer import GENESIS_HASH, AuditSigner, verify_log
 
 log = get_logger("audit")
 
@@ -65,8 +65,11 @@ class AuditLogger:
         """Rotate audit.jsonl → .1 → .2 … once it exceeds max_bytes.
 
         Called before each append. Bounds total growth to roughly
-        max_bytes * (max_files + 1). HMAC chaining (if ever enabled) resets at
-        each rotation boundary — acceptable; it is disabled live."""
+        max_bytes * (max_files + 1). The HMAC chain (if enabled) starts fresh in
+        the new current file — the signer's prev-hash is reset to GENESIS after
+        rotation, so verify_integrity() (which reads the current file from
+        genesis) stays valid instead of chaining across the rotation boundary
+        and failing on the first post-rotation entry."""
         try:
             if not self.path.exists() or self.path.stat().st_size < self._max_bytes:
                 return
@@ -81,6 +84,10 @@ class AuditLogger:
                 if src.exists():
                     src.rename(self.path.with_name(self.path.name + f".{i + 1}"))
             self.path.rename(self.path.with_name(self.path.name + ".1"))
+            if self._signer is not None:
+                # New file = new chain from genesis (the rotated .1 keeps its own
+                # self-consistent chain for offline verification).
+                self._signer.prev_hmac = GENESIS_HASH
             log.info("Rotated audit log at %d bytes", self._max_bytes)
         except OSError as e:
             log.error("Audit log rotation failed: %s", e)
@@ -128,6 +135,29 @@ class AuditLogger:
         """Set a callback to be invoked with each audit entry (for live WS events)."""
         self._event_callback = callback
 
+    async def _persist(self, entry: dict) -> None:
+        """Rotate, sign, append, and fan out one entry.
+
+        Rotation happens BEFORE signing so that when a rotation occurs the entry
+        being written becomes the first line of the fresh file and its
+        _prev_hmac is GENESIS (the signer is reset in _maybe_rotate). Signing
+        after rotation was the bug: the first post-rotation entry chained to the
+        old file and verify_integrity() failed."""
+        self._maybe_rotate()
+        if self._signer:
+            self._signer.sign(entry)
+        line = json.dumps(entry, default=str) + "\n"
+        try:
+            async with aiofiles.open(self.path, "a") as f:
+                await f.write(line)
+        except Exception as e:
+            log.error("Failed to write audit log: %s", e)
+        if self._event_callback:
+            try:
+                await self._event_callback(entry)
+            except Exception:
+                pass
+
     async def log_execution(
         self,
         *,
@@ -171,21 +201,7 @@ class AuditLogger:
             entry["risk_level"] = risk_level
         if risk_reason:
             entry["risk_reason"] = risk_reason
-        if self._signer:
-            self._signer.sign(entry)
-        line = json.dumps(entry, default=str) + "\n"
-        try:
-            self._maybe_rotate()
-            async with aiofiles.open(self.path, "a") as f:
-                await f.write(line)
-        except Exception as e:
-            log.error("Failed to write audit log: %s", e)
-
-        if self._event_callback:
-            try:
-                await self._event_callback(entry)
-            except Exception:
-                pass
+        await self._persist(entry)
 
     async def log_event(
         self,
@@ -214,20 +230,7 @@ class AuditLogger:
             entry["channel_id"] = channel_id
         if metadata:
             entry["metadata"] = metadata
-        if self._signer:
-            self._signer.sign(entry)
-        line = json.dumps(entry, default=str) + "\n"
-        try:
-            async with aiofiles.open(self.path, "a") as f:
-                await f.write(line)
-        except Exception as e:
-            log.error("Failed to write audit event: %s", e)
-
-        if self._event_callback:
-            try:
-                await self._event_callback(entry)
-            except Exception:
-                pass
+        await self._persist(entry)
 
     async def log_web_action(
         self,
@@ -264,20 +267,7 @@ class AuditLogger:
             entry["label"] = label
         if diff:
             entry["diff"] = diff
-        if self._signer:
-            self._signer.sign(entry)
-        line = json.dumps(entry, default=str) + "\n"
-        try:
-            async with aiofiles.open(self.path, "a") as f:
-                await f.write(line)
-        except Exception as e:
-            log.error("Failed to write web audit log: %s", e)
-
-        if self._event_callback:
-            try:
-                await self._event_callback(entry)
-            except Exception:
-                pass
+        await self._persist(entry)
 
     async def count_by_tool(self) -> dict[str, int]:
         """Return execution counts per tool name (most used first)."""
