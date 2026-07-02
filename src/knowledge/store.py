@@ -480,6 +480,21 @@ class KnowledgeStore:
             log.error("Failed to delete source '%s': %s", source, e)
         return 0
 
+    async def delete_source_async(self, source: str) -> int:
+        """Delete a source under the write lock, off the event loop.
+
+        delete_source() shares the single SQLite connection with ingest() but
+        took no _write_lock — interleaving a delete with an in-flight ingest
+        could commit half-written chunks. Callers in async contexts must use
+        this wrapper (it also moves the blocking DB work to a thread)."""
+        async with self._write_lock:
+            return await asyncio.to_thread(self.delete_source, source)
+
+    async def merge_sources_async(self, keep_source: str, remove_source: str) -> int:
+        """Merge sources under the write lock, off the event loop (see delete_source_async)."""
+        async with self._write_lock:
+            return await asyncio.to_thread(self.merge_sources, keep_source, remove_source)
+
     async def search_hybrid(
         self, query: str, embedder: LocalEmbedder | None = None, limit: int = 5,
     ) -> list[dict]:

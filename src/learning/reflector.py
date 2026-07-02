@@ -17,6 +17,17 @@ TextFn = Callable[[list[dict], str], Awaitable[str]]
 
 log = get_logger("learning")
 
+
+def _neg_iso(iso: str) -> float:
+    """Negative epoch seconds for an ISO timestamp — sorts newest-first when
+    used ascending. Missing/unparseable timestamps sort last (oldest)."""
+    if not iso:
+        return 0.0
+    try:
+        return -datetime.fromisoformat(iso).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
 # Content length policy. The soft limit is prompt guidance to the LLM; the
 # hard limit is enforced at storage time — but never as a silent chop.
 # Oversized content is clipped at a sentence boundary, suffixed with
@@ -193,6 +204,9 @@ class ConversationReflector:
         }
 
     def delete_entry(self, key: str) -> bool:
+        """Synchronous delete. Prefer delete_entry_async from async callers —
+        without the lock a delete racing an in-flight reflection is undone when
+        the reflection writes back its pre-delete snapshot."""
         data = self._load()
         entries = data.get("entries", [])
         before = len(entries)
@@ -202,7 +216,16 @@ class ConversationReflector:
             return True
         return False
 
+    async def delete_entry_async(self, key: str) -> bool:
+        """Delete an entry under the reflection lock, so it can't be resurrected
+        by a concurrent reflection/consolidation writing a stale snapshot."""
+        async with self._lock:
+            result = await asyncio.to_thread(self.delete_entry, key)
+        self.invalidate_cache()
+        return result
+
     def update_entry(self, key: str, content: str | None = None, category: str | None = None) -> dict | None:
+        """Synchronous update. Prefer update_entry_async from async callers."""
         data = self._load()
         for e in data.get("entries", []):
             if e.get("key") == key:
@@ -214,6 +237,15 @@ class ConversationReflector:
                 self._save(data)
                 return e
         return None
+
+    async def update_entry_async(
+        self, key: str, content: str | None = None, category: str | None = None,
+    ) -> dict | None:
+        """Update an entry under the reflection lock (see delete_entry_async)."""
+        async with self._lock:
+            result = await asyncio.to_thread(self.update_entry, key, content, category)
+        self.invalidate_cache()
+        return result
 
     # Injection selection caps, applied only when the corpus exceeds the
     # token budget. Corrections and the requester's preferences are pinned;
@@ -288,6 +320,15 @@ class ConversationReflector:
             selected = filtered
             selection_mode = "include_all"
             gated_records: list[dict] = []
+            # If we're over budget (e.g. a query-less caller with a big
+            # corpus), the trim order is priority then recency.
+            priority_order = sorted(
+                filtered,
+                key=lambda e: (
+                    self._INJECTION_PRIORITY.get(e.get("category", ""), 4),
+                    _neg_iso(e.get("updated_at", "")),
+                ),
+            )
         else:
             def entry_text(e: dict) -> str:
                 return " ".join([
@@ -312,6 +353,11 @@ class ConversationReflector:
             # Preserve original corpus order for stable prompts
             chosen = {id(e) for e in (*corrections, *preferences, *operational, *facts)}
             selected = [e for e in filtered if id(e) in chosen]
+            # Budget-trim order keeps the relevance ranking already computed:
+            # corrections, preferences, then operational/facts most relevant to
+            # the query. This is why the enforcement can't just re-sort by
+            # recency — it would drop the most relevant operational entry.
+            priority_order = [*corrections, *preferences, *operational, *facts]
             selection_mode = "gated"
             gated_records = []
             if trace is not None:
@@ -326,6 +372,13 @@ class ConversationReflector:
                 "Learned injection gated: %d/%d entries selected",
                 len(selected), len(filtered),
             )
+
+        # Hard token cap. Two paths could previously blow the nominal budget:
+        # a query-less caller took the include-all branch regardless of size,
+        # and the gated branch unioned up to 72 fixed top-K entries without a
+        # token re-check. Enforce the cap on the final selection either way,
+        # trimming along priority_order (lowest priority/relevance first).
+        selected = self._enforce_injection_budget(selected, priority_order)
 
         self._note_used(selected)
         lines = [fmt(e) for e in selected]
@@ -344,6 +397,36 @@ class ConversationReflector:
                 mode=selection_mode,
             )
         return section_text
+
+    # Priority order for trimming when the selection exceeds the token budget.
+    _INJECTION_PRIORITY = {"correction": 0, "preference": 1, "operational": 2, "fact": 3}
+
+    def _enforce_injection_budget(
+        self, selected: list[dict], priority_order: list[dict],
+    ) -> list[dict]:
+        """Trim *selected* to the injection token budget.
+
+        *priority_order* lists the same entries from most to least important
+        (corrections, preferences, then relevance-ranked operational/facts).
+        We keep the longest prefix of that order which fits the budget — but
+        always at least one entry, so a non-empty corpus never injects nothing.
+        The kept entries are returned in *selected*'s (corpus) order for
+        stable prompts."""
+        def cost(e: dict) -> int:
+            return len(f"- [{e.get('category', '')}] {e.get('content', '')}") // 4
+
+        if sum(cost(e) for e in selected) <= self._injection_token_budget:
+            return selected
+
+        kept: set[int] = set()
+        running = 0
+        for e in priority_order:
+            c = cost(e)
+            if running + c > self._injection_token_budget and kept:
+                break  # keep the first entry even if it alone exceeds budget
+            running += c
+            kept.add(id(e))
+        return [e for e in selected if id(e) in kept]
 
     _REFLECTION_CONTEXT_TOP_K = 30
 
@@ -764,14 +847,26 @@ class ConversationReflector:
         system_instruction = "You consolidate learned entries. Return only valid JSON array."
 
         def _fallback() -> list[dict]:
-            candidates.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
+            # Pin high-value, never-expire categories (corrections and
+            # preferences) so an LLM consolidation failure can't evict a long-
+            # standing correction in favor of recent operational trivia. Only
+            # the remaining categories compete for the leftover slots by recency.
+            pinned = [e for e in candidates
+                      if e.get("category") in ("correction", "preference")]
+            rest = [e for e in candidates
+                    if e.get("category") not in ("correction", "preference")]
+            rest.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
+            slots = max(0, target - len(pinned))
+            kept = pinned + rest[:slots]
             elapsed = _time.monotonic() - t0
             log.warning(
-                "Consolidation fallback: kept newest %d of %d candidates "
-                "(prompt was %d chars, elapsed %.1fs, %d damaged passed through)",
-                target, len(candidates), prompt_chars, elapsed, len(damaged),
+                "Consolidation fallback: kept %d (%d pinned corrections/prefs "
+                "+ %d newest of %d others; prompt %d chars, elapsed %.1fs, "
+                "%d damaged passed through)",
+                len(kept), len(pinned), min(slots, len(rest)), len(rest),
+                prompt_chars, elapsed, len(damaged),
             )
-            return candidates[:target] + damaged
+            return kept + damaged
 
         try:
             if not self._text_fn:
