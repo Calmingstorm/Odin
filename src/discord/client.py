@@ -36,6 +36,7 @@ from ..scheduler import Scheduler
 from ..sessions import SessionManager
 from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
 from ..tools import ToolExecutor, SkillManager, ToolResult, get_tool_definitions
+from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..search import LocalEmbedder, SessionVectorStore
 from ..permissions import PermissionManager
 from ..permissions.host_access import HostAccessManager
@@ -3430,6 +3431,9 @@ class OdinBot(commands.Bot):
                     elapsed_ms = tool_result.duration_ms or elapsed_ms
                     if tool_result.error and not error:
                         error = tool_result.error
+                    if not tool_result.ok and not error:
+                        error = "tool reported failure"
+                    result = self._ensure_failure_visible(result, tool_result.ok)
 
                 # Audit log — never crash tool execution on audit failure
                 try:
@@ -3616,6 +3620,19 @@ class OdinBot(commands.Bot):
             trace=trace,
         )
         return _cap_msg, False, True, tools_used_in_loop, False
+
+    @staticmethod
+    def _ensure_failure_visible(result_text: str, ok: bool) -> str:
+        """Make a structurally-failed tool result visible to the model.
+
+        execute() carries ok=False on ToolResult, but the model only sees
+        str(result) — the raw output. When that text lacks an error prefix
+        (e.g. run_command_multi's per-host markdown aggregate wrapping a
+        denial), the model reads a refused action as success. Prefix it.
+        """
+        if ok or result_text.lstrip().startswith(_ERROR_RESULT_PREFIXES):
+            return result_text
+        return f"Error (tool reported failure):\n{result_text}"
 
     @staticmethod
     def _detect_image_type(data: bytes) -> str | None:
@@ -4877,6 +4894,13 @@ class OdinBot(commands.Bot):
                 # Handle image block returns from analyze_image
                 if isinstance(raw, dict) and "__image_block__" in raw:
                     raw = f"[Image loaded: {raw.get('__prompt__', '')}]"
+
+                # Make structured failure visible (see _ensure_failure_visible)
+                # and propagate it into the audit error field.
+                if isinstance(raw, ToolResult):
+                    if not raw.ok and not error:
+                        error = raw.error or "tool reported failure"
+                    raw = self._ensure_failure_visible(str(raw), raw.ok)
 
                 result = truncate_tool_output(scrub_output_secrets(str(raw)))
 
