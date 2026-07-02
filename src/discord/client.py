@@ -5258,9 +5258,15 @@ class OdinBot(commands.Bot):
             # Validate URL scheme to prevent SSRF via file://, ftp://, etc.
             if not url.startswith(("http://", "https://")):
                 return "Only http:// and https:// URLs are supported."
+            # DNS-rebind-aware SSRF guard — scheme-only validation let this
+            # reach 169.254.169.254 / internal hosts.
+            from ..tools.url_safety import is_url_blocked
+            if is_url_blocked(url):
+                return ("URL blocked: targets a private, loopback, link-local, "
+                        "or cloud-metadata address (SSRF protection).")
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False) as resp:
                         if resp.status != 200:
                             return f"Failed to fetch image from URL (HTTP {resp.status})"
                         ct = resp.headers.get("Content-Type", "")

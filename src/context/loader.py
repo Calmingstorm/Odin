@@ -7,6 +7,12 @@ from ..odin_log import get_logger
 
 log = get_logger("context")
 
+# Per-file and total size caps. A context file is injected into EVERY LLM
+# request, so an oversized/binary file would silently bloat every prompt (or,
+# with the old unguarded read_text, crash boot on one undecodable byte).
+MAX_CONTEXT_FILE_BYTES = 256 * 1024      # 256 KB per file
+MAX_CONTEXT_TOTAL_BYTES = 1024 * 1024    # 1 MB total across all files
+
 SECRET_PATTERNS = [
     re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*\S+"),
     re.compile(r"(?i)(api[_-]?key|apikey)\s*[:=]\s*\S+"),
@@ -29,8 +35,32 @@ class ContextLoader:
             return self._context
 
         parts: list[str] = []
+        total = 0
         for md_file in sorted(self.directory.glob("*.md")):
-            content = md_file.read_text()
+            try:
+                size = md_file.stat().st_size
+            except OSError as e:
+                log.warning("Skipping context file %s (stat failed: %s)", md_file.name, e)
+                continue
+            if size > MAX_CONTEXT_FILE_BYTES:
+                log.warning(
+                    "Skipping context file %s: %d bytes exceeds per-file cap (%d)",
+                    md_file.name, size, MAX_CONTEXT_FILE_BYTES,
+                )
+                continue
+            if total + size > MAX_CONTEXT_TOTAL_BYTES:
+                log.warning(
+                    "Context total cap (%d bytes) reached; skipping remaining files from %s",
+                    MAX_CONTEXT_TOTAL_BYTES, md_file.name,
+                )
+                break
+            try:
+                # errors="replace": one undecodable byte must not crash boot.
+                content = md_file.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                log.warning("Skipping context file %s (read failed: %s)", md_file.name, e)
+                continue
+            total += size
             self._scan_secrets(md_file.name, content)
             parts.append(f"# {md_file.stem}\n\n{content}")
 

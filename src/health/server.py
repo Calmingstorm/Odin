@@ -48,6 +48,45 @@ AUTH_PUBLIC_EXACT = frozenset({"/api/auth/login"})
 _AUTH_SKIP_PREFIXES = AUTH_PUBLIC_PREFIXES
 _AUTH_SKIP_PATHS = AUTH_PUBLIC_EXACT
 
+# Control-plane prefixes that require the ADMIN tier for ANY method. These grant
+# privileges or reconfigure the bot (permission/host-access grants, config,
+# self-update, LLM/codex credentials, skills, tokens), so a non-admin scoped
+# token must never reach them. Enforced centrally by the admin middleware
+# because per-route _require_admin historically covered only a handful of the
+# ~80 mutating routes, leaving a self-escalation path.
+ADMIN_ONLY_PREFIXES = (
+    "/api/config", "/api/reload", "/api/setup",
+    "/api/permissions", "/api/host-access",
+    "/api/update", "/api/codex", "/api/llm",
+    "/api/ollama", "/api/kimi", "/api/skills",
+    "/api/mcp", "/api/tokens", "/api/personality",
+    "/api/tools/timeouts", "/api/pools",
+    "/api/outbound-webhooks", "/api/grafana-alerts", "/api/slack",
+)
+
+
+def _is_admin_only_path(path: str) -> bool:
+    return any(
+        path == prefix or path.startswith(prefix + "/")
+        for prefix in ADMIN_ONLY_PREFIXES
+    )
+
+
+def _client_ip(request: web.Request, trusted_proxies: tuple[str, ...] = ()) -> str:
+    """Resolve the real client IP for rate-limiting and audit.
+
+    Behind a reverse proxy every request's peer is the proxy, so without this
+    all clients collapse to one IP (one client could 429 everyone, and audit
+    records the proxy). Only honor X-Forwarded-For when the immediate peer is a
+    configured trusted proxy — otherwise a client could spoof the header."""
+    peer = request.remote or "unknown"
+    if trusted_proxies and peer in trusted_proxies:
+        fwd = request.headers.get("X-Forwarded-For", "")
+        if fwd:
+            # Left-most entry is the original client.
+            return fwd.split(",")[0].strip() or peer
+    return peer
+
 # Rate-limit: max requests per window per IP on /api/ routes
 _RATE_LIMIT_MAX = 120
 _RATE_LIMIT_WINDOW = 60  # seconds
@@ -238,8 +277,37 @@ def _make_auth_middleware(
     return auth_middleware
 
 
-def _make_rate_limit_middleware() -> web.middleware:
-    """Simple in-memory rate limiter for /api/ routes (per remote IP)."""
+def _make_admin_middleware(web_config) -> web.middleware:
+    """Enforce the admin tier on control-plane prefixes (ADMIN_ONLY_PREFIXES).
+
+    Runs after auth_middleware, so request._api_identity is already resolved.
+    Dev mode (no tokens configured) is unaffected — auth is disabled wholesale
+    there, matching auth_middleware's own behavior.
+    """
+    @web.middleware
+    async def admin_middleware(
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
+        if not _is_admin_only_path(request.path):
+            return await handler(request)
+        token = web_config.api_token
+        tm = request.app.get("token_manager")
+        has_any_token = (
+            token or getattr(web_config, "api_tokens", None) or (tm and tm.list_tokens())
+        )
+        if not has_any_token:
+            return await handler(request)  # dev mode
+        identity = getattr(request, "_api_identity", None)
+        if getattr(identity, "tier", None) != "admin":
+            return web.json_response({"error": "admin access required"}, status=403)
+        return await handler(request)
+
+    return admin_middleware
+
+
+def _make_rate_limit_middleware(trusted_proxies: tuple[str, ...] = ()) -> web.middleware:
+    """Simple in-memory rate limiter for /api/ routes (per client IP)."""
     # {ip: [timestamp, ...]}
     _buckets: dict[str, list[float]] = defaultdict(list)
     _last_eviction = [0.0]  # mutable container for nonlocal access
@@ -251,7 +319,7 @@ def _make_rate_limit_middleware() -> web.middleware:
     ) -> web.StreamResponse:
         if not request.path.startswith("/api/"):
             return await handler(request)
-        ip = request.remote or "unknown"
+        ip = _client_ip(request, trusted_proxies)
         now = time.monotonic()
         window_start = now - _RATE_LIMIT_WINDOW
         # Prune old entries for this IP
@@ -344,7 +412,7 @@ def _make_csrf_middleware() -> web.middleware:
     return csrf_middleware
 
 
-def _make_web_audit_middleware() -> web.middleware:
+def _make_web_audit_middleware(trusted_proxies: tuple[str, ...] = ()) -> web.middleware:
     """Log state-changing API requests to the audit log."""
 
     @web.middleware
@@ -370,7 +438,7 @@ def _make_web_audit_middleware() -> web.middleware:
                     method=request.method,
                     path=request.path,
                     status=response.status,
-                    ip=request.remote or "",
+                    ip=_client_ip(request, trusted_proxies),
                     execution_time_ms=elapsed_ms,
                     diff=config_diff,
                     user_id=getattr(identity, "user_id", "") if identity else "",
@@ -454,11 +522,13 @@ class HealthServer:
 
         middlewares = []
         if self._web_config.enabled:
+            trusted_proxies = tuple(getattr(self._web_config, "trusted_proxies", ()) or ())
             middlewares.append(_make_security_headers_middleware())
-            middlewares.append(_make_rate_limit_middleware())
+            middlewares.append(_make_rate_limit_middleware(trusted_proxies))
             middlewares.append(_make_csrf_middleware())
             middlewares.append(_make_auth_middleware(self._web_config, self._session_manager))
-            middlewares.append(_make_web_audit_middleware())
+            middlewares.append(_make_admin_middleware(self._web_config))
+            middlewares.append(_make_web_audit_middleware(trusted_proxies))
         self._app = web.Application(middlewares=middlewares, client_max_size=10 * 1024 * 1024)
         # Store session_manager on app for access by API routes
         self._app["session_manager"] = self._session_manager
@@ -586,9 +656,10 @@ class HealthServer:
     async def start(self) -> None:
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, "0.0.0.0", self.port)
+        bind_host = getattr(self._web_config, "host", "0.0.0.0") or "0.0.0.0"
+        site = web.TCPSite(self._runner, bind_host, self.port)
         await site.start()
-        log.info("Health server listening on port %d", self.port)
+        log.info("Health server listening on %s:%d", bind_host, self.port)
 
     async def stop(self) -> None:
         if self._slack_notifier:

@@ -31,6 +31,37 @@ def _is_ip_blocked(addr_str: str) -> bool:
 
 
 _METADATA_HOSTS = frozenset({"169.254.169.254", "metadata.google.internal"})
+_METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
+
+
+def is_metadata_url(url: str, resolve_dns: bool = True) -> bool:
+    """Return True if a URL targets a cloud-metadata endpoint.
+
+    Narrower than is_url_blocked: it does NOT block general private/loopback
+    addresses, so tools that legitimately probe internal infrastructure
+    (http_probe) still work, while the one target that is never legitimate —
+    the cloud-metadata service that hands out instance credentials — is blocked
+    even via DNS rebinding.
+    """
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+    except Exception:
+        return True
+    if not host:
+        return False
+    if host in _METADATA_HOSTS or host in _METADATA_IPS:
+        return True
+    if resolve_dns:
+        try:
+            resolved = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            for _f, _t, _p, _c, sockaddr in resolved:
+                if sockaddr[0] in _METADATA_IPS:
+                    log.warning("Metadata SSRF blocked: %s resolves to %s", host, sockaddr[0])
+                    return True
+        except (socket.gaierror, OSError):
+            return False
+    return False
 
 
 def _matches_allowlist(parsed, allowed_urls: list[str]) -> bool:

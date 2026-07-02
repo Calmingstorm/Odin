@@ -456,8 +456,19 @@ class WebConfig(BaseModel):
     enabled: bool = True
     api_token: str = ""
     api_tokens: list[ApiTokenIdentity] = Field(default_factory=list)
-    session_timeout_minutes: int = 0
+    # Sessions expire after this many minutes of the token's lifetime. 0 meant
+    # "never expire", so a leaked WebUI session id was valid forever; default to
+    # a bounded lifetime (set to 0 explicitly to opt back into no-expiry).
+    session_timeout_minutes: int = 720  # 12 hours
     port: int = 3000
+    # Bind address. Historically hardcoded 0.0.0.0 (exposed on LAN/Tailscale);
+    # now configurable so a deployment can bind localhost and front it with a
+    # reverse proxy.
+    host: str = "0.0.0.0"
+    # Trusted reverse-proxy IPs. When the request's peer is one of these, the
+    # left-most X-Forwarded-For entry is used as the client IP for rate-limiting
+    # and audit — otherwise all clients behind the proxy collapse to one IP.
+    trusted_proxies: list[str] = Field(default_factory=list)
 
     @field_validator("port")
     @classmethod
