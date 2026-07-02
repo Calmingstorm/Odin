@@ -765,6 +765,11 @@ def load_config(path: str | Path = "config.yml") -> Config:
             "It must contain a YAML mapping with at least a 'discord' section.\n"
             "See config.yml comments for examples."
         )
+    # Warn on unknown top-level keys. Pydantic silently drops unknown fields by
+    # default, so a typo like "sesions:" or "web_ui:" is ignored with no signal
+    # and the intended setting never applies. We warn rather than error
+    # (extra="forbid") so a slightly-ahead config can't hard-fail boot.
+    _warn_unknown_config_keys(data)
     try:
         return Config(**data)
     except Exception as exc:
@@ -772,3 +777,20 @@ def load_config(path: str | Path = "config.yml") -> Config:
             f"Config validation failed: {exc}\n"
             "Check config.yml values — numeric fields must be within valid ranges."
         ) from exc
+
+
+def _warn_unknown_config_keys(data: dict) -> None:
+    """Log a warning for top-level config keys the schema doesn't define."""
+    from ..odin_log import get_logger
+    known = set(Config.model_fields)
+    # Also accept field aliases if any are defined.
+    for f in Config.model_fields.values():
+        if getattr(f, "alias", None):
+            known.add(f.alias)
+    unknown = [k for k in data if k not in known]
+    if unknown:
+        get_logger("config").warning(
+            "Ignoring unknown config key(s): %s — check for typos "
+            "(known top-level sections: %s)",
+            ", ".join(sorted(unknown)), ", ".join(sorted(known)),
+        )

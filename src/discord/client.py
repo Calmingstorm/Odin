@@ -550,7 +550,17 @@ class OdinBot(commands.Bot):
         # voice/browser/comfyui). Always on; subsystems call record_success/
         # record_failure as they operate.
         from ..health.subsystem_guard import SubsystemGuard
-        self.subsystem_guard = SubsystemGuard()
+        # Pass the configured thresholds — the guard was built with no args, so
+        # graceful_degradation.degraded_threshold / unavailable_threshold in
+        # config were silently ignored (always the module defaults).
+        _gd = getattr(config, "graceful_degradation", None)
+        if _gd is not None:
+            self.subsystem_guard = SubsystemGuard(
+                degraded_threshold=_gd.degraded_threshold,
+                unavailable_threshold=_gd.unavailable_threshold,
+            )
+        else:
+            self.subsystem_guard = SubsystemGuard()
         for _name in ("llm_codex", "llm_ollama", "llm_kimi", "codex", "ssh", "knowledge", "voice", "browser", "comfyui"):
             self.subsystem_guard.register(_name)
 
@@ -1249,9 +1259,16 @@ class OdinBot(commands.Bot):
         for channel_id in expired_channels:
             del self._recent_actions[channel_id]
 
-        # Clean up _channel_locks for channels no longer in active sessions
+        # Clean up _channel_locks for channels no longer in active sessions.
+        # A lock that is currently HELD must not be deleted: an in-flight
+        # request in a channel whose session was just reset/purged still owns
+        # its lock, and dropping it lets the next message setdefault() a fresh
+        # lock, so two handlers run concurrently in the same channel.
         active_channels = set(self.sessions.ids())
-        stale_locks = [cid for cid in self._channel_locks if cid not in active_channels]
+        stale_locks = [
+            cid for cid, lock in self._channel_locks.items()
+            if cid not in active_channels and not lock.locked()
+        ]
         for cid in stale_locks:
             del self._channel_locks[cid]
 
@@ -2145,8 +2162,13 @@ class OdinBot(commands.Bot):
             self._processed_messages.popitem(last=False)
 
         # Buffer rapid-fire bot messages (e.g. code blocks split across messages)
-        # Wait 2s after each bot message to see if more follow, then process all at once
-        if message.author.bot and self.config.discord.respond_to_bots:
+        # Wait 2s after each bot message to see if more follow, then process all
+        # at once. Use the per-channel override (not the raw global flag) so this
+        # agrees with the mention gate above — otherwise a channel that opts out
+        # of bot replies still gets its bot messages buffered and answered.
+        if message.author.bot and self.channel_config.should_respond_to_bots(
+            guild_id, channel_id_str, self.config.discord.respond_to_bots,
+        ):
             buf_key = (str(message.channel.id), str(message.author.id))
             if buf_key not in self._bot_msg_buffer:
                 self._bot_msg_buffer[buf_key] = []
@@ -2211,21 +2233,33 @@ class OdinBot(commands.Bot):
         if not content:
             content = "(see attached image)"
 
-        # Check for secrets, scrub from history and delete the message
+        # Check for secrets, scrub from history and delete the message.
         if self._check_for_secrets(content):
             self.sessions.scrub_secrets(str(message.channel.id), content)
+            # Deletion can fail for more than just Forbidden — the message may
+            # already be gone (NotFound) or we may be rate-limited
+            # (HTTPException). Catching only Forbidden let those propagate out
+            # of on_message, so the user never even got the scrub notice.
+            deleted = False
             try:
                 await message.delete()
+                deleted = True
+            except discord.NotFound:
+                deleted = True  # already gone — treat as deleted
+            except (discord.Forbidden, discord.HTTPException) as e:
+                log.warning("Could not delete secret-bearing message: %s", e)
+            note = (
+                "I've deleted it and scrubbed it from my history." if deleted else
+                "I've scrubbed it from my history. I couldn't delete the "
+                "message — please delete it manually."
+            )
+            try:
                 await message.channel.send(
-                    f"{message.author.mention} I detected a secret/credential in your message. "
-                    "I've deleted it and scrubbed it from my history."
+                    f"{message.author.mention} I detected a secret/credential "
+                    f"in your message. {note}"
                 )
-            except discord.Forbidden:
-                await message.channel.send(
-                    f"{message.author.mention} I detected a secret/credential in your message. "
-                    "I've scrubbed it from my history. "
-                    "I couldn't delete the message — please delete it manually."
-                )
+            except discord.HTTPException:
+                pass  # best-effort notice; the scrub already happened
             return
 
         # Voice commands via natural language (short, direct commands only)
@@ -2529,6 +2563,15 @@ class OdinBot(commands.Bot):
             await self._send_with_retry(message, scrub_response_secrets(f"Something went wrong: {e}"))
             self.sessions.remove_last_message(channel_id, "user")
             return
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so it bypasses the Exception
+            # handlers here — without this the just-appended user turn is left
+            # orphaned in history (no assistant reply). Clean up synchronously
+            # (no awaits, which could re-raise mid-cancellation) and re-raise so
+            # the cancellation still propagates.
+            self._pending_files.pop(channel_id, None)
+            self.sessions.remove_last_message(channel_id, "user")
+            raise
         except Exception as e:
             await self._set_status(None, task_end=True)
             log.error("Unexpected error processing message: %s", e, exc_info=True)
@@ -2986,7 +3029,11 @@ class OdinBot(commands.Bot):
                         ),
                     })
                     continue
-            if not llm_resp.is_tool_use:
+            # Gate on actual parsed tool calls, not is_tool_use (which is also
+            # true when stop_reason=="tool_use" with zero calls). The sibling
+            # loop already uses this stricter form; matching it prevents an
+            # empty-tool_use response from skipping finalization and re-looping.
+            if not llm_resp.tool_calls:
                 if _cancel.is_set():
                     return _stopped("before_validation")
                 # Enforce pending validation before allowing final response
@@ -4727,6 +4774,7 @@ class OdinBot(commands.Bot):
             return outcome_text
 
         final_text = ""
+        completed_naturally = False  # True only when a tool-free turn ended the loop
         tool_timeout = self.config.tools.tool_timeout_seconds
         channel_id_str = str(getattr(channel, "id", ""))
         loop_cap = self.config.tools.max_tool_iterations_loop
@@ -4762,6 +4810,7 @@ class OdinBot(commands.Bot):
                 final_text = response.text
 
             if not response.tool_calls:
+                completed_naturally = True
                 break
 
             tool_calls_made += len(response.tool_calls)
@@ -4886,8 +4935,14 @@ class OdinBot(commands.Bot):
                     tool_results, _result_store_cap,
                 )
 
-        # Scrub final text; posting is handled by _post_response in LoopManager
-        if final_text:
+        # Scrub final text; posting is handled by _post_response in LoopManager.
+        # Only treat final_text as a clean success when the loop ended NATURALLY
+        # (a tool-free response). If we fell out by exhausting the cap, any
+        # final_text is stale pre-tool text from some earlier iteration —
+        # returning it as is_error=False would silently hide the cap hit (the
+        # cap-warning path below was unreachable whenever any iteration produced
+        # text).
+        if final_text and completed_naturally:
             final_text = scrub_output_secrets(final_text)
             if len(final_text) > DISCORD_MAX_LEN:
                 final_text = final_text[:DISCORD_MAX_LEN - 50] + "\n... (truncated)"
@@ -4904,20 +4959,23 @@ class OdinBot(commands.Bot):
                 error_text=_first_err["result"] if _first_err else "",
             )
 
-        # No final text produced. If we exhausted the cap without Codex ever
-        # returning a tool-free response, say so — the previous "(no response)"
-        # silently hid the fact that the loop did real work but ran out of
-        # budget. Tell the operator what happened and how to tune it.
-        if tool_calls_made >= loop_cap:
+        # Cap exhausted without a tool-free response. Surface it (optionally with
+        # the stale partial text) instead of hiding the truncation.
+        if tool_calls_made >= loop_cap or not completed_naturally:
             log.warning(
-                "Loop tool-iteration cap hit (%d) after %d tool calls; no final summary from Codex",
+                "Loop tool-iteration cap hit (%d) after %d tool calls; no tool-free summary from Codex",
                 loop_cap, tool_calls_made,
             )
+            _partial = ""
+            if final_text:
+                _partial = "\n\nLast partial output before the cap:\n" + scrub_output_secrets(
+                    final_text[:1000],
+                )
             return await _finish(
                 f"Iteration hit the loop tool-iteration cap ({loop_cap}) "
-                f"after {tool_calls_made} tool calls. No final summary was "
-                f"produced by Codex. Raise `tools.max_tool_iterations_loop` "
-                f"in config (or via the web UI) if this happens repeatedly.",
+                f"after {tool_calls_made} tool calls without a final summary. "
+                f"Raise `tools.max_tool_iterations_loop` in config (or via the "
+                f"web UI) if this happens repeatedly." + _partial,
                 is_error=True, failure_class="cancelled",
                 error_text=f"loop iteration cap {loop_cap} reached",
             )
