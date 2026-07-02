@@ -57,8 +57,25 @@ _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 _URL_SKILL_DENIED_IMPORTS = frozenset({
     "os", "subprocess", "socket", "sys", "ctypes", "shutil",
     "multiprocessing", "importlib", "pty", "fcntl", "resource", "signal",
+    # Added: low-level / interpreter-escape modules the original list missed
+    # (e.g. `import posix; posix.system(...)`, `runpy.run_path`, pickle/marshal
+    # code execution, pdb shell-out).
+    "posix", "nt", "builtins", "runpy", "pdb", "pickle", "marshal",
+    "code", "codeop", "gc", "cProfile", "commands", "popen2",
 })
 _URL_SKILL_DENIED_CALLS = frozenset({"eval", "exec", "compile", "__import__", "open"})
+# Attribute-form calls a URL skill must not make — catches things the bare-Name
+# check missed, e.g. `builtins.__import__("os")`, `x.system(...)`, `y.popen(...)`.
+_URL_SKILL_DENIED_ATTR_CALLS = frozenset({
+    "system", "popen", "popen2", "popen3", "spawn", "spawnl", "spawnv",
+    "execv", "execve", "execl", "fork", "__import__", "run_path", "run_module",
+    "loads", "load",  # pickle/marshal deserialization
+})
+# Dunder escape hatches (sandbox breakouts) denied anywhere in URL skills.
+_URL_SKILL_DENIED_DUNDERS = frozenset({
+    "__import__", "__builtins__", "__globals__", "__subclasses__",
+    "__bases__", "__mro__", "__code__", "__loader__",
+})
 
 
 def _scan_url_skill_ast(code: str) -> list[str]:
@@ -76,9 +93,16 @@ def _scan_url_skill_ast(code: str) -> list[str]:
         elif isinstance(node, ast.ImportFrom):
             if (node.module or "").split(".")[0] in _URL_SKILL_DENIED_IMPORTS:
                 violations.add(f"from {node.module} import ...")
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id in _URL_SKILL_DENIED_CALLS:
-                violations.add(f"{node.func.id}()")
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in _URL_SKILL_DENIED_CALLS:
+                violations.add(f"{func.id}()")
+            elif isinstance(func, ast.Attribute) and func.attr in _URL_SKILL_DENIED_ATTR_CALLS:
+                violations.add(f".{func.attr}()")
+        elif isinstance(node, ast.Attribute) and node.attr in _URL_SKILL_DENIED_DUNDERS:
+            violations.add(f".{node.attr}")
+        elif isinstance(node, ast.Name) and node.id in _URL_SKILL_DENIED_DUNDERS:
+            violations.add(node.id)
     return sorted(violations)
 
 
@@ -91,6 +115,41 @@ def _parse_package_name(spec: str) -> str:
     base = spec.strip().split("[")[0]
     m = _PACKAGE_NAME_RE.match(base)
     return m.group(1) if m else ""
+
+
+# Version-specifier operators allowed after a package name/extras.
+_DEP_VERSION_RE = re.compile(r"^(===|==|~=|!=|<=|>=|<|>)?\s*[A-Za-z0-9_.*+!-]*$")
+
+
+def is_safe_dependency_spec(spec: str) -> bool:
+    """Reject pip specs that let a skill run arbitrary code at install time.
+
+    A PEP 508 direct reference (``pkg @ https://attacker/x.tar.gz``), a VCS URL
+    (``git+https://...``), a bare URL, or a local path all make pip build an
+    sdist and execute the attacker's setup.py as the bot user. Only allow
+    ``name[extras]<version-specifier>`` from a package index.
+    """
+    s = spec.strip()
+    if not s:
+        return False
+    # Direct references, URLs, VCS, path installs, env markers, shell metachars.
+    lowered = s.lower()
+    if (
+        "@" in s
+        or "://" in s
+        or ";" in s          # environment markers / command chaining
+        or s.startswith("-")  # pip options (-e, --index-url, etc.)
+        or "/" in s or "\\" in s
+        or any(lowered.startswith(v + "+") for v in ("git", "hg", "svn", "bzr"))
+        or any(c.isspace() for c in s)
+    ):
+        return False
+    name = _parse_package_name(s)
+    if not name:
+        return False
+    # Whatever follows the name[extras] must be a plain version specifier.
+    remainder = s.split("]", 1)[1] if "[" in s and "]" in s else s[len(name):]
+    return bool(_DEP_VERSION_RE.match(remainder.strip()))
 
 
 def _is_package_installed(name: str) -> bool:
@@ -143,6 +202,30 @@ def _extract_dependencies_from_source(source: str) -> list[str]:
     return []
 
 
+def _extract_skill_name_from_source(source: str) -> str:
+    """Statically read SKILL_DEFINITION['name'] without executing the module.
+
+    install_skill used to exec() URL-sourced code just to read the name, which
+    runs any module-level payload before the file is even persisted. The name
+    is a literal, so ast.literal_eval gets it without execution."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "SKILL_DEFINITION":
+                    try:
+                        value = ast.literal_eval(node.value)
+                    except (ValueError, TypeError):
+                        return ""
+                    if isinstance(value, dict):
+                        name = value.get("name", "")
+                        return name if isinstance(name, str) else ""
+    return ""
+
+
 def resolve_dependencies(deps: list[str]) -> tuple[list[str], list[str], list["SkillDiagnostic"]]:
     """Resolve skill pip dependencies.
 
@@ -164,6 +247,16 @@ def resolve_dependencies(deps: list[str]) -> tuple[list[str], list[str], list["S
     to_install: list[str] = []
 
     for spec in deps:
+        # Block install-time RCE via direct-reference / URL / VCS / path specs
+        # BEFORE anything reaches pip.
+        if not is_safe_dependency_spec(spec):
+            diagnostics.append(SkillDiagnostic(
+                "error",
+                f"Refused unsafe dependency spec {spec!r}: only plain "
+                "'name[extras]<version>' from a package index is allowed "
+                "(no URLs, @ direct references, VCS, or local paths).",
+            ))
+            return [], [], diagnostics
         name = _parse_package_name(spec)
         if not name:
             diagnostics.append(SkillDiagnostic("warn", f"Invalid dependency spec: {spec!r}"))
@@ -1059,16 +1152,11 @@ class SkillManager:
             url, hashlib.sha256(code.encode()).hexdigest()[:16],
         )
 
-        # Extract skill name from the code
-        ns: dict[str, Any] = {}
-        try:
-            exec(code, ns)  # noqa: S102
-        except Exception as e:
-            return f"Skill code execution error: {e}"
-        definition = ns.get("SKILL_DEFINITION", {})
-        name = definition.get("name", "")
-        if not name or not isinstance(name, str):
-            return "Skill code missing SKILL_DEFINITION['name']."
+        # Extract skill name STATICALLY — never exec URL code just to read a
+        # literal (that would run any module-level payload pre-persist).
+        name = _extract_skill_name_from_source(code)
+        if not name:
+            return "Skill code missing a static SKILL_DEFINITION['name']."
 
         # Create the skill (handles name validation, duplicate checks, loading)
         return self.create_skill(name, code)

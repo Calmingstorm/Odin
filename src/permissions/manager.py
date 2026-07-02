@@ -15,8 +15,11 @@ _request_tier: contextvars.ContextVar[str | None] = contextvars.ContextVar("_req
 
 # Tools available to the "user" tier — read-only monitoring and search.
 # Everything else is admin-only.
+# NOTE: run_command was removed — it is arbitrary shell execution, not
+# "read-only monitoring", and it sat here under that comment. With the RBAC
+# gate now wired into ToolExecutor, leaving it would grant every user-tier
+# caller a shell (subject to host_access/governor, but still).
 USER_TIER_TOOLS = frozenset({
-    "run_command",
     "search_history",
     "search_knowledge",
     "web_search",

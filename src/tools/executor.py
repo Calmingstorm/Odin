@@ -48,6 +48,15 @@ log = get_logger("tools")
 # oldest-by-write notes are evicted past the cap.
 MEMORY_MAX_KEYS_PER_SECTION = 200
 
+# Prefixes that mark a tool result string as a failure. A governor block
+# ("Blocked [risk]: ...") and a host-access denial ("Unknown or disallowed
+# host: ...") were previously NOT recognized, so a refused action was reported
+# to the LLM and audit log as ok=True — a refused command looked successful.
+_ERROR_RESULT_PREFIXES = (
+    "Error", "Command failed", "Script failed",
+    "Blocked", "Unknown or disallowed host",
+)
+
 # Request-scoped caller identity, backed by contextvars. asyncio gives each
 # message-handling task (and each gather()-wrapped tool call) its own context
 # copy, so these are isolated across concurrent channels/requests. This replaces
@@ -229,7 +238,7 @@ class ToolExecutor:
         else:
             raw_result = raw
             exit_code = None
-            is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
+            is_error = isinstance(raw_result, str) and raw_result.startswith(_ERROR_RESULT_PREFIXES)
 
         if self._recovery_enabled:
             category = self._check_recoverable(raw_result)
@@ -269,7 +278,7 @@ class ToolExecutor:
                         self.recovery_stats.record_failure(tool_name, category, snippet)
                     else:
                         self.recovery_stats.record_success(tool_name, category, snippet)
-                        is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
+                        is_error = isinstance(raw_result, str) and raw_result.startswith(_ERROR_RESULT_PREFIXES)
 
         mutation_detected = False
         mutation_reason = ""
@@ -623,6 +632,13 @@ class ToolExecutor:
         if not host:
             return "Error: 'host' is required for write_file."
         safe_path = shlex.quote(path)
+        # Govern the write before executing — write_file reaches the filesystem
+        # via _run_on_host, which does NOT itself govern. Check a representative
+        # redirect-to-path command so policy (e.g. writes to sensitive targets)
+        # applies here as it does for run_command.
+        allowed, denial, _ = self._govern_command(f"write_file > {safe_path}", host)
+        if not allowed:
+            return denial
         # Base64-encode content to avoid shell injection via heredoc delimiter
         encoded = base64.b64encode(content.encode()).decode()
         cmd = f"mkdir -p $(dirname {safe_path}) && echo '{encoded}' | base64 -d > {safe_path}"
@@ -868,6 +884,12 @@ class ToolExecutor:
                 return "pid is required for write action."
             if not text:
                 return "input_text is required for write action."
+            # Writing to a managed process's stdin can drive an interactive
+            # shell — govern the input as a command so a `rm -rf /`-class line
+            # is caught, matching run_command.
+            allowed, denial, _ = self._govern_command(text)
+            if not allowed:
+                return denial
             return await registry.write(int(pid), text)
 
         elif action == "kill":
@@ -1717,7 +1739,10 @@ class ToolExecutor:
         subject = str(inp.get("subject", ""))
         body = str(inp.get("body", ""))
         try:
-            result = send_email(
+            # smtplib blocks; run it off the event loop so a slow mail server
+            # can't stall every other channel/task.
+            result = await asyncio.to_thread(
+                send_email,
                 smtp_host=cfg.smtp.host,
                 smtp_port=cfg.smtp.port,
                 username=cfg.smtp.username,
@@ -1758,7 +1783,8 @@ class ToolExecutor:
             return "Error: 'query' is required"
         limit = max(1, min(int(inp.get("limit", 20)), cfg.max_results))
         try:
-            results = search_email(
+            results = await asyncio.to_thread(
+                search_email,
                 imap_host=cfg.imap.host,
                 imap_port=cfg.imap.port,
                 username=cfg.imap.username,
@@ -1789,7 +1815,8 @@ class ToolExecutor:
         if not uid:
             return "Error: 'uid' is required"
         try:
-            result = read_email(
+            result = await asyncio.to_thread(
+                read_email,
                 imap_host=cfg.imap.host,
                 imap_port=cfg.imap.port,
                 username=cfg.imap.username,
@@ -1823,7 +1850,8 @@ class ToolExecutor:
             return "Error: email tools are not configured (email.enabled is false)"
         limit = max(1, min(int(inp.get("limit", 10)), cfg.max_results))
         try:
-            results = list_recent(
+            results = await asyncio.to_thread(
+                list_recent,
                 imap_host=cfg.imap.host,
                 imap_port=cfg.imap.port,
                 username=cfg.imap.username,

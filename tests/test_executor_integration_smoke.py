@@ -28,7 +28,13 @@ def _make_bot() -> OdinBot:
     still gets wired (tool_executor, sessions, scheduler, agents, etc.),
     which is what we want to validate.
     """
-    cfg = Config(discord={"token": "smoke-test-token"})
+    # default_tier="admin" mirrors the live deployment. The RBAC gate is now
+    # wired into ToolExecutor (previously a no-op), so without this the smoke
+    # tests would be denied admin-tier tools like invoke_skill.
+    cfg = Config(
+        discord={"token": "smoke-test-token"},
+        permissions={"default_tier": "admin"},
+    )
     return OdinBot(cfg)
 
 
