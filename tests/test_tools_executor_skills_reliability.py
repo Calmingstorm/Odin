@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.tools.executor import _ERROR_RESULT_PREFIXES
+from src.tools.executor import _ERROR_RESULT_PREFIXES, ToolExecutor
 from src.tools.git_ops import build_git_command
 from src.tools.recovery import UNSAFE_TO_RETRY
 from src.permissions.manager import USER_TIER_TOOLS
@@ -44,6 +44,38 @@ def test_denials_and_errors_are_error_prefixed(result):
 
 def test_success_not_error_prefixed():
     assert not "ok, done".startswith(_ERROR_RESULT_PREFIXES)
+
+
+# ---------------------------------------------------------------------------
+# run_command_multi reports preflight/host denials as errors (Odin PR#128)
+# ---------------------------------------------------------------------------
+
+async def test_run_command_multi_unknown_host_is_error():
+    from src.config.schema import ToolsConfig
+    exe = ToolExecutor(config=ToolsConfig())
+    result = await exe._handle_run_command_multi(
+        {"hosts": ["missing"], "command": "echo hi"},
+    )
+    # Returns (aggregate, exit_code); an unknown host makes it non-zero so
+    # execute() classifies it ok=False (the markdown-wrapped denial would
+    # otherwise slip past the string-prefix check).
+    text, exit_code = result
+    assert exit_code == 1
+    assert "Unknown or disallowed host" in text
+
+
+async def test_run_command_multi_all_success_is_ok():
+    from unittest.mock import AsyncMock
+    from src.config.schema import ToolsConfig
+    exe = ToolExecutor(config=ToolsConfig())
+    exe.config.hosts = {
+        "h1": type("H", (), {"address": "localhost", "ssh_user": "root", "os": "linux"})(),
+    }
+    exe._run_on_host = AsyncMock(return_value=("output", 0))
+    text, exit_code = await exe._handle_run_command_multi(
+        {"hosts": ["h1"], "command": "uptime"},
+    )
+    assert exit_code == 0  # clean run → ok
 
 
 # ---------------------------------------------------------------------------

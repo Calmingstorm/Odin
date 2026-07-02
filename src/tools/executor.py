@@ -646,7 +646,7 @@ class ToolExecutor:
 
     # --- Multi-host tools ---
 
-    async def _handle_run_command_multi(self, inp: dict) -> str:
+    async def _handle_run_command_multi(self, inp: dict) -> str | tuple[str, int]:
         hosts = inp["hosts"]
         command = inp["command"]
 
@@ -670,23 +670,40 @@ class ToolExecutor:
             else:
                 allowed_hosts.append(h)
 
-        async def _run_one(alias: str) -> str:
+        async def _run_one(alias: str) -> tuple[str, bool]:
             raw = await self._run_on_host(alias, command)
-            text = raw[0] if isinstance(raw, tuple) else raw
+            if isinstance(raw, tuple):
+                text, code = raw[0], raw[1]
+                host_err = code != 0
+            else:
+                text = raw
+                # e.g. "Unknown or disallowed host: ..." / "Command failed ..."
+                host_err = isinstance(raw, str) and raw.startswith(_ERROR_RESULT_PREFIXES)
             text = _truncate_lines(text)
-            return f"### {alias}\n```\n{text.strip()}\n```"
+            return f"### {alias}\n```\n{text.strip()}\n```", host_err
 
         tasks = [_run_one(h) for h in allowed_hosts]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         parts = []
+        any_run_error = False
         for h, r in zip(allowed_hosts, results):
             if isinstance(r, Exception):
                 parts.append(f"### {h}\n```\nError: {r}\n```")
+                any_run_error = True
             else:
-                parts.append(r)
+                markdown, host_err = r
+                parts.append(markdown)
+                any_run_error = any_run_error or host_err
         for h, denial in blocked_hosts:
             parts.append(f"### {h}\n```\n{denial}\n```")
-        return "\n\n".join(parts)
+        aggregate = "\n\n".join(parts)
+        # Return a non-zero exit code when any host was preflight-denied
+        # (host-access or governor), any host errored, or nothing ran. The
+        # aggregate wraps per-host denials in markdown sections, so a
+        # string-prefix check in execute() would miss them and report a refused
+        # action as ok=True.
+        exit_code = 1 if (blocked_hosts or any_run_error or not allowed_hosts) else 0
+        return aggregate, exit_code
 
     # --- Browser tools (text-returning, screenshot handled in client.py) ---
 

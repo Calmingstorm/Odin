@@ -797,8 +797,12 @@ class TestInvokeSkillTool:
             "hosts": ["dev", "prod"],
             "command": "systemctl restart nginx",
         })
-        assert "ok" in result
-        assert "strict" in result
+        # Now returns (aggregate, exit_code); prod is governor-denied on the
+        # strict host, so the aggregate is a non-zero (error) result.
+        text, exit_code = result
+        assert "ok" in text
+        assert "strict" in text
+        assert exit_code == 1  # a host was denied → not ok
         exe._run_on_host.assert_called_once_with("dev", "systemctl restart nginx")
 
     @pytest.mark.asyncio
