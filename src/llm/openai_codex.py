@@ -726,14 +726,17 @@ class CodexChatClient:
                         call_id = item.get("call_id", "")
                         if not any(tc.id == call_id for tc in tool_calls):
                             args_str = item.get("arguments", "")
+                            parse_error = None
                             try:
                                 parsed_args = json.loads(args_str) if args_str else {}
                             except json.JSONDecodeError:
                                 parsed_args = {}
+                                parse_error = f"malformed tool arguments (invalid JSON): {args_str[:200]}"
                             tool_calls.append(ToolCall(
                                 id=call_id,
                                 name=item.get("name", ""),
                                 input=parsed_args,
+                                parse_error=parse_error,
                             ))
 
         text = "".join(text_parts)

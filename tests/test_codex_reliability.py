@@ -501,6 +501,38 @@ async def test_malformed_tool_args_set_parse_error():
     assert "malformed tool arguments" in tc.parse_error
 
 
+async def test_malformed_tool_args_in_completed_fallback_set_parse_error():
+    """The response.completed fallback path (used when arguments.done/output_item.done
+    never arrived) must also flag malformed JSON instead of coercing to {}."""
+    client = _client()
+    resp = FakeResp(200, sse_lines=_sse([
+        {"type": "response.completed", "response": {"output": [
+            {"type": "function_call", "call_id": "c9", "name": "run_command",
+             "arguments": '{"command": "ls'},  # truncated / invalid JSON
+        ]}},
+    ]))
+    result = await client._read_tool_stream(resp)
+    assert len(result.tool_calls) == 1
+    tc = result.tool_calls[0]
+    assert tc.input == {}
+    assert tc.parse_error is not None
+    assert "malformed tool arguments" in tc.parse_error
+
+
+async def test_valid_tool_args_in_completed_fallback_have_no_parse_error():
+    client = _client()
+    resp = FakeResp(200, sse_lines=_sse([
+        {"type": "response.completed", "response": {"output": [
+            {"type": "function_call", "call_id": "c9", "name": "run_command",
+             "arguments": '{"command": "ls"}'},
+        ]}},
+    ]))
+    result = await client._read_tool_stream(resp)
+    tc = result.tool_calls[0]
+    assert tc.input == {"command": "ls"}
+    assert tc.parse_error is None
+
+
 async def test_valid_tool_args_have_no_parse_error():
     client = _client()
     resp = FakeResp(200, sse_lines=_sse([
