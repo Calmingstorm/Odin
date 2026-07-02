@@ -84,6 +84,26 @@ def test_save_all_keeps_only_failed_dirty(tmp_path, monkeypatch):
     assert mgr._dirty == {"bad"}
 
 
+def test_save_all_remarks_previously_clean_session_on_failure(tmp_path, monkeypatch):
+    """A session already clean before save_all() must be re-marked dirty if its
+    shutdown write fails (Odin's PR#125 blocker)."""
+    mgr = _mgr(tmp_path)
+    mgr.add_message("bad", "user", "x", user_id="u1")
+    mgr.save()                      # 'bad' now clean
+    assert "bad" not in mgr._dirty
+
+    real_write = Path.write_text
+
+    def _fail_bad(self, *a, **k):
+        if "bad" in self.name:
+            raise OSError("disk full")
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", _fail_bad)
+    mgr.save_all()
+    assert mgr._dirty == {"bad"}
+
+
 # ---------------------------------------------------------------------------
 # 2.10 — atomic archive + restore fallback
 # ---------------------------------------------------------------------------
@@ -200,6 +220,25 @@ async def test_search_excludes_reset_content(tmp_path):
     mgr._reset_epochs["c9"] = 150.0
     hits_after = await mgr.search_history("banana", channel_id="c9")
     assert not any("banana" in h["content"] for h in hits_after)
+
+
+async def test_search_excludes_reset_content_from_channel_logs(tmp_path):
+    """Reset content must not resurface via the Step-4 channel-log fallback
+    either (Odin's PR#125 blocker)."""
+    mgr = _mgr(tmp_path)
+
+    class _FakeLogger:
+        def search(self, query, limit):
+            return [{
+                "type": "user", "content": "banana old log",
+                "timestamp": 100.0, "channel_id": "c9", "user_id": "u",
+            }]
+
+    mgr._channel_logger = _FakeLogger()
+    mgr._reset_epochs["c9"] = 150.0
+
+    hits = await mgr.search_history("banana", channel_id="c9")
+    assert not any("banana" in h.get("content", "") for h in hits)
 
 
 # ---------------------------------------------------------------------------

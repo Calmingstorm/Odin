@@ -1427,9 +1427,13 @@ class SessionManager:
                     ts = cr.get("timestamp", 0)
                     if not _ts_ok(ts):
                         continue
-                    if channel_id and cr.get("channel_id", "") != channel_id:
+                    cr_cid = cr.get("channel_id", "")
+                    if channel_id and cr_cid != channel_id:
                         continue
-                    key = (cr.get("channel_id", ""), ts)
+                    # Reset content stays purged from channel-log search too.
+                    if ts <= self._reset_epochs.get(cr_cid, 0.0):
+                        continue
+                    key = (cr_cid, ts)
                     if key not in seen:
                         results.append(cr)
                         seen.add(key)
@@ -1523,9 +1527,11 @@ class SessionManager:
             except Exception as e:
                 log.error("Failed to save session %s during save_all: %s", cid, e)
                 failed.add(cid)
-        # Keep any channel that failed to write marked dirty so a later save
-        # can retry it, rather than dropping its changes.
-        self._dirty = {cid for cid in self._dirty if cid in failed}
+        # After attempting every session, exactly the failed ones remain dirty
+        # so a later save retries them. Assigning the failed set directly (vs
+        # intersecting the old dirty set) also re-marks a session that was
+        # already clean before save_all but whose shutdown write just failed.
+        self._dirty = failed
 
     @staticmethod
     def _session_from_dict(data: dict) -> Session:
