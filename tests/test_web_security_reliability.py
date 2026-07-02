@@ -160,6 +160,27 @@ def test_http_probe_allows_internal_target():
     assert "curl" in cmd and "192.168.1.13" in cmd
 
 
+def test_http_probe_sinkholes_metadata_on_redirect():
+    # Following redirects sinkholes metadata endpoints so a public URL that
+    # 302s into 169.254.169.254 can't reach the metadata service.
+    cmd = build_http_probe_command({
+        "url": "https://example.com/", "follow_redirects": True,
+    })
+    assert "-L" in cmd
+    assert "--connect-to" in cmd
+    assert "169.254.169.254:80:127.0.0.1:9" in cmd
+    assert "169.254.169.254:443:127.0.0.1:9" in cmd
+    assert "metadata.google.internal:80:127.0.0.1:9" in cmd
+
+
+def test_http_probe_no_sinkhole_when_not_following():
+    cmd = build_http_probe_command({
+        "url": "https://example.com/", "follow_redirects": False,
+    })
+    assert "-L" not in cmd
+    assert "--connect-to" not in cmd
+
+
 # ---------------------------------------------------------------------------
 # Context loader robustness
 # ---------------------------------------------------------------------------

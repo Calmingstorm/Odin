@@ -24,6 +24,20 @@ MAX_RETRY_DELAY = 30
 DEFAULT_RETRY_DELAY = 1
 MAX_BODY_SIZE = 50000  # 50KB body limit
 
+# Cloud-metadata endpoints to neutralize on redirect. is_metadata_url() checks
+# the INITIAL url, but curl -L follows redirects, so a public URL that 302s to
+# 169.254.169.254 would still reach metadata. curl has no per-IP connect deny,
+# so we sinkhole these hosts to a closed local port via --connect-to; a redirect
+# into metadata then fails to connect instead of leaking instance credentials.
+# Ports 80/443 are the only ports the metadata services listen on.
+_METADATA_SINKHOLE_HOSTS = (
+    "169.254.169.254",
+    "metadata.google.internal",
+    "[fd00:ec2::254]",
+)
+_SINKHOLE_PORTS = (80, 443)
+_SINKHOLE_TARGET = "127.0.0.1:9"  # discard port, effectively closed
+
 _TIMING_FORMAT = (
     r"\n---PROBE-RESULTS---"
     r"\nstatus_code: %{http_code}"
@@ -113,6 +127,11 @@ def build_http_probe_command(params: dict) -> str:
     if follow:
         parts.append("-L")
         parts.append("--max-redirs 10")
+        # Block redirect-to-metadata: is_metadata_url() only guards the initial
+        # URL, so sinkhole the metadata endpoints for any followed hop too.
+        for mhost in _METADATA_SINKHOLE_HOSTS:
+            for mport in _SINKHOLE_PORTS:
+                parts.append(f"--connect-to {_sq(f'{mhost}:{mport}:{_SINKHOLE_TARGET}')}")
 
     # SSL verification
     verify_ssl = params.get("verify_ssl", True)
