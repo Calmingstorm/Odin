@@ -2,7 +2,7 @@
 
 An autonomous execution agent on Discord. Norse god of wisdom and war, stuck managing mortal infrastructure for eternity.
 
-Odin executes real work from Discord: incident response, deploys, investigations, code review, automation, and scheduled operations across 70 tools (25 core, 47 skill). It runs shell commands on managed hosts, uses browser automation, orchestrates agents and workflows, and verifies results automatically after service changes.
+Odin executes real work from Discord: incident response, deploys, investigations, code review, automation, and scheduled operations across 74 built-in tools plus user-created skills. It runs shell commands on managed hosts, uses browser automation, orchestrates agents and workflows, and verifies results automatically after service changes.
 
 ## Why operators pick Odin
 
@@ -70,7 +70,7 @@ Tell Odin things like:
 ```
 Discord ──> OdinBot (client.py)
                │
-               ├── Tool Executor ──> 70 tools (shell, browser, git, docker, etc.)
+               ├── Tool Executor ──> 74 tools (shell, browser, git, docker, email, etc.)
                │       │
                │       ├── CommandGovernor (blocks dangerous commands)
                │       ├── Risk Classifier (observability tags)
@@ -212,7 +212,7 @@ src/
     cogs/                  9 moderation/utility cog extensions
   tools/
     executor.py            Tool dispatch + recovery
-    registry.py            72 tool definitions (25 core, 47 skill)
+    registry.py            74 built-in tool definitions
     skill_manager.py       Skill CRUD + AST validation
     risk_classifier.py    CommandGovernor + risk classification
     post_validation.py     validate_action implementation
