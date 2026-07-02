@@ -17,6 +17,10 @@ log = get_logger("codex")
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
 
 
+class CodexStreamError(RuntimeError):
+    """The SSE stream reported a terminal failure event (response.failed / error)."""
+
+
 class CodexChatClient:
     """Chat client using OpenAI Codex backend API (ChatGPT subscription)."""
 
@@ -97,6 +101,54 @@ class CodexChatClient:
             "http_pool_total_requests": self._total_requests,
         }
 
+    # ------------------------------------------------------------------
+    # Auth adapters — self.auth may be a CodexAuthPool (multi-account) or a
+    # bare CodexAuth (single). The pool variants pin an account index to the
+    # request so failure marking hits the account that actually served it.
+    # ------------------------------------------------------------------
+
+    async def _acquire_auth(self) -> tuple[str, str | None, int]:
+        """Return (access_token, account_id, account_index) for this request."""
+        if isinstance(self.auth, CodexAuthPool):
+            return await self.auth.acquire()
+        return await self.auth.get_access_token(), self.auth.get_account_id(), 0
+
+    async def _token_for(self, index: int) -> tuple[str, str | None]:
+        """Re-fetch the (token, account_id) pair for a pinned account."""
+        if isinstance(self.auth, CodexAuthPool):
+            return await self.auth.token_for(index)
+        return await self.auth.get_access_token(), self.auth.get_account_id()
+
+    async def _mark_limited(self, index: int) -> None:
+        if isinstance(self.auth, CodexAuthPool):
+            await self.auth.mark_limited(index)
+        elif hasattr(self.auth, "mark_rate_limited"):
+            self.auth.mark_rate_limited()
+
+    async def _mark_auth_failed(self, index: int) -> bool:
+        if isinstance(self.auth, CodexAuthPool):
+            return await self.auth.mark_auth_failed(index)
+        if hasattr(self.auth, "mark_current_auth_failed"):
+            return await self.auth.mark_current_auth_failed()
+        return False
+
+    async def _force_refresh(self, index: int, stale_token: str | None) -> bool:
+        if isinstance(self.auth, CodexAuthPool):
+            return await self.auth.force_refresh(index, stale_token)
+        if hasattr(self.auth, "force_refresh"):
+            return await self.auth.force_refresh(stale_token)
+        return False
+
+    @staticmethod
+    def _auth_headers(token: str, account_id: str | None) -> dict:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        if account_id:
+            headers["ChatGPT-Account-Id"] = account_id
+        return headers
+
     async def chat(
         self, messages: list[dict], system: str,
         max_tokens: int | None = None,
@@ -107,16 +159,6 @@ class CodexChatClient:
             max_tokens: Per-call token limit override. Falls back to
                         ``self.max_tokens`` when *None*.
         """
-        access_token = await self.auth.get_access_token()
-        account_id = self.auth.get_account_id()
-
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        }
-        if account_id:
-            headers["ChatGPT-Account-Id"] = account_id
-
         body = {
             "model": self.model,
             "instructions": system,
@@ -128,7 +170,7 @@ class CodexChatClient:
         # Callers needing short responses should use prompt instructions instead.
 
         input_tokens = self._estimate_body_input_tokens(body)
-        text = await self._stream_request(headers, body)
+        text = await self._stream_request(body)
         output_tokens = estimate_tokens(text) if text else 0
         self._last_input_tokens = input_tokens
         self._last_output_tokens = output_tokens
@@ -373,16 +415,6 @@ class CodexChatClient:
         Returns:
             LLMResponse with text, tool_calls, and stop_reason.
         """
-        access_token = await self.auth.get_access_token()
-        account_id = self.auth.get_account_id()
-
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        }
-        if account_id:
-            headers["ChatGPT-Account-Id"] = account_id
-
         body = {
             "model": self.model,
             "instructions": system,
@@ -394,7 +426,7 @@ class CodexChatClient:
         }
 
         input_tokens = self._estimate_body_input_tokens(body)
-        result = await self._stream_tool_request(headers, body)
+        result = await self._stream_tool_request(body)
         output_chars = len(result.text)
         for tc in result.tool_calls:
             output_chars += len(tc.name) + len(json.dumps(tc.input))
@@ -402,28 +434,72 @@ class CodexChatClient:
         result.output_tokens = estimate_tokens("x" * output_chars) if output_chars else 0
         return result
 
-    async def _stream_tool_request(self, headers: dict, body: dict) -> LLMResponse:
+    async def _stream_tool_request(self, body: dict) -> LLMResponse:
         """Send a streaming request and parse both text and function_call events."""
+        return await self._send_with_retries(
+            body,
+            self._read_tool_stream,
+            lambda r: not (r.text or r.tool_calls),
+        )
+
+    async def _stream_request(self, body: dict) -> str:
+        """Send a streaming request and collect the full response text."""
+        return await self._send_with_retries(
+            body,
+            self._read_stream,
+            lambda r: not r,
+        )
+
+    async def _send_with_retries(self, body: dict, reader, result_is_empty):
+        """Shared retry/rotation/breaker engine for both streaming paths.
+
+        The text and tool paths previously carried duplicated copies of this
+        loop, which is how the 429/5xx breaker double-count crept in (the
+        status branch recorded a failure, then the terminal path fell through
+        to a second record_failure). Invariant here: each failed attempt
+        records exactly ONE breaker failure.
+
+        The account serving the request is pinned by index at acquire time so
+        429/401 marking penalizes the account that actually failed — under
+        concurrent traffic "whatever account is current when I take the lock"
+        is frequently a different, healthy one.
+        """
         self.breaker.check()
         session = await self._get_session()
         self._total_requests += 1
         last_error = None
+        token, account_id, acct_idx = await self._acquire_auth()
 
         for attempt in range(self.max_retries):
             try:
                 async with session.post(
                     CODEX_API_URL,
-                    headers=headers,
+                    headers=self._auth_headers(token, account_id),
                     json=body,
                     timeout=aiohttp.ClientTimeout(total=600),
                 ) as resp:
                     if resp.status == 200:
-                        result = await self._read_tool_stream(resp)
-                        if result.text or result.tool_calls:
+                        try:
+                            result = await reader(resp)
+                        except CodexStreamError as e:
+                            # response.failed / error event: the "200" turned
+                            # out to be a failure mid-stream — retryable.
+                            self.breaker.record_failure()
+                            last_error = str(e)
+                            if attempt < self.max_retries - 1:
+                                wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
+                                log.warning(
+                                    "Codex stream failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                                    attempt + 1, self.max_retries, last_error, wait,
+                                )
+                                await asyncio.sleep(wait)
+                                continue
+                            raise RuntimeError(f"Codex stream failed: {last_error}") from e
+                        if not result_is_empty(result):
                             self.breaker.record_success()
                             return result
                         log.warning(
-                            "Codex tool request returned 200 with empty response (attempt %d/%d)",
+                            "Codex returned 200 with empty response (attempt %d/%d)",
                             attempt + 1, self.max_retries,
                         )
                         if attempt < self.max_retries - 1:
@@ -442,34 +518,21 @@ class CodexChatClient:
                             or "invalidated" in body_l
                             or "sign in again" in body_l
                         )
-                        # Likely-stale cached bearer (generic 401, first try):
-                        # clear + refresh and retry the SAME account once.
-                        if attempt == 0 and not invalidated:
-                            log.warning("Codex auth 401, forcing token refresh...")
-                            await self.auth.invalidate_current()
-                            new_token = await self.auth.get_access_token()
-                            headers["Authorization"] = f"Bearer {new_token}"
-                            account_id = self.auth.get_account_id()
-                            if account_id:
-                                headers["ChatGPT-Account-Id"] = account_id
-                            else:
-                                headers.pop("ChatGPT-Account-Id", None)
+                        # Likely-stale/revoked bearer (generic 401, first try):
+                        # actually exercise the refresh token — merely dropping
+                        # the cached token re-serves the same unexpired bearer —
+                        # then retry the SAME account once.
+                        if attempt == 0 and not invalidated and await self._force_refresh(acct_idx, token):
+                            log.warning("Codex auth 401, token refreshed, retrying...")
+                            token, account_id = await self._token_for(acct_idx)
                             continue
-                        # Invalidated, or a 401 that survived the refresh: this
-                        # account can't authenticate. Skip it and rotate to the
-                        # next account — only on this error, never routine traffic.
-                        rotated = False
-                        if hasattr(self.auth, "mark_current_auth_failed"):
-                            rotated = await self.auth.mark_current_auth_failed()
+                        # Invalidated, refresh failed, or a 401 that survived
+                        # the refresh: this account can't authenticate. Bench
+                        # it (long backoff) and move to the next account.
+                        rotated = await self._mark_auth_failed(acct_idx)
                         if rotated and attempt < self.max_retries - 1:
                             log.warning("Codex 401: skipped failed account, retrying on next...")
-                            new_token = await self.auth.get_access_token()
-                            headers["Authorization"] = f"Bearer {new_token}"
-                            account_id = self.auth.get_account_id()
-                            if account_id:
-                                headers["ChatGPT-Account-Id"] = account_id
-                            else:
-                                headers.pop("ChatGPT-Account-Id", None)
+                            token, account_id, acct_idx = await self._acquire_auth()
                             continue
                         self.breaker.record_failure()
                         raise RuntimeError(
@@ -477,8 +540,7 @@ class CodexChatClient:
                         )
 
                     if resp.status == 429:
-                        if hasattr(self.auth, "mark_current_limited"):
-                            await self.auth.mark_current_limited()
+                        await self._mark_limited(acct_idx)
                         self.breaker.record_failure()
                         last_error = f"HTTP 429: {error_body[:200]}"
                         if attempt < self.max_retries - 1:
@@ -488,13 +550,9 @@ class CodexChatClient:
                                 attempt + 1, self.max_retries, last_error, wait,
                             )
                             await asyncio.sleep(wait)
-                            access_token = await self.auth.get_access_token()
-                            headers["Authorization"] = f"Bearer {access_token}"
-                            if hasattr(self.auth, "get_account_id"):
-                                aid = self.auth.get_account_id()
-                                if aid:
-                                    headers["ChatGPT-Account-Id"] = aid
+                            token, account_id, acct_idx = await self._acquire_auth()
                             continue
+                        raise RuntimeError(f"Codex API error (429): {error_body[:500]}")
 
                     if resp.status in (500, 502, 503, 504):
                         self.breaker.record_failure()
@@ -502,27 +560,31 @@ class CodexChatClient:
                         if attempt < self.max_retries - 1:
                             wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                             log.warning(
-                                "Codex tool API error (attempt %d/%d): %s. Retrying in %.1fs...",
+                                "Codex API error (attempt %d/%d): %s. Retrying in %.1fs...",
                                 attempt + 1, self.max_retries, last_error, wait,
                             )
                             await asyncio.sleep(wait)
                             continue
+                        raise RuntimeError(f"Codex API error ({resp.status}): {error_body[:500]}")
 
                     self.breaker.record_failure()
                     raise RuntimeError(f"Codex API error ({resp.status}): {error_body[:500]}")
 
-            except aiohttp.ClientError as e:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                # asyncio.TimeoutError: the 600s total timeout can fire
+                # mid-stream; it is not an aiohttp.ClientError and previously
+                # escaped both the retry loop and breaker bookkeeping.
                 self.breaker.record_failure()
-                last_error = str(e)
+                last_error = str(e) or type(e).__name__
                 if attempt < self.max_retries - 1:
                     wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                     log.warning(
-                        "Codex tool connection error (attempt %d/%d): %s. Retrying in %.1fs...",
-                        attempt + 1, self.max_retries, e, wait,
+                        "Codex connection error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, self.max_retries, last_error, wait,
                     )
                     await asyncio.sleep(wait)
                 else:
-                    raise RuntimeError(f"Codex API connection failed: {e}") from e
+                    raise RuntimeError(f"Codex API connection failed: {last_error}") from e
 
         raise RuntimeError(f"Codex API failed after {self.max_retries} retries: {last_error}")
 
@@ -539,6 +601,7 @@ class CodexChatClient:
         """
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        incomplete = False
 
         # Track in-progress function calls by output_index
         pending_calls: dict[int, dict] = {}  # {index: {"call_id": ..., "name": ..., "args": ""}}
@@ -596,15 +659,18 @@ class CodexChatClient:
                 idx = event.get("output_index", 0)
                 if idx in pending_calls:
                     call_info = pending_calls[idx]
+                    parse_error = None
                     try:
                         parsed_args = json.loads(call_info["args"]) if call_info["args"] else {}
                     except json.JSONDecodeError:
                         parsed_args = {}
+                        parse_error = f"malformed tool arguments (invalid JSON): {call_info['args'][:200]}"
                         log.warning("Failed to parse function call arguments: %s", call_info["args"][:200])
                     tool_calls.append(ToolCall(
                         id=call_info["call_id"],
                         name=call_info["name"],
                         input=parsed_args,
+                        parse_error=parse_error,
                     ))
 
             # Output item done — finalize any remaining pending call at this index
@@ -616,19 +682,33 @@ class CodexChatClient:
                     call_info = pending_calls.pop(idx, None)
                     if call_info and not any(tc.id == call_info["call_id"] for tc in tool_calls):
                         args_str = item.get("arguments", call_info.get("args", ""))
+                        parse_error = None
                         try:
                             parsed_args = json.loads(args_str) if args_str else {}
                         except json.JSONDecodeError:
                             parsed_args = {}
+                            parse_error = f"malformed tool arguments (invalid JSON): {args_str[:200]}"
                         tool_calls.append(ToolCall(
                             id=call_info["call_id"],
                             name=call_info["name"],
                             input=parsed_args,
+                            parse_error=parse_error,
                         ))
 
-            # Content filter / refusal / error events
-            elif event_type in ("response.failed", "response.incomplete", "error"):
-                log.warning("Codex stream event %s: %s", event_type, json.dumps(event)[:500])
+            # Terminal failure events: the HTTP 200 turned out to be a failed
+            # generation — surface it so the retry engine treats it as an
+            # error instead of returning partial output as a completed turn.
+            elif event_type in ("response.failed", "error"):
+                detail = json.dumps(event)[:500]
+                log.warning("Codex stream terminal failure %s: %s", event_type, detail)
+                raise CodexStreamError(f"{event_type}: {detail}")
+
+            # Incomplete (length-capped / filtered): keep the partial output
+            # but mark it so callers can tell it isn't a normal completion.
+            elif event_type == "response.incomplete":
+                incomplete = True
+                reason = ((event.get("response") or {}).get("incomplete_details") or {}).get("reason") or "unknown"
+                log.warning("Codex stream incomplete (reason: %s) — returning partial output", reason)
 
             # Final response object — fallback
             elif event_type == "response.completed":
@@ -646,14 +726,17 @@ class CodexChatClient:
                         call_id = item.get("call_id", "")
                         if not any(tc.id == call_id for tc in tool_calls):
                             args_str = item.get("arguments", "")
+                            parse_error = None
                             try:
                                 parsed_args = json.loads(args_str) if args_str else {}
                             except json.JSONDecodeError:
                                 parsed_args = {}
+                                parse_error = f"malformed tool arguments (invalid JSON): {args_str[:200]}"
                             tool_calls.append(ToolCall(
                                 id=call_id,
                                 name=item.get("name", ""),
                                 input=parsed_args,
+                                parse_error=parse_error,
                             ))
 
         text = "".join(text_parts)
@@ -661,132 +744,13 @@ class CodexChatClient:
             log.warning("Codex tool stream empty (events: %s, pending: %s)",
                         event_types_seen, list(pending_calls.keys()))
 
-        stop_reason = "tool_use" if tool_calls else "end_turn"
+        if tool_calls:
+            stop_reason = "tool_use"
+        elif incomplete:
+            stop_reason = "incomplete"
+        else:
+            stop_reason = "end_turn"
         return LLMResponse(text=text, tool_calls=tool_calls, stop_reason=stop_reason)
-
-    async def _stream_request(self, headers: dict, body: dict) -> str:
-        """Send a streaming request and collect the full response text."""
-        self.breaker.check()
-        session = await self._get_session()
-        self._total_requests += 1
-        last_error = None
-
-        for attempt in range(self.max_retries):
-            try:
-                async with session.post(
-                    CODEX_API_URL,
-                    headers=headers,
-                    json=body,
-                    timeout=aiohttp.ClientTimeout(total=600),
-                ) as resp:
-                    if resp.status == 200:
-                        result = await self._read_stream(resp)
-                        if result:
-                            self.breaker.record_success()
-                            return result
-                        log.warning(
-                            "Codex returned 200 with empty response (attempt %d/%d)",
-                            attempt + 1, self.max_retries,
-                        )
-                        if attempt < self.max_retries - 1:
-                            wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
-                            await asyncio.sleep(wait)
-                            continue
-                        self.breaker.record_failure()
-                        return result
-
-                    error_body = (await resp.read()).decode("utf-8", errors="replace")
-
-                    if resp.status == 401:
-                        body_l = error_body.lower()
-                        invalidated = (
-                            "token_invalidated" in body_l
-                            or "invalidated" in body_l
-                            or "sign in again" in body_l
-                        )
-                        # Likely-stale cached bearer (generic 401, first try):
-                        # clear + refresh and retry the SAME account once.
-                        if attempt == 0 and not invalidated:
-                            log.warning("Codex auth 401, forcing token refresh...")
-                            await self.auth.invalidate_current()
-                            new_token = await self.auth.get_access_token()
-                            headers["Authorization"] = f"Bearer {new_token}"
-                            account_id = self.auth.get_account_id()
-                            if account_id:
-                                headers["ChatGPT-Account-Id"] = account_id
-                            else:
-                                headers.pop("ChatGPT-Account-Id", None)
-                            continue
-                        # Invalidated, or a 401 that survived the refresh: this
-                        # account can't authenticate. Skip it and rotate to the
-                        # next account — only on this error, never routine traffic.
-                        rotated = False
-                        if hasattr(self.auth, "mark_current_auth_failed"):
-                            rotated = await self.auth.mark_current_auth_failed()
-                        if rotated and attempt < self.max_retries - 1:
-                            log.warning("Codex 401: skipped failed account, retrying on next...")
-                            new_token = await self.auth.get_access_token()
-                            headers["Authorization"] = f"Bearer {new_token}"
-                            account_id = self.auth.get_account_id()
-                            if account_id:
-                                headers["ChatGPT-Account-Id"] = account_id
-                            else:
-                                headers.pop("ChatGPT-Account-Id", None)
-                            continue
-                        self.breaker.record_failure()
-                        raise RuntimeError(
-                            f"Codex 401 (auth failed, no healthy account): {error_body[:200]}"
-                        )
-
-                    if resp.status == 429:
-                        if hasattr(self.auth, "mark_current_limited"):
-                            await self.auth.mark_current_limited()
-                        self.breaker.record_failure()
-                        last_error = f"HTTP 429: {error_body[:200]}"
-                        if attempt < self.max_retries - 1:
-                            wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
-                            log.warning(
-                                "Codex rate limited (attempt %d/%d): %s. Rotating + retry in %.1fs...",
-                                attempt + 1, self.max_retries, last_error, wait,
-                            )
-                            await asyncio.sleep(wait)
-                            access_token = await self.auth.get_access_token()
-                            headers["Authorization"] = f"Bearer {access_token}"
-                            if hasattr(self.auth, "get_account_id"):
-                                aid = self.auth.get_account_id()
-                                if aid:
-                                    headers["ChatGPT-Account-Id"] = aid
-                            continue
-
-                    if resp.status in (500, 502, 503, 504):
-                        self.breaker.record_failure()
-                        last_error = f"HTTP {resp.status}: {error_body[:200]}"
-                        if attempt < self.max_retries - 1:
-                            wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
-                            log.warning(
-                                "Codex API error (attempt %d/%d): %s. Retrying in %.1fs...",
-                                attempt + 1, self.max_retries, last_error, wait,
-                            )
-                            await asyncio.sleep(wait)
-                            continue
-
-                    self.breaker.record_failure()
-                    raise RuntimeError(f"Codex API error ({resp.status}): {error_body[:500]}")
-
-            except aiohttp.ClientError as e:
-                self.breaker.record_failure()
-                last_error = str(e)
-                if attempt < self.max_retries - 1:
-                    wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
-                    log.warning(
-                        "Codex connection error (attempt %d/%d): %s. Retrying in %.1fs...",
-                        attempt + 1, self.max_retries, e, wait,
-                    )
-                    await asyncio.sleep(wait)
-                else:
-                    raise RuntimeError(f"Codex API connection failed: {e}") from e
-
-        raise RuntimeError(f"Codex API failed after {self.max_retries} retries: {last_error}")
 
     async def _read_stream(self, resp: aiohttp.ClientResponse) -> str:
         """Read SSE stream and extract text content."""
@@ -821,6 +785,17 @@ class CodexChatClient:
                 done_text = event.get("text", "")
                 if done_text and not text_parts:
                     text_parts.append(done_text)
+
+            # Terminal failure events — surface to the retry engine instead of
+            # returning partial output as a normal completion.
+            elif event_type in ("response.failed", "error"):
+                detail = json.dumps(event)[:500]
+                log.warning("Codex stream terminal failure %s: %s", event_type, detail)
+                raise CodexStreamError(f"{event_type}: {detail}")
+
+            elif event_type == "response.incomplete":
+                reason = ((event.get("response") or {}).get("incomplete_details") or {}).get("reason") or "unknown"
+                log.warning("Codex stream incomplete (reason: %s) — returning partial output", reason)
 
             # response.completed — final response object
             elif event_type == "response.completed":

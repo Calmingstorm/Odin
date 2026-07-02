@@ -87,10 +87,15 @@ def _decode_jwt_payload(token: str) -> dict:
 
 
 class CodexAuth:
-    def __init__(self, credentials_path: str) -> None:
+    def __init__(self, credentials_path: str, on_save=None) -> None:
         self._path = Path(credentials_path)
         self._credentials: dict | None = None
         self._refresh_lock = asyncio.Lock()
+        # Called with the new creds dict after every successful _save().
+        # OpenAI refresh tokens are single-use, so whoever owns the canonical
+        # multi-account file must see every rotation — otherwise a restart
+        # resurrects a burned refresh token and the account dies on next use.
+        self.on_save = on_save
 
     def is_configured(self) -> bool:
         """Check if credentials file exists and has tokens."""
@@ -116,6 +121,11 @@ class CodexAuth:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_secure(self._path, json.dumps(creds, indent=2))
         self._credentials = creds
+        if self.on_save is not None:
+            try:
+                self.on_save(creds)
+            except Exception as e:
+                log.warning("Failed to propagate refreshed Codex credentials: %s", e)
 
     async def get_access_token(self) -> str:
         """Return a valid access token, refreshing if needed.
@@ -158,6 +168,30 @@ class CodexAuth:
         """Single-account auth has nothing to rotate to — returns False so the
         caller surfaces the 401 (this account must be re-authed)."""
         return False
+
+    async def force_refresh(self, stale_token: str | None = None) -> bool:
+        """Refresh the token now, regardless of expiry (reactive 401 handling).
+
+        The expiry-driven get_access_token() will happily re-serve a
+        server-revoked-but-unexpired bearer; this actually exercises the
+        refresh token. ``stale_token`` is the bearer the failing request
+        used — if the stored token already differs, another coroutine
+        refreshed first and this call is a no-op success. Returns False
+        when the refresh itself fails (account needs re-auth).
+        """
+        async with self._refresh_lock:
+            try:
+                creds = self._load()
+            except Exception:
+                return False
+            if stale_token and creds.get("access_token") != stale_token:
+                return True
+            try:
+                await self._refresh(creds)
+                return True
+            except Exception as e:
+                log.warning("Reactive Codex token refresh failed: %s", e)
+                return False
 
     async def _refresh(self, creds: dict) -> None:
         """Refresh the access token using the refresh token."""
@@ -356,7 +390,17 @@ class CodexAuthPool:
         self._init_accounts()
 
     def _init_accounts(self) -> None:
-        """Load credentials and create CodexAuth instances."""
+        """Load credentials and create CodexAuth instances.
+
+        Token refreshes rotate single-use refresh tokens into the per-account
+        shadow files, while re-auth/account edits rewrite the canonical file.
+        For the same account (matched by account_id), whichever side is newer
+        (by expires_at) wins — blindly overwriting a rotated shadow with stale
+        canonical creds burns the refresh-token chain, which is how all
+        accounts used to die together on every restart/reload. A different
+        account_id at the same slot (account deleted/reordered) means the
+        canonical entry is authoritative.
+        """
         if not self._path.exists():
             return
         try:
@@ -365,17 +409,35 @@ class CodexAuthPool:
             return
 
         if isinstance(raw, list):
-            # Multi-account format — canonical file is source of truth.
-            # Always sync shadow files and clean up stale ones.
             valid_count = 0
+            canonical_dirty = False
             for i, creds in enumerate(raw):
                 if not isinstance(creds, dict) or not creds.get("access_token"):
                     continue
                 individual_path = self._path.parent / f"codex_auth_{i}.json"
-                _atomic_write_secure(individual_path, json.dumps(creds, indent=2))
-                auth = CodexAuth(str(individual_path))
+                shadow = self._load_creds_file(individual_path)
+                same_account = (
+                    shadow is not None
+                    and bool(creds.get("account_id"))
+                    and shadow.get("account_id") == creds.get("account_id")
+                )
+                if (
+                    same_account
+                    and shadow.get("access_token")
+                    and shadow.get("expires_at", 0) >= creds.get("expires_at", 0)
+                ):
+                    # Shadow holds newer (rotated) tokens — keep it and pull
+                    # the canonical entry up to date instead of the reverse.
+                    if shadow != creds:
+                        raw[i] = shadow
+                        canonical_dirty = True
+                else:
+                    _atomic_write_secure(individual_path, json.dumps(creds, indent=2))
+                auth = CodexAuth(str(individual_path), on_save=self._canonical_sync(i))
                 self._accounts.append(auth)
                 valid_count = i + 1
+            if canonical_dirty:
+                _atomic_write_secure(self._path, json.dumps(raw, indent=2))
             # Remove stale shadow files from previous larger pools
             for j in range(valid_count, valid_count + 20):
                 stale = self._path.parent / f"codex_auth_{j}.json"
@@ -388,6 +450,36 @@ class CodexAuthPool:
             # Single account (backward compat) — use the file directly
             self._accounts.append(CodexAuth(str(self._path)))
             log.info("Codex auth pool: 1 account loaded (single format)")
+
+    @staticmethod
+    def _load_creds_file(path: Path) -> dict | None:
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _canonical_sync(self, index: int):
+        """Build an on_save hook that mirrors account *index* back to the canonical file."""
+        def _sync(creds: dict) -> None:
+            try:
+                raw = json.loads(self._path.read_text())
+            except Exception:
+                return
+            if not isinstance(raw, list) or index >= len(raw):
+                return
+            raw[index] = creds
+            _atomic_write_secure(self._path, json.dumps(raw, indent=2))
+        return _sync
+
+    @staticmethod
+    def _account_label(auth: CodexAuth, index: int) -> str:
+        try:
+            return auth._load().get("email", f"account {index}")
+        except Exception:
+            return f"account {index}"
 
     def is_configured(self) -> bool:
         return any(a.is_configured() for a in self._accounts)
@@ -402,58 +494,95 @@ class CodexAuthPool:
             raise RuntimeError("No Codex credentials configured.")
         return self._accounts[self._current_index]
 
-    async def get_access_token(self) -> str:
-        """Get a token from the current account, rotating on failure or rate-limit."""
+    async def acquire(self) -> tuple[str, str | None, int]:
+        """Pick a healthy account and return (access_token, account_id, index).
+
+        The index pins the account to the request, so failure marking can
+        target the account that actually served it — concurrent requests
+        rotate the pool underneath each other, and penalizing "whatever is
+        current now" benches healthy accounts. Token refresh happens OUTSIDE
+        the pool lock: a slow refresh must not serialize unrelated LLM
+        traffic, and the per-account refresh lock already prevents
+        refresh-token reuse.
+        """
         if not self._accounts:
             raise RuntimeError("No Codex credentials configured.")
-        async with self._pool_lock:
-            errors = []
-            for attempt in range(len(self._accounts)):
-                auth = self._accounts[self._current_index]
+        errors: list[tuple[int, str]] = []
+        for _ in range(len(self._accounts)):
+            async with self._pool_lock:
+                if not self._accounts:
+                    raise RuntimeError("No Codex credentials configured.")
+                self._current_index %= len(self._accounts)
+                idx = self._current_index
+                auth = self._accounts[idx]
                 if auth.is_rate_limited():
                     self._rotate()
                     continue
-                try:
-                    return await auth.get_access_token()
-                except Exception as e:
-                    idx = self._current_index
-                    try:
-                        email = auth._load().get("email", f"account {idx}")
-                    except Exception:
-                        email = f"account {idx}"
-                    log.warning("Codex account %s failed: %s — rotating to next", email, e)
-                    errors.append((idx, str(e)))
+            try:
+                token = await auth.get_access_token()
+            except Exception as e:
+                log.warning(
+                    "Codex account %s failed: %s — rotating to next",
+                    self._account_label(auth, idx), e,
+                )
+                errors.append((idx, str(e)))
+                async with self._pool_lock:
                     auth.mark_rate_limited()
-                    if len(self._accounts) > 1:
+                    if len(self._accounts) > 1 and self._accounts[self._current_index % len(self._accounts)] is auth:
                         self._rotate()
+                continue
+            return token, auth.get_account_id(), idx
+        if errors:
             raise RuntimeError(
                 f"All {len(self._accounts)} Codex accounts failed: "
                 + "; ".join(f"#{i}: {err}" for i, err in errors)
             )
+        raise RuntimeError(
+            f"All {len(self._accounts)} Codex accounts are rate-limited or "
+            "backing off; retry shortly."
+        )
+
+    async def get_access_token(self) -> str:
+        """Get a token from a healthy account, rotating on failure or rate-limit."""
+        token, _, _ = await self.acquire()
+        return token
+
+    async def token_for(self, index: int) -> tuple[str, str | None]:
+        """Return (access_token, account_id) for a specific account index."""
+        async with self._pool_lock:
+            if not self._accounts or index >= len(self._accounts):
+                raise RuntimeError(f"Codex account index {index} out of range")
+            auth = self._accounts[index]
+        return await auth.get_access_token(), auth.get_account_id()
 
     def get_account_id(self) -> str | None:
         if not self._accounts:
             return None
         return self.current.get_account_id()
 
+    async def mark_limited(self, index: int) -> None:
+        """Mark the *given* account rate-limited; rotate only if it is still current."""
+        if not self._accounts:
+            return
+        async with self._pool_lock:
+            if index >= len(self._accounts):
+                return
+            account = self._accounts[index]
+            account.mark_rate_limited()
+            label = self._account_label(account, index)
+            if len(self._accounts) > 1:
+                if self._current_index == index:
+                    self._rotate()
+                log.warning("Codex %s hit rate limit, active account now %d/%d",
+                            label, self._current_index + 1, len(self._accounts))
+            else:
+                log.warning("Codex %s hit rate limit (only account, no rotation)", label)
+
     async def mark_current_limited(self) -> None:
         """Mark the current account as rate-limited and rotate to the next."""
         if not self._accounts:
             return
-        async with self._pool_lock:
-            current = self._accounts[self._current_index]
-            current.mark_rate_limited()
-            try:
-                email = current._load().get("email", f"account {self._current_index}")
-            except Exception:
-                email = f"account {self._current_index}"
-
-            if len(self._accounts) > 1:
-                self._rotate()
-                log.warning("Codex %s hit rate limit, rotated to account %d/%d",
-                            email, self._current_index + 1, len(self._accounts))
-            else:
-                log.warning("Codex %s hit rate limit (only account, no rotation)", email)
+        await self.mark_limited(self._current_index)
 
     async def invalidate_current(self) -> None:
         """Force a token refresh for the *currently active* account.
@@ -472,33 +601,52 @@ class CodexAuthPool:
         # call it outside the pool lock to keep lock ordering simple.
         await current.invalidate_current()
 
-    async def mark_current_auth_failed(self) -> bool:
-        """Mark the current account as auth-failed (401/invalidated) and rotate.
+    async def mark_auth_failed(self, index: int) -> bool:
+        """Mark the *given* account auth-failed (401/invalidated) and rotate off it.
 
         Distinct from rate-limit rotation: an invalidated token won't recover
         until re-auth, so set the account aside for a longer window
-        (AUTH_FAILED_BACKOFF_SECONDS) rather than retrying it every minute, then
-        rotate to the next account. Returns True if it rotated to a *different*
-        account, False if this is the only one (caller should surface the error).
+        (AUTH_FAILED_BACKOFF_SECONDS) rather than retrying it every minute.
+        Rotation happens only if the failed account is still current. Returns
+        True if another account is available, False if this is the only one
+        (caller should surface the error).
         """
         if not self._accounts:
             return False
         async with self._pool_lock:
-            current = self._accounts[self._current_index]
-            current.mark_rate_limited(AUTH_FAILED_BACKOFF_SECONDS)
-            try:
-                email = current._load().get("email", f"account {self._current_index}")
-            except Exception:
-                email = f"account {self._current_index}"
+            if index >= len(self._accounts):
+                return False
+            account = self._accounts[index]
+            account.mark_rate_limited(AUTH_FAILED_BACKOFF_SECONDS)
+            label = self._account_label(account, index)
             if len(self._accounts) > 1:
-                self._rotate()
+                if self._current_index == index:
+                    self._rotate()
                 log.warning(
-                    "Codex %s auth failed (401/invalidated), skipped to account %d/%d",
-                    email, self._current_index + 1, len(self._accounts),
+                    "Codex %s auth failed (401/invalidated), active account now %d/%d",
+                    label, self._current_index + 1, len(self._accounts),
                 )
                 return True
-            log.warning("Codex %s auth failed (401), only account — cannot rotate", email)
+            log.warning("Codex %s auth failed (401), only account — cannot rotate", label)
             return False
+
+    async def mark_current_auth_failed(self) -> bool:
+        """Mark the current account auth-failed and rotate (see mark_auth_failed)."""
+        if not self._accounts:
+            return False
+        return await self.mark_auth_failed(self._current_index)
+
+    async def force_refresh(self, index: int, stale_token: str | None = None) -> bool:
+        """Force an immediate token refresh for the given account (reactive 401)."""
+        if not self._accounts:
+            return False
+        async with self._pool_lock:
+            if index >= len(self._accounts):
+                return False
+            account = self._accounts[index]
+        # The account's own refresh lock guards the single-use refresh token;
+        # run outside the pool lock so a slow refresh doesn't stall the pool.
+        return await account.force_refresh(stale_token)
 
     def _rotate(self) -> None:
         self._current_index = (self._current_index + 1) % len(self._accounts)

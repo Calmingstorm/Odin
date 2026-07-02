@@ -3047,7 +3047,13 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         pool = getattr(bot, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
         if pool:
-            pool.reload()
+            # reload() ignores the pool lock and can race in-flight token
+            # operations (account-mutation methods index the list after an
+            # await) — use the locked variant.
+            if hasattr(pool, "reload_async"):
+                await pool.reload_async()
+            else:
+                pool.reload()
 
         return web.json_response({
             "status": "deleted",

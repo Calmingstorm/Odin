@@ -14,6 +14,10 @@ class ToolCall:
     id: str  # call_id (OpenAI) or internal tool_use_id
     name: str  # tool name
     input: dict  # parsed tool arguments
+    # Set when the model's arguments were not valid JSON. The dispatcher must
+    # NOT execute such a call with the empty input — feed the error back to
+    # the model instead so it can retry with valid arguments.
+    parse_error: str | None = None
 
 
 @dataclass(slots=True)
