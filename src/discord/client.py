@@ -3105,6 +3105,18 @@ class OdinBot(commands.Bot):
                 tool_name = block.name
                 tool_input = block.input
                 log.info("Tool call: %s(%s)", tool_name, tool_input)
+                # The provider could not parse the model's arguments — do NOT
+                # run the tool with a silently-empty input; bounce the error
+                # back so the model retries with valid arguments.
+                if getattr(block, "parse_error", None):
+                    log.warning("Tool call %s not executed: %s", tool_name, block.parse_error)
+                    return {
+                        "type": "tool_result", "tool_use_id": block.id,
+                        "content": (
+                            f"Error: {block.parse_error}. The tool was NOT executed — "
+                            "re-issue the call with valid JSON arguments."
+                        ),
+                    }
                 # Central RBAC gate: Discord-native tools, skills, and MCP tools are
                 # dispatched below WITHOUT going through ToolExecutor.execute() (the only
                 # place check_permission runs). permissions.filter_tools is advisory
@@ -4735,6 +4747,17 @@ class OdinBot(commands.Bot):
                 tool_name = block.name
                 tool_input = block.input
                 log.info("Loop tool call: %s(%s)", tool_name, tool_input)
+                # Provider couldn't parse the model's arguments — don't run
+                # the tool on a silently-empty input (see _run_tool).
+                if getattr(block, "parse_error", None):
+                    log.warning("Loop tool call %s not executed: %s", tool_name, block.parse_error)
+                    return {
+                        "type": "tool_result", "tool_use_id": block.id,
+                        "content": (
+                            f"Error: {block.parse_error}. The tool was NOT executed — "
+                            "re-issue the call with valid JSON arguments."
+                        ),
+                    }
 
                 t0 = time.monotonic()
                 error = None
