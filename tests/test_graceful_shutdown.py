@@ -44,10 +44,13 @@ class TestOdinBotClose:
     async def test_close_stops_loop_manager(self):
         bot = _make_bot()
         bot.loop_manager = MagicMock()
-        bot.loop_manager.stop_loop = MagicMock(return_value="Stopped")
+        # close() now uses shutdown() (cancels AND awaits loop tasks) rather
+        # than stop_loop("all"), which only set cancel events and left tasks
+        # pending at process exit.
+        bot.loop_manager.shutdown = AsyncMock()
         with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
             await bot.close()
-        bot.loop_manager.stop_loop.assert_called_once_with("all")
+        bot.loop_manager.shutdown.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_close_stops_scheduler(self):
@@ -102,7 +105,7 @@ class TestOdinBotClose:
         """If one component raises during shutdown, others still get cleaned up."""
         bot = _make_bot()
         bot.loop_manager = MagicMock()
-        bot.loop_manager.stop_loop = MagicMock(side_effect=RuntimeError("boom"))
+        bot.loop_manager.shutdown = AsyncMock(side_effect=RuntimeError("boom"))
         bot.scheduler = AsyncMock()
         bot.scheduler.stop = AsyncMock(side_effect=RuntimeError("bang"))
         bot.sessions = MagicMock()
@@ -118,8 +121,8 @@ class TestOdinBotClose:
         call_order = []
 
         bot.loop_manager = MagicMock()
-        bot.loop_manager.stop_loop = MagicMock(
-            side_effect=lambda x: call_order.append("loop_manager")
+        bot.loop_manager.shutdown = AsyncMock(
+            side_effect=lambda: call_order.append("loop_manager")
         )
         bot.scheduler = AsyncMock()
         bot.scheduler.stop = AsyncMock(

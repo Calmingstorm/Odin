@@ -468,6 +468,22 @@ class AgentManager:
             })
         return result
 
+    @staticmethod
+    def _force_cancel(agent: AgentInfo) -> None:
+        """Signal cooperative stop AND cancel the task.
+
+        The cancel event alone is only checked between iterations, so an
+        agent stuck in a long tool call ignored a "kill" for up to
+        TOOL_EXEC_TIMEOUT (300s) — the log said "killed" while the agent ran
+        on. Cancelling the task interrupts the in-flight await; the agent
+        run's `except CancelledError` + `finally` still finalize the
+        trajectory cleanly.
+        """
+        agent._cancel_event.set()
+        task = getattr(agent, "_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+
     def kill(self, agent_id: str, cascade: bool = True) -> str:
         """Cancel a running agent. If cascade=True, also kill all descendants."""
         agent = self._agents.get(agent_id)
@@ -477,13 +493,13 @@ class AgentManager:
             return f"Agent '{agent_id}' already in terminal state: {agent.status}."
 
         killed_ids = [agent_id]
-        agent._cancel_event.set()
+        self._force_cancel(agent)
 
         if cascade:
             for desc_id in self.get_descendants(agent_id):
                 desc = self._agents.get(desc_id)
                 if desc and desc._sm.is_active:
-                    desc._cancel_event.set()
+                    self._force_cancel(desc)
                     killed_ids.append(desc_id)
 
         log.info(
@@ -723,7 +739,10 @@ class AgentManager:
             elapsed = now - agent.created_at
             idle = now - agent.last_activity
             if elapsed > MAX_AGENT_LIFETIME:
-                agent._cancel_event.set()
+                # Actually force-cancel the task — setting the cancel event
+                # alone left an agent stuck in a long tool call running for up
+                # to TOOL_EXEC_TIMEOUT while the log claimed "Force-killed".
+                self._force_cancel(agent)
                 killed += 1
                 log.warning(
                     "Force-killed stuck agent %s (%s): lifetime exceeded (%ds)",

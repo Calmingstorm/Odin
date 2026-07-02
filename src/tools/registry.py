@@ -201,6 +201,10 @@ TOOLS: list[dict] = [
                     "type": "string",
                     "description": "Cron expression for recurring tasks (e.g. '0 9 * * *' = daily 9am). Omit for one-time.",
                 },
+                "cron_timezone": {
+                    "type": "string",
+                    "description": "IANA timezone for the cron expression (e.g. 'America/New_York'). The task fires on that timezone's wall clock across DST. Defaults to UTC.",
+                },
                 "run_at": {
                     "type": "string",
                     "description": "ISO datetime for one-time tasks (e.g. '2026-03-20T09:00'). Use parse_time to convert natural language. Omit for recurring.",
@@ -304,6 +308,10 @@ TOOLS: list[dict] = [
                 "cron": {
                     "type": "string",
                     "description": "New cron expression (replaces previous timing)",
+                },
+                "cron_timezone": {
+                    "type": "string",
+                    "description": "IANA timezone for the cron expression (e.g. 'America/New_York'). Defaults to UTC.",
                 },
                 "run_at": {
                     "type": "string",

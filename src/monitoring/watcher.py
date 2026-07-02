@@ -77,6 +77,14 @@ class InfraWatcher:
         if not self.config.checks:
             log.info("No monitoring checks configured")
             return
+        # Idempotent: on_ready fires on every Discord reconnect. Without this
+        # guard each reconnect leaked a second set of check loops that ran in
+        # parallel with the first (duplicate SSH probes, duplicate alerts).
+        live = [t for t in self._check_tasks.values() if not t.done()]
+        if live:
+            log.info("Monitoring already running (%d check loop(s)); not restarting", len(live))
+            return
+        self._check_tasks.clear()
         for i, check in enumerate(self.config.checks):
             stagger = self.STAGGER_INTERVAL * (i + 1)
             task = asyncio.create_task(self._check_loop(check, stagger))

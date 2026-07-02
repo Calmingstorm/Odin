@@ -1719,7 +1719,10 @@ class OdinBot(commands.Bot):
         loop_manager = getattr(self, "loop_manager", None)
         if loop_manager is not None:
             try:
-                loop_manager.stop_loop("all")
+                # shutdown() cancels AND awaits loop tasks; stop_loop("all")
+                # only set cancel events, leaving tasks pending at process
+                # exit ("Task was destroyed but it is pending").
+                await loop_manager.shutdown()
             except Exception:
                 log.exception("Error stopping loop_manager")
 
@@ -1778,8 +1781,19 @@ class OdinBot(commands.Bot):
         if agent_mgr is not None:
             try:
                 active = [a for a in agent_mgr._agents.values() if a._sm.is_active]
+                agent_tasks = [a._task for a in active if getattr(a, "_task", None) is not None]
                 for agent in active:
                     agent_mgr.kill(agent.id, cascade=True)
+                # Await the cancelled agent tasks so their finally-blocks run
+                # (trajectory save) before the process exits, instead of
+                # leaving them pending.
+                if agent_tasks:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(*agent_tasks, return_exceptions=True), 10.0,
+                        )
+                    except asyncio.TimeoutError:
+                        log.warning("Shutdown: %d agent task(s) did not finish in 10s", len(agent_tasks))
                 await agent_mgr.cleanup()
                 log.info("Shutdown: killed %d active agent(s)", len(active))
             except Exception:
@@ -1946,7 +1960,7 @@ class OdinBot(commands.Bot):
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
             log.info("Slash commands synced to guild: %s", guild.name)
-        self.scheduler.start(self._on_scheduled_task)
+        self.scheduler.start(self._on_scheduled_task, self._on_schedule_failure)
         if self._vector_store:
             fire_and_forget(self._backfill_archives(), name="backfill_archives")
         # Start proactive monitoring if configured
@@ -3685,6 +3699,7 @@ class OdinBot(commands.Bot):
                 tool_input=inp.get("tool_input"),
                 steps=inp.get("steps"),
                 trigger=inp.get("trigger"),
+                cron_timezone=inp.get("cron_timezone"),
                 requester_id=str(message.author.id),
             )
             if schedule.get("trigger"):
@@ -3738,7 +3753,7 @@ class OdinBot(commands.Bot):
             return "Error: 'schedule_id' is required."
         kwargs = {}
         for key in ("description", "cron", "run_at", "message", "tool_name",
-                     "tool_input", "steps", "channel_id"):
+                     "tool_input", "steps", "channel_id", "cron_timezone"):
             if key in inp:
                 kwargs[key] = inp[key]
         trigger = inp.get("trigger")
@@ -4556,6 +4571,10 @@ class OdinBot(commands.Bot):
             tools=tools,
             system_prompt=system_prompt,
             tool_timeouts=self.config.tools.tool_timeouts,
+            # Honor the configured agent iteration cap; without this the
+            # bridge passed None and agents fell back to the module default,
+            # ignoring agents.max_iterations.
+            max_iterations=self.config.agents.max_iterations,
             context_compression_enabled=cc.enabled,
             max_context_chars=cc.max_context_chars,
             keep_recent_iterations=cc.keep_recent_iterations,
@@ -5464,6 +5483,28 @@ class OdinBot(commands.Bot):
             log.error("Failed to post workflow results: %s", e)
 
         return workflow_ok
+
+    async def _on_schedule_failure(self, schedule: dict, consecutive: int) -> None:
+        """Alert callback fired when a schedule crosses the consecutive-failure
+        threshold. Previously never wired, so the alerting path was dead."""
+        channel_id = schedule.get("channel_id")
+        last_error = schedule.get("last_error", "unknown error")
+        text = (
+            f"⚠️ **Scheduled task failing:** {schedule.get('description', schedule.get('id', '?'))}\n"
+            f"{consecutive} consecutive failures. Last error:\n"
+            f"```\n{str(last_error)[:1000]}\n```"
+        )
+        try:
+            channel = self.get_channel(int(channel_id)) if channel_id else None
+            if channel:
+                await channel.send(scrub_response_secrets(text))
+            else:
+                log.warning(
+                    "Schedule %s failed %d times but channel %s is unavailable for alert",
+                    schedule.get("id"), consecutive, channel_id,
+                )
+        except Exception as e:
+            log.warning("Failed to send schedule failure alert for %s: %s", schedule.get("id"), e)
 
     async def _on_scheduled_task(self, schedule: dict) -> None:
         """Callback fired by the scheduler when a task is due."""
