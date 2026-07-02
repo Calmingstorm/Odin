@@ -43,6 +43,11 @@ from .ssh_pool import SSHConnectionPool
 
 log = get_logger("tools")
 
+# Max working-memory notes retained per section (global / per-user). The full
+# merged map is injected into every system prompt, so this bounds prompt bloat;
+# oldest-by-write notes are evicted past the cap.
+MEMORY_MAX_KEYS_PER_SECTION = 200
+
 # Request-scoped caller identity, backed by contextvars. asyncio gives each
 # message-handling task (and each gather()-wrapped tool call) its own context
 # copy, so these are isolated across concurrent channels/requests. This replaces
@@ -1147,12 +1152,24 @@ class ToolExecutor:
                     section = f"user_{user_id}"
                 else:
                     section = "global"
-                if section not in all_mem:
-                    all_mem[section] = {}
-                all_mem[section][key] = value
+                section_map = all_mem.setdefault(section, {})
+                # Move-to-end + cap: working memory is injected into every
+                # system prompt, so it must not grow without bound. Re-inserting
+                # gives LRU-by-write order; evict the oldest keys beyond the cap
+                # (never the one just written).
+                section_map.pop(key, None)
+                section_map[key] = value
+                evicted = 0
+                while len(section_map) > MEMORY_MAX_KEYS_PER_SECTION:
+                    oldest = next(iter(section_map))
+                    if oldest == key:
+                        break
+                    del section_map[oldest]
+                    evicted += 1
                 await asyncio.to_thread(self._save_all_memory, all_mem)
                 scope_label = "global" if section == "global" else "personal"
-                return f"Saved {scope_label} note '{key}'."
+                suffix = f" (evicted {evicted} oldest note(s) at cap {MEMORY_MAX_KEYS_PER_SECTION})" if evicted else ""
+                return f"Saved {scope_label} note '{key}'.{suffix}"
 
             elif action == "delete":
                 key = inp.get("key")

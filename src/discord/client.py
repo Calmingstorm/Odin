@@ -3204,7 +3204,7 @@ class OdinBot(commands.Bot):
                     elif tool_name == "list_knowledge":
                         result = self._handle_list_knowledge()
                     elif tool_name == "delete_knowledge":
-                        result = self._handle_delete_knowledge(tool_input)
+                        result = await self._handle_delete_knowledge(tool_input)
                     elif tool_name == "set_permission":
                         result = await self._handle_set_permission(
                             str(message.author.id), tool_input,
@@ -3896,7 +3896,7 @@ class OdinBot(commands.Bot):
         total = sum(s["chunks"] for s in sources)
         return f"**Knowledge base: {len(sources)} document(s), {total} total chunks**\n" + "\n".join(lines)
 
-    def _handle_delete_knowledge(self, inp: dict) -> str:
+    async def _handle_delete_knowledge(self, inp: dict) -> str:
         """Delete a document from the knowledge base."""
         if not self._knowledge_store:
             return "Knowledge base is not available."
@@ -3905,7 +3905,7 @@ class OdinBot(commands.Bot):
         if not source:
             return "'source' is required."
 
-        count = self._knowledge_store.delete_source(source)
+        count = await self._knowledge_store.delete_source_async(source)
         if count == 0:
             return f"No document found with source '{source}'."
         return f"Deleted '{source}' from knowledge base ({count} chunks removed)."
@@ -5006,7 +5006,7 @@ class OdinBot(commands.Bot):
         if tool_name == "list_knowledge":
             return self._handle_list_knowledge()
         if tool_name == "delete_knowledge":
-            return self._handle_delete_knowledge(tool_input)
+            return await self._handle_delete_knowledge(tool_input)
         if tool_name == "set_permission":
             return await self._handle_set_permission(user_id, tool_input)
         if tool_name == "search_audit":

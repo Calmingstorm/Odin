@@ -305,7 +305,10 @@ class TestInjection:
             )
         ]
         path = self._store(tmp_path, entries)
-        r = ConversationReflector(str(path), injection_token_budget=50)  # force gating
+        # Budget forces gating (whole corpus doesn't fit) but is large enough
+        # that the gated selection — pinned corrections/preferences plus the
+        # top-K relevant operational — fits without being trimmed.
+        r = ConversationReflector(str(path), injection_token_budget=185)
         section = r.get_prompt_section(user_id="42", query="fix the nginx config")
         assert "never do the bad thing." in section
         assert "user likes terse output." in section
@@ -323,14 +326,25 @@ class TestInjection:
         assert "their secret pref." not in section
         assert "global lesson." in section
 
-    def test_no_query_includes_all_in_scope(self, tmp_path):
+    def test_no_query_includes_all_in_scope_when_within_budget(self, tmp_path):
         path = self._store(tmp_path, [
             _entry(f"k{i}", content="x" * 600 + ".") for i in range(40)
         ])
-        r = ConversationReflector(str(path), injection_token_budget=100)
-        # Without a query there is nothing to rank against — include all
+        # Budget large enough to hold the whole corpus → include all.
+        r = ConversationReflector(str(path), injection_token_budget=10_000)
         section = r.get_prompt_section(query=None)
         assert section.count("- [") == 40
+
+    def test_no_query_still_enforces_budget(self, tmp_path):
+        # The old bug: a query-less caller injected the whole corpus regardless
+        # of the budget. Now the budget is a hard cap even without a query.
+        path = self._store(tmp_path, [
+            _entry(f"k{i}", content="x" * 600 + ".") for i in range(40)
+        ])
+        r = ConversationReflector(str(path), injection_token_budget=500)
+        section = r.get_prompt_section(query=None)
+        n = section.count("- [")
+        assert 0 < n < 40  # trimmed to fit — not all, not nothing
 
     @pytest.mark.asyncio
     async def test_use_stamps_persist_via_locked_write(self, tmp_path):

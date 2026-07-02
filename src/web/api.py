@@ -1884,7 +1884,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         source = request.match_info["source"]
-        deleted = await asyncio.to_thread(store.delete_source, source)
+        deleted = await store.delete_source_async(source)
         if deleted == 0:
             return web.json_response({"error": "source not found"}, status=404)
         return web.json_response({"status": "deleted", "chunks_removed": deleted})
@@ -1959,7 +1959,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response(
                 {"error": "keep_source and remove_source are required"}, status=400
             )
-        removed = await asyncio.to_thread(store.merge_sources, keep, remove)
+        removed = await store.merge_sources_async(keep, remove)
         if removed == 0:
             return web.json_response(
                 {"error": "keep_source not found or nothing to merge"}, status=404
@@ -3883,7 +3883,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.delete("/api/learned/{key}")
     async def delete_learned(request: web.Request) -> web.Response:
         key = request.match_info["key"]
-        if bot.reflector.delete_entry(key):
+        if await bot.reflector.delete_entry_async(key):
             return web.json_response({"status": "deleted", "key": key})
         return web.json_response({"error": "entry not found"}, status=404)
 
@@ -3894,7 +3894,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             data = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
-        updated = bot.reflector.update_entry(
+        updated = await bot.reflector.update_entry_async(
             key,
             content=data.get("content"),
             category=data.get("category"),
