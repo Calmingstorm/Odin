@@ -289,6 +289,41 @@ async def test_force_cancel_tolerates_missing_task():
     assert agent._cancel_event.is_set()
 
 
+async def test_check_health_force_cancels_stuck_task(monkeypatch):
+    """The safety-net path must actually cancel the task, not just set the
+    cooperative flag a stuck tool call ignores (Odin's PR#124 blocker)."""
+    import src.agents.manager as mgr_mod
+    from src.agents.manager import AgentManager
+
+    manager = AgentManager()
+
+    async def _sleep_forever():
+        await asyncio.sleep(3600)
+
+    task = asyncio.create_task(_sleep_forever())
+    await asyncio.sleep(0)
+
+    sm = MagicMock()
+    sm.is_terminal = False
+    agent = SimpleNamespace(
+        _sm=sm, _cancel_event=asyncio.Event(), _task=task,
+        id="a1", label="stuck",
+        created_at=0.0,          # far in the past → lifetime exceeded
+        last_activity=time.time(),
+    )
+    manager._agents["a1"] = agent
+    # Ensure the lifetime threshold is exceeded regardless of its constant.
+    monkeypatch.setattr(mgr_mod, "MAX_AGENT_LIFETIME", 1.0)
+
+    result = manager.check_health()
+    assert result["killed"] == 1
+    assert agent._cancel_event.is_set()
+    await asyncio.sleep(0)
+    assert task.cancelled() or task.done()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 # ---------------------------------------------------------------------------
 # Plan store — id uniqueness + perms
 # ---------------------------------------------------------------------------

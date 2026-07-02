@@ -739,7 +739,10 @@ class AgentManager:
             elapsed = now - agent.created_at
             idle = now - agent.last_activity
             if elapsed > MAX_AGENT_LIFETIME:
-                agent._cancel_event.set()
+                # Actually force-cancel the task — setting the cancel event
+                # alone left an agent stuck in a long tool call running for up
+                # to TOOL_EXEC_TIMEOUT while the log claimed "Force-killed".
+                self._force_cancel(agent)
                 killed += 1
                 log.warning(
                     "Force-killed stuck agent %s (%s): lifetime exceeded (%ds)",
