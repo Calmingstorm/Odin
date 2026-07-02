@@ -674,17 +674,22 @@ class OdinBot(commands.Bot):
 
     def _wire_llm_callbacks(self) -> None:
         """Attach LLM-backed compaction and reflection callbacks using the active provider."""
+        # Compaction emits a segment of up to ~2500 chars (≈625 tokens) plus
+        # structured header lines; reflection emits multi-lesson JSON. The old
+        # 300/500 caps guaranteed mid-output truncation on providers that honor
+        # max_tokens (Ollama/Kimi) — truncated reflection JSON parsed to [] and
+        # silently dropped lessons. (Codex ignores max_tokens entirely.)
         async def _llm_compaction(messages: list[dict], system: str) -> str:
             client = self.llm_client
             if not client:
                 raise RuntimeError("No LLM provider configured")
-            return await client.chat(messages=messages, system=system, max_tokens=300)
+            return await client.chat(messages=messages, system=system, max_tokens=1500)
 
         async def _llm_reflection(messages: list[dict], system: str) -> str:
             client = self.llm_client
             if not client:
                 raise RuntimeError("No LLM provider configured")
-            return await client.chat(messages=messages, system=system, max_tokens=500)
+            return await client.chat(messages=messages, system=system, max_tokens=2000)
 
         self.sessions.set_compaction_fn(_llm_compaction)
         self.reflector.set_text_fn(_llm_reflection)

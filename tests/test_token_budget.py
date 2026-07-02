@@ -26,6 +26,7 @@ from src.llm.cost_tracker import estimate_tokens
 from src.sessions.manager import (
     DEFAULT_SESSION_TOKEN_BUDGET,
     COMPACTION_THRESHOLD,
+    MESSAGE_TOKEN_OVERHEAD,
     Message,
     Session,
     SessionManager,
@@ -76,13 +77,20 @@ class TestEstimateSessionTokens:
     def test_messages_only(self):
         msgs = [_make_message("a" * 40), _make_message("b" * 80)]
         result = _estimate_session_tokens(msgs, "")
-        assert result == estimate_tokens("a" * 40) + estimate_tokens("b" * 80)
+        # Each message carries a small structural overhead beyond its content.
+        assert result == (
+            estimate_tokens("a" * 40) + estimate_tokens("b" * 80)
+            + 2 * MESSAGE_TOKEN_OVERHEAD
+        )
 
     def test_messages_and_summary(self):
         msgs = [_make_message("a" * 100)]
         summary = "b" * 200
         result = _estimate_session_tokens(msgs, summary)
-        assert result == estimate_tokens("a" * 100) + estimate_tokens("b" * 200)
+        assert result == (
+            estimate_tokens("a" * 100) + estimate_tokens("b" * 200)
+            + MESSAGE_TOKEN_OVERHEAD
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +106,7 @@ class TestSessionEstimatedTokens:
         msgs = [_make_message("hello " * 100)]
         session = _make_session(messages=msgs)
         assert session.estimated_tokens > 0
-        assert session.estimated_tokens == estimate_tokens("hello " * 100)
+        assert session.estimated_tokens == estimate_tokens("hello " * 100) + MESSAGE_TOKEN_OVERHEAD
 
     def test_with_summary(self):
         session = _make_session(summary="important context " * 50)
@@ -229,7 +237,9 @@ class TestGetSessionTokenUsage:
         mgr = _make_manager(tmp_path, token_budget=1000)
         mgr.add_message("ch1", "user", "a" * 400)
         usage = mgr.get_session_token_usage()
-        assert usage["ch1"]["budget_pct"] == 10.0
+        # 100 content tokens + per-message overhead, over a 1000 budget.
+        expected_pct = round((100 + MESSAGE_TOKEN_OVERHEAD) / 1000 * 100, 1)
+        assert usage["ch1"]["budget_pct"] == expected_pct
 
     def test_has_summary_field(self, tmp_path):
         mgr = _make_manager(tmp_path)
@@ -260,7 +270,7 @@ class TestGetTokenMetrics:
         mgr.add_message("ch2", "user", "b" * 800)
         metrics = mgr.get_token_metrics()
         assert metrics["session_count"] == 2
-        assert metrics["total_tokens"] == 100 + 200
+        assert metrics["total_tokens"] == 100 + 200 + 2 * MESSAGE_TOKEN_OVERHEAD
         assert len(metrics["per_session"]) == 2
 
     def test_over_budget_count(self, tmp_path):
