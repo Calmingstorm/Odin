@@ -83,6 +83,13 @@ UNSAFE_TO_RETRY: frozenset[str] = frozenset({
     "terraform_ops",
     "kubectl",
     "issue_tracker",
+    # Side-effecting tools missing from the original set. email_send is the
+    # dangerous one: SMTP can fail after DATA is accepted, so an auto-retry
+    # duplicates the mail.
+    "email_send",
+    "install_skill",
+    "send_to_agent",
+    "cancel_task",
 })
 
 

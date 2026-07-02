@@ -48,6 +48,15 @@ log = get_logger("tools")
 # oldest-by-write notes are evicted past the cap.
 MEMORY_MAX_KEYS_PER_SECTION = 200
 
+# Prefixes that mark a tool result string as a failure. A governor block
+# ("Blocked [risk]: ...") and a host-access denial ("Unknown or disallowed
+# host: ...") were previously NOT recognized, so a refused action was reported
+# to the LLM and audit log as ok=True — a refused command looked successful.
+_ERROR_RESULT_PREFIXES = (
+    "Error", "Command failed", "Script failed",
+    "Blocked", "Unknown or disallowed host",
+)
+
 # Request-scoped caller identity, backed by contextvars. asyncio gives each
 # message-handling task (and each gather()-wrapped tool call) its own context
 # copy, so these are isolated across concurrent channels/requests. This replaces
@@ -229,7 +238,7 @@ class ToolExecutor:
         else:
             raw_result = raw
             exit_code = None
-            is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
+            is_error = isinstance(raw_result, str) and raw_result.startswith(_ERROR_RESULT_PREFIXES)
 
         if self._recovery_enabled:
             category = self._check_recoverable(raw_result)
@@ -269,7 +278,7 @@ class ToolExecutor:
                         self.recovery_stats.record_failure(tool_name, category, snippet)
                     else:
                         self.recovery_stats.record_success(tool_name, category, snippet)
-                        is_error = isinstance(raw_result, str) and raw_result.startswith(("Error", "Command failed", "Script failed"))
+                        is_error = isinstance(raw_result, str) and raw_result.startswith(_ERROR_RESULT_PREFIXES)
 
         mutation_detected = False
         mutation_reason = ""
@@ -623,6 +632,13 @@ class ToolExecutor:
         if not host:
             return "Error: 'host' is required for write_file."
         safe_path = shlex.quote(path)
+        # Govern the write before executing — write_file reaches the filesystem
+        # via _run_on_host, which does NOT itself govern. Check a representative
+        # redirect-to-path command so policy (e.g. writes to sensitive targets)
+        # applies here as it does for run_command.
+        allowed, denial, _ = self._govern_command(f"write_file > {safe_path}", host)
+        if not allowed:
+            return denial
         # Base64-encode content to avoid shell injection via heredoc delimiter
         encoded = base64.b64encode(content.encode()).decode()
         cmd = f"mkdir -p $(dirname {safe_path}) && echo '{encoded}' | base64 -d > {safe_path}"
@@ -630,7 +646,7 @@ class ToolExecutor:
 
     # --- Multi-host tools ---
 
-    async def _handle_run_command_multi(self, inp: dict) -> str:
+    async def _handle_run_command_multi(self, inp: dict) -> str | tuple[str, int]:
         hosts = inp["hosts"]
         command = inp["command"]
 
@@ -654,23 +670,40 @@ class ToolExecutor:
             else:
                 allowed_hosts.append(h)
 
-        async def _run_one(alias: str) -> str:
+        async def _run_one(alias: str) -> tuple[str, bool]:
             raw = await self._run_on_host(alias, command)
-            text = raw[0] if isinstance(raw, tuple) else raw
+            if isinstance(raw, tuple):
+                text, code = raw[0], raw[1]
+                host_err = code != 0
+            else:
+                text = raw
+                # e.g. "Unknown or disallowed host: ..." / "Command failed ..."
+                host_err = isinstance(raw, str) and raw.startswith(_ERROR_RESULT_PREFIXES)
             text = _truncate_lines(text)
-            return f"### {alias}\n```\n{text.strip()}\n```"
+            return f"### {alias}\n```\n{text.strip()}\n```", host_err
 
         tasks = [_run_one(h) for h in allowed_hosts]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         parts = []
+        any_run_error = False
         for h, r in zip(allowed_hosts, results):
             if isinstance(r, Exception):
                 parts.append(f"### {h}\n```\nError: {r}\n```")
+                any_run_error = True
             else:
-                parts.append(r)
+                markdown, host_err = r
+                parts.append(markdown)
+                any_run_error = any_run_error or host_err
         for h, denial in blocked_hosts:
             parts.append(f"### {h}\n```\n{denial}\n```")
-        return "\n\n".join(parts)
+        aggregate = "\n\n".join(parts)
+        # Return a non-zero exit code when any host was preflight-denied
+        # (host-access or governor), any host errored, or nothing ran. The
+        # aggregate wraps per-host denials in markdown sections, so a
+        # string-prefix check in execute() would miss them and report a refused
+        # action as ok=True.
+        exit_code = 1 if (blocked_hosts or any_run_error or not allowed_hosts) else 0
+        return aggregate, exit_code
 
     # --- Browser tools (text-returning, screenshot handled in client.py) ---
 
@@ -868,6 +901,12 @@ class ToolExecutor:
                 return "pid is required for write action."
             if not text:
                 return "input_text is required for write action."
+            # Writing to a managed process's stdin can drive an interactive
+            # shell — govern the input as a command so a `rm -rf /`-class line
+            # is caught, matching run_command.
+            allowed, denial, _ = self._govern_command(text)
+            if not allowed:
+                return denial
             return await registry.write(int(pid), text)
 
         elif action == "kill":
@@ -1717,7 +1756,10 @@ class ToolExecutor:
         subject = str(inp.get("subject", ""))
         body = str(inp.get("body", ""))
         try:
-            result = send_email(
+            # smtplib blocks; run it off the event loop so a slow mail server
+            # can't stall every other channel/task.
+            result = await asyncio.to_thread(
+                send_email,
                 smtp_host=cfg.smtp.host,
                 smtp_port=cfg.smtp.port,
                 username=cfg.smtp.username,
@@ -1758,7 +1800,8 @@ class ToolExecutor:
             return "Error: 'query' is required"
         limit = max(1, min(int(inp.get("limit", 20)), cfg.max_results))
         try:
-            results = search_email(
+            results = await asyncio.to_thread(
+                search_email,
                 imap_host=cfg.imap.host,
                 imap_port=cfg.imap.port,
                 username=cfg.imap.username,
@@ -1789,7 +1832,8 @@ class ToolExecutor:
         if not uid:
             return "Error: 'uid' is required"
         try:
-            result = read_email(
+            result = await asyncio.to_thread(
+                read_email,
                 imap_host=cfg.imap.host,
                 imap_port=cfg.imap.port,
                 username=cfg.imap.username,
@@ -1823,7 +1867,8 @@ class ToolExecutor:
             return "Error: email tools are not configured (email.enabled is false)"
         limit = max(1, min(int(inp.get("limit", 10)), cfg.max_results))
         try:
-            results = list_recent(
+            results = await asyncio.to_thread(
+                list_recent,
                 imap_host=cfg.imap.host,
                 imap_port=cfg.imap.port,
                 username=cfg.imap.username,

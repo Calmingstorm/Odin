@@ -49,6 +49,22 @@ _CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(DROP|TRUNCATE)\s+(DATABASE|TABLE)\b", re.IGNORECASE), "database drop/truncate"),
     (re.compile(r"\bcrontab\s+.*-r\b"), "crontab remove all"),
     (re.compile(r">\s*/dev/sd[a-z]"), "write to block device"),
+    # Bypass closures — the root-delete rules above anchor on a trailing "/",
+    # so "rm -rf /*", "rm -rf / --no-preserve-root", and "rm -rf /; ..." slipped
+    # to HIGH (which is allowed on non-strict hosts). Close those, plus other
+    # catastrophic forms the original set missed.
+    (re.compile(r"\brm\s+.*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\*"), "recursive delete on root glob"),
+    (re.compile(r"\brm\s+.*--no-preserve-root"), "delete overriding root guard"),
+    (re.compile(r"\brm\s+.*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\s*[;&|]"), "recursive delete on root (chained)"),
+    (re.compile(r"\bfind\s+/\s+.*-delete\b"), "recursive delete from root via find"),
+    (re.compile(r"\bfind\s+/\s+.*-exec\s+rm\b"), "recursive delete from root via find -exec"),
+    (re.compile(r"\bdd\s+.*\bof=/dev/(sd|nvme|vd|xvd|mmcblk)"), "raw write to block device"),
+    # chmod 777 on root, either flag order (chmod -R 777 / or chmod 777 -R /).
+    (re.compile(r"\bchmod\s+.*\b777\b.*\s+/\s*($|[;&|])"), "world-writable on root"),
+    # Decode/download piped into a shell — arbitrary remote code execution.
+    (re.compile(r"\bbase64\s+.*(--decode|-d)\b.*\|\s*(sudo\s+)?(sh|bash|zsh)\b"),
+     "base64 decode piped to shell"),
+    (re.compile(r"\|\s*sudo\s+(sh|bash|zsh)\b"), "piped into privileged shell"),
 ]
 
 _HIGH_PATTERNS: list[tuple[re.Pattern, str]] = [
@@ -92,8 +108,8 @@ _MEDIUM_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bmkdir\b"), "directory creation"),
     (re.compile(r"\bchmod\b"), "permission change"),
     (re.compile(r"\bchown\b"), "ownership change"),
-    (re.compile(r"\bcurl\s+.*\|\s*(bash|sh)\b"), "piped script execution"),
-    (re.compile(r"\bwget\s+.*\|\s*(bash|sh)\b"), "piped script execution"),
+    (re.compile(r"\bcurl\s+.*\|\s*(sudo\s+)?(bash|sh|zsh)\b"), "piped script execution"),
+    (re.compile(r"\bwget\s+.*\|\s*(sudo\s+)?(bash|sh|zsh)\b"), "piped script execution"),
     (re.compile(r"\b(useradd|groupadd|usermod)\b"), "user/group management"),
     (re.compile(r"\bmount\b"), "filesystem mount"),
     (re.compile(r"\bUPDATE\s+\S+\s+SET\b", re.IGNORECASE), "database update"),

@@ -344,14 +344,15 @@ class TestPermissionManagerEdgeCases:
     def test_filter_tools_preserves_order(self):
         pm = PermissionManager({}, default_tier="user")
         tools = [
-            {"name": "run_command"},
+            {"name": "run_command"},   # no longer user-tier (shell execution)
             {"name": "write_file"},
             {"name": "search_knowledge"},
             {"name": "delete_everything"},
             {"name": "web_search"},
         ]
         filtered = pm.filter_tools("someone", tools)
-        assert [t["name"] for t in filtered] == ["run_command", "search_knowledge", "web_search"]
+        # run_command was removed from USER_TIER_TOOLS; the rest keep order.
+        assert [t["name"] for t in filtered] == ["search_knowledge", "web_search"]
 
 
 # ---------------------------------------------------------------------------

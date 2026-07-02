@@ -58,6 +58,10 @@ def _build_clone(params: dict) -> str:
                 parts += ["--depth", str(d)]
         except (TypeError, ValueError):
             pass
+    # `--` terminates option parsing: without it a url like
+    # "--upload-pack=touch /tmp/x" is consumed by git as an option (shlex
+    # quoting stops SHELL injection but not git OPTION injection).
+    parts.append("--")
     parts.append(_sq(url))
     if dest:
         parts.append(_sq(dest))

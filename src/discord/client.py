@@ -404,12 +404,24 @@ class OdinBot(commands.Bot):
             available_hosts=list(config.tools.hosts.keys()),
         )
 
+        # Built before ToolExecutor so it can be wired in as the RBAC gate.
+        # Historically the executor was constructed without it, so
+        # check_permission() always allowed and the central RBAC gate was a
+        # no-op (masked live by default_tier: admin, but a real gap for any
+        # deployment using a non-admin default tier).
+        self.permissions = PermissionManager(
+            config_tiers=config.permissions.tiers,
+            default_tier=config.permissions.default_tier,
+            overrides_path=config.permissions.overrides_path,
+        )
+
         self.tool_executor = ToolExecutor(
             config.tools, memory_path=self._memory_path,
             browser_manager=self.browser_manager,
             output_streamer=output_streamer,
             host_access_manager=self.host_access_manager,
             email_config=getattr(config, "email", None),
+            permission_manager=self.permissions,
         )
         self.skill_manager = SkillManager(
             skills_dir="./data/skills",
@@ -489,12 +501,6 @@ class OdinBot(commands.Bot):
                 "audit.jsonl is NOT tamper-evident and verify_integrity() will fail. "
                 "Set audit.hmac_key to enable the integrity chain."
             )
-        self.permissions = PermissionManager(
-            config_tiers=config.permissions.tiers,
-            default_tier=config.permissions.default_tier,
-            overrides_path=config.permissions.overrides_path,
-        )
-
         from ..permissions.token_manager import ApiTokenManager
         self.api_token_manager = ApiTokenManager("./data/api_tokens.json")
 
@@ -1212,6 +1218,12 @@ class OdinBot(commands.Bot):
         _email_tools = {"email_send", "email_search", "email_read", "email_list_recent"}
         if not getattr(self.config, "email", None) or not self.config.email.enabled:
             builtin = [t for t in builtin if t["name"] not in _email_tools]
+        # issue_tracker returns "not configured" for every call unless enabled,
+        # yet was always advertised — so the model kept trying it. Filter it out
+        # like the other backend-gated tools.
+        issue_cfg = getattr(self.config, "issue_tracker", None)
+        if not issue_cfg or not issue_cfg.enabled:
+            builtin = [t for t in builtin if t["name"] != "issue_tracker"]
         builtin_names = {t["name"] for t in builtin}
         skill_defs = [
             t for t in self.skill_manager.get_tool_definitions()

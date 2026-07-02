@@ -28,7 +28,13 @@ def _make_bot() -> OdinBot:
     still gets wired (tool_executor, sessions, scheduler, agents, etc.),
     which is what we want to validate.
     """
-    cfg = Config(discord={"token": "smoke-test-token"})
+    # default_tier="admin" mirrors the live deployment. The RBAC gate is now
+    # wired into ToolExecutor (previously a no-op), so without this the smoke
+    # tests would be denied admin-tier tools like invoke_skill.
+    cfg = Config(
+        discord={"token": "smoke-test-token"},
+        permissions={"default_tier": "admin"},
+    )
     return OdinBot(cfg)
 
 
@@ -791,8 +797,12 @@ class TestInvokeSkillTool:
             "hosts": ["dev", "prod"],
             "command": "systemctl restart nginx",
         })
-        assert "ok" in result
-        assert "strict" in result
+        # Now returns (aggregate, exit_code); prod is governor-denied on the
+        # strict host, so the aggregate is a non-zero (error) result.
+        text, exit_code = result
+        assert "ok" in text
+        assert "strict" in text
+        assert exit_code == 1  # a host was denied → not ok
         exe._run_on_host.assert_called_once_with("dev", "systemctl restart nginx")
 
     @pytest.mark.asyncio

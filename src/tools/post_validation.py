@@ -551,13 +551,27 @@ _MUTATION_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bnginx\s+-s\s+reload\b"), "nginx reload"),
     (re.compile(r"\biptables\b"), "firewall change"),
     (re.compile(r"\bufw\s+(allow|deny|delete|enable|disable)\b"), "firewall change"),
+    # Filesystem mutations the original set missed.
+    (re.compile(r"\brm\s+(-\w+\s+)*-?\w*[rf]"), "file deletion"),
+    (re.compile(r"\bmv\s+\S"), "file move/rename"),
+    (re.compile(r"\bsed\s+(-\w+\s+)*-i"), "in-place file edit"),
+    (re.compile(r"\bchmod\s+\S"), "permission change"),
+    (re.compile(r"\bchown\s+\S"), "ownership change"),
+    (re.compile(r"\bdd\s+.*\bof="), "raw disk/file write"),
+    (re.compile(r"\btruncate\s+-s"), "file truncation"),
+    # Redirect/append to an absolute path other than /dev/null.
+    (re.compile(r">>?\s*/(?!dev/null)\S"), "file overwrite via redirect"),
 ]
 
 _MUTATION_TOOL_ACTIONS: dict[str, frozenset[str]] = {
     "docker_ops": frozenset({"run", "build", "pull", "stop", "rm", "compose_up", "compose_down"}),
     "kubectl": frozenset({"apply", "delete", "rollout", "scale", "patch"}),
     "terraform_ops": frozenset({"apply", "destroy"}),
+    "git_ops": frozenset({"clone", "commit", "push", "checkout", "pull", "stash", "branch"}),
 }
+
+# Tools that are a mutation on every call, regardless of arguments.
+_ALWAYS_MUTATING_TOOLS: frozenset[str] = frozenset({"email_send"})
 
 _VALIDATION_HINT = (
     "\n\n[post-action] Operational mutation detected ({reason}). "
@@ -575,6 +589,8 @@ class MutationDetection:
 
 def detect_mutation(tool_name: str, tool_input: dict) -> MutationDetection:
     """Check if a tool call represents an operational mutation."""
+    if tool_name in _ALWAYS_MUTATING_TOOLS:
+        return MutationDetection(True, f"tool: {tool_name}")
     if tool_name in _MUTATION_TOOL_ACTIONS:
         allowed_actions = _MUTATION_TOOL_ACTIONS[tool_name]
         if not allowed_actions:
