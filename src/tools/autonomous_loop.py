@@ -95,6 +95,10 @@ class LoopManager:
         interval_seconds = max(MIN_INTERVAL_SECONDS, interval_seconds)
         max_iterations = max(1, min(max_iterations, 1000))
 
+        # Opportunistic cleanup — records only accumulate via start_loop, so
+        # sweeping here keeps the map bounded without a dedicated timer task.
+        self.cleanup_finished()
+
         loop_id = uuid.uuid4().hex[:8]
         info = LoopInfo(
             id=loop_id,
@@ -164,11 +168,40 @@ class LoopManager:
         now = time.monotonic()
         to_remove = []
         for lid, info in self._loops.items():
-            if info.status != "running" and info.last_trigger:
-                if now - info.last_trigger > 3600:  # 1 hour after finish
+            if info.status != "running":
+                # A loop stopped before its first iteration has no
+                # last_trigger — treat it as immediately stale.
+                ref = info.last_trigger or 0
+                if now - ref > 3600:  # 1 hour after finish
                     to_remove.append(lid)
         for lid in to_remove:
             del self._loops[lid]
+
+    async def shutdown(self, timeout: float = 10.0) -> None:
+        """Stop all loops and await their tasks.
+
+        Setting the cancel event alone leaves a loop mid-iteration until its
+        next wait; on process shutdown that means "Task was destroyed but it
+        is pending" and a skipped trajectory save. Cancel and await instead.
+        """
+        tasks = []
+        for info in self._loops.values():
+            if info.status == "running":
+                info._cancel_event.set()
+                info.status = "stopped"
+            if info._task and not info._task.done():
+                info._task.cancel()
+                tasks.append(info._task)
+        if tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True), timeout,
+                )
+            except asyncio.TimeoutError:
+                log.warning(
+                    "LoopManager shutdown: %d task(s) did not finish within %.0fs",
+                    len(tasks), timeout,
+                )
 
     async def _run_loop(
         self,
@@ -259,6 +292,19 @@ class LoopManager:
                         except Exception:
                             pass
                         break
+                    # Back off before retrying — a bare `continue` here used to
+                    # skip the interval wait entirely, so a fast-failing
+                    # callback hammered the failing endpoint at full speed.
+                    backoff = min(
+                        info.interval_seconds * (2 ** consecutive_errors),
+                        MAX_BACKOFF_SECONDS,
+                    )
+                    log.info(
+                        "Loop %s: backing off %ds after %d consecutive error(s)",
+                        info.id, backoff, consecutive_errors,
+                    )
+                    if await self._interruptible_wait(info, backoff):
+                        break
                     continue
 
                 # Store iteration result (truncated) in history
@@ -305,25 +351,10 @@ class LoopManager:
 
                 # Wait for interval before next iteration (interruptible by cancel).
                 # Placed AFTER iteration so the first run executes immediately.
-                wait_seconds = info.interval_seconds
-                if consecutive_errors > 0:
-                    backoff = min(
-                        info.interval_seconds * (2 ** consecutive_errors),
-                        MAX_BACKOFF_SECONDS,
-                    )
-                    wait_seconds = backoff
-                    log.info(
-                        "Loop %s: backing off %ds after %d consecutive errors",
-                        info.id, wait_seconds, consecutive_errors,
-                    )
-                try:
-                    await asyncio.wait_for(
-                        info._cancel_event.wait(),
-                        timeout=wait_seconds,
-                    )
+                # (Error iterations back off and `continue` above, so
+                # consecutive_errors is always 0 here.)
+                if await self._interruptible_wait(info, info.interval_seconds):
                     break  # Cancel was set during the wait
-                except asyncio.TimeoutError:
-                    pass  # Normal — interval elapsed, proceed with next iteration
 
             # Loop ended normally (max iterations reached)
             if info.status == "running":
@@ -387,6 +418,15 @@ class LoopManager:
             )
 
         return "\n".join(parts)
+
+    @staticmethod
+    async def _interruptible_wait(info: LoopInfo, seconds: float) -> bool:
+        """Wait up to *seconds*; return True if the loop was cancelled."""
+        try:
+            await asyncio.wait_for(info._cancel_event.wait(), timeout=seconds)
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     async def _post_response(
         self, info: LoopInfo, channel: Any, response: str,

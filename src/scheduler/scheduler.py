@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 from croniter import croniter
@@ -27,6 +28,24 @@ def _utc_iso(dt: datetime) -> str:
     else:
         dt = dt.astimezone(timezone.utc)
     return dt.isoformat()
+
+
+def _cron_next_run(cron_expr: str, tz_name: str | None = None) -> str:
+    """Next cron occurrence as a UTC ISO string.
+
+    When *tz_name* is set the schedule fires on that timezone's wall clock
+    (so "0 9 * * *" means 9am local across DST), computed locally then stored
+    as UTC. Without it, cron is evaluated in UTC as before.
+    """
+    if tz_name:
+        try:
+            base = datetime.now(ZoneInfo(tz_name))
+            cr = croniter(cron_expr, base)
+            return _utc_iso(cr.get_next(datetime))
+        except (ZoneInfoNotFoundError, ValueError):
+            log.warning("Unknown schedule timezone %r; evaluating cron in UTC", tz_name)
+    cr = croniter(cron_expr, datetime.now(timezone.utc))
+    return _utc_iso(cr.get_next(datetime))
 
 
 # Tools that can be scheduled for "check" actions
@@ -61,6 +80,10 @@ class Scheduler:
         self._failure_callback: Callable[[dict, int], Awaitable[None]] | None = None
         self._lock = asyncio.Lock()
         self._wake = asyncio.Event()
+        # Schedule ids currently executing — prevents the same schedule from
+        # double-firing when a manual run_now overlaps a tick, a duplicate
+        # webhook arrives, or (defensively) two scheduler loops tick at once.
+        self._in_flight: set[str] = set()
         # Execution history
         _hist_path = history_path or str(self.data_path.parent / "schedule_history.jsonl")
         self.history = ScheduleHistory(_hist_path)
@@ -105,8 +128,7 @@ class Scheduler:
                 if next_run.tzinfo is not None:
                     next_run = next_run.replace(tzinfo=None)
                 if next_run < now:
-                    cr = croniter(cron_expr, now)
-                    schedule["next_run"] = _utc_iso(cr.get_next(datetime))
+                    schedule["next_run"] = _cron_next_run(cron_expr, schedule.get("timezone"))
                     advanced += 1
             except Exception:
                 continue
@@ -140,6 +162,7 @@ class Scheduler:
         retry_backoff_seconds: int | None = None,
         webhook_config: dict | None = None,
         requester_id: str = "",
+        cron_timezone: str | None = None,
     ) -> dict:
         if action == "digest":
             # Digest is a predefined action, no tool validation needed
@@ -168,6 +191,9 @@ class Scheduler:
         elif not cron and not run_at:
             raise ValueError("Either 'cron', 'run_at', or 'trigger' is required")
 
+        if cron_timezone is not None:
+            self._validate_timezone(cron_timezone)
+
         schedule: dict[str, Any] = {
             "id": uuid.uuid4().hex[:8],
             "description": description,
@@ -187,8 +213,9 @@ class Scheduler:
                 raise ValueError(f"Invalid cron expression: {cron}")
             schedule["cron"] = cron
             schedule["one_time"] = False
-            cr = croniter(cron, datetime.now(timezone.utc))
-            schedule["next_run"] = _utc_iso(cr.get_next(datetime))
+            if cron_timezone:
+                schedule["timezone"] = cron_timezone
+            schedule["next_run"] = _cron_next_run(cron, cron_timezone)
         else:
             if run_at:
                 try:
@@ -232,6 +259,16 @@ class Scheduler:
         log_next = schedule.get("next_run", "on trigger")
         log.info("Added schedule %s: %s (next: %s)", schedule["id"], description, log_next)
         return schedule
+
+    @staticmethod
+    def _validate_timezone(tz_name: str) -> None:
+        """Validate an IANA timezone name (e.g. 'America/New_York')."""
+        if not isinstance(tz_name, str) or not tz_name:
+            raise ValueError("cron_timezone must be a non-empty string")
+        try:
+            ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, ValueError) as e:
+            raise ValueError(f"Invalid timezone {tz_name!r}: {e}") from e
 
     @staticmethod
     def _validate_trigger(trigger: dict) -> None:
@@ -501,6 +538,7 @@ class Scheduler:
         retry_backoff_seconds: int | None = None,
         webhook_config: dict | None = None,
         paused: bool | None = None,
+        cron_timezone: str | None = None,
     ) -> dict | None:
         """Update mutable fields on an existing schedule.
 
@@ -511,6 +549,8 @@ class Scheduler:
         mode entirely — e.g. passing ``cron`` on a one-time schedule converts
         it to recurring.
         """
+        if cron_timezone is not None:
+            self._validate_timezone(cron_timezone)
         async with self._lock:
             target: dict | None = None
             for s in self._schedules:
@@ -562,6 +602,11 @@ class Scheduler:
                     raise ValueError("retry_backoff_seconds must be >= 1")
                 target["retry_backoff_seconds"] = retry_backoff_seconds
 
+            # A timezone change alone (no new cron) still needs next_run
+            # recomputed on the existing cron.
+            if cron_timezone is not None:
+                target["timezone"] = cron_timezone
+
             # --- timing mode changes ---
             new_timing = trigger is not None or cron is not None or run_at is not None
             if new_timing:
@@ -573,13 +618,13 @@ class Scheduler:
                     self._validate_trigger(trigger)
                     target["trigger"] = trigger
                     target["one_time"] = False
+                    target.pop("timezone", None)
                 elif cron is not None:
                     if not croniter.is_valid(cron):
                         raise ValueError(f"Invalid cron expression: {cron}")
                     target["cron"] = cron
                     target["one_time"] = False
-                    cr = croniter(cron, datetime.now(timezone.utc))
-                    target["next_run"] = _utc_iso(cr.get_next(datetime))
+                    target["next_run"] = _cron_next_run(cron, target.get("timezone"))
                 elif run_at is not None:
                     try:
                         datetime.fromisoformat(run_at)
@@ -589,6 +634,10 @@ class Scheduler:
                     target["run_at"] = normalized
                     target["next_run"] = normalized
                     target["one_time"] = True
+                    target.pop("timezone", None)
+            elif cron_timezone is not None and target.get("cron"):
+                # Timezone changed on an existing cron schedule — recompute.
+                target["next_run"] = _cron_next_run(target["cron"], cron_timezone)
 
             await asyncio.to_thread(self._save)
             log.info("Updated schedule %s", schedule_id)
@@ -649,6 +698,12 @@ class Scheduler:
     ) -> None:
         self._callback = callback
         self._failure_callback = failure_callback
+        # Idempotent: Discord fires on_ready on every reconnect, and start()
+        # used to create_task() unconditionally, leaking a second _loop() that
+        # ticked independently and double-fired one-time/retry schedules.
+        if self._task is not None and not self._task.done():
+            log.info("Scheduler already running; refreshed callbacks without a second loop")
+            return
         self._task = asyncio.create_task(self._loop())
         log.info("Scheduler started with %d schedule(s)", len(self._schedules))
 
@@ -690,7 +745,9 @@ class Scheduler:
             for schedule in self._schedules:
                 if schedule.get("paused"):
                     continue
-                nxt = schedule.get("next_run")
+                # A pending retry has its own due time; ignoring it here meant
+                # retries waited for the next 60s tick instead of firing on time.
+                nxt = schedule.get("retry_at") or schedule.get("next_run")
                 if not nxt:
                     continue
                 try:
@@ -709,10 +766,15 @@ class Scheduler:
             return 60.0
 
     def _compute_retry_at(self, schedule: dict) -> str:
-        """Compute the next retry time using exponential backoff."""
-        retry_count = schedule.get("retry_count", 0)
+        """Compute the next retry time using exponential backoff.
+
+        ``attempt`` is 1-based (the retry_count that was just incremented),
+        so the first retry waits base·2⁰ = base, the second base·2¹, etc.
+        Using retry_count directly made the first retry wait 2·base.
+        """
+        attempt = schedule.get("retry_count", 1)
         base = schedule.get("retry_backoff_seconds", DEFAULT_RETRY_BACKOFF_SECONDS)
-        delay = min(base * (2 ** retry_count), MAX_BACKOFF_SECONDS)
+        delay = min(base * (2 ** max(0, attempt - 1)), MAX_BACKOFF_SECONDS)
         retry_time = datetime.now(timezone.utc) + timedelta(seconds=delay)
         return retry_time.isoformat()
 
@@ -721,7 +783,24 @@ class Scheduler:
 
         For 'webhook' actions, the built-in HTTP executor is used directly.
         All other actions are dispatched through the registered callback.
+
+        A per-schedule in-flight guard drops overlapping executions (manual
+        run_now during a tick, duplicate webhook deliveries) so a schedule
+        never runs twice concurrently.
         """
+        sid = schedule.get("id", "")
+        if sid in self._in_flight:
+            log.warning(
+                "Schedule %s is already executing — skipping overlapping fire", sid,
+            )
+            return
+        self._in_flight.add(sid)
+        try:
+            await self._execute_and_record_inner(schedule)
+        finally:
+            self._in_flight.discard(sid)
+
+    async def _execute_and_record_inner(self, schedule: dict) -> None:
         if schedule.get("action") == "webhook":
             await self._execute_and_record_webhook(schedule)
             return
@@ -870,8 +949,9 @@ class Scheduler:
                 to_fire.append(schedule)
 
                 if schedule.get("cron"):
-                    cr = croniter(schedule["cron"], now.replace(tzinfo=None))
-                    schedule["next_run"] = _utc_iso(cr.get_next(datetime))
+                    schedule["next_run"] = _cron_next_run(
+                        schedule["cron"], schedule.get("timezone"),
+                    )
 
             if to_fire:
                 try:

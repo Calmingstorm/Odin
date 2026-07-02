@@ -7,7 +7,9 @@ run the most recent pending plan for that user+channel.
 from __future__ import annotations
 
 import json
+import os
 import time
+import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -63,10 +65,18 @@ class PlanStore:
 
     def _save(self) -> None:
         tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(
+        # Plans embed the user's original request; write 0600 so they aren't
+        # world-readable (default umask left them 0644).
+        payload = json.dumps(
             {pid: p.to_dict() for pid, p in self._plans.items()},
             indent=2,
-        ))
+        )
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, payload.encode())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         tmp.replace(self._path)
 
     def create(
@@ -80,7 +90,9 @@ class PlanStore:
         expiry_seconds: int = DEFAULT_EXPIRY_SECONDS,
     ) -> ExecutionPlan:
         now = time.time()
-        plan_id = f"plan-{int(now)}-{user_id[:8]}"
+        # 1-second granularity meant two plans by the same user in the same
+        # second collided (dict overwrite); add a short random suffix.
+        plan_id = f"plan-{int(now)}-{user_id[:8]}-{uuid.uuid4().hex[:6]}"
         plan = ExecutionPlan(
             plan_id=plan_id,
             user_id=user_id,
