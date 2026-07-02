@@ -61,6 +61,12 @@ TOOL_SUMMARY_THRESHOLD = 10  # summarize when this many tool calls occurred
 TOOL_SUMMARY_MAX_CHARS = 2000  # max chars for summarized tool response in history
 CHAT_RESPONSE_MAX_CHARS = 4000  # max chars for text-only (no-tool) response in history
 
+# Max chars of each source message fed into a compaction summary. Must be at
+# least CHAT_RESPONSE_MAX_CHARS or assistant responses (which persist up to
+# 4000 chars) get clipped to 500 before summarizing, permanently losing
+# identifiers past that point despite the "preserve verbatim" prompt.
+COMPACTION_SOURCE_MAX_CHARS = CHAT_RESPONSE_MAX_CHARS
+
 # Context budget constants. The send budget is configurable
 # (sessions.context_token_budget, per-channel overrides) — this is the default.
 CONTEXT_TOKEN_BUDGET = 64_000  # max estimated tokens for history sent to LLM
@@ -297,6 +303,13 @@ class Message:
     user_id: str | None = None
 
 
+# Per-message token overhead — role tag + structural/JSON framing the raw
+# content-length estimate ignores. Without it the estimator undercounts and
+# the always-kept recent window can overshoot the send budget on dense
+# code/JSON messages.
+MESSAGE_TOKEN_OVERHEAD = 4
+
+
 def _estimate_session_tokens(
     messages: list[Message], summary: str, segments: list | None = None,
 ) -> int:
@@ -305,9 +318,10 @@ def _estimate_session_tokens(
     if summary:
         total += estimate_tokens(summary)
     for seg in segments or []:
-        total += estimate_tokens(seg.get("summary", ""))
+        total += estimate_tokens(seg.get("summary", "")) + MESSAGE_TOKEN_OVERHEAD
     for m in messages:
         total += estimate_tokens(m.content if isinstance(m.content, str) else str(m.content))
+        total += MESSAGE_TOKEN_OVERHEAD
     return total
 
 
@@ -429,19 +443,24 @@ class SessionManager:
             candidates.append((ts, path))
         if not candidates:
             return None
-        candidates.sort()
-        _, latest = candidates[-1]
-        try:
-            data = json.loads(latest.read_text())
-            session = self._session_from_dict(data)
-        except Exception as e:
-            log.error("Failed to restore archive %s: %s", latest, e)
-            return None
-        log.info(
-            "Restored session for channel %s from archive %s (%d messages, %d segments)",
-            channel_id, latest.name, len(session.messages), len(session.summary_segments),
-        )
-        return session
+        # Newest first, but fall back to older archives if the newest is
+        # corrupt (truncated by a crash mid-write) instead of giving up and
+        # starting the channel fresh.
+        candidates.sort(reverse=True)
+        for ts, path in candidates:
+            try:
+                data = json.loads(path.read_text())
+                session = self._session_from_dict(data)
+            except Exception as e:
+                log.error("Skipping corrupt archive %s: %s", path, e)
+                continue
+            log.info(
+                "Restored session for channel %s from archive %s (%d messages, %d segments)",
+                channel_id, path.name, len(session.messages), len(session.summary_segments),
+            )
+            return session
+        log.error("All %d archive(s) for channel %s were unreadable", len(candidates), channel_id)
+        return None
 
     def add_message(
         self, channel_id: str, role: str, content: str,
@@ -922,7 +941,7 @@ class SessionManager:
         convo_lines = []
         for m in to_summarize:
             speaker = f"{m.role}[{m.user_id}]" if m.user_id else m.role
-            convo_lines.append(f"{speaker}: {m.content[:500]}")
+            convo_lines.append(f"{speaker}: {m.content[:COMPACTION_SOURCE_MAX_CHARS]}")
         convo_text = "\n".join(convo_lines)
 
         system_instruction = (
@@ -1149,7 +1168,12 @@ class SessionManager:
         timestamp = int(session.last_active)
         path = archive_dir / f"{channel_id}_{timestamp}.json"
         data = asdict(session)
-        path.write_text(json.dumps(data, indent=2))
+        # Atomic write: a bare write_text left a truncated newest archive on an
+        # OOM/crash mid-write, and _restore_from_archive aborts on the newest
+        # file — so one bad write erased the channel despite good older archives.
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        tmp.replace(path)
         log.info("Archived session %s (%d messages)", channel_id, len(session.messages))
         self._prune_old_archives(archive_dir)
 
@@ -1182,19 +1206,33 @@ class SessionManager:
         """
         try:
             files = sorted(archive_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
-            pruned = 0
             total_bytes = sum(f.stat().st_size for f in files)
-            while files and (
-                total_bytes > self.archive_max_bytes
-                or len(files) > self.archive_max_files
-            ):
-                oldest = files.pop(0)
-                total_bytes -= oldest.stat().st_size
-                oldest.unlink()
+
+            # Protect each channel's most-recent archive so a high-traffic
+            # channel can't evict a quiet channel's only restore point.
+            # Eviction order: oldest non-protected first; the protected
+            # newest-per-channel files are only touched as a last resort to
+            # honor a hard cap.
+            newest_per_channel: dict[str, Path] = {}
+            for f in files:  # ascending mtime → last write per channel wins
+                newest_per_channel[f.stem.rsplit("_", 1)[0]] = f
+            protected = set(newest_per_channel.values())
+            evict_order = [f for f in files if f not in protected]
+            evict_order += [f for f in files if f in protected]
+
+            pruned = 0
+            over_cap = lambda: total_bytes > self.archive_max_bytes or len(files) > self.archive_max_files
+            for f in evict_order:
+                if not over_cap():
+                    break
+                total_bytes -= f.stat().st_size
+                f.unlink()
+                files.remove(f)
                 pruned += 1
             if pruned:
                 log.info(
-                    "Pruned %d oldest archive(s) from %s (caps: %d bytes / %d files)",
+                    "Pruned %d archive(s) from %s (caps: %d bytes / %d files; "
+                    "newest-per-channel protected)",
                     pruned, archive_dir, self.archive_max_bytes, self.archive_max_files,
                 )
         except Exception as e:
@@ -1227,10 +1265,13 @@ class SessionManager:
                 arch_cid = data.get("channel_id", "unknown")
                 if channel_id and arch_cid != channel_id:
                     continue
+                # Content at or before the channel's reset epoch was purged —
+                # it must not resurface via search, mirroring restore.
+                reset_epoch = self._reset_epochs.get(arch_cid, 0.0)
                 summary = data.get("summary", "")
                 if summary and query_lower in summary.lower():
                     ts = data.get("last_active", 0)
-                    if (after and ts < after) or (before and ts > before):
+                    if (after and ts < after) or (before and ts > before) or ts <= reset_epoch:
                         pass
                     else:
                         results.append({
@@ -1246,6 +1287,8 @@ class SessionManager:
                     if after and ts < after:
                         continue
                     if before and ts > before:
+                        continue
+                    if ts <= reset_epoch:
                         continue
                     content = msg.get("content", "")
                     if query_lower in content.lower():
@@ -1353,6 +1396,9 @@ class SessionManager:
                     ts = hr.get("timestamp", 0)
                     if not _ts_ok(ts):
                         continue
+                    # Reset content stays purged from the semantic index too.
+                    if ts <= self._reset_epochs.get(hr.get("channel_id", ""), 0.0):
+                        continue
                     key = (hr["channel_id"], ts)
                     if key not in seen:
                         results.append(hr)
@@ -1441,28 +1487,45 @@ class SessionManager:
             log.error("Compaction reflection failed: %s", e)
 
     def save(self) -> None:
-        """Persist only sessions that changed since the last save."""
-        to_save = set(self._dirty)
-        self._dirty -= to_save
-        for cid in to_save:
+        """Persist only sessions that changed since the last save.
+
+        A channel is cleared from the dirty set only AFTER its write
+        succeeds. The old code cleared dirty up-front, so any write failure
+        (disk full, permission, tmp collision with the web-chat save) silently
+        dropped that session's changes forever.
+        """
+        for cid in list(self._dirty):
             session = self._sessions.get(cid)
             if session is None:
+                self._dirty.discard(cid)
                 continue
-            path = self.persist_dir / f"{cid}.json"
-            data = asdict(session)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, indent=2))
-            tmp.replace(path)
+            try:
+                path = self.persist_dir / f"{cid}.json"
+                data = asdict(session)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(data, indent=2))
+                tmp.replace(path)
+            except Exception as e:
+                log.error("Failed to save session %s (kept dirty for retry): %s", cid, e)
+                continue
+            self._dirty.discard(cid)
 
     def save_all(self) -> None:
         """Persist every session (used during shutdown)."""
+        failed: set[str] = set()
         for cid, session in list(self._sessions.items()):
-            path = self.persist_dir / f"{cid}.json"
-            data = asdict(session)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, indent=2))
-            tmp.replace(path)
-        self._dirty.clear()
+            try:
+                path = self.persist_dir / f"{cid}.json"
+                data = asdict(session)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(data, indent=2))
+                tmp.replace(path)
+            except Exception as e:
+                log.error("Failed to save session %s during save_all: %s", cid, e)
+                failed.add(cid)
+        # Keep any channel that failed to write marked dirty so a later save
+        # can retry it, rather than dropping its changes.
+        self._dirty = {cid for cid in self._dirty if cid in failed}
 
     @staticmethod
     def _session_from_dict(data: dict) -> Session:
