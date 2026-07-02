@@ -36,11 +36,27 @@ if TYPE_CHECKING:
 
 log = get_logger("web.api")
 
-# Sensitive config fields that should be redacted in API responses
+# Sensitive config fields that should be redacted in API responses (exact
+# names kept for backward-compat / clarity).
 _SENSITIVE_FIELDS = frozenset({
     "token", "api_token", "secret", "ssh_key_path", "credentials_path",
-    "api_key", "password",
+    "api_key", "password", "hmac_key",
 })
+
+# Substrings that mark a key as sensitive regardless of its exact name. Key-name
+# EXACT matching missed fields like `hmac_key`, `webhook_url`, `*_secret`, and
+# `app_password`, leaking them (or future additions) through GET /api/config.
+_SENSITIVE_KEY_SUBSTRINGS = (
+    "token", "secret", "password", "api_key", "apikey",
+    "hmac", "webhook_url", "webhook_urls", "private_key", "credential",
+)
+
+
+def _is_sensitive_key(key: str) -> bool:
+    if key in _SENSITIVE_FIELDS:
+        return True
+    kl = key.lower()
+    return any(s in kl for s in _SENSITIVE_KEY_SUBSTRINGS)
 
 
 # Input validation limits
@@ -125,7 +141,7 @@ def _redact_config(obj: Any, *, _depth: int = 0) -> Any:
         return "..."
     if isinstance(obj, dict):
         return {
-            k: "••••••••" if k in _SENSITIVE_FIELDS and isinstance(v, str) and v
+            k: "••••••••" if _is_sensitive_key(k) and isinstance(v, str) and v
             else _redact_config(v, _depth=_depth + 1)
             for k, v in obj.items()
         }
@@ -2687,7 +2703,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/permissions/tiers")
     async def list_tiers(_request: web.Request) -> web.Response:
-        pm = getattr(bot, "permission_manager", None)
+        # Bot attribute is `permissions` (PermissionManager); the old
+        # "permission_manager" name never resolved, so these RBAC endpoints 503'd.
+        pm = getattr(bot, "permissions", None)
         if not pm:
             return web.json_response({"error": "permission manager not available"}, status=503)
         from ..permissions.manager import VALID_TIERS, USER_TIER_TOOLS
@@ -2703,7 +2721,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/permissions/user/{user_id}")
     async def get_user_tier(request: web.Request) -> web.Response:
-        pm = getattr(bot, "permission_manager", None)
+        # Bot attribute is `permissions` (PermissionManager); the old
+        # "permission_manager" name never resolved, so these RBAC endpoints 503'd.
+        pm = getattr(bot, "permissions", None)
         if not pm:
             return web.json_response({"error": "permission manager not available"}, status=503)
         uid = request.match_info["user_id"]
@@ -2717,7 +2737,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.put("/api/permissions/user/{user_id}")
     async def set_user_tier(request: web.Request) -> web.Response:
-        pm = getattr(bot, "permission_manager", None)
+        # Bot attribute is `permissions` (PermissionManager); the old
+        # "permission_manager" name never resolved, so these RBAC endpoints 503'd.
+        pm = getattr(bot, "permissions", None)
         if not pm:
             return web.json_response({"error": "permission manager not available"}, status=503)
         uid = request.match_info["user_id"]
@@ -2748,7 +2770,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.delete("/api/permissions/user/{user_id}")
     async def delete_user_tier(request: web.Request) -> web.Response:
-        pm = getattr(bot, "permission_manager", None)
+        # Bot attribute is `permissions` (PermissionManager); the old
+        # "permission_manager" name never resolved, so these RBAC endpoints 503'd.
+        pm = getattr(bot, "permissions", None)
         if not pm:
             return web.json_response({"error": "permission manager not available"}, status=503)
         uid = request.match_info["user_id"]
@@ -3641,9 +3665,23 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     # API Token Management
     # ------------------------------------------------------------------
 
+    def _auth_configured() -> bool:
+        tm = getattr(bot, "api_token_manager", None)
+        return bool(
+            bot.config.web.api_token
+            or bot.config.web.api_tokens
+            or (tm and tm.list_tokens())
+        )
+
     def _require_admin(request: web.Request) -> web.Response | None:
         identity = getattr(request, "_api_identity", None)
-        if identity and getattr(identity, "tier", "admin") != "admin":
+        if identity is None:
+            # Fail closed: a missing identity is allowed only in dev mode
+            # (no tokens configured, so auth is disabled wholesale).
+            if _auth_configured():
+                return web.json_response({"error": "admin access required"}, status=403)
+            return None
+        if getattr(identity, "tier", "admin") != "admin":
             return web.json_response({"error": "admin access required"}, status=403)
         return None
 

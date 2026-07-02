@@ -10,6 +10,8 @@ from __future__ import annotations
 import shlex
 from urllib.parse import urlparse
 
+from .url_safety import is_metadata_url
+
 ALLOWED_METHODS = frozenset({
     "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
 })
@@ -54,6 +56,14 @@ def validate_url(url: str) -> str:
         )
     if not parsed.netloc:
         raise ValueError("URL must include a host (e.g., https://example.com)")
+    # SSRF guard: block cloud-metadata endpoints (DNS-rebind aware). http_probe
+    # is an infra tool that legitimately probes internal/localhost services, so
+    # we block only the metadata service (never a legitimate probe target and
+    # the one that hands out instance credentials) rather than all private IPs.
+    if is_metadata_url(url):
+        raise ValueError(
+            "URL blocked: targets a cloud-metadata endpoint (SSRF protection)."
+        )
     return url
 
 
