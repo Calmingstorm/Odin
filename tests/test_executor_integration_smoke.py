@@ -184,11 +184,14 @@ class TestOnMessageWiring:
         # If on_message overrides commands.Bot's, it must call self.process_commands
         # so cog @command decorators still fire. Without this, the bot becomes
         # an executor that silently breaks every cog command.
+        # P9: the gating chain moved to intake_pipeline.MessageIntake.handle;
+        # behavior is pinned in tests/characterization/test_intake_gating.py
+        # (test_plain_message_reaches_handler asserts process_commands awaited).
         import inspect
-        from src.discord.client import OdinBot
-        src = inspect.getsource(OdinBot.on_message)
+        from src.discord.intake_pipeline import MessageIntake
+        src = inspect.getsource(MessageIntake.handle)
         assert "process_commands" in src, (
-            "on_message must call self.process_commands(message) to keep cogs working"
+            "intake must call bot.process_commands(message) to keep cogs working"
         )
 
     def test_on_message_secret_scrub_runs_before_process_commands(self):
@@ -199,9 +202,12 @@ class TestOnMessageWiring:
         they were scrubbed. Fix moves the secret-scrub block above
         process_commands. This test locks the ordering in.
         """
+        # P9: chain moved to intake_pipeline.MessageIntake.handle; ordering is
+        # behaviorally pinned in tests/characterization/test_intake_gating.py
+        # (test_secret_scrub_deletes_before_commands_and_handler).
         import inspect
-        from src.discord.client import OdinBot
-        src = inspect.getsource(OdinBot.on_message)
+        from src.discord.intake_pipeline import MessageIntake
+        src = inspect.getsource(MessageIntake.handle)
         scrub_pos = src.find("_check_for_secrets")
         pc_pos = src.find("process_commands")
         assert 0 <= scrub_pos < pc_pos, (
