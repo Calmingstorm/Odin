@@ -53,6 +53,8 @@ class PromptBuilder:
         self.cached_hosts: dict[str, str] | None = None
         # Cached skills list text — invalidated on skill create/edit/delete
         self.cached_skills_text: str | None = None
+        # The default (no-channel) system prompt — set by rebuild_default()
+        self.default_prompt: str = ""
         # TTL cache for per-user memory (avoids file I/O per message)
         self.memory_cache: dict[str | None, tuple[float, dict[str, str]]] = {}
         self.memory_cache_ttl: float = 60.0  # seconds
@@ -110,6 +112,17 @@ class PromptBuilder:
         self.memory_cache.clear()
         if self.reflector is not None:
             self.reflector.invalidate_cache()
+
+    def rebuild_default(self) -> str:
+        """Rebuild and store the default (no-channel) system prompt.
+
+        The stored value is the fallback the tool loop uses when a turn has
+        no channel-specific override; the web layer rebuilds it after
+        config/context/personality changes (RFC-002 P6 — this replaces the
+        old ``bot._system_prompt = bot._build_system_prompt()`` dance).
+        """
+        self.default_prompt = self.build_full_prompt()
+        return self.default_prompt
 
     def prune_expired_memory(self, now: float) -> None:
         """Drop expired per-user memory entries (periodic housekeeping)."""

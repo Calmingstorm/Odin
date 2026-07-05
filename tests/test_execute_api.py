@@ -266,7 +266,7 @@ class TestRealHandler:
     @pytest.mark.asyncio
     async def test_execute_opts_out_of_channel_lock(self):
         """/api/execute must pass persist_channel_lock=False so it does not
-        cache (and leak) a per-request lock in bot._web_channel_locks."""
+        cache (and leak) a per-request lock in the module WEB_CHANNEL_LOCKS cache."""
         bot = _make_bot()
         bot.config = MagicMock()
         bot.config.web.api_token = ""

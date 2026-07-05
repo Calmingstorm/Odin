@@ -108,7 +108,6 @@ FACADE_METHODS = [
 
 LATE_BOUND_ABSENT = [
     "startup_report",
-    "_web_channel_locks",
     "mcp_manager",
     "_codex_auth_pool",
     "_issue_tracker_client",
@@ -172,9 +171,8 @@ class TestPositiveSurface:
         assert bot.codex_client == "sentinel"
         bot.knowledge = "kstore"
         assert bot._knowledge_store == "kstore"
-        # web/chat.py lazily creates this:
-        bot._web_channel_locks = {}
-        assert bot._web_channel_locks == {}
+        # (the web-chat lock cache moved to src.web.chat.WEB_CHANNEL_LOCKS
+        # in RFC-002 P6 — web-owned state no longer parked on the bot)
 
     def test_classifier_prompt_class_attr_exists(self, bot):
         assert isinstance(type(bot)._CLASSIFIER_SYSTEM_PROMPT, str)
@@ -251,6 +249,8 @@ class TestWebChatRoute:
         assert result["is_error"] is False
         assert result["response"] == "web answer"
         assert result["tools_used"] == []
-        assert len(fake.calls) == 1  # went through the REAL _process_with_tools
-        # And the lazily-created lock cache now exists (late-bound behavior)
-        assert hasattr(bot, "_web_channel_locks")
+        assert len(fake.calls) == 1  # went through the REAL tool loop
+        # The lock cache is web-owned module state now (RFC-002 P6)
+        from src.web.chat import WEB_CHANNEL_LOCKS
+
+        assert "web-42" in WEB_CHANNEL_LOCKS
