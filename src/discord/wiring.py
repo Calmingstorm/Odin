@@ -51,7 +51,13 @@ from .channel_logger import ChannelLogger
 from .channel_state import ChannelStateRegistry
 from .completion import CompletionClassifier
 from .delivery import ResponseDelivery
-from .intake_pipeline import MessageIntake, MessagePipeline
+from .housekeeping import Housekeeping
+from .intake_pipeline import (
+    MessageIntake,
+    MessageIntakeDeps,
+    MessagePipeline,
+    MessagePipelineDeps,
+)
 from .llm_gateway import LLMGateway
 from .native_tools import NativeToolDispatcher, register_native_handlers
 from .native_tools.agents_tasks import AgentTaskDeps, AgentTaskTools
@@ -62,7 +68,7 @@ from .native_tools.scheduling import SchedulingTools
 from .prompts import PromptBuilder
 from .scheduled_events import ScheduledEventHandlers, ScheduledEventsDeps
 from .tool_catalog import ToolCatalog
-from .tool_loop import ToolLoopRunner
+from .tool_loop import ToolLoopDeps, ToolLoopRunner
 from .turn_recorder import TurnRecorder
 
 log = get_logger("discord")
@@ -519,12 +525,13 @@ class BotComponents:
     media_tools: MediaTools
     delivery: ResponseDelivery
     completion_classifier: CompletionClassifier
-    tool_loop: ToolLoopRunner
     turn_recorder: TurnRecorder
+    tool_loop: ToolLoopRunner
     scheduled_events: ScheduledEventHandlers
     agent_task_tools: AgentTaskTools
-    intake: MessageIntake
+    housekeeping: Housekeeping
     pipeline: MessagePipeline
+    intake: MessageIntake
 
 
 def build_components(bot, services: BotServices) -> BotComponents:
@@ -615,17 +622,39 @@ def build_components(bot, services: BotServices) -> BotComponents:
     completion_classifier = CompletionClassifier(
         get_llm_client=lambda: bot.llm_client,
     )
-    tool_loop = ToolLoopRunner(bot)
-    # Narrow-deps components (RFC-002 P3). Construction order note: the
-    # agents/tasks domain now builds BEFORE scheduled events (its consumer)
-    # — a declared deviation from the old inline order, where both were
-    # inert `host` captures.
+    # Narrow-deps components (RFC-002 P3/P4). Construction order notes:
+    # the turn recorder builds BEFORE the tool loop (its consumer), and the
+    # agents/tasks domain BEFORE scheduled events (its consumer) — declared
+    # deviations from the old inline order, where all were inert `host`
+    # captures.
     turn_recorder = TurnRecorder(
         get_config=lambda: bot.config,
         trajectory_saver=services.trajectory_saver,
         reflector=services.reflector,
         outbound_webhook_dispatcher=services.outbound_webhook_dispatcher,
         loop_reflection_gate=services.loop_reflection_gate,
+    )
+    tool_loop = ToolLoopRunner(
+        ToolLoopDeps(
+            get_config=lambda: bot.config,
+            # live: the web layer rebuilds + reassigns the default prompt
+            get_default_system_prompt=lambda: bot._system_prompt,
+            get_context_compressor=lambda: bot.context_compressor,
+            llm_gateway=llm_gateway,
+            prompt_builder=prompt_builder,
+            tool_catalog=tool_catalog,
+            channel_state=services.channel_state,
+            delivery=delivery,
+            turn_recorder=turn_recorder,
+            completion_classifier=completion_classifier,
+            native_tools=native_tools,
+            tool_executor=services.tool_executor,
+            permissions=services.permissions,
+            skill_manager=services.skill_manager,
+            audit=services.audit,
+            loop_manager=services.loop_manager,
+            stuck_loop_tracker_cls=services.stuck_loop_tracker_cls,
+        )
     )
     agent_task_tools = AgentTaskTools(
         AgentTaskDeps(
@@ -665,8 +694,43 @@ def build_components(bot, services: BotServices) -> BotComponents:
             agent_task_tools=agent_task_tools,
         )
     )
-    intake = MessageIntake(bot)
-    pipeline = MessagePipeline(bot)
+    housekeeping = Housekeeping(
+        get_config=lambda: bot.config,
+        sessions=services.sessions,
+        channel_state=services.channel_state,
+        prompt_builder=prompt_builder,
+        agent_manager=services.agent_manager,
+        loop_manager=services.loop_manager,
+        loop_agent_bridge=services.loop_agent_bridge,
+        channel_logger=services.channel_logger,
+        fts_index=services.fts_index,
+    )
+    pipeline = MessagePipeline(
+        MessagePipelineDeps(
+            channel_state=services.channel_state,
+            sessions=services.sessions,
+            permissions=services.permissions,
+            llm_gateway=llm_gateway,
+            prompt_builder=prompt_builder,
+            turn_recorder=turn_recorder,
+            tool_loop=tool_loop,
+            delivery=delivery,
+            housekeeping=housekeeping,
+        )
+    )
+    intake = MessageIntake(
+        MessageIntakeDeps(
+            get_config=lambda: bot.config,
+            get_user=lambda: bot.user,
+            get_voice_manager=lambda: bot.voice_manager,
+            process_commands=lambda message: bot.process_commands(message),
+            channel_logger=services.channel_logger,
+            channel_config=services.channel_config,
+            channel_state=services.channel_state,
+            sessions=services.sessions,
+            pipeline=pipeline,
+        )
+    )
 
     return BotComponents(
         llm_gateway=llm_gateway,
@@ -679,12 +743,13 @@ def build_components(bot, services: BotServices) -> BotComponents:
         media_tools=media_tools,
         delivery=delivery,
         completion_classifier=completion_classifier,
-        tool_loop=tool_loop,
         turn_recorder=turn_recorder,
+        tool_loop=tool_loop,
         scheduled_events=scheduled_events,
         agent_task_tools=agent_task_tools,
-        intake=intake,
+        housekeeping=housekeeping,
         pipeline=pipeline,
+        intake=intake,
     )
 
 

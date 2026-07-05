@@ -264,13 +264,6 @@ class _LoopIterClient:
     def __init__(self, responses, tool_output="hi out", result_cap=2000):
         from types import SimpleNamespace
 
-        # P8 migration: _run_loop_iteration is now a delegate to the
-        # host-based ToolLoopRunner — give the fake host its own runner so
-        # the test keeps driving the REAL loop body.
-        from src.discord.tool_loop import ToolLoopRunner
-
-        self._tool_loop_runner = ToolLoopRunner(self)
-
         class _Obs:
             loop_trace = True
             trajectory_user_content = True
@@ -311,6 +304,39 @@ class _LoopIterClient:
 
         self.llm_client = SimpleNamespace(chat_with_tools=_chat_with_tools)
         self.audit = SimpleNamespace(log_execution=_log_execution)
+
+        # P4 migration: the runner takes narrow deps now. The recorder is the
+        # REAL one; its save/reflect hooks are shadowed with this fake's
+        # capture methods so assertions keep observing the loop body.
+        self._turn_recorder._save_turn_trajectory = self._save_turn_trajectory
+        self._turn_recorder._maybe_loop_reflect = self._maybe_loop_reflect
+        from src.discord.tool_loop import ToolLoopDeps, ToolLoopRunner
+
+        self._tool_loop_runner = ToolLoopRunner(
+            ToolLoopDeps(
+                get_config=lambda: self.config,
+                get_default_system_prompt=lambda: "sys",
+                get_context_compressor=lambda: None,
+                llm_gateway=SimpleNamespace(active_client=self.llm_client),
+                prompt_builder=SimpleNamespace(build_full_prompt=lambda **kw: "sys"),
+                tool_catalog=SimpleNamespace(
+                    merged_definitions=lambda: [{"name": "run_command"}]
+                ),
+                channel_state=SimpleNamespace(),
+                delivery=SimpleNamespace(),
+                turn_recorder=self._turn_recorder,
+                completion_classifier=SimpleNamespace(),
+                native_tools=SimpleNamespace(handles=lambda n: False),
+                tool_executor=SimpleNamespace(),
+                permissions=SimpleNamespace(),
+                skill_manager=SimpleNamespace(),
+                audit=self.audit,
+                loop_manager=self.loop_manager,
+                stuck_loop_tracker_cls=object,
+            )
+        )
+        # Same capture seam the old bot-delegate override provided
+        self._tool_loop_runner.dispatch_loop_tool = self._dispatch_loop_tool
 
     def _new_context_trace(self):
         return None

@@ -27,11 +27,14 @@ from .tool_loop_helpers import (
     _ALLOWED_WEBHOOK_IDS,  # noqa: F401 — re-export
     _EMAIL_BODY_TOOLS,  # noqa: F401 — re-export
     _EMPTY_RESPONSE_FALLBACK,  # noqa: F401 — re-export
-    _scrub_tool_input_for_storage,
+    _scrub_tool_input_for_storage,  # noqa: F401 — re-export until P7
     init_allowed_webhook_ids as _init_allowed_webhook_ids_impl,
 )
 from .delivery import DISCORD_MAX_LEN  # noqa: F401 — module re-export contract
 from .delivery import SEND_MAX_RETRIES  # noqa: F401 — module re-export contract
+from .delivery import TOOL_STATUS_LABELS
+from .intake_pipeline import SECRET_SCRUB_PATTERNS  # noqa: F401 — re-export until P7
+from .intake_pipeline import check_for_secrets as _check_for_secrets_impl
 from .slash_commands import register_commands
 from .native_tools.media import MediaTools
 from .voice import VoiceManager, VoiceMessageProxy
@@ -52,15 +55,6 @@ INITIAL_EXTENSIONS: tuple[str, ...] = (
     "src.discord.cogs.message_triggers",
 )
 
-
-# Patterns that might indicate a secret was pasted
-SECRET_SCRUB_PATTERNS = [
-    re.compile(r"sk-[a-zA-Z0-9]{20,}"),
-    re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*\S{8,}"),
-    re.compile(r"xox[boaprs]-[a-zA-Z0-9-]+"),
-    # Natural language: "my password is ...", "password for gmail is ..."
-    re.compile(r"(?i)(?:my\s+)?(?:password|passwd|pwd)\s+(?:\S+\s+){0,4}(?:is|was)\s+\S{6,}"),
-]
 
 # Tool-iteration caps are now configurable per path (chat vs loop) via
 # config.tools.max_tool_iterations_chat / _loop. Read fresh each request so
@@ -264,6 +258,7 @@ class OdinBot(commands.Bot):
         self.agent_task_tools = self._agent_task_tools = components.agent_task_tools
         self.intake = self._message_intake = components.intake
         self.pipeline = self._message_pipeline = components.pipeline
+        self.housekeeping = components.housekeeping
 
         # Proactive infrastructure monitoring — constructed AFTER the
         # components so the alert callback wires directly to the
@@ -483,82 +478,21 @@ class OdinBot(commands.Bot):
 
 
     def _cleanup_stale_caches(self) -> None:
-        """Remove stale entries from per-channel caches to prevent memory leaks.
-
-        Called periodically (throttled by the channel-state registry's
-        cleanup_interval) after session prune. Removes expired per-channel
-        state for channels that no longer have active sessions.
-        """
-        now = time.time()
-        # Per-channel state (recent actions, locks, pending files, cancel
-        # events, active requests) — delegated to the registry.
-        active_channels = set(self.sessions.ids())
-        self._channel_state.cleanup(active_channels=active_channels)
-
-        # Prompt-layer memory cache pruning — owned by PromptBuilder (P3)
-        self._prompt_builder.prune_expired_memory(now)
-
-        # Agent lifecycle: kill stuck agents, log stale ones
-        if hasattr(self, "agent_manager"):
-            self.agent_manager.check_health()
-
-        # Clean up old attachment workspaces
-        try:
-            from .attachments import AttachmentProcessor
-            cfg = self.config.attachments if hasattr(self.config, "attachments") else None
-            proc = AttachmentProcessor(**({"temp_dir": cfg.temp_directory, "retention_hours": cfg.retention_hours} if cfg else {}))
-            proc.cleanup_old_workspaces()
-        except Exception:
-            pass
-
-        # Clean up loop-agent bridge records for finished loops
-        if hasattr(self, "loop_agent_bridge"):
-            for loop_id in list(self.loop_agent_bridge._loop_agents):
-                loop_info = self.loop_manager._loops.get(loop_id)
-                if not loop_info or loop_info.status != "running":
-                    self.loop_agent_bridge.cleanup_loop(loop_id)
-
-        # Batch-index channel logs into FTS (runs every ~5 min with cache cleanup)
-        if self._fts_index and hasattr(self, "channel_logger"):
-            try:
-                self.channel_logger.index_to_fts(self._fts_index)
-            except Exception:
-                pass
+        """Cache housekeeping — owned by Housekeeping (P4)."""
+        self.housekeeping.cleanup_stale()
 
     def _maybe_cleanup_caches(self) -> None:
-        """Run cache cleanup if enough time has passed since the last run."""
-        try:
-            now = time.time()
-            cs = self._channel_state
-            if now - cs.last_cleanup > cs.cleanup_interval:
-                self._cleanup_stale_caches()
-                cs.last_cleanup = now
-        except Exception:
-            pass  # Non-critical — don't break message processing
+        """Throttled cache housekeeping — owned by Housekeeping (P4)."""
+        self.housekeeping.maybe_cleanup()
 
     def _track_recent_action(
         self, tool_name: str, tool_input: dict, result_preview: str,
         elapsed_ms: int, channel_id: str | None = None,
     ) -> None:
-        """Record a tool execution for conversational context injection.
-
-        Actions are stored per-channel so that channel A's tool results
-        don't leak into channel B's system prompt.  Each entry carries a
-        real timestamp for time-based expiry (1 hour).
-        """
-        if not channel_id:
-            return  # No channel context — nothing to inject later
-
-        from datetime import datetime
-        ts = datetime.now().strftime("%H:%M")
-        safe_input = _scrub_tool_input_for_storage(tool_name, tool_input)
-        inp_summary = ", ".join(f"{k}={v}" for k, v in safe_input.items() if isinstance(v, str))
-        if len(inp_summary) > 100:
-            inp_summary = inp_summary[:100] + "..."
-        status = "OK" if "error" not in result_preview.lower()[:50] else "ERROR"
-        entry = f"- [{ts}] `{tool_name}`({inp_summary}) → {status} ({elapsed_ms}ms)"
-
-        self._channel_state.track_recent_action(channel_id, entry)
+        """Recent-action tracking — owned by ChannelStateRegistry (P4)."""
+        self.channel_state.track_action(
+            tool_name, tool_input, result_preview, elapsed_ms, channel_id=channel_id,
+        )
 
     def _register_commands(self) -> None:
         """Slash commands — owned by slash_commands.register_commands (P10)."""
@@ -570,17 +504,13 @@ class OdinBot(commands.Bot):
         return bool(ev and ev.is_set())
 
     def _is_allowed_user(self, user: discord.User | discord.Member) -> bool:
-        if not self.config.discord.allowed_users:
-            return True
-        return str(user.id) in self.config.discord.allowed_users
+        return self.intake.is_allowed_user(user)
 
     def _is_allowed_channel(self, channel_id: int) -> bool:
-        if not self.config.discord.channels:
-            return True
-        return str(channel_id) in self.config.discord.channels
+        return self.intake.is_allowed_channel(channel_id)
 
     def _check_for_secrets(self, content: str) -> bool:
-        return any(p.search(content) for p in SECRET_SCRUB_PATTERNS)
+        return _check_for_secrets_impl(content)
 
     # ------------------------------------------------------------------
     # commands.Bot lifecycle hooks (cog loading + prefix)
@@ -690,78 +620,8 @@ class OdinBot(commands.Bot):
         await super().close()
         log.info("OdinBot shutdown complete")
 
-    _TOOL_STATUS_LABELS: dict[str, str] = {
-        "run_command": "Running a command",
-        "run_script": "Executing a script",
-        "run_command_multi": "Commanding multiple hosts",
-        "read_file": "Reading a file",
-        "write_file": "Writing to disk",
-        "generate_file": "Forging an artifact",
-        "post_file": "Delivering a file",
-        "claude_code": "Thinking expensively",
-        "analyze_image": "Staring at a picture",
-        "analyze_pdf": "Suffering through a PDF",
-        "web_search": "Googling it like a mortal",
-        "fetch_url": "Fetching a URL",
-        "http_probe": "Checking a pulse",
-        "browser_read_page": "Reading a webpage",
-        "browser_screenshot": "Screenshotting a page",
-        "browser_read_table": "Parsing a table",
-        "browser_click": "Clicking things",
-        "browser_fill": "Filling out a form",
-        "browser_evaluate": "Running browser JS",
-        "docker_ops": "Wrangling containers",
-        "kubectl": "Talking to Kubernetes",
-        "terraform_ops": "Terraforming",
-        "git_ops": "Doing git things",
-        "manage_process": "Babysitting a process",
-        "validate_action": "Checking if it's still alive",
-        "schedule_task": "Scheduling a future problem",
-        "list_schedules": "Reviewing pending regrets",
-        "update_schedule": "Adjusting the timeline",
-        "delete_schedule": "Cancelling a fate",
-        "start_loop": "Starting a watch",
-        "stop_loop": "Ending a watch",
-        "list_loops": "Checking active watches",
-        "parse_time": "Deciphering mortal time",
-        "spawn_agent": "Delegating the suffering",
-        "wait_for_agents": "Waiting on subordinates",
-        "get_agent_results": "Collecting the findings",
-        "list_agents": "Checking on the crew",
-        "kill_agent": "Terminating a subordinate",
-        "delegate_task": "Handing off work",
-        "list_tasks": "Reviewing the queue",
-        "cancel_task": "Killing a task",
-        "send_to_agent": "Messaging a subordinate",
-        "spawn_loop_agents": "Deploying a patrol",
-        "collect_loop_agents": "Recalling the patrol",
-        "memory_manage": "Remembering, reluctantly",
-        "search_audit": "Reviewing the audit log",
-        "search_history": "Digging through history",
-        "search_knowledge": "Consulting the knowledge base",
-        "ingest_document": "Ingesting a document",
-        "bulk_ingest_knowledge": "Bulk ingesting documents",
-        "list_knowledge": "Listing known documents",
-        "delete_knowledge": "Forgetting on purpose",
-        "create_skill": "Teaching myself a new trick",
-        "edit_skill": "Refining a skill",
-        "delete_skill": "Unlearning",
-        "list_skills": "Listing skills",
-        "enable_skill": "Enabling a skill",
-        "disable_skill": "Shelving a skill",
-        "invoke_skill": "Running a skill",
-        "install_skill": "Installing a skill",
-        "export_skill": "Exporting a skill",
-        "skill_status": "Checking a skill",
-        "read_channel": "Reading the channel",
-        "add_reaction": "Reacting",
-        "create_poll": "Creating a poll",
-        "purge_messages": "Purging messages",
-        "generate_image": "Bothering the GPU",
-        "manage_list": "Managing a list",
-        "set_permission": "Adjusting permissions",
-        "issue_tracker": "Filing paperwork",
-    }
+    # Moved to delivery.TOOL_STATUS_LABELS (P4); alias kept until P7.
+    _TOOL_STATUS_LABELS = TOOL_STATUS_LABELS
 
     async def _set_status(self, text: str | None = None, task_start: bool = False, task_end: bool = False) -> None:
         """Presence updates — owned by ResponseDelivery (P6)."""
@@ -842,54 +702,8 @@ class OdinBot(commands.Bot):
 
 
     async def _process_attachments(self, message: discord.Message, content: str = "") -> tuple[str, list[dict]]:
-        """Process attachments via AttachmentProcessor.
-
-        Returns (inline_text, image_blocks).
-        """
-        if not message.attachments:
-            return "", []
-
-        from .attachments import AttachmentProcessor, infer_attachment_intent
-
-        cfg = self.config.attachments if hasattr(self.config, "attachments") else None
-        processor = AttachmentProcessor(
-            **({"temp_dir": cfg.temp_directory,
-                "inline_max_bytes": cfg.inline_text_max_bytes,
-                "preview_max_chars": cfg.preview_max_chars,
-                "large_preview_chars": cfg.large_preview_chars,
-                "archive_max_bytes": cfg.archive_max_bytes,
-                "archive_max_files": cfg.archive_max_files,
-                "archive_extract_max_bytes": cfg.archive_extract_max_bytes,
-                "archive_preview_total_chars": cfg.archive_preview_total_chars,
-                "archive_preview_file_max_bytes": cfg.archive_preview_file_max_bytes,
-                "image_max_bytes": cfg.image_max_bytes,
-                "pdf_max_bytes": cfg.pdf_max_bytes,
-                "retention_hours": cfg.retention_hours,
-                } if cfg else {})
-        )
-
-        recent_assistant = None
-        session = self.sessions.get(str(message.channel.id))
-        if session and session.messages:
-            for m in reversed(session.messages):
-                if m.role == "assistant":
-                    recent_assistant = m.content
-                    break
-
-        intent = infer_attachment_intent(content, recent_assistant)
-
-        result = await processor.process(
-            message.attachments,
-            channel_id=str(message.channel.id),
-            message_id=str(message.id),
-            intent=intent,
-        )
-
-        if result.warnings:
-            for w in result.warnings:
-                log.warning("Attachment warning: %s", w)
-
-        return result.inline_text, result.image_blocks
+        """Attachment processing — owned by MessageIntake (P4)."""
+        return await self.intake._process_attachments(message, content)
 
     async def _on_voice_transcription(
         self, text: str, member: discord.Member, transcript_channel: discord.TextChannel,

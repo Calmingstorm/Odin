@@ -602,13 +602,13 @@ class TestToolSurfaceAndSkills:
         bot._cached_skills_text = "stale-skills-text"
         bot._cached_merged_tools = [{"name": "stale"}]
         rebuild_calls = []
-        orig_build = bot._build_system_prompt
+        orig_build = bot.prompt_builder.build_full_prompt
 
         def spy(*args, **kwargs):
             rebuild_calls.append(kwargs)
             return orig_build(*args, **kwargs)
 
-        bot._build_system_prompt = spy
+        bot.prompt_builder.build_full_prompt = spy
         await run_loop(bot, FakeMessage("make a skill"))
         # CRUD invalidated both caches and rebuilt the prompt mid-loop
         assert rebuild_calls, "system prompt was not rebuilt after skill CRUD"

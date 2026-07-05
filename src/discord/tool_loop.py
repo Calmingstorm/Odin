@@ -15,16 +15,20 @@ ship with the P1 PR). Phase methods return ``("done", value)`` when the
 turn must return, ``("retry", None)``/None to continue — control flow
 stays in the two orchestrators.
 
-Like the dispatch registry (P5a), the runner still takes the bot as
-``host``; interface narrowing is RFC-002 P4. The chat-vs-loop behavioral
-asymmetries stay pinned as LoopPolicy data + control flow (RFC-001 §4.3)
-— do not unify a documented dimension without a characterization pin.
+Narrow-deps since RFC-002 P4 (``ToolLoopDeps``): live roots come in as
+provider callables (``get_config``, the default system prompt, the
+compression config), the LLM surface as the gateway, and the rest as the
+components/services the two pipelines actually touch. The chat-vs-loop
+behavioral asymmetries stay pinned as LoopPolicy data + control flow
+(RFC-001 §4.3) — do not unify a documented dimension without a
+characterization pin.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import discord
@@ -34,7 +38,7 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
 from ..tools import ToolResult
-from .delivery import DISCORD_MAX_LEN
+from .delivery import DISCORD_MAX_LEN, TOOL_STATUS_LABELS
 from .response_guards import (
     _CODE_HEDGING_RETRY_MSG,
     _CONTINUATION_MSG,
@@ -217,9 +221,48 @@ class _LoopTurn:
     tool_calls_made: int = 0
 
 
+@dataclass(frozen=True)
+class ToolLoopDeps:
+    """The true dependency surface of both tool pipelines."""
+
+    get_config: Callable  # live root — replaced by config hot-reload
+    get_default_system_prompt: Callable  # live — rebuilt on config/context reload
+    get_context_compressor: Callable  # live read — tests swap it on the bot
+    llm_gateway: object  # owns the swappable provider clients + guarded calls
+    prompt_builder: object
+    tool_catalog: object
+    channel_state: object  # cancel events, active requests, op details, actions
+    delivery: object  # presence updates
+    turn_recorder: object  # trajectories, traces, lifecycle events, reflection
+    completion_classifier: object
+    native_tools: object  # the shared dispatch table
+    tool_executor: object
+    permissions: object
+    skill_manager: object
+    audit: object
+    loop_manager: object
+    stuck_loop_tracker_cls: type
+
+
 class ToolLoopRunner:
-    def __init__(self, host) -> None:
-        self.host = host
+    def __init__(self, deps: ToolLoopDeps) -> None:
+        self._get_config = deps.get_config
+        self._get_default_system_prompt = deps.get_default_system_prompt
+        self._get_context_compressor = deps.get_context_compressor
+        self._llm_gateway = deps.llm_gateway
+        self._prompt_builder = deps.prompt_builder
+        self._tool_catalog = deps.tool_catalog
+        self._channel_state = deps.channel_state
+        self._delivery = deps.delivery
+        self._turn_recorder = deps.turn_recorder
+        self._completion_classifier = deps.completion_classifier
+        self._native_tools = deps.native_tools
+        self._tool_executor = deps.tool_executor
+        self._permissions = deps.permissions
+        self._skill_manager = deps.skill_manager
+        self._audit = deps.audit
+        self._loop_manager = deps.loop_manager
+        self._stuck_loop_tracker_cls = deps.stuck_loop_tracker_cls
 
     # ------------------------------------------------------------------
     # Chat pipeline (old _process_with_tools) — orchestrator + phases
@@ -312,16 +355,17 @@ class ToolLoopRunner:
     ) -> _ChatTurn:
         """Turn setup: prompt/tools resolution, request preamble, permission
         filtering, trajectory + correlation init, cancellation wiring."""
-        bot = self.host
 
-        system_prompt = system_prompt_override or bot._system_prompt
-        tools = bot._merged_tool_definitions() if bot.config.tools.enabled else None
+        system_prompt = system_prompt_override or self._get_default_system_prompt()
+        tools = (
+            self._tool_catalog.merged_definitions() if self._get_config().tools.enabled else None
+        )
         messages = list(history)
 
         # Insert context separator between history and the current user request
         # so Codex evaluates tools fresh instead of repeating patterns from history
         is_bot_message = (
-            getattr(message.author, "bot", False) and bot.config.discord.respond_to_bots
+            getattr(message.author, "bot", False) and self._get_config().discord.respond_to_bots
         )
         from .tool_loop_helpers import (
             build_request_preamble,
@@ -363,14 +407,14 @@ class ToolLoopRunner:
         # Filter tools based on user permission tier (skip for test webhooks)
         is_test_wh = message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
         if tools is not None and not is_test_wh:
-            tools = bot.permissions.filter_tools(user_id, tools)
+            tools = self._permissions.filter_tools(user_id, tools)
             # Apply API token allowed_tools scope if present
             api_allowed = getattr(message, "allowed_tools", None)
             if api_allowed is not None and tools:
                 allowed_set = set(api_allowed)
                 tools = [t for t in tools if t["name"] in allowed_set]
 
-        chat_cap = bot.config.tools.max_tool_iterations_chat
+        chat_cap = self._get_config().tools.max_tool_iterations_chat
         log.info(
             "Tool loop starting: %d tools available, %d messages in history, cap=%d",
             len(tools) if tools else 0,
@@ -378,28 +422,28 @@ class ToolLoopRunner:
             chat_cap,
         )
 
-        await bot._set_status("Working...", task_start=True)
+        await self._delivery.set_status("Working...", task_start=True)
 
         # Per-turn StuckLoopTracker — detects repeating tool-call sequences and
         # nudges the LLM out of cycles before the iteration cap forces an exit.
-        stuck_tracker = bot.stuck_loop_tracker_cls()
+        stuck_tracker = self._stuck_loop_tracker_cls()
 
         # Per-turn trajectory accumulator — populated each iteration, saved at end.
         from ..trajectories.saver import TrajectoryTurn
 
         _result_store_cap = int(
             getattr(
-                getattr(bot.config, "observability", None),
+                getattr(self._get_config(), "observability", None),
                 "max_tool_result_chars",
                 2000,
             )
             or 2000
         )
         if trace is not None:
-            provider_cfg = getattr(bot.config, "llm_provider", None)
+            provider_cfg = getattr(self._get_config(), "llm_provider", None)
             trace.provider(
                 name=getattr(provider_cfg, "active_provider", "codex") if provider_cfg else "codex",
-                model=getattr(bot.llm_client, "model", "") or "",
+                model=getattr(self._llm_gateway.active_client, "model", "") or "",
             )
         _turn_ctx = get_turn() or {}
         _trajectory = TrajectoryTurn(
@@ -412,7 +456,7 @@ class ToolLoopRunner:
                 or getattr(message, "_odin_source", policy.trajectory_source)
             ),
         )
-        bot._record_user_content(_trajectory, getattr(message, "content", "") or "")
+        self._turn_recorder._record_user_content(_trajectory, getattr(message, "content", "") or "")
         # No explicit reset — each message handler runs in its own asyncio
         # task, so the context var dies with the task. (The loop manager
         # resets its own stamp explicitly around each iteration callback.)
@@ -425,9 +469,9 @@ class ToolLoopRunner:
 
         # Per-request cancellation via /stop command
         _ch_id = str(message.channel.id)
-        _cancel = bot._cancel_events.setdefault(_ch_id, asyncio.Event())
+        _cancel = self._channel_state.cancel_events.setdefault(_ch_id, asyncio.Event())
         _req_id = req_hash
-        bot._channel_state.set_active_request(_ch_id, _req_id)
+        self._channel_state.set_active_request(_ch_id, _req_id)
 
         return _ChatTurn(
             message=message,
@@ -447,8 +491,7 @@ class ToolLoopRunner:
         )
 
     def _clear_active(self, st: _ChatTurn) -> None:
-        bot = self.host
-        bot._channel_state.clear_active_request(st._ch_id, st._req_id)
+        self._channel_state.clear_active_request(st._ch_id, st._req_id)
 
     def _stopped(self, st: _ChatTurn, where: str) -> tuple[str, bool, bool, list[str], bool]:
         log.info("Task stopped by /stop in channel %s at %s", st._ch_id, where)
@@ -472,19 +515,19 @@ class ToolLoopRunner:
         the message list over the configured budget, summarise older
         iterations into a single text message and keep the most recent N
         iterations intact."""
-        bot = self.host
-        if bot.context_compressor is not None and st.iteration > 0:
+        if self._get_context_compressor() is not None and st.iteration > 0:
             try:
                 from ..llm.context_compressor import (
                     compress_tool_context,
                     estimate_message_chars,
                 )
 
-                if estimate_message_chars(st.messages) > bot.context_compressor.max_context_chars:
+                _cc = self._get_context_compressor()
+                if estimate_message_chars(st.messages) > _cc.max_context_chars:
                     st.messages, _saved = compress_tool_context(
                         st.messages,
-                        max_context_chars=bot.context_compressor.max_context_chars,
-                        keep_recent=bot.context_compressor.keep_recent_iterations,
+                        max_context_chars=_cc.max_context_chars,
+                        keep_recent=_cc.keep_recent_iterations,
                     )
                     log.info("context_compressor: trimmed %d chars", _saved)
             except Exception:
@@ -497,7 +540,6 @@ class ToolLoopRunner:
 
         Returns ("ok", llm_resp) or ("done", <run() return tuple>).
         """
-        bot = self.host
         # Show typing indicator while waiting for LLM response.
         # Typing is best-effort — isolate typing setup failures from
         # LLM call failures so we don't misclassify provider errors.
@@ -511,7 +553,7 @@ class ToolLoopRunner:
 
         _channel_id = str(st.message.channel.id)
         try:
-            llm_resp = await bot._codex_call(
+            llm_resp = await self._llm_gateway.call_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
                 tools=st.tools or [],
@@ -529,7 +571,7 @@ class ToolLoopRunner:
             )
             await asyncio.sleep(wait_secs)
             try:
-                llm_resp = await bot._codex_call(
+                llm_resp = await self._llm_gateway.call_with_tools(
                     messages=st.messages,
                     system=st.system_prompt,
                     tools=st.tools or [],
@@ -538,7 +580,7 @@ class ToolLoopRunner:
                     tools_used=st.tools_used_in_loop,
                 )
             except Exception as retry_err:
-                await bot._save_turn_trajectory(
+                await self._turn_recorder._save_turn_trajectory(
                     st._trajectory, error=str(retry_err), trace=st.trace
                 )
                 self._clear_active(st)
@@ -555,7 +597,9 @@ class ToolLoopRunner:
         except Exception as api_err:
             err_msg = str(api_err) or f"{type(api_err).__name__} (no message)"
             log.error("LLM API call failed: %s", err_msg, exc_info=True)
-            await bot._save_turn_trajectory(st._trajectory, error=err_msg, trace=st.trace)
+            await self._turn_recorder._save_turn_trajectory(
+                st._trajectory, error=err_msg, trace=st.trace
+            )
             self._clear_active(st)
             return (
                 "done",
@@ -577,7 +621,6 @@ class ToolLoopRunner:
         Returns None to proceed, ("retry", None) after injecting the nudge,
         or ("done", <run() return tuple>) on confirmed-stuck termination.
         """
-        bot = self.host
         from ..trajectories.saver import ToolIteration
 
         iter_tool_calls = [
@@ -597,8 +640,8 @@ class ToolLoopRunner:
         if st.stuck_tracker.check():
             if st.stuck_tracker.warned:
                 log.warning("Stuck loop confirmed after warning — terminating tool loop")
-                await bot._save_turn_trajectory(st._trajectory, trace=st.trace)
-                await bot._emit_lifecycle_event(
+                await self._turn_recorder._save_turn_trajectory(st._trajectory, trace=st.trace)
+                await self._turn_recorder._emit_lifecycle_event(
                     "loop.stuck",
                     {
                         "channel_id": str(st.message.channel.id),
@@ -644,7 +687,6 @@ class ToolLoopRunner:
         Returns ("done", <run() return tuple>) or ("retry", None) after
         injecting a retry/continuation message.
         """
-        bot = self.host
         if st._cancel.is_set():
             return ("done", self._stopped(st, "before_validation"))
         # Enforce pending validation before allowing final response
@@ -734,7 +776,7 @@ class ToolLoopRunner:
         # Tier 3: Completion classifier — uses LLM to judge whether
         # the user's request was fully addressed.
         if st.tools_used_in_loop and st.continuation_count < st.max_continuations:
-            is_complete, reason = await bot._classify_completion(
+            is_complete, reason = await self._completion_classifier.classify(
                 st.message.content,
                 llm_resp.text or "",
                 st.tools_used_in_loop,
@@ -765,7 +807,7 @@ class ToolLoopRunner:
                 return ("retry", None)
 
         _final = llm_resp.text or _EMPTY_RESPONSE_FALLBACK
-        await bot._save_turn_trajectory(
+        await self._turn_recorder._save_turn_trajectory(
             st._trajectory,
             final_response=_final,
             tools_used=st.tools_used_in_loop,
@@ -778,7 +820,6 @@ class ToolLoopRunner:
         """Execute a single tool call: RBAC gate, native/executor dispatch,
         failure visibility, audit, recent-action tracking, validation
         bookkeeping. (The old `_run_tool` closure.)"""
-        bot = self.host
         tool_name = block.name
         tool_input = block.input
         log.info("Tool call: %s(%s)", tool_name, tool_input)
@@ -800,16 +841,16 @@ class ToolLoopRunner:
         # place check_permission runs). permissions.filter_tools is advisory
         # (offer-time) only, so enforce permission here for EVERY tool.
         _uid = str(st.message.author.id)
-        _rbac_denial = bot.tool_executor.check_permission(tool_name, _uid)
+        _rbac_denial = self._tool_executor.check_permission(tool_name, _uid)
         if isinstance(_rbac_denial, str) and _rbac_denial:  # str = deny, None = allow
             log.warning("RBAC gate denied tool %s for user %s", tool_name, _uid)
             return {"type": "tool_result", "tool_use_id": block.id, "content": _rbac_denial}
-        await bot._set_status(
-            bot._TOOL_STATUS_LABELS.get(tool_name, f"Running: {tool_name}")
+        await self._delivery.set_status(
+            TOOL_STATUS_LABELS.get(tool_name, f"Running: {tool_name}")
         )
 
         try:
-            await bot.audit.log_event(
+            await self._audit.log_event(
                 event_type="tool_start",
                 action=tool_name,
                 actor=str(st.message.author.id),
@@ -827,8 +868,8 @@ class ToolLoopRunner:
         tool_result = None
         # Handle Discord-native tools
         try:
-            if bot._native_tools.handles(tool_name):
-                result, _effects = await bot._native_tools.dispatch(
+            if self._native_tools.handles(tool_name):
+                result, _effects = await self._native_tools.dispatch(
                     tool_name,
                     tool_input,
                     message=st.message,
@@ -836,12 +877,12 @@ class ToolLoopRunner:
                     skill_file_delivery=st.policy.skill_file_delivery,
                 )
                 if _effects.rebuild_system_prompt:
-                    st.system_prompt = bot._build_system_prompt(
+                    st.system_prompt = self._prompt_builder.build_full_prompt(
                         channel=st.message.channel,
                         user_id=st.user_id,
                     )
             else:
-                tool_result = await bot.tool_executor.execute(
+                tool_result = await self._tool_executor.execute(
                     tool_name,
                     tool_input,
                     user_id=st.user_id,
@@ -881,7 +922,7 @@ class ToolLoopRunner:
                 error = tool_result.error
             if not tool_result.ok and not error:
                 error = "tool reported failure"
-            result = bot._ensure_failure_visible(result, tool_result.ok)
+            result = ensure_failure_visible(result, tool_result.ok)
 
         await self._audit_tool_outcome(
             st, tool_name, tool_input, result, elapsed_ms, error, tool_result
@@ -889,7 +930,7 @@ class ToolLoopRunner:
 
         # Track for conversational context
         try:
-            bot._track_recent_action(
+            self._channel_state.track_action(
                 tool_name,
                 tool_input,
                 result[:200],
@@ -917,7 +958,6 @@ class ToolLoopRunner:
     ) -> None:
         """Write execution + tool_end audit records — never crash tool
         execution on audit failure. (Inline block of the old `_run_tool`.)"""
-        bot = self.host
         # Audit log — never crash tool execution on audit failure
         try:
             scrubbed_input = _scrub_tool_input_for_storage(
@@ -927,7 +967,7 @@ class ToolLoopRunner:
                     for k, v in (tool_input or {}).items()
                 },
             )
-            await bot.audit.log_execution(
+            await self._audit.log_execution(
                 user_id=str(st.message.author.id),
                 user_name=str(st.message.author),
                 channel_id=str(st.message.channel.id),
@@ -940,7 +980,7 @@ class ToolLoopRunner:
                 risk_level=tool_result.risk_level if tool_result else None,
                 risk_reason=tool_result.risk_reason if tool_result else None,
             )
-            await bot.audit.log_event(
+            await self._audit.log_event(
                 event_type="tool_end",
                 action=tool_name,
                 actor=str(st.message.author.id),
@@ -954,7 +994,6 @@ class ToolLoopRunner:
     async def _run_one_tool_with_timeout(self, st: _ChatTurn, block, tool_timeout) -> dict:
         """Per-tool timeout wrapper around _run_one_tool (the old
         `_run_tool_with_timeout` closure)."""
-        bot = self.host
         t = 3660 if block.name in _LONG_TIMEOUT_TOOL_SET else tool_timeout
         try:
             return await asyncio.wait_for(
@@ -964,7 +1003,7 @@ class ToolLoopRunner:
         except TimeoutError:
             error_msg = f"Tool '{block.name}' timed out after {t}s"
             try:
-                await bot.audit.log_execution(
+                await self._audit.log_execution(
                     user_id=str(st.message.author.id),
                     user_name=str(st.message.author),
                     channel_id=str(st.message.channel.id),
@@ -986,8 +1025,7 @@ class ToolLoopRunner:
     async def _execute_tool_calls(self, st: _ChatTurn, tool_calls) -> list:
         """Run all tool calls concurrently with per-tool timeout; append the
         result block to the message list (gather preserves call order)."""
-        bot = self.host
-        tool_timeout = bot.config.tools.tool_timeout_seconds
+        tool_timeout = self._get_config().tools.tool_timeout_seconds
 
         async with st.message.channel.typing():
             tool_results = await asyncio.gather(
@@ -1000,7 +1038,6 @@ class ToolLoopRunner:
         """Post-execution bookkeeping: op-details pairing for reflection,
         trajectory result persistence, cancellation, validation state, and
         vision injection. Returns ("done", <tuple>) on /stop, else None."""
-        bot = self.host
         from ..trajectories.saver import stored_tool_results
 
         # Pair calls with results for post-operation reflection. Stashed
@@ -1024,7 +1061,7 @@ class ToolLoopRunner:
                     .startswith(("error", "[error", "failed", "traceback")),
                 }
             )
-        bot._last_op_details[str(st.message.channel.id)] = st._op_tool_details
+        self._channel_state.last_op_details[str(st.message.channel.id)] = st._op_tool_details
 
         # Persist results onto the iteration recorded before execution —
         # without this the saved trajectory has calls but no outcomes.
@@ -1084,10 +1121,9 @@ class ToolLoopRunner:
         """Check if all tool calls in this iteration are skills that want
         Codex to handle the response instead of another tool-loop iteration.
         Returns ("done", <tuple with handoff=True>) or None."""
-        bot = self.host
         tool_names_this_round = [b.name for b in tool_calls]
-        if bot.llm_client and all(
-            bot.skill_manager.should_handoff_to_codex(n) is True for n in tool_names_this_round
+        if self._llm_gateway.active_client and all(
+            self._skill_manager.should_handoff_to_codex(n) is True for n in tool_names_this_round
         ):
             # Collect skill results as context for Codex
             skill_output = "\n".join(r["content"] for r in tool_results if isinstance(r, dict))
@@ -1097,7 +1133,6 @@ class ToolLoopRunner:
 
     async def _finalize_cap_hit(self, st: _ChatTurn) -> tuple[str, bool, bool, list[str], bool]:
         """The for-loop fell through: iteration cap exhausted."""
-        bot = self.host
         self._clear_active(st)
         log.warning(
             "Chat tool-iteration cap hit (%d) after %d tool calls; exiting loop",
@@ -1110,7 +1145,7 @@ class ToolLoopRunner:
             f"complete. Raise `tools.max_tool_iterations_chat` in config "
             f"(or via the web UI) if this happens often."
         )
-        await bot._save_turn_trajectory(
+        await self._turn_recorder._save_turn_trajectory(
             st._trajectory,
             final_response=_cap_msg,
             tools_used=st.tools_used_in_loop,
@@ -1135,8 +1170,7 @@ class ToolLoopRunner:
         Simplified version of the chat pipeline for autonomous loops: same
         Codex + tool execution pipeline but without detection retries.
         """
-        bot = self.host
-        if not bot.llm_client:
+        if not self._llm_gateway.active_client:
             return "LLM provider not available."
 
         st = self._prepare_loop_turn(prompt, channel, prev_context, user_id, policy)
@@ -1172,11 +1206,10 @@ class ToolLoopRunner:
     ) -> _LoopTurn:
         """Iteration setup: requester resolution, trajectory/trace init,
         message + system prompt + tool-definition assembly."""
-        bot = self.host
 
         # Resolve requester name for audit logging and message proxy
         requester_name = "loop"
-        for loop_info in bot.loop_manager._loops.values():
+        for loop_info in self._loop_manager._loops.values():
             if loop_info.requester_id == user_id:
                 requester_name = loop_info.requester_name
                 break
@@ -1190,10 +1223,10 @@ class ToolLoopRunner:
         _loop_iter = int(_turn_ctx.get("loop_iteration", 0) or 0)  # noqa: F841 — kept from the pre-carve body
         from ..trajectories.saver import TrajectoryTurn
 
-        _obs = getattr(bot.config, "observability", None)
+        _obs = getattr(self._get_config(), "observability", None)
         _loop_trace_on = _obs is None or getattr(_obs, "loop_trace", True)
         _result_store_cap = int(getattr(_obs, "max_tool_result_chars", 2000) or 2000)
-        _trace = bot._new_context_trace() if _loop_trace_on else None
+        _trace = self._turn_recorder._new_context_trace() if _loop_trace_on else None
         _trajectory = None
         if _loop_trace_on:
             _trajectory = TrajectoryTurn(
@@ -1203,7 +1236,7 @@ class ToolLoopRunner:
                 user_name=requester_name,
                 source=policy.trajectory_source,
             )
-            bot._record_user_content(_trajectory, prompt)
+            self._turn_recorder._record_user_content(_trajectory, prompt)
 
         # Build messages for the iteration
         messages: list[dict] = []
@@ -1225,7 +1258,7 @@ class ToolLoopRunner:
         # Build system prompt and tool definitions
         if _trace is not None:
             with _trace.phase("system_prompt"):
-                system_prompt = bot._build_system_prompt(
+                system_prompt = self._prompt_builder.build_full_prompt(
                     channel=channel,
                     user_id=user_id,
                     trace=_trace,
@@ -1234,12 +1267,14 @@ class ToolLoopRunner:
             if prev_context:
                 _trace.section("loop_prev_context", tokens=len(prev_context) // 4)
         else:
-            system_prompt = bot._build_system_prompt(channel=channel, user_id=user_id)
-        tools = bot._merged_tool_definitions() if bot.config.tools.enabled else None
+            system_prompt = self._prompt_builder.build_full_prompt(channel=channel, user_id=user_id)
+        tools = (
+            self._tool_catalog.merged_definitions() if self._get_config().tools.enabled else None
+        )
 
-        tool_timeout = bot.config.tools.tool_timeout_seconds
+        tool_timeout = self._get_config().tools.tool_timeout_seconds
         channel_id_str = str(getattr(channel, "id", ""))
-        loop_cap = bot.config.tools.max_tool_iterations_loop
+        loop_cap = self._get_config().tools.max_tool_iterations_loop
 
         return _LoopTurn(
             prompt=prompt,
@@ -1271,16 +1306,15 @@ class ToolLoopRunner:
     ) -> str:
         """Persist the loop turn and run gated reflection at every exit.
         (The old `_finish` closure.)"""
-        bot = self.host
         if st._trajectory is not None:
-            await bot._save_turn_trajectory(
+            await self._turn_recorder._save_turn_trajectory(
                 st._trajectory,
                 error=error_text if is_error else "",
                 final_response=outcome_text if not is_error else "",
                 tools_used=[d["tool"] for d in st._loop_details],
                 trace=st._trace,
             )
-        bot._maybe_loop_reflect(
+        self._turn_recorder._maybe_loop_reflect(
             loop_id=st._loop_id or st.channel_id_str,
             prompt=st.prompt,
             outcome=outcome_text,
@@ -1298,9 +1332,8 @@ class ToolLoopRunner:
 
         Returns ("ok", response) or ("done", <run_autonomous() return str>).
         """
-        bot = self.host
         try:
-            response = await bot.llm_client.chat_with_tools(
+            response = await self._llm_gateway.active_client.chat_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
                 tools=st.tools or [],
@@ -1351,7 +1384,6 @@ class ToolLoopRunner:
     async def _run_one_loop_tool(self, st: _LoopTurn, block) -> dict:
         """Execute a single loop tool call through the shared dispatch path,
         with failure visibility and audit. (The old `_run_loop_tool` closure.)"""
-        bot = self.host
         tool_name = block.name
         tool_input = block.input
         log.info("Loop tool call: %s(%s)", tool_name, tool_input)
@@ -1373,7 +1405,7 @@ class ToolLoopRunner:
         try:
             _t = 3660 if tool_name in _LONG_TIMEOUT_TOOL_SET else st.tool_timeout
             raw = await asyncio.wait_for(
-                bot._dispatch_loop_tool(
+                self.dispatch_loop_tool(
                     tool_name,
                     tool_input,
                     st.msg_proxy,
@@ -1390,7 +1422,7 @@ class ToolLoopRunner:
                 "disable_skill",
                 "install_skill",
             ):
-                st.system_prompt = bot._build_system_prompt(
+                st.system_prompt = self._prompt_builder.build_full_prompt(
                     channel=st.channel,
                     user_id=st.user_id,
                 )
@@ -1416,13 +1448,13 @@ class ToolLoopRunner:
         if isinstance(raw, ToolResult):
             if not raw.ok and not error:
                 error = raw.error or "tool reported failure"
-            raw = bot._ensure_failure_visible(str(raw), raw.ok)
+            raw = ensure_failure_visible(str(raw), raw.ok)
 
         result = truncate_tool_output(scrub_output_secrets(str(raw)))
 
         # Audit log
         try:
-            await bot.audit.log_execution(
+            await self._audit.log_execution(
                 user_id=st.user_id,
                 user_name=st.requester_name,
                 channel_id=st.channel_id_str,
@@ -1562,12 +1594,11 @@ class ToolLoopRunner:
         Mirrors the Discord-native tool dispatch in the chat pipeline, using
         a lightweight message proxy instead of a real Discord message.
         """
-        bot = self.host
         t0 = time.monotonic()
         result = await self.dispatch_loop_tool_inner(tool_name, tool_input, msg_proxy, user_id)
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         try:
-            await bot.audit.log_event(
+            await self._audit.log_event(
                 event_type="loop_tool",
                 action=tool_name,
                 actor=user_id,
@@ -1589,16 +1620,15 @@ class ToolLoopRunner:
         msg_proxy: _LoopMessageProxy,
         user_id: str,
     ) -> str | dict:
-        bot = self.host
         # Central RBAC gate: same enforcement as the message tool loop — these
         # handlers bypass ToolExecutor.execute(), so check permission for EVERY tool.
-        _rbac_denial = bot.tool_executor.check_permission(tool_name, user_id)
+        _rbac_denial = self._tool_executor.check_permission(tool_name, user_id)
         if isinstance(_rbac_denial, str) and _rbac_denial:  # str = deny, None = allow
             log.warning("RBAC gate denied loop tool %s for user %s", tool_name, user_id)
             return _rbac_denial
         # One dispatch table for both pipelines (RFC-001 P5a).
-        if bot._native_tools.handles(tool_name):
-            result, _effects = await bot._native_tools.dispatch(
+        if self._native_tools.handles(tool_name):
+            result, _effects = await self._native_tools.dispatch(
                 tool_name,
                 tool_input,
                 message=msg_proxy,
@@ -1607,4 +1637,4 @@ class ToolLoopRunner:
             )
             return result
         # --- Executor-routed tools (run_command, run_script, SSH, etc.) ---
-        return await bot.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+        return await self._tool_executor.execute(tool_name, tool_input, user_id=user_id)

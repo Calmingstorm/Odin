@@ -32,7 +32,7 @@ def build(script, **overrides):
     fake = FakeLLM(script)
     bot = make_bot(fake_llm=fake, config_overrides=overrides or None)
     # Deterministic tests: reflection dispatch is a boundary here
-    bot._maybe_loop_reflect = _ReflectRecorder()
+    bot.turn_recorder._maybe_loop_reflect = _ReflectRecorder()
     return bot, fake
 
 
@@ -117,13 +117,13 @@ class TestAsymmetryPins:
         """The loop bypasses _codex_call — no cost tracking, no model routing."""
         bot, fake = build([text_response("ok")])
         gateway_calls = []
-        orig = bot._codex_call
+        orig = bot.llm_gateway.call_with_tools
 
         async def spy(**kwargs):
             gateway_calls.append(kwargs)
             return await orig(**kwargs)
 
-        bot._codex_call = spy
+        bot.llm_gateway.call_with_tools = spy
         records = []
         bot.cost_tracker.record = lambda *a, **k: records.append((a, k))
         await run_iteration(bot)
@@ -140,8 +140,8 @@ class TestAsymmetryPins:
         bot, fake = build([RuntimeError("provider exploded")])
         result = await run_iteration(bot)
         assert result == "LLM call failed: provider exploded"
-        assert bot._maybe_loop_reflect.calls[-1]["is_error"] is True
-        assert bot._maybe_loop_reflect.calls[-1]["failure_class"] == "provider"
+        assert bot.turn_recorder._maybe_loop_reflect.calls[-1]["is_error"] is True
+        assert bot.turn_recorder._maybe_loop_reflect.calls[-1]["failure_class"] == "provider"
 
     async def test_cap_exhaustion_is_error_with_failure_class_cancelled(self):
         bot, fake = build(
@@ -153,7 +153,7 @@ class TestAsymmetryPins:
         )
         result = await run_iteration(bot)
         assert "Iteration hit the loop tool-iteration cap (2)" in result
-        reflect = bot._maybe_loop_reflect.calls[-1]
+        reflect = bot.turn_recorder._maybe_loop_reflect.calls[-1]
         assert reflect["is_error"] is True
         assert reflect["failure_class"] == "cancelled"
 
@@ -183,7 +183,7 @@ class TestAsymmetryPins:
         bot.tool_executor.execute = AsyncMock(side_effect=RuntimeError("ssh died"))
         result = await run_iteration(bot)
         assert result == "recovered and finished"
-        reflect = bot._maybe_loop_reflect.calls[-1]
+        reflect = bot.turn_recorder._maybe_loop_reflect.calls[-1]
         assert reflect["is_error"] is False
         assert reflect["failure_class"] == "command_failed"
         assert "ssh died" in reflect["error_text"]
