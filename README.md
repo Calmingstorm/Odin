@@ -236,7 +236,7 @@ Tokens auto-refresh at runtime. Re-run the login script if the bot is offline fo
 ## Testing
 
 ```bash
-# Full suite (124 files, 6,000+ tests; asyncio auto mode)
+# Full suite (134 files, 6,000+ tests; asyncio auto mode)
 pytest tests/ -q
 
 # One file or pattern
@@ -298,7 +298,7 @@ src/
   trajectories/saver.py    Per-turn JSONL trajectory logging
 
 ui/                        Vue 3 + Tailwind web dashboard (19 pages)
-tests/                     124 files, 6,000+ tests
+tests/                     134 files, 6,000+ tests
 config.yml                 Default configuration template
 ```
 
