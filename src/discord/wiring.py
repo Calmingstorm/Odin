@@ -48,6 +48,22 @@ from ..tools.autonomous_loop import LoopManager
 from ..trajectories.saver import TrajectorySaver
 from .channel_config import ChannelConfigManager
 from .channel_logger import ChannelLogger
+from .channel_state import ChannelStateRegistry
+from .completion import CompletionClassifier
+from .delivery import ResponseDelivery
+from .intake_pipeline import MessageIntake, MessagePipeline
+from .llm_gateway import LLMGateway
+from .native_tools import NativeToolDispatcher, register_native_handlers
+from .native_tools.agents_tasks import AgentTaskTools
+from .native_tools.channel_ops import ChannelOpsTools
+from .native_tools.knowledge import KnowledgeTools
+from .native_tools.media import MediaTools
+from .native_tools.scheduling import SchedulingTools
+from .prompts import PromptBuilder
+from .scheduled_events import ScheduledEventHandlers
+from .tool_catalog import ToolCatalog
+from .tool_loop import ToolLoopRunner
+from .turn_recorder import TurnRecorder
 
 log = get_logger("discord")
 
@@ -56,6 +72,7 @@ log = get_logger("discord")
 class BotServices:
     """Every bot-independent subsystem, constructed in dependency order."""
 
+    channel_state: ChannelStateRegistry
     context_loader: ContextLoader
     reflector: ConversationReflector
     embedder: LocalEmbedder | None
@@ -102,6 +119,10 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
     from ..tools.time_parser import set_default_timezone
 
     set_default_timezone(config.timezone)
+
+    # Per-channel mutable state — bot-independent, so it belongs here
+    # (RFC-002 P2; the bot keeps facade aliases to its dicts until P7).
+    channel_state = ChannelStateRegistry()
 
     # Multi-agent orchestration
     agent_manager = AgentManager()
@@ -441,6 +462,7 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
         )
 
     return BotServices(
+        channel_state=channel_state,
         context_loader=context_loader,
         reflector=reflector,
         embedder=embedder,
@@ -480,6 +502,143 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
         stuck_loop_tracker_cls=StuckLoopTracker,
         classify_command_risk=classify_command,
         classify_tool_risk=classify_tool,
+    )
+
+
+@dataclass
+class BotComponents:
+    """Every bot-coupled component, constructed in dependency order (RFC-002 P2)."""
+
+    llm_gateway: LLMGateway
+    prompt_builder: PromptBuilder
+    tool_catalog: ToolCatalog
+    native_tools: NativeToolDispatcher
+    scheduling_tools: SchedulingTools
+    knowledge_tools: KnowledgeTools
+    channel_ops_tools: ChannelOpsTools
+    media_tools: MediaTools
+    delivery: ResponseDelivery
+    completion_classifier: CompletionClassifier
+    tool_loop: ToolLoopRunner
+    turn_recorder: TurnRecorder
+    scheduled_events: ScheduledEventHandlers
+    agent_task_tools: AgentTaskTools
+    intake: MessageIntake
+    pipeline: MessagePipeline
+
+
+def build_components(bot, services: BotServices) -> BotComponents:
+    """Bot-coupled component assembly — moved verbatim from ``OdinBot.__init__``
+    (RFC-002 P2), in the exact construction order it used.
+
+    "Bot-coupled" means exactly: live hot-reloadable roots read via provider
+    callables (``bot.config`` is replaced by config hot-reload, the provider
+    clients by live auth reloads), Discord-client operations
+    (``change_presence``, ``get_channel``), the voice manager (constructed on
+    the bot before this runs), and — until P3/P4 narrow them — the classes
+    that still take the bot as ``host``.
+    """
+    # LLM provider management (RFC-001 P4) — the gateway owns the provider
+    # clients and switch state; codex_client/ollama_client/kimi_client on
+    # the bot are property shims over it.
+    llm_gateway = LLMGateway(
+        get_config=lambda: bot.config,
+        codex_client=services.codex_client,
+        ollama_client=services.ollama_client,
+        kimi_client=services.kimi_client,
+        subsystem_guard=services.subsystem_guard,
+        model_router=services.model_router,
+        auxiliary_llm_client=services.auxiliary_llm_client,
+        cost_tracker=services.cost_tracker,
+        sessions=services.sessions,
+        reflector=services.reflector,
+    )
+
+    # Wire LLM callbacks to whichever provider is active
+    if llm_gateway.active_client is not None:
+        llm_gateway.wire_callbacks()
+
+    # Prompt assembly + tool catalog (RFC-001 P3). Bot-coupled because they
+    # must read LIVE hot-reloadable state: bot.config is replaced by the web
+    # API's config hot-reload and the codex client by live auth reloads —
+    # hence provider callables, not captured references.
+    prompt_builder = PromptBuilder(
+        get_config=lambda: bot.config,
+        context_loader=services.context_loader,
+        reflector=services.reflector,
+        skill_manager=services.skill_manager,
+        tool_executor=services.tool_executor,
+        channel_state=services.channel_state,
+        voice_manager=bot.voice_manager,
+        get_codex_client=lambda: llm_gateway.codex_client,
+    )
+    tool_catalog = ToolCatalog(
+        get_config=lambda: bot.config,
+        skill_manager=services.skill_manager,
+    )
+
+    # One Discord-native dispatch table for both pipelines (RFC-001 P5a);
+    # handler bodies live in the domain modules, dispatched late through the
+    # host until P5 binds owners directly.
+    native_tools = NativeToolDispatcher(
+        handler_host=bot,
+        skill_manager=services.skill_manager,
+        tool_catalog=tool_catalog,
+        prompt_builder=prompt_builder,
+        channel_state=services.channel_state,
+        invoke_skill_missing_required=bot._invoke_skill_missing_required,
+    )
+    register_native_handlers(native_tools)
+
+    # Domain handler bundles (P5b)
+    scheduling_tools = SchedulingTools(scheduler=services.scheduler)
+    knowledge_tools = KnowledgeTools(
+        sessions=services.sessions,
+        get_knowledge_store=lambda: bot._knowledge_store,
+        embedder=services.embedder,
+        audit=services.audit,
+    )
+    channel_ops_tools = ChannelOpsTools(
+        sessions=services.sessions,
+        permissions=services.permissions,
+        get_channel=bot.get_channel,
+    )
+    media_tools = MediaTools(
+        get_config=lambda: bot.config,
+        browser_manager=services.browser_manager,
+        tool_executor=services.tool_executor,
+    )
+    delivery = ResponseDelivery(
+        channel_state=services.channel_state,
+        change_presence=bot.change_presence,
+    )
+    completion_classifier = CompletionClassifier(
+        get_llm_client=lambda: bot.llm_client,
+    )
+    tool_loop = ToolLoopRunner(bot)
+    turn_recorder = TurnRecorder(bot)
+    scheduled_events = ScheduledEventHandlers(bot)
+    agent_task_tools = AgentTaskTools(bot)
+    intake = MessageIntake(bot)
+    pipeline = MessagePipeline(bot)
+
+    return BotComponents(
+        llm_gateway=llm_gateway,
+        prompt_builder=prompt_builder,
+        tool_catalog=tool_catalog,
+        native_tools=native_tools,
+        scheduling_tools=scheduling_tools,
+        knowledge_tools=knowledge_tools,
+        channel_ops_tools=channel_ops_tools,
+        media_tools=media_tools,
+        delivery=delivery,
+        completion_classifier=completion_classifier,
+        tool_loop=tool_loop,
+        turn_recorder=turn_recorder,
+        scheduled_events=scheduled_events,
+        agent_task_tools=agent_task_tools,
+        intake=intake,
+        pipeline=pipeline,
     )
 
 
