@@ -16,10 +16,8 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..tools import ToolResult, get_tool_definitions
 from ..async_utils import fire_and_forget
-from .channel_state import ChannelStateRegistry
 from .completion import CLASSIFIER_SYSTEM_PROMPT, CompletionClassifier
-from .intake_pipeline import MessageIntake, MessagePipeline
-from .tool_loop import ToolLoopRunner, ensure_failure_visible
+from .tool_loop import ensure_failure_visible
 from .tool_loop import _LoopAuthorProxy, _LoopMessageProxy  # noqa: F401 — re-export (tests, proxies)
 
 # Canonical homes moved to tool_loop_helpers (RFC-002 P1) — re-exported here
@@ -32,23 +30,12 @@ from .tool_loop_helpers import (
     _scrub_tool_input_for_storage,
     init_allowed_webhook_ids as _init_allowed_webhook_ids_impl,
 )
-from .delivery import ResponseDelivery
 from .delivery import DISCORD_MAX_LEN  # noqa: F401 — module re-export contract
 from .delivery import SEND_MAX_RETRIES  # noqa: F401 — module re-export contract
-from .llm_gateway import LLMGateway
-from .native_tools import NativeToolDispatcher, register_native_handlers
-from .native_tools.agents_tasks import AgentTaskTools
-from .scheduled_events import ScheduledEventHandlers
 from .slash_commands import register_commands
-from .turn_recorder import TurnRecorder
-from .native_tools.channel_ops import ChannelOpsTools
 from .native_tools.media import MediaTools
-from .native_tools.knowledge import KnowledgeTools
-from .native_tools.scheduling import SchedulingTools
-from .prompts import PromptBuilder
-from .tool_catalog import ToolCatalog
 from .voice import VoiceManager, VoiceMessageProxy
-from .wiring import build_services, shutdown_services
+from .wiring import build_components, build_services, shutdown_services
 
 log = get_logger("discord")
 
@@ -182,11 +169,20 @@ class OdinBot(commands.Bot):
         # commands.Bot already initializes self.tree (app_commands.CommandTree); do not overwrite
         self._start_time = time.monotonic()
 
-        # Per-channel mutable state — owned by ChannelStateRegistry (RFC-001
-        # P2). The dict attributes below are facade ALIASES to the registry's
-        # dicts (same objects): external readers (web layer, tests) keep
-        # working, and mutations through either name stay in sync.
-        self._channel_state = ChannelStateRegistry()
+        # ------------------------------------------------------------------
+        # Subsystem construction lives in the composition root (wiring.py,
+        # RFC-001 P1). Attributes are attached flat so the external facade
+        # (web/api.py, health checks, tests) is unchanged.
+        # ------------------------------------------------------------------
+        services = build_services(config)
+        self.services = services
+
+        # Per-channel mutable state — owned by ChannelStateRegistry
+        # (constructed in build_services since RFC-002 P2). The dict
+        # attributes below are facade ALIASES to the registry's dicts (same
+        # objects): external readers (web layer, tests) keep working, and
+        # mutations through either name stay in sync.
+        self.channel_state = self._channel_state = services.channel_state
         self._channel_locks = self._channel_state.channel_locks
         self._cancel_events = self._channel_state.cancel_events
         self._pending_files = self._channel_state.pending_files
@@ -194,12 +190,6 @@ class OdinBot(commands.Bot):
         self._last_op_details = self._channel_state.last_op_details
         self._background_tasks = self._channel_state.background_tasks
 
-        # ------------------------------------------------------------------
-        # Subsystem construction lives in the composition root (wiring.py,
-        # RFC-001 P1). Attributes are attached flat so the external facade
-        # (web/api.py, health checks, tests) is unchanged.
-        # ------------------------------------------------------------------
-        services = build_services(config)
         self.context_loader = services.context_loader
         self.reflector = services.reflector
         self._embedder = services.embedder
@@ -241,106 +231,50 @@ class OdinBot(commands.Bot):
         # constructor arg; signing happens automatically inside log_execution.
         self.audit_signer = self.audit._signer
 
-        # LLM provider management (RFC-001 P4) — the gateway owns the
-        # provider clients and switch state; codex_client/ollama_client/
-        # kimi_client on the bot are property shims over it.
-        self._llm_gateway = LLMGateway(
-            get_config=lambda: self.config,
-            codex_client=services.codex_client,
-            ollama_client=services.ollama_client,
-            kimi_client=services.kimi_client,
-            subsystem_guard=services.subsystem_guard,
-            model_router=services.model_router,
-            auxiliary_llm_client=services.auxiliary_llm_client,
-            cost_tracker=services.cost_tracker,
-            sessions=services.sessions,
-            reflector=services.reflector,
-        )
-
-        # Wire LLM callbacks to whichever provider is active
-        if self.llm_client is not None:
-            self._wire_llm_callbacks()
-
         # Voice support — VoiceManager takes the live bot, so it stays here
+        # (and must exist before build_components: PromptBuilder consumes it).
         self.voice_manager: VoiceManager | None = None
         if config.voice.enabled:
             self.voice_manager = VoiceManager(config.voice, self)
             self.voice_manager.on_transcription = self._on_voice_transcription
 
-        # Proactive infrastructure monitoring — alert callback needs the bot
+        # ------------------------------------------------------------------
+        # Bot-coupled component assembly (RFC-002 P2) — construction moved to
+        # wiring.build_components. Components carry PUBLIC names; the old
+        # underscore spellings remain as aliases to the same objects until P7
+        # retires the facade.
+        # ------------------------------------------------------------------
+        components = build_components(self, services)
+        self.components = components
+        self.llm_gateway = self._llm_gateway = components.llm_gateway
+        self.prompt_builder = self._prompt_builder = components.prompt_builder
+        self.tool_catalog = self._tool_catalog = components.tool_catalog
+        self.native_tools = self._native_tools = components.native_tools
+        self.scheduling_tools = self._scheduling_tools = components.scheduling_tools
+        self.knowledge_tools = self._knowledge_tools = components.knowledge_tools
+        self.channel_ops_tools = self._channel_ops_tools = components.channel_ops_tools
+        self.media_tools = self._media_tools = components.media_tools
+        self.delivery = self._delivery = components.delivery
+        self.completion_classifier = self._completion_classifier = (
+            components.completion_classifier
+        )
+        self.tool_loop = self._tool_loop_runner = components.tool_loop
+        self.turn_recorder = self._turn_recorder = components.turn_recorder
+        self.scheduled_events = self._scheduled_events = components.scheduled_events
+        self.agent_task_tools = self._agent_task_tools = components.agent_task_tools
+        self.intake = self._message_intake = components.intake
+        self.pipeline = self._message_pipeline = components.pipeline
+
+        # Proactive infrastructure monitoring — constructed AFTER the
+        # components so the alert callback wires directly to the
+        # scheduled-events component (RFC-002 R1; no bot delegate).
         self.infra_watcher: InfraWatcher | None = None
         if config.monitoring.enabled and config.monitoring.checks:
             self.infra_watcher = InfraWatcher(
                 config=config.monitoring,
                 executor=self.tool_executor,
-                alert_callback=self._on_monitor_alert,
+                alert_callback=self.scheduled_events._on_monitor_alert,
             )
-
-        # Prompt assembly + tool catalog (RFC-001 P3). Bot-coupled because
-        # they must read LIVE hot-reloadable state: bot.config is replaced by
-        # the web API's config hot-reload and bot.codex_client by live auth
-        # reloads — hence provider callables, not captured references.
-        self._prompt_builder = PromptBuilder(
-            get_config=lambda: self.config,
-            context_loader=self.context_loader,
-            reflector=self.reflector,
-            skill_manager=self.skill_manager,
-            tool_executor=self.tool_executor,
-            channel_state=self._channel_state,
-            voice_manager=self.voice_manager,
-            get_codex_client=lambda: self.codex_client,
-        )
-        self._tool_catalog = ToolCatalog(
-            get_config=lambda: self.config,
-            skill_manager=self.skill_manager,
-        )
-
-        # One Discord-native dispatch table for both pipelines (RFC-001 P5a);
-        # handler bodies stay as bot methods until P5b moves them to domain
-        # modules. Constructed after the catalog/builder it invalidates.
-        self._native_tools = NativeToolDispatcher(
-            handler_host=self,
-            skill_manager=self.skill_manager,
-            tool_catalog=self._tool_catalog,
-            prompt_builder=self._prompt_builder,
-            channel_state=self._channel_state,
-            invoke_skill_missing_required=self._invoke_skill_missing_required,
-        )
-        register_native_handlers(self._native_tools)
-
-        # Domain handler bundles (P5b) — bodies moved out of the bot; the
-        # delegate methods below keep the dispatch host + test seam stable.
-        self._scheduling_tools = SchedulingTools(scheduler=self.scheduler)
-        self._knowledge_tools = KnowledgeTools(
-            sessions=self.sessions,
-            get_knowledge_store=lambda: self._knowledge_store,
-            embedder=self._embedder,
-            audit=self.audit,
-        )
-        self._channel_ops_tools = ChannelOpsTools(
-            sessions=self.sessions,
-            permissions=self.permissions,
-            get_channel=self.get_channel,
-        )
-        self._media_tools = MediaTools(
-            get_config=lambda: self.config,
-            browser_manager=self.browser_manager,
-            tool_executor=self.tool_executor,
-        )
-        self._delivery = ResponseDelivery(
-            channel_state=self._channel_state,
-            change_presence=self.change_presence,
-        )
-        self._completion_classifier = CompletionClassifier(
-            get_llm_client=lambda: self.llm_client,
-        )
-        self._tool_loop_runner = ToolLoopRunner(self)
-        self._turn_recorder = TurnRecorder(self)
-        self._scheduled_events = ScheduledEventHandlers(self)
-        self._agent_task_tools = AgentTaskTools(self)
-        self._message_intake = MessageIntake(self)
-        self._message_pipeline = MessagePipeline(self)
-
 
         # Public `codex` / `knowledge` attributes are exposed as dynamic
         # properties defined below on the class — see the @property blocks.
@@ -848,7 +782,10 @@ class OdinBot(commands.Bot):
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
             log.info("Slash commands synced to guild: %s", guild.name)
-        self.scheduler.start(self._on_scheduled_task, self._on_schedule_failure)
+        self.scheduler.start(
+            self.scheduled_events._on_scheduled_task,
+            self.scheduled_events._on_schedule_failure,
+        )
         if self._vector_store:
             fire_and_forget(self._backfill_archives(), name="backfill_archives")
         # Start proactive monitoring if configured
