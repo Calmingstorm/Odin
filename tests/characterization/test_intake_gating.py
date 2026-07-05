@@ -178,7 +178,7 @@ class TestGatingChain:
 class TestBotMessageBuffering:
     async def test_rapid_bot_messages_buffered_and_combined(self):
         bot = build(discord={"respond_to_bots": True})
-        bot._bot_msg_buffer_delay = 0.02
+        bot._channel_state.bot_msg_buffer_delay = 0.02
         other_bot = FakeAuthor(id=555, name="otherbot", bot=True)
         ch = FakeChannel(id=99)
         await bot.on_message(FakeMessage("part one", author=other_bot, channel=ch))
@@ -189,7 +189,7 @@ class TestBotMessageBuffering:
 
     async def test_split_code_block_joined_across_bot_messages(self):
         bot = build(discord={"respond_to_bots": True})
-        bot._bot_msg_buffer_delay = 0.02
+        bot._channel_state.bot_msg_buffer_delay = 0.02
         other_bot = FakeAuthor(id=555, name="otherbot", bot=True)
         ch = FakeChannel(id=99)
         await bot.on_message(FakeMessage("```python\nx = 1", author=other_bot, channel=ch))
@@ -200,7 +200,7 @@ class TestBotMessageBuffering:
 
     async def test_buffered_bot_messages_dropped_without_mention_when_required(self):
         bot = build(discord={"respond_to_bots": True, "require_mention": True})
-        bot._bot_msg_buffer_delay = 0.02
+        bot._channel_state.bot_msg_buffer_delay = 0.02
         other_bot = FakeAuthor(id=555, name="otherbot", bot=True)
         guild = _FakeGuild()
         ch = FakeChannel(id=99)

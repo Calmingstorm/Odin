@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import collections
 import hashlib
 import io
 import os
@@ -30,6 +29,7 @@ from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
 from ..tools import ToolResult, get_tool_definitions
 from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..async_utils import fire_and_forget
+from .channel_state import ChannelStateRegistry
 from .voice import VoiceManager, VoiceMessageProxy
 from .wiring import build_services, shutdown_services
 
@@ -228,34 +228,18 @@ class OdinBot(commands.Bot):
         # commands.Bot already initializes self.tree (app_commands.CommandTree); do not overwrite
         self._start_time = time.monotonic()
 
-        # Per-channel lock to prevent concurrent processing of the same message
-        self._channel_locks: dict[str, asyncio.Lock] = {}
-        # Per-channel cancellation for /stop command
-        self._cancel_events: dict[str, asyncio.Event] = {}
-        self._active_request_by_channel: dict[str, str] = {}
-        # Pending file attachments from skills — per-channel to avoid cross-channel leaks
-        self._pending_files: dict[str, list[tuple[bytes, str]]] = {}
-        # Track recently processed message IDs to prevent duplicate handling
-        self._processed_messages: collections.OrderedDict[int, None] = collections.OrderedDict()
-        self._processed_messages_max = 100
-        # Bot message buffer: accumulate rapid-fire bot messages before processing
-        # Key: (channel_id, author_id) → list of content strings
-        self._bot_msg_buffer: dict[tuple[str, str], list[str]] = {}
-        self._bot_msg_tasks: dict[tuple[str, str], asyncio.Task] = {}
-        self._bot_msg_buffer_delay: float = 2.0  # seconds to wait for more bot messages
-        self._bot_msg_buffer_max: int = 20  # max messages to buffer per bot+channel
-        # Recent tool executions for conversational context (injected into system prompt)
-        # Per-channel: {channel_id: [(timestamp, entry_text), ...]}
-        self._recent_actions: dict[str, list[tuple[float, str]]] = {}
-        # Per-channel tool input/result details from the most recent tool
-        # loop — consumed by post-operation reflection so it learns from
-        # what actually happened, not just tool names.
-        self._last_op_details: dict[str, list[dict]] = {}
-        self._recent_actions_max = 10
-        self._recent_actions_expiry = 3600  # seconds (1 hour)
-        # Background task tracking
-        self._background_tasks: dict[str, BackgroundTask] = {}
-        self._background_tasks_max = 20
+        # Per-channel mutable state — owned by ChannelStateRegistry (RFC-001
+        # P2). The dict attributes below are facade ALIASES to the registry's
+        # dicts (same objects): external readers (web layer, tests) keep
+        # working, and mutations through either name stay in sync.
+        self._channel_state = ChannelStateRegistry()
+        self._channel_locks = self._channel_state.channel_locks
+        self._cancel_events = self._channel_state.cancel_events
+        self._pending_files = self._channel_state.pending_files
+        self._recent_actions = self._channel_state.recent_actions
+        self._last_op_details = self._channel_state.last_op_details
+        self._background_tasks = self._channel_state.background_tasks
+        # Prompt-layer caches — these move with PromptBuilder in P3
         # Cached merged tool definitions — invalidated on skill create/edit/delete
         self._cached_merged_tools: list[dict] | None = None
         # Cached host string dict — invalidated on context reload
@@ -265,10 +249,6 @@ class OdinBot(commands.Bot):
         # TTL cache for per-user memory (avoids file I/O per message)
         self._memory_cache: dict[str | None, tuple[float, dict[str, str]]] = {}
         self._memory_cache_ttl: float = 60.0  # seconds
-        # TTL cache for reflector prompt section (avoids file I/O per message)
-        # Throttled cache cleanup
-        self._last_cache_cleanup: float = 0.0
-        self._cache_cleanup_interval: float = 300.0  # every 5 minutes
 
         # ------------------------------------------------------------------
         # Subsystem construction lives in the composition root (wiring.py,
@@ -818,12 +798,7 @@ class OdinBot(commands.Bot):
         # Inject recent tool executions for this channel only
         if channel is not None:
             channel_id = str(channel.id)
-            now = time.time()
-            expiry = getattr(self, "_recent_actions_expiry", 3600)
-            channel_actions = [
-                entry for ts, entry in self._recent_actions.get(channel_id, [])
-                if now - ts < expiry
-            ]
+            channel_actions = self._channel_state.recent_entries(channel_id)
             if channel_actions:
                 actions_text = "\n".join(channel_actions[-10:])
                 prompt += f"\n\n## Recent Actions\n{actions_text}"
@@ -925,60 +900,23 @@ class OdinBot(commands.Bot):
     def _cleanup_stale_caches(self) -> None:
         """Remove stale entries from per-channel caches to prevent memory leaks.
 
-        Called periodically (every _cache_cleanup_interval seconds) after session prune.
-        Removes expired entries from _recent_actions and _channel_locks for
-        channels that no longer have active sessions.
+        Called periodically (throttled by the channel-state registry's
+        cleanup_interval) after session prune. Removes expired per-channel
+        state for channels that no longer have active sessions.
         """
         now = time.time()
-        # Clean up _recent_actions: remove channels with all expired entries
-        expired_channels = []
-        for channel_id, actions in self._recent_actions.items():
-            actions[:] = [(ts, entry) for ts, entry in actions if now - ts < self._recent_actions_expiry]
-            if not actions:
-                expired_channels.append(channel_id)
-        for channel_id in expired_channels:
-            del self._recent_actions[channel_id]
-
-        # Clean up _channel_locks for channels no longer in active sessions.
-        # A lock that is currently HELD must not be deleted: an in-flight
-        # request in a channel whose session was just reset/purged still owns
-        # its lock, and dropping it lets the next message setdefault() a fresh
-        # lock, so two handlers run concurrently in the same channel.
+        # Per-channel state (recent actions, locks, pending files, cancel
+        # events, active requests) — delegated to the registry.
         active_channels = set(self.sessions.ids())
-        stale_locks = [
-            cid for cid, lock in self._channel_locks.items()
-            if cid not in active_channels and not lock.locked()
-        ]
-        for cid in stale_locks:
-            del self._channel_locks[cid]
+        self._channel_state.cleanup(active_channels=active_channels)
 
-        # Clean up expired TTL cache entries for memory and reflector
+        # Clean up expired TTL cache entries for per-user memory
+        # (prompt-cache family — moves with PromptBuilder in P3)
         ttl = getattr(self, "_memory_cache_ttl", 60.0)
         self._memory_cache = {
             k: v for k, v in getattr(self, "_memory_cache", {}).items()
             if now - v[0] < ttl
         }
-
-        # Clean up _pending_files for channels no longer active
-        stale_files = [cid for cid in self._pending_files if cid not in active_channels]
-        for cid in stale_files:
-            leaked = self._pending_files.pop(cid, [])
-            if leaked:
-                log.warning("Evicted %d stale pending file(s) for channel %s", len(leaked), cid)
-
-        # Clean up stale cancel events and active request tracking
-        stale_cancel = [
-            cid for cid, ev in self._cancel_events.items()
-            if cid not in active_channels and not ev.is_set()
-        ]
-        for cid in stale_cancel:
-            del self._cancel_events[cid]
-        stale_active = [
-            cid for cid in self._active_request_by_channel
-            if cid not in active_channels and not self._cancel_events.get(cid, asyncio.Event()).is_set()
-        ]
-        for cid in stale_active:
-            del self._active_request_by_channel[cid]
 
         # Agent lifecycle: kill stuck agents, log stale ones
         if hasattr(self, "agent_manager"):
@@ -1011,11 +949,10 @@ class OdinBot(commands.Bot):
         """Run cache cleanup if enough time has passed since the last run."""
         try:
             now = time.time()
-            interval = getattr(self, "_cache_cleanup_interval", 300.0)
-            last = getattr(self, "_last_cache_cleanup", 0.0)
-            if now - last > interval:
+            cs = self._channel_state
+            if now - cs.last_cleanup > cs.cleanup_interval:
                 self._cleanup_stale_caches()
-                self._last_cache_cleanup = now
+                cs.last_cleanup = now
         except Exception:
             pass  # Non-critical — don't break message processing
 
@@ -1041,11 +978,7 @@ class OdinBot(commands.Bot):
         status = "OK" if "error" not in result_preview.lower()[:50] else "ERROR"
         entry = f"- [{ts}] `{tool_name}`({inp_summary}) → {status} ({elapsed_ms}ms)"
 
-        actions = self._recent_actions.setdefault(channel_id, [])
-        actions.append((time.time(), entry))
-        # Cap per-channel list
-        if len(actions) > self._recent_actions_max:
-            self._recent_actions[channel_id] = actions[-self._recent_actions_max:]
+        self._channel_state.track_recent_action(channel_id, entry)
 
     def _register_commands(self) -> None:
         @self.tree.command(name="status", description="Show Odin bot status")
@@ -1131,7 +1064,7 @@ class OdinBot(commands.Bot):
                 return
             channel_id = str(interaction.channel_id)
             event = self._cancel_events.setdefault(channel_id, asyncio.Event())
-            active = self._active_request_by_channel.get(channel_id)
+            active = self._channel_state.active_requests.get(channel_id)
             if active:
                 event.set()
                 await interaction.response.send_message("Stopping current task...", ephemeral=True)
@@ -1701,13 +1634,9 @@ class OdinBot(commands.Bot):
         )
 
         # Dedup: skip if we've already processed this exact message
-        if message.id in self._processed_messages:
+        if self._channel_state.seen_message(message.id):
             log.warning("Duplicate on_message for msg_id=%s, skipping", message.id)
             return
-        self._processed_messages[message.id] = None
-        # Keep bounded — remove oldest entries (OrderedDict preserves insertion order)
-        while len(self._processed_messages) > self._processed_messages_max:
-            self._processed_messages.popitem(last=False)
 
         # Buffer rapid-fire bot messages (e.g. code blocks split across messages)
         # Wait 2s after each bot message to see if more follow, then process all
@@ -1718,23 +1647,23 @@ class OdinBot(commands.Bot):
             guild_id, channel_id_str, self.config.discord.respond_to_bots,
         ):
             buf_key = (str(message.channel.id), str(message.author.id))
-            if buf_key not in self._bot_msg_buffer:
-                self._bot_msg_buffer[buf_key] = []
-            buf = self._bot_msg_buffer[buf_key]
-            if len(buf) >= self._bot_msg_buffer_max:
+            if buf_key not in self._channel_state.bot_msg_buffer:
+                self._channel_state.bot_msg_buffer[buf_key] = []
+            buf = self._channel_state.bot_msg_buffer[buf_key]
+            if len(buf) >= self._channel_state.bot_msg_buffer_max:
                 log.warning("Bot buffer full (%d msgs) for %s, dropping oldest", len(buf), buf_key)
                 buf.pop(0)
             buf.append(scrub_output_secrets(message.content))
 
             # Cancel previous timer for this bot+channel
-            if buf_key in self._bot_msg_tasks:
-                self._bot_msg_tasks[buf_key].cancel()
+            if buf_key in self._channel_state.bot_msg_tasks:
+                self._channel_state.bot_msg_tasks[buf_key].cancel()
 
             # Set new timer — process after delay of silence
             async def _flush_bot_buffer(key, orig_msg):
-                await asyncio.sleep(self._bot_msg_buffer_delay)
-                parts = self._bot_msg_buffer.pop(key, [])
-                self._bot_msg_tasks.pop(key, None)
+                await asyncio.sleep(self._channel_state.bot_msg_buffer_delay)
+                parts = self._channel_state.bot_msg_buffer.pop(key, [])
+                self._channel_state.bot_msg_tasks.pop(key, None)
                 if not parts:
                     return
                 combined = combine_bot_messages(parts)
@@ -1758,7 +1687,7 @@ class OdinBot(commands.Bot):
                 if combined:
                     await self._handle_message(orig_msg, combined, image_blocks=[])
 
-            self._bot_msg_tasks[buf_key] = asyncio.create_task(
+            self._channel_state.bot_msg_tasks[buf_key] = asyncio.create_task(
                 _flush_bot_buffer(buf_key, message)
             )
             return
@@ -2456,12 +2385,10 @@ class OdinBot(commands.Bot):
         _ch_id = str(message.channel.id)
         _cancel = self._cancel_events.setdefault(_ch_id, asyncio.Event())
         _req_id = req_hash
-        self._active_request_by_channel[_ch_id] = _req_id
+        self._channel_state.set_active_request(_ch_id, _req_id)
 
         def _clear_active():
-            if self._active_request_by_channel.get(_ch_id) == _req_id:
-                self._active_request_by_channel.pop(_ch_id, None)
-                _cancel.clear()
+            self._channel_state.clear_active_request(_ch_id, _req_id)
 
         def _stopped(where: str) -> tuple[str, bool, bool, list[str], bool]:
             log.info("Task stopped by /stop in channel %s at %s", _ch_id, where)
@@ -3737,7 +3664,7 @@ class OdinBot(commands.Bot):
             tid for tid, t in self._background_tasks.items()
             if t.status in ("completed", "failed", "cancelled")
         ]
-        while len(completed) > self._background_tasks_max:
+        while len(completed) > self._channel_state.background_tasks_max:
             old = completed.pop(0)
             del self._background_tasks[old]
 
