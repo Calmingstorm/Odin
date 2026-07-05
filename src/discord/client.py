@@ -14,10 +14,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from ..audit import AuditLogger
 from ..config.schema import Config
-from ..context import ContextLoader
-from ..knowledge import KnowledgeStore
 from ..monitoring import InfraWatcher
 from .background_task import (
     BackgroundTask, run_background_task, create_task_id, MAX_STEPS,
@@ -25,25 +22,18 @@ from .background_task import (
 from ..agents import AgentManager, LoopAgentBridge
 from ..agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ..tools.autonomous_loop import LoopManager
-from ..learning import ConversationReflector
-from ..llm import CircuitOpenError, CodexAuth, CodexChatClient, KimiClient, OllamaClient
+from ..llm import CircuitOpenError, CodexChatClient, KimiClient, OllamaClient
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
 from ..llm.system_prompt import build_system_prompt, build_chat_system_prompt
 from ..odin_log import get_logger
-from ..scheduler import Scheduler
-from ..sessions import SessionManager
 from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
-from ..tools import ToolExecutor, SkillManager, ToolResult, get_tool_definitions
+from ..tools import ToolResult, get_tool_definitions
 from ..tools.executor import _ERROR_RESULT_PREFIXES
-from ..search import LocalEmbedder, SessionVectorStore
-from ..permissions import PermissionManager
-from ..permissions.host_access import HostAccessManager
 from ..async_utils import fire_and_forget
-from .channel_config import ChannelConfigManager
-from .channel_logger import ChannelLogger
 from .voice import VoiceManager, VoiceMessageProxy
+from .wiring import build_services, shutdown_services
 
 log = get_logger("discord")
 
@@ -240,10 +230,6 @@ class OdinBot(commands.Bot):
         # commands.Bot already initializes self.tree (app_commands.CommandTree); do not overwrite
         self._start_time = time.monotonic()
 
-        # Configure timezone for time parser module
-        from ..tools.time_parser import set_default_timezone
-        set_default_timezone(config.timezone)
-
         # Per-channel lock to prevent concurrent processing of the same message
         self._channel_locks: dict[str, asyncio.Lock] = {}
         # Per-channel cancellation for /stop command
@@ -307,176 +293,57 @@ class OdinBot(commands.Bot):
         self._last_cache_cleanup: float = 0.0
         self._cache_cleanup_interval: float = 300.0  # every 5 minutes
 
-        self.context_loader = ContextLoader(config.context.directory)
-        self.context_loader.load()
+        # ------------------------------------------------------------------
+        # Subsystem construction lives in the composition root (wiring.py,
+        # RFC-001 P1). Attributes are attached flat so the external facade
+        # (web/api.py, health checks, tests) is unchanged.
+        # ------------------------------------------------------------------
+        services = build_services(config)
+        self.context_loader = services.context_loader
+        self.reflector = services.reflector
+        self._embedder = services.embedder
+        self._fts_index = services.fts_index
+        self._vector_store = services.vector_store
+        self._knowledge_store = services.knowledge_store
+        self.sessions = services.sessions
+        self._memory_path = services.memory_path
+        self.channel_config = services.channel_config
+        self.channel_logger = services.channel_logger
+        self.browser_manager = services.browser_manager
+        self.host_access_manager = services.host_access_manager
+        self.permissions = services.permissions
+        self.tool_executor = services.tool_executor
+        self.skill_manager = services.skill_manager
+        self.codex_client = services.codex_client
+        self.ollama_client = services.ollama_client
+        self.kimi_client = services.kimi_client
+        self.scheduler = services.scheduler
+        self.audit = services.audit
+        self.api_token_manager = services.api_token_manager
+        self.agent_manager = services.agent_manager
+        self.loop_manager = services.loop_manager
+        self.trajectory_saver = services.trajectory_saver
+        self.agent_trajectory_saver = services.agent_trajectory_saver
+        self.loop_agent_bridge = services.loop_agent_bridge
+        self._loop_reflection_gate = services.loop_reflection_gate
+        self.cost_tracker = services.cost_tracker
+        self.subsystem_guard = services.subsystem_guard
+        self.diff_tracker = services.diff_tracker
+        self.model_router = services.model_router
+        self.context_compressor = services.context_compressor
+        self.prefix_tracker = services.prefix_tracker
+        self.auxiliary_llm_client = services.auxiliary_llm_client
+        self.outbound_webhook_dispatcher = services.outbound_webhook_dispatcher
+        self._run_startup_diagnostics = services.run_startup_diagnostics
+        self.stuck_loop_tracker_cls = services.stuck_loop_tracker_cls
+        self.classify_command_risk = services.classify_command_risk
+        self.classify_tool_risk = services.classify_tool_risk
+        # Audit signer — exposed as bot.audit_signer for tests/introspection.
+        # The actual chain signing is wired into AuditLogger via the hmac_key
+        # constructor arg; signing happens automatically inside log_execution.
+        self.audit_signer = self.audit._signer
 
-        self.reflector = ConversationReflector(
-            learned_path="./data/learned.json",
-            max_entries=config.learning.max_entries,
-            consolidation_target=config.learning.consolidation_target,
-            injection_token_budget=config.learning.injection_token_budget,
-            enabled=config.learning.enabled,
-        )
-
-        # Semantic search + FTS5 components
-        self._vector_store: SessionVectorStore | None = None
-        self._embedder: LocalEmbedder | None = None
-        self._knowledge_store: KnowledgeStore | None = None
-        self._fts_index: FullTextIndex | None = None
-        if config.search.enabled:
-            self._embedder = LocalEmbedder()
-            # Initialize FTS5 index (SQLite, no external deps)
-            from pathlib import Path
-            search_db_path = config.search.search_db_path
-            fts_db_path = str(Path(search_db_path).parent / "fts.db")
-            from ..search.fts import FullTextIndex
-            self._fts_index = FullTextIndex(fts_db_path)
-            if not self._fts_index.available:
-                self._fts_index = None
-
-            # Always initialize stores — they work in FTS-only mode even without
-            # sqlite-vec or embedder. Don't null them out on vec init failure.
-            session_db = str(Path(search_db_path) / "sessions.db") if Path(search_db_path).is_dir() else search_db_path + "_sessions.db"
-            knowledge_db = str(Path(search_db_path) / "knowledge.db") if Path(search_db_path).is_dir() else search_db_path + "_knowledge.db"
-            # Ensure the directory exists
-            Path(search_db_path).mkdir(parents=True, exist_ok=True)
-            session_db = str(Path(search_db_path) / "sessions.db")
-            knowledge_db = str(Path(search_db_path) / "knowledge.db")
-
-            self._vector_store = SessionVectorStore(
-                session_db, fts_index=self._fts_index,
-            )
-            if not self._vector_store.available:
-                self._vector_store = None
-            self._knowledge_store = KnowledgeStore(
-                knowledge_db, fts_index=self._fts_index,
-            )
-            if not self._knowledge_store.available:
-                self._knowledge_store = None
-
-        self.sessions = SessionManager(
-            max_history=config.sessions.max_history,
-            max_age_hours=config.sessions.max_age_hours,
-            persist_dir=config.sessions.persist_directory,
-            reflector=self.reflector,
-            vector_store=self._vector_store,
-            embedder=self._embedder,
-            token_budget=config.sessions.token_budget,
-            adaptive_compaction=config.sessions.adaptive_compaction,
-            archive_max_bytes=config.sessions.archive_max_bytes,
-            archive_max_files=config.sessions.archive_max_files,
-            context_token_budget=config.sessions.context_token_budget,
-            context_budget_overrides=config.sessions.context_budget_overrides,
-        )
-        self.sessions.load()
-
-        self._memory_path = "./data/memory.json"
-        self.channel_config = ChannelConfigManager("./data/channel_config.json")
-
-        # Passive channel logger — writes ALL guild messages to JSONL (zero LLM tokens)
-        self.channel_logger = ChannelLogger("./data/channel_logs")
-        self.sessions.set_channel_search(self.channel_logger, self._fts_index)
-
-        # Browser automation
-        self.browser_manager = None
-        if config.browser.enabled:
-            from ..tools.browser import BrowserManager
-            self.browser_manager = BrowserManager(
-                cdp_url=config.browser.cdp_url,
-                default_timeout_ms=config.browser.default_timeout_ms,
-                viewport_width=config.browser.viewport_width,
-                viewport_height=config.browser.viewport_height,
-                allow_private_targets=config.browser.allow_private_targets,
-            )
-
-        from ..tools.output_streamer import ToolOutputStreamer
-        streaming_cfg = config.tools.streaming
-        output_streamer = None
-        if streaming_cfg.enabled:
-            enabled_tools = set(streaming_cfg.tools) if streaming_cfg.tools else {"run_command", "run_script", "claude_code"}
-            output_streamer = ToolOutputStreamer(
-                enabled_tools=enabled_tools,
-                chunk_interval=streaming_cfg.chunk_interval_seconds,
-                max_chunk_chars=streaming_cfg.max_chunk_chars,
-            )
-
-        self.host_access_manager = HostAccessManager(
-            path="./data/host_access.json",
-            available_hosts=list(config.tools.hosts.keys()),
-        )
-
-        # Built before ToolExecutor so it can be wired in as the RBAC gate.
-        # Historically the executor was constructed without it, so
-        # check_permission() always allowed and the central RBAC gate was a
-        # no-op (masked live by default_tier: admin, but a real gap for any
-        # deployment using a non-admin default tier).
-        self.permissions = PermissionManager(
-            config_tiers=config.permissions.tiers,
-            default_tier=config.permissions.default_tier,
-            overrides_path=config.permissions.overrides_path,
-        )
-
-        self.tool_executor = ToolExecutor(
-            config.tools, memory_path=self._memory_path,
-            browser_manager=self.browser_manager,
-            output_streamer=output_streamer,
-            host_access_manager=self.host_access_manager,
-            email_config=getattr(config, "email", None),
-            permission_manager=self.permissions,
-        )
-        self.skill_manager = SkillManager(
-            skills_dir="./data/skills",
-            tool_executor=self.tool_executor,
-            memory_path=self._memory_path,
-            tool_timeouts=config.tools.tool_timeouts,
-        )
-
-        # Apply skill URL allowlist from config
-        if config.tools.skill_allowed_urls:
-            from ..tools.skill_context import set_skill_allowed_urls
-            set_skill_allowed_urls(config.tools.skill_allowed_urls)
-
-        # Initialize Codex client if configured
-        self.codex_client: CodexChatClient | None = None
-        if config.openai_codex.enabled:
-            codex_auth = CodexAuthPool(config.openai_codex.credentials_path)
-            if codex_auth.is_configured():
-                self.codex_client = CodexChatClient(
-                    auth=codex_auth,
-                    model=config.openai_codex.model,
-                    max_tokens=config.openai_codex.max_tokens,
-                )
-                log.info("Codex backend enabled (model: %s)", config.openai_codex.model)
-            else:
-                log.warning("Codex enabled in config but no credentials found. Run scripts/codex_login.py")
-
-        # Initialize Ollama client if configured
-        self.ollama_client: OllamaClient | None = None
-        ollama_cfg = getattr(config, "ollama", None)
-        if ollama_cfg and ollama_cfg.enabled:
-            self.ollama_client = OllamaClient(
-                base_url=ollama_cfg.base_url,
-                model=ollama_cfg.model,
-                max_tokens=ollama_cfg.max_tokens,
-                timeout=ollama_cfg.timeout,
-                api_key=ollama_cfg.api_key,
-            )
-            log.info("Ollama backend enabled (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url)
-
-        # Initialize Kimi client if configured
-        self.kimi_client: KimiClient | None = None
-        kimi_cfg = getattr(config, "kimi", None)
-        if kimi_cfg and kimi_cfg.enabled and kimi_cfg.api_key:
-            self.kimi_client = KimiClient(
-                api_key=kimi_cfg.api_key,
-                model=kimi_cfg.model,
-                max_tokens=kimi_cfg.max_tokens,
-                timeout=kimi_cfg.timeout,
-            )
-            log.info("Kimi backend enabled (model: %s)", kimi_cfg.model)
-        elif kimi_cfg and kimi_cfg.enabled and not kimi_cfg.api_key:
-            log.warning("Kimi enabled in config but no api_key set")
-
+        # LLM provider-switch state (moves into LLMGateway in P4)
         self._llm_provider_lock = asyncio.Lock()
         self._llm_active_requests = 0
         self._llm_switching = False
@@ -485,41 +352,13 @@ class OdinBot(commands.Bot):
         if self.llm_client is not None:
             self._wire_llm_callbacks()
 
-        self.scheduler = Scheduler(data_path="./data/schedules.json")
-
-        # Audit logger — HMAC chain signing is on iff config.audit.hmac_key is set
-        _audit_key = config.audit.hmac_key if getattr(config, "audit", None) else ""
-        self.audit = AuditLogger(
-            path="./data/audit.jsonl", hmac_key=_audit_key,
-            classify_failures=getattr(
-                getattr(config, "observability", None),
-                "audit_failure_classification", True,
-            ),
-        )
-        if getattr(config, "audit", None) is not None and not _audit_key:
-            log.warning(
-                "Audit HMAC signing is DISABLED (config.audit.hmac_key is empty): "
-                "audit.jsonl is NOT tamper-evident and verify_integrity() will fail. "
-                "Set audit.hmac_key to enable the integrity chain."
-            )
-        from ..permissions.token_manager import ApiTokenManager
-        self.api_token_manager = ApiTokenManager("./data/api_tokens.json")
-
-        # Wire optional services into skill manager for expanded skill context
-        self.skill_manager.set_services(
-            knowledge_store=self._knowledge_store,
-            embedder=self._embedder,
-            session_manager=self.sessions,
-            scheduler=self.scheduler,
-        )
-
-        # Voice support
+        # Voice support — VoiceManager takes the live bot, so it stays here
         self.voice_manager: VoiceManager | None = None
         if config.voice.enabled:
             self.voice_manager = VoiceManager(config.voice, self)
             self.voice_manager.on_transcription = self._on_voice_transcription
 
-        # Proactive infrastructure monitoring
+        # Proactive infrastructure monitoring — alert callback needs the bot
         self.infra_watcher: InfraWatcher | None = None
         if config.monitoring.enabled and config.monitoring.checks:
             self.infra_watcher = InfraWatcher(
@@ -528,148 +367,11 @@ class OdinBot(commands.Bot):
                 alert_callback=self._on_monitor_alert,
             )
 
-        # ------------------------------------------------------------------
-        # Build-loop additions — instantiate every module the 50-round build
-        # loop produced, so each is reachable from the running bot rather than
-        # sitting as standalone code in src/. Each is config-gated where it
-        # makes sense so default behavior matches Heimdall.
-        # ------------------------------------------------------------------
-
-        # Cost tracking — always on, near-zero overhead.
-        from ..llm.cost_tracker import CostTracker
-        self.cost_tracker = CostTracker()
-
-        # Trajectory savers — message-level + agent-level. Always on; writes
-        # to date-partitioned JSONL under data/trajectories/.
-
-        # Stuck-loop tracker — instantiated per-iteration in the tool loop, but
-        # store the class on the bot for tests and external introspection.
-        from ..discord.response_guards import StuckLoopTracker
-        self.stuck_loop_tracker_cls = StuckLoopTracker
-
-        # Subsystem guard — tracks per-subsystem health (Codex/SSH/knowledge/
-        # voice/browser/comfyui). Always on; subsystems call record_success/
-        # record_failure as they operate.
-        from ..health.subsystem_guard import SubsystemGuard
-        # Pass the configured thresholds — the guard was built with no args, so
-        # graceful_degradation.degraded_threshold / unavailable_threshold in
-        # config were silently ignored (always the module defaults).
-        _gd = getattr(config, "graceful_degradation", None)
-        if _gd is not None:
-            self.subsystem_guard = SubsystemGuard(
-                degraded_threshold=_gd.degraded_threshold,
-                unavailable_threshold=_gd.unavailable_threshold,
-            )
-        else:
-            self.subsystem_guard = SubsystemGuard()
-        for _name in ("llm_codex", "llm_ollama", "llm_kimi", "codex", "ssh", "knowledge", "voice", "browser", "comfyui"):
-            self.subsystem_guard.register(_name)
-
-        # Audit signer — exposed as bot.audit_signer for tests/introspection.
-        # The actual chain signing is wired into AuditLogger via the hmac_key
-        # constructor arg above; signing happens automatically inside log_execution.
-        self.audit_signer = self.audit._signer
-
-        # Action diff tracker — records before→after diffs for file/config
-        # changes when audit logging picks them up. Always on.
-        from ..audit.diff_tracker import DiffTracker
-        self.diff_tracker = DiffTracker()
-
-        # Risk classifier — observability only, never blocks. The classify
-        # functions are stateless module-level; expose them as bot methods so
-        # callers can use them through the bot.
-        from ..tools.risk_classifier import classify_command, classify_tool
-        self.classify_command_risk = classify_command
-        self.classify_tool_risk = classify_tool
-
-        # Model router — heuristic-first, LLM fallback to pick cheap vs strong
-        # model per intent. Off by default; enable via openai_codex.model_routing.
-        self.model_router = None
-        _routing = getattr(config.openai_codex, "model_routing", None)
-        if _routing and _routing.enabled:
-            from ..llm.model_router import ModelRouter
-            self.model_router = ModelRouter(
-                enabled=True,
-                confidence_threshold=_routing.confidence_threshold,
-                max_cheap_length=_routing.max_cheap_length,
-                strong_intents=frozenset(_routing.strong_intents),
-            )
-
-        # Context compressor — summarizes prior tool iterations when context
-        # grows. On by default; tune via openai_codex.context_compression.
-        self.context_compressor = None
-        self.prefix_tracker = None
-        _compress = getattr(config.openai_codex, "context_compression", None)
-        if _compress and _compress.enabled:
-            from ..llm.context_compressor import PrefixTracker
-            self.prefix_tracker = PrefixTracker()
-            self.context_compressor = _compress  # config object itself acts as the on/off + thresholds
-
-        # Auxiliary LLM client — cheap-model wrapper for classification /
-        # summarization tasks. Off unless openai_codex.auxiliary.enabled.
-        self.auxiliary_llm_client = None
-        _aux = getattr(config.openai_codex, "auxiliary", None)
-        if _aux and _aux.enabled and self.codex_client:
-            try:
-                from ..llm.auxiliary import AuxiliaryLLMClient
-                aux_creds = _aux.credentials_path or config.openai_codex.credentials_path
-                aux_auth = CodexAuthPool(aux_creds)
-                if aux_auth.is_configured():
-                    aux_client = CodexChatClient(
-                        auth=aux_auth,
-                        model=_aux.model,
-                        max_tokens=_aux.max_tokens,
-                    )
-                    self.auxiliary_llm_client = AuxiliaryLLMClient(
-                        aux_client=aux_client,
-                        primary_client=self.codex_client,
-                        cost_tracker=self.cost_tracker,
-                    )
-                    log.info(
-                        "Auxiliary LLM client enabled (model: %s)", _aux.model,
-                    )
-            except Exception:
-                log.exception("Failed to initialize auxiliary LLM client")
-
-        # Outbound webhook dispatcher — lifecycle event push to registered
-        # external URLs. Off unless outbound_webhooks.enabled. Targets
-        # populated from config.
-        self.outbound_webhook_dispatcher = None
-        if getattr(config, "outbound_webhooks", None) and config.outbound_webhooks.enabled:
-            from ..notifications.outbound_webhooks import OutboundWebhookDispatcher
-            self.outbound_webhook_dispatcher = OutboundWebhookDispatcher(
-                scrub_secrets=config.outbound_webhooks.scrub_secrets,
-                rate_limit_seconds=config.outbound_webhooks.rate_limit_seconds,
-            )
-            for tgt in getattr(config.outbound_webhooks, "targets", []) or []:
-                try:
-                    self.outbound_webhook_dispatcher.register(
-                        name=tgt.name,
-                        url=tgt.url,
-                        secret=tgt.secret,
-                        events=tgt.events or None,
-                        enabled=tgt.enabled,
-                    )
-                except Exception:
-                    log.exception("Failed to register outbound webhook target")
-
-        # Startup diagnostics — function reference; called from setup_hook.
-        from ..health.startup import run_startup_diagnostics
-        self._run_startup_diagnostics = run_startup_diagnostics
-
         # Public `codex` / `knowledge` attributes are exposed as dynamic
         # properties defined below on the class — see the @property blocks.
         # Using properties (instead of one-time aliases) means the web UI /
         # health checker always reads the live value, even if the underlying
         # attribute gets reassigned during a reload or reinit.
-
-        # Register user-created personality presets from config before first prompt build
-        if hasattr(self.config, "personality") and self.config.personality.user_presets:
-            from src.llm.system_prompt import register_user_presets
-            register_user_presets({
-                k: {"name": v.name, "identity": v.identity, "voice": v.voice}
-                for k, v in self.config.personality.user_presets.items()
-            })
 
         self._system_prompt = self._build_system_prompt()
         self._register_commands()
@@ -1745,143 +1447,11 @@ class OdinBot(commands.Bot):
     async def close(self) -> None:
         """Graceful shutdown: stop services, persist state, then disconnect.
 
-        Component attributes are looked up via getattr because they may not be
-        present (some are config-gated). Order matters: stop work-producers
-        before consumers, and persist user-visible state (sessions) last.
+        Teardown order and the getattr guards live in
+        wiring.shutdown_services — the mirror of wiring.build_services.
         """
         log.info("Shutting down OdinBot…")
-
-        loop_manager = getattr(self, "loop_manager", None)
-        if loop_manager is not None:
-            try:
-                # shutdown() cancels AND awaits loop tasks; stop_loop("all")
-                # only set cancel events, leaving tasks pending at process
-                # exit ("Task was destroyed but it is pending").
-                await loop_manager.shutdown()
-            except Exception:
-                log.exception("Error stopping loop_manager")
-
-        scheduler = getattr(self, "scheduler", None)
-        if scheduler is not None:
-            try:
-                await scheduler.stop()
-            except Exception:
-                log.exception("Error stopping scheduler")
-
-        watcher = getattr(self, "infra_watcher", None)
-        if watcher is not None:
-            try:
-                await watcher.stop()
-            except Exception:
-                log.exception("Error stopping watcher")
-
-        health_server = getattr(self, "health_server", None)
-        if health_server is not None:
-            try:
-                await health_server.stop()
-            except Exception:
-                log.exception("Error stopping health_server")
-
-        process_registry = getattr(self, "process_registry", None)
-        if process_registry is not None:
-            try:
-                await process_registry.shutdown()
-            except Exception:
-                log.exception("Error shutting down process_registry")
-
-        knowledge = getattr(self, "knowledge", None)
-        if knowledge is not None:
-            try:
-                knowledge.close()
-            except Exception:
-                log.exception("Error closing knowledge")
-
-        sessions = getattr(self, "sessions", None)
-        if sessions is not None:
-            try:
-                sessions.save_all()
-            except Exception:
-                log.exception("Error saving sessions")
-
-        # Outbound webhook session cleanup (lazily created; only present after first dispatch)
-        dispatcher = getattr(self, "outbound_webhook_dispatcher", None)
-        if dispatcher is not None:
-            try:
-                await dispatcher.close()
-            except Exception:
-                log.exception("Error closing outbound_webhook_dispatcher")
-
-        # Kill all active agents and clean up
-        agent_mgr = getattr(self, "agent_manager", None)
-        if agent_mgr is not None:
-            try:
-                active = [a for a in agent_mgr._agents.values() if a._sm.is_active]
-                agent_tasks = [a._task for a in active if getattr(a, "_task", None) is not None]
-                for agent in active:
-                    agent_mgr.kill(agent.id, cascade=True)
-                # Await the cancelled agent tasks so their finally-blocks run
-                # (trajectory save) before the process exits, instead of
-                # leaving them pending.
-                if agent_tasks:
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.gather(*agent_tasks, return_exceptions=True), 10.0,
-                        )
-                    except asyncio.TimeoutError:
-                        log.warning("Shutdown: %d agent task(s) did not finish in 10s", len(agent_tasks))
-                await agent_mgr.cleanup()
-                log.info("Shutdown: killed %d active agent(s)", len(active))
-            except Exception:
-                log.exception("Error cleaning up agent_manager")
-
-        # Close SSH connection pool — release ControlMaster sockets
-        executor = getattr(self, "tool_executor", None)
-        if executor is not None:
-            pool = getattr(executor, "ssh_pool", None)
-            if pool is not None:
-                try:
-                    await pool.close_all()
-                except Exception:
-                    log.exception("Error closing SSH pool")
-
-        # Close auxiliary LLM client
-        aux = getattr(self, "auxiliary_llm_client", None)
-        if aux is not None:
-            try:
-                await aux.close()
-            except Exception:
-                log.exception("Error closing auxiliary LLM client")
-
-        # Close LLM HTTP client sessions
-        codex = getattr(self, "codex_client", None)
-        if codex is not None:
-            try:
-                await codex.close()
-            except Exception:
-                log.exception("Error closing Codex client")
-
-        ollama = getattr(self, "ollama_client", None)
-        if ollama is not None:
-            try:
-                await ollama.close()
-            except Exception:
-                log.exception("Error closing Ollama client")
-
-        kimi = getattr(self, "kimi_client", None)
-        if kimi is not None:
-            try:
-                await kimi.close()
-            except Exception:
-                log.exception("Error closing Kimi client")
-
-        # Shut down Playwright browser
-        browser = getattr(self, "browser_manager", None)
-        if browser is not None:
-            try:
-                await browser.shutdown()
-            except Exception:
-                log.exception("Error shutting down browser_manager")
-
+        await shutdown_services(self)
         await super().close()
         log.info("OdinBot shutdown complete")
 
