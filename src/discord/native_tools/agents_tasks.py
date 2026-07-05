@@ -589,7 +589,12 @@ class AgentTaskTools:
                 loop_info.requester_id,
             )
 
-        cc = bot.config.context_compression
+        # bot.context_compressor is the wiring-built compression config object
+        # (None when disabled) — config.context_compression never existed; the
+        # old attribute access raised AttributeError on EVERY spawn_loop_agents
+        # call since the tool shipped (soak round-2 finding, 2026-07-05). Same
+        # pattern as _handle_spawn_agent above.
+        cc = bot.context_compressor
         agent_ids = bot.loop_agent_bridge.spawn_agents_for_loop(
             loop_id=loop_id,
             iteration=loop_info.iteration_count,
@@ -607,9 +612,9 @@ class AgentTaskTools:
             # bridge passed None and agents fell back to the module default,
             # ignoring agents.max_iterations.
             max_iterations=bot.config.agents.max_iterations,
-            context_compression_enabled=cc.enabled,
-            max_context_chars=cc.max_context_chars,
-            keep_recent_iterations=cc.keep_recent_iterations,
+            context_compression_enabled=bool(cc),
+            max_context_chars=cc.max_context_chars if cc else 750000,
+            keep_recent_iterations=cc.keep_recent_iterations if cc else 30,
         )
 
         # Format response
