@@ -1,12 +1,13 @@
-"""Small, pure helpers extracted from the Discord tool loop.
+"""Shared leaf helpers for the tool-execution pipelines.
 
-The main tool loop (`_process_with_tools`) is a ~700-line coroutine that
-does most of its work in place. That size made Odin's brainstorm call it
-out as the single worst structural problem — but a full decomposition is
-too risky without an end-to-end harness. This module collects *safe*
-pieces: pure functions with no hidden state, no side effects, and easy
-unit tests. Each extracted piece replaces an inline block in the loop
-1:1 and should be callable from isolation.
+Originally the "safe pure pieces" carved out of the old ~700-line chat
+tool loop. RFC-002 P1 widened the charter slightly: this is now the
+shared LEAF module for symbols the tool loop, the message intake, the
+background-task runner, and the client module all need — it imports
+nothing from ``src.discord``, which is what dissolves the old
+``tool_loop → client`` late-import cycle. Besides the pure functions it
+holds exactly one piece of module state, the test-webhook allowlist
+(mutated in place so every importer sees updates).
 """
 
 from __future__ import annotations
@@ -14,6 +15,59 @@ from __future__ import annotations
 import hashlib
 import time
 from typing import Any
+
+from ..tools.executor import _ERROR_RESULT_PREFIXES
+
+# Friendly fallback when the LLM returns an empty response after retries
+# (moved verbatim from client.py, RFC-002 P1).
+_EMPTY_RESPONSE_FALLBACK = "I couldn't generate a response. Please try again."
+
+# Webhook IDs allowed to bypass the bot-author check. Populated from the
+# ALLOWED_WEBHOOK_IDS env var at startup via init_allowed_webhook_ids().
+# MUTATED IN PLACE (never rebound) so `from ... import _ALLOWED_WEBHOOK_IDS`
+# bindings held by other modules always observe the live contents.
+_ALLOWED_WEBHOOK_IDS: set[str] = set()
+
+
+def init_allowed_webhook_ids(raw: str) -> None:
+    """(Re)populate the test-webhook allowlist from a comma-separated string.
+
+    Matches the original client.py semantics exactly: an empty value leaves
+    the existing contents untouched; a non-empty value replaces them.
+    """
+    if raw:
+        _ALLOWED_WEBHOOK_IDS.clear()
+        _ALLOWED_WEBHOOK_IDS.update(wid.strip() for wid in raw.split(",") if wid.strip())
+
+
+_EMAIL_BODY_TOOLS = frozenset({"email_send"})
+
+
+def _scrub_tool_input_for_storage(tool_name: str, tool_input: dict) -> dict:
+    """Redact privacy-sensitive fields from tool input before any storage path."""
+    if tool_name not in _EMAIL_BODY_TOOLS or not isinstance(tool_input, dict):
+        return tool_input
+    cleaned = dict(tool_input)
+    body = cleaned.get("body", "")
+    cleaned["body"] = f"[redacted email body: {len(body)} chars]"
+    if "attachments" in cleaned and cleaned["attachments"]:
+        from pathlib import Path
+
+        cleaned["attachments"] = [Path(p).name for p in cleaned["attachments"]]
+    return cleaned
+
+
+def ensure_failure_visible(result_text: str, ok: bool) -> str:
+    """Make a structurally-failed tool result visible to the model.
+
+    execute() carries ok=False on ToolResult, but the model only sees
+    str(result) — the raw output. When that text lacks an error prefix
+    (e.g. run_command_multi's per-host markdown aggregate wrapping a
+    denial), the model reads a refused action as success. Prefix it.
+    """
+    if ok or result_text.lstrip().startswith(_ERROR_RESULT_PREFIXES):
+        return result_text
+    return f"Error (tool reported failure):\n{result_text}"
 
 
 def build_request_preamble(

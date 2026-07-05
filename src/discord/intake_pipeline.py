@@ -38,7 +38,7 @@ class MessageIntake:
 
     async def handle(self, message: discord.Message) -> None:
         bot = self.host
-        from .client import _ALLOWED_WEBHOOK_IDS
+        from .tool_loop_helpers import _ALLOWED_WEBHOOK_IDS
 
         # Passive channel log — every guild message, including our own, before any filtering
         bot.channel_logger.log_message(message)
@@ -393,7 +393,7 @@ class MessagePipeline:
         voice_callback: Callable | None = None,
     ) -> None:
         bot = self.host
-        from .client import _EMPTY_RESPONSE_FALLBACK
+        from .tool_loop_helpers import _EMPTY_RESPONSE_FALLBACK
 
         user_id = str(message.author.id)
         # Prefix with display name so the LLM knows who's talking
