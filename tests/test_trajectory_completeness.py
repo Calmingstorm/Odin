@@ -454,7 +454,6 @@ class TestAgentSaverWiring:
         # The omission hid for months because nothing asserted the call site.
         import inspect
 
-        from src.discord.client import OdinBot
         # P5c: body moved to native_tools/agents_tasks.py (host-based)
         from src.discord.native_tools.agents_tasks import AgentTaskTools
 
