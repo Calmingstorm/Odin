@@ -29,6 +29,7 @@ from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..async_utils import fire_and_forget
 from .channel_state import ChannelStateRegistry
 from .llm_gateway import LLMGateway
+from .native_tools import NativeToolDispatcher, register_native_handlers
 from .prompts import PromptBuilder
 from .tool_catalog import ToolCatalog
 from .voice import VoiceManager, VoiceMessageProxy
@@ -341,6 +342,19 @@ class OdinBot(commands.Bot):
             get_config=lambda: self.config,
             skill_manager=self.skill_manager,
         )
+
+        # One Discord-native dispatch table for both pipelines (RFC-001 P5a);
+        # handler bodies stay as bot methods until P5b moves them to domain
+        # modules. Constructed after the catalog/builder it invalidates.
+        self._native_tools = NativeToolDispatcher(
+            handler_host=self,
+            skill_manager=self.skill_manager,
+            tool_catalog=self._tool_catalog,
+            prompt_builder=self._prompt_builder,
+            channel_state=self._channel_state,
+            invoke_skill_missing_required=self._invoke_skill_missing_required,
+        )
+        register_native_handlers(self._native_tools)
 
 
         # Public `codex` / `knowledge` attributes are exposed as dynamic
@@ -2379,183 +2393,20 @@ class OdinBot(commands.Bot):
                 tool_result = None
                 # Handle Discord-native tools
                 try:
-                    if tool_name == "purge_messages":
-                        result = await self._handle_purge(message, tool_input)
-                    elif tool_name == "browser_screenshot":
-                        result = await self._handle_browser_screenshot(message, tool_input)
-                    elif tool_name == "generate_file":
-                        result = await self._handle_generate_file(message, tool_input)
-                    elif tool_name == "post_file":
-                        result = await self._handle_post_file(message, tool_input)
-                    elif tool_name == "schedule_task":
-                        result = await self._handle_schedule_task(message, tool_input)
-                    elif tool_name == "list_schedules":
-                        result = self._handle_list_schedules()
-                    elif tool_name == "update_schedule":
-                        result = await self._handle_update_schedule(tool_input)
-                    elif tool_name == "delete_schedule":
-                        result = await self._handle_delete_schedule(tool_input)
-                    elif tool_name == "parse_time":
-                        result = self._handle_parse_time(tool_input)
-                    elif tool_name == "search_history":
-                        result = await self._handle_search_history(tool_input)
-                    elif tool_name == "delegate_task":
-                        result = await self._handle_delegate_task(message, tool_input)
-                    elif tool_name == "list_tasks":
-                        result = self._handle_list_tasks(tool_input)
-                    elif tool_name == "cancel_task":
-                        result = self._handle_cancel_task(tool_input)
-                    elif tool_name == "start_loop":
-                        result = self._handle_start_loop(message, tool_input)
-                    elif tool_name == "stop_loop":
-                        result = self._handle_stop_loop(tool_input)
-                    elif tool_name == "list_loops":
-                        result = self._handle_list_loops()
-                    elif tool_name == "search_knowledge":
-                        result = await self._handle_search_knowledge(tool_input)
-                    elif tool_name == "ingest_document":
-                        result = await self._handle_ingest_document(tool_input, str(message.author))
-                    elif tool_name == "bulk_ingest_knowledge":
-                        result = await self._handle_bulk_ingest(tool_input, str(message.author))
-                    elif tool_name == "list_knowledge":
-                        result = self._handle_list_knowledge()
-                    elif tool_name == "delete_knowledge":
-                        result = await self._handle_delete_knowledge(tool_input)
-                    elif tool_name == "set_permission":
-                        result = await self._handle_set_permission(
-                            str(message.author.id), tool_input,
-                        )
-                    elif tool_name == "search_audit":
-                        result = await self._handle_search_audit(tool_input)
-                    elif tool_name == "create_skill":
-                        result = await asyncio.to_thread(
-                            self.skill_manager.create_skill, tool_input["name"], tool_input["code"],
-                        )
-                        self._cached_merged_tools = None  # invalidate tool cache
-                        self._cached_skills_text = None  # invalidate skills text cache
-                        system_prompt = self._build_system_prompt(channel=message.channel, user_id=user_id)
-                    elif tool_name == "edit_skill":
-                        result = await asyncio.to_thread(
-                            self.skill_manager.edit_skill, tool_input["name"], tool_input["code"],
-                        )
-                        self._cached_merged_tools = None  # invalidate tool cache
-                        self._cached_skills_text = None  # invalidate skills text cache
-                        system_prompt = self._build_system_prompt(channel=message.channel, user_id=user_id)
-                    elif tool_name == "delete_skill":
-                        result = await asyncio.to_thread(
-                            self.skill_manager.delete_skill, tool_input["name"],
-                        )
-                        self._cached_merged_tools = None  # invalidate tool cache
-                        self._cached_skills_text = None  # invalidate skills text cache
-                        system_prompt = self._build_system_prompt(channel=message.channel, user_id=user_id)
-                    elif tool_name == "enable_skill":
-                        result = self.skill_manager.enable_skill(tool_input["name"])
-                        self._cached_merged_tools = None
-                        self._cached_skills_text = None
-                        system_prompt = self._build_system_prompt(channel=message.channel, user_id=user_id)
-                    elif tool_name == "disable_skill":
-                        result = self.skill_manager.disable_skill(tool_input["name"])
-                        self._cached_merged_tools = None
-                        self._cached_skills_text = None
-                        system_prompt = self._build_system_prompt(channel=message.channel, user_id=user_id)
-                    elif tool_name == "install_skill":
-                        result = await self.skill_manager.install_from_url(tool_input["url"])
-                        self._cached_merged_tools = None
-                        self._cached_skills_text = None
-                        system_prompt = self._build_system_prompt(channel=message.channel, user_id=user_id)
-                    elif tool_name == "export_skill":
-                        export_result = self.skill_manager.export_skill(tool_input["name"])
-                        if isinstance(export_result, str):
-                            result = export_result
-                        else:
-                            file_bytes, filename = export_result
-                            channel_id_key = str(message.channel.id)
-                            self._pending_files.setdefault(channel_id_key, []).append((file_bytes, filename))
-                            result = f"Skill '{tool_input['name']}' exported as {filename}."
-                    elif tool_name == "skill_status":
-                        result = self.skill_manager.skill_status(tool_input["name"])
-                    elif tool_name == "read_channel":
-                        result = await self._handle_read_channel(message, tool_input)
-                    elif tool_name == "add_reaction":
-                        result = await self._handle_add_reaction(message, tool_input)
-                    elif tool_name == "create_poll":
-                        result = await self._handle_create_poll(message, tool_input)
-                    elif tool_name == "analyze_image":
-                        result = await self._handle_analyze_image(message, tool_input)
-                    elif tool_name == "generate_image":
-                        result = await self._handle_generate_image(message, tool_input)
-                    elif tool_name == "spawn_agent":
-                        result = await self._handle_spawn_agent(message, tool_input)
-                    elif tool_name == "send_to_agent":
-                        result = self._handle_send_to_agent(tool_input)
-                    elif tool_name == "list_agents":
-                        result = self._handle_list_agents(message)
-                    elif tool_name == "kill_agent":
-                        result = self._handle_kill_agent(tool_input)
-                    elif tool_name == "get_agent_results":
-                        result = self._handle_get_agent_results(tool_input)
-                    elif tool_name == "wait_for_agents":
-                        result = await self._handle_wait_for_agents(tool_input)
-                    elif tool_name == "spawn_loop_agents":
-                        result = await self._handle_spawn_loop_agents(message, tool_input)
-                    elif tool_name == "collect_loop_agents":
-                        result = await self._handle_collect_loop_agents(tool_input)
-                    elif tool_name == "list_skills":
-                        skills = self.skill_manager.list_skills()
-                        if not skills:
-                            result = "No user-created skills."
-                        else:
-                            lines = []
-                            for s in skills:
-                                lines.append(f"**{s['name']}**: {s['description']}")
-                            result = f"**User-created skills ({len(skills)}):**\n" + "\n".join(lines)
-                    elif tool_name == "invoke_skill":
-                        target_name = tool_input.get("name")
-                        if not target_name:
-                            result = "Error: invoke_skill requires 'name'."
-                        elif not self.skill_manager.has_skill(target_name):
-                            result = f"Error: skill '{target_name}' not found or disabled. Use list_skills to see available skills."
-                        else:
-                            skill_input = tool_input.get("input") or {}
-                            if not isinstance(skill_input, dict):
-                                result = "Error: invoke_skill 'input' must be an object."
-                            else:
-                                missing = self._invoke_skill_missing_required(target_name, skill_input)
-                                if missing:
-                                    result = (
-                                        f"Error: invoke_skill for '{target_name}' is missing required fields: {missing}. "
-                                        f"Pass them via the 'input' object, e.g. invoke_skill(name='{target_name}', input={{...}})."
-                                    )
-                                else:
-                                    async def _skill_msg(text: str) -> None:
-                                        await message.channel.send(scrub_response_secrets(text))
-                                    async def _skill_file(data: bytes, filename: str, caption: str = "") -> None:
-                                        import io as _io
-                                        await message.channel.send(
-                                            content=caption or None,
-                                            file=discord.File(_io.BytesIO(data), filename=filename),
-                                        )
-                                    result = await self.skill_manager.execute(
-                                        target_name, skill_input,
-                                        message_callback=_skill_msg,
-                                        file_callback=_skill_file,
-                                    )
-                    elif self.skill_manager.has_skill(tool_name):
-                        async def _skill_msg(text: str) -> None:
-                            await message.channel.send(scrub_response_secrets(text))
-                        async def _skill_file(data: bytes, filename: str, caption: str = "") -> None:
-                            import io as _io
-                            await message.channel.send(
-                                content=caption or None,
-                                file=discord.File(_io.BytesIO(data), filename=filename),
-                            )
-                        result = await self.skill_manager.execute(
+                    if self._native_tools.handles(tool_name):
+                        result, _effects = await self._native_tools.dispatch(
                             tool_name, tool_input,
-                            message_callback=_skill_msg,
-                            file_callback=_skill_file,
+                            message=message, user_id=user_id,
+                            skill_file_delivery="send",
                         )
+                        if _effects.rebuild_system_prompt:
+                            system_prompt = self._build_system_prompt(
+                                channel=message.channel, user_id=user_id,
+                            )
                     else:
-                        tool_result = await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
+                        tool_result = await self.tool_executor.execute(
+                            tool_name, tool_input, user_id=user_id,
+                        )
                         result = str(tool_result)
                 except asyncio.TimeoutError as e:
                     error = str(e)
@@ -4029,8 +3880,6 @@ class OdinBot(commands.Bot):
                     )
                     # Skill CRUD invalidates caches
                     if tool_name in ("create_skill", "edit_skill", "delete_skill", "enable_skill", "disable_skill", "install_skill"):
-                        self._cached_merged_tools = None
-                        self._cached_skills_text = None
                         system_prompt = self._build_system_prompt(
                             channel=channel, user_id=user_id,
                         )
@@ -4203,168 +4052,13 @@ class OdinBot(commands.Bot):
         if isinstance(_rbac_denial, str) and _rbac_denial:  # str = deny, None = allow
             log.warning("RBAC gate denied loop tool %s for user %s", tool_name, user_id)
             return _rbac_denial
-        # --- Discord-native tools (message + input) ---
-        if tool_name == "purge_messages":
-            return await self._handle_purge(msg_proxy, tool_input)
-        if tool_name == "browser_screenshot":
-            return await self._handle_browser_screenshot(msg_proxy, tool_input)
-        if tool_name == "generate_file":
-            return await self._handle_generate_file(msg_proxy, tool_input)
-        if tool_name == "post_file":
-            return await self._handle_post_file(msg_proxy, tool_input)
-        if tool_name == "schedule_task":
-            return await self._handle_schedule_task(msg_proxy, tool_input)
-        if tool_name == "delegate_task":
-            return await self._handle_delegate_task(msg_proxy, tool_input)
-        if tool_name == "start_loop":
-            return self._handle_start_loop(msg_proxy, tool_input)
-        if tool_name == "read_channel":
-            return await self._handle_read_channel(msg_proxy, tool_input)
-        if tool_name == "add_reaction":
-            return await self._handle_add_reaction(msg_proxy, tool_input)
-        if tool_name == "create_poll":
-            return await self._handle_create_poll(msg_proxy, tool_input)
-        if tool_name == "analyze_image":
-            return await self._handle_analyze_image(msg_proxy, tool_input)
-        if tool_name == "generate_image":
-            return await self._handle_generate_image(msg_proxy, tool_input)
-        # --- Discord-native tools (input only) ---
-        if tool_name == "list_schedules":
-            return self._handle_list_schedules()
-        if tool_name == "update_schedule":
-            return await self._handle_update_schedule(tool_input)
-        if tool_name == "delete_schedule":
-            return await self._handle_delete_schedule(tool_input)
-        if tool_name == "parse_time":
-            return self._handle_parse_time(tool_input)
-        if tool_name == "search_history":
-            return await self._handle_search_history(tool_input)
-        if tool_name == "list_tasks":
-            return self._handle_list_tasks(tool_input)
-        if tool_name == "cancel_task":
-            return self._handle_cancel_task(tool_input)
-        if tool_name == "stop_loop":
-            return self._handle_stop_loop(tool_input)
-        if tool_name == "list_loops":
-            return self._handle_list_loops()
-        if tool_name == "search_knowledge":
-            return await self._handle_search_knowledge(tool_input)
-        if tool_name == "ingest_document":
-            return await self._handle_ingest_document(tool_input, str(msg_proxy.author))
-        if tool_name == "bulk_ingest_knowledge":
-            return await self._handle_bulk_ingest(tool_input, str(msg_proxy.author))
-        if tool_name == "list_knowledge":
-            return self._handle_list_knowledge()
-        if tool_name == "delete_knowledge":
-            return await self._handle_delete_knowledge(tool_input)
-        if tool_name == "set_permission":
-            return await self._handle_set_permission(user_id, tool_input)
-        if tool_name == "search_audit":
-            return await self._handle_search_audit(tool_input)
-
-        # --- Agent tools ---
-        if tool_name == "spawn_agent":
-            return await self._handle_spawn_agent(msg_proxy, tool_input)
-        if tool_name == "send_to_agent":
-            return self._handle_send_to_agent(tool_input)
-        if tool_name == "list_agents":
-            return self._handle_list_agents(msg_proxy)
-        if tool_name == "kill_agent":
-            return self._handle_kill_agent(tool_input)
-        if tool_name == "get_agent_results":
-            return self._handle_get_agent_results(tool_input)
-        if tool_name == "wait_for_agents":
-            return await self._handle_wait_for_agents(tool_input)
-
-        # --- Loop-Agent bridge ---
-        if tool_name == "spawn_loop_agents":
-            return await self._handle_spawn_loop_agents(msg_proxy, tool_input)
-        if tool_name == "collect_loop_agents":
-            return await self._handle_collect_loop_agents(tool_input)
-
-        # --- Skill CRUD ---
-        if tool_name == "create_skill":
-            return await asyncio.to_thread(
-                self.skill_manager.create_skill, tool_input["name"], tool_input["code"],
+        # One dispatch table for both pipelines (RFC-001 P5a).
+        if self._native_tools.handles(tool_name):
+            result, _effects = await self._native_tools.dispatch(
+                tool_name, tool_input, message=msg_proxy, user_id=user_id,
+                skill_file_delivery="stage",
             )
-        if tool_name == "edit_skill":
-            return await asyncio.to_thread(
-                self.skill_manager.edit_skill, tool_input["name"], tool_input["code"],
-            )
-        if tool_name == "delete_skill":
-            return await asyncio.to_thread(
-                self.skill_manager.delete_skill, tool_input["name"],
-            )
-        if tool_name == "enable_skill":
-            return self.skill_manager.enable_skill(tool_input["name"])
-        if tool_name == "disable_skill":
-            return self.skill_manager.disable_skill(tool_input["name"])
-        if tool_name == "install_skill":
-            return await self.skill_manager.install_from_url(tool_input["url"])
-        if tool_name == "export_skill":
-            export_result = self.skill_manager.export_skill(tool_input["name"])
-            if isinstance(export_result, str):
-                return export_result
-            file_bytes, filename = export_result
-            ch_id_key = str(getattr(msg_proxy.channel, "id", ""))
-            self._pending_files.setdefault(ch_id_key, []).append((file_bytes, filename))
-            return f"Skill '{tool_input['name']}' exported as {filename}."
-        if tool_name == "skill_status":
-            return self.skill_manager.skill_status(tool_input["name"])
-        if tool_name == "list_skills":
-            skills = self.skill_manager.list_skills()
-            if not skills:
-                return "No user-created skills."
-            lines = [f"**{s['name']}**: {s['description']}" for s in skills]
-            return f"**User-created skills ({len(skills)}):**\n" + "\n".join(lines)
-
-        if tool_name == "invoke_skill":
-            target_name = tool_input.get("name")
-            if not target_name:
-                return "Error: invoke_skill requires 'name'."
-            if not self.skill_manager.has_skill(target_name):
-                return f"Error: skill '{target_name}' not found or disabled. Use list_skills to see available skills."
-            skill_input = tool_input.get("input") or {}
-            if not isinstance(skill_input, dict):
-                return "Error: invoke_skill 'input' must be an object."
-            missing = self._invoke_skill_missing_required(target_name, skill_input)
-            if missing:
-                return (
-                    f"Error: invoke_skill for '{target_name}' is missing required fields: {missing}. "
-                    f"Pass them via the 'input' object, e.g. invoke_skill(name='{target_name}', input={{...}})."
-                )
-            ch = msg_proxy.channel
-
-            async def _skill_msg(text: str) -> None:
-                await ch.send(scrub_response_secrets(text))
-
-            async def _skill_file(data: bytes, filename: str, caption: str = "") -> None:
-                ch_id_key = str(getattr(ch, "id", ""))
-                self._pending_files.setdefault(ch_id_key, []).append((data, filename))
-
-            return await self.skill_manager.execute(
-                target_name, skill_input,
-                message_callback=_skill_msg,
-                file_callback=_skill_file,
-            )
-
-        # --- User-created skills ---
-        if self.skill_manager.has_skill(tool_name):
-            ch = msg_proxy.channel
-
-            async def _skill_msg(text: str) -> None:
-                await ch.send(scrub_response_secrets(text))
-
-            async def _skill_file(data: bytes, filename: str, caption: str = "") -> None:
-                ch_id_key = str(getattr(ch, "id", ""))
-                self._pending_files.setdefault(ch_id_key, []).append((data, filename))
-
-            return await self.skill_manager.execute(
-                tool_name, tool_input,
-                message_callback=_skill_msg,
-                file_callback=_skill_file,
-            )
-
+            return result
         # --- Executor-routed tools (run_command, run_script, SSH, etc.) ---
         return await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
 
