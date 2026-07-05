@@ -21,7 +21,7 @@ from ..odin_log import get_logger
 from ..tools.risk_classifier import classify_tool
 from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..tools.result_validator import ToolResult
-from .tool_loop import ensure_failure_visible
+from .tool_loop_helpers import ensure_failure_visible
 
 _EMAIL_BODY_TOOLS = frozenset({"email_send"})
 

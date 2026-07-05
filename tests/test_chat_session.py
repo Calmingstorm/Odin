@@ -160,7 +160,8 @@ async def test_same_session_serializes_concurrent_requests():
     from src.web.chat import process_web_chat
 
     bot = _make_bot()
-    bot._web_channel_locks = {}          # real dict -> a real asyncio.Lock is used
+    from src.web import chat as web_chat
+    web_chat.WEB_CHANNEL_LOCKS.clear()   # module cache -> a real asyncio.Lock is used
     state = {"now": 0, "max": 0}
 
     async def slow_do(*args, **kwargs):

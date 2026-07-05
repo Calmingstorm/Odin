@@ -102,7 +102,8 @@ def main() -> None:
         load_dotenv(env_path)
 
     from src.config import load_config
-    from src.discord.client import OdinBot, scrub_response_secrets
+    from src.discord.client import OdinBot
+    from src.discord.response_guards import scrub_response_secrets
     from src.health import HealthServer
     from src.odin_log import get_logger
 

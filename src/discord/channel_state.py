@@ -108,6 +108,38 @@ class ChannelStateRegistry:
 
     # -- recent actions ------------------------------------------------------
 
+    def track_action(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        result_preview: str,
+        elapsed_ms: int,
+        channel_id: str | None = None,
+    ) -> None:
+        """Record a tool execution for conversational context injection.
+
+        Formatting moved verbatim from ``OdinBot._track_recent_action``
+        (RFC-002 P4). Actions are stored per-channel so that channel A's
+        tool results don't leak into channel B's system prompt. Each entry
+        carries a real timestamp for time-based expiry (1 hour).
+        """
+        if not channel_id:
+            return  # No channel context — nothing to inject later
+
+        from datetime import datetime
+
+        from .tool_loop_helpers import _scrub_tool_input_for_storage
+
+        ts = datetime.now().strftime("%H:%M")
+        safe_input = _scrub_tool_input_for_storage(tool_name, tool_input)
+        inp_summary = ", ".join(f"{k}={v}" for k, v in safe_input.items() if isinstance(v, str))
+        if len(inp_summary) > 100:
+            inp_summary = inp_summary[:100] + "..."
+        status = "OK" if "error" not in result_preview.lower()[:50] else "ERROR"
+        entry = f"- [{ts}] `{tool_name}`({inp_summary}) → {status} ({elapsed_ms}ms)"
+
+        self.track_recent_action(channel_id, entry)
+
     def track_recent_action(self, channel_id: str, entry: str) -> None:
         actions = self.recent_actions.setdefault(channel_id, [])
         actions.append((time.time(), entry))

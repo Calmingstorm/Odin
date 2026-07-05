@@ -640,9 +640,10 @@ class TestPoolAPI:
             "http_pool_active_connections": 1,
             "http_pool_total_requests": 42,
         }
-        bot = _make_bot(codex=codex)
-        bot.ollama_client = None
-        bot.kimi_client = None
+        bot = _make_bot()
+        bot.llm_gateway.codex_client = codex
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.kimi_client = None
         async with TestClient(TestServer(_make_app(bot))) as client:
             resp = await client.get("/api/pools/http")
             assert resp.status == 200
@@ -651,10 +652,10 @@ class TestPoolAPI:
 
     async def test_http_pool_unavailable(self):
         from aiohttp.test_utils import TestClient, TestServer
-        bot = MagicMock(spec=[])
-        bot.config = MagicMock()
-        bot.config.web = MagicMock()
-        bot.config.web.api_token = ""
+        bot = _make_bot()
+        bot.llm_gateway.codex_client = None
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.kimi_client = None
         async with TestClient(TestServer(_make_app(bot))) as client:
             resp = await client.get("/api/pools/http")
             assert resp.status == 503

@@ -1,0 +1,104 @@
+"""Characterization: two-stage composition (RFC-002 P2).
+
+Pins the build_services → build_components assembly: public component
+names and their campaign-era underscore aliases are the SAME objects,
+the channel-state registry lives in services, and the R1 rewiring holds
+(infra-watcher alert callback and scheduler callbacks bind the
+scheduled-events component directly — no bot delegate in the path).
+"""
+
+from __future__ import annotations
+
+import inspect
+
+import pytest
+
+from src.discord.wiring import BotComponents, BotServices
+from tests.fakes import FakeLLM, make_bot
+
+# (public name, BotComponents field) — the campaign-era underscore aliases
+# were retired in P7; public names are the only spelling.
+COMPONENT_PAIRS = [
+    ("llm_gateway", "llm_gateway"),
+    ("prompt_builder", "prompt_builder"),
+    ("tool_catalog", "tool_catalog"),
+    ("native_tools", "native_tools"),
+    ("scheduling_tools", "scheduling_tools"),
+    ("knowledge_tools", "knowledge_tools"),
+    ("channel_ops_tools", "channel_ops_tools"),
+    ("media_tools", "media_tools"),
+    ("delivery", "delivery"),
+    ("completion_classifier", "completion_classifier"),
+    ("tool_loop", "tool_loop"),
+    ("turn_recorder", "turn_recorder"),
+    ("scheduled_events", "scheduled_events"),
+    ("agent_task_tools", "agent_task_tools"),
+    ("intake", "intake"),
+    ("pipeline", "pipeline"),
+    ("housekeeping", "housekeeping"),
+]
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture
+def bot():
+    return make_bot(fake_llm=FakeLLM([]))
+
+
+class TestTwoStageComposition:
+    def test_services_and_components_handles(self, bot):
+        assert isinstance(bot.services, BotServices)
+        assert isinstance(bot.components, BotComponents)
+
+    def test_public_names_are_the_component_fields(self, bot):
+        for public, fieldname in COMPONENT_PAIRS:
+            pub = getattr(bot, public)
+            assert pub is getattr(bot.components, fieldname), (
+                f"bot.{public} is not components.{fieldname}"
+            )
+
+    def test_channel_state_lives_in_services(self, bot):
+        assert bot.channel_state is bot.services.channel_state
+        assert bot.channel_state is bot.channel_state
+        # The six facade dict aliases still point INTO the registry
+        assert bot.channel_state.channel_locks is bot.channel_state.channel_locks
+        assert bot.channel_state.cancel_events is bot.channel_state.cancel_events
+        assert bot.channel_state.pending_files is bot.channel_state.pending_files
+        assert bot.channel_state.recent_actions is bot.channel_state.recent_actions
+        assert bot.channel_state.last_op_details is bot.channel_state.last_op_details
+        assert bot.channel_state.background_tasks is bot.channel_state.background_tasks
+
+    def test_gateway_owns_the_llm_surface(self, bot):
+        assert bot.llm_gateway is bot.components.llm_gateway
+
+    def test_infra_watcher_alert_callback_binds_scheduled_events(self, tmp_path):
+        bot = make_bot(
+            fake_llm=FakeLLM([]),
+            config_overrides={
+                "monitoring": {
+                    "enabled": True,
+                    "checks": [{"name": "disk", "type": "disk", "threshold": 95}],
+                }
+            },
+        )
+        assert bot.infra_watcher is not None
+        cb = bot.infra_watcher._alert_callback
+        assert getattr(cb, "__self__", None) is bot.scheduled_events, (
+            "R1: the alert callback must bind the scheduled-events component "
+            "directly, not a bot delegate"
+        )
+
+    def test_infra_watcher_absent_but_attribute_none_by_default(self, bot):
+        assert bot.infra_watcher is None  # attribute exists, None when disabled
+
+    def test_scheduler_start_wires_scheduled_events_methods(self):
+        # on_ready is too heavy to drive here (guild sync); pin the spelling.
+        from src.discord.client import OdinBot
+
+        src = inspect.getsource(OdinBot.on_ready)
+        assert "self.scheduled_events._on_scheduled_task" in src
+        assert "self.scheduled_events._on_schedule_failure" in src

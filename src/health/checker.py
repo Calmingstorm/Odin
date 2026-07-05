@@ -64,7 +64,7 @@ def check_discord(bot: OdinBot) -> ComponentStatus:
 
 
 def check_codex(bot: OdinBot) -> ComponentStatus:
-    codex = getattr(bot, "codex", None)
+    codex = getattr(getattr(bot, "llm_gateway", None), "codex_client", None)
     if codex is None:
         cfg = getattr(bot, "config", None)
         codex_cfg = getattr(cfg, "openai_codex", None) if cfg else None
@@ -401,7 +401,7 @@ def check_agents(bot: OdinBot) -> ComponentStatus:
 
 def check_ollama(bot: OdinBot) -> ComponentStatus:
     from ..llm.ollama import OllamaClient
-    ollama = getattr(bot, "ollama_client", None)
+    ollama = getattr(getattr(bot, "llm_gateway", None), "ollama_client", None)
     if not isinstance(ollama, OllamaClient):
         return ComponentStatus(
             name="ollama", healthy=True, status="unconfigured",
@@ -440,7 +440,7 @@ def check_ollama(bot: OdinBot) -> ComponentStatus:
 
 def check_kimi(bot: OdinBot) -> ComponentStatus:
     from ..llm.kimi import KimiClient
-    kimi = getattr(bot, "kimi_client", None)
+    kimi = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
     if not isinstance(kimi, KimiClient):
         return ComponentStatus(
             name="kimi", healthy=True, status="unconfigured",

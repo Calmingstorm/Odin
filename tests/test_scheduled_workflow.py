@@ -67,15 +67,19 @@ class TestCollectAgentResult:
     """_collect_agent_result must return (text, raw_data) with structured status."""
 
     @staticmethod
-    def _make_bot_with_agent_manager(wait_result: dict):
-        """Create a minimal mock bot with agent_manager.wait_for_agents."""
-        bot = MagicMock()
-        bot.agent_manager = MagicMock()
-        bot.agent_manager.wait_for_agents = AsyncMock(return_value=wait_result)
-        return bot
+    def _make_tools_with_agent_manager(wait_result: dict):
+        """AgentTaskTools over a mock agent manager (narrow-deps, RFC-002 P3)."""
+        import dataclasses
+
+        from src.discord.native_tools.agents_tasks import AgentTaskDeps, AgentTaskTools
+
+        am = MagicMock()
+        am.wait_for_agents = AsyncMock(return_value=wait_result)
+        fields = {f.name: MagicMock() for f in dataclasses.fields(AgentTaskDeps)}
+        fields["agent_manager"] = am
+        return AgentTaskTools(AgentTaskDeps(**fields))
 
     async def test_completed_agent_returns_ok(self):
-        from src.discord.native_tools.agents_tasks import AgentTaskTools
         wait_result = {
             "abc123": {
                 "status": "completed",
@@ -87,14 +91,13 @@ class TestCollectAgentResult:
                 "error": "",
             }
         }
-        bot = self._make_bot_with_agent_manager(wait_result)
-        text, raw = await AgentTaskTools(bot)._collect_agent_result("abc123", timeout=10)
+        tools = self._make_tools_with_agent_manager(wait_result)
+        text, raw = await tools._collect_agent_result("abc123", timeout=10)
         assert raw["status"] == "completed"
         assert raw["empty_result"] is False
         assert "All checks passed" in text
 
     async def test_failed_agent_returns_failure_data(self):
-        from src.discord.native_tools.agents_tasks import AgentTaskTools
 
         wait_result = {
             "def456": {
@@ -107,14 +110,13 @@ class TestCollectAgentResult:
                 "error": "All 3 Codex accounts failed",
             }
         }
-        bot = self._make_bot_with_agent_manager(wait_result)
-        text, raw = await AgentTaskTools(bot)._collect_agent_result("def456", timeout=10)
+        tools = self._make_tools_with_agent_manager(wait_result)
+        text, raw = await tools._collect_agent_result("def456", timeout=10)
         assert raw["status"] == "failed"
         assert raw["error"] == "All 3 Codex accounts failed"
         assert raw["empty_result"] is True
 
     async def test_completed_empty_result_flagged(self):
-        from src.discord.native_tools.agents_tasks import AgentTaskTools
 
         wait_result = {
             "ghi789": {
@@ -127,13 +129,12 @@ class TestCollectAgentResult:
                 "error": "",
             }
         }
-        bot = self._make_bot_with_agent_manager(wait_result)
-        text, raw = await AgentTaskTools(bot)._collect_agent_result("ghi789", timeout=10)
+        tools = self._make_tools_with_agent_manager(wait_result)
+        text, raw = await tools._collect_agent_result("ghi789", timeout=10)
         assert raw["status"] == "completed"
         assert raw["empty_result"] is True
 
     async def test_timed_out_agent(self):
-        from src.discord.native_tools.agents_tasks import AgentTaskTools
 
         wait_result = {
             "timeout1": {
@@ -146,8 +147,8 @@ class TestCollectAgentResult:
                 "error": "",
             }
         }
-        bot = self._make_bot_with_agent_manager(wait_result)
-        text, raw = await AgentTaskTools(bot)._collect_agent_result("timeout1", timeout=1)
+        tools = self._make_tools_with_agent_manager(wait_result)
+        text, raw = await tools._collect_agent_result("timeout1", timeout=1)
         assert raw["status"] == "running"
 
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from src.llm.system_prompt import build_system_prompt
-from src.discord.client import OdinBot
+from src.discord.completion import CLASSIFIER_SYSTEM_PROMPT
 
 
 class TestSystemPromptRule12:
@@ -47,14 +47,14 @@ class TestCompletionClassifierPrompt:
     def test_classifier_rejects_plausible_substitute(self):
         """The classifier prompt now explicitly teaches it to flag
         INCOMPLETE when the artifact doesn't match the request shape."""
-        prompt = OdinBot._CLASSIFIER_SYSTEM_PROMPT
+        prompt = CLASSIFIER_SYSTEM_PROMPT
         assert "plausible-shaped substitute" in prompt
         assert "artifact asked for was produced" in prompt
 
     def test_classifier_rejects_offering_more_work(self):
         """The classifier learns to flag 'I could also' as INCOMPLETE
         rather than closure."""
-        prompt = OdinBot._CLASSIFIER_SYSTEM_PROMPT
+        prompt = CLASSIFIER_SYSTEM_PROMPT
         assert "I could also" in prompt or "would you like" in prompt
         # Example of this class of incompletion must be present so the
         # classifier has a concrete target.
@@ -65,5 +65,5 @@ class TestCompletionClassifierPrompt:
         runbook without including its source."""
         assert (
             "described the synthesized runbook but did not include its source"
-            in OdinBot._CLASSIFIER_SYSTEM_PROMPT
+            in CLASSIFIER_SYSTEM_PROMPT
         )

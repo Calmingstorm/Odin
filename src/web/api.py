@@ -400,8 +400,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             for g in bot.guilds
         ]
         user_count = sum(g.member_count or 0 for g in bot.guilds)
-        tools = bot._merged_tool_definitions()
-        uptime = time.monotonic() - bot._start_time if hasattr(bot, "_start_time") else 0
+        tools = bot.tool_catalog.merged_definitions()
+        uptime = time.monotonic() - bot.start_time if hasattr(bot, "_start_time") else 0
 
         # Agent counts
         try:
@@ -649,8 +649,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.post("/api/reload")
     async def reload_config(_request: web.Request) -> web.Response:
         bot.context_loader.reload()
-        bot._invalidate_prompt_caches()
-        bot._system_prompt = bot._build_system_prompt()
+        bot.prompt_builder.invalidate()
+        bot.tool_catalog.invalidate()
+        bot.prompt_builder.rebuild_default()
         return web.json_response({"status": "reloaded"})
 
     # ------------------------------------------------------------------
@@ -695,8 +696,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         current = bot.config.model_dump()
         config_path = getattr(request.app, "_config_path", "config.yml")
         await asyncio.to_thread(_write_config, config_path, current)
-        bot._invalidate_prompt_caches()
-        bot._system_prompt = bot._build_system_prompt()
+        bot.prompt_builder.invalidate()
+        bot.tool_catalog.invalidate()
+        bot.prompt_builder.rebuild_default()
         return web.json_response({"status": "updated", "preset": preset})
 
     @routes.post("/api/personality/presets")
@@ -741,8 +743,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         register_user_presets({k: {"name": v.name, "identity": v.identity, "voice": v.voice} for k, v in bot.config.personality.user_presets.items()})
         if bot.config.personality.preset == name:
             bot.config.personality.preset = "odin"
-            bot._invalidate_prompt_caches()
-            bot._system_prompt = bot._build_system_prompt()
+            bot.prompt_builder.invalidate()
+            bot.tool_catalog.invalidate()
+            bot.prompt_builder.rebuild_default()
         current = bot.config.model_dump()
         config_path = getattr(request.app, "_config_path", "config.yml")
         await asyncio.to_thread(_write_config, config_path, current)
@@ -1306,13 +1309,13 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.get("/api/pools/http")
     async def get_http_pool(_request: web.Request) -> web.Response:
         result = {}
-        codex = getattr(bot, "codex", None)
+        codex = getattr(bot.llm_gateway, "codex_client", None)
         if codex is not None and hasattr(codex, "get_pool_metrics"):
             result["codex"] = codex.get_pool_metrics()
-        ollama = getattr(bot, "ollama_client", None)
+        ollama = getattr(bot.llm_gateway, "ollama_client", None)
         if ollama is not None:
             result["ollama"] = ollama.pool_stats()
-        kimi = getattr(bot, "kimi_client", None)
+        kimi = getattr(bot.llm_gateway, "kimi_client", None)
         if kimi is not None:
             result["kimi"] = kimi.pool_stats()
         if not result:
@@ -1483,8 +1486,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             if err:
                 return web.json_response({"error": err}, status=400)
         result = bot.skill_manager.create_skill(name, code)
-        bot._cached_merged_tools = None
-        bot._cached_skills_text = None
+        bot.tool_catalog.invalidate()
+        bot.prompt_builder.cached_skills_text = None
         is_error = "error" in result.lower() or "failed" in result.lower()
         return web.json_response(
             {"result": result},
@@ -1505,8 +1508,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if err:
             return web.json_response({"error": err}, status=400)
         result = bot.skill_manager.edit_skill(name, code)
-        bot._cached_merged_tools = None
-        bot._cached_skills_text = None
+        bot.tool_catalog.invalidate()
+        bot.prompt_builder.cached_skills_text = None
         is_error = "error" in result.lower() or "failed" in result.lower()
         return web.json_response(
             {"result": result},
@@ -1532,8 +1535,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     async def delete_skill(request: web.Request) -> web.Response:
         name = request.match_info["name"]
         result = bot.skill_manager.delete_skill(name)
-        bot._cached_merged_tools = None
-        bot._cached_skills_text = None
+        bot.tool_catalog.invalidate()
+        bot.prompt_builder.cached_skills_text = None
         is_error = "error" in result.lower() or "not found" in result.lower()
         return web.json_response(
             {"result": result},
@@ -1569,8 +1572,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         result = bot.skill_manager.enable_skill(name)
         if "not found" in result.lower():
             return web.json_response({"result": result}, status=404)
-        bot._cached_merged_tools = None
-        bot._cached_skills_text = None
+        bot.tool_catalog.invalidate()
+        bot.prompt_builder.cached_skills_text = None
         return web.json_response({"result": result})
 
     @routes.post("/api/skills/{name}/disable")
@@ -1579,8 +1582,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         result = bot.skill_manager.disable_skill(name)
         if "not found" in result.lower():
             return web.json_response({"result": result}, status=404)
-        bot._cached_merged_tools = None
-        bot._cached_skills_text = None
+        bot.tool_catalog.invalidate()
+        bot.prompt_builder.cached_skills_text = None
         return web.json_response({"result": result})
 
     @routes.get("/api/skills/{name}/config")
@@ -1659,7 +1662,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 env=data.get("env", {}),
                 timeout=data.get("timeout"),
             )
-            bot._cached_merged_tools = None
+            bot.tool_catalog.invalidate()
             return web.json_response(info, status=201)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -1672,7 +1675,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         name = request.match_info["name"]
         try:
             await mgr.remove_server(name)
-            bot._cached_merged_tools = None
+            bot.tool_catalog.invalidate()
             return web.json_response({"status": "removed", "server": name})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=404)
@@ -1868,14 +1871,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/knowledge")
     async def list_knowledge(_request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         return web.json_response(await asyncio.to_thread(store.list_sources))
 
     @routes.post("/api/knowledge")
     async def ingest_knowledge(request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         data = await request.json()
@@ -1891,12 +1894,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         ):
             if err:
                 return web.json_response({"error": err}, status=400)
-        chunks = await store.ingest(content, source, embedder=bot._embedder, uploader="web-api")
+        chunks = await store.ingest(content, source, embedder=bot.embedder, uploader="web-api")
         return web.json_response({"source": source, "chunks": chunks}, status=201)
 
     @routes.delete("/api/knowledge/{source}")
     async def delete_knowledge(request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         source = request.match_info["source"]
@@ -1907,19 +1910,19 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/knowledge/{source}/reingest")
     async def reingest_knowledge(request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         source = request.match_info["source"]
         content = await asyncio.to_thread(store.get_source_content, source)
         if content is None:
             return web.json_response({"error": "source not found"}, status=404)
-        chunks = await store.ingest(content, source, embedder=bot._embedder, uploader="web-reingest")
+        chunks = await store.ingest(content, source, embedder=bot.embedder, uploader="web-reingest")
         return web.json_response({"source": source, "chunks": chunks})
 
     @routes.get("/api/knowledge/search")
     async def search_knowledge(request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         query = request.query.get("q", "").strip()
@@ -1929,12 +1932,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             limit = _safe_int_param(request, "limit", 10, hi=50)
         except ValueError:
             return web.json_response({"error": "limit must be an integer"}, status=400)
-        results = await store.search_hybrid(query, embedder=bot._embedder, limit=limit)
+        results = await store.search_hybrid(query, embedder=bot.embedder, limit=limit)
         return web.json_response(results)
 
     @routes.get("/api/knowledge/{source}/chunks")
     async def list_knowledge_chunks(request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         source = request.match_info["source"]
@@ -1948,7 +1951,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/knowledge/duplicates")
     async def list_knowledge_duplicates(_request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         exact = await asyncio.to_thread(store.find_duplicates)
@@ -1962,7 +1965,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/knowledge/merge")
     async def merge_knowledge(request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         try:
@@ -1989,7 +1992,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/knowledge/{source}/versions")
     async def list_knowledge_versions(request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         source = request.match_info["source"]
@@ -1998,7 +2001,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/knowledge/{source}/versions/{version:\\d+}")
     async def get_knowledge_version(request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         source = request.match_info["source"]
@@ -2010,7 +2013,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/knowledge/{source}/versions/{version:\\d+}/restore")
     async def restore_knowledge_version(request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         source = request.match_info["source"]
@@ -2022,14 +2025,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response(
                 {"error": "version has no content snapshot (delete version)"}, status=400
             )
-        chunks = await store.restore_version(source, version, embedder=bot._embedder)
+        chunks = await store.restore_version(source, version, embedder=bot.embedder)
         return web.json_response(
             {"status": "restored", "source": source, "version": version, "chunks": chunks}
         )
 
     @routes.get("/api/knowledge/{source}/versions/{v1:\\d+}/diff/{v2:\\d+}")
     async def diff_knowledge_versions(request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         source = request.match_info["source"]
@@ -2045,7 +2048,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/knowledge/import")
     async def import_knowledge(request: web.Request) -> web.Response:
-        store = bot._knowledge_store
+        store = bot.knowledge
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         try:
@@ -2056,7 +2059,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not items or not isinstance(items, list):
             return web.json_response({"error": "items (array) is required"}, status=400)
         from ..knowledge.importer import BulkImporter
-        importer = BulkImporter(store, bot._embedder)
+        importer = BulkImporter(store, bot.embedder)
         batch = await importer.import_batch(items, uploader="web-api")
         return web.json_response({
             "total": batch.total,
@@ -2283,7 +2286,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         async def _iteration_cb(
             prompt: str, ch: object, prev_context: str | None,
         ) -> str:
-            return await bot._run_loop_iteration(
+            return await bot.tool_loop.run_autonomous(
                 prompt, ch, prev_context, requester_id,
             )
 
@@ -2344,7 +2347,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         async def _iteration_cb(
             prompt: str, ch: object, prev_context: str | None,
         ) -> str:
-            return await bot._run_loop_iteration(
+            return await bot.tool_loop.run_autonomous(
                 prompt, ch, prev_context, requester_id,
             )
 
@@ -2798,7 +2801,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/codex/status")
     async def codex_status(_request: web.Request) -> web.Response:
-        pool = getattr(bot, "codex_client", None)
+        pool = getattr(bot.llm_gateway, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
         if pool is None:
             pool = getattr(bot, "_codex_auth_pool", None)
@@ -2911,7 +2914,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 _atomic_write_secure(path, _json.dumps([creds], indent=2))
                 log.warning("Failed to merge credentials (backup at %s), wrote fresh: %s", bak, e)
 
-        await bot.reload_codex_auth()
+        await bot.llm_gateway.reload_codex()
 
         return web.json_response({
             "status": "authenticated",
@@ -2926,7 +2929,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except ValueError:
             return web.json_response({"error": "index must be an integer"}, status=400)
 
-        pool = getattr(bot, "codex_client", None)
+        pool = getattr(bot.llm_gateway, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
         if pool is None:
             return web.json_response({"error": "codex not configured"}, status=503)
@@ -2966,7 +2969,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except ValueError:
             return web.json_response({"error": "index must be an integer"}, status=400)
 
-        pool = getattr(bot, "codex_client", None)
+        pool = getattr(bot.llm_gateway, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
         if pool is None:
             return web.json_response({"error": "codex not configured"}, status=503)
@@ -2978,7 +2981,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/codex/reload")
     async def codex_reload(_request: web.Request) -> web.Response:
-        result = await bot.reload_codex_auth()
+        result = await bot.llm_gateway.reload_codex()
         status = 200 if result.get("configured") else 503
         return web.json_response(result, status=status)
 
@@ -3023,7 +3026,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             _atomic_write_secure(path, _json.dumps(raw, indent=2))
 
         # Also update the in-memory shadow file so status reflects immediately
-        pool = getattr(bot, "codex_client", None)
+        pool = getattr(bot.llm_gateway, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
         if pool and index < len(pool._accounts):
             try:
@@ -3068,7 +3071,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             else:
                 return web.json_response({"error": "invalid index"}, status=400)
 
-        pool = getattr(bot, "codex_client", None)
+        pool = getattr(bot.llm_gateway, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
         if pool:
             # reload() ignores the pool lock and can race in-flight token
@@ -3093,8 +3096,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         provider_cfg = getattr(bot.config, "llm_provider", None)
         active = provider_cfg.active_provider if provider_cfg else "codex"
 
-        codex_configured = bot.codex_client is not None
-        ollama_configured = bot.ollama_client is not None
+        codex_configured = bot.llm_gateway.codex_client is not None
+        ollama_configured = bot.llm_gateway.ollama_client is not None
 
         ollama_cfg = getattr(bot.config, "ollama", None)
         kimi_cfg = getattr(bot.config, "kimi", None)
@@ -3118,7 +3121,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 "has_api_key": bool(ollama_cfg and ollama_cfg.api_key),
             },
             "kimi": {
-                "configured": bot.kimi_client is not None,
+                "configured": bot.llm_gateway.kimi_client is not None,
                 "enabled": kimi_cfg.enabled if kimi_cfg else False,
                 "model": kimi_cfg.model if kimi_cfg else "",
                 "max_tokens": kimi_cfg.max_tokens if kimi_cfg else 4096,
@@ -3126,7 +3129,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             },
         }
 
-        client = bot.llm_client
+        client = bot.llm_gateway.active_client
         if client:
             result["active_model"] = getattr(client, "model", "unknown")
             result["active_provider_name"] = getattr(client, "provider_name", active)
@@ -3144,7 +3147,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if provider not in ("codex", "ollama", "kimi"):
             return web.json_response({"error": "provider must be 'codex', 'ollama', or 'kimi'"}, status=400)
 
-        result = await bot.switch_llm_provider(provider)
+        result = await bot.llm_gateway.switch_provider(provider)
         if "error" in result:
             return web.json_response(result, status=400)
         await _persist_config()
@@ -3280,7 +3283,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        lock = getattr(bot, "_llm_provider_lock", None)
+        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
@@ -3298,7 +3301,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                     cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
                     changed = True
                 if changed:
-                    await bot._reload_codex_inner()
+                    await bot.llm_gateway.reload_codex_inner()
                     await _persist_config()
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -3307,7 +3310,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "status": "updated",
             "enabled": cfg.enabled,
             "model": cfg.model,
-            "configured": bot.codex_client is not None,
+            "configured": bot.llm_gateway.codex_client is not None,
         })
 
     @routes.put("/api/llm/ollama/config")
@@ -3317,7 +3320,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        lock = getattr(bot, "_llm_provider_lock", None)
+        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
@@ -3345,7 +3348,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                     cfg.timeout = _parse_int(body["timeout"], "timeout", 10, 3600)
                     changed = True
                 if changed:
-                    await bot._reload_ollama_inner()
+                    await bot.llm_gateway.reload_ollama_inner()
                     await _persist_config()
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -3355,7 +3358,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "enabled": cfg.enabled,
             "model": cfg.model,
             "base_url": cfg.base_url,
-            "configured": bot.ollama_client is not None,
+            "configured": bot.llm_gateway.ollama_client is not None,
         })
 
     @routes.put("/api/llm/kimi/config")
@@ -3365,7 +3368,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        lock = getattr(bot, "_llm_provider_lock", None)
+        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
@@ -3390,7 +3393,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                     cfg.timeout = _parse_int(body["timeout"], "timeout", 10, 3600)
                     changed = True
                 if changed:
-                    await bot._reload_kimi_inner()
+                    await bot.llm_gateway.reload_kimi_inner()
                     await _persist_config()
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -3399,7 +3402,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "status": "updated",
             "enabled": cfg.enabled,
             "model": cfg.model,
-            "configured": bot.kimi_client is not None,
+            "configured": bot.llm_gateway.kimi_client is not None,
         })
 
     # ------------------------------------------------------------------
@@ -3408,7 +3411,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/ollama/status")
     async def ollama_status(_request: web.Request) -> web.Response:
-        client = getattr(bot, "ollama_client", None)
+        client = getattr(getattr(bot, "llm_gateway", None), "ollama_client", None)
         if client is None:
             return web.json_response({"configured": False, "enabled": False})
 
@@ -3424,7 +3427,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/ollama/reload")
     async def ollama_reload(_request: web.Request) -> web.Response:
-        result = await bot.reload_ollama()
+        result = await bot.llm_gateway.reload_ollama()
         status = 200 if result.get("configured") else 503
         return web.json_response(result, status=status)
 
@@ -3455,7 +3458,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/ollama/models")
     async def ollama_models(_request: web.Request) -> web.Response:
-        client = getattr(bot, "ollama_client", None)
+        client = getattr(getattr(bot, "llm_gateway", None), "ollama_client", None)
         if client is None:
             return web.json_response({"error": "Ollama not configured"}, status=503)
 
@@ -3488,12 +3491,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not model:
             return web.json_response({"error": "model is required"}, status=400)
 
-        lock = getattr(bot, "_llm_provider_lock", None)
+        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
         async with lock:
-            client = getattr(bot, "ollama_client", None)
+            client = getattr(getattr(bot, "llm_gateway", None), "ollama_client", None)
             if client is None:
                 return web.json_response({"error": "Ollama not configured"}, status=503)
 
@@ -3517,7 +3520,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/kimi/status")
     async def kimi_status(_request: web.Request) -> web.Response:
-        client = getattr(bot, "kimi_client", None)
+        client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
         if client is None:
             return web.json_response({"configured": False, "enabled": False})
 
@@ -3533,13 +3536,13 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/kimi/reload")
     async def kimi_reload(_request: web.Request) -> web.Response:
-        result = await bot.reload_kimi()
+        result = await bot.llm_gateway.reload_kimi()
         status = 200 if result.get("configured") else 503
         return web.json_response(result, status=status)
 
     @routes.get("/api/kimi/models")
     async def kimi_models(_request: web.Request) -> web.Response:
-        client = getattr(bot, "kimi_client", None)
+        client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
         if client is None:
             return web.json_response({"error": "Kimi not configured"}, status=503)
 
@@ -3562,12 +3565,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not model:
             return web.json_response({"error": "model is required"}, status=400)
 
-        lock = getattr(bot, "_llm_provider_lock", None)
+        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
         async with lock:
-            client = getattr(bot, "kimi_client", None)
+            client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
             if client is None:
                 return web.json_response({"error": "Kimi not configured"}, status=503)
 

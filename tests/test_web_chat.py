@@ -215,13 +215,14 @@ class TestProcessWebChat:
         bot.sessions.get_task_history = AsyncMock(return_value=[])
 
         if has_codex:
-            bot.codex_client = MagicMock()
+            bot.llm_gateway.codex_client = MagicMock()
         else:
-            bot.codex_client = None
+            bot.llm_gateway.codex_client = None
 
-        bot._build_system_prompt = MagicMock(return_value="system prompt")
-        bot._set_status = AsyncMock()
-        bot._process_with_tools = AsyncMock(return_value=(
+        bot.prompt_builder.build_full_prompt = MagicMock(return_value="system prompt")
+        bot.delivery.set_status = AsyncMock()
+        bot.turn_recorder._new_context_trace = MagicMock(return_value=None)
+        bot.tool_loop.run = AsyncMock(return_value=(
             response,
             False,  # already_sent
             is_error,
@@ -249,7 +250,7 @@ class TestProcessWebChat:
     @pytest.mark.asyncio
     async def test_chat_no_tools_no_save(self):
         bot = self._make_bot(response="Just chat", tools=[])
-        bot._process_with_tools = AsyncMock(return_value=(
+        bot.tool_loop.run = AsyncMock(return_value=(
             "Just chat", False, False, [], False,
         ))
         result = await process_web_chat(bot, "hello", "ch-1")
@@ -266,7 +267,7 @@ class TestProcessWebChat:
     @pytest.mark.asyncio
     async def test_exception_handling(self):
         bot = self._make_bot()
-        bot._process_with_tools = AsyncMock(side_effect=RuntimeError("boom"))
+        bot.tool_loop.run = AsyncMock(side_effect=RuntimeError("boom"))
         result = await process_web_chat(bot, "hello", "ch-1")
         assert result["is_error"] is True
         # User-facing error is intentionally generic (no internal details leaked)
@@ -278,15 +279,15 @@ class TestProcessWebChat:
         bot = self._make_bot(response="done")
         result = await process_web_chat(bot, "hello", "ch-1")
         assert result["is_error"] is False
-        bot._set_status.assert_awaited_once_with(None, task_end=True)
+        bot.delivery.set_status.assert_awaited_once_with(None, task_end=True)
 
     @pytest.mark.asyncio
     async def test_web_chat_ends_status_when_tool_processing_raises(self):
         bot = self._make_bot()
-        bot._process_with_tools = AsyncMock(side_effect=RuntimeError("boom"))
+        bot.tool_loop.run = AsyncMock(side_effect=RuntimeError("boom"))
         result = await process_web_chat(bot, "hello", "ch-1")
         assert result["is_error"] is True
-        bot._set_status.assert_awaited_once_with(None, task_end=True)
+        bot.delivery.set_status.assert_awaited_once_with(None, task_end=True)
 
     @pytest.mark.asyncio
     async def test_files_returned(self):
@@ -299,23 +300,25 @@ class TestProcessWebChat:
     async def test_single_use_channel_does_not_register_lock(self):
         """persist_channel_lock=False (e.g. /api/execute) must not cache a
         per-channel lock; otherwise each ephemeral UUID channel leaks one
-        permanent entry in bot._web_channel_locks."""
+        permanent entry in the module's WEB_CHANNEL_LOCKS cache."""
         bot = self._make_bot()
-        bot._web_channel_locks = {}  # real dict so growth is observable
+        from src.web import chat as web_chat
+        web_chat.WEB_CHANNEL_LOCKS.clear()  # module cache — observable growth
         for i in range(5):
             await process_web_chat(bot, "hi", f"api-{i}", persist_channel_lock=False)
-        assert bot._web_channel_locks == {}
+        assert web_chat.WEB_CHANNEL_LOCKS == {}
 
     @pytest.mark.asyncio
     async def test_stateful_channel_registers_one_lock_per_channel(self):
         """The default path (/api/chat, WebSocket) still caches exactly one
         lock per channel_id so a user's overlapping requests serialize."""
         bot = self._make_bot()
-        bot._web_channel_locks = {}
+        from src.web import chat as web_chat
+        web_chat.WEB_CHANNEL_LOCKS.clear()
         await process_web_chat(bot, "hi", "user-1")
         await process_web_chat(bot, "again", "user-1")
-        assert set(bot._web_channel_locks) == {"user-1"}
-        assert isinstance(bot._web_channel_locks["user-1"], asyncio.Lock)
+        assert set(web_chat.WEB_CHANNEL_LOCKS) == {"user-1"}
+        assert isinstance(web_chat.WEB_CHANNEL_LOCKS["user-1"], asyncio.Lock)
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,11 @@ if TYPE_CHECKING:
 
 log = get_logger("web.chat")
 
+# Per-channel serialization for persistent web-chat channels — WEB-OWNED
+# state (RFC-002 P6: previously parked on the bot as _web_channel_locks).
+# One bot per process, so module scope ≡ the old bot scope.
+WEB_CHANNEL_LOCKS: dict[str, asyncio.Lock] = {}
+
 # Atomic monotonic counter for virtual message IDs (thread-safe via C impl)
 _msg_id_counter = itertools.count(int(time.time() * 1000))
 
@@ -170,9 +175,11 @@ async def process_web_chat(
 
     persist_channel_lock: when True (default), concurrent calls sharing this
         channel_id are serialized via a per-channel asyncio.Lock cached in
-        bot._web_channel_locks. Used by /api/chat and the WebSocket chat, where
-        channel_id == user_id and a user's overlapping requests must run one at
-        a time. Set False for single-use/ephemeral channels — e.g.
+        this module's WEB_CHANNEL_LOCKS (web-owned state — RFC-002 P6 moved
+        it off the bot; one app per bot per process makes the scopes
+        equivalent). Used by /api/chat and the WebSocket chat, where
+        channel_id == user_id and a user's overlapping requests must run one
+        at a time. Set False for single-use/ephemeral channels — e.g.
         /api/execute's per-request UUID channels — which no other caller can
         share: caching a lock there is pointless and leaks one permanent dict
         entry per request, since the channel is reset and never reused.
@@ -191,9 +198,7 @@ async def process_web_chat(
 
     try:
         if persist_channel_lock:
-            if not hasattr(bot, "_web_channel_locks"):
-                bot._web_channel_locks = {}
-            lock = bot._web_channel_locks.setdefault(channel_id, asyncio.Lock())
+            lock = WEB_CHANNEL_LOCKS.setdefault(channel_id, asyncio.Lock())
             async with lock:
                 return await _do_process_web_chat(bot, content, channel_id, user_id, username, allowed_tools)
         else:
@@ -221,7 +226,7 @@ async def _do_process_web_chat(
     tagged = f"[{username}]: {content}"
     bot.sessions.add_message(channel_id, "user", tagged, user_id=user_id)
 
-    if not bot.codex_client:
+    if not bot.llm_gateway.codex_client:
         bot.sessions.remove_last_message(channel_id, "user")
         return {
             "response": "No LLM backend available.",
@@ -230,8 +235,8 @@ async def _do_process_web_chat(
         }
 
     try:
-        trace = bot._new_context_trace()
-        sp = bot._build_system_prompt(
+        trace = bot.turn_recorder._new_context_trace()
+        sp = bot.prompt_builder.build_full_prompt(
             channel=None, user_id=user_id, query=content, trace=trace,
         )
         history = await bot.sessions.get_task_history(
@@ -240,12 +245,12 @@ async def _do_process_web_chat(
 
         try:
             response, _already_sent, is_error, tools_used, handoff = (
-                await bot._process_with_tools(
+                await bot.tool_loop.run(
                     msg, history, system_prompt_override=sp, trace=trace,
                 )
             )
         finally:
-            await bot._set_status(None, task_end=True)
+            await bot.delivery.set_status(None, task_end=True)
 
         response = _scrub(response)
 

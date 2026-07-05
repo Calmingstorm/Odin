@@ -32,7 +32,7 @@ def build(script, **overrides):
     fake = FakeLLM(script)
     bot = make_bot(fake_llm=fake, config_overrides=overrides or None)
     # Deterministic tests: reflection dispatch is a boundary here
-    bot._maybe_loop_reflect = _ReflectRecorder()
+    bot.turn_recorder._maybe_loop_reflect = _ReflectRecorder()
     return bot, fake
 
 
@@ -45,7 +45,7 @@ class _ReflectRecorder:
 
 
 async def run_iteration(bot, prompt="do the loop work", prev=None, user_id="4242"):
-    return await bot._run_loop_iteration(prompt, FakeChannel(id=777), prev, user_id)
+    return await bot.tool_loop.run_autonomous(prompt, FakeChannel(id=777), prev, user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +82,7 @@ class TestLoopFlow:
         assert msgs == [{"role": "user", "content": "just this"}]
 
     async def test_long_final_text_truncated_to_discord_limit(self):
-        from src.discord.client import DISCORD_MAX_LEN
+        from src.discord.delivery import DISCORD_MAX_LEN
 
         bot, fake = build([text_response("x" * (DISCORD_MAX_LEN + 500))])
         result = await run_iteration(bot)
@@ -117,13 +117,13 @@ class TestAsymmetryPins:
         """The loop bypasses _codex_call — no cost tracking, no model routing."""
         bot, fake = build([text_response("ok")])
         gateway_calls = []
-        orig = bot._codex_call
+        orig = bot.llm_gateway.call_with_tools
 
         async def spy(**kwargs):
             gateway_calls.append(kwargs)
             return await orig(**kwargs)
 
-        bot._codex_call = spy
+        bot.llm_gateway.call_with_tools = spy
         records = []
         bot.cost_tracker.record = lambda *a, **k: records.append((a, k))
         await run_iteration(bot)
@@ -140,8 +140,8 @@ class TestAsymmetryPins:
         bot, fake = build([RuntimeError("provider exploded")])
         result = await run_iteration(bot)
         assert result == "LLM call failed: provider exploded"
-        assert bot._maybe_loop_reflect.calls[-1]["is_error"] is True
-        assert bot._maybe_loop_reflect.calls[-1]["failure_class"] == "provider"
+        assert bot.turn_recorder._maybe_loop_reflect.calls[-1]["is_error"] is True
+        assert bot.turn_recorder._maybe_loop_reflect.calls[-1]["failure_class"] == "provider"
 
     async def test_cap_exhaustion_is_error_with_failure_class_cancelled(self):
         bot, fake = build(
@@ -153,7 +153,7 @@ class TestAsymmetryPins:
         )
         result = await run_iteration(bot)
         assert "Iteration hit the loop tool-iteration cap (2)" in result
-        reflect = bot._maybe_loop_reflect.calls[-1]
+        reflect = bot.turn_recorder._maybe_loop_reflect.calls[-1]
         assert reflect["is_error"] is True
         assert reflect["failure_class"] == "cancelled"
 
@@ -183,7 +183,7 @@ class TestAsymmetryPins:
         bot.tool_executor.execute = AsyncMock(side_effect=RuntimeError("ssh died"))
         result = await run_iteration(bot)
         assert result == "recovered and finished"
-        reflect = bot._maybe_loop_reflect.calls[-1]
+        reflect = bot.turn_recorder._maybe_loop_reflect.calls[-1]
         assert reflect["is_error"] is False
         assert reflect["failure_class"] == "command_failed"
         assert "ssh died" in reflect["error_text"]
@@ -277,11 +277,11 @@ class TestLoopDispatchParity:
             ]
         )
         bot.skill_manager.create_skill = lambda name, code: f"Skill '{name}' created."
-        bot._cached_skills_text = "stale"
-        bot._cached_merged_tools = [{"name": "stale"}]
+        bot.prompt_builder.cached_skills_text = "stale"
+        bot.tool_catalog.cached = [{"name": "stale"}]
         await run_iteration(bot)
-        assert bot._cached_merged_tools is None
-        assert bot._cached_skills_text != "stale"
+        assert bot.tool_catalog.cached is None
+        assert bot.prompt_builder.cached_skills_text != "stale"
 
     async def test_export_skill_stages_pending_file_in_loop(self):
         """Loop-path skill files are STAGED to _pending_files, not sent
@@ -289,12 +289,14 @@ class TestLoopDispatchParity:
         parity subtlety worth its own tripwire."""
         bot, _ = build([text_response("unused")])
         bot.skill_manager.export_skill = lambda name: (b"zipbytes", "s1_skill.zip")
-        from src.discord.client import _LoopMessageProxy
+        from src.discord.tool_loop import _LoopMessageProxy
 
         proxy = _LoopMessageProxy(FakeChannel(id=777), "4242", "loop")
-        result = await bot._dispatch_loop_tool("export_skill", {"name": "s1"}, proxy, "4242")
+        result = await bot.tool_loop.dispatch_loop_tool(
+            "export_skill", {"name": "s1"}, proxy, "4242"
+        )
         assert "exported as s1_skill.zip" in result
-        assert bot._pending_files["777"] == [(b"zipbytes", "s1_skill.zip")]
+        assert bot.channel_state.pending_files["777"] == [(b"zipbytes", "s1_skill.zip")]
 
     async def test_invoke_skill_missing_required_fields_errors(self):
         bot, _ = build([text_response("unused")])
@@ -304,10 +306,10 @@ class TestLoopDispatchParity:
         bot.skill_manager._skills = {
             "needy": SimpleNamespace(definition={"input_schema": {"required": ["q", "depth"]}}),
         }
-        from src.discord.client import _LoopMessageProxy
+        from src.discord.tool_loop import _LoopMessageProxy
 
         proxy = _LoopMessageProxy(FakeChannel(id=777), "4242", "loop")
-        result = await bot._dispatch_loop_tool(
+        result = await bot.tool_loop.dispatch_loop_tool(
             "invoke_skill",
             {"name": "needy", "input": {"q": "x"}},
             proxy,
@@ -321,10 +323,10 @@ class TestLoopDispatchParity:
         bot.tool_executor.execute = AsyncMock(
             return_value=ToolResult(output="ran", tool_name="run_command")
         )
-        from src.discord.client import _LoopMessageProxy
+        from src.discord.tool_loop import _LoopMessageProxy
 
         proxy = _LoopMessageProxy(FakeChannel(id=777), "4242", "loop")
-        result = await bot._dispatch_loop_tool(
+        result = await bot.tool_loop.dispatch_loop_tool(
             "run_command", {"host": "h", "command": "x"}, proxy, "4242"
         )
         bot.tool_executor.execute.assert_awaited_once()

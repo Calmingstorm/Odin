@@ -169,20 +169,29 @@ class TestCommandFailedClass:
 
 class _FakeClient:
     """Just enough client surface for _record_user_content."""
-    from src.discord.client import OdinBot as _C  # noqa: N814
-    _record_user_content = _C._record_user_content
+
+    def _record_user_content(self, trajectory, content):
+        # P7: the bot delegate is retired — forward like it used to
+        return self._turn_recorder._record_user_content(trajectory, content)
 
     def __init__(self, enabled=True, cap=4000):
         from src.discord.turn_recorder import TurnRecorder
 
-        # P10 migration: _record_user_content now delegates to TurnRecorder
-        self._turn_recorder = TurnRecorder(self)
         class _Obs:
             trajectory_user_content = enabled
             max_user_content_chars = cap
         class _Cfg:
             observability = _Obs()
         self.config = _Cfg()
+        # P10 migration: _record_user_content delegates to TurnRecorder
+        # (narrow-deps since RFC-002 P3)
+        self._turn_recorder = TurnRecorder(
+            get_config=lambda: self.config,
+            trajectory_saver=None,
+            reflector=None,
+            outbound_webhook_dispatcher=None,
+            loop_reflection_gate=None,
+        )
 
 
 class TestUserContentRecording:
@@ -249,23 +258,17 @@ class TestStoredToolResults:
 
 
 class _LoopIterClient:
-    """Fake client binding the REAL _run_loop_iteration + _record_user_content."""
-    from src.discord.client import OdinBot as _C  # noqa: N814
-    _run_loop_iteration = _C._run_loop_iteration
-    _record_user_content = _C._record_user_content
+    """Fake client driving the REAL loop body + user-content recording."""
+
+    async def _run_loop_iteration(self, prompt, channel, prev_context, user_id):
+        # P7: the bot delegate is retired — drive the runner directly
+        return await self._tool_loop_runner.run_autonomous(prompt, channel, prev_context, user_id)
+
+    def _record_user_content(self, trajectory, content):
+        return self._turn_recorder._record_user_content(trajectory, content)
 
     def __init__(self, responses, tool_output="hi out", result_cap=2000):
         from types import SimpleNamespace
-
-        # P8 migration: _run_loop_iteration is now a delegate to the
-        # host-based ToolLoopRunner — give the fake host its own runner so
-        # the test keeps driving the REAL loop body.
-        from src.discord.tool_loop import ToolLoopRunner
-
-        self._tool_loop_runner = ToolLoopRunner(self)
-        from src.discord.turn_recorder import TurnRecorder
-
-        self._turn_recorder = TurnRecorder(self)
 
         class _Obs:
             loop_trace = True
@@ -283,6 +286,16 @@ class _LoopIterClient:
             tools = _Tools()
 
         self.config = _Cfg()
+        from src.discord.turn_recorder import TurnRecorder
+
+        # narrow-deps recorder (RFC-002 P3) — only _record_user_content is used
+        self._turn_recorder = TurnRecorder(
+            get_config=lambda: self.config,
+            trajectory_saver=None,
+            reflector=None,
+            outbound_webhook_dispatcher=None,
+            loop_reflection_gate=None,
+        )
         self.loop_manager = SimpleNamespace(_loops={})
         self._responses = list(responses)
         self._tool_output = tool_output
@@ -297,6 +310,39 @@ class _LoopIterClient:
 
         self.llm_client = SimpleNamespace(chat_with_tools=_chat_with_tools)
         self.audit = SimpleNamespace(log_execution=_log_execution)
+
+        # P4 migration: the runner takes narrow deps now. The recorder is the
+        # REAL one; its save/reflect hooks are shadowed with this fake's
+        # capture methods so assertions keep observing the loop body.
+        self._turn_recorder._save_turn_trajectory = self._save_turn_trajectory
+        self._turn_recorder._maybe_loop_reflect = self._maybe_loop_reflect
+        from src.discord.tool_loop import ToolLoopDeps, ToolLoopRunner
+
+        self._tool_loop_runner = ToolLoopRunner(
+            ToolLoopDeps(
+                get_config=lambda: self.config,
+                get_default_system_prompt=lambda: "sys",
+                get_context_compressor=lambda: None,
+                llm_gateway=SimpleNamespace(active_client=self.llm_client),
+                prompt_builder=SimpleNamespace(build_full_prompt=lambda **kw: "sys"),
+                tool_catalog=SimpleNamespace(
+                    merged_definitions=lambda: [{"name": "run_command"}]
+                ),
+                channel_state=SimpleNamespace(),
+                delivery=SimpleNamespace(),
+                turn_recorder=self._turn_recorder,
+                completion_classifier=SimpleNamespace(),
+                native_tools=SimpleNamespace(handles=lambda n: False),
+                tool_executor=SimpleNamespace(),
+                permissions=SimpleNamespace(),
+                skill_manager=SimpleNamespace(),
+                audit=self.audit,
+                loop_manager=self.loop_manager,
+                stuck_loop_tracker_cls=object,
+            )
+        )
+        # Same capture seam the old bot-delegate override provided
+        self._tool_loop_runner.dispatch_loop_tool = self._dispatch_loop_tool
 
     def _new_context_trace(self):
         return None
@@ -465,4 +511,4 @@ class TestAgentSaverWiring:
         from src.discord.native_tools.agents_tasks import AgentTaskTools
 
         src = inspect.getsource(AgentTaskTools._handle_spawn_agent)
-        assert "trajectory_saver=bot.agent_trajectory_saver" in src
+        assert "trajectory_saver=self._agent_trajectory_saver" in src

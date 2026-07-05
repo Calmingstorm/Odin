@@ -1,13 +1,16 @@
-"""Turn observability + reflection dispatch (RFC-001 Phase 10).
+"""Turn observability + reflection dispatch (RFC-001 P10, RFC-002 P3).
 
-Verbatim host-based moves from OdinBot: trajectory user-content recording,
-context-trace creation, turn-trajectory persistence, lifecycle webhook
-emission, and the reflection triggers (chat post-operation + gated loop
-reflection).
+Trajectory user-content recording, context-trace creation, turn-trajectory
+persistence, lifecycle webhook emission, and the reflection triggers (chat
+post-operation + gated loop reflection). Narrow-deps since RFC-002 P3:
+``get_config`` is a provider callable because ``bot.config`` is replaced
+wholesale by the web API's config hot-reload; the remaining collaborators
+are stable service objects (never reassigned after boot).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC
 
 from ..async_utils import fire_and_forget
@@ -18,15 +21,26 @@ log = get_logger("discord")
 
 
 class TurnRecorder:
-    def __init__(self, host) -> None:
-        self.host = host
+    def __init__(
+        self,
+        *,
+        get_config: Callable,
+        trajectory_saver,
+        reflector,
+        outbound_webhook_dispatcher,
+        loop_reflection_gate,
+    ) -> None:
+        self._get_config = get_config
+        self._trajectory_saver = trajectory_saver
+        self._reflector = reflector
+        self._outbound_webhook_dispatcher = outbound_webhook_dispatcher
+        self._loop_reflection_gate = loop_reflection_gate
 
     def _record_user_content(self, trajectory, content: str) -> None:
         """Store the request on the trajectory turn — capped, secret-scrubbed,
         with explicit truncation metadata. Config-gated; never raises."""
-        bot = self.host
         try:
-            obs = getattr(bot.config, "observability", None)
+            obs = getattr(self._get_config(), "observability", None)
             if obs is not None and not obs.trajectory_user_content:
                 return
             cap = getattr(obs, "max_user_content_chars", 4000) if obs else 4000
@@ -45,9 +59,8 @@ class TurnRecorder:
         Returns None when disabled — every consumer treats None as
         "record nothing", leaving the request path byte-identical.
         """
-        bot = self.host
         try:
-            obs = getattr(bot.config, "observability", None)
+            obs = getattr(self._get_config(), "observability", None)
             ct = getattr(obs, "context_trace", None)
             if ct is None or not ct.enabled:
                 return None
@@ -109,11 +122,12 @@ class TurnRecorder:
         user_id: str | None,
     ) -> None:
         """Gated reflection for loop iterations (fire-and-forget)."""
-        bot = self.host
         try:
-            if not getattr(bot.config.learning, "loop_reflection_enabled", True):
+            if not getattr(self._get_config().learning, "loop_reflection_enabled", True):
                 return
-            if not hasattr(self, "reflector") or not tool_details:
+            # Guard kept from the bot-method era (PR #148 fixed its silent
+            # always-False form); with narrow deps the reflector is injected.
+            if self._reflector is None or not tool_details:
                 return
             if is_error or any(d.get("error") for d in tool_details):
                 effective_error = error_text or next(
@@ -124,14 +138,14 @@ class TurnRecorder:
                     from ..observability.failure_classes import classify_failure
 
                     failure_class = classify_failure(effective_error)["class"]
-                should, reason = bot._loop_reflection_gate.evaluate(
+                should, reason = self._loop_reflection_gate.evaluate(
                     loop_id,
                     is_error=True,
                     failure_class=failure_class,
                     error_text=effective_error,
                 )
             else:
-                should, reason = bot._loop_reflection_gate.evaluate(
+                should, reason = self._loop_reflection_gate.evaluate(
                     loop_id,
                     is_error=False,
                 )
@@ -140,7 +154,7 @@ class TurnRecorder:
                 return
             log.info("Loop reflection triggered (%s) for %s", reason, loop_id)
             fire_and_forget(
-                bot.reflector.reflect_on_operation(
+                self._reflector.reflect_on_operation(
                     user_request=f"[autonomous loop {loop_id}] {prompt[:300]}",
                     tools_used=[d["tool"] for d in tool_details][:20],
                     tool_details=tool_details,
@@ -164,11 +178,10 @@ class TurnRecorder:
     ) -> None:
         """Fire-and-forget post-operation reflection — selective, with real
         tool inputs/results from the operation instead of bare tool names."""
-        bot = self.host
         try:
             if not tool_details:
                 tool_details = [{"tool": t} for t in tools_used[:20]]
-            if not bot._should_reflect_on_operation(
+            if not self._should_reflect_on_operation(
                 user_request,
                 tools_used,
                 is_error,
@@ -179,7 +192,7 @@ class TurnRecorder:
                     len(tools_used),
                 )
                 return
-            await bot.reflector.reflect_on_operation(
+            await self._reflector.reflect_on_operation(
                 user_request=user_request,
                 tools_used=tools_used,
                 tool_details=tool_details,
@@ -200,8 +213,7 @@ class TurnRecorder:
         trace=None,
     ) -> None:
         """Persist the turn trajectory as JSONL. Non-fatal on error."""
-        bot = self.host
-        if bot.trajectory_saver is None:
+        if self._trajectory_saver is None:
             return
         try:
             if trace is not None:
@@ -219,20 +231,19 @@ class TurnRecorder:
             # Aggregate token counts from iterations
             trajectory.total_input_tokens = sum(it.input_tokens for it in trajectory.iterations)
             trajectory.total_output_tokens = sum(it.output_tokens for it in trajectory.iterations)
-            await bot.trajectory_saver.save(trajectory)
+            await self._trajectory_saver.save(trajectory)
         except Exception:
             log.exception("TrajectorySaver.save failed (non-fatal)")
 
     async def _emit_lifecycle_event(self, event_type: str, payload: dict) -> None:
         """Emit a lifecycle event to registered outbound webhooks (no-op if disabled)."""
-        bot = self.host
-        if bot.outbound_webhook_dispatcher is None:
+        if self._outbound_webhook_dispatcher is None:
             return
         try:
             from ..notifications.outbound_webhooks import build_event_payload
 
             full_payload = build_event_payload(event_type=event_type, data=payload)
-            await bot.outbound_webhook_dispatcher.dispatch_fire_and_forget(
+            await self._outbound_webhook_dispatcher.dispatch_fire_and_forget(
                 event_type=event_type,
                 payload=full_payload,
             )

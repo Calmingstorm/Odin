@@ -56,7 +56,7 @@ def build(script, chat=None, **overrides):
 
 
 async def run_loop(bot, msg, history=None):
-    return await bot._process_with_tools(
+    return await bot.tool_loop.run(
         msg,
         history if history is not None else [{"role": "user", "content": msg.content}],
     )
@@ -402,22 +402,22 @@ class TestCompletionClassifier:
 
     async def test_start_loop_short_circuits_classifier(self):
         bot, fake = build([])
-        is_complete, reason = await bot._classify_completion(
+        is_complete, reason = await bot.completion_classifier.classify(
             "run 50 iterations", "started", ["start_loop"]
         )
         assert is_complete is True and reason == ""
         assert fake.chat_calls == []
 
     def test_parse_classifier_response_variants(self):
-        from src.discord.client import OdinBot
+        from src.discord.completion import CompletionClassifier
 
-        assert OdinBot._parse_classifier_response("COMPLETE") == (True, "")
-        ok, reason = OdinBot._parse_classifier_response("INCOMPLETE: missing deploy")
+        assert CompletionClassifier.parse_response("COMPLETE") == (True, "")
+        ok, reason = CompletionClassifier.parse_response("INCOMPLETE: missing deploy")
         assert ok is False and reason == "missing deploy"
-        ok, reason = OdinBot._parse_classifier_response("INCOMPLETE - no artifact")
+        ok, reason = CompletionClassifier.parse_response("INCOMPLETE - no artifact")
         assert ok is False and reason == "no artifact"
-        assert OdinBot._parse_classifier_response("¯\\_(ツ)_/¯") == (True, "")
-        assert OdinBot._parse_classifier_response("") == (True, "")
+        assert CompletionClassifier.parse_response("¯\\_(ツ)_/¯") == (True, "")
+        assert CompletionClassifier.parse_response("") == (True, "")
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +509,7 @@ class TestLoopTermination:
         bot = None  # placeholder for closure
 
         def cancel_then_tool():
-            bot._cancel_events["99"].set()
+            bot.channel_state.cancel_events["99"].set()
             return tool_call_response(("parse_time", {"text": "now"}))
 
         fake = FakeLLM([cancel_then_tool])
@@ -523,8 +523,8 @@ class TestLoopTermination:
         assert tools_used == []
         bot.tool_executor.execute.assert_not_awaited()
         # Active-request bookkeeping cleaned up
-        assert "99" not in bot._channel_state.active_requests
-        assert not bot._cancel_events["99"].is_set()
+        assert "99" not in bot.channel_state.active_requests
+        assert not bot.channel_state.cancel_events["99"].is_set()
 
     async def test_stop_during_tool_execution_reports_tools_used(self):
         """Cancel set while a tool executes → the after_tools checkpoint
@@ -532,7 +532,7 @@ class TestLoopTermination:
         bot = None  # placeholder for closure
 
         async def tool_sets_cancel(name, tool_input, user_id=None):
-            bot._cancel_events["99"].set()
+            bot.channel_state.cancel_events["99"].set()
             return ToolResult(output="partial work", tool_name=name)
 
         fake = FakeLLM([tool_call_response(("run_command", {"host": "h", "command": "x"}))])
@@ -544,7 +544,7 @@ class TestLoopTermination:
         assert "run_command" in text  # tools note
         assert is_error is False
         assert tools_used == ["run_command"]
-        assert "99" not in bot._channel_state.active_requests
+        assert "99" not in bot.channel_state.active_requests
 
     async def test_iteration_cap_exit_is_error(self):
         bot, fake = build(
@@ -563,7 +563,7 @@ class TestLoopTermination:
         bot, fake = build([text_response("done")])
         msg = FakeMessage("go")
         await run_loop(bot, msg)
-        assert str(msg.channel.id) not in bot._channel_state.active_requests
+        assert str(msg.channel.id) not in bot.channel_state.active_requests
 
 
 # ---------------------------------------------------------------------------
@@ -599,21 +599,21 @@ class TestToolSurfaceAndSkills:
             ],
         )
         bot.skill_manager.create_skill = lambda name, code: f"Skill '{name}' created."
-        bot._cached_skills_text = "stale-skills-text"
-        bot._cached_merged_tools = [{"name": "stale"}]
+        bot.prompt_builder.cached_skills_text = "stale-skills-text"
+        bot.tool_catalog.cached = [{"name": "stale"}]
         rebuild_calls = []
-        orig_build = bot._build_system_prompt
+        orig_build = bot.prompt_builder.build_full_prompt
 
         def spy(*args, **kwargs):
             rebuild_calls.append(kwargs)
             return orig_build(*args, **kwargs)
 
-        bot._build_system_prompt = spy
+        bot.prompt_builder.build_full_prompt = spy
         await run_loop(bot, FakeMessage("make a skill"))
         # CRUD invalidated both caches and rebuilt the prompt mid-loop
         assert rebuild_calls, "system prompt was not rebuilt after skill CRUD"
-        assert bot._cached_skills_text != "stale-skills-text"
-        assert bot._cached_merged_tools is None
+        assert bot.prompt_builder.cached_skills_text != "stale-skills-text"
+        assert bot.tool_catalog.cached is None
 
     async def test_analyze_image_block_injected_for_next_iteration(self):
         bot, fake = build(
@@ -630,7 +630,7 @@ class TestToolSurfaceAndSkills:
         async def fake_analyze(message, tool_input):
             return {"__image_block__": block, "__prompt__": "describe it"}
 
-        bot._handle_analyze_image = fake_analyze
+        bot.media_tools._handle_analyze_image = fake_analyze
         text, _, _, _, _ = await run_loop(bot, FakeMessage("look at this"))
         assert text == "described the image"
         vision_msg = fake.messages_of_call(1)[-1]

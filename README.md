@@ -236,7 +236,7 @@ Tokens auto-refresh at runtime. Re-run the login script if the bot is offline fo
 ## Testing
 
 ```bash
-# Full suite (124 files, 6,000+ tests; asyncio auto mode)
+# Full suite (134 files, 6,000+ tests; asyncio auto mode)
 pytest tests/ -q
 
 # One file or pattern
@@ -251,9 +251,21 @@ src/
   __main__.py              Entry point
   config/schema.py         Pydantic config models
   discord/
-    client.py              OdinBot — main executor (~4800 lines)
+    client.py              OdinBot — composition + Discord lifecycle
+    wiring.py              Composition root (services + components)
+    intake_pipeline.py     on_message gating chain + message pipeline
+    tool_loop.py           Chat + autonomous tool-execution pipelines
+    native_tools/          Discord-native tool domains + dispatch table
+    prompts.py             System-prompt assembly + caches
+    llm_gateway.py         Provider clients, reloads, guarded calls
+    delivery.py            Presence, retries, chunked sends
+    channel_state.py       Per-channel mutable state registry
+    scheduled_events.py    Scheduler/digest/monitor callbacks
+    turn_recorder.py       Trajectories, traces, reflection dispatch
+    completion.py          Completion classifier
+    housekeeping.py        Periodic cache maintenance
     response_guards.py     Fabrication, hedging, premature failure detection
-    tool_loop_helpers.py   Request preamble, topic change detection
+    tool_loop_helpers.py   Request preamble + shared leaf helpers
     cogs/                  9 moderation/utility cog extensions
   tools/
     executor.py            Tool dispatch + recovery
@@ -286,7 +298,7 @@ src/
   trajectories/saver.py    Per-turn JSONL trajectory logging
 
 ui/                        Vue 3 + Tailwind web dashboard (19 pages)
-tests/                     124 files, 6,000+ tests
+tests/                     134 files, 6,000+ tests
 config.yml                 Default configuration template
 ```
 

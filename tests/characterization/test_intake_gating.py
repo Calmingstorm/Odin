@@ -50,13 +50,13 @@ def build(**overrides):
     bot = make_bot(fake_llm=FakeLLM([]), config_overrides=overrides or None)
     bot._connection.user = FakeClientUser(BOT_USER_ID)
     bot.process_commands = AsyncMock()
-    bot._handle_message = AsyncMock()
-    bot._process_attachments = AsyncMock(return_value=("", []))
+    bot.pipeline.run = AsyncMock()
+    bot.intake._process_attachments = AsyncMock(return_value=("", []))
     return bot
 
 
 def handled_contents(bot) -> list[str]:
-    return [call.args[1] for call in bot._handle_message.await_args_list]
+    return [call.args[1] for call in bot.pipeline.run.await_args_list]
 
 
 class TestGatingChain:
@@ -75,7 +75,7 @@ class TestGatingChain:
         await bot.on_message(msg)
         assert logged == [msg]  # passive log happens first
         bot.process_commands.assert_not_awaited()  # then everything else skipped
-        bot._handle_message.assert_not_awaited()
+        bot.pipeline.run.assert_not_awaited()
 
     async def test_secret_scrub_deletes_before_commands_and_handler(self):
         bot = build()
@@ -89,7 +89,7 @@ class TestGatingChain:
         assert "secret/credential" in notice and "deleted" in notice
         # The scrub path returns BEFORE cogs and the pipeline see the content
         bot.process_commands.assert_not_awaited()
-        bot._handle_message.assert_not_awaited()
+        bot.pipeline.run.assert_not_awaited()
 
     async def test_secret_scrub_delete_forbidden_asks_manual_delete(self):
         import discord
@@ -108,16 +108,16 @@ class TestGatingChain:
     async def test_disallowed_user_dropped(self):
         bot = build(discord={"allowed_users": ["111"]})
         await bot.on_message(FakeMessage("hi", author=FakeAuthor(id=222)))
-        bot._handle_message.assert_not_awaited()
+        bot.pipeline.run.assert_not_awaited()
         await bot.on_message(FakeMessage("hi", author=FakeAuthor(id=111)))
-        bot._handle_message.assert_awaited_once()
+        bot.pipeline.run.assert_awaited_once()
 
     async def test_disallowed_channel_dropped(self):
         bot = build(discord={"channels": ["99"]})
         await bot.on_message(FakeMessage("hi", channel=FakeChannel(id=42)))
-        bot._handle_message.assert_not_awaited()
+        bot.pipeline.run.assert_not_awaited()
         await bot.on_message(FakeMessage("hi", channel=FakeChannel(id=99)))
-        bot._handle_message.assert_awaited_once()
+        bot.pipeline.run.assert_awaited_once()
 
     async def test_require_mention_drops_unmentioned_guild_message(self):
         bot = build(discord={"require_mention": True})
@@ -125,7 +125,7 @@ class TestGatingChain:
         ch = FakeChannel(id=99)
         ch.guild = guild
         await bot.on_message(FakeMessage("no mention here", channel=ch, guild=guild))
-        bot._handle_message.assert_not_awaited()
+        bot.pipeline.run.assert_not_awaited()
 
     async def test_require_mention_accepts_mention_and_strips_it(self):
         bot = build(discord={"require_mention": True})
@@ -148,48 +148,48 @@ class TestGatingChain:
         msg = FakeMessage("only once")
         await bot.on_message(msg)
         await bot.on_message(msg)
-        bot._handle_message.assert_awaited_once()
+        bot.pipeline.run.assert_awaited_once()
 
     async def test_bot_author_dropped_when_respond_to_bots_disabled(self):
         bot = build()  # respond_to_bots defaults False
         await bot.on_message(FakeMessage("beep", author=FakeAuthor(id=555, bot=True)))
-        bot._handle_message.assert_not_awaited()
+        bot.pipeline.run.assert_not_awaited()
 
     async def test_attachment_text_appended_to_content(self):
         bot = build()
-        bot._process_attachments = AsyncMock(return_value=("FILE: notes contents", []))
+        bot.intake._process_attachments = AsyncMock(return_value=("FILE: notes contents", []))
         await bot.on_message(FakeMessage("see attached"))
         assert handled_contents(bot) == ["see attached\n\nFILE: notes contents"]
 
     async def test_image_only_message_gets_placeholder_content(self):
         bot = build()
         block = {"type": "image", "source": {}}
-        bot._process_attachments = AsyncMock(return_value=("", [block]))
+        bot.intake._process_attachments = AsyncMock(return_value=("", [block]))
         await bot.on_message(FakeMessage(""))
         assert handled_contents(bot) == ["(see attached image)"]
-        assert bot._handle_message.await_args.kwargs["image_blocks"] == [block]
+        assert bot.pipeline.run.await_args.kwargs["image_blocks"] == [block]
 
     async def test_empty_message_without_attachments_dropped(self):
         bot = build()
         await bot.on_message(FakeMessage(""))
-        bot._handle_message.assert_not_awaited()
+        bot.pipeline.run.assert_not_awaited()
 
 
 class TestBotMessageBuffering:
     async def test_rapid_bot_messages_buffered_and_combined(self):
         bot = build(discord={"respond_to_bots": True})
-        bot._channel_state.bot_msg_buffer_delay = 0.02
+        bot.channel_state.bot_msg_buffer_delay = 0.02
         other_bot = FakeAuthor(id=555, name="otherbot", bot=True)
         ch = FakeChannel(id=99)
         await bot.on_message(FakeMessage("part one", author=other_bot, channel=ch))
         await bot.on_message(FakeMessage("part two", author=other_bot, channel=ch))
-        bot._handle_message.assert_not_awaited()  # buffered, not yet flushed
+        bot.pipeline.run.assert_not_awaited()  # buffered, not yet flushed
         await asyncio.sleep(0.1)
         assert handled_contents(bot) == ["part one\n\npart two"]
 
     async def test_split_code_block_joined_across_bot_messages(self):
         bot = build(discord={"respond_to_bots": True})
-        bot._channel_state.bot_msg_buffer_delay = 0.02
+        bot.channel_state.bot_msg_buffer_delay = 0.02
         other_bot = FakeAuthor(id=555, name="otherbot", bot=True)
         ch = FakeChannel(id=99)
         await bot.on_message(FakeMessage("```python\nx = 1", author=other_bot, channel=ch))
@@ -200,11 +200,11 @@ class TestBotMessageBuffering:
 
     async def test_buffered_bot_messages_dropped_without_mention_when_required(self):
         bot = build(discord={"respond_to_bots": True, "require_mention": True})
-        bot._channel_state.bot_msg_buffer_delay = 0.02
+        bot.channel_state.bot_msg_buffer_delay = 0.02
         other_bot = FakeAuthor(id=555, name="otherbot", bot=True)
         guild = _FakeGuild()
         ch = FakeChannel(id=99)
         ch.guild = guild
         await bot.on_message(FakeMessage("no mention", author=other_bot, channel=ch, guild=guild))
         await asyncio.sleep(0.1)
-        bot._handle_message.assert_not_awaited()
+        bot.pipeline.run.assert_not_awaited()
