@@ -31,6 +31,7 @@ from .channel_state import ChannelStateRegistry
 from .llm_gateway import LLMGateway
 from .native_tools import NativeToolDispatcher, register_native_handlers
 from .native_tools.channel_ops import ChannelOpsTools
+from .native_tools.media import MediaTools
 from .native_tools.knowledge import KnowledgeTools
 from .native_tools.scheduling import SchedulingTools
 from .prompts import PromptBuilder
@@ -372,6 +373,11 @@ class OdinBot(commands.Bot):
             sessions=self.sessions,
             permissions=self.permissions,
             get_channel=self.get_channel,
+        )
+        self._media_tools = MediaTools(
+            get_config=lambda: self.config,
+            browser_manager=self.browser_manager,
+            tool_executor=self.tool_executor,
         )
 
 
@@ -2589,128 +2595,23 @@ class OdinBot(commands.Bot):
             return result_text
         return f"Error (tool reported failure):\n{result_text}"
 
-    @staticmethod
-    def _detect_image_type(data: bytes) -> str | None:
-        """Detect image media type from file magic bytes."""
-        if data[:8] == b"\x89PNG\r\n\x1a\n":
-            return "image/png"
-        if data[:2] == b"\xff\xd8":
-            return "image/jpeg"
-        if data[:4] == b"GIF8":
-            return "image/gif"
-        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-            return "image/webp"
-        return None
+    _detect_image_type = staticmethod(MediaTools._detect_image_type)
 
     async def _handle_purge(self, message: discord.Message, inp: dict) -> str:
         return await self._channel_ops_tools._handle_purge(message, inp)
 
 
+    # -- media handlers: bodies in native_tools/media.py (P5b) --
+
     async def _handle_browser_screenshot(self, message: discord.Message, inp: dict) -> str:
-        """Take a browser screenshot and post it as a Discord image."""
-        if not self.browser_manager:
-            return "Browser automation is not enabled. Set browser.enabled=true in config."
-        from ..tools.browser import handle_browser_screenshot
-        try:
-            text, screenshot_bytes = await handle_browser_screenshot(self.browser_manager, inp)
-            if screenshot_bytes:
-                discord_file = discord.File(io.BytesIO(screenshot_bytes), filename="screenshot.png")
-                await message.channel.send(file=discord_file)
-            return text
-        except Exception as e:
-            return f"Browser screenshot failed: {e}"
+        return await self._media_tools._handle_browser_screenshot(message, inp)
 
     async def _handle_generate_file(self, message: discord.Message, inp: dict) -> str:
-        """Generate a file from content and post it as a Discord attachment."""
-        filename = inp.get("filename", "output.txt")
-        content = inp.get("content", "")
-        caption = inp.get("caption", "")
-
-        file_bytes = content.encode("utf-8")
-        discord_file = discord.File(io.BytesIO(file_bytes), filename=filename)
-        try:
-            await message.channel.send(content=caption or None, file=discord_file)
-            return f"File `{filename}` ({len(file_bytes)} bytes) attached to channel."
-        except Exception as e:
-            return f"Failed to post file: {e}"
+        return await self._media_tools._handle_generate_file(message, inp)
 
     async def _handle_post_file(self, message: discord.Message, inp: dict) -> str:
-        """Fetch a file from a host and post it to Discord.
+        return await self._media_tools._handle_post_file(message, inp)
 
-        For localhost this reads directly from the local filesystem; for any
-        other host it falls back to SSH + base64 stream (handles binary safely).
-        Bypassing SSH for localhost avoids the host-key / ssh_key_path gauntlet
-        when Odin wants to post its own files.
-        """
-        host_alias = inp.get("host")
-        path = inp.get("path")
-        caption = inp.get("caption", "")
-
-        if not host_alias or not path:
-            return "Both 'host' and 'path' are required."
-
-        resolved = self.tool_executor._resolve_host(host_alias)
-        if not resolved:
-            return f"Unknown or disallowed host: {host_alias}"
-        address, ssh_user, _os = resolved
-
-        # Local fast path — no SSH gymnastics needed.
-        from ..tools.ssh import is_local_address
-        if is_local_address(address):
-            try:
-                with open(path, "rb") as f:
-                    file_bytes = f.read()
-            except FileNotFoundError:
-                return f"File not found: {path}"
-            except PermissionError:
-                return f"Permission denied reading file: {path}"
-            except OSError as exc:
-                return f"Failed to read file: {exc}"
-        else:
-            # Fetch file as base64 via SSH (handles binary safely)
-            import shlex
-            safe_path = shlex.quote(path)
-            ssh_args = [
-                "ssh",
-                "-i", self.config.tools.ssh_key_path,
-                "-o", f"UserKnownHostsFile={self.config.tools.ssh_known_hosts_path}",
-                "-o", "StrictHostKeyChecking=yes",
-                "-o", "ConnectTimeout=10",
-                "-o", "BatchMode=yes",
-                f"{ssh_user}@{address}",
-                f"base64 {safe_path}",
-            ]
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *ssh_args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-                if proc.returncode != 0:
-                    return f"Failed to fetch file: {stderr.decode('utf-8', errors='replace').strip()}"
-                file_bytes = base64.b64decode(stdout)
-            except asyncio.TimeoutError:
-                return "File fetch timed out (30s)."
-            except Exception as e:
-                return f"Failed to fetch file: {e}"
-
-        if not file_bytes:
-            return f"File not found or empty: {path}"
-
-        # Size check (Discord limit: 25MB for non-boosted servers)
-        if len(file_bytes) > 25 * 1024 * 1024:
-            return f"File too large to post ({len(file_bytes) / 1024 / 1024:.1f} MB). Discord limit is 25 MB."
-
-        filename = os.path.basename(path)
-        try:
-            file = discord.File(io.BytesIO(file_bytes), filename=filename)
-            await message.channel.send(content=caption or None, file=file)
-            return f"Posted `{filename}` ({len(file_bytes) / 1024:.1f} KB) to channel."
-        except discord.HTTPException as e:
-            return f"Failed to upload to Discord: {e}"
-
-    # -- scheduling handlers: bodies live in native_tools/scheduling.py (P5b) --
 
     def _validate_schedule_payload(self, inp: dict) -> str | None:
         return self._scheduling_tools._validate_schedule_payload(inp)
@@ -3793,128 +3694,11 @@ class OdinBot(commands.Bot):
 
 
     async def _handle_analyze_image(self, message: discord.Message, inp: dict) -> str | dict:
-        """Fetch an image and return a vision block for the LLM to analyze.
-
-        Returns either an error string or a dict with ``__image_block__`` key
-        that the tool loop injects as a vision content block.
-        """
-        import aiohttp
-
-        url = inp.get("url")
-        host = inp.get("host")
-        path = inp.get("path")
-        prompt = inp.get("prompt", "Describe this image in detail.")
-
-        image_bytes: bytes | None = None
-
-        if url:
-            # Validate URL scheme to prevent SSRF via file://, ftp://, etc.
-            if not url.startswith(("http://", "https://")):
-                return "Only http:// and https:// URLs are supported."
-            # DNS-rebind-aware SSRF guard — scheme-only validation let this
-            # reach 169.254.169.254 / internal hosts.
-            from ..tools.url_safety import is_url_blocked
-            if is_url_blocked(url):
-                return ("URL blocked: targets a private, loopback, link-local, "
-                        "or cloud-metadata address (SSRF protection).")
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False) as resp:
-                        if resp.status != 200:
-                            return f"Failed to fetch image from URL (HTTP {resp.status})"
-                        ct = resp.headers.get("Content-Type", "")
-                        if not ct.startswith("image/"):
-                            return f"URL does not point to an image (Content-Type: {ct})"
-                        image_bytes = await resp.read()
-            except Exception as e:
-                return f"Failed to fetch image from URL: {e}"
-        elif host and path:
-            # Use executor to fetch from host via base64
-            import shlex
-            resolved = self.tool_executor._resolve_host(host)
-            if not resolved:
-                return f"Unknown or disallowed host: {host}"
-            address, ssh_user, _os = resolved
-            safe_path = shlex.quote(path)
-            code, output = await self.tool_executor._exec_command(
-                address, f"base64 -w0 {safe_path}", ssh_user,
-            )
-            if code != 0:
-                return f"Failed to read image from host: {output}"
-            try:
-                image_bytes = base64.b64decode(output.strip())
-            except Exception as e:
-                return f"Failed to decode image data: {e}"
-        else:
-            return "Provide either 'url' or both 'host' and 'path'."
-
-        if not image_bytes:
-            return "No image data retrieved."
-
-        # Enforce 5MB limit (same as Discord attachment limit)
-        if len(image_bytes) > 5 * 1024 * 1024:
-            return "Image exceeds 5MB size limit."
-
-        media_type = self._detect_image_type(image_bytes)
-        if not media_type:
-            return "Unsupported image format. Supported: PNG, JPEG, GIF, WEBP."
-
-        b64 = base64.b64encode(image_bytes).decode("ascii")
-
-        # Return a special marker dict that the tool loop will inject as a
-        # vision content block.  The tool result text sent to the LLM will be
-        # the prompt, while the image block gets appended to the next user
-        # message so Codex can see it.
-        return {
-            "__image_block__": {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": b64,
-                },
-            },
-            "__prompt__": prompt,
-        }
+        return await self._media_tools._handle_analyze_image(message, inp)
 
     async def _handle_generate_image(self, message: discord.Message, inp: dict) -> str:
-        """Generate an image via ComfyUI and post as Discord attachment."""
-        if not self.config.comfyui.enabled:
-            return "Image generation is disabled. Enable ComfyUI in config to use this tool."
+        return await self._media_tools._handle_generate_image(message, inp)
 
-        prompt_text = inp.get("prompt", "")
-        if not prompt_text:
-            return "A 'prompt' describing the image is required."
-
-        negative = inp.get("negative", "")
-        width = inp.get("width", 1024)
-        height = inp.get("height", 1024)
-        model = inp.get("model", "")
-
-        # Clamp dimensions to reasonable range
-        width = max(64, min(2048, width))
-        height = max(64, min(2048, height))
-
-        from ..tools.comfyui import ComfyUIClient
-
-        client = ComfyUIClient(self.config.comfyui.url, default_checkpoint=self.config.comfyui.default_checkpoint)
-        image_bytes = await client.generate(
-            prompt=prompt_text,
-            negative=negative,
-            width=width,
-            height=height,
-            model=model,
-        )
-
-        if not image_bytes:
-            return "Image generation failed. ComfyUI may be unavailable or the request timed out."
-
-        try:
-            file = discord.File(io.BytesIO(image_bytes), filename="generated.png")
-            await message.channel.send(file=file)
-            return f"Image generated and posted ({len(image_bytes) / 1024:.1f} KB)."
-        except discord.HTTPException as e:
-            return f"Failed to upload generated image to Discord: {e}"
 
     async def _execute_scheduled_tool(
         self,
