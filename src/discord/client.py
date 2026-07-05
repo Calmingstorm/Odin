@@ -27,7 +27,7 @@ from ..tools import ToolResult, get_tool_definitions
 from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..async_utils import fire_and_forget
 from .channel_state import ChannelStateRegistry
-from .delivery import DISCORD_MAX_LEN, ResponseDelivery
+from .delivery import DISCORD_MAX_LEN, SEND_MAX_RETRIES, ResponseDelivery
 from .llm_gateway import LLMGateway
 from .native_tools import NativeToolDispatcher, register_native_handlers
 from .native_tools.channel_ops import ChannelOpsTools
