@@ -3283,7 +3283,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        lock = getattr(bot, "_llm_provider_lock", None)
+        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
@@ -3320,7 +3320,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        lock = getattr(bot, "_llm_provider_lock", None)
+        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
@@ -3368,7 +3368,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        lock = getattr(bot, "_llm_provider_lock", None)
+        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
@@ -3411,7 +3411,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/ollama/status")
     async def ollama_status(_request: web.Request) -> web.Response:
-        client = getattr(bot, "ollama_client", None)
+        client = getattr(getattr(bot, "llm_gateway", None), "ollama_client", None)
         if client is None:
             return web.json_response({"configured": False, "enabled": False})
 
@@ -3458,7 +3458,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/ollama/models")
     async def ollama_models(_request: web.Request) -> web.Response:
-        client = getattr(bot, "ollama_client", None)
+        client = getattr(getattr(bot, "llm_gateway", None), "ollama_client", None)
         if client is None:
             return web.json_response({"error": "Ollama not configured"}, status=503)
 
@@ -3491,12 +3491,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not model:
             return web.json_response({"error": "model is required"}, status=400)
 
-        lock = getattr(bot, "_llm_provider_lock", None)
+        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
         async with lock:
-            client = getattr(bot, "ollama_client", None)
+            client = getattr(getattr(bot, "llm_gateway", None), "ollama_client", None)
             if client is None:
                 return web.json_response({"error": "Ollama not configured"}, status=503)
 
@@ -3520,7 +3520,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/kimi/status")
     async def kimi_status(_request: web.Request) -> web.Response:
-        client = getattr(bot, "kimi_client", None)
+        client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
         if client is None:
             return web.json_response({"configured": False, "enabled": False})
 
@@ -3542,7 +3542,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/kimi/models")
     async def kimi_models(_request: web.Request) -> web.Response:
-        client = getattr(bot, "kimi_client", None)
+        client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
         if client is None:
             return web.json_response({"error": "Kimi not configured"}, status=503)
 
@@ -3565,12 +3565,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not model:
             return web.json_response({"error": "model is required"}, status=400)
 
-        lock = getattr(bot, "_llm_provider_lock", None)
+        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
         async with lock:
-            client = getattr(bot, "kimi_client", None)
+            client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
             if client is None:
                 return web.json_response({"error": "Kimi not configured"}, status=503)
 

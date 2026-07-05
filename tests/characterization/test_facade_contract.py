@@ -158,6 +158,14 @@ RETIRED_BOT_ATTRS = [
 
 _RETIRED_RE = re.compile(r"\bbot\.(" + "|".join(map(re.escape, RETIRED_BOT_ATTRS)) + r")\b")
 
+# String-based lookups dodge the attribute regex — exactly how the last
+# offenders survived the P7 sweep (Odin's #155 review). Scan them too.
+_RETIRED_STR_RE = re.compile(
+    r"(?:getattr|hasattr|setattr)\(\s*bot\s*,\s*['\"](?:"
+    + "|".join(map(re.escape, RETIRED_BOT_ATTRS))
+    + r")['\"]"
+)
+
 # Files allowed to mention retired spellings (this contract itself)
 _SCAN_EXCLUDE = {"test_facade_contract.py"}
 
@@ -220,6 +228,15 @@ class TestNegativeContract:
     def test_no_retired_spellings_in_src(self):
         offenders = self._scan(REPO_ROOT / "src", _RETIRED_RE, _SCAN_EXCLUDE)
         assert offenders == [], "retired facade spellings in src:\n" + "\n".join(offenders)
+
+    def test_no_string_based_retired_lookups_in_src(self):
+        """getattr/hasattr/setattr(bot, "<retired>") — the dark-corner form."""
+        offenders = self._scan(REPO_ROOT / "src", _RETIRED_STR_RE, _SCAN_EXCLUDE)
+        assert offenders == [], "string-based retired lookups in src:\n" + "\n".join(offenders)
+
+    def test_no_string_based_retired_lookups_in_tests(self):
+        offenders = self._scan(REPO_ROOT / "tests", _RETIRED_STR_RE, _SCAN_EXCLUDE)
+        assert offenders == [], "string-based retired lookups in tests:\n" + "\n".join(offenders)
 
     def test_no_retired_spellings_in_tests(self):
         offenders = self._scan(REPO_ROOT / "tests", _RETIRED_RE, _SCAN_EXCLUDE)
