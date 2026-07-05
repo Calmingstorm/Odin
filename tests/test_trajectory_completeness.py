@@ -175,14 +175,21 @@ class _FakeClient:
     def __init__(self, enabled=True, cap=4000):
         from src.discord.turn_recorder import TurnRecorder
 
-        # P10 migration: _record_user_content now delegates to TurnRecorder
-        self._turn_recorder = TurnRecorder(self)
         class _Obs:
             trajectory_user_content = enabled
             max_user_content_chars = cap
         class _Cfg:
             observability = _Obs()
         self.config = _Cfg()
+        # P10 migration: _record_user_content delegates to TurnRecorder
+        # (narrow-deps since RFC-002 P3)
+        self._turn_recorder = TurnRecorder(
+            get_config=lambda: self.config,
+            trajectory_saver=None,
+            reflector=None,
+            outbound_webhook_dispatcher=None,
+            loop_reflection_gate=None,
+        )
 
 
 class TestUserContentRecording:
@@ -263,9 +270,6 @@ class _LoopIterClient:
         from src.discord.tool_loop import ToolLoopRunner
 
         self._tool_loop_runner = ToolLoopRunner(self)
-        from src.discord.turn_recorder import TurnRecorder
-
-        self._turn_recorder = TurnRecorder(self)
 
         class _Obs:
             loop_trace = True
@@ -283,6 +287,16 @@ class _LoopIterClient:
             tools = _Tools()
 
         self.config = _Cfg()
+        from src.discord.turn_recorder import TurnRecorder
+
+        # narrow-deps recorder (RFC-002 P3) — only _record_user_content is used
+        self._turn_recorder = TurnRecorder(
+            get_config=lambda: self.config,
+            trajectory_saver=None,
+            reflector=None,
+            outbound_webhook_dispatcher=None,
+            loop_reflection_gate=None,
+        )
         self.loop_manager = SimpleNamespace(_loops={})
         self._responses = list(responses)
         self._tool_output = tool_output
@@ -465,4 +479,4 @@ class TestAgentSaverWiring:
         from src.discord.native_tools.agents_tasks import AgentTaskTools
 
         src = inspect.getsource(AgentTaskTools._handle_spawn_agent)
-        assert "trajectory_saver=bot.agent_trajectory_saver" in src
+        assert "trajectory_saver=self._agent_trajectory_saver" in src

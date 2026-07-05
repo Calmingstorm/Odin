@@ -1,15 +1,21 @@
-"""Agents/tasks/loops native tool handlers (RFC-001 Phase 5c).
+"""Agents/tasks/loops native tool handlers (RFC-001 P5c, RFC-002 P3).
 
-The deferred fifth handler domain (RFC R4), moved after P8 settled the
-loop terrain. Verbatim host-based moves: these handlers orchestrate the
-loop pipeline itself (start_loop closes over bot._run_loop_iteration),
-background tasks, and the agent manager — dependencies route through the
-bot's late-bound delegates on purpose.
+The fifth handler domain: background-task delegation, autonomous-loop
+start/stop, agent spawn/collect, and the loop-agent bridge. These
+handlers orchestrate the loop pipeline itself, so they take the
+ToolLoopRunner directly (constructed before them in
+``wiring.build_components``). Narrow-deps since RFC-002 P3: ``get_config``
+and ``get_knowledge_store`` are provider callables (config is hot-reload
+replaced; the knowledge store is swappable via reload), the LLM surface
+is the gateway, and the compression config object is read live through
+``get_context_compressor`` (the chat pipeline reads it the same way).
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import discord
 
@@ -22,15 +28,53 @@ from ..tool_loop import _LoopMessageProxy
 log = get_logger("discord")
 
 
+@dataclass(frozen=True)
+class AgentTaskDeps:
+    """The true dependency surface of the agents/tasks/loops handlers."""
+
+    get_config: Callable  # live root — replaced by config hot-reload
+    llm_gateway: object  # owns the swappable provider clients
+    channel_state: object  # background-task registry + caps
+    tool_executor: object
+    skill_manager: object
+    get_knowledge_store: Callable  # swappable via bot.knowledge reloads
+    embedder: object
+    audit: object
+    agent_manager: object
+    loop_manager: object
+    loop_agent_bridge: object
+    agent_trajectory_saver: object
+    get_context_compressor: Callable  # live read — tests swap it on the bot
+    tool_loop: object  # ToolLoopRunner — loop iterations + tool dispatch
+    turn_recorder: object  # lifecycle webhook emission
+    prompt_builder: object
+    tool_catalog: object
+
+
 class AgentTaskTools:
-    def __init__(self, host) -> None:
-        self.host = host
+    def __init__(self, deps: AgentTaskDeps) -> None:
+        self._get_config = deps.get_config
+        self._llm_gateway = deps.llm_gateway
+        self._channel_state = deps.channel_state
+        self._tool_executor = deps.tool_executor
+        self._skill_manager = deps.skill_manager
+        self._get_knowledge_store = deps.get_knowledge_store
+        self._embedder = deps.embedder
+        self._audit = deps.audit
+        self._agent_manager = deps.agent_manager
+        self._loop_manager = deps.loop_manager
+        self._loop_agent_bridge = deps.loop_agent_bridge
+        self._agent_trajectory_saver = deps.agent_trajectory_saver
+        self._get_context_compressor = deps.get_context_compressor
+        self._tool_loop = deps.tool_loop
+        self._turn_recorder = deps.turn_recorder
+        self._prompt_builder = deps.prompt_builder
+        self._tool_catalog = deps.tool_catalog
 
     # --- Background task delegation ---
 
     async def _handle_delegate_task(self, message: discord.Message, inp: dict) -> str:
         """Create and start a background task."""
-        bot = self.host
         description = inp.get("description", "Background task")
         steps = inp.get("steps", [])
 
@@ -71,21 +115,21 @@ class AgentTaskTools:
         # Prune old completed tasks
         completed = [
             tid
-            for tid, t in bot._background_tasks.items()
+            for tid, t in self._channel_state.background_tasks.items()
             if t.status in ("completed", "failed", "cancelled")
         ]
-        while len(completed) > bot._channel_state.background_tasks_max:
+        while len(completed) > self._channel_state.background_tasks_max:
             old = completed.pop(0)
-            del bot._background_tasks[old]
+            del self._channel_state.background_tasks[old]
 
-        bot._background_tasks[task.task_id] = task
+        self._channel_state.background_tasks[task.task_id] = task
 
         # Build Codex callback for conversational follow-up
         codex_cb = None
-        if bot.llm_client:
+        if self._llm_gateway.active_client:
 
             async def _codex_followup(messages: list[dict], system: str, max_tokens: int) -> str:
-                return await bot.llm_client.chat(
+                return await self._llm_gateway.active_client.chat(
                     messages=messages,
                     system=system,
                     max_tokens=max_tokens,
@@ -98,11 +142,11 @@ class AgentTaskTools:
             try:
                 await run_background_task(
                     task,
-                    bot.tool_executor,
-                    bot.skill_manager,
-                    knowledge_store=bot._knowledge_store,
-                    embedder=bot._embedder,
-                    audit_logger=bot.audit,
+                    self._tool_executor,
+                    self._skill_manager,
+                    knowledge_store=self._get_knowledge_store(),
+                    embedder=self._embedder,
+                    audit_logger=self._audit,
                     codex_callback=codex_cb,
                 )
             except Exception as e:
@@ -118,15 +162,14 @@ class AgentTaskTools:
 
     def _handle_list_tasks(self, inp: dict | None = None) -> str:
         """List background tasks, or get detailed results for a specific task."""
-        bot = self.host
-        if not bot._background_tasks:
+        if not self._channel_state.background_tasks:
             return "No background tasks."
 
         task_id = (inp or {}).get("task_id")
 
         # Detailed view for a specific task
         if task_id:
-            task = bot._background_tasks.get(task_id)
+            task = self._channel_state.background_tasks.get(task_id)
             if not task:
                 return f"No task found with ID `{task_id}`."
             lines = [
@@ -153,7 +196,7 @@ class AgentTaskTools:
 
         # Overview of all tasks
         lines = []
-        for tid, t in bot._background_tasks.items():
+        for tid, t in self._channel_state.background_tasks.items():
             done = len(t.results)
             total = len(t.steps)
             ok = sum(1 for r in t.results if r.status == "ok")
@@ -166,9 +209,8 @@ class AgentTaskTools:
 
     def _handle_cancel_task(self, inp: dict) -> str:
         """Cancel a running background task."""
-        bot = self.host
         task_id = inp.get("task_id", "")
-        task = bot._background_tasks.get(task_id)
+        task = self._channel_state.background_tasks.get(task_id)
         if not task:
             return f"No task found with ID `{task_id}`."
         if task.status != "running":
@@ -178,7 +220,6 @@ class AgentTaskTools:
 
     def _handle_start_loop(self, message: discord.Message, inp: dict) -> str:
         """Start an autonomous loop."""
-        bot = self.host
         goal = inp.get("goal", "")
         if not goal:
             return "A 'goal' is required to start a loop."
@@ -194,14 +235,14 @@ class AgentTaskTools:
             channel: object,
             prev_context: str | None,
         ) -> str:
-            return await bot._run_loop_iteration(
+            return await self._tool_loop.run_autonomous(
                 prompt,
                 channel,
                 prev_context,
                 str(message.author.id),
             )
 
-        result = bot.loop_manager.start_loop(
+        result = self._loop_manager.start_loop(
             goal=goal,
             channel=message.channel,
             requester_id=str(message.author.id),
@@ -218,7 +259,7 @@ class AgentTaskTools:
             return result
         # Lifecycle webhook: loop.started
         fire_and_forget(
-            bot._emit_lifecycle_event(
+            self._turn_recorder._emit_lifecycle_event(
                 "loop.started",
                 {
                     "loop_id": result,
@@ -239,14 +280,13 @@ class AgentTaskTools:
 
     def _handle_stop_loop(self, inp: dict) -> str:
         """Stop an autonomous loop."""
-        bot = self.host
         loop_id = inp.get("loop_id", "")
         if not loop_id:
             return "A 'loop_id' is required."
-        result = bot.loop_manager.stop_loop(loop_id)
+        result = self._loop_manager.stop_loop(loop_id)
         # Lifecycle webhook: loop.stopped
         fire_and_forget(
-            bot._emit_lifecycle_event(
+            self._turn_recorder._emit_lifecycle_event(
                 "loop.stopped",
                 {
                     "loop_id": loop_id,
@@ -259,8 +299,7 @@ class AgentTaskTools:
 
     def _handle_list_loops(self) -> str:
         """List all autonomous loops."""
-        bot = self.host
-        return bot.loop_manager.list_loops()
+        return self._loop_manager.list_loops()
 
     # --- Agent tool handlers ---
 
@@ -274,14 +313,13 @@ class AgentTaskTools:
         captures the agent's own id, so if the child itself calls spawn_agent
         the grandchild is correctly nested.
         """
-        bot = self.host
         label = inp.get("label", "")
         goal = inp.get("goal", "")
         parent_id_arg = inp.get("parent_id")
         if not label or not goal:
             return "Both 'label' and 'goal' are required."
 
-        if not bot.llm_client:
+        if not self._llm_gateway.active_client:
             return "Error: LLM provider not available."
 
         channel = getattr(message, "channel", message)
@@ -289,18 +327,20 @@ class AgentTaskTools:
         user_id = str(getattr(author, "id", "0"))
         user_name = str(author) if author else "agent"
 
-        system_prompt = bot._build_system_prompt(channel=channel, user_id=user_id)
-        all_tools = bot._merged_tool_definitions() if bot.config.tools.enabled else []
+        system_prompt = self._prompt_builder.build_full_prompt(channel=channel, user_id=user_id)
+        all_tools = (
+            self._tool_catalog.merged_definitions() if self._get_config().tools.enabled else []
+        )
         # Depth-aware filter: root spawn uses depth 0; nested spawns compute
         # the expected child depth from the parent so terminal children don't
         # even see spawn_agent in their tool list.
         parent_depth = 0
         if parent_id_arg:
-            parent = bot.agent_manager._agents.get(parent_id_arg)
+            parent = self._agent_manager._agents.get(parent_id_arg)
             if parent is not None:
                 parent_depth = parent.depth + 1
         max_depth = getattr(
-            getattr(bot.config, "agents", None),
+            getattr(self._get_config(), "agents", None),
             "max_nesting_depth",
             2,
         )
@@ -312,7 +352,7 @@ class AgentTaskTools:
             sys_prompt: str,
             tool_defs: list[dict],
         ) -> dict:
-            resp = await bot.llm_client.chat_with_tools(
+            resp = await self._llm_gateway.active_client.chat_with_tools(
                 messages=messages,
                 system=sys_prompt,
                 tools=tool_defs,
@@ -342,7 +382,7 @@ class AgentTaskTools:
                 # operate on already-spawned agents and aren't the same as
                 # spawning new ones.
                 pass
-            result = await bot._dispatch_loop_tool(
+            result = await self._tool_loop.dispatch_loop_tool(
                 tool_name,
                 tool_input,
                 msg_proxy,
@@ -351,7 +391,7 @@ class AgentTaskTools:
             return str(result) if result is not None else ""
 
         # Determine iteration cap from config — scheduled spawns get a higher budget
-        agents_cfg = getattr(bot.config, "agents", None)
+        agents_cfg = getattr(self._get_config(), "agents", None)
         hard_max = getattr(agents_cfg, "hard_max_iterations", 300) if agents_cfg else 300
         if inp.get("_scheduled"):
             iter_cap = min(
@@ -368,7 +408,7 @@ class AgentTaskTools:
             else [20, 10, 5, 1]
         )
 
-        agent_id = bot.agent_manager.spawn(
+        agent_id = self._agent_manager.spawn(
             label=label,
             goal=goal,
             channel_id=str(getattr(channel, "id", "0")),
@@ -380,16 +420,16 @@ class AgentTaskTools:
             system_prompt=system_prompt,
             parent_id=parent_id_arg,
             max_depth=max_depth,
-            tool_timeouts=bot.config.tools.tool_timeouts,
-            trajectory_saver=bot.agent_trajectory_saver,
+            tool_timeouts=self._get_config().tools.tool_timeouts,
+            trajectory_saver=self._agent_trajectory_saver,
             max_iterations=iter_cap,
             budget_warnings=warnings,
-            context_compression_enabled=bool(bot.context_compressor),
-            max_context_chars=bot.context_compressor.max_context_chars
-            if bot.context_compressor
+            context_compression_enabled=bool(self._get_context_compressor()),
+            max_context_chars=self._get_context_compressor().max_context_chars
+            if self._get_context_compressor()
             else 750000,
-            keep_recent_iterations=bot.context_compressor.keep_recent_iterations
-            if bot.context_compressor
+            keep_recent_iterations=self._get_context_compressor().keep_recent_iterations
+            if self._get_context_compressor()
             else 30,
         )
 
@@ -410,8 +450,7 @@ class AgentTaskTools:
         so callers can make ok/fail decisions based on structured state
         rather than parsing markdown.
         """
-        bot = self.host
-        results = await bot.agent_manager.wait_for_agents([agent_id], timeout=timeout)
+        results = await self._agent_manager.wait_for_agents([agent_id], timeout=timeout)
         r = results.get(agent_id, {})
         status = r.get("status", "unknown")
         label = r.get("label", agent_id)
@@ -441,21 +480,19 @@ class AgentTaskTools:
 
     def _handle_send_to_agent(self, inp: dict) -> str:
         """Send a message to a running agent."""
-        bot = self.host
         agent_id = inp.get("agent_id", "")
         message = inp.get("message", "")
         if not agent_id:
             return "'agent_id' is required."
         if not message:
             return "'message' is required."
-        return bot.agent_manager.send(agent_id, message)
+        return self._agent_manager.send(agent_id, message)
 
     def _handle_list_agents(self, message: object) -> str:
         """List all agents, optionally filtered by channel."""
-        bot = self.host
         channel = getattr(message, "channel", message)
         channel_id = str(getattr(channel, "id", "0"))
-        agents = bot.agent_manager.list(channel_id)
+        agents = self._agent_manager.list(channel_id)
         if not agents:
             return "No agents running."
         lines = []
@@ -468,19 +505,17 @@ class AgentTaskTools:
 
     def _handle_kill_agent(self, inp: dict) -> str:
         """Kill a running agent."""
-        bot = self.host
         agent_id = inp.get("agent_id", "")
         if not agent_id:
             return "'agent_id' is required."
-        return bot.agent_manager.kill(agent_id)
+        return self._agent_manager.kill(agent_id)
 
     def _handle_get_agent_results(self, inp: dict) -> str:
         """Get results of a completed agent."""
-        bot = self.host
         agent_id = inp.get("agent_id", "")
         if not agent_id:
             return "'agent_id' is required."
-        results = bot.agent_manager.get_results(agent_id)
+        results = self._agent_manager.get_results(agent_id)
         if results is None:
             return f"Agent '{agent_id}' not found."
         if results["status"] == "running":
@@ -506,7 +541,6 @@ class AgentTaskTools:
 
     async def _handle_wait_for_agents(self, inp: dict) -> str:
         """Wait for agents to complete and return collected results."""
-        bot = self.host
         agent_ids = inp.get("agent_ids", [])
         timeout = inp.get("timeout", 300)
         if not agent_ids:
@@ -514,7 +548,7 @@ class AgentTaskTools:
         if not isinstance(agent_ids, list):
             return "'agent_ids' must be a list of agent ID strings."
 
-        results = await bot.agent_manager.wait_for_agents(
+        results = await self._agent_manager.wait_for_agents(
             agent_ids,
             timeout=float(timeout),
         )
@@ -537,7 +571,6 @@ class AgentTaskTools:
 
     async def _handle_spawn_loop_agents(self, message: object, inp: dict) -> str:
         """Spawn agents from within a loop iteration via the loop-agent bridge."""
-        bot = self.host
         loop_id = inp.get("loop_id", "")
         tasks = inp.get("tasks", [])
         if not loop_id:
@@ -546,29 +579,31 @@ class AgentTaskTools:
             return "A 'tasks' list is required."
 
         # Validate the loop exists
-        loop_info = bot.loop_manager._loops.get(loop_id)
+        loop_info = self._loop_manager._loops.get(loop_id)
         if not loop_info:
             return f"Error: Loop '{loop_id}' not found."
         if loop_info.status != "running":
             return f"Error: Loop '{loop_id}' is not running (status: {loop_info.status})."
 
-        if not bot.llm_client:
+        if not self._llm_gateway.active_client:
             return "Error: LLM provider not available."
 
         channel = getattr(message, "channel", message)
         channel_id = str(getattr(channel, "id", "0"))
 
         # Build system prompt and tools for the agents (no agent tools — prevents nesting)
-        system_prompt = bot._build_system_prompt(
+        system_prompt = self._prompt_builder.build_full_prompt(
             channel=channel,
             user_id=loop_info.requester_id,
         )
-        all_tools = bot._merged_tool_definitions() if bot.config.tools.enabled else []
+        all_tools = (
+            self._tool_catalog.merged_definitions() if self._get_config().tools.enabled else []
+        )
         tools = filter_agent_tools(all_tools)
 
         # Build iteration/tool callbacks (same pattern as _handle_spawn_agent)
         async def _iteration_cb(messages, sys, tool_defs):
-            resp = await bot.llm_client.chat_with_tools(
+            resp = await self._llm_gateway.active_client.chat_with_tools(
                 messages=messages,
                 system=sys,
                 tools=tool_defs,
@@ -582,20 +617,20 @@ class AgentTaskTools:
             }
 
         async def _tool_cb(tool_name, tool_input):
-            return await bot._dispatch_loop_tool(
+            return await self._tool_loop.dispatch_loop_tool(
                 tool_name,
                 tool_input,
                 _LoopMessageProxy(channel, loop_info.requester_id, loop_info.requester_name),
                 loop_info.requester_id,
             )
 
-        # bot.context_compressor is the wiring-built compression config object
-        # (None when disabled) — config.context_compression never existed; the
-        # old attribute access raised AttributeError on EVERY spawn_loop_agents
+        # The compression config object (None when disabled) — read live via
+        # the provider; config.context_compression never existed, and the old
+        # attribute access raised AttributeError on EVERY spawn_loop_agents
         # call since the tool shipped (soak round-2 finding, 2026-07-05). Same
         # pattern as _handle_spawn_agent above.
-        cc = bot.context_compressor
-        agent_ids = bot.loop_agent_bridge.spawn_agents_for_loop(
+        cc = self._get_context_compressor()
+        agent_ids = self._loop_agent_bridge.spawn_agents_for_loop(
             loop_id=loop_id,
             iteration=loop_info.iteration_count,
             loop_goal=loop_info.goal,
@@ -607,11 +642,11 @@ class AgentTaskTools:
             tool_executor_callback=_tool_cb,
             tools=tools,
             system_prompt=system_prompt,
-            tool_timeouts=bot.config.tools.tool_timeouts,
+            tool_timeouts=self._get_config().tools.tool_timeouts,
             # Honor the configured agent iteration cap; without this the
             # bridge passed None and agents fell back to the module default,
             # ignoring agents.max_iterations.
-            max_iterations=bot.config.agents.max_iterations,
+            max_iterations=self._get_config().agents.max_iterations,
             context_compression_enabled=bool(cc),
             max_context_chars=cc.max_context_chars if cc else 750000,
             keep_recent_iterations=cc.keep_recent_iterations if cc else 30,
@@ -630,7 +665,6 @@ class AgentTaskTools:
 
     async def _handle_collect_loop_agents(self, inp: dict) -> str:
         """Collect results from agents spawned by a loop."""
-        bot = self.host
         loop_id = inp.get("loop_id", "")
         agent_ids = inp.get("agent_ids", None)
         timeout = inp.get("timeout", 300)
@@ -638,10 +672,10 @@ class AgentTaskTools:
             return "A 'loop_id' is required."
 
         # Validate the loop exists
-        if loop_id not in bot.loop_manager._loops:
+        if loop_id not in self._loop_manager._loops:
             return f"Error: Loop '{loop_id}' not found."
 
-        results = await bot.loop_agent_bridge.wait_and_collect(
+        results = await self._loop_agent_bridge.wait_and_collect(
             loop_id=loop_id,
             agent_ids=agent_ids if isinstance(agent_ids, list) else None,
             timeout=float(timeout),
@@ -650,4 +684,4 @@ class AgentTaskTools:
         if not results:
             return "No agents to collect for this loop."
 
-        return bot.loop_agent_bridge.format_agent_results_for_context(results)
+        return self._loop_agent_bridge.format_agent_results_for_context(results)

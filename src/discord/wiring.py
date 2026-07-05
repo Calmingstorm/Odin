@@ -54,13 +54,13 @@ from .delivery import ResponseDelivery
 from .intake_pipeline import MessageIntake, MessagePipeline
 from .llm_gateway import LLMGateway
 from .native_tools import NativeToolDispatcher, register_native_handlers
-from .native_tools.agents_tasks import AgentTaskTools
+from .native_tools.agents_tasks import AgentTaskDeps, AgentTaskTools
 from .native_tools.channel_ops import ChannelOpsTools
 from .native_tools.knowledge import KnowledgeTools
 from .native_tools.media import MediaTools
 from .native_tools.scheduling import SchedulingTools
 from .prompts import PromptBuilder
-from .scheduled_events import ScheduledEventHandlers
+from .scheduled_events import ScheduledEventHandlers, ScheduledEventsDeps
 from .tool_catalog import ToolCatalog
 from .tool_loop import ToolLoopRunner
 from .turn_recorder import TurnRecorder
@@ -616,9 +616,55 @@ def build_components(bot, services: BotServices) -> BotComponents:
         get_llm_client=lambda: bot.llm_client,
     )
     tool_loop = ToolLoopRunner(bot)
-    turn_recorder = TurnRecorder(bot)
-    scheduled_events = ScheduledEventHandlers(bot)
-    agent_task_tools = AgentTaskTools(bot)
+    # Narrow-deps components (RFC-002 P3). Construction order note: the
+    # agents/tasks domain now builds BEFORE scheduled events (its consumer)
+    # — a declared deviation from the old inline order, where both were
+    # inert `host` captures.
+    turn_recorder = TurnRecorder(
+        get_config=lambda: bot.config,
+        trajectory_saver=services.trajectory_saver,
+        reflector=services.reflector,
+        outbound_webhook_dispatcher=services.outbound_webhook_dispatcher,
+        loop_reflection_gate=services.loop_reflection_gate,
+    )
+    agent_task_tools = AgentTaskTools(
+        AgentTaskDeps(
+            get_config=lambda: bot.config,
+            llm_gateway=llm_gateway,
+            channel_state=services.channel_state,
+            tool_executor=services.tool_executor,
+            skill_manager=services.skill_manager,
+            get_knowledge_store=lambda: bot._knowledge_store,
+            embedder=services.embedder,
+            audit=services.audit,
+            agent_manager=services.agent_manager,
+            loop_manager=services.loop_manager,
+            loop_agent_bridge=services.loop_agent_bridge,
+            agent_trajectory_saver=services.agent_trajectory_saver,
+            # live read through the bot: never reassigned in production today,
+            # but the chat pipeline reads it the same way and tests swap it
+            get_context_compressor=lambda: bot.context_compressor,
+            tool_loop=tool_loop,
+            turn_recorder=turn_recorder,
+            prompt_builder=prompt_builder,
+            tool_catalog=tool_catalog,
+        )
+    )
+    scheduled_events = ScheduledEventHandlers(
+        ScheduledEventsDeps(
+            get_config=lambda: bot.config,
+            # late-bound through the bot: tests (and any future hot swap)
+            # replace bot.get_channel per-instance — a captured bound method
+            # would go stale (caught by characterization when first captured)
+            get_channel=lambda cid: bot.get_channel(cid),
+            get_guilds=lambda: bot.guilds,
+            tool_executor=services.tool_executor,
+            audit=services.audit,
+            llm_gateway=llm_gateway,
+            tool_loop=tool_loop,
+            agent_task_tools=agent_task_tools,
+        )
+    )
     intake = MessageIntake(bot)
     pipeline = MessagePipeline(bot)
 
