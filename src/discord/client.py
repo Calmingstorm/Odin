@@ -19,9 +19,7 @@ from ..monitoring import InfraWatcher
 from .background_task import (
     BackgroundTask, run_background_task, create_task_id, MAX_STEPS,
 )
-from ..agents import AgentManager, LoopAgentBridge
 from ..agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
-from ..tools.autonomous_loop import LoopManager
 from ..llm import CircuitOpenError, CodexChatClient, KimiClient, OllamaClient
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.secret_scrubber import scrub_output_secrets
@@ -258,27 +256,6 @@ class OdinBot(commands.Bot):
         # Background task tracking
         self._background_tasks: dict[str, BackgroundTask] = {}
         self._background_tasks_max = 20
-        # Multi-agent orchestration
-        self.agent_manager = AgentManager()
-        # Autonomous loop manager (agent-aware)
-        self.loop_manager = LoopManager(agents_enabled=True)
-        # Trajectory savers — constructed before the loop bridge, which
-        # forwards the agent saver into loop-spawned agents
-        from ..agents.trajectory import AgentTrajectorySaver
-        from ..trajectories.saver import TrajectorySaver
-        self.trajectory_saver = TrajectorySaver()
-        self.agent_trajectory_saver = AgentTrajectorySaver()
-        # Loop-agent bridge for spawning agents from loop iterations
-        self.loop_agent_bridge = LoopAgentBridge(
-            self.agent_manager, trajectory_saver=self.agent_trajectory_saver,
-        )
-        # Reflection gate for loop iterations — dedup/cooldown so repeated
-        # identical failures teach one lesson, not one per minute
-        from ..learning.loop_reflection import LoopReflectionGate
-        self._loop_reflection_gate = LoopReflectionGate(
-            cooldown_hours=getattr(config.learning, "loop_reflection_cooldown_hours", 12.0),
-            max_per_hour=getattr(config.learning, "loop_reflection_max_per_hour", 10),
-        )
         # Cached merged tool definitions — invalidated on skill create/edit/delete
         self._cached_merged_tools: list[dict] | None = None
         # Cached host string dict — invalidated on context reload
