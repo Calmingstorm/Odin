@@ -113,7 +113,10 @@ class TurnRecorder:
         try:
             if not getattr(bot.config.learning, "loop_reflection_enabled", True):
                 return
-            if not hasattr(self, "reflector") or not tool_details:
+            # The P10 move kept `hasattr(self, ...)` from the bot-method era;
+            # on the recorder that was always False, silently suppressing all
+            # loop reflection. The reflector lives on the bot.
+            if getattr(bot, "reflector", None) is None or not tool_details:
                 return
             if is_error or any(d.get("error") for d in tool_details):
                 effective_error = error_text or next(
