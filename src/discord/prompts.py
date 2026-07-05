@@ -5,9 +5,9 @@ the prompt-layer caches (hosts, skills text, per-user memory TTL cache).
 Bodies are verbatim moves from ``OdinBot`` with dependency access adjusted.
 
 Two dependencies are provider callables rather than captured references,
-because the bot attributes they read are REPLACED at runtime:
-``bot.config`` by the web API's config hot-reload and ``bot.codex_client``
-by live auth reloads / the ``codex`` property setter. ``voice_manager`` is
+because the underlying objects are REPLACED at runtime: the config by
+the web API's config hot-reload and the codex client by live auth
+reloads (both live on the gateway/bot as live roots). ``voice_manager`` is
 constructed once and never reassigned, so it is captured directly.
 
 Cache-name note: the fields here deliberately carry no leading underscore
@@ -118,8 +118,8 @@ class PromptBuilder:
 
         The stored value is the fallback the tool loop uses when a turn has
         no channel-specific override; the web layer rebuilds it after
-        config/context/personality changes (RFC-002 P6 — this replaces the
-        old ``bot._system_prompt = bot._build_system_prompt()`` dance).
+        config/context/personality changes (RFC-002 P6 — this replaced the
+        old rebuild-and-reassign dance on the bot).
         """
         self.default_prompt = self.build_full_prompt()
         return self.default_prompt

@@ -64,7 +64,7 @@ def check_discord(bot: OdinBot) -> ComponentStatus:
 
 
 def check_codex(bot: OdinBot) -> ComponentStatus:
-    codex = getattr(bot, "codex", None)
+    codex = getattr(getattr(bot, "llm_gateway", None), "codex_client", None)
     if codex is None:
         cfg = getattr(bot, "config", None)
         codex_cfg = getattr(cfg, "openai_codex", None) if cfg else None

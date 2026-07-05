@@ -718,8 +718,8 @@ class TestResourceUsageAPI:
         bot.config.web.session_timeout_minutes = 30
         bot.config.model_dump.return_value = {}
         bot.skill_manager.list_skills.return_value = []
-        bot._merged_tool_definitions.return_value = []
-        bot._start_time = 0
+        bot.tool_catalog.merged_definitions.return_value = []
+        bot.start_time = 0
         return bot
 
     @pytest.mark.asyncio

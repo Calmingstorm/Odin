@@ -1309,13 +1309,13 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     @routes.get("/api/pools/http")
     async def get_http_pool(_request: web.Request) -> web.Response:
         result = {}
-        codex = getattr(bot, "codex", None)
+        codex = getattr(bot.llm_gateway, "codex_client", None)
         if codex is not None and hasattr(codex, "get_pool_metrics"):
             result["codex"] = codex.get_pool_metrics()
-        ollama = getattr(bot, "ollama_client", None)
+        ollama = getattr(bot.llm_gateway, "ollama_client", None)
         if ollama is not None:
             result["ollama"] = ollama.pool_stats()
-        kimi = getattr(bot, "kimi_client", None)
+        kimi = getattr(bot.llm_gateway, "kimi_client", None)
         if kimi is not None:
             result["kimi"] = kimi.pool_stats()
         if not result:
@@ -2801,7 +2801,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/codex/status")
     async def codex_status(_request: web.Request) -> web.Response:
-        pool = getattr(bot, "codex_client", None)
+        pool = getattr(bot.llm_gateway, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
         if pool is None:
             pool = getattr(bot, "_codex_auth_pool", None)
@@ -2929,7 +2929,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except ValueError:
             return web.json_response({"error": "index must be an integer"}, status=400)
 
-        pool = getattr(bot, "codex_client", None)
+        pool = getattr(bot.llm_gateway, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
         if pool is None:
             return web.json_response({"error": "codex not configured"}, status=503)
@@ -2969,7 +2969,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except ValueError:
             return web.json_response({"error": "index must be an integer"}, status=400)
 
-        pool = getattr(bot, "codex_client", None)
+        pool = getattr(bot.llm_gateway, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
         if pool is None:
             return web.json_response({"error": "codex not configured"}, status=503)
@@ -3026,7 +3026,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             _atomic_write_secure(path, _json.dumps(raw, indent=2))
 
         # Also update the in-memory shadow file so status reflects immediately
-        pool = getattr(bot, "codex_client", None)
+        pool = getattr(bot.llm_gateway, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
         if pool and index < len(pool._accounts):
             try:
@@ -3071,7 +3071,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             else:
                 return web.json_response({"error": "invalid index"}, status=400)
 
-        pool = getattr(bot, "codex_client", None)
+        pool = getattr(bot.llm_gateway, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
         if pool:
             # reload() ignores the pool lock and can race in-flight token

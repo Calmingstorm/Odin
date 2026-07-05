@@ -169,8 +169,10 @@ class TestCommandFailedClass:
 
 class _FakeClient:
     """Just enough client surface for _record_user_content."""
-    from src.discord.client import OdinBot as _C  # noqa: N814
-    _record_user_content = _C._record_user_content
+
+    def _record_user_content(self, trajectory, content):
+        # P7: the bot delegate is retired — forward like it used to
+        return self._turn_recorder._record_user_content(trajectory, content)
 
     def __init__(self, enabled=True, cap=4000):
         from src.discord.turn_recorder import TurnRecorder
@@ -256,10 +258,14 @@ class TestStoredToolResults:
 
 
 class _LoopIterClient:
-    """Fake client binding the REAL _run_loop_iteration + _record_user_content."""
-    from src.discord.client import OdinBot as _C  # noqa: N814
-    _run_loop_iteration = _C._run_loop_iteration
-    _record_user_content = _C._record_user_content
+    """Fake client driving the REAL loop body + user-content recording."""
+
+    async def _run_loop_iteration(self, prompt, channel, prev_context, user_id):
+        # P7: the bot delegate is retired — drive the runner directly
+        return await self._tool_loop_runner.run_autonomous(prompt, channel, prev_context, user_id)
+
+    def _record_user_content(self, trajectory, content):
+        return self._turn_recorder._record_user_content(trajectory, content)
 
     def __init__(self, responses, tool_output="hi out", result_cap=2000):
         from types import SimpleNamespace

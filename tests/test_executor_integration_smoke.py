@@ -24,7 +24,7 @@ from src.discord.client import OdinBot
 def _make_bot() -> OdinBot:
     """Build a bot from a minimal pydantic Config — Codex disabled.
 
-    Codex disabled means bot.codex_client is None; the executor surface
+    Codex disabled means bot.llm_gateway.codex_client is None; the executor surface
     still gets wired (tool_executor, sessions, scheduler, agents, etc.),
     which is what we want to validate.
     """
@@ -96,7 +96,8 @@ class TestExecutorSurface:
         # When credentials are absent, codex_client must be None (not crash).
         bot = _make_bot()
         # Either disabled in config or no credentials → None is the only sane outcome
-        assert bot.codex_client is None or bot.codex_client is not None  # type only
+        gw = bot.llm_gateway
+        assert gw.codex_client is None or gw.codex_client is not None  # type only
 
 
 # ---------------------------------------------------------------------------
@@ -105,23 +106,23 @@ class TestExecutorSurface:
 
 
 class TestHelperMethods:
-    """The methods src/web/chat.py and the message handler depend on exist."""
+    """The component surfaces src/web/chat.py and the pipeline depend on exist."""
 
-    def test_process_with_tools_callable(self):
+    def test_tool_loop_run_callable(self):
         bot = _make_bot()
-        assert callable(bot._process_with_tools)
+        assert callable(bot.tool_loop.run)
 
-    def test_build_system_prompt_callable(self):
+    def test_prompt_builder_callable(self):
         bot = _make_bot()
-        assert callable(bot._build_system_prompt)
+        assert callable(bot.prompt_builder.build_full_prompt)
 
-    def test_classify_completion_callable(self):
+    def test_completion_classifier_callable(self):
         bot = _make_bot()
-        assert callable(bot._classify_completion)
+        assert callable(bot.completion_classifier.classify)
 
     def test_handle_start_loop_callable(self):
         bot = _make_bot()
-        assert callable(bot._handle_start_loop)
+        assert callable(bot.agent_task_tools._handle_start_loop)
 
 
 # ---------------------------------------------------------------------------
@@ -222,22 +223,20 @@ class TestOnMessageWiring:
 
 
 class TestWebChatContract:
-    """src/web/chat.py calls bot._process_with_tools(...) — the contract must hold."""
+    """src/web/chat.py calls bot.tool_loop.run(...) — the contract must hold."""
 
     def test_web_chat_module_imports(self):
         from src.web import chat
         assert hasattr(chat, "process_web_chat")
 
     def test_web_chat_signatures_compatible(self):
-        # The web chat endpoint expects bot.sessions.add_message,
-        # bot.sessions.remove_last_message, bot.sessions.get_task_history,
-        # bot.codex_client (may be None), bot._build_system_prompt,
-        # bot._process_with_tools.
+        # The web chat endpoint expects bot.sessions (add/remove/history),
+        # bot.llm_gateway.codex_client (may be None), and the prompt/tool-loop
+        # /delivery/turn-recorder components.
         bot = _make_bot()
         for attr in (
-            "sessions", "codex_client",
-            "_build_system_prompt",
-            "_process_with_tools",
+            "sessions", "llm_gateway", "prompt_builder",
+            "tool_loop", "delivery", "turn_recorder",
         ):
             assert hasattr(bot, attr), f"web/chat.py needs bot.{attr}"
         for method in ("add_message", "remove_last_message", "get_task_history"):
@@ -307,7 +306,7 @@ class TestProcessWithToolsEndToEnd:
 
         bot = _make_bot()
         # Inject a mock codex client (real wiring path; only the network call is faked)
-        bot.codex_client = MagicMock()
+        bot.llm_gateway.codex_client = MagicMock()
 
         # Codex returns a single tool call on iter 1, then a text response on iter 2.
         async def fake_chat_with_tools(messages, system, tools):
@@ -330,9 +329,11 @@ class TestProcessWithToolsEndToEnd:
                 stop_reason="tool_use",
             )
 
-        bot.codex_client.chat_with_tools = fake_chat_with_tools
+        bot.llm_gateway.codex_client.chat_with_tools = fake_chat_with_tools
         from src.tools.result_validator import ToolResult
-        bot.tool_executor.execute = AsyncMock(return_value=ToolResult(output="Filesystem 42% used", tool_name="check_disk"))
+        bot.tool_executor.execute = AsyncMock(
+            return_value=ToolResult(output="Filesystem 42% used", tool_name="check_disk")
+        )
         bot.audit.log_execution = AsyncMock()
 
         # Build a fake Discord message
@@ -361,10 +362,10 @@ class TestProcessWithToolsEndToEnd:
         msg.attachments = []
         msg.webhook_id = None
 
-        with patch("src.discord.client.scrub_output_secrets", side_effect=lambda x: x), \
-             patch("src.discord.client.truncate_tool_output", side_effect=lambda x: x):
+        with patch("src.discord.tool_loop.scrub_output_secrets", side_effect=lambda x: x), \
+             patch("src.discord.tool_loop.truncate_tool_output", side_effect=lambda x: x):
             text, _already_sent, is_error, tools_used, _handoff = (
-                await bot._process_with_tools(
+                await bot.tool_loop.run(
                     msg,
                     [{"role": "user", "content": "check disk"}],
                 )
@@ -485,32 +486,32 @@ class TestExecutorHelpers:
 
     def test_codex_call_helper_exists(self):
         bot = _make_bot()
-        assert callable(bot._codex_call)
+        assert callable(bot.llm_gateway.call_with_tools)
 
     def test_save_turn_trajectory_helper_exists(self):
         bot = _make_bot()
-        assert callable(bot._save_turn_trajectory)
+        assert callable(bot.turn_recorder._save_turn_trajectory)
 
     def test_emit_lifecycle_event_helper_exists(self):
         bot = _make_bot()
-        assert callable(bot._emit_lifecycle_event)
+        assert callable(bot.turn_recorder._emit_lifecycle_event)
 
     @pytest.mark.asyncio
     async def test_codex_call_records_cost_and_subsystem(self):
         from src.llm.types import LLMResponse
         bot = _make_bot()
-        bot.codex_client = MagicMock()
+        bot.llm_gateway.codex_client = MagicMock()
 
         async def fake_chat(messages, system, tools, **kw):
             return LLMResponse(
                 text="ok", tool_calls=[], stop_reason="stop",
                 input_tokens=100, output_tokens=50,
             )
-        bot.codex_client.chat_with_tools = fake_chat
+        bot.llm_gateway.codex_client.chat_with_tools = fake_chat
 
         before_in = bot.cost_tracker._total_input_tokens
         before_out = bot.cost_tracker._total_output_tokens
-        resp = await bot._codex_call(messages=[], system="s", tools=[])
+        resp = await bot.llm_gateway.call_with_tools(messages=[], system="s", tools=[])
         assert resp.text == "ok"
         assert bot.cost_tracker._total_input_tokens == before_in + 100
         assert bot.cost_tracker._total_output_tokens == before_out + 50
@@ -518,14 +519,14 @@ class TestExecutorHelpers:
     @pytest.mark.asyncio
     async def test_codex_call_records_subsystem_failure_on_exception(self):
         bot = _make_bot()
-        bot.codex_client = MagicMock()
+        bot.llm_gateway.codex_client = MagicMock()
 
         async def fake_chat(messages, system, tools, **kw):
             raise RuntimeError("boom")
-        bot.codex_client.chat_with_tools = fake_chat
+        bot.llm_gateway.codex_client.chat_with_tools = fake_chat
 
         with pytest.raises(RuntimeError, match="boom"):
-            await bot._codex_call(messages=[], system="s", tools=[])
+            await bot.llm_gateway.call_with_tools(messages=[], system="s", tools=[])
         # Failure was recorded against the llm subsystem
         info = bot.subsystem_guard._subsystems["llm_codex"]
         assert info.consecutive_failures >= 1
@@ -536,7 +537,7 @@ class TestExecutorHelpers:
         # dispatcher is None when outbound_webhooks.enabled is False
         assert bot.outbound_webhook_dispatcher is None
         # Must not raise
-        await bot._emit_lifecycle_event("test.event", {"foo": "bar"})
+        await bot.turn_recorder._emit_lifecycle_event("test.event", {"foo": "bar"})
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +593,7 @@ class TestInvokeSkillTool:
         msg_proxy.channel = MagicMock()
         msg_proxy.channel.id = 123
         msg_proxy.channel.send = AsyncMock()
-        out = await bot._dispatch_loop_tool(
+        out = await bot.tool_loop.dispatch_loop_tool(
             "invoke_skill",
             {"name": "my_skill", "input": {"x": 1}},
             msg_proxy,
@@ -608,7 +609,7 @@ class TestInvokeSkillTool:
     async def test_dispatch_loop_tool_invoke_skill_missing_name(self):
         bot = _make_bot()
         msg_proxy = MagicMock()
-        out = await bot._dispatch_loop_tool(
+        out = await bot.tool_loop.dispatch_loop_tool(
             "invoke_skill",
             {},
             msg_proxy,
@@ -621,7 +622,7 @@ class TestInvokeSkillTool:
         bot = _make_bot()
         bot.skill_manager.has_skill = MagicMock(return_value=False)
         msg_proxy = MagicMock()
-        out = await bot._dispatch_loop_tool(
+        out = await bot.tool_loop.dispatch_loop_tool(
             "invoke_skill",
             {"name": "nope"},
             msg_proxy,
@@ -633,7 +634,7 @@ class TestInvokeSkillTool:
         """Odin queued a check-action schedule without tool_input; it fired 90s
         later and crashed. Validation now rejects at creation time."""
         bot = _make_bot()
-        err = bot._validate_schedule_payload({
+        err = bot.scheduling_tools._validate_schedule_payload({
             "description": "x",
             "action": "check",
             "tool_name": "run_command",
@@ -649,9 +650,14 @@ class TestInvokeSkillTool:
             "description": "x",
             "action": "check",
             "tool_name": "run_command",
-            "steps": [{"tool_name": "run_command", "tool_input": {"host": "localhost", "command": "uname"}}],
+            "steps": [
+                {
+                    "tool_name": "run_command",
+                    "tool_input": {"host": "localhost", "command": "uname"},
+                }
+            ],
         }
-        err = bot._validate_schedule_payload(inp)
+        err = bot.scheduling_tools._validate_schedule_payload(inp)
         assert err is None
         assert inp["tool_input"] == {"host": "localhost", "command": "uname"}
 
@@ -663,7 +669,7 @@ class TestInvokeSkillTool:
             "action": "check",
             "command": "uname -r",
         }
-        err = bot._validate_schedule_payload(inp)
+        err = bot.scheduling_tools._validate_schedule_payload(inp)
         assert err is None
         assert inp["tool_name"] == "run_command"
         assert inp["tool_input"] == {"host": "localhost", "command": "uname -r"}
@@ -676,13 +682,13 @@ class TestInvokeSkillTool:
             "command": "uname",
             "host": "myhost",
         }
-        err = bot._validate_schedule_payload(inp)
+        err = bot.scheduling_tools._validate_schedule_payload(inp)
         assert err is None
         assert inp["tool_input"]["host"] == "myhost"
 
     def test_validate_schedule_rejects_workflow_step_missing_tool_input(self):
         bot = _make_bot()
-        err = bot._validate_schedule_payload({
+        err = bot.scheduling_tools._validate_schedule_payload({
             "description": "x",
             "action": "workflow",
             "steps": [{"tool_name": "run_command", "description": "doit"}],
@@ -692,7 +698,7 @@ class TestInvokeSkillTool:
 
     def test_validate_schedule_accepts_complete_check(self):
         bot = _make_bot()
-        err = bot._validate_schedule_payload({
+        err = bot.scheduling_tools._validate_schedule_payload({
             "description": "x",
             "action": "check",
             "tool_name": "run_command",
@@ -702,8 +708,10 @@ class TestInvokeSkillTool:
 
     def test_validate_schedule_reminder_needs_message(self):
         bot = _make_bot()
-        assert bot._validate_schedule_payload({"description": "x", "action": "reminder"}) is not None
-        assert bot._validate_schedule_payload(
+        assert bot.scheduling_tools._validate_schedule_payload(
+            {"description": "x", "action": "reminder"}
+        ) is not None
+        assert bot.scheduling_tools._validate_schedule_payload(
             {"description": "x", "action": "reminder", "message": "hi"}
         ) is None
 
@@ -871,11 +879,13 @@ class TestInvokeSkillTool:
         bot.skill_manager.execute = AsyncMock(return_value="should-not-run")
         fake_skill = MagicMock()
         fake_skill.definition = {
-            "input_schema": {"type": "object", "required": ["msg"], "properties": {"msg": {"type": "string"}}},
+            "input_schema": {
+                "type": "object", "required": ["msg"], "properties": {"msg": {"type": "string"}}
+            },
         }
         bot.skill_manager._skills = {"echo_test": fake_skill}
         msg_proxy = MagicMock()
-        out = await bot._dispatch_loop_tool(
+        out = await bot.tool_loop.dispatch_loop_tool(
             "invoke_skill",
             {"name": "echo_test"},
             msg_proxy,

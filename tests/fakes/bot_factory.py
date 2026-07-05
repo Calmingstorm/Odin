@@ -46,7 +46,7 @@ def make_bot(*, config_overrides: dict | None = None, fake_llm=None):
     - openai_codex stays disabled (schema default) → codex_client is None
       until a FakeLLM is installed.
 
-    If ``fake_llm`` is given it is installed at ``bot.codex_client`` — the
+    If ``fake_llm`` is given it is installed at ``bot.llm_gateway.codex_client`` — the
     single attribute BOTH pipelines resolve their provider from (the chat
     loop via the llm_client property inside _codex_call, the autonomous
     loop via self.llm_client directly).
@@ -73,5 +73,5 @@ def make_bot(*, config_overrides: dict | None = None, fake_llm=None):
     cfg = Config(**_deep_merge(base, config_overrides or {}))
     bot = OdinBot(cfg)
     if fake_llm is not None:
-        bot.codex_client = fake_llm
+        bot.llm_gateway.codex_client = fake_llm
     return bot

@@ -39,17 +39,21 @@ def schedule(**kw) -> dict:
 class TestScheduledTaskRouting:
     async def test_reminder_posts_to_channel(self, bot_and_channel):
         bot, channel = bot_and_channel
-        await bot._on_scheduled_task(schedule(action="reminder", message="water the servers"))
+        await bot.scheduled_events._on_scheduled_task(
+            schedule(action="reminder", message="water the servers")
+        )
         assert channel.sent_texts == ["**Scheduled reminder:** water the servers"]
 
     async def test_missing_channel_id_is_silently_skipped(self, bot_and_channel):
         bot, channel = bot_and_channel
-        await bot._on_scheduled_task(schedule(action="reminder", channel_id="", message="x"))
+        await bot.scheduled_events._on_scheduled_task(
+            schedule(action="reminder", channel_id="", message="x")
+        )
         assert channel.sent == []
 
     async def test_unknown_action_is_ignored_without_raise(self, bot_and_channel):
         bot, channel = bot_and_channel
-        await bot._on_scheduled_task(schedule(action="mystery"))
+        await bot.scheduled_events._on_scheduled_task(schedule(action="mystery"))
         assert channel.sent == []
 
     async def test_check_success_posts_result(self, bot_and_channel):
@@ -57,7 +61,7 @@ class TestScheduledTaskRouting:
         bot.tool_executor.execute = AsyncMock(
             return_value=ToolResult(output="disk 42% used", tool_name="run_command"),
         )
-        await bot._on_scheduled_task(
+        await bot.scheduled_events._on_scheduled_task(
             schedule(
                 action="check",
                 tool_name="run_command",
@@ -76,7 +80,7 @@ class TestScheduledTaskRouting:
             return_value=ToolResult(output="host unreachable", ok=False, tool_name="run_command"),
         )
         with pytest.raises(RuntimeError, match="Scheduled check failed"):
-            await bot._on_scheduled_task(
+            await bot.scheduled_events._on_scheduled_task(
                 schedule(
                     action="check",
                     tool_name="run_command",
@@ -103,7 +107,7 @@ class TestScheduledWorkflow:
             ],
         )
         with pytest.raises(RuntimeError, match="Scheduled workflow failed"):
-            await bot._on_scheduled_task(sched)
+            await bot.scheduled_events._on_scheduled_task(sched)
         assert bot.tool_executor.execute.await_count == 1
         summary = channel.sent_texts[0]
         assert "FAILED" in summary
@@ -130,7 +134,7 @@ class TestScheduledWorkflow:
                 {"tool_name": "run_command", "tool_input": {"host": "h", "command": "b"}},
             ],
         )
-        await bot._on_scheduled_task(sched)  # no raise
+        await bot.scheduled_events._on_scheduled_task(sched)  # no raise
         assert bot.tool_executor.execute.await_count == 2
         summary = channel.sent_texts[0]
         assert "FAILED" in summary and "second ran fine" in summary
@@ -156,7 +160,7 @@ class TestScheduledWorkflow:
                 },
             ],
         )
-        await bot._on_scheduled_task(sched)
+        await bot.scheduled_events._on_scheduled_task(sched)
         assert bot.tool_executor.execute.await_count == 1
         assert "skipped" in channel.sent_texts[0]
 
@@ -179,7 +183,7 @@ class TestScheduledWorkflow:
                 },
             ],
         )
-        await bot._on_scheduled_task(sched)
+        await bot.scheduled_events._on_scheduled_task(sched)
         assert bot.tool_executor.execute.await_count == 1
         assert "skipped" in channel.sent_texts[0]
 
@@ -188,7 +192,7 @@ class TestExecuteScheduledTool:
     async def test_rbac_denial_returns_structured_failure(self, bot_and_channel):
         bot, channel = bot_and_channel
         bot.tool_executor.check_permission = lambda tool, uid: "RBAC denied: nope"
-        result = await bot._execute_scheduled_tool(
+        result = await bot.scheduled_events._execute_scheduled_tool(
             "run_command",
             {"host": "h", "command": "x"},
             channel,
@@ -202,7 +206,7 @@ class TestExecuteScheduledTool:
     async def test_dispatch_exception_wrapped_as_execution_error(self, bot_and_channel):
         bot, channel = bot_and_channel
         bot.tool_executor.execute = AsyncMock(side_effect=RuntimeError("ssh exploded"))
-        result = await bot._execute_scheduled_tool(
+        result = await bot.scheduled_events._execute_scheduled_tool(
             "run_command",
             {"host": "h", "command": "x"},
             channel,
@@ -214,7 +218,7 @@ class TestExecuteScheduledTool:
 
     async def test_string_result_wrapped_ok(self, bot_and_channel):
         bot, channel = bot_and_channel
-        result = await bot._execute_scheduled_tool(
+        result = await bot.scheduled_events._execute_scheduled_tool(
             "parse_time",
             {"text": "tomorrow 3pm"},
             channel,
@@ -234,17 +238,17 @@ class TestAlerts:
         )
         channel = FakeChannel(id=777)
         bot.get_channel = lambda cid: channel if int(cid) == 777 else None
-        await bot._on_monitor_alert("CPU at 99% on desktop")
+        await bot.scheduled_events._on_monitor_alert("CPU at 99% on desktop")
         assert channel.sent_texts == ["CPU at 99% on desktop"]
 
     async def test_monitor_alert_with_no_channel_is_dropped(self, bot_and_channel):
         bot, channel = bot_and_channel
-        await bot._on_monitor_alert("nowhere to go")
+        await bot.scheduled_events._on_monitor_alert("nowhere to go")
         assert channel.sent == []
 
     async def test_schedule_failure_alert_posts_threshold_message(self, bot_and_channel):
         bot, channel = bot_and_channel
-        await bot._on_schedule_failure(
+        await bot.scheduled_events._on_schedule_failure(
             schedule(last_error="timeout talking to host"),
             consecutive=3,
         )

@@ -138,7 +138,17 @@ Rollback: every phase is a merge commit on the campaign branch; `git revert -m1`
 5. Full suite green (≥6,056 tests), characterization green throughout, ruff finding-set diff vs baseline = zero new.
 6. Soak on /opt/odin: healthy chat + loop + web traffic, no new log errors attributable to the campaign.
 
+## 6.1 Results (P7 complete, 2026-07-05)
+
+- `client.py`: **1,267 → 361 lines**, 13 methods, all real logic — zero delegates, zero property shims (one deliberate property survives: `knowledge`, see R2). Cumulative across both campaigns: 5,790 → 361.
+- `grep "def __init__(self, host)" src/discord` → empty; `grep "bot\._" src/web src/health` → empty.
+- `tool_loop.run()`: 800 → 75-line orchestrator; no method > 160 lines; AST carve gate CLEAN (22/22 blocks).
+- Dispatch: 36 entries bound to 5 domain owners; the bot is out of the dispatch path.
+- New negative contract: ~110 retired `bot.<name>` spellings scanned to zero across src/ AND tests/; broad `bot._` scan over src/ (composition files excepted).
+- Suite: 6,067 passed / 4 skipped; lint finding-set vs baseline: **zero new, 11 resolved**.
+
 ## 7. Revision log
 
 - R0 (2026-07-05): initial draft for Odin review.
+- R2 (2026-07-05, during P6/P7): two declared deviations from the §3.2 table. (1) The web-chat lock cache landed as **module-owned** `src.web.chat.WEB_CHANNEL_LOCKS`, not aiohttp app state — one bot/app per process makes them equivalent, and it keeps `process_web_chat()` request-agnostic (Odin's P6 review note). (2) The knowledge store's public name stays the established **`knowledge` property pair** (live, settable — the dominant spelling in tests and the P6 web migration) instead of a `knowledge_store` rename; `_knowledge_store` is client-internal storage.
 - R1 (2026-07-05, from Odin's review): resolved the `_on_monitor_alert` keeps/deletes contradiction — scheduler + infra-watcher callbacks wire directly to `scheduled_events`, no delegate survives P7 (infra_watcher construction reorders after components in P2). P1 gains an explicit mechanical carve gate (AST-normalized block comparison + mutation-semantics assertions). Live-state grep gate extended to Deps-dataclass field captures. P6 underscore-gate wording made precise (public handles allowed) + app-state lock serialization test. health/checker.py inventory note. Discovery during prep, fixed ahead of P1 as its own PR: `turn_recorder.py:116` kept `hasattr(self, "reflector")` from the P10 verbatim move — always False on the recorder, silently suppressing ALL loop reflection since v3.45.0.

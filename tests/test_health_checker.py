@@ -125,7 +125,7 @@ class TestCheckCodex:
         session = MagicMock()
         session.closed = not session_ok
         codex._session = session
-        bot.codex = codex
+        bot.llm_gateway.codex_client = codex
         return bot
 
     def test_healthy(self):
@@ -159,24 +159,25 @@ class TestCheckCodex:
         assert "session" in result.detail.lower()
 
     def test_no_codex_disabled(self):
-        bot = MagicMock(spec=[])
+        bot = MagicMock(spec=["llm_gateway"])
+        bot.llm_gateway.codex_client = None
         result = check_codex(bot)
         assert result.healthy is True
         assert result.status == "unconfigured"
 
     def test_no_codex_enabled_no_creds(self):
-        bot = MagicMock(spec=["config"])
+        bot = MagicMock(spec=["config", "llm_gateway"])
         bot.config.openai_codex.enabled = True
-        bot.codex = None
+        bot.llm_gateway.codex_client = None
         result = check_codex(bot)
         assert result.healthy is False
         assert result.status == "down"
 
     def test_exception(self):
         bot = MagicMock()
-        bot.codex = MagicMock()
-        bot.codex.breaker = MagicMock()
-        bot.codex.get_pool_metrics.side_effect = RuntimeError("fail")
+        bot.llm_gateway.codex_client = MagicMock()
+        bot.llm_gateway.codex_client.breaker = MagicMock()
+        bot.llm_gateway.codex_client.get_pool_metrics.side_effect = RuntimeError("fail")
         result = check_codex(bot)
         assert result.healthy is False
         assert result.status == "down"
@@ -214,7 +215,7 @@ class TestCheckSessions:
         assert "over token budget" in result.detail
 
     def test_no_sessions_manager(self):
-        bot = MagicMock(spec=[])
+        bot = MagicMock(spec=["llm_gateway"])
         result = check_sessions(bot)
         assert result.healthy is False
         assert "not initialised" in result.detail
@@ -271,7 +272,7 @@ class TestCheckKnowledge:
         assert result.status == "down"
 
     def test_no_knowledge(self):
-        bot = MagicMock(spec=[])
+        bot = MagicMock(spec=["llm_gateway"])
         result = check_knowledge(bot)
         assert result.status == "unconfigured"
 
@@ -353,7 +354,7 @@ class TestCheckSSHHosts:
         assert "No SSH hosts" in result.detail
 
     def test_no_executor(self):
-        bot = MagicMock(spec=[])
+        bot = MagicMock(spec=["llm_gateway"])
         result = check_ssh_hosts(bot)
         assert result.status == "unconfigured"
 
@@ -410,7 +411,7 @@ class TestCheckVoice:
         assert result.status == "degraded"
 
     def test_unconfigured(self):
-        bot = MagicMock(spec=[])
+        bot = MagicMock(spec=["llm_gateway"])
         result = check_voice(bot)
         assert result.status == "unconfigured"
 
@@ -447,7 +448,7 @@ class TestCheckMonitoring:
         assert "2 active alert" in result.detail
 
     def test_unconfigured(self):
-        bot = MagicMock(spec=[])
+        bot = MagicMock(spec=["llm_gateway"])
         result = check_monitoring(bot)
         assert result.status == "unconfigured"
 
@@ -490,7 +491,7 @@ class TestCheckBrowser:
         assert result.status == "unconfigured"
 
     def test_no_executor(self):
-        bot = MagicMock(spec=[])
+        bot = MagicMock(spec=["llm_gateway"])
         result = check_browser(bot)
         assert result.status == "unconfigured"
 
@@ -515,7 +516,7 @@ class TestCheckScheduler:
         assert "0 scheduled" in result.detail
 
     def test_unconfigured(self):
-        bot = MagicMock(spec=[])
+        bot = MagicMock(spec=["llm_gateway"])
         result = check_scheduler(bot)
         assert result.status == "unconfigured"
 
@@ -545,7 +546,7 @@ class TestCheckLoops:
         assert "0 active" in result.detail
 
     def test_unconfigured(self):
-        bot = MagicMock(spec=[])
+        bot = MagicMock(spec=["llm_gateway"])
         result = check_loops(bot)
         assert result.status == "unconfigured"
 
@@ -575,7 +576,7 @@ class TestCheckAgents:
         assert result.metadata["total"] == 0
 
     def test_unconfigured(self):
-        bot = MagicMock(spec=[])
+        bot = MagicMock(spec=["llm_gateway"])
         result = check_agents(bot)
         assert result.status == "unconfigured"
 
@@ -592,10 +593,10 @@ class TestCheckAll:
         guild.member_count = 10
         bot.guilds = [guild]
         # codex
-        bot.codex.model = "gpt-4o"
-        bot.codex.breaker = MagicMock()
-        type(bot.codex.breaker).state = PropertyMock(return_value="closed")
-        bot.codex.get_pool_metrics.return_value = {
+        bot.llm_gateway.codex_client.model = "gpt-4o"
+        bot.llm_gateway.codex_client.breaker = MagicMock()
+        type(bot.llm_gateway.codex_client.breaker).state = PropertyMock(return_value="closed")
+        bot.llm_gateway.codex_client.get_pool_metrics.return_value = {
             "http_pool_max_connections": 10,
             "http_pool_keepalive_timeout": 30,
             "http_pool_active_connections": 0,
@@ -603,7 +604,7 @@ class TestCheckAll:
         }
         session = MagicMock()
         session.closed = False
-        bot.codex._session = session
+        bot.llm_gateway.codex_client._session = session
         # sessions
         bot.sessions._sessions = {}
         bot.sessions.count.return_value = 0
@@ -657,10 +658,10 @@ class TestCheckAll:
 
     def test_unhealthy_overall(self):
         bot = self._make_healthy_bot()
-        bot.codex.breaker = MagicMock()
-        type(bot.codex.breaker).state = PropertyMock(return_value="open")
-        bot.codex._session = MagicMock()
-        bot.codex._session.closed = False
+        bot.llm_gateway.codex_client.breaker = MagicMock()
+        type(bot.llm_gateway.codex_client.breaker).state = PropertyMock(return_value="open")
+        bot.llm_gateway.codex_client._session = MagicMock()
+        bot.llm_gateway.codex_client._session.closed = False
         result = check_all(bot)
         assert result["overall"] == "unhealthy"
         assert result["down_count"] >= 1
@@ -746,10 +747,10 @@ class TestHealthAPI:
         guild = MagicMock()
         guild.member_count = 5
         bot.guilds = [guild]
-        bot.codex.model = "gpt-4o"
-        bot.codex.breaker = MagicMock()
-        type(bot.codex.breaker).state = PropertyMock(return_value="closed")
-        bot.codex.get_pool_metrics.return_value = {
+        bot.llm_gateway.codex_client.model = "gpt-4o"
+        bot.llm_gateway.codex_client.breaker = MagicMock()
+        type(bot.llm_gateway.codex_client.breaker).state = PropertyMock(return_value="closed")
+        bot.llm_gateway.codex_client.get_pool_metrics.return_value = {
             "http_pool_max_connections": 10,
             "http_pool_keepalive_timeout": 30,
             "http_pool_active_connections": 0,
@@ -757,7 +758,7 @@ class TestHealthAPI:
         }
         session = MagicMock()
         session.closed = False
-        bot.codex._session = session
+        bot.llm_gateway.codex_client._session = session
         bot.sessions._sessions = {}
         bot.sessions.count.return_value = 0
         bot.sessions.get_token_metrics.return_value = {"total_tokens": 0, "over_budget_count": 0}
@@ -774,7 +775,7 @@ class TestHealthAPI:
         bot.agent_manager._agents = {}
         bot.config.model_dump.return_value = {}
         bot.skill_manager.list_skills.return_value = []
-        bot._merged_tool_definitions.return_value = []
+        bot.tool_catalog.merged_definitions.return_value = []
         return bot
 
     @pytest.mark.asyncio
@@ -832,15 +833,15 @@ class TestEdgeCases:
 
     def test_codex_no_breaker(self):
         bot = MagicMock()
-        bot.codex.breaker = None
-        bot.codex.get_pool_metrics.return_value = {
+        bot.llm_gateway.codex_client.breaker = None
+        bot.llm_gateway.codex_client.get_pool_metrics.return_value = {
             "http_pool_max_connections": 10,
             "http_pool_keepalive_timeout": 30,
             "http_pool_active_connections": 0,
             "http_pool_total_requests": 0,
         }
-        bot.codex._session = MagicMock()
-        bot.codex._session.closed = False
+        bot.llm_gateway.codex_client._session = MagicMock()
+        bot.llm_gateway.codex_client._session.closed = False
         result = check_codex(bot)
         assert result.metadata["circuit_breaker"] == "unknown"
 
@@ -866,7 +867,7 @@ class TestEdgeCases:
         assert result.status == "down"
 
     def test_check_all_returns_iso_timestamp(self):
-        bot = MagicMock(spec=[])
+        bot = MagicMock(spec=["llm_gateway"])
         result = check_all(bot)
         assert "T" in result["checked_at"]
         assert result["total"] == 13

@@ -6,10 +6,10 @@ the guarded ``call_with_tools`` path (provider lock, subsystem-guard
 health, model routing to the auxiliary cheap client, cost tracking).
 Bodies are verbatim moves from ``OdinBot``.
 
-The bot keeps ``codex_client``/``ollama_client``/``kimi_client`` and
-``_llm_provider_lock`` as property shims over this gateway, because the
-web layer reads them, live reloads replace them, and tests inject fakes
-through ``bot.codex_client`` (RFC-001 Appendix B).
+Since RFC-002 P7 the gateway IS the public LLM surface: the web layer,
+tests, and every component read/replace the provider clients here
+(``bot.llm_gateway.codex_client`` …) — the old bot property shims are
+retired.
 
 Deliberately NOT routed through here: the autonomous loop's LLM calls —
 it calls ``active_client.chat_with_tools`` directly, bypassing cost
