@@ -501,8 +501,8 @@ def _make_bot(tmp_path):
     bot = MagicMock()
     mgr = _manager(tmp_path)
     bot.sessions = mgr
-    bot._knowledge_store = None
-    bot._embedder = None
+    bot.knowledge = None
+    bot.embedder = None
     bot.config = MagicMock()
     bot.config.web = MagicMock()
     bot.config.web.api_token = ""

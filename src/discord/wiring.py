@@ -589,7 +589,8 @@ def build_components(bot, services: BotServices) -> BotComponents:
     scheduling_tools = SchedulingTools(scheduler=services.scheduler)
     knowledge_tools = KnowledgeTools(
         sessions=services.sessions,
-        get_knowledge_store=lambda: bot._knowledge_store,
+        # live: swappable at runtime via the bot's `knowledge` property
+        get_knowledge_store=lambda: bot.knowledge,
         embedder=services.embedder,
         audit=services.audit,
     )
@@ -626,7 +627,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
         change_presence=bot.change_presence,
     )
     completion_classifier = CompletionClassifier(
-        get_llm_client=lambda: bot.llm_client,
+        get_llm_client=lambda: llm_gateway.active_client,
     )
     # Narrow-deps components (RFC-002 P3/P4). Construction order notes:
     # the turn recorder builds BEFORE the tool loop (its consumer), and the
@@ -643,8 +644,8 @@ def build_components(bot, services: BotServices) -> BotComponents:
     tool_loop = ToolLoopRunner(
         ToolLoopDeps(
             get_config=lambda: bot.config,
-            # live: the web layer rebuilds + reassigns the default prompt
-            get_default_system_prompt=lambda: bot._system_prompt,
+            # live: the web layer rebuilds it via prompt_builder.rebuild_default()
+            get_default_system_prompt=lambda: prompt_builder.default_prompt,
             get_context_compressor=lambda: bot.context_compressor,
             llm_gateway=llm_gateway,
             prompt_builder=prompt_builder,
@@ -669,7 +670,8 @@ def build_components(bot, services: BotServices) -> BotComponents:
             channel_state=services.channel_state,
             tool_executor=services.tool_executor,
             skill_manager=services.skill_manager,
-            get_knowledge_store=lambda: bot._knowledge_store,
+            # live: swappable at runtime via the bot's `knowledge` property
+        get_knowledge_store=lambda: bot.knowledge,
             embedder=services.embedder,
             audit=services.audit,
             agent_manager=services.agent_manager,
@@ -875,22 +877,25 @@ async def shutdown_services(bot) -> None:
         except Exception:
             log.exception("Error closing auxiliary LLM client")
 
-    # Close LLM HTTP client sessions
-    codex = getattr(bot, "codex_client", None)
+    # Close LLM HTTP client sessions — read through the gateway: the
+    # per-provider bot properties were retired in RFC-002 P7, and the
+    # gateway holds the LIVE clients (reloads replace them there).
+    gateway = getattr(bot, "llm_gateway", None)
+    codex = getattr(gateway, "codex_client", None)
     if codex is not None:
         try:
             await codex.close()
         except Exception:
             log.exception("Error closing Codex client")
 
-    ollama = getattr(bot, "ollama_client", None)
+    ollama = getattr(gateway, "ollama_client", None)
     if ollama is not None:
         try:
             await ollama.close()
         except Exception:
             log.exception("Error closing Ollama client")
 
-    kimi = getattr(bot, "kimi_client", None)
+    kimi = getattr(gateway, "kimi_client", None)
     if kimi is not None:
         try:
             await kimi.close()

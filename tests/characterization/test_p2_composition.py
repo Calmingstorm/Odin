@@ -16,24 +16,26 @@ import pytest
 from src.discord.wiring import BotComponents, BotServices
 from tests.fakes import FakeLLM, make_bot
 
-# (public name, campaign alias, BotComponents field)
-COMPONENT_TRIPLES = [
-    ("llm_gateway", "_llm_gateway", "llm_gateway"),
-    ("prompt_builder", "_prompt_builder", "prompt_builder"),
-    ("tool_catalog", "_tool_catalog", "tool_catalog"),
-    ("native_tools", "_native_tools", "native_tools"),
-    ("scheduling_tools", "_scheduling_tools", "scheduling_tools"),
-    ("knowledge_tools", "_knowledge_tools", "knowledge_tools"),
-    ("channel_ops_tools", "_channel_ops_tools", "channel_ops_tools"),
-    ("media_tools", "_media_tools", "media_tools"),
-    ("delivery", "_delivery", "delivery"),
-    ("completion_classifier", "_completion_classifier", "completion_classifier"),
-    ("tool_loop", "_tool_loop_runner", "tool_loop"),
-    ("turn_recorder", "_turn_recorder", "turn_recorder"),
-    ("scheduled_events", "_scheduled_events", "scheduled_events"),
-    ("agent_task_tools", "_agent_task_tools", "agent_task_tools"),
-    ("intake", "_message_intake", "intake"),
-    ("pipeline", "_message_pipeline", "pipeline"),
+# (public name, BotComponents field) — the campaign-era underscore aliases
+# were retired in P7; public names are the only spelling.
+COMPONENT_PAIRS = [
+    ("llm_gateway", "llm_gateway"),
+    ("prompt_builder", "prompt_builder"),
+    ("tool_catalog", "tool_catalog"),
+    ("native_tools", "native_tools"),
+    ("scheduling_tools", "scheduling_tools"),
+    ("knowledge_tools", "knowledge_tools"),
+    ("channel_ops_tools", "channel_ops_tools"),
+    ("media_tools", "media_tools"),
+    ("delivery", "delivery"),
+    ("completion_classifier", "completion_classifier"),
+    ("tool_loop", "tool_loop"),
+    ("turn_recorder", "turn_recorder"),
+    ("scheduled_events", "scheduled_events"),
+    ("agent_task_tools", "agent_task_tools"),
+    ("intake", "intake"),
+    ("pipeline", "pipeline"),
+    ("housekeeping", "housekeeping"),
 ]
 
 
@@ -52,29 +54,26 @@ class TestTwoStageComposition:
         assert isinstance(bot.services, BotServices)
         assert isinstance(bot.components, BotComponents)
 
-    def test_public_names_alias_underscore_names_and_component_fields(self, bot):
-        for public, alias, fieldname in COMPONENT_TRIPLES:
+    def test_public_names_are_the_component_fields(self, bot):
+        for public, fieldname in COMPONENT_PAIRS:
             pub = getattr(bot, public)
-            assert pub is getattr(bot, alias), f"{public} is not {alias}"
             assert pub is getattr(bot.components, fieldname), (
                 f"bot.{public} is not components.{fieldname}"
             )
 
     def test_channel_state_lives_in_services(self, bot):
         assert bot.channel_state is bot.services.channel_state
-        assert bot.channel_state is bot._channel_state
+        assert bot.channel_state is bot.channel_state
         # The six facade dict aliases still point INTO the registry
-        assert bot._channel_locks is bot.channel_state.channel_locks
-        assert bot._cancel_events is bot.channel_state.cancel_events
-        assert bot._pending_files is bot.channel_state.pending_files
-        assert bot._recent_actions is bot.channel_state.recent_actions
-        assert bot._last_op_details is bot.channel_state.last_op_details
-        assert bot._background_tasks is bot.channel_state.background_tasks
+        assert bot.channel_state.channel_locks is bot.channel_state.channel_locks
+        assert bot.channel_state.cancel_events is bot.channel_state.cancel_events
+        assert bot.channel_state.pending_files is bot.channel_state.pending_files
+        assert bot.channel_state.recent_actions is bot.channel_state.recent_actions
+        assert bot.channel_state.last_op_details is bot.channel_state.last_op_details
+        assert bot.channel_state.background_tasks is bot.channel_state.background_tasks
 
     def test_gateway_owns_the_llm_surface(self, bot):
-        # The bot property shims read the gateway (unchanged by P2)
-        assert bot.codex_client is bot.llm_gateway.codex_client
-        assert bot.llm_client is bot.llm_gateway.active_client
+        assert bot.llm_gateway is bot.components.llm_gateway
 
     def test_infra_watcher_alert_callback_binds_scheduled_events(self, tmp_path):
         bot = make_bot(

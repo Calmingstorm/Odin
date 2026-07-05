@@ -46,8 +46,8 @@ def _make_bot(tmp_path=None, knowledge_store=None, permission_manager=None):
     bot = MagicMock()
     bot.config = MagicMock()
     bot.config.web.api_token = ""
-    bot._knowledge_store = knowledge_store
-    bot._embedder = None
+    bot.knowledge = knowledge_store
+    bot.embedder = None
     bot.permission_manager = permission_manager
     if tmp_path:
         bot.audit = AuditLogger(path=str(tmp_path / "audit.jsonl"))

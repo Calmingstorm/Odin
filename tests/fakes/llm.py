@@ -7,7 +7,7 @@ exact message-list shape the tool loop constructs per iteration.
 
 Installable at BOTH seams the client currently uses:
 
-- ``bot.codex_client = FakeLLM(...)`` — the chat tool loop reaches the LLM
+- ``bot.llm_gateway.codex_client = FakeLLM(...)`` — the chat tool loop reaches the LLM
   via ``_codex_call`` → the ``llm_client`` property, which resolves to
   ``codex_client`` under the default ``active_provider: codex``.
 - The autonomous loop (``_run_loop_iteration``) calls

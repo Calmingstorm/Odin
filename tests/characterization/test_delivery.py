@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.discord.client import DISCORD_MAX_LEN
+from src.discord.delivery import DISCORD_MAX_LEN
 from tests.fakes import FakeLLM, FakeMessage, make_bot
 
 
@@ -26,14 +26,14 @@ def bot():
 class TestSendChunked:
     async def test_short_text_single_reply(self, bot):
         msg = FakeMessage("q")
-        await bot._send_chunked(msg, "short answer")
+        await bot.delivery.send_chunked(msg, "short answer")
         assert msg.reply_texts == ["short answer"]
         assert msg.channel.sent == []
 
     async def test_chunked_first_is_reply_rest_are_sends(self, bot):
         msg = FakeMessage("q")
         text = "\n".join(f"line {i} " + "x" * 40 for i in range(90))  # ~4.3K chars
-        await bot._send_chunked(msg, text)
+        await bot.delivery.send_chunked(msg, text)
         assert len(msg.replies) == 1  # first chunk replies to the message
         assert len(msg.channel.sent) >= 1  # later chunks are plain sends
         rejoined = "\n".join(t.rstrip("\n") for t in msg.all_delivered_texts())
@@ -45,7 +45,7 @@ class TestSendChunked:
         msg = FakeMessage("q")
         body = "\n".join("x = 1  # padding padding padding" for _ in range(90))
         text = f"```python\n{body}\n```"
-        await bot._send_chunked(msg, text)
+        await bot.delivery.send_chunked(msg, text)
         chunks = msg.all_delivered_texts()
         assert len(chunks) >= 2
         # Every chunk that opens a block closes it, and continuation chunks
@@ -57,7 +57,7 @@ class TestSendChunked:
     async def test_single_overlong_line_is_presplit(self, bot):
         msg = FakeMessage("q")
         text = "y" * 5000  # one line, no newlines, still under the 4x file threshold
-        await bot._send_chunked(msg, text)
+        await bot.delivery.send_chunked(msg, text)
         chunks = msg.all_delivered_texts()
         assert len(chunks) >= 3
         for t in chunks:
@@ -66,7 +66,7 @@ class TestSendChunked:
 
     async def test_very_long_response_becomes_file(self, bot):
         msg = FakeMessage("q")
-        await bot._send_chunked(msg, "z" * (DISCORD_MAX_LEN * 4 + 1))
+        await bot.delivery.send_chunked(msg, "z" * (DISCORD_MAX_LEN * 4 + 1))
         assert len(msg.replies) == 1
         entry = msg.replies[0]
         assert entry["content"] == "Response too long for chat, attached as file:"
@@ -75,17 +75,17 @@ class TestSendChunked:
 
     async def test_pending_files_attach_to_first_message_and_are_popped(self, bot):
         msg = FakeMessage("q")
-        bot._pending_files[str(msg.channel.id)] = [(b"data", "report.txt")]
-        await bot._send_chunked(msg, "here is your file")
+        bot.channel_state.pending_files[str(msg.channel.id)] = [(b"data", "report.txt")]
+        await bot.delivery.send_chunked(msg, "here is your file")
         entry = msg.replies[0]
         assert entry["content"] == "here is your file"
         assert [f.filename for f in entry["files"]] == ["report.txt"]
-        assert str(msg.channel.id) not in bot._pending_files
+        assert str(msg.channel.id) not in bot.channel_state.pending_files
 
     async def test_pending_files_ride_along_with_file_fallback(self, bot):
         msg = FakeMessage("q")
-        bot._pending_files[str(msg.channel.id)] = [(b"data", "extra.bin")]
-        await bot._send_chunked(msg, "z" * (DISCORD_MAX_LEN * 4 + 1))
+        bot.channel_state.pending_files[str(msg.channel.id)] = [(b"data", "extra.bin")]
+        await bot.delivery.send_chunked(msg, "z" * (DISCORD_MAX_LEN * 4 + 1))
         names = [f.filename for f in msg.replies[0]["files"]]
         assert names == ["extra.bin", "response.md"]
 
@@ -100,7 +100,7 @@ class TestSendWithRetry:
         monkeypatch.setattr("asyncio.sleep", fake_sleep)
         msg = FakeMessage("q")
         msg.reply_error = ConnectionError("blip")  # first attempt fails
-        sent = await bot._send_with_retry(msg, "eventually delivered")
+        sent = await bot.delivery.send_with_retry(msg, "eventually delivered")
         assert sent is not None
         assert msg.reply_texts == ["eventually delivered"]
         assert sleeps == [1]  # backoff is 1 + attempt
@@ -118,12 +118,12 @@ class TestSendWithRetry:
             raise ConnectionError("still down")
 
         msg.reply = always_fail
-        sent = await bot._send_with_retry(msg, "never arrives")
+        sent = await bot.delivery.send_with_retry(msg, "never arrives")
         assert sent is None
         assert sleeps == [1, 2]  # two backoffs between three attempts
 
     async def test_as_reply_false_uses_channel_send(self, bot):
         msg = FakeMessage("q")
-        await bot._send_with_retry(msg, "broadcast", as_reply=False)
+        await bot.delivery.send_with_retry(msg, "broadcast", as_reply=False)
         assert msg.replies == []
         assert msg.channel.sent_texts == ["broadcast"]

@@ -1,42 +1,30 @@
+"""OdinBot — the Discord client: lifecycle, gating entry points, composition.
+
+Since RFC-002 P7 this module holds ONLY what genuinely belongs to the bot:
+discord.py lifecycle hooks, the composition sequence (services →
+components → watchers), and the handful of real helpers those hooks use.
+Everything else lives in the components (``wiring.build_components``) and
+is reachable through their PUBLIC names on the bot (``bot.tool_loop``,
+``bot.prompt_builder``, ``bot.llm_gateway``, …) plus ``bot.services`` /
+``bot.components``. The old delegate/shim facade is retired — the public
+surface is pinned by tests/characterization/test_facade_contract.py.
+"""
+
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import os
-import re
 import time
-from collections.abc import Callable
 
 import discord
 from discord.ext import commands
 
 from ..config.schema import Config
 from ..monitoring import InfraWatcher
-from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
-from ..tools import ToolResult, get_tool_definitions
+from ..tools import get_tool_definitions
 from ..async_utils import fire_and_forget
-from .completion import CLASSIFIER_SYSTEM_PROMPT, CompletionClassifier
-from .tool_loop import ensure_failure_visible
-from .tool_loop import _LoopAuthorProxy, _LoopMessageProxy  # noqa: F401 — re-export (tests, proxies)
-
-# Canonical homes moved to tool_loop_helpers (RFC-002 P1) — re-exported here
-# until P7 retires the facade spellings. _ALLOWED_WEBHOOK_IDS is the SAME set
-# object (mutated in place), so this binding stays live across env re-reads.
-from .tool_loop_helpers import (
-    _ALLOWED_WEBHOOK_IDS,  # noqa: F401 — re-export
-    _EMAIL_BODY_TOOLS,  # noqa: F401 — re-export
-    _EMPTY_RESPONSE_FALLBACK,  # noqa: F401 — re-export
-    _scrub_tool_input_for_storage,  # noqa: F401 — re-export until P7
-    init_allowed_webhook_ids as _init_allowed_webhook_ids_impl,
-)
-from .delivery import DISCORD_MAX_LEN  # noqa: F401 — module re-export contract
-from .delivery import SEND_MAX_RETRIES  # noqa: F401 — module re-export contract
-from .delivery import TOOL_STATUS_LABELS
-from .intake_pipeline import SECRET_SCRUB_PATTERNS  # noqa: F401 — re-export until P7
-from .intake_pipeline import check_for_secrets as _check_for_secrets_impl
 from .slash_commands import register_commands
-from .native_tools.media import MediaTools
+from .tool_loop_helpers import init_allowed_webhook_ids as _init_allowed_webhook_ids_impl
 from .voice import VoiceManager, VoiceMessageProxy
 from .wiring import build_components, build_services, shutdown_services
 
@@ -56,96 +44,6 @@ INITIAL_EXTENSIONS: tuple[str, ...] = (
 )
 
 
-# Tool-iteration caps are now configurable per path (chat vs loop) via
-# config.tools.max_tool_iterations_chat / _loop. Read fresh each request so
-# config updates via /api/config PUT take effect on the next message/iteration.
-TOOL_OUTPUT_MAX_CHARS = 12000  # ~3000 tokens; cap tool results to prevent context bloat
-_LONG_TIMEOUT_TOOL_SET = frozenset({"claude_code"})  # Tools that get extended timeout (3660s vs config default)
-
-# Pre-compiled regex for merging adjacent code blocks in combine_bot_messages
-_ADJACENT_FENCE_RE = re.compile(r"\n```[ \t]*\n\n```(\w*)[ \t]*\n")
-
-
-
-
-
-# Additional patterns for scrubbing LLM responses before Discord delivery.
-# These extend OUTPUT_SECRET_PATTERNS (applied via scrub_output_secrets) with
-# patterns more likely to appear in natural-language LLM output.
-_RESPONSE_EXTRA_PATTERNS = [
-    re.compile(r"xox[boaprs]-[a-zA-Z0-9-]+"),  # Slack tokens
-    # Natural language: "the password is ...", "my password is hunter2"
-    re.compile(r"(?i)(?:my\s+)?(?:password|passwd|pwd)\s+(?:\S+\s+){0,4}(?:is|was)\s+\S{6,}"),
-]
-
-
-def scrub_response_secrets(text: str) -> str:
-    """Scrub potential secrets from LLM responses before sending to Discord.
-
-    Applies the tool-output patterns (passwords, API keys, private keys,
-    database URLs) plus additional patterns for secrets that LLMs might
-    express in natural language.
-    """
-    text = scrub_output_secrets(text)
-    for pattern in _RESPONSE_EXTRA_PATTERNS:
-        text = pattern.sub("[REDACTED]", text)
-    return text
-
-
-
-
-def truncate_tool_output(text: str, max_chars: int = TOOL_OUTPUT_MAX_CHARS) -> str:
-    """Truncate large tool output, preserving the start and end for context.
-
-    Tool results stay in the messages list and are re-sent as input tokens
-    on every subsequent iteration of the tool loop.  Capping output prevents
-    a single large result (Prometheus JSON, file contents, long command output)
-    from ballooning costs across iterations.
-    """
-    if len(text) <= max_chars:
-        return text
-    half = max_chars // 2
-    omitted = len(text) - max_chars
-    return (
-        text[:half]
-        + f"\n\n[... {omitted} characters omitted ...]\n\n"
-        + text[-half:]
-    )
-
-
-def combine_bot_messages(parts: list[str]) -> str:
-    """Combine buffered bot messages, intelligently merging code blocks.
-
-    Handles:
-    - Split code blocks (open in one message, close in later one) — joined
-      with a single newline so no extra blank lines appear inside the block.
-    - Adjacent code blocks (close fence then immediately open fence) — merged
-      into one continuous block by removing the redundant fence pair.
-    - Regular text between code blocks — joined with double newline as usual.
-    """
-    if len(parts) <= 1:
-        return parts[0] if parts else ""
-
-    # Join parts, using \n (not \n\n) when the previous part has an unclosed
-    # code block — meaning the next part is a continuation of the same block.
-    # Track fence count incrementally to avoid O(n²) rescanning.
-    result = parts[0]
-    fence_count = result.count("```")
-    for i in range(1, len(parts)):
-        if fence_count % 2 == 1:
-            # Inside an unclosed code block — continuation, single newline
-            result += "\n" + parts[i]
-        else:
-            result += "\n\n" + parts[i]
-        fence_count += parts[i].count("```")
-
-    # Merge adjacent code blocks: \n```<ws>\n\n```<lang>\n → \n
-    # This collapses e.g. "\n```\n\n```bash\n" into a single block.
-    result = _ADJACENT_FENCE_RE.sub("\n", result)
-
-    return result
-
-
 class OdinBot(commands.Bot):
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.default()
@@ -161,38 +59,22 @@ class OdinBot(commands.Bot):
 
         self.config = config
         # commands.Bot already initializes self.tree (app_commands.CommandTree); do not overwrite
-        self.start_time = self._start_time = time.monotonic()
+        self.start_time = time.monotonic()
 
         # ------------------------------------------------------------------
-        # Subsystem construction lives in the composition root (wiring.py,
-        # RFC-001 P1). Attributes are attached flat so the external facade
-        # (web/api.py, health checks, tests) is unchanged.
+        # Stage 1: bot-independent services (wiring.build_services).
+        # Flat handles are the documented public composition surface.
         # ------------------------------------------------------------------
         services = build_services(config)
         self.services = services
 
-        # Per-channel mutable state — owned by ChannelStateRegistry
-        # (constructed in build_services since RFC-002 P2). The dict
-        # attributes below are facade ALIASES to the registry's dicts (same
-        # objects): external readers (web layer, tests) keep working, and
-        # mutations through either name stay in sync.
-        self.channel_state = self._channel_state = services.channel_state
-        self._channel_locks = self._channel_state.channel_locks
-        self._cancel_events = self._channel_state.cancel_events
-        self._pending_files = self._channel_state.pending_files
-        self._recent_actions = self._channel_state.recent_actions
-        self._last_op_details = self._channel_state.last_op_details
-        self._background_tasks = self._channel_state.background_tasks
+        # Per-channel mutable state — owned by ChannelStateRegistry.
+        self.channel_state = services.channel_state
 
         self.context_loader = services.context_loader
-        self.embedder = services.embedder  # public; _embedder alias below
         self.reflector = services.reflector
-        self._embedder = services.embedder
-        self._fts_index = services.fts_index
-        self._vector_store = services.vector_store
-        self._knowledge_store = services.knowledge_store
+        self.embedder = services.embedder
         self.sessions = services.sessions
-        self._memory_path = services.memory_path
         self.channel_config = services.channel_config
         self.channel_logger = services.channel_logger
         self.browser_manager = services.browser_manager
@@ -208,7 +90,7 @@ class OdinBot(commands.Bot):
         self.trajectory_saver = services.trajectory_saver
         self.agent_trajectory_saver = services.agent_trajectory_saver
         self.loop_agent_bridge = services.loop_agent_bridge
-        self._loop_reflection_gate = services.loop_reflection_gate
+        self.loop_reflection_gate = services.loop_reflection_gate
         self.cost_tracker = services.cost_tracker
         self.subsystem_guard = services.subsystem_guard
         self.diff_tracker = services.diff_tracker
@@ -217,10 +99,18 @@ class OdinBot(commands.Bot):
         self.prefix_tracker = services.prefix_tracker
         self.auxiliary_llm_client = services.auxiliary_llm_client
         self.outbound_webhook_dispatcher = services.outbound_webhook_dispatcher
-        self._run_startup_diagnostics = services.run_startup_diagnostics
         self.stuck_loop_tracker_cls = services.stuck_loop_tracker_cls
         self.classify_command_risk = services.classify_command_risk
         self.classify_tool_risk = services.classify_tool_risk
+        # Internal storage (client-owned): search stores + memory path. The
+        # knowledge store is swappable at runtime via the `knowledge`
+        # property; the others feed the archive backfill below.
+        self._embedder = services.embedder
+        self._fts_index = services.fts_index
+        self._vector_store = services.vector_store
+        self._knowledge_store = services.knowledge_store
+        self._memory_path = services.memory_path
+        self._run_startup_diagnostics = services.run_startup_diagnostics
         # Audit signer — exposed as bot.audit_signer for tests/introspection.
         # The actual chain signing is wired into AuditLogger via the hmac_key
         # constructor arg; signing happens automatically inside log_execution.
@@ -234,31 +124,27 @@ class OdinBot(commands.Bot):
             self.voice_manager.on_transcription = self._on_voice_transcription
 
         # ------------------------------------------------------------------
-        # Bot-coupled component assembly (RFC-002 P2) — construction moved to
-        # wiring.build_components. Components carry PUBLIC names; the old
-        # underscore spellings remain as aliases to the same objects until P7
-        # retires the facade.
+        # Stage 2: bot-coupled components (wiring.build_components), exposed
+        # under their public names — the real successor of the old facade.
         # ------------------------------------------------------------------
         components = build_components(self, services)
         self.components = components
-        self.llm_gateway = self._llm_gateway = components.llm_gateway
-        self.prompt_builder = self._prompt_builder = components.prompt_builder
-        self.tool_catalog = self._tool_catalog = components.tool_catalog
-        self.native_tools = self._native_tools = components.native_tools
-        self.scheduling_tools = self._scheduling_tools = components.scheduling_tools
-        self.knowledge_tools = self._knowledge_tools = components.knowledge_tools
-        self.channel_ops_tools = self._channel_ops_tools = components.channel_ops_tools
-        self.media_tools = self._media_tools = components.media_tools
-        self.delivery = self._delivery = components.delivery
-        self.completion_classifier = self._completion_classifier = (
-            components.completion_classifier
-        )
-        self.tool_loop = self._tool_loop_runner = components.tool_loop
-        self.turn_recorder = self._turn_recorder = components.turn_recorder
-        self.scheduled_events = self._scheduled_events = components.scheduled_events
-        self.agent_task_tools = self._agent_task_tools = components.agent_task_tools
-        self.intake = self._message_intake = components.intake
-        self.pipeline = self._message_pipeline = components.pipeline
+        self.llm_gateway = components.llm_gateway
+        self.prompt_builder = components.prompt_builder
+        self.tool_catalog = components.tool_catalog
+        self.native_tools = components.native_tools
+        self.scheduling_tools = components.scheduling_tools
+        self.knowledge_tools = components.knowledge_tools
+        self.channel_ops_tools = components.channel_ops_tools
+        self.media_tools = components.media_tools
+        self.delivery = components.delivery
+        self.completion_classifier = components.completion_classifier
+        self.tool_loop = components.tool_loop
+        self.turn_recorder = components.turn_recorder
+        self.scheduled_events = components.scheduled_events
+        self.agent_task_tools = components.agent_task_tools
+        self.intake = components.intake
+        self.pipeline = components.pipeline
         self.housekeeping = components.housekeeping
 
         # Proactive infrastructure monitoring — constructed AFTER the
@@ -272,141 +158,23 @@ class OdinBot(commands.Bot):
                 alert_callback=self.scheduled_events._on_monitor_alert,
             )
 
-        # Public `codex` / `knowledge` attributes are exposed as dynamic
-        # properties defined below on the class — see the @property blocks.
-        # Using properties (instead of one-time aliases) means the web UI /
-        # health checker always reads the live value, even if the underlying
-        # attribute gets reassigned during a reload or reinit.
-
         self.prompt_builder.rebuild_default()
-        self._register_commands()
+        register_commands(self)
         self._init_allowed_webhook_ids()
         self._log_startup_config()
 
-    # ---------- LLM provider abstraction ------------------------------------
-
-    @property
-    def llm_client(self):
-        """Return whichever LLM provider is currently active (gateway-owned)."""
-        return self._llm_gateway.active_client
-
-    def _wire_llm_callbacks(self) -> None:
-        """Attach LLM-backed compaction/reflection callbacks (gateway-owned)."""
-        self._llm_gateway.wire_callbacks()
-
-    def _wire_codex_callbacks(self) -> None:
-        """Legacy alias — routes through provider abstraction."""
-        self._llm_gateway.wire_callbacks()
-
-    # ---------- Live provider reloads (gateway-owned, facade retained) ------
-
-    async def _reload_codex_inner(self) -> dict:
-        """Inner reload — caller must hold _llm_provider_lock."""
-        return await self._llm_gateway.reload_codex_inner()
-
-    async def reload_codex_auth(self) -> dict:
-        """Reload Codex credentials and create the client if it was missing at boot."""
-        return await self._llm_gateway.reload_codex()
-
-    async def _reload_ollama_inner(self) -> dict:
-        """Inner reload — caller must hold _llm_provider_lock."""
-        return await self._llm_gateway.reload_ollama_inner()
-
-    async def reload_ollama(self) -> dict:
-        """Reload Ollama client from current config."""
-        return await self._llm_gateway.reload_ollama()
-
-    async def _reload_kimi_inner(self) -> dict:
-        """Inner reload — caller must hold _llm_provider_lock."""
-        return await self._llm_gateway.reload_kimi_inner()
-
-    async def reload_kimi(self) -> dict:
-        """Reload Kimi client from current config."""
-        return await self._llm_gateway.reload_kimi()
-
-    async def switch_llm_provider(self, provider: str) -> dict:
-        """Switch the active LLM provider at runtime."""
-        return await self._llm_gateway.switch_provider(provider)
-
-
-    @property
-    def codex(self):
-        return self.codex_client
-
-    @codex.setter
-    def codex(self, value) -> None:
-        """Allow tests and reloads to swap the Codex client via the public name."""
-        self.codex_client = value
+    # ---------- Runtime-swappable stores ------------------------------------
 
     @property
     def knowledge(self):
+        """The knowledge store — live: reloads and tests swap it at runtime."""
         return self._knowledge_store
 
     @knowledge.setter
     def knowledge(self, value) -> None:
-        """Allow tests and reloads to swap the knowledge store via the public name."""
         self._knowledge_store = value
 
-    # LLM provider client shims — storage moved to LLMGateway (P4); the
-    # attribute spellings stay because the web layer reads them, live
-    # reloads replace them, and tests inject fakes via bot.codex_client.
-    @property
-    def codex_client(self):
-        return self._llm_gateway.codex_client
-
-    @codex_client.setter
-    def codex_client(self, value) -> None:
-        self._llm_gateway.codex_client = value
-
-    @property
-    def ollama_client(self):
-        return self._llm_gateway.ollama_client
-
-    @ollama_client.setter
-    def ollama_client(self, value) -> None:
-        self._llm_gateway.ollama_client = value
-
-    @property
-    def kimi_client(self):
-        return self._llm_gateway.kimi_client
-
-    @kimi_client.setter
-    def kimi_client(self, value) -> None:
-        self._llm_gateway.kimi_client = value
-
-    @property
-    def _llm_provider_lock(self):
-        return self._llm_gateway.provider_lock
-
-    # Default-prompt storage moved to PromptBuilder (RFC-002 P6); the old
-    # spelling stays live in BOTH directions until P7.
-    @property
-    def _system_prompt(self):
-        return self.prompt_builder.default_prompt
-
-    @_system_prompt.setter
-    def _system_prompt(self, value) -> None:
-        self.prompt_builder.default_prompt = value
-
-
-    # Prompt/catalog cache shims — web/api.py reads AND writes these names
-    # (Appendix B starred entries); storage moved to PromptBuilder/ToolCatalog
-    # in P3, the facade spelling stays.
-    @property
-    def _cached_merged_tools(self):
-        return self._tool_catalog.cached
-
-    @_cached_merged_tools.setter
-    def _cached_merged_tools(self, value) -> None:
-        self._tool_catalog.cached = value
-
-    @property
-    def _cached_skills_text(self):
-        return self._prompt_builder.cached_skills_text
-
-    @_cached_skills_text.setter
-    def _cached_skills_text(self, value) -> None:
-        self._prompt_builder.cached_skills_text = value
+    # ---------- Startup helpers ----------------------------------------------
 
     def _init_allowed_webhook_ids(self) -> None:
         """Populate the test-webhook allowlist from the ALLOWED_WEBHOOK_IDS env var."""
@@ -421,107 +189,12 @@ class OdinBot(commands.Bot):
             log.info("Configured hosts: %s", ", ".join(cfg.tools.hosts.keys()))
         if not cfg.tools.claude_code_host:
             log.info("claude_code_host not set — claude -p code generation requires a configured host")
-        if cfg.openai_codex.enabled and not self.codex_client:
+        if cfg.openai_codex.enabled and not self.llm_gateway.codex_client:
             log.warning("Codex enabled but not configured — session compaction and learning reflection disabled")
         if cfg.discord.respond_to_bots:
             log.info("Bot interaction enabled — will respond to other bots")
         if cfg.discord.require_mention:
             log.info("Mention-only mode — will only respond when @mentioned")
-
-    # -- turn observability: bodies in turn_recorder.py (P10) --
-
-    def _record_user_content(self, trajectory, content: str) -> None:
-        self._turn_recorder._record_user_content(trajectory, content)
-
-    def _new_context_trace(self):
-        return self._turn_recorder._new_context_trace()
-
-
-    def _invalidate_prompt_caches(self) -> None:
-        """Invalidate all prompt-related caches. Called on config/context reload."""
-        self._prompt_builder.invalidate()
-        self._tool_catalog.invalidate()
-
-
-    def _invoke_skill_missing_required(self, name: str, payload: dict) -> list[str]:
-        """Return required input fields the payload omits, or [] if complete.
-
-        Used by invoke_skill to fail loudly when the LLM omits the input
-        object — otherwise the skill silently runs with empty params and
-        returns a degenerate result that looks like a tool bug.
-        """
-        try:
-            skill = self.skill_manager._skills.get(name)
-            if skill is None:
-                return []
-            schema = skill.definition.get("input_schema") or {}
-            required = schema.get("required") or []
-            return [f for f in required if f not in payload]
-        except Exception:
-            return []
-
-    def _build_system_prompt(
-        self, channel: discord.abc.GuildChannel | None = None,
-        user_id: str | None = None,
-        query: str | None = None,
-        trace=None,
-    ) -> str:
-        """Full system prompt — owned by PromptBuilder (P3)."""
-        return self._prompt_builder.build_full_prompt(
-            channel=channel, user_id=user_id, query=query, trace=trace,
-        )
-
-
-    def _build_chat_system_prompt(
-        self, channel: discord.abc.GuildChannel | None = None,
-        user_id: str | None = None,
-        query: str | None = None,
-    ) -> str:
-        """Lightweight chat prompt — owned by PromptBuilder (P3)."""
-        return self._prompt_builder.build_chat_prompt(
-            channel=channel, user_id=user_id, query=query,
-        )
-
-
-    def _merged_tool_definitions(self) -> list[dict]:
-        """Merged builtin+skill tool definitions — owned by ToolCatalog (P3)."""
-        return self._tool_catalog.merged_definitions()
-
-
-    def _cleanup_stale_caches(self) -> None:
-        """Cache housekeeping — owned by Housekeeping (P4)."""
-        self.housekeeping.cleanup_stale()
-
-    def _maybe_cleanup_caches(self) -> None:
-        """Throttled cache housekeeping — owned by Housekeeping (P4)."""
-        self.housekeeping.maybe_cleanup()
-
-    def _track_recent_action(
-        self, tool_name: str, tool_input: dict, result_preview: str,
-        elapsed_ms: int, channel_id: str | None = None,
-    ) -> None:
-        """Recent-action tracking — owned by ChannelStateRegistry (P4)."""
-        self.channel_state.track_action(
-            tool_name, tool_input, result_preview, elapsed_ms, channel_id=channel_id,
-        )
-
-    def _register_commands(self) -> None:
-        """Slash commands — owned by slash_commands.register_commands (P10)."""
-        register_commands(self)
-
-
-    def _is_cancelled(self, channel_id: str) -> bool:
-        ev = self._cancel_events.get(channel_id)
-        return bool(ev and ev.is_set())
-
-    def _is_allowed_user(self, user: discord.User | discord.Member) -> bool:
-        return self.intake.is_allowed_user(user)
-
-    def _is_allowed_channel(self, channel_id: int) -> bool:
-        return self.intake.is_allowed_channel(channel_id)
-
-    def _check_for_secrets(self, content: str) -> bool:
-        return _check_for_secrets_impl(content)
 
     # ------------------------------------------------------------------
     # commands.Bot lifecycle hooks (cog loading + prefix)
@@ -533,51 +206,6 @@ class OdinBot(commands.Bot):
         """Return applicable prefixes; mention also accepted."""
         base = ["!"]  # OdinBot's default prefix; can be made config-driven later
         return commands.when_mentioned_or(*base)(bot, message)
-
-    async def _codex_call(
-        self, *, messages: list, system: str, tools: list,
-        user_message: str = "",
-        user_id: str = "", channel_id: str = "", tools_used: list[str] | None = None,
-        **kwargs,
-    ):
-        """Guarded LLM call — owned by LLMGateway (P4)."""
-        return await self._llm_gateway.call_with_tools(
-            messages=messages, system=system, tools=tools,
-            user_message=user_message, user_id=user_id, channel_id=channel_id,
-            tools_used=tools_used, **kwargs,
-        )
-
-
-    async def _operational_reflection(
-        self, user_request: str, tools_used: list[str], response: str,
-        is_error: bool, user_id: str | None, tool_details: list[dict] | None = None,
-    ) -> None:
-        await self._turn_recorder._operational_reflection(
-            user_request, tools_used, response, is_error, user_id, tool_details=tool_details,
-        )
-
-    def _should_reflect_on_operation(
-        self, user_request: str, tools_used: list[str], is_error: bool, tool_details: list[dict],
-    ) -> bool:
-        return self._turn_recorder._should_reflect_on_operation(
-            user_request, tools_used, is_error, tool_details,
-        )
-
-    def _maybe_loop_reflect(self, **kwargs) -> None:
-        self._turn_recorder._maybe_loop_reflect(**kwargs)
-
-    async def _save_turn_trajectory(
-        self, trajectory, *, error: str = "", final_response: str = "",
-        tools_used: list[str] | None = None, trace=None,
-    ) -> None:
-        await self._turn_recorder._save_turn_trajectory(
-            trajectory, error=error, final_response=final_response,
-            tools_used=tools_used, trace=trace,
-        )
-
-    async def _emit_lifecycle_event(self, event_type: str, payload: dict) -> None:
-        await self._turn_recorder._emit_lifecycle_event(event_type, payload)
-
 
     async def setup_hook(self) -> None:
         """Called once before connecting to the gateway.
@@ -631,14 +259,6 @@ class OdinBot(commands.Bot):
         await super().close()
         log.info("OdinBot shutdown complete")
 
-    # Moved to delivery.TOOL_STATUS_LABELS (P4); alias kept until P7.
-    _TOOL_STATUS_LABELS = TOOL_STATUS_LABELS
-
-    async def _set_status(self, text: str | None = None, task_start: bool = False, task_end: bool = False) -> None:
-        """Presence updates — owned by ResponseDelivery (P6)."""
-        await self._delivery.set_status(text, task_start=task_start, task_end=task_end)
-
-
     async def on_ready(self) -> None:
         log.info("Logged in as %s (ID: %s)", self.user, self.user.id)
         log.info("Tools loaded: %d definitions", len(get_tool_definitions()))
@@ -662,7 +282,7 @@ class OdinBot(commands.Bot):
         # Start proactive monitoring if configured
         if hasattr(self, "infra_watcher") and self.infra_watcher:
             self.infra_watcher.start()
-        await self._set_status(None, task_end=True)
+        await self.delivery.set_status(None, task_end=True)
 
     async def _backfill_archives(self) -> None:
         """Backfill semantic search index and FTS5 with existing archive files."""
@@ -675,6 +295,8 @@ class OdinBot(commands.Bot):
                 log.info("Vector store up to date")
             # Backfill knowledge FTS from existing data
             if self._knowledge_store and self._fts_index:
+                import asyncio
+
                 kb_count = await asyncio.to_thread(self._knowledge_store.backfill_fts)
                 if kb_count:
                     log.info("Backfilled %d knowledge chunks into FTS index", kb_count)
@@ -692,7 +314,7 @@ class OdinBot(commands.Bot):
             return
         if member.bot:
             return
-        if not self._is_allowed_user(member):
+        if not self.intake.is_allowed_user(member):
             return
         # User joined a voice channel (was not in one before)
         if before.channel is None and after.channel is not None:
@@ -708,13 +330,8 @@ class OdinBot(commands.Bot):
                     await self.voice_manager.leave_channel()
 
     async def on_message(self, message: discord.Message) -> None:
-        """Intake gating chain — owned by intake_pipeline.MessageIntake (P9)."""
-        await self._message_intake.handle(message)
-
-
-    async def _process_attachments(self, message: discord.Message, content: str = "") -> tuple[str, list[dict]]:
-        """Attachment processing — owned by MessageIntake (P4)."""
-        return await self.intake._process_attachments(message, content)
+        """Intake gating chain — owned by intake_pipeline.MessageIntake."""
+        await self.intake.handle(message)
 
     async def _on_voice_transcription(
         self, text: str, member: discord.Member, transcript_channel: discord.TextChannel,
@@ -738,278 +355,7 @@ class OdinBot(commands.Bot):
             if self.voice_manager:
                 await self.voice_manager.speak(response)
 
-        await self._handle_message(
+        await self.pipeline.run(
             proxy, text,
             voice_callback=voice_callback,
         )
-
-    async def _handle_message(
-        self, message: discord.Message, content: str, *, image_blocks: list[dict] | None = None,
-        voice_callback: Callable | None = None,
-    ) -> None:
-        """Pipeline orchestration — owned by intake_pipeline.MessagePipeline (P9)."""
-        await self._message_pipeline.run(
-            message, content, image_blocks=image_blocks, voice_callback=voice_callback,
-        )
-
-    async def _handle_message_inner(
-        self, message: discord.Message, content: str, channel_id: str,
-        *, image_blocks: list[dict] | None = None,
-        voice_callback: Callable | None = None,
-    ) -> None:
-        await self._message_pipeline._run_inner(
-            message, content, channel_id,
-            image_blocks=image_blocks, voice_callback=voice_callback,
-        )
-
-
-    # Completion classification — owned by completion.CompletionClassifier
-    # (P7). The class attr + method delegates keep the facade/test seams.
-    _CLASSIFIER_SYSTEM_PROMPT = CLASSIFIER_SYSTEM_PROMPT
-
-    async def _classify_completion(
-        self,
-        user_message: str,
-        response_text: str,
-        tools_used: list[str],
-    ) -> tuple[bool, str]:
-        return await self._completion_classifier.classify(
-            user_message, response_text, tools_used,
-        )
-
-    @staticmethod
-    def _parse_classifier_response(raw: str) -> tuple[bool, str]:
-        return CompletionClassifier.parse_response(raw)
-
-
-    async def _process_with_tools(
-        self,
-        message: discord.Message,
-        history: list[dict],
-        system_prompt_override: str | None = None,
-        trace=None,
-    ) -> tuple[str, bool, bool, list[str], bool]:
-        """Chat tool loop — owned by tool_loop.ToolLoopRunner (P7).
-
-        Returns (text, already_sent, is_error, tools_used, handoff).
-        """
-        return await self._tool_loop_runner.run(
-            message, history, system_prompt_override=system_prompt_override, trace=trace,
-        )
-
-    _ensure_failure_visible = staticmethod(ensure_failure_visible)
-
-
-    _detect_image_type = staticmethod(MediaTools._detect_image_type)
-
-    async def _handle_purge(self, message: discord.Message, inp: dict) -> str:
-        return await self._channel_ops_tools._handle_purge(message, inp)
-
-
-    # -- media handlers: bodies in native_tools/media.py (P5b) --
-
-    async def _handle_browser_screenshot(self, message: discord.Message, inp: dict) -> str:
-        return await self._media_tools._handle_browser_screenshot(message, inp)
-
-    async def _handle_generate_file(self, message: discord.Message, inp: dict) -> str:
-        return await self._media_tools._handle_generate_file(message, inp)
-
-    async def _handle_post_file(self, message: discord.Message, inp: dict) -> str:
-        return await self._media_tools._handle_post_file(message, inp)
-
-
-    def _validate_schedule_payload(self, inp: dict) -> str | None:
-        return self._scheduling_tools._validate_schedule_payload(inp)
-
-    async def _handle_schedule_task(self, message: discord.Message, inp: dict) -> str:
-        return await self._scheduling_tools._handle_schedule_task(message, inp)
-
-    def _handle_list_schedules(self) -> str:
-        return self._scheduling_tools._handle_list_schedules()
-
-    async def _handle_update_schedule(self, inp: dict) -> str:
-        return await self._scheduling_tools._handle_update_schedule(inp)
-
-    async def _handle_delete_schedule(self, inp: dict) -> str:
-        return await self._scheduling_tools._handle_delete_schedule(inp)
-
-    def _handle_parse_time(self, inp: dict) -> str:
-        return self._scheduling_tools._handle_parse_time(inp)
-
-
-    # -- knowledge/history handlers: bodies in native_tools/knowledge.py (P5b) --
-
-    async def _handle_search_history(self, inp: dict) -> str:
-        return await self._knowledge_tools._handle_search_history(inp)
-
-    async def _handle_search_knowledge(self, inp: dict) -> str:
-        return await self._knowledge_tools._handle_search_knowledge(inp)
-
-    async def _handle_ingest_document(self, inp: dict, uploader: str) -> str:
-        return await self._knowledge_tools._handle_ingest_document(inp, uploader)
-
-    async def _handle_bulk_ingest(self, inp: dict, uploader: str) -> str:
-        return await self._knowledge_tools._handle_bulk_ingest(inp, uploader)
-
-    def _handle_list_knowledge(self) -> str:
-        return self._knowledge_tools._handle_list_knowledge()
-
-    async def _handle_delete_knowledge(self, inp: dict) -> str:
-        return await self._knowledge_tools._handle_delete_knowledge(inp)
-
-
-    async def _handle_set_permission(self, caller_id: str, inp: dict) -> str:
-        return await self._channel_ops_tools._handle_set_permission(caller_id, inp)
-
-
-    async def _handle_search_audit(self, inp: dict) -> str:
-        return await self._knowledge_tools._handle_search_audit(inp)
-
-
-    # -- scheduler/digest/monitor callbacks: bodies in scheduled_events.py (P10) --
-
-    async def _on_scheduled_digest(self, schedule: dict) -> None:
-        await self._scheduled_events._on_scheduled_digest(schedule)
-
-    async def _format_digest_raw(self) -> str:
-        return await self._scheduled_events._format_digest_raw()
-
-    def _resolve_mentions(self, text: str) -> str:
-        return self._scheduled_events._resolve_mentions(text)
-
-    async def _on_monitor_alert(self, message: str) -> None:
-        await self._scheduled_events._on_monitor_alert(message)
-
-
-    # -- agents/tasks/loops handlers: bodies in native_tools/agents_tasks.py (P5c) --
-
-    async def _handle_delegate_task(self, message: discord.Message, inp: dict) -> str:
-        return await self._agent_task_tools._handle_delegate_task(message, inp)
-
-    def _handle_list_tasks(self, inp: dict | None = None) -> str:
-        return self._agent_task_tools._handle_list_tasks(inp)
-
-    def _handle_cancel_task(self, inp: dict) -> str:
-        return self._agent_task_tools._handle_cancel_task(inp)
-
-    def _handle_start_loop(self, message: discord.Message, inp: dict) -> str:
-        return self._agent_task_tools._handle_start_loop(message, inp)
-
-    def _handle_stop_loop(self, inp: dict) -> str:
-        return self._agent_task_tools._handle_stop_loop(inp)
-
-    def _handle_list_loops(self) -> str:
-        return self._agent_task_tools._handle_list_loops()
-
-    async def _handle_spawn_agent(self, message: object, inp: dict) -> str:
-        return await self._agent_task_tools._handle_spawn_agent(message, inp)
-
-    async def _collect_agent_result(self, agent_id: str, timeout: float = 3660.0):
-        return await self._agent_task_tools._collect_agent_result(agent_id, timeout=timeout)
-
-    def _handle_send_to_agent(self, inp: dict) -> str:
-        return self._agent_task_tools._handle_send_to_agent(inp)
-
-    def _handle_list_agents(self, message: object) -> str:
-        return self._agent_task_tools._handle_list_agents(message)
-
-    def _handle_kill_agent(self, inp: dict) -> str:
-        return self._agent_task_tools._handle_kill_agent(inp)
-
-    def _handle_get_agent_results(self, inp: dict) -> str:
-        return self._agent_task_tools._handle_get_agent_results(inp)
-
-    async def _handle_wait_for_agents(self, inp: dict) -> str:
-        return await self._agent_task_tools._handle_wait_for_agents(inp)
-
-    async def _handle_spawn_loop_agents(self, message: object, inp: dict) -> str:
-        return await self._agent_task_tools._handle_spawn_loop_agents(message, inp)
-
-    async def _handle_collect_loop_agents(self, inp: dict) -> str:
-        return await self._agent_task_tools._handle_collect_loop_agents(inp)
-
-
-    async def _run_loop_iteration(
-        self,
-        prompt: str,
-        channel: object,
-        prev_context: str | None,
-        user_id: str,
-    ) -> str:
-        """Autonomous-loop iteration — owned by tool_loop.ToolLoopRunner (P8)."""
-        return await self._tool_loop_runner.run_autonomous(prompt, channel, prev_context, user_id)
-
-    async def _dispatch_loop_tool(
-        self,
-        tool_name: str,
-        tool_input: dict,
-        msg_proxy: _LoopMessageProxy,
-        user_id: str,
-    ) -> str | dict:
-        """Loop tool dispatch — owned by tool_loop.ToolLoopRunner (P8)."""
-        return await self._tool_loop_runner.dispatch_loop_tool(
-            tool_name, tool_input, msg_proxy, user_id,
-        )
-
-    async def _dispatch_loop_tool_inner(
-        self,
-        tool_name: str,
-        tool_input: dict,
-        msg_proxy: _LoopMessageProxy,
-        user_id: str,
-    ) -> str | dict:
-        return await self._tool_loop_runner.dispatch_loop_tool_inner(
-            tool_name, tool_input, msg_proxy, user_id,
-        )
-
-
-    # -- channel-ops handlers: bodies in native_tools/channel_ops.py (P5b) --
-
-    async def _handle_read_channel(self, message: discord.Message, inp: dict) -> str:
-        return await self._channel_ops_tools._handle_read_channel(message, inp)
-
-    async def _handle_add_reaction(self, message: discord.Message, inp: dict) -> str:
-        return await self._channel_ops_tools._handle_add_reaction(message, inp)
-
-    async def _handle_create_poll(self, message: discord.Message, inp: dict) -> str:
-        return await self._channel_ops_tools._handle_create_poll(message, inp)
-
-
-    async def _handle_analyze_image(self, message: discord.Message, inp: dict) -> str | dict:
-        return await self._media_tools._handle_analyze_image(message, inp)
-
-    async def _handle_generate_image(self, message: discord.Message, inp: dict) -> str:
-        return await self._media_tools._handle_generate_image(message, inp)
-
-
-    async def _execute_scheduled_tool(
-        self, tool_name: str, tool_input: dict, channel: discord.abc.Messageable,
-        requester_id: str | None, requester_name: str = "scheduler",
-    ) -> ToolResult:
-        return await self._scheduled_events._execute_scheduled_tool(
-            tool_name, tool_input, channel, requester_id, requester_name,
-        )
-
-    async def _run_scheduled_workflow(self, channel: discord.abc.Messageable, schedule: dict) -> bool:
-        return await self._scheduled_events._run_scheduled_workflow(channel, schedule)
-
-    async def _on_schedule_failure(self, schedule: dict, consecutive: int) -> None:
-        await self._scheduled_events._on_schedule_failure(schedule, consecutive)
-
-    async def _on_scheduled_task(self, schedule: dict) -> None:
-        await self._scheduled_events._on_scheduled_task(schedule)
-
-
-    async def _send_with_retry(
-        self,
-        message: discord.Message,
-        text: str,
-        as_reply: bool = True,
-        files: list[discord.File] | None = None,
-    ) -> discord.Message | None:
-        """Send with retry — owned by ResponseDelivery (P6)."""
-        return await self._delivery.send_with_retry(message, text, as_reply=as_reply, files=files)
-
-    async def _send_chunked(self, message: discord.Message, text: str) -> None:
-        """Chunked send — owned by ResponseDelivery (P6)."""
-        await self._delivery.send_chunked(message, text)

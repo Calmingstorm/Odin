@@ -13,6 +13,7 @@ import pytest
 
 from src.config.schema import Config
 from src.discord.client import OdinBot
+from src.discord.tool_loop_helpers import ensure_failure_visible
 
 
 def _make_bot() -> OdinBot:
@@ -29,12 +30,12 @@ def _make_bot() -> OdinBot:
 
 def test_ok_result_untouched():
     text = "### host\n```\nall good\n```"
-    assert OdinBot._ensure_failure_visible(text, True) == text
+    assert ensure_failure_visible(text, True) == text
 
 
 def test_failed_result_without_marker_gets_prefixed():
     text = "### definitely-not-a-host\n```\nHost access denied: definitely-not-a-host\n```"
-    out = OdinBot._ensure_failure_visible(text, False)
+    out = ensure_failure_visible(text, False)
     assert out.startswith("Error (tool reported failure):")
     assert "Host access denied" in out
 
@@ -46,7 +47,7 @@ def test_failed_result_with_existing_marker_not_double_prefixed():
         "Blocked [critical]: nope",
         "Unknown or disallowed host: x",
     ):
-        assert OdinBot._ensure_failure_visible(text, False) == text
+        assert ensure_failure_visible(text, False) == text
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +65,6 @@ async def test_multi_host_denial_visible_through_executor():
     # Structured layer: classified as failure (PR#128 fix).
     assert result.ok is False
     # Model layer: after the visibility wrapper, the text carries an error marker.
-    rendered = OdinBot._ensure_failure_visible(str(result), result.ok)
+    rendered = ensure_failure_visible(str(result), result.ok)
     assert rendered.startswith("Error")
     assert "Unknown or disallowed host" in rendered or "Host access denied" in rendered

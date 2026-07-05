@@ -51,7 +51,7 @@ class TestSpawnLoopAgentsConfigPath:
         values are forwarded (the old code raised AttributeError here)."""
         bot, captured = _bot_with_running_loop()
         assert bot.context_compressor is not None  # schema default: enabled
-        result = await bot._handle_spawn_loop_agents(
+        result = await bot.agent_task_tools._handle_spawn_loop_agents(
             FakeMessage("go", channel=FakeChannel(id=777)),
             {"loop_id": "loop-1", "tasks": [{"goal": "trivial"}]},
         )
@@ -64,7 +64,7 @@ class TestSpawnLoopAgentsConfigPath:
     async def test_defaults_used_when_compression_disabled(self):
         bot, captured = _bot_with_running_loop()
         bot.context_compressor = None  # config-disabled wiring outcome
-        await bot._handle_spawn_loop_agents(
+        await bot.agent_task_tools._handle_spawn_loop_agents(
             FakeMessage("go", channel=FakeChannel(id=777)),
             {"loop_id": "loop-1", "tasks": [{"goal": "trivial"}]},
         )
@@ -77,7 +77,7 @@ class TestSpawnLoopAgentsConfigPath:
         bot.context_compressor = SimpleNamespace(
             enabled=True, max_context_chars=123456, keep_recent_iterations=7
         )
-        await bot._handle_spawn_loop_agents(
+        await bot.agent_task_tools._handle_spawn_loop_agents(
             FakeMessage("go", channel=FakeChannel(id=777)),
             {"loop_id": "loop-1", "tasks": [{"goal": "trivial"}]},
         )
@@ -88,8 +88,9 @@ class TestSpawnLoopAgentsConfigPath:
     async def test_validation_paths_unchanged(self):
         bot, _ = _bot_with_running_loop()
         msg = FakeMessage("go", channel=FakeChannel(id=777))
-        assert "loop_id" in await bot._handle_spawn_loop_agents(msg, {"tasks": [{}]})
-        assert "tasks" in await bot._handle_spawn_loop_agents(msg, {"loop_id": "loop-1"})
-        assert "not found" in await bot._handle_spawn_loop_agents(
+        spawn = bot.agent_task_tools._handle_spawn_loop_agents
+        assert "loop_id" in await spawn(msg, {"tasks": [{}]})
+        assert "tasks" in await spawn(msg, {"loop_id": "loop-1"})
+        assert "not found" in await bot.agent_task_tools._handle_spawn_loop_agents(
             msg, {"loop_id": "nope", "tasks": [{}]}
         )

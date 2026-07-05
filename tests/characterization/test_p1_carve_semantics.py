@@ -56,7 +56,7 @@ class TestCarveMutationSemantics:
         snapshot = copy.deepcopy(history)
         history_id = id(history)
 
-        await bot._process_with_tools(FakeMessage("parse the time"), history)
+        await bot.tool_loop.run(FakeMessage("parse the time"), history)
 
         assert id(history) == history_id
         assert history == snapshot, "caller's history list was mutated by the turn"
@@ -90,7 +90,7 @@ class TestCarveMutationSemantics:
         bot.scheduling_tools._handle_parse_time = slow_parse_time
         bot.scheduling_tools._handle_list_schedules = fast_list_schedules
 
-        text, _, is_error, tools_used, _ = await bot._process_with_tools(
+        text, _, is_error, tools_used, _ = await bot.tool_loop.run(
             FakeMessage("do both"), [{"role": "user", "content": "do both"}]
         )
 
@@ -116,9 +116,9 @@ class TestCarveMutationSemantics:
             ]
         )
         msg = FakeMessage("two steps")
-        await bot._process_with_tools(msg, [{"role": "user", "content": "two steps"}])
+        await bot.tool_loop.run(msg, [{"role": "user", "content": "two steps"}])
 
-        details = bot._last_op_details[str(msg.channel.id)]
+        details = bot.channel_state.last_op_details[str(msg.channel.id)]
         assert [d["tool"] for d in details] == ["parse_time", "list_schedules"], (
             "op-details must accumulate across iterations in execution order"
         )
