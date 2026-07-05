@@ -19,16 +19,16 @@ from .background_task import (
     BackgroundTask, run_background_task, create_task_id, MAX_STEPS,
 )
 from ..agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
-from ..llm import CircuitOpenError, CodexChatClient, KimiClient, OllamaClient
-from ..llm.codex_auth import CodexAuthPool
+from ..llm import CircuitOpenError
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
 from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
-from ..tools import ToolResult
+from ..tools import ToolResult, get_tool_definitions
 from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..async_utils import fire_and_forget
 from .channel_state import ChannelStateRegistry
+from .llm_gateway import LLMGateway
 from .prompts import PromptBuilder
 from .tool_catalog import ToolCatalog
 from .voice import VoiceManager, VoiceMessageProxy
@@ -262,9 +262,6 @@ class OdinBot(commands.Bot):
         self.permissions = services.permissions
         self.tool_executor = services.tool_executor
         self.skill_manager = services.skill_manager
-        self.codex_client = services.codex_client
-        self.ollama_client = services.ollama_client
-        self.kimi_client = services.kimi_client
         self.scheduler = services.scheduler
         self.audit = services.audit
         self.api_token_manager = services.api_token_manager
@@ -291,10 +288,21 @@ class OdinBot(commands.Bot):
         # constructor arg; signing happens automatically inside log_execution.
         self.audit_signer = self.audit._signer
 
-        # LLM provider-switch state (moves into LLMGateway in P4)
-        self._llm_provider_lock = asyncio.Lock()
-        self._llm_active_requests = 0
-        self._llm_switching = False
+        # LLM provider management (RFC-001 P4) — the gateway owns the
+        # provider clients and switch state; codex_client/ollama_client/
+        # kimi_client on the bot are property shims over it.
+        self._llm_gateway = LLMGateway(
+            get_config=lambda: self.config,
+            codex_client=services.codex_client,
+            ollama_client=services.ollama_client,
+            kimi_client=services.kimi_client,
+            subsystem_guard=services.subsystem_guard,
+            model_router=services.model_router,
+            auxiliary_llm_client=services.auxiliary_llm_client,
+            cost_tracker=services.cost_tracker,
+            sessions=services.sessions,
+            reflector=services.reflector,
+        )
 
         # Wire LLM callbacks to whichever provider is active
         if self.llm_client is not None:
@@ -350,177 +358,47 @@ class OdinBot(commands.Bot):
 
     @property
     def llm_client(self):
-        """Return whichever LLM provider is currently active."""
-        provider_cfg = getattr(self.config, "llm_provider", None)
-        active = provider_cfg.active_provider if provider_cfg else "codex"
-        if active == "ollama" and self.ollama_client is not None:
-            return self.ollama_client
-        if active == "kimi" and self.kimi_client is not None:
-            return self.kimi_client
-        return self.codex_client
+        """Return whichever LLM provider is currently active (gateway-owned)."""
+        return self._llm_gateway.active_client
 
     def _wire_llm_callbacks(self) -> None:
-        """Attach LLM-backed compaction and reflection callbacks using the active provider."""
-        # Compaction emits a segment of up to ~2500 chars (≈625 tokens) plus
-        # structured header lines; reflection emits multi-lesson JSON. The old
-        # 300/500 caps guaranteed mid-output truncation on providers that honor
-        # max_tokens (Ollama/Kimi) — truncated reflection JSON parsed to [] and
-        # silently dropped lessons. (Codex ignores max_tokens entirely.)
-        async def _llm_compaction(messages: list[dict], system: str) -> str:
-            client = self.llm_client
-            if not client:
-                raise RuntimeError("No LLM provider configured")
-            return await client.chat(messages=messages, system=system, max_tokens=1500)
-
-        async def _llm_reflection(messages: list[dict], system: str) -> str:
-            client = self.llm_client
-            if not client:
-                raise RuntimeError("No LLM provider configured")
-            return await client.chat(messages=messages, system=system, max_tokens=2000)
-
-        self.sessions.set_compaction_fn(_llm_compaction)
-        self.reflector.set_text_fn(_llm_reflection)
+        """Attach LLM-backed compaction/reflection callbacks (gateway-owned)."""
+        self._llm_gateway.wire_callbacks()
 
     def _wire_codex_callbacks(self) -> None:
         """Legacy alias — routes through provider abstraction."""
-        self._wire_llm_callbacks()
+        self._llm_gateway.wire_callbacks()
 
-    # ---------- Live Codex reload -----------------------------------------
+    # ---------- Live provider reloads (gateway-owned, facade retained) ------
 
     async def _reload_codex_inner(self) -> dict:
         """Inner reload — caller must hold _llm_provider_lock."""
-        if not self.config.openai_codex.enabled:
-            self.codex_client = None
-            return {"configured": False, "reason": "openai_codex disabled in config"}
-
-        if self.codex_client is not None:
-            auth = getattr(self.codex_client, "auth", None)
-            if isinstance(auth, CodexAuthPool):
-                count = await auth.reload_async()
-                return {"configured": True, "reloaded": True, "accounts": count}
-
-        auth = CodexAuthPool(self.config.openai_codex.credentials_path)
-        if not auth.is_configured():
-            return {"configured": False, "reason": "credentials file missing or empty"}
-
-        self.codex_client = CodexChatClient(
-            auth=auth,
-            model=self.config.openai_codex.model,
-            max_tokens=self.config.openai_codex.max_tokens,
-        )
-        self._wire_llm_callbacks()
-        log.info("Codex client created via live reload (model: %s)", self.config.openai_codex.model)
-        return {"configured": True, "created": True, "accounts": len(auth._accounts)}
+        return await self._llm_gateway.reload_codex_inner()
 
     async def reload_codex_auth(self) -> dict:
         """Reload Codex credentials and create the client if it was missing at boot."""
-        async with self._llm_provider_lock:
-            return await self._reload_codex_inner()
-
-    # ---------- Live Ollama reload ----------------------------------------
+        return await self._llm_gateway.reload_codex()
 
     async def _reload_ollama_inner(self) -> dict:
         """Inner reload — caller must hold _llm_provider_lock."""
-        ollama_cfg = getattr(self.config, "ollama", None)
-        if not ollama_cfg or not ollama_cfg.enabled:
-            old = self.ollama_client
-            self.ollama_client = None
-            if old:
-                asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
-            return {"configured": False, "reason": "ollama disabled in config"}
-
-        old = self.ollama_client
-        self.ollama_client = OllamaClient(
-            base_url=ollama_cfg.base_url,
-            model=ollama_cfg.model,
-            max_tokens=ollama_cfg.max_tokens,
-            timeout=ollama_cfg.timeout,
-            api_key=ollama_cfg.api_key,
-        )
-        if old:
-            asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
-        self._wire_llm_callbacks()
-        log.info("Ollama client reloaded (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url)
-        return {"configured": True}
+        return await self._llm_gateway.reload_ollama_inner()
 
     async def reload_ollama(self) -> dict:
         """Reload Ollama client from current config."""
-        async with self._llm_provider_lock:
-            result = await self._reload_ollama_inner()
-        if result.get("configured") and self.ollama_client:
-            result["health"] = await self.ollama_client.health_check()
-        return result
+        return await self._llm_gateway.reload_ollama()
 
     async def _reload_kimi_inner(self) -> dict:
         """Inner reload — caller must hold _llm_provider_lock."""
-        kimi_cfg = getattr(self.config, "kimi", None)
-        if not kimi_cfg or not kimi_cfg.enabled:
-            old = self.kimi_client
-            self.kimi_client = None
-            if old:
-                asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
-            return {"configured": False, "reason": "kimi disabled in config"}
-        if not kimi_cfg.api_key:
-            return {"configured": False, "reason": "kimi api_key not set"}
-
-        old = self.kimi_client
-        self.kimi_client = KimiClient(
-            api_key=kimi_cfg.api_key,
-            model=kimi_cfg.model,
-            max_tokens=kimi_cfg.max_tokens,
-            timeout=kimi_cfg.timeout,
-        )
-        if old:
-            asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
-        self._wire_llm_callbacks()
-        log.info("Kimi client reloaded (model: %s)", kimi_cfg.model)
-        return {"configured": True}
+        return await self._llm_gateway.reload_kimi_inner()
 
     async def reload_kimi(self) -> dict:
         """Reload Kimi client from current config."""
-        async with self._llm_provider_lock:
-            result = await self._reload_kimi_inner()
-        if result.get("configured") and self.kimi_client:
-            result["health"] = await self.kimi_client.health_check()
-        return result
+        return await self._llm_gateway.reload_kimi()
 
     async def switch_llm_provider(self, provider: str) -> dict:
         """Switch the active LLM provider at runtime."""
-        if provider not in ("codex", "ollama", "kimi"):
-            return {"error": f"Unknown provider: {provider}"}
+        return await self._llm_gateway.switch_provider(provider)
 
-        async with self._llm_provider_lock:
-            if provider == "codex" and not self.codex_client:
-                return {"error": "Codex not configured — authenticate first"}
-            if provider == "ollama" and not self.ollama_client:
-                return {"error": "Ollama not configured — enable and set base_url first"}
-            if provider == "kimi" and not self.kimi_client:
-                return {"error": "Kimi not configured — set api_key first"}
-
-            self._llm_switching = True
-            try:
-                if self._llm_active_requests > 0:
-                    log.warning("Provider switch while %d request(s) in-flight — waiting", self._llm_active_requests)
-                    for _ in range(50):
-                        if self._llm_active_requests == 0:
-                            break
-                        await asyncio.sleep(0.1)
-
-                self.config.llm_provider.active_provider = provider
-                self._wire_llm_callbacks()
-            finally:
-                self._llm_switching = False
-
-        client = self.llm_client
-        model = getattr(client, "model", "unknown") if client else "none"
-        log.info("LLM provider switched to %s (model: %s)", provider, model)
-        return {"active_provider": provider, "model": model}
-
-    # ---------- Live aliases expected by the health checker / web UI -------
-    # These forward to the Heimdall-style internal names. Keeping them as
-    # @property (not as one-time assignments in __init__) ensures that if
-    # self.codex_client or self._knowledge_store is ever reassigned after
-    # boot (reloads, reinit flows), health reports stay accurate.
 
     @property
     def codex(self):
@@ -539,6 +417,38 @@ class OdinBot(commands.Bot):
     def knowledge(self, value) -> None:
         """Allow tests and reloads to swap the knowledge store via the public name."""
         self._knowledge_store = value
+
+    # LLM provider client shims — storage moved to LLMGateway (P4); the
+    # attribute spellings stay because the web layer reads them, live
+    # reloads replace them, and tests inject fakes via bot.codex_client.
+    @property
+    def codex_client(self):
+        return self._llm_gateway.codex_client
+
+    @codex_client.setter
+    def codex_client(self, value) -> None:
+        self._llm_gateway.codex_client = value
+
+    @property
+    def ollama_client(self):
+        return self._llm_gateway.ollama_client
+
+    @ollama_client.setter
+    def ollama_client(self, value) -> None:
+        self._llm_gateway.ollama_client = value
+
+    @property
+    def kimi_client(self):
+        return self._llm_gateway.kimi_client
+
+    @kimi_client.setter
+    def kimi_client(self, value) -> None:
+        self._llm_gateway.kimi_client = value
+
+    @property
+    def _llm_provider_lock(self):
+        return self._llm_gateway.provider_lock
+
 
     # Prompt/catalog cache shims — web/api.py reads AND writes these names
     # (Appendix B starred entries); storage moved to PromptBuilder/ToolCatalog
@@ -943,79 +853,13 @@ class OdinBot(commands.Bot):
         user_id: str = "", channel_id: str = "", tools_used: list[str] | None = None,
         **kwargs,
     ):
-        """Wrap Codex chat_with_tools with cost / subsystem / routing wiring.
+        """Guarded LLM call — owned by LLMGateway (P4)."""
+        return await self._llm_gateway.call_with_tools(
+            messages=messages, system=system, tools=tools,
+            user_message=user_message, user_id=user_id, channel_id=channel_id,
+            tools_used=tools_used, **kwargs,
+        )
 
-        - subsystem_guard.check() short-circuits if codex is UNAVAILABLE
-        - model_router (when enabled and user_message given) picks cheap vs
-          strong model; cheap path uses auxiliary_llm_client when available
-        - cost_tracker.record() captures token usage on every successful call
-        - subsystem_guard.record_success / record_failure tracks codex health
-        """
-        async with self._llm_provider_lock:
-            if self._llm_switching:
-                raise RuntimeError("LLM provider switch in progress — retry shortly")
-            client = self.llm_client
-            if client is None:
-                raise RuntimeError("No LLM provider configured")
-            self._llm_active_requests += 1
-            provider_cfg = getattr(self.config, "llm_provider", None)
-            active = provider_cfg.active_provider if provider_cfg else "codex"
-
-        guard_key = f"llm_{active}"
-        if self.subsystem_guard is not None:
-            err = self.subsystem_guard.check(guard_key)
-            if err:
-                self._llm_active_requests -= 1
-                raise RuntimeError(f"LLM subsystem unavailable: {err}")
-        # Auxiliary cheap-model routing is Codex-only (the aux client is always a
-        # CodexChatClient). When the operator has switched the active provider to
-        # ollama/kimi, do NOT divert "cheap" turns back to Codex — that defeats the
-        # provider switch and fails if Codex isn't authed. Let the active provider
-        # handle everything.
-        if (
-            user_message
-            and active == "codex"
-            and self.model_router is not None
-            and self.auxiliary_llm_client is not None
-        ):
-            try:
-                decision = await self.model_router.route(user_message)
-                if not decision.use_strong:
-                    client = self.auxiliary_llm_client
-                    log.debug(
-                        "model_router: routing to cheap model (intent=%s, conf=%.2f)",
-                        decision.intent.value, decision.confidence,
-                    )
-            except Exception:
-                log.exception("model_router.route failed; using strong model (non-fatal)")
-
-        try:
-            try:
-                resp = await client.chat_with_tools(
-                    messages=messages, system=system, tools=tools, **kwargs,
-                )
-            except Exception as exc:
-                if self.subsystem_guard is not None:
-                    self.subsystem_guard.record_failure(guard_key, str(exc))
-                raise
-            if self.subsystem_guard is not None:
-                self.subsystem_guard.record_success(guard_key)
-            if self.cost_tracker is not None:
-                try:
-                    active_model = getattr(client, "model", "unknown")
-                    self.cost_tracker.record(
-                        int(getattr(resp, "input_tokens", 0) or 0),
-                        int(getattr(resp, "output_tokens", 0) or 0),
-                        model=active_model,
-                        user_id=user_id,
-                        channel_id=channel_id,
-                        tools_used=tools_used or [],
-                    )
-                except Exception:
-                    log.exception("CostTracker.record failed (non-fatal)")
-            return resp
-        finally:
-            self._llm_active_requests -= 1
 
     # Successful operations below this tool count are routine — reflection
     # is reserved for failures, corrections, explicit asks, and substantive work.
