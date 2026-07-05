@@ -20,6 +20,7 @@ ERROR_DETAILS = [{"tool": "run_command", "input": {}, "result": "Error: boom", "
 
 
 def _bot(*, reflection_enabled: bool = True, gate_verdict=(True, "test")):
+    """A namespace carrying the recorder's collaborators (narrow-deps, P3)."""
     gate = Mock()
     gate.evaluate = Mock(return_value=gate_verdict)
     reflector = Mock()
@@ -30,6 +31,16 @@ def _bot(*, reflection_enabled: bool = True, gate_verdict=(True, "test")):
         ),
         reflector=reflector,
         _loop_reflection_gate=gate,
+    )
+
+
+def _recorder(bot) -> TurnRecorder:
+    return TurnRecorder(
+        get_config=lambda: bot.config,
+        trajectory_saver=None,
+        reflector=getattr(bot, "reflector", None),
+        outbound_webhook_dispatcher=None,
+        loop_reflection_gate=bot._loop_reflection_gate,
     )
 
 
@@ -54,7 +65,7 @@ def _reflect(bot, **overrides):
         user_id="u1",
     )
     kwargs.update(overrides)
-    TurnRecorder(bot)._maybe_loop_reflect(**kwargs)
+    _recorder(bot)._maybe_loop_reflect(**kwargs)
 
 
 async def test_success_path_consults_gate_and_fires_reflection(monkeypatch):

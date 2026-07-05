@@ -1,17 +1,22 @@
-"""Scheduler, digest, and monitoring callbacks (RFC-001 Phase 10).
+"""Scheduler, digest, and monitoring callbacks (RFC-001 P10, RFC-002 P3).
 
-Verbatim host-based moves from OdinBot: the scheduled-task action router
-(reminder/check/workflow/digest), workflow step execution with condition
-and on_failure semantics, the structured-RBAC scheduled dispatch, the
-infrastructure digest, mention resolution, and the monitor/failure alert
-callbacks. The bot keeps delegates — the scheduler is started with bot
-methods (on_ready) and tests drive them there.
+The scheduled-task action router (reminder/check/workflow/digest),
+workflow step execution with condition and on_failure semantics, the
+structured-RBAC scheduled dispatch, the infrastructure digest, mention
+resolution, and the monitor/failure alert callbacks. Narrow-deps since
+RFC-002 P3: live roots (``config``, the guild list) come in as provider
+callables; the LLM surface comes in as the gateway (which owns the
+swappable provider clients); cross-component calls (loop dispatch, agent
+collection) take the components directly — construction order in
+``wiring.build_components`` guarantees they exist.
 """
 
 from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import discord
 
@@ -23,26 +28,46 @@ from .tool_loop import _LoopMessageProxy
 log = get_logger("discord")
 
 
+@dataclass(frozen=True)
+class ScheduledEventsDeps:
+    """The true dependency surface of the scheduled-events handlers."""
+
+    get_config: Callable  # live root — replaced by config hot-reload
+    get_channel: Callable  # discord.Client.get_channel (bound method)
+    get_guilds: Callable  # live — the guild list changes at runtime
+    tool_executor: object
+    audit: object
+    llm_gateway: object  # owns the swappable provider clients
+    tool_loop: object  # ToolLoopRunner — shared dispatch path
+    agent_task_tools: object  # agent result collection in workflows
+
+
 class ScheduledEventHandlers:
-    def __init__(self, host) -> None:
-        self.host = host
+    def __init__(self, deps: ScheduledEventsDeps) -> None:
+        self._get_config = deps.get_config
+        self._get_channel = deps.get_channel
+        self._get_guilds = deps.get_guilds
+        self._tool_executor = deps.tool_executor
+        self._audit = deps.audit
+        self._llm_gateway = deps.llm_gateway
+        self._tool_loop = deps.tool_loop
+        self._agent_task_tools = deps.agent_task_tools
 
     async def _on_scheduled_digest(self, schedule: dict) -> None:
         """Run the daily infrastructure digest and post results."""
-        bot = self.host
         channel_id = schedule.get("channel_id")
         if not channel_id:
             log.warning("Digest has no channel_id: %s", schedule["id"])
             return
 
-        channel = bot.get_channel(int(channel_id))
+        channel = self._get_channel(int(channel_id))
         if not channel:
             log.warning("Digest channel %s not found", channel_id)
             return
 
         log.info("Running daily digest for channel %s", channel_id)
         try:
-            raw = await bot._format_digest_raw()
+            raw = await self._format_digest_raw()
         except Exception as e:
             log.error("Digest data collection failed: %s", e)
             await channel.send(
@@ -61,8 +86,8 @@ class ScheduledEventHandlers:
         ]
         digest_system = "You are a concise infrastructure report summarizer. Output a short summary with key findings."  # noqa: E501
         try:
-            if bot.llm_client:
-                summary = await bot.llm_client.chat(
+            if self._llm_gateway.active_client:
+                summary = await self._llm_gateway.active_client.chat(
                     messages=digest_messages,
                     system=digest_system,
                     max_tokens=500,
@@ -77,7 +102,7 @@ class ScheduledEventHandlers:
         await channel.send(scrub_response_secrets(f"**Daily Infrastructure Digest**\n\n{summary}"))
 
         # Audit log the digest
-        await bot.audit.log_execution(
+        await self._audit.log_execution(
             user_id="system",
             user_name="scheduler",
             channel_id=channel_id,
@@ -90,14 +115,13 @@ class ScheduledEventHandlers:
 
     async def _format_digest_raw(self) -> str:
         """Collect raw infrastructure data for the digest."""
-        bot = self.host
         tasks = []
         labels = []
 
         # Disk + memory checks on all hosts via run_command
-        for host_alias in bot.config.tools.hosts:
+        for host_alias in self._get_config().tools.hosts:
             tasks.append(
-                bot.tool_executor.execute(
+                self._tool_executor.execute(
                     "run_command",
                     {
                         "host": host_alias,
@@ -107,7 +131,7 @@ class ScheduledEventHandlers:
             )
             labels.append(f"Disk ({host_alias})")
             tasks.append(
-                bot.tool_executor.execute(
+                self._tool_executor.execute(
                     "run_command",
                     {"host": host_alias, "command": "free -h"},
                 )
@@ -127,11 +151,10 @@ class ScheduledEventHandlers:
 
     def _resolve_mentions(self, text: str) -> str:
         """Replace @username with proper Discord <@ID> mentions."""
-        bot = self.host
 
         def _replace(match: re.Match) -> str:
             name = match.group(1).lower()
-            for guild in bot.guilds:
+            for guild in self._get_guilds():
                 for member in guild.members:
                     if member.name.lower() == name or (member.nick and member.nick.lower() == name):
                         return f"<@{member.id}>"
@@ -141,17 +164,16 @@ class ScheduledEventHandlers:
 
     async def _on_monitor_alert(self, message: str) -> None:
         """Callback fired by the infrastructure watcher when a threshold is crossed."""
-        bot = self.host
-        channel_id = bot.config.monitoring.alert_channel_id
+        channel_id = self._get_config().monitoring.alert_channel_id
         if not channel_id:
             # Fall back to first configured channel
-            if bot.config.discord.channels:
-                channel_id = bot.config.discord.channels[0]
+            if self._get_config().discord.channels:
+                channel_id = self._get_config().discord.channels[0]
             else:
                 log.warning("Monitor alert has no channel to send to: %s", message[:100])
                 return
 
-        channel = bot.get_channel(int(channel_id))
+        channel = self._get_channel(int(channel_id))
         if not channel:
             log.warning("Monitor alert channel %s not found", channel_id)
             return
@@ -175,11 +197,10 @@ class ScheduledEventHandlers:
         Routes through the same client-level dispatch as live messages and
         autonomous loops, so scheduled tasks have full tool parity.
         """
-        bot = self.host
         # Pre-check RBAC so we can return a structured failure — the dispatch
         # also checks, but returns a plain denial string we'd have to guess at.
         if requester_id:
-            denial = bot.tool_executor.check_permission(tool_name, requester_id)
+            denial = self._tool_executor.check_permission(tool_name, requester_id)
             if isinstance(denial, str) and denial:
                 return ToolResult(
                     output=denial, ok=False, error="permission_denied", tool_name=tool_name
@@ -187,7 +208,7 @@ class ScheduledEventHandlers:
 
         msg_proxy = _LoopMessageProxy(channel, requester_id or "0", requester_name)
         try:
-            result = await bot._dispatch_loop_tool_inner(
+            result = await self._tool_loop.dispatch_loop_tool_inner(
                 tool_name,
                 tool_input,
                 msg_proxy,
@@ -214,7 +235,6 @@ class ScheduledEventHandlers:
 
         Returns True if all steps succeeded, False if any step failed.
         """
-        bot = self.host
         steps = schedule.get("steps", [])
         desc = schedule.get("description", "Workflow")
         results: list[str] = []
@@ -253,7 +273,7 @@ class ScheduledEventHandlers:
                 if tool_name == "spawn_agent":
                     tool_input = {**tool_input, "_scheduled": True}
 
-                result = await bot._execute_scheduled_tool(
+                result = await self._execute_scheduled_tool(
                     tool_name,
                     tool_input,
                     channel,
@@ -271,7 +291,7 @@ class ScheduledEventHandlers:
                     if id_match:
                         agent_id = id_match.group(1)
                         timeout = float(step.get("timeout", 3660))
-                        agent_text, agent_data = await bot._collect_agent_result(
+                        agent_text, agent_data = await self._agent_task_tools._collect_agent_result(
                             agent_id,
                             timeout=min(timeout, 3660),
                         )
@@ -325,7 +345,6 @@ class ScheduledEventHandlers:
     async def _on_schedule_failure(self, schedule: dict, consecutive: int) -> None:
         """Alert callback fired when a schedule crosses the consecutive-failure
         threshold. Previously never wired, so the alerting path was dead."""
-        bot = self.host
         channel_id = schedule.get("channel_id")
         last_error = schedule.get("last_error", "unknown error")
         text = (
@@ -334,7 +353,7 @@ class ScheduledEventHandlers:
             f"```\n{str(last_error)[:1000]}\n```"
         )
         try:
-            channel = bot.get_channel(int(channel_id)) if channel_id else None
+            channel = self._get_channel(int(channel_id)) if channel_id else None
             if channel:
                 await channel.send(scrub_response_secrets(text))
             else:
@@ -349,9 +368,8 @@ class ScheduledEventHandlers:
 
     async def _on_scheduled_task(self, schedule: dict) -> None:
         """Callback fired by the scheduler when a task is due."""
-        bot = self.host
         try:
-            await bot.audit.log_event(
+            await self._audit.log_event(
                 event_type="schedule_execution",
                 action=schedule.get("action", "unknown"),
                 actor="scheduler",
@@ -366,19 +384,19 @@ class ScheduledEventHandlers:
             log.warning("Scheduled task has no channel_id: %s", schedule["id"])
             return
 
-        channel = bot.get_channel(int(channel_id))
+        channel = self._get_channel(int(channel_id))
         if not channel:
             log.warning("Scheduled task channel %s not found", channel_id)
             return
 
         if schedule["action"] == "digest":
-            await bot._on_scheduled_digest(schedule)
+            await self._on_scheduled_digest(schedule)
             return
 
         if schedule["action"] == "reminder":
             msg = schedule.get("message", schedule["description"])
             # Resolve @username mentions to proper Discord <@ID> mentions
-            msg = bot._resolve_mentions(msg)
+            msg = self._resolve_mentions(msg)
             try:
                 await channel.send(f"**Scheduled reminder:** {msg}")
             except Exception as e:
@@ -390,7 +408,7 @@ class ScheduledEventHandlers:
             req_id = schedule.get("requester_id") or None
             req_name = schedule.get("requester") or schedule.get("created_by") or "scheduler"
             try:
-                result = await bot._execute_scheduled_tool(
+                result = await self._execute_scheduled_tool(
                     tool_name,
                     tool_input,
                     channel,
@@ -424,7 +442,7 @@ class ScheduledEventHandlers:
                 raise
 
         elif schedule["action"] == "workflow":
-            ok = await bot._run_scheduled_workflow(channel, schedule)
+            ok = await self._run_scheduled_workflow(channel, schedule)
             if not ok:
                 raise RuntimeError(
                     f"Scheduled workflow failed: {schedule.get('description', '')[:200]}"
