@@ -161,7 +161,7 @@ class OdinBot(commands.Bot):
 
         self.config = config
         # commands.Bot already initializes self.tree (app_commands.CommandTree); do not overwrite
-        self._start_time = time.monotonic()
+        self.start_time = self._start_time = time.monotonic()
 
         # ------------------------------------------------------------------
         # Subsystem construction lives in the composition root (wiring.py,
@@ -185,6 +185,7 @@ class OdinBot(commands.Bot):
         self._background_tasks = self._channel_state.background_tasks
 
         self.context_loader = services.context_loader
+        self.embedder = services.embedder  # public; _embedder alias below
         self.reflector = services.reflector
         self._embedder = services.embedder
         self._fts_index = services.fts_index
@@ -277,7 +278,7 @@ class OdinBot(commands.Bot):
         # health checker always reads the live value, even if the underlying
         # attribute gets reassigned during a reload or reinit.
 
-        self._system_prompt = self._build_system_prompt()
+        self.prompt_builder.rebuild_default()
         self._register_commands()
         self._init_allowed_webhook_ids()
         self._log_startup_config()
@@ -376,6 +377,16 @@ class OdinBot(commands.Bot):
     @property
     def _llm_provider_lock(self):
         return self._llm_gateway.provider_lock
+
+    # Default-prompt storage moved to PromptBuilder (RFC-002 P6); the old
+    # spelling stays live in BOTH directions until P7.
+    @property
+    def _system_prompt(self):
+        return self.prompt_builder.default_prompt
+
+    @_system_prompt.setter
+    def _system_prompt(self, value) -> None:
+        self.prompt_builder.default_prompt = value
 
 
     # Prompt/catalog cache shims — web/api.py reads AND writes these names

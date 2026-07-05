@@ -19,7 +19,7 @@ log = get_logger("discord")
 def register_commands(bot) -> None:
     @bot.tree.command(name="status", description="Show Odin bot status")
     async def cmd_status(interaction: discord.Interaction) -> None:
-        if not bot._is_allowed_user(interaction.user):
+        if not bot.intake.is_allowed_user(interaction.user):
             await interaction.response.send_message("Access denied.", ephemeral=True)
             return
         voice_status = ""
@@ -33,15 +33,15 @@ def register_commands(bot) -> None:
                 voice_status = "\nVoice: Not connected"
         provider_cfg = getattr(bot.config, "llm_provider", None)
         active = provider_cfg.active_provider if provider_cfg else "codex"
-        client = bot.llm_client
+        client = bot.llm_gateway.active_client
         if client:
             model = getattr(client, "model", "unknown")
             llm_status = f"LLM: **{active}** ({model})"
         else:
             llm_status = "LLM: not configured"
-        codex_configured = "yes" if bot.codex_client else "no"
-        ollama_configured = "yes" if bot.ollama_client else "no"
-        kimi_configured = "yes" if bot.kimi_client else "no"
+        codex_configured = "yes" if bot.llm_gateway.codex_client else "no"
+        ollama_configured = "yes" if bot.llm_gateway.ollama_client else "no"
+        kimi_configured = "yes" if bot.llm_gateway.kimi_client else "no"
         await interaction.response.send_message(
             f"**Odin Status**\n"
             f"{llm_status}\n"
@@ -51,7 +51,7 @@ def register_commands(bot) -> None:
 
     @bot.tree.command(name="reset", description="Reset conversation history")
     async def cmd_reset(interaction: discord.Interaction) -> None:
-        if not bot._is_allowed_user(interaction.user):
+        if not bot.intake.is_allowed_user(interaction.user):
             await interaction.response.send_message("Access denied.", ephemeral=True)
             return
         bot.sessions.reset(str(interaction.channel_id))
@@ -59,18 +59,19 @@ def register_commands(bot) -> None:
 
     @bot.tree.command(name="reload", description="Reload context files")
     async def cmd_reload(interaction: discord.Interaction) -> None:
-        if not bot._is_allowed_user(interaction.user):
+        if not bot.intake.is_allowed_user(interaction.user):
             await interaction.response.send_message("Access denied.", ephemeral=True)
             return
         bot.context_loader.reload()
-        bot._invalidate_prompt_caches()
-        bot._system_prompt = bot._build_system_prompt()
+        bot.prompt_builder.invalidate()
+        bot.tool_catalog.invalidate()
+        bot.prompt_builder.rebuild_default()
         await interaction.response.send_message("Context files reloaded.")
 
     @bot.tree.command(name="purge", description="Delete recent messages in this channel")
     @app_commands.describe(count="Number of messages to delete (default 100, max 500)")
     async def cmd_purge(interaction: discord.Interaction, count: int = 100) -> None:
-        if not bot._is_allowed_user(interaction.user):
+        if not bot.intake.is_allowed_user(interaction.user):
             await interaction.response.send_message("Access denied.", ephemeral=True)
             return
         count = min(count, 500)
@@ -84,7 +85,7 @@ def register_commands(bot) -> None:
 
     @bot.tree.command(name="usage", description="Show token usage details")
     async def cmd_usage(interaction: discord.Interaction) -> None:
-        if not bot._is_allowed_user(interaction.user):
+        if not bot.intake.is_allowed_user(interaction.user):
             await interaction.response.send_message("Access denied.", ephemeral=True)
             return
         await interaction.response.send_message(
@@ -96,12 +97,12 @@ def register_commands(bot) -> None:
 
     @bot.tree.command(name="stop", description="Stop Odin's current task in this channel")
     async def cmd_stop(interaction: discord.Interaction) -> None:
-        if not bot._is_allowed_user(interaction.user):
+        if not bot.intake.is_allowed_user(interaction.user):
             await interaction.response.send_message("Access denied.", ephemeral=True)
             return
         channel_id = str(interaction.channel_id)
-        event = bot._cancel_events.setdefault(channel_id, asyncio.Event())
-        active = bot._channel_state.active_requests.get(channel_id)
+        event = bot.channel_state.cancel_events.setdefault(channel_id, asyncio.Event())
+        active = bot.channel_state.active_requests.get(channel_id)
         if active:
             event.set()
             await interaction.response.send_message("Stopping current task...", ephemeral=True)

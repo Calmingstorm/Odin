@@ -560,8 +560,8 @@ class TestModuleImports:
 
 def _make_bot_with_store(store=None):
     bot = MagicMock()
-    bot._knowledge_store = store
-    bot._embedder = None
+    bot.knowledge = store
+    bot.embedder = None
     bot.config = MagicMock()
     bot.config.web = MagicMock()
     bot.config.web.api_token = ""
