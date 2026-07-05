@@ -523,7 +523,7 @@ class TestLoopTermination:
         assert tools_used == []
         bot.tool_executor.execute.assert_not_awaited()
         # Active-request bookkeeping cleaned up
-        assert "99" not in bot._active_request_by_channel
+        assert "99" not in bot._channel_state.active_requests
         assert not bot._cancel_events["99"].is_set()
 
     async def test_stop_during_tool_execution_reports_tools_used(self):
@@ -544,7 +544,7 @@ class TestLoopTermination:
         assert "run_command" in text  # tools note
         assert is_error is False
         assert tools_used == ["run_command"]
-        assert "99" not in bot._active_request_by_channel
+        assert "99" not in bot._channel_state.active_requests
 
     async def test_iteration_cap_exit_is_error(self):
         bot, fake = build(
@@ -563,7 +563,7 @@ class TestLoopTermination:
         bot, fake = build([text_response("done")])
         msg = FakeMessage("go")
         await run_loop(bot, msg)
-        assert str(msg.channel.id) not in bot._active_request_by_channel
+        assert str(msg.channel.id) not in bot._channel_state.active_requests
 
 
 # ---------------------------------------------------------------------------
