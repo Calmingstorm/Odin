@@ -27,6 +27,7 @@ from ..tools import ToolResult, get_tool_definitions
 from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..async_utils import fire_and_forget
 from .channel_state import ChannelStateRegistry
+from .completion import CLASSIFIER_SYSTEM_PROMPT, CompletionClassifier
 from .delivery import DISCORD_MAX_LEN, SEND_MAX_RETRIES, ResponseDelivery
 from .llm_gateway import LLMGateway
 from .native_tools import NativeToolDispatcher, register_native_handlers
@@ -380,6 +381,9 @@ class OdinBot(commands.Bot):
         self._delivery = ResponseDelivery(
             channel_state=self._channel_state,
             change_presence=self.change_presence,
+        )
+        self._completion_classifier = CompletionClassifier(
+            get_llm_client=lambda: self.llm_client,
         )
 
 
@@ -1768,28 +1772,9 @@ class OdinBot(commands.Bot):
                 except Exception as e:
                     log.warning("Failed to send pending skill files: %s", e)
 
-    _CLASSIFIER_SYSTEM_PROMPT = (
-        "You are a completion judge. A user asked an AI assistant to do something. "
-        "The assistant called some tools, then wrote a response. Your job: decide "
-        "if the user's requested outcome was actually achieved.\n\n"
-        "COMPLETE means:\n"
-        "- The user's full request was addressed (not just part of it)\n"
-        "- The exact artifact asked for was produced, not a plausible-shaped substitute\n"
-        "- The assistant is not promising to do more work\n"
-        "- A failure report after genuinely trying counts as COMPLETE\n\n"
-        "INCOMPLETE means:\n"
-        "- The assistant only did part of what was asked (e.g., built but didn't deploy)\n"
-        "- The assistant is describing work it still plans to do\n"
-        "- The assistant is reporting partial progress with more steps remaining\n"
-        "- The response is shaped like an answer but doesn't contain the specific "
-        "  artifact requested (e.g., asked for the generated code; got a description of it)\n"
-        "- The assistant closes by offering MORE work ('I could also…', 'would you like…') "
-        "  instead of finishing the requested work\n\n"
-        'If INCOMPLETE, briefly state what\'s missing after a colon.\n'
-        'Examples: "INCOMPLETE: deployment not performed", "INCOMPLETE: verification step missing", '
-        '"INCOMPLETE: described the synthesized runbook but did not include its source"\n'
-        'If COMPLETE, just say: "COMPLETE"'
-    )
+    # Completion classification — owned by completion.CompletionClassifier
+    # (P7). The class attr + method delegates keep the facade/test seams.
+    _CLASSIFIER_SYSTEM_PROMPT = CLASSIFIER_SYSTEM_PROMPT
 
     async def _classify_completion(
         self,
@@ -1797,83 +1782,14 @@ class OdinBot(commands.Bot):
         response_text: str,
         tools_used: list[str],
     ) -> tuple[bool, str]:
-        """Judge whether the assistant's response fully addresses the user's request.
-
-        Uses the same CodexClient (same OAuth, same API) to make a lightweight
-        classifier call.  Fail-open: any error/timeout/ambiguity → COMPLETE.
-
-        Short-circuit: if ``start_loop`` was called, the user's request was to
-        *schedule* recurring work, not to complete it now.  The loop runs
-        asynchronously in the background, so treat the scheduling itself as
-        completion.  Without this, the classifier reads the user's goal (e.g.
-        "run 50 iterations") and keeps flagging the response INCOMPLETE,
-        forcing redundant in-band execution of the loop's body.
-
-        Returns (is_complete, reason).  reason is non-empty only for INCOMPLETE.
-        """
-        if not self.llm_client:
-            return True, ""
-
-        if "start_loop" in tools_used:
-            log.info(
-                "Completion classifier: start_loop called — loop runs in "
-                "background, treating as COMPLETE"
-            )
-            return True, ""
-
-        classifier_user_msg = (
-            f"User's task: {user_message}\n\n"
-            f"Tools called: {', '.join(tools_used)}\n\n"
-            f"Assistant's response: {response_text}"
+        return await self._completion_classifier.classify(
+            user_message, response_text, tools_used,
         )
-
-        try:
-            raw = await asyncio.wait_for(
-                self.llm_client.chat(
-                    messages=[{"role": "user", "content": classifier_user_msg}],
-                    system=self._CLASSIFIER_SYSTEM_PROMPT,
-                ),
-                timeout=10,
-            )
-        except Exception as e:
-            log.warning("Completion classifier: error/timeout (%s) — fail-open to COMPLETE", e)
-            return True, ""
-
-        return self._parse_classifier_response(raw)
 
     @staticmethod
     def _parse_classifier_response(raw: str) -> tuple[bool, str]:
-        """Parse the classifier's raw text into (is_complete, reason).
+        return CompletionClassifier.parse_response(raw)
 
-        Checks INCOMPLETE first (more specific), then COMPLETE, else fail-open.
-        """
-        stripped = (raw or "").strip()
-        upper = stripped.upper()
-
-        if upper.startswith("INCOMPLETE"):
-            # Extract reason after first colon, dash, or em-dash
-            reason = ""
-            for sep in (":", " - ", " — ", "—"):
-                idx = stripped.find(sep)
-                if idx != -1:
-                    reason = stripped[idx + len(sep):].strip()
-                    break
-            log.info(
-                "Completion classifier: INCOMPLETE reason=%r (raw: %r)",
-                reason, stripped[:80],
-            )
-            return False, reason
-
-        if upper.startswith("COMPLETE"):
-            log.info("Completion classifier: COMPLETE (raw: %r)", stripped[:80])
-            return True, ""
-
-        # Ambiguous / gibberish → fail-open
-        log.info(
-            "Completion classifier: ambiguous response, treating as COMPLETE (raw: %r)",
-            stripped[:80],
-        )
-        return True, ""
 
     async def _process_with_tools(
         self,
