@@ -251,9 +251,21 @@ src/
   __main__.py              Entry point
   config/schema.py         Pydantic config models
   discord/
-    client.py              OdinBot — main executor (~4800 lines)
+    client.py              OdinBot — composition + Discord lifecycle
+    wiring.py              Composition root (services + components)
+    intake_pipeline.py     on_message gating chain + message pipeline
+    tool_loop.py           Chat + autonomous tool-execution pipelines
+    native_tools/          Discord-native tool domains + dispatch table
+    prompts.py             System-prompt assembly + caches
+    llm_gateway.py         Provider clients, reloads, guarded calls
+    delivery.py            Presence, retries, chunked sends
+    channel_state.py       Per-channel mutable state registry
+    scheduled_events.py    Scheduler/digest/monitor callbacks
+    turn_recorder.py       Trajectories, traces, reflection dispatch
+    completion.py          Completion classifier
+    housekeeping.py        Periodic cache maintenance
     response_guards.py     Fabrication, hedging, premature failure detection
-    tool_loop_helpers.py   Request preamble, topic change detection
+    tool_loop_helpers.py   Request preamble + shared leaf helpers
     cogs/                  9 moderation/utility cog extensions
   tools/
     executor.py            Tool dispatch + recovery
