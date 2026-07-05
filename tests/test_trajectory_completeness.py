@@ -253,6 +253,13 @@ class _LoopIterClient:
     def __init__(self, responses, tool_output="hi out", result_cap=2000):
         from types import SimpleNamespace
 
+        # P8 migration: _run_loop_iteration is now a delegate to the
+        # host-based ToolLoopRunner — give the fake host its own runner so
+        # the test keeps driving the REAL loop body.
+        from src.discord.tool_loop import ToolLoopRunner
+
+        self._tool_loop_runner = ToolLoopRunner(self)
+
         class _Obs:
             loop_trace = True
             trajectory_user_content = True
