@@ -23,13 +23,14 @@ from ..llm import CircuitOpenError, CodexChatClient, KimiClient, OllamaClient
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
-from ..llm.system_prompt import build_system_prompt, build_chat_system_prompt
 from ..odin_log import get_logger
 from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
-from ..tools import ToolResult, get_tool_definitions
+from ..tools import ToolResult
 from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..async_utils import fire_and_forget
 from .channel_state import ChannelStateRegistry
+from .prompts import PromptBuilder
+from .tool_catalog import ToolCatalog
 from .voice import VoiceManager, VoiceMessageProxy
 from .wiring import build_services, shutdown_services
 
@@ -239,16 +240,6 @@ class OdinBot(commands.Bot):
         self._recent_actions = self._channel_state.recent_actions
         self._last_op_details = self._channel_state.last_op_details
         self._background_tasks = self._channel_state.background_tasks
-        # Prompt-layer caches — these move with PromptBuilder in P3
-        # Cached merged tool definitions — invalidated on skill create/edit/delete
-        self._cached_merged_tools: list[dict] | None = None
-        # Cached host string dict — invalidated on context reload
-        self._cached_hosts: dict[str, str] | None = None
-        # Cached skills list text — invalidated on skill create/edit/delete
-        self._cached_skills_text: str | None = None
-        # TTL cache for per-user memory (avoids file I/O per message)
-        self._memory_cache: dict[str | None, tuple[float, dict[str, str]]] = {}
-        self._memory_cache_ttl: float = 60.0  # seconds
 
         # ------------------------------------------------------------------
         # Subsystem construction lives in the composition root (wiring.py,
@@ -323,6 +314,26 @@ class OdinBot(commands.Bot):
                 executor=self.tool_executor,
                 alert_callback=self._on_monitor_alert,
             )
+
+        # Prompt assembly + tool catalog (RFC-001 P3). Bot-coupled because
+        # they must read LIVE hot-reloadable state: bot.config is replaced by
+        # the web API's config hot-reload and bot.codex_client by live auth
+        # reloads — hence provider callables, not captured references.
+        self._prompt_builder = PromptBuilder(
+            get_config=lambda: self.config,
+            context_loader=self.context_loader,
+            reflector=self.reflector,
+            skill_manager=self.skill_manager,
+            tool_executor=self.tool_executor,
+            channel_state=self._channel_state,
+            voice_manager=self.voice_manager,
+            get_codex_client=lambda: self.codex_client,
+        )
+        self._tool_catalog = ToolCatalog(
+            get_config=lambda: self.config,
+            skill_manager=self.skill_manager,
+        )
+
 
         # Public `codex` / `knowledge` attributes are exposed as dynamic
         # properties defined below on the class — see the @property blocks.
@@ -529,6 +540,25 @@ class OdinBot(commands.Bot):
         """Allow tests and reloads to swap the knowledge store via the public name."""
         self._knowledge_store = value
 
+    # Prompt/catalog cache shims — web/api.py reads AND writes these names
+    # (Appendix B starred entries); storage moved to PromptBuilder/ToolCatalog
+    # in P3, the facade spelling stays.
+    @property
+    def _cached_merged_tools(self):
+        return self._tool_catalog.cached
+
+    @_cached_merged_tools.setter
+    def _cached_merged_tools(self, value) -> None:
+        self._tool_catalog.cached = value
+
+    @property
+    def _cached_skills_text(self):
+        return self._prompt_builder.cached_skills_text
+
+    @_cached_skills_text.setter
+    def _cached_skills_text(self, value) -> None:
+        self._prompt_builder.cached_skills_text = value
+
     def _init_allowed_webhook_ids(self) -> None:
         """Populate _ALLOWED_WEBHOOK_IDS from ALLOWED_WEBHOOK_IDS env var."""
         global _ALLOWED_WEBHOOK_IDS
@@ -551,40 +581,6 @@ class OdinBot(commands.Bot):
             log.info("Bot interaction enabled — will respond to other bots")
         if cfg.discord.require_mention:
             log.info("Mention-only mode — will only respond when @mentioned")
-
-    def _get_cached_hosts(self) -> dict[str, str]:
-        """Return cached host string dict. Rebuilt on config reload."""
-        if self._cached_hosts is None:
-            self._cached_hosts = {
-                alias: f"{h.ssh_user}@{h.address}"
-                for alias, h in self.config.tools.hosts.items()
-            }
-        return self._cached_hosts
-
-    def _get_cached_skills_text(self) -> str:
-        """Return cached skills list text. Invalidated on skill create/edit/delete."""
-        if self._cached_skills_text is None:
-            if hasattr(self, "skill_manager"):
-                skills = self.skill_manager.list_skills()
-                if skills:
-                    self._cached_skills_text = "\n".join(
-                        f"- `{s['name']}`: {s['description']}" for s in skills
-                    )
-                else:
-                    self._cached_skills_text = ""
-            else:
-                self._cached_skills_text = ""
-        return self._cached_skills_text
-
-    def _get_cached_memory(self, user_id: str | None) -> dict[str, str]:
-        """Return cached per-user memory with TTL to avoid file I/O per message."""
-        now = time.time()
-        cached = self._memory_cache.get(user_id)
-        if cached and now - cached[0] < self._memory_cache_ttl:
-            return cached[1]
-        memory = self.tool_executor._load_memory_for_user(user_id)
-        self._memory_cache[user_id] = (now, memory)
-        return memory
 
     def _record_user_content(self, trajectory, content: str) -> None:
         """Store the request on the trajectory turn — capped, secret-scrubbed,
@@ -623,27 +619,11 @@ class OdinBot(commands.Bot):
         except Exception:  # noqa: BLE001 — tracing must never block a turn
             return None
 
-    def _get_reflector_section(
-        self, user_id: str | None, query: str | None = None, trace=None,
-    ) -> str:
-        """Learned Context for the prompt — query-aware relevance selection.
-
-        File parsing is mtime-cached inside the reflector, so calling per
-        message is cheap; selection is fast over <=150 entries.
-        """
-        if not hasattr(self, "reflector"):
-            return ""
-        return self.reflector.get_prompt_section(
-            user_id=user_id, query=query, trace=trace,
-        )
-
     def _invalidate_prompt_caches(self) -> None:
         """Invalidate all prompt-related caches. Called on config/context reload."""
-        self._cached_hosts = None
-        self._cached_skills_text = None
-        self._memory_cache.clear()
-        if hasattr(self, "reflector"):
-            self.reflector.invalidate_cache()
+        self._prompt_builder.invalidate()
+        self._tool_catalog.invalidate()
+
 
     def _invoke_skill_missing_required(self, name: str, payload: dict) -> list[str]:
         """Return required input fields the payload omits, or [] if complete.
@@ -738,164 +718,27 @@ class OdinBot(commands.Bot):
         query: str | None = None,
         trace=None,
     ) -> str:
-        voice_info = "Voice support is not enabled."
-        if self.voice_manager:
-            if self.voice_manager.is_connected:
-                ch = self.voice_manager.current_channel
-                ch_name = ch.name if ch else "unknown"
-                voice_info = (
-                    f"You are currently in voice channel **{ch_name}**. "
-                    "You can hear users via speech-to-text and respond via text-to-speech. "
-                    "Transcribed voice input appears as regular messages. Your text responses "
-                    "are spoken aloud in the voice channel AND posted as text. "
-                    "Keep voice responses concise and conversational — they will be spoken."
-                )
-            else:
-                voice_info = (
-                    "Voice support is enabled but you are not in a voice channel. "
-                    "Users can ask you to join with '/voice join' or 'join voice'."
-                )
-
-        p_cfg = self.config.personality if hasattr(self.config, "personality") else None
-        prompt = build_system_prompt(
-            context=self.context_loader.context,
-            hosts=self._get_cached_hosts(),
-            voice_info=voice_info,
-            tz=self.config.timezone,
-            claude_code_dir=self.config.tools.claude_code_dir,
-            personality_preset=p_cfg.preset if p_cfg else "odin",
-            personality_name=p_cfg.custom_name if p_cfg else "",
-            personality_identity=p_cfg.custom_identity if p_cfg else "",
-            personality_voice=p_cfg.custom_voice if p_cfg else "",
+        """Full system prompt — owned by PromptBuilder (P3)."""
+        return self._prompt_builder.build_full_prompt(
+            channel=channel, user_id=user_id, query=query, trace=trace,
         )
 
-        if trace is not None:
-            trace.section("base", tokens=len(prompt) // 4)
-
-        # Inject persistent memory into the system prompt (per-user + global)
-        memory = self._get_cached_memory(user_id)
-        if memory:
-            memory_text = "\n".join(f"- **{k}**: {v}" for k, v in memory.items())
-            prompt += f"\n\n## Persistent Memory\n{memory_text}"
-            if trace is not None:
-                trace.section("persistent_memory", tokens=len(memory_text) // 4,
-                              keys=len(memory))
-
-        # Inject learned context from cross-conversation reflection
-        # (per-user filtered, relevance-ranked against the current query).
-        # The reflector records its own selection decisions on the trace.
-        learned = self._get_reflector_section(user_id, query, trace=trace)
-        if learned:
-            prompt += f"\n\n{learned}"
-
-        # Inject user-created skills list (cached, invalidated on skill CRUD)
-        skills_text = self._get_cached_skills_text()
-        if skills_text:
-            prompt += f"\n\n## User-Created Skills\n{skills_text}"
-            if trace is not None:
-                trace.section("skills_list", tokens=len(skills_text) // 4)
-
-        # Inject recent tool executions for this channel only
-        if channel is not None:
-            channel_id = str(channel.id)
-            channel_actions = self._channel_state.recent_entries(channel_id)
-            if channel_actions:
-                actions_text = "\n".join(channel_actions[-10:])
-                prompt += f"\n\n## Recent Actions\n{actions_text}"
-                if trace is not None:
-                    trace.section("recent_actions", tokens=len(actions_text) // 4,
-                                  entries=len(channel_actions[-10:]))
-
-        # Surface degradation state so the LLM can adapt
-        degradation_notes = []
-        codex = getattr(self, "codex_client", None)
-        if codex and hasattr(codex, "breaker"):
-            breaker_state = codex.breaker.state
-            if breaker_state == "open":
-                degradation_notes.append("LLM backend circuit breaker is OPEN — API calls will fail. Use cached/local approaches.")
-            elif breaker_state == "half_open":
-                degradation_notes.append("LLM backend circuit breaker is recovering (half-open) — requests may be slow or fail.")
-        if degradation_notes:
-            prompt += "\n\n## System Health Warnings\n" + "\n".join(f"- {n}" for n in degradation_notes)
-            if trace is not None:
-                trace.section("health_warnings", tokens=20, notes=len(degradation_notes))
-
-        return prompt
 
     def _build_chat_system_prompt(
         self, channel: discord.abc.GuildChannel | None = None,
         user_id: str | None = None,
         query: str | None = None,
     ) -> str:
-        """Build a lightweight system prompt for chat-routed messages.
-
-        Includes identity, rules, memory, and personality but omits
-        infrastructure details, tool docs, host lists, and PromQL to
-        save input tokens on casual conversation.
-        """
-        voice_info = "Voice support is not enabled."
-        if self.voice_manager:
-            if self.voice_manager.is_connected:
-                ch = self.voice_manager.current_channel
-                ch_name = ch.name if ch else "unknown"
-                voice_info = (
-                    f"You are currently in voice channel **{ch_name}**. "
-                    "Transcribed voice input appears as regular messages. Your text responses "
-                    "are spoken aloud. Keep voice responses concise and conversational."
-                )
-
-        p_cfg = self.config.personality if hasattr(self.config, "personality") else None
-        prompt = build_chat_system_prompt(
-            voice_info=voice_info,
-            tz=self.config.timezone,
-            personality_preset=p_cfg.preset if p_cfg else "odin",
-            personality_name=p_cfg.custom_name if p_cfg else "",
-            personality_identity=p_cfg.custom_identity if p_cfg else "",
-            personality_voice=p_cfg.custom_voice if p_cfg else "",
+        """Lightweight chat prompt — owned by PromptBuilder (P3)."""
+        return self._prompt_builder.build_chat_prompt(
+            channel=channel, user_id=user_id, query=query,
         )
 
-        # Inject persistent memory (per-user + global, personalization matters for chat)
-        memory = self._get_cached_memory(user_id)
-        if memory:
-            memory_text = "\n".join(f"- **{k}**: {v}" for k, v in memory.items())
-            prompt += f"\n\n## Persistent Memory\n{memory_text}"
-
-        # Inject learned context (per-user filtered, relevance-ranked)
-        learned = self._get_reflector_section(user_id, query)
-        if learned:
-            prompt += f"\n\n{learned}"
-
-        return prompt
 
     def _merged_tool_definitions(self) -> list[dict]:
-        """Merge built-in and skill tool definitions, deduplicating by name.
+        """Merged builtin+skill tool definitions — owned by ToolCatalog (P3)."""
+        return self._tool_catalog.merged_definitions()
 
-        Built-in tools take priority over skills with the same name.
-        Tools requiring unconfigured backends are excluded (e.g. claude_code
-        without claude_code_host). Cached — invalidated on skill create/edit/delete.
-        """
-        if self._cached_merged_tools is not None:
-            return self._cached_merged_tools
-        builtin = get_tool_definitions()
-        # Filter out tools that require unconfigured backends
-        if not self.config.tools.claude_code_host:
-            builtin = [t for t in builtin if t["name"] != "claude_code"]
-        _email_tools = {"email_send", "email_search", "email_read", "email_list_recent"}
-        if not getattr(self.config, "email", None) or not self.config.email.enabled:
-            builtin = [t for t in builtin if t["name"] not in _email_tools]
-        # issue_tracker returns "not configured" for every call unless enabled,
-        # yet was always advertised — so the model kept trying it. Filter it out
-        # like the other backend-gated tools.
-        issue_cfg = getattr(self.config, "issue_tracker", None)
-        if not issue_cfg or not issue_cfg.enabled:
-            builtin = [t for t in builtin if t["name"] != "issue_tracker"]
-        builtin_names = {t["name"] for t in builtin}
-        skill_defs = [
-            t for t in self.skill_manager.get_tool_definitions()
-            if t["name"] not in builtin_names
-        ]
-        self._cached_merged_tools = builtin + skill_defs
-        return self._cached_merged_tools
 
     def _cleanup_stale_caches(self) -> None:
         """Remove stale entries from per-channel caches to prevent memory leaks.
@@ -910,13 +753,8 @@ class OdinBot(commands.Bot):
         active_channels = set(self.sessions.ids())
         self._channel_state.cleanup(active_channels=active_channels)
 
-        # Clean up expired TTL cache entries for per-user memory
-        # (prompt-cache family — moves with PromptBuilder in P3)
-        ttl = getattr(self, "_memory_cache_ttl", 60.0)
-        self._memory_cache = {
-            k: v for k, v in getattr(self, "_memory_cache", {}).items()
-            if now - v[0] < ttl
-        }
+        # Prompt-layer memory cache pruning — owned by PromptBuilder (P3)
+        self._prompt_builder.prune_expired_memory(now)
 
         # Agent lifecycle: kill stuck agents, log stale ones
         if hasattr(self, "agent_manager"):
