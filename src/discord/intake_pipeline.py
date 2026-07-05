@@ -1,25 +1,29 @@
-"""Message intake and pipeline orchestration (RFC-001 Phase 9).
+"""Message intake and pipeline orchestration (RFC-001 P9, RFC-002 P4).
 
-``MessageIntake.handle`` is the verbatim ``on_message`` gating chain
-(secret scrub → cog commands → bot/webhook gates → allowlists → channel
-enablement → mention gate → dedup → bot-message buffering → attachments →
-voice shortcuts). ``MessagePipeline.run`` is the verbatim
-``_handle_message`` (per-channel lock + thread-context inheritance) and
-``_run_inner`` the verbatim ``_handle_message_inner`` (guest/tool routing,
-skill handoff, history persistence + error sanitization, reflection
-dispatch, delivery hand-off).
+``MessageIntake.handle`` is the ``on_message`` gating chain (secret scrub
+→ cog commands → bot/webhook gates → allowlists → channel enablement →
+mention gate → dedup → bot-message buffering → attachments → voice
+shortcuts). ``MessagePipeline.run`` is the old ``_handle_message``
+(per-channel lock + thread-context inheritance) and ``_run_inner`` the old
+``_handle_message_inner`` (guest/tool routing, skill handoff, history
+persistence + error sanitization, reflection dispatch, delivery hand-off).
 
-Host-based like the P5a/P7/P8 moves. Cross-references between the moved
-methods deliberately route back through the bot delegates
-(``bot._handle_message``, ``bot._handle_message_inner``, ``bot._process_
-attachments``) — those are the late-bound seams tests patch.
+Narrow-deps since RFC-002 P4: live roots (config, the bot user — None
+until login) come in as provider callables; the LLM surface as the
+gateway; components as themselves. The intake owns the secret patterns,
+the allowlist checks, and attachment processing; the pipeline hands
+housekeeping to the Housekeeping component. Patch seams live on the
+owning components now (``bot.pipeline.run``, ``bot.intake
+._process_attachments``), not on bot delegates.
 """
 
 from __future__ import annotations
 
 import asyncio
 import io
+import re
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import discord
 
@@ -31,29 +35,129 @@ from .response_guards import combine_bot_messages, scrub_response_secrets
 
 log = get_logger("discord")
 
+# Patterns that might indicate a secret was pasted (moved verbatim from
+# client.py, RFC-002 P4 — the intake is their only behavioral consumer).
+SECRET_SCRUB_PATTERNS = [
+    re.compile(r"sk-[a-zA-Z0-9]{20,}"),
+    re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*\S{8,}"),
+    re.compile(r"xox[boaprs]-[a-zA-Z0-9-]+"),
+    # Natural language: "my password is ...", "password for gmail is ..."
+    re.compile(r"(?i)(?:my\s+)?(?:password|passwd|pwd)\s+(?:\S+\s+){0,4}(?:is|was)\s+\S{6,}"),
+]
+
+
+def check_for_secrets(content: str) -> bool:
+    return any(p.search(content) for p in SECRET_SCRUB_PATTERNS)
+
+
+@dataclass(frozen=True)
+class MessageIntakeDeps:
+    """The true dependency surface of the intake gating chain."""
+
+    get_config: Callable  # live root — replaced by config hot-reload
+    get_user: Callable  # live — None until the gateway login completes
+    get_voice_manager: Callable  # live — constructed on the bot, may be None
+    process_commands: Callable  # cog prefix-command dispatch (bot-bound)
+    channel_logger: object
+    channel_config: object
+    channel_state: object
+    sessions: object
+    pipeline: object  # MessagePipeline — the post-gate hand-off
+
 
 class MessageIntake:
-    def __init__(self, host) -> None:
-        self.host = host
+    def __init__(self, deps: MessageIntakeDeps) -> None:
+        self._get_config = deps.get_config
+        self._get_user = deps.get_user
+        self._get_voice_manager = deps.get_voice_manager
+        self._process_commands = deps.process_commands
+        self._channel_logger = deps.channel_logger
+        self._channel_config = deps.channel_config
+        self._channel_state = deps.channel_state
+        self._sessions = deps.sessions
+        self._pipeline = deps.pipeline
+
+    def is_allowed_user(self, user: discord.User | discord.Member) -> bool:
+        if not self._get_config().discord.allowed_users:
+            return True
+        return str(user.id) in self._get_config().discord.allowed_users
+
+    def is_allowed_channel(self, channel_id: int) -> bool:
+        if not self._get_config().discord.channels:
+            return True
+        return str(channel_id) in self._get_config().discord.channels
+
+    async def _process_attachments(
+        self, message: discord.Message, content: str = ""
+    ) -> tuple[str, list[dict]]:
+        """Process attachments via AttachmentProcessor.
+
+        Returns (inline_text, image_blocks). (Moved verbatim from the bot,
+        RFC-002 P4.)
+        """
+        if not message.attachments:
+            return "", []
+
+        from .attachments import AttachmentProcessor, infer_attachment_intent
+
+        config = self._get_config()
+        cfg = config.attachments if hasattr(config, "attachments") else None
+        processor = AttachmentProcessor(
+            **({"temp_dir": cfg.temp_directory,
+                "inline_max_bytes": cfg.inline_text_max_bytes,
+                "preview_max_chars": cfg.preview_max_chars,
+                "large_preview_chars": cfg.large_preview_chars,
+                "archive_max_bytes": cfg.archive_max_bytes,
+                "archive_max_files": cfg.archive_max_files,
+                "archive_extract_max_bytes": cfg.archive_extract_max_bytes,
+                "archive_preview_total_chars": cfg.archive_preview_total_chars,
+                "archive_preview_file_max_bytes": cfg.archive_preview_file_max_bytes,
+                "image_max_bytes": cfg.image_max_bytes,
+                "pdf_max_bytes": cfg.pdf_max_bytes,
+                "retention_hours": cfg.retention_hours,
+                } if cfg else {})
+        )
+
+        recent_assistant = None
+        session = self._sessions.get(str(message.channel.id))
+        if session and session.messages:
+            for m in reversed(session.messages):
+                if m.role == "assistant":
+                    recent_assistant = m.content
+                    break
+
+        intent = infer_attachment_intent(content, recent_assistant)
+
+        result = await processor.process(
+            message.attachments,
+            channel_id=str(message.channel.id),
+            message_id=str(message.id),
+            intent=intent,
+        )
+
+        if result.warnings:
+            for w in result.warnings:
+                log.warning("Attachment warning: %s", w)
+
+        return result.inline_text, result.image_blocks
 
     async def handle(self, message: discord.Message) -> None:
-        bot = self.host
         from .tool_loop_helpers import _ALLOWED_WEBHOOK_IDS
 
         # Passive channel log — every guild message, including our own, before any filtering
-        bot.channel_logger.log_message(message)
+        self._channel_logger.log_message(message)
 
         # Never respond to our own messages
-        if message.author == bot.user:
+        if message.author == self._get_user():
             return
 
         # Secret scrubbing runs BEFORE anything that inspects the message
         # content (cog prefix commands, executor flow). If a user posts a
         # credential, we delete + scrub first so nothing else sees it.
         pre_content = (message.content or "").strip()
-        if pre_content and bot._check_for_secrets(pre_content):
+        if pre_content and check_for_secrets(pre_content):
             try:
-                bot.sessions.scrub_secrets(str(message.channel.id), pre_content)
+                self._sessions.scrub_secrets(str(message.channel.id), pre_content)
             except Exception:
                 log.exception("scrub_secrets failed in early pre-filter")
             try:
@@ -92,12 +196,12 @@ class MessageIntake:
         # process_commands here (after secret scrubbing, before executor gates)
         # lets cogs work regardless of executor allowlist without exposing
         # secrets to command handlers.
-        await bot.process_commands(message)
+        await self._process_commands(message)
 
         if message.author.bot:
             # Ignore specific bot IDs unless they explicitly @mention us in message text
-            if str(message.author.id) in bot.config.discord.ignore_bot_ids:
-                mention_str = f"<@{bot.user.id}>" if bot.user else ""
+            if str(message.author.id) in self._get_config().discord.ignore_bot_ids:
+                mention_str = f"<@{self._get_user().id}>" if self._get_user() else ""
                 if mention_str not in (message.content or ""):
                     return
             # Allow specific webhooks (via ALLOWED_WEBHOOK_IDS env var)
@@ -106,44 +210,45 @@ class MessageIntake:
             )
             _bot_gid = str(message.guild.id) if message.guild else None
             _bot_cid = str(message.channel.id)
-            _respond_bots = bot.channel_config.should_respond_to_bots(
+            _respond_bots = self._channel_config.should_respond_to_bots(
                 _bot_gid,
                 _bot_cid,
-                bot.config.discord.respond_to_bots,
+                self._get_config().discord.respond_to_bots,
             )
             if not is_allowed_webhook and not _respond_bots:
                 return
 
         is_test_webhook = message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
-        if not is_test_webhook and not bot._is_allowed_user(message.author):
+        if not is_test_webhook and not self.is_allowed_user(message.author):
             return
-        if not bot._is_allowed_channel(message.channel.id):
+        if not self.is_allowed_channel(message.channel.id):
             return
 
         # Per-channel enabled check (channel override > guild default > global)
         guild_id = str(message.guild.id) if message.guild else None
         channel_id_str = str(message.channel.id)
-        if not bot.channel_config.is_enabled(guild_id, channel_id_str):
+        if not self._channel_config.is_enabled(guild_id, channel_id_str):
             return
 
         # Per-channel require_mention check (channel override > guild default > global)
         # Bot messages skip this gate — they go into the buffer and the mention
         # check happens after all segments are collected.
-        _require_mention = bot.channel_config.should_require_mention(
+        _require_mention = self._channel_config.should_require_mention(
             guild_id,
             channel_id_str,
-            bot.config.discord.require_mention,
+            self._get_config().discord.require_mention,
         )
         if _require_mention:
             is_dm = not hasattr(message.channel, "guild") or message.channel.guild is None
-            is_bot_buffered = message.author.bot and bot.channel_config.should_respond_to_bots(
+            is_bot_buffered = message.author.bot and self._channel_config.should_respond_to_bots(
                 guild_id,
                 channel_id_str,
-                bot.config.discord.respond_to_bots,
+                self._get_config().discord.respond_to_bots,
             )
             if not is_dm and not is_bot_buffered:
-                is_mentioned = bot.user and (
-                    bot.user.mentioned_in(message) or f"<@{bot.user.id}>" in (message.content or "")
+                is_mentioned = self._get_user() and (
+                    self._get_user().mentioned_in(message)
+                    or f"<@{self._get_user().id}>" in (message.content or "")
                 )
                 if not is_mentioned:
                     return
@@ -156,7 +261,7 @@ class MessageIntake:
         )
 
         # Dedup: skip if we've already processed this exact message
-        if bot._channel_state.seen_message(message.id):
+        if self._channel_state.seen_message(message.id):
             log.warning("Duplicate on_message for msg_id=%s, skipping", message.id)
             return
 
@@ -165,29 +270,29 @@ class MessageIntake:
         # at once. Use the per-channel override (not the raw global flag) so this
         # agrees with the mention gate above — otherwise a channel that opts out
         # of bot replies still gets its bot messages buffered and answered.
-        if message.author.bot and bot.channel_config.should_respond_to_bots(
+        if message.author.bot and self._channel_config.should_respond_to_bots(
             guild_id,
             channel_id_str,
-            bot.config.discord.respond_to_bots,
+            self._get_config().discord.respond_to_bots,
         ):
             buf_key = (str(message.channel.id), str(message.author.id))
-            if buf_key not in bot._channel_state.bot_msg_buffer:
-                bot._channel_state.bot_msg_buffer[buf_key] = []
-            buf = bot._channel_state.bot_msg_buffer[buf_key]
-            if len(buf) >= bot._channel_state.bot_msg_buffer_max:
+            if buf_key not in self._channel_state.bot_msg_buffer:
+                self._channel_state.bot_msg_buffer[buf_key] = []
+            buf = self._channel_state.bot_msg_buffer[buf_key]
+            if len(buf) >= self._channel_state.bot_msg_buffer_max:
                 log.warning("Bot buffer full (%d msgs) for %s, dropping oldest", len(buf), buf_key)
                 buf.pop(0)
             buf.append(scrub_output_secrets(message.content))
 
             # Cancel previous timer for this bot+channel
-            if buf_key in bot._channel_state.bot_msg_tasks:
-                bot._channel_state.bot_msg_tasks[buf_key].cancel()
+            if buf_key in self._channel_state.bot_msg_tasks:
+                self._channel_state.bot_msg_tasks[buf_key].cancel()
 
             # Set new timer — process after delay of silence
             async def _flush_bot_buffer(key, orig_msg):
-                await asyncio.sleep(bot._channel_state.bot_msg_buffer_delay)
-                parts = bot._channel_state.bot_msg_buffer.pop(key, [])
-                bot._channel_state.bot_msg_tasks.pop(key, None)
+                await asyncio.sleep(self._channel_state.bot_msg_buffer_delay)
+                parts = self._channel_state.bot_msg_buffer.pop(key, [])
+                self._channel_state.bot_msg_tasks.pop(key, None)
                 if not parts:
                     return
                 combined = combine_bot_messages(parts)
@@ -197,14 +302,14 @@ class MessageIntake:
                 # require_mention for bots: check if ANY buffered part mentions us
                 _bot_guild_id = str(orig_msg.guild.id) if orig_msg.guild else None
                 _bot_channel_id = str(orig_msg.channel.id)
-                _bot_require = bot.channel_config.should_require_mention(
+                _bot_require = self._channel_config.should_require_mention(
                     _bot_guild_id,
                     _bot_channel_id,
-                    bot.config.discord.require_mention,
+                    self._get_config().discord.require_mention,
                 )
-                if _bot_require and bot.user:
-                    mention_str = f"<@{bot.user.id}>"
-                    mention_nick = f"<@!{bot.user.id}>"
+                if _bot_require and self._get_user():
+                    mention_str = f"<@{self._get_user().id}>"
+                    mention_nick = f"<@!{self._get_user().id}>"
                     if not any(mention_str in p or mention_nick in p for p in parts):
                         log.info(
                             "Bot buffer discarded: no mention found in %d messages from %s",
@@ -213,25 +318,25 @@ class MessageIntake:
                         )
                         return
                 # Strip mention from combined content
-                if bot.user:
-                    combined = combined.replace(f"<@{bot.user.id}>", "").strip()
-                    combined = combined.replace(f"<@!{bot.user.id}>", "").strip()
+                if self._get_user():
+                    combined = combined.replace(f"<@{self._get_user().id}>", "").strip()
+                    combined = combined.replace(f"<@!{self._get_user().id}>", "").strip()
                 if combined:
-                    await bot._handle_message(orig_msg, combined, image_blocks=[])
+                    await self._pipeline.run(orig_msg, combined, image_blocks=[])
 
-            bot._channel_state.bot_msg_tasks[buf_key] = asyncio.create_task(
+            self._channel_state.bot_msg_tasks[buf_key] = asyncio.create_task(
                 _flush_bot_buffer(buf_key, message)
             )
             return
 
         content = message.content
         # Strip the bot mention from the message if present
-        if bot.user and bot.user.mentioned_in(message):
-            content = content.replace(f"<@{bot.user.id}>", "").strip()
-            content = content.replace(f"<@!{bot.user.id}>", "").strip()
+        if self._get_user() and self._get_user().mentioned_in(message):
+            content = content.replace(f"<@{self._get_user().id}>", "").strip()
+            content = content.replace(f"<@!{self._get_user().id}>", "").strip()
 
         # Handle file attachments — append file contents to the message
-        attachment_text, image_blocks = await bot._process_attachments(message, content)
+        attachment_text, image_blocks = await self._process_attachments(message, content)
         if attachment_text:
             attachment_text = scrub_output_secrets(attachment_text)
             content = f"{content}\n\n{attachment_text}" if content else attachment_text
@@ -243,8 +348,8 @@ class MessageIntake:
             content = "(see attached image)"
 
         # Check for secrets, scrub from history and delete the message.
-        if bot._check_for_secrets(content):
-            bot.sessions.scrub_secrets(str(message.channel.id), content)
+        if check_for_secrets(content):
+            self._sessions.scrub_secrets(str(message.channel.id), content)
             # Deletion can fail for more than just Forbidden — the message may
             # already be gone (NotFound) or we may be rate-limited
             # (HTTPException). Catching only Forbidden let those propagate out
@@ -273,7 +378,7 @@ class MessageIntake:
             return
 
         # Voice commands via natural language (short, direct commands only)
-        if bot.voice_manager:
+        if self._get_voice_manager():
             _voice_lower = content.lower().strip()
             _voice_words = _voice_lower.split()
             # Only treat short messages (≤8 words) as voice commands to avoid
@@ -295,31 +400,56 @@ class MessageIntake:
 
                 if _has_voice_context and any(w in _voice_lower for w in _join_words):
                     if isinstance(message.author, discord.Member) and message.author.voice:
-                        result = await bot.voice_manager.join_channel(message.author.voice.channel)
+                        result = await self._get_voice_manager().join_channel(
+                            message.author.voice.channel
+                        )
                         await message.reply(result)
                     else:
                         await message.reply("You need to be in a voice channel first.")
                     return
                 if _has_voice_context and any(w in _voice_lower for w in _leave_words):
-                    result = await bot.voice_manager.leave_channel()
+                    result = await self._get_voice_manager().leave_channel()
                     await message.reply(result)
                     return
 
         # If bot is in a voice channel, auto-attach voice callback for TTS
         vc_callback = None
-        if bot.voice_manager and bot.voice_manager.is_connected:
+        if self._get_voice_manager() and self._get_voice_manager().is_connected:
 
             async def vc_callback(response: str) -> None:
-                await bot.voice_manager.speak(response)
+                await self._get_voice_manager().speak(response)
 
-        await bot._handle_message(
+        await self._pipeline.run(
             message, content, image_blocks=image_blocks, voice_callback=vc_callback
         )
 
 
+@dataclass(frozen=True)
+class MessagePipelineDeps:
+    """The true dependency surface of the message pipeline."""
+
+    channel_state: object  # per-channel locks, pending files, op details
+    sessions: object
+    permissions: object  # guest-tier routing
+    llm_gateway: object  # owns the swappable provider clients
+    prompt_builder: object
+    turn_recorder: object  # context traces + operational reflection
+    tool_loop: object  # ToolLoopRunner — the tools route
+    delivery: object  # status, retries, chunked sends
+    housekeeping: object  # post-turn cache maintenance
+
+
 class MessagePipeline:
-    def __init__(self, host) -> None:
-        self.host = host
+    def __init__(self, deps: MessagePipelineDeps) -> None:
+        self._channel_state = deps.channel_state
+        self._sessions = deps.sessions
+        self._permissions = deps.permissions
+        self._llm_gateway = deps.llm_gateway
+        self._prompt_builder = deps.prompt_builder
+        self._turn_recorder = deps.turn_recorder
+        self._tool_loop = deps.tool_loop
+        self._delivery = deps.delivery
+        self._housekeeping = deps.housekeeping
 
     async def run(
         self,
@@ -329,11 +459,10 @@ class MessagePipeline:
         image_blocks: list[dict] | None = None,
         voice_callback: Callable | None = None,
     ) -> None:
-        bot = self.host
         channel_id = str(message.channel.id)
 
         # Acquire per-channel lock — messages queue naturally via the lock
-        lock = bot._channel_locks.setdefault(channel_id, asyncio.Lock())
+        lock = self._channel_state.channel_locks.setdefault(channel_id, asyncio.Lock())
 
         async with lock:
             # Thread context inheritance: if this is a thread with no session yet,
@@ -343,9 +472,9 @@ class MessagePipeline:
             if isinstance(message.channel, discord.Thread) and message.channel.parent:
                 parent_id = str(message.channel.parent.id)
                 parent_name = getattr(message.channel.parent, "name", parent_id)
-                thread_session = bot.sessions.get_or_create(channel_id)
+                thread_session = self._sessions.get_or_create(channel_id)
                 if not thread_session.messages:
-                    parent_session = bot.sessions.get_or_create(parent_id)
+                    parent_session = self._sessions.get_or_create(parent_id)
                     if parent_session.messages or parent_session.summary:
                         # Copy the parent's summary and last few messages for context
                         # Mark as inherited so the LLM distinguishes thread-native
@@ -375,7 +504,7 @@ class MessagePipeline:
                             parent_id,
                         )
 
-            await bot._handle_message_inner(
+            await self._run_inner(
                 message,
                 content,
                 channel_id,
@@ -392,17 +521,16 @@ class MessagePipeline:
         image_blocks: list[dict] | None = None,
         voice_callback: Callable | None = None,
     ) -> None:
-        bot = self.host
         from .tool_loop_helpers import _EMPTY_RESPONSE_FALLBACK
 
         user_id = str(message.author.id)
         # Prefix with display name so the LLM knows who's talking
         display_name = message.author.display_name or message.author.name
         tagged_content = f"[{display_name}]: {content}"
-        bot.sessions.add_message(channel_id, "user", tagged_content, user_id=user_id)
+        self._sessions.add_message(channel_id, "user", tagged_content, user_id=user_id)
 
         try:
-            is_guest = bot.permissions.is_guest(str(message.author.id))
+            is_guest = self._permissions.is_guest(str(message.author.id))
             already_sent = False
             is_error = False
             tools_used: list[str] = []
@@ -412,7 +540,7 @@ class MessagePipeline:
                 # Guest tier: chat only, no tools
                 log.info("Guest tier user %s, chat route (no tools)", message.author.id)
                 # Guests use full history (with compaction)
-                history = await bot.sessions.get_history_with_compaction(channel_id)
+                history = await self._sessions.get_history_with_compaction(channel_id)
                 if image_blocks:
                     history = list(history)
                     if history and history[-1]["role"] == "user":
@@ -427,14 +555,14 @@ class MessagePipeline:
                             "content": image_blocks + [{"type": "text", "text": text_content}],
                         }
                     log.info("Attached %d image(s) to message for Claude vision", len(image_blocks))
-                if bot.llm_client:
-                    chat_prompt = bot._build_chat_system_prompt(
+                if self._llm_gateway.active_client:
+                    chat_prompt = self._prompt_builder.build_chat_prompt(
                         channel=message.channel,
                         user_id=user_id,
                         query=content,
                     )
                     try:
-                        response = await bot.llm_client.chat(
+                        response = await self._llm_gateway.active_client.chat(
                             messages=history,
                             system=chat_prompt,
                         )
@@ -451,24 +579,24 @@ class MessagePipeline:
                     is_error = True
             else:
                 # Everyone else: Codex with ALL tools
-                if not bot.llm_client:
-                    await bot._send_with_retry(
+                if not self._llm_gateway.active_client:
+                    await self._delivery.send_with_retry(
                         message,
                         "No LLM provider available. Please try again later.",
                     )
-                    bot.sessions.remove_last_message(channel_id, "user")
+                    self._sessions.remove_last_message(channel_id, "user")
                     return
-                _trace = bot._new_context_trace()
+                _trace = self._turn_recorder._new_context_trace()
                 if _trace is not None:
                     with _trace.phase("system_prompt"):
-                        _sp = bot._build_system_prompt(
+                        _sp = self._prompt_builder.build_full_prompt(
                             channel=message.channel,
                             user_id=user_id,
                             query=content,
                             trace=_trace,
                         )
                 else:
-                    _sp = bot._build_system_prompt(
+                    _sp = self._prompt_builder.build_full_prompt(
                         channel=message.channel,
                         user_id=user_id,
                         query=content,
@@ -480,14 +608,14 @@ class MessagePipeline:
                 # older messages unrelated to the current query are dropped
                 if _trace is not None:
                     with _trace.phase("history"):
-                        task_history = await bot.sessions.get_task_history(
+                        task_history = await self._sessions.get_task_history(
                             channel_id,
                             max_messages=160,
                             current_query=content,
                             trace=_trace,
                         )
                 else:
-                    task_history = await bot.sessions.get_task_history(
+                    task_history = await self._sessions.get_task_history(
                         channel_id,
                         max_messages=160,
                         current_query=content,
@@ -511,7 +639,7 @@ class MessagePipeline:
                         is_error,
                         tools_used,
                         handoff,
-                    ) = await bot._process_with_tools(
+                    ) = await self._tool_loop.run(
                         message,
                         task_history,
                         system_prompt_override=_sp,
@@ -527,16 +655,16 @@ class MessagePipeline:
                     is_error = True
                     handoff = False
                 # Skill requested Codex handoff — route skill result to Codex for response
-                if handoff and bot.llm_client and not is_error:
+                if handoff and self._llm_gateway.active_client and not is_error:
                     log.info("Skill handoff to Codex for response")
                     _skill_response = response  # Save before overwriting
-                    chat_prompt = bot._build_chat_system_prompt(
+                    chat_prompt = self._prompt_builder.build_chat_prompt(
                         channel=message.channel,
                         user_id=user_id,
                         query=content,
                     )
                     # Fetch full history for handoff (compaction already ran in get_task_history)
-                    history = bot.sessions.get_history(channel_id)
+                    history = self._sessions.get_history(channel_id)
                     codex_messages = list(history) + [
                         {"role": "assistant", "content": f"[Tool result: {response}]"},
                         {
@@ -548,7 +676,7 @@ class MessagePipeline:
                         },
                     ]
                     try:
-                        response = await bot.llm_client.chat(
+                        response = await self._llm_gateway.active_client.chat(
                             messages=codex_messages,
                             system=chat_prompt,
                         )
@@ -561,17 +689,17 @@ class MessagePipeline:
                         response = _skill_response
                         already_sent = False
         except (TimeoutError, discord.HTTPException, discord.Forbidden) as e:
-            await bot._set_status(None, task_end=True)
+            await self._delivery.set_status(None, task_end=True)
             log.error("Discord/network error processing message: %s", e, exc_info=True)
-            leaked = bot._pending_files.pop(channel_id, None)
+            leaked = self._channel_state.pending_files.pop(channel_id, None)
             if leaked:
                 log.warning(
                     "Cleaned %d leaked pending file(s) for channel %s", len(leaked), channel_id
                 )
-            await bot._send_with_retry(
+            await self._delivery.send_with_retry(
                 message, scrub_response_secrets(f"Something went wrong: {e}")
             )
-            bot.sessions.remove_last_message(channel_id, "user")
+            self._sessions.remove_last_message(channel_id, "user")
             return
         except asyncio.CancelledError:
             # CancelledError is a BaseException, so it bypasses the Exception
@@ -579,24 +707,24 @@ class MessagePipeline:
             # orphaned in history (no assistant reply). Clean up synchronously
             # (no awaits, which could re-raise mid-cancellation) and re-raise so
             # the cancellation still propagates.
-            bot._pending_files.pop(channel_id, None)
-            bot.sessions.remove_last_message(channel_id, "user")
+            self._channel_state.pending_files.pop(channel_id, None)
+            self._sessions.remove_last_message(channel_id, "user")
             raise
         except Exception as e:
-            await bot._set_status(None, task_end=True)
+            await self._delivery.set_status(None, task_end=True)
             log.error("Unexpected error processing message: %s", e, exc_info=True)
-            leaked = bot._pending_files.pop(channel_id, None)
+            leaked = self._channel_state.pending_files.pop(channel_id, None)
             if leaked:
                 log.warning(
                     "Cleaned %d leaked pending file(s) for channel %s", len(leaked), channel_id
                 )
-            await bot._send_with_retry(
+            await self._delivery.send_with_retry(
                 message, scrub_response_secrets(f"Something went wrong: {e}")
             )
-            bot.sessions.remove_last_message(channel_id, "user")
+            self._sessions.remove_last_message(channel_id, "user")
             return
 
-        await bot._set_status(None, task_end=True)
+        await self._delivery.set_status(None, task_end=True)
 
         # Scrub secrets from LLM response before logging, saving, or sending.
         # Tool output is already scrubbed (scrub_output_secrets in _run_tool),
@@ -618,11 +746,11 @@ class MessagePipeline:
                     if len(response) > CHAT_RESPONSE_MAX_CHARS
                     else response
                 )
-            bot.sessions.add_message(channel_id, "assistant", history_response)
-            bot.sessions.prune()
-            bot._maybe_cleanup_caches()
+            self._sessions.add_message(channel_id, "assistant", history_response)
+            self._sessions.prune()
+            self._housekeeping.maybe_cleanup()
             try:
-                await asyncio.to_thread(bot.sessions.save)
+                await asyncio.to_thread(self._sessions.save)
             except Exception as save_err:
                 log.warning("Session save failed: %s", save_err)
         else:
@@ -636,10 +764,10 @@ class MessagePipeline:
                 )
             else:
                 sanitized = "[Previous request encountered an error before tool execution.]"
-            bot.sessions.add_message(channel_id, "assistant", sanitized)
-            bot.sessions.prune()
+            self._sessions.add_message(channel_id, "assistant", sanitized)
+            self._sessions.prune()
             try:
-                await asyncio.to_thread(bot.sessions.save)
+                await asyncio.to_thread(self._sessions.save)
             except Exception as save_err:
                 log.warning("Session save failed: %s", save_err)
 
@@ -650,9 +778,9 @@ class MessagePipeline:
             # Pop synchronously inside the channel-locked request body so a
             # fast follow-up request can never swap details under the
             # fire-and-forget reflection task.
-            op_details = bot._last_op_details.pop(channel_id, None)
+            op_details = self._channel_state.last_op_details.pop(channel_id, None)
             fire_and_forget(
-                bot._operational_reflection(
+                self._turn_recorder._operational_reflection(
                     content,
                     tools_used,
                     response,
@@ -668,10 +796,10 @@ class MessagePipeline:
         if not already_sent:
             # _send_chunked picks up pending files and attaches them to the
             # first message — text + file arrive as one Discord message.
-            await bot._send_chunked(message, response)
+            await self._delivery.send_chunked(message, response)
         else:
             # Streamed response already on Discord — post pending files separately
-            pending = bot._pending_files.pop(channel_id, [])
+            pending = self._channel_state.pending_files.pop(channel_id, [])
             if pending:
                 discord_files = [
                     discord.File(io.BytesIO(data), filename=fname) for data, fname in pending

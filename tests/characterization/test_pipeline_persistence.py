@@ -90,7 +90,7 @@ class TestPersistence:
 
     async def test_cancelled_error_removes_orphaned_user_turn_and_reraises(self):
         bot, fake = build()
-        bot._process_with_tools = AsyncMock(side_effect=asyncio.CancelledError())
+        bot.tool_loop.run = AsyncMock(side_effect=asyncio.CancelledError())
         msg = FakeMessage("interrupted")
         bot._pending_files[str(msg.channel.id)] = [(b"x", "leak.txt")]
         with pytest.raises(asyncio.CancelledError):
@@ -113,7 +113,7 @@ class TestPersistence:
             seen["tool_details"] = tool_details
             seen["tools_used"] = tools_used
 
-        bot._operational_reflection = spy_reflection
+        bot.turn_recorder._operational_reflection = spy_reflection
         msg = FakeMessage("do it")
         await bot._handle_message(msg, "do it")
         await asyncio.sleep(0.05)  # fire_and_forget task
@@ -143,7 +143,7 @@ class TestRouting:
 
     async def test_skill_handoff_routes_result_through_chat(self):
         bot, fake = build(chat=["conversational wrap-up"])
-        bot._process_with_tools = AsyncMock(
+        bot.tool_loop.run = AsyncMock(
             return_value=("raw skill output", False, False, ["myskill"], True),
         )
         msg = FakeMessage("use the skill")
@@ -155,7 +155,7 @@ class TestRouting:
 
     async def test_skill_handoff_falls_back_to_skill_output_on_chat_failure(self):
         bot, fake = build(chat=[RuntimeError("chat down")])
-        bot._process_with_tools = AsyncMock(
+        bot.tool_loop.run = AsyncMock(
             return_value=("raw skill output", False, False, ["myskill"], True),
         )
         msg = FakeMessage("use the skill")
@@ -232,7 +232,7 @@ class TestDeliveryHandoff:
 
     async def test_already_sent_response_posts_pending_files_separately(self):
         bot, fake = build()
-        bot._process_with_tools = AsyncMock(
+        bot.tool_loop.run = AsyncMock(
             return_value=("streamed already", True, False, ["some_tool"], False),
         )
         msg = FakeMessage("stream it")

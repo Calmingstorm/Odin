@@ -208,7 +208,8 @@ class TestOnMessageWiring:
         import inspect
         from src.discord.intake_pipeline import MessageIntake
         src = inspect.getsource(MessageIntake.handle)
-        scrub_pos = src.find("_check_for_secrets")
+        # P4: the intake owns the secret check as a module function now
+        scrub_pos = src.find("check_for_secrets")
         pc_pos = src.find("process_commands")
         assert 0 <= scrub_pos < pc_pos, (
             "secret scrub block must appear before process_commands in on_message"
