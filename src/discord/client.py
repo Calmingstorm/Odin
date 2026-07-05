@@ -21,6 +21,17 @@ from .completion import CLASSIFIER_SYSTEM_PROMPT, CompletionClassifier
 from .intake_pipeline import MessageIntake, MessagePipeline
 from .tool_loop import ToolLoopRunner, ensure_failure_visible
 from .tool_loop import _LoopAuthorProxy, _LoopMessageProxy  # noqa: F401 — re-export (tests, proxies)
+
+# Canonical homes moved to tool_loop_helpers (RFC-002 P1) — re-exported here
+# until P7 retires the facade spellings. _ALLOWED_WEBHOOK_IDS is the SAME set
+# object (mutated in place), so this binding stays live across env re-reads.
+from .tool_loop_helpers import (
+    _ALLOWED_WEBHOOK_IDS,  # noqa: F401 — re-export
+    _EMAIL_BODY_TOOLS,  # noqa: F401 — re-export
+    _EMPTY_RESPONSE_FALLBACK,  # noqa: F401 — re-export
+    _scrub_tool_input_for_storage,
+    init_allowed_webhook_ids as _init_allowed_webhook_ids_impl,
+)
 from .delivery import ResponseDelivery
 from .delivery import DISCORD_MAX_LEN  # noqa: F401 — module re-export contract
 from .delivery import SEND_MAX_RETRIES  # noqa: F401 — module re-export contract
@@ -55,13 +66,6 @@ INITIAL_EXTENSIONS: tuple[str, ...] = (
 )
 
 
-# Friendly fallback when Codex returns an empty response after retries
-_EMPTY_RESPONSE_FALLBACK = "I couldn't generate a response. Please try again."
-
-# Webhook IDs allowed to bypass the bot-author check.
-# Populated from ALLOWED_WEBHOOK_IDS env var (comma-separated) at startup.
-_ALLOWED_WEBHOOK_IDS: set[str] = set()
-
 # Patterns that might indicate a secret was pasted
 SECRET_SCRUB_PATTERNS = [
     re.compile(r"sk-[a-zA-Z0-9]{20,}"),
@@ -79,21 +83,6 @@ _LONG_TIMEOUT_TOOL_SET = frozenset({"claude_code"})  # Tools that get extended t
 
 # Pre-compiled regex for merging adjacent code blocks in combine_bot_messages
 _ADJACENT_FENCE_RE = re.compile(r"\n```[ \t]*\n\n```(\w*)[ \t]*\n")
-
-_EMAIL_BODY_TOOLS = frozenset({"email_send"})
-
-
-def _scrub_tool_input_for_storage(tool_name: str, tool_input: dict) -> dict:
-    """Redact privacy-sensitive fields from tool input before any storage path."""
-    if tool_name not in _EMAIL_BODY_TOOLS or not isinstance(tool_input, dict):
-        return tool_input
-    cleaned = dict(tool_input)
-    body = cleaned.get("body", "")
-    cleaned["body"] = f"[redacted email body: {len(body)} chars]"
-    if "attachments" in cleaned and cleaned["attachments"]:
-        from pathlib import Path
-        cleaned["attachments"] = [Path(p).name for p in cleaned["attachments"]]
-    return cleaned
 
 
 
@@ -480,11 +469,8 @@ class OdinBot(commands.Bot):
         self._prompt_builder.cached_skills_text = value
 
     def _init_allowed_webhook_ids(self) -> None:
-        """Populate _ALLOWED_WEBHOOK_IDS from ALLOWED_WEBHOOK_IDS env var."""
-        global _ALLOWED_WEBHOOK_IDS
-        raw = os.environ.get("ALLOWED_WEBHOOK_IDS", "")
-        if raw:
-            _ALLOWED_WEBHOOK_IDS = {wid.strip() for wid in raw.split(",") if wid.strip()}
+        """Populate the test-webhook allowlist from the ALLOWED_WEBHOOK_IDS env var."""
+        _init_allowed_webhook_ids_impl(os.environ.get("ALLOWED_WEBHOOK_IDS", ""))
 
     def _log_startup_config(self) -> None:
         """Log configuration summary at startup to help users verify setup."""
