@@ -173,6 +173,10 @@ class _FakeClient:
     _record_user_content = _C._record_user_content
 
     def __init__(self, enabled=True, cap=4000):
+        from src.discord.turn_recorder import TurnRecorder
+
+        # P10 migration: _record_user_content now delegates to TurnRecorder
+        self._turn_recorder = TurnRecorder(self)
         class _Obs:
             trajectory_user_content = enabled
             max_user_content_chars = cap
@@ -259,6 +263,9 @@ class _LoopIterClient:
         from src.discord.tool_loop import ToolLoopRunner
 
         self._tool_loop_runner = ToolLoopRunner(self)
+        from src.discord.turn_recorder import TurnRecorder
+
+        self._turn_recorder = TurnRecorder(self)
 
         class _Obs:
             loop_trace = True
