@@ -19,6 +19,9 @@ from ..audit.diff_tracker import DIFF_TOOLS, DiffTracker
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..tools.risk_classifier import classify_tool
+from ..tools.executor import _ERROR_RESULT_PREFIXES
+from ..tools.result_validator import ToolResult
+from .tool_loop import ensure_failure_visible
 
 _EMAIL_BODY_TOOLS = frozenset({"email_send"})
 
@@ -177,6 +180,13 @@ async def run_background_task(
                 requester_id=task.requester_id,
             )
             elapsed_ms = int((time.monotonic() - t0) * 1000)
+            structured_ok: bool | None = None
+            if isinstance(output, ToolResult):
+                structured_ok = output.ok
+                # Same canonical marking the chat/loop pipelines apply: a
+                # structurally-failed result gets an explicit Error prefix so
+                # the posted step output cannot read as success.
+                output = ensure_failure_visible(str(output), output.ok)
             output = scrub_output_secrets(output)
             prev_output = output
 
@@ -191,8 +201,12 @@ async def run_background_task(
                 except Exception:
                     pass
 
-            # Detect error strings returned by executor (not raised as exceptions)
-            is_error = _is_error_output(output)
+            # Structured failure signal first (ToolResult.ok), then the
+            # error-string heuristic for plain-string handler branches.
+            if structured_ok is not None:
+                is_error = not structured_ok
+            else:
+                is_error = _is_error_output(output)
             task.results.append(StepResult(
                 index=i, tool_name=tool_name,
                 description=step_desc, status="error" if is_error else "ok",
@@ -305,6 +319,11 @@ def _is_error_output(output: str) -> bool:
     # executor.execute() returns "Permission denied: ..." for RBAC violations
     if output.startswith("Permission denied: "):
         return True
+    # The executor's own canonical error grammar ("Error…", "Command failed",
+    # "Script failed", "Blocked…", "Unknown or disallowed host") — the same
+    # prefix set ensure_failure_visible treats as already-visible failures.
+    if output.startswith(_ERROR_RESULT_PREFIXES):
+        return True
     return False
 
 
@@ -319,8 +338,12 @@ async def _execute_tool(
     step_desc: str = "",
     mcp_manager: MCPManager | None = None,
     requester_id: str = "",
-) -> str:
-    """Execute a single tool, routing to the right handler."""
+) -> str | ToolResult:
+    """Execute a single tool, routing to the right handler.
+
+    The executor path returns the structured ToolResult (the caller consumes
+    .ok); every other branch returns a plain string.
+    """
     # Central RBAC gate for deferred/background execution. Skills, MCP, and the
     # knowledge tools below bypass ToolExecutor.execute() (the only place
     # check_permission runs), and even the final execute() call only enforces
@@ -396,7 +419,10 @@ async def _execute_tool(
         tool_input = {**tool_input, "host": _get_default_host(executor)}
     # run_command/run_script: if 'command'/'script' missing, let executor handle it
     # (it will return an error that _is_error_output catches)
-    return str(await executor.execute(tool_name, tool_input, user_id=requester_id or None))
+    # Return the structured result — run_background_task consumes .ok so a
+    # failed tool can no longer masquerade as a successful step (soak finding
+    # 2026-07-05; same failure class PR #130 fixed for the chat loop).
+    return await executor.execute(tool_name, tool_input, user_id=requester_id or None)
 
 
 def _substitute_vars(
