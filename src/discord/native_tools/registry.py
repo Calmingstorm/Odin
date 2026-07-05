@@ -66,33 +66,51 @@ class NativeToolDispatcher:
     def __init__(
         self,
         *,
-        handler_host,
+        owners: dict[str, object],
         skill_manager,
         tool_catalog,
         prompt_builder,
         channel_state,
-        invoke_skill_missing_required,
     ) -> None:
-        # Handlers are stored as ATTRIBUTE NAMES and resolved against
-        # handler_host at dispatch time (late binding) — exactly how the old
-        # inline chains looked up self._handle_X per call. This keeps the
-        # test seam (patching bot._handle_X) and lets P5b swap the host for
-        # domain classes without touching dispatch.
-        self.handler_host = handler_host
+        # Handlers are stored as (OWNER KEY, ATTRIBUTE NAME) and resolved
+        # against the owner object at dispatch time (RFC-002 P5). Late
+        # binding on the OWNER preserves the patch seam at the domain level
+        # (tests patch e.g. ``bot.media_tools._handle_analyze_image``) —
+        # exactly the discipline the old bot-attr resolution provided, one
+        # level down. The owners dict is mutable on purpose: wiring attaches
+        # the agents domain after the tool loop exists (documented there).
+        self.owners = owners
         self.skill_manager = skill_manager
         self.tool_catalog = tool_catalog
         self.prompt_builder = prompt_builder
         self.channel_state = channel_state
-        # Bot helper (moves into the skills domain module in P5b)
-        self._invoke_skill_missing_required = invoke_skill_missing_required
-        self._handlers: dict[str, tuple[str, Shape]] = {}
+        self._handlers: dict[str, tuple[str, str, Shape]] = {}
 
     # -- registration ---------------------------------------------------------
 
-    def register(self, name: str, handler_attr: str, shape: Shape) -> None:
+    def register(self, name: str, owner_key: str, handler_attr: str, shape: Shape) -> None:
         assert name not in self._handlers, f"duplicate native tool: {name}"
-        assert callable(getattr(self.handler_host, handler_attr)), handler_attr
-        self._handlers[name] = (handler_attr, shape)
+        assert owner_key in self.owners, f"unknown owner {owner_key!r} for {name}"
+        assert callable(getattr(self.owners[owner_key], handler_attr)), handler_attr
+        self._handlers[name] = (owner_key, handler_attr, shape)
+
+    def _invoke_skill_missing_required(self, name: str, payload: dict) -> list[str]:
+        """Return required input fields the payload omits, or [] if complete.
+
+        Used by invoke_skill to fail loudly when the LLM omits the input
+        object — otherwise the skill silently runs with empty params and
+        returns a degenerate result that looks like a tool bug. (Moved from
+        the bot, RFC-002 P5 — it only ever read the skill manager.)
+        """
+        try:
+            skill = self.skill_manager._skills.get(name)
+            if skill is None:
+                return []
+            schema = skill.definition.get("input_schema") or {}
+            required = schema.get("required") or []
+            return [f for f in required if f not in payload]
+        except Exception:
+            return []
 
     def handles(self, tool_name: str) -> bool:
         """Native table + skill-manager tools (skill CRUD/meta + user skills)."""
@@ -118,8 +136,8 @@ class NativeToolDispatcher:
         # --- registered native handlers ---
         entry = self._handlers.get(tool_name)
         if entry is not None:
-            handler_attr, shape = entry
-            handler = getattr(self.handler_host, handler_attr)
+            owner_key, handler_attr, shape = entry
+            handler = getattr(self.owners[owner_key], handler_attr)
             if shape == "msg_input":
                 result = handler(message, tool_input)
             elif shape == "input":
@@ -256,51 +274,51 @@ class NativeToolDispatcher:
 
 
 def register_native_handlers(dispatcher: NativeToolDispatcher) -> None:
-    """Build the dispatch table (Phase 5a): tool name -> (host attr, shape).
+    """Build the dispatch table: tool name -> (owner key, attr, shape).
 
-    Handlers resolve late against dispatcher.handler_host. Phase 5b moves
-    the bodies to domain classes behind the same attribute names; this
-    table is the stable artifact both pipelines share. Shapes mirror the
-    exact call forms of the two replaced chains.
+    Handlers resolve late against the domain owner objects (RFC-002 P5) —
+    the same table both pipelines share since P5a. Shapes mirror the exact
+    call forms of the two replaced chains. Call this AFTER every owner in
+    the table is present in dispatcher.owners (registration asserts it).
     """
     d = dispatcher
     # message + input
-    d.register("purge_messages", "_handle_purge", "msg_input")
-    d.register("browser_screenshot", "_handle_browser_screenshot", "msg_input")
-    d.register("generate_file", "_handle_generate_file", "msg_input")
-    d.register("post_file", "_handle_post_file", "msg_input")
-    d.register("schedule_task", "_handle_schedule_task", "msg_input")
-    d.register("delegate_task", "_handle_delegate_task", "msg_input")
-    d.register("start_loop", "_handle_start_loop", "msg_input")
-    d.register("read_channel", "_handle_read_channel", "msg_input")
-    d.register("add_reaction", "_handle_add_reaction", "msg_input")
-    d.register("create_poll", "_handle_create_poll", "msg_input")
-    d.register("analyze_image", "_handle_analyze_image", "msg_input")
-    d.register("generate_image", "_handle_generate_image", "msg_input")
-    d.register("spawn_agent", "_handle_spawn_agent", "msg_input")
-    d.register("spawn_loop_agents", "_handle_spawn_loop_agents", "msg_input")
+    d.register("purge_messages", "channel_ops", "_handle_purge", "msg_input")
+    d.register("browser_screenshot", "media", "_handle_browser_screenshot", "msg_input")
+    d.register("generate_file", "media", "_handle_generate_file", "msg_input")
+    d.register("post_file", "media", "_handle_post_file", "msg_input")
+    d.register("schedule_task", "scheduling", "_handle_schedule_task", "msg_input")
+    d.register("delegate_task", "agents", "_handle_delegate_task", "msg_input")
+    d.register("start_loop", "agents", "_handle_start_loop", "msg_input")
+    d.register("read_channel", "channel_ops", "_handle_read_channel", "msg_input")
+    d.register("add_reaction", "channel_ops", "_handle_add_reaction", "msg_input")
+    d.register("create_poll", "channel_ops", "_handle_create_poll", "msg_input")
+    d.register("analyze_image", "media", "_handle_analyze_image", "msg_input")
+    d.register("generate_image", "media", "_handle_generate_image", "msg_input")
+    d.register("spawn_agent", "agents", "_handle_spawn_agent", "msg_input")
+    d.register("spawn_loop_agents", "agents", "_handle_spawn_loop_agents", "msg_input")
     # input-only
-    d.register("update_schedule", "_handle_update_schedule", "input")
-    d.register("delete_schedule", "_handle_delete_schedule", "input")
-    d.register("parse_time", "_handle_parse_time", "input")
-    d.register("search_history", "_handle_search_history", "input")
-    d.register("list_tasks", "_handle_list_tasks", "input")
-    d.register("cancel_task", "_handle_cancel_task", "input")
-    d.register("stop_loop", "_handle_stop_loop", "input")
-    d.register("search_knowledge", "_handle_search_knowledge", "input")
-    d.register("delete_knowledge", "_handle_delete_knowledge", "input")
-    d.register("search_audit", "_handle_search_audit", "input")
-    d.register("send_to_agent", "_handle_send_to_agent", "input")
-    d.register("kill_agent", "_handle_kill_agent", "input")
-    d.register("get_agent_results", "_handle_get_agent_results", "input")
-    d.register("wait_for_agents", "_handle_wait_for_agents", "input")
-    d.register("collect_loop_agents", "_handle_collect_loop_agents", "input")
+    d.register("update_schedule", "scheduling", "_handle_update_schedule", "input")
+    d.register("delete_schedule", "scheduling", "_handle_delete_schedule", "input")
+    d.register("parse_time", "scheduling", "_handle_parse_time", "input")
+    d.register("search_history", "knowledge", "_handle_search_history", "input")
+    d.register("list_tasks", "agents", "_handle_list_tasks", "input")
+    d.register("cancel_task", "agents", "_handle_cancel_task", "input")
+    d.register("stop_loop", "agents", "_handle_stop_loop", "input")
+    d.register("search_knowledge", "knowledge", "_handle_search_knowledge", "input")
+    d.register("delete_knowledge", "knowledge", "_handle_delete_knowledge", "input")
+    d.register("search_audit", "knowledge", "_handle_search_audit", "input")
+    d.register("send_to_agent", "agents", "_handle_send_to_agent", "input")
+    d.register("kill_agent", "agents", "_handle_kill_agent", "input")
+    d.register("get_agent_results", "agents", "_handle_get_agent_results", "input")
+    d.register("wait_for_agents", "agents", "_handle_wait_for_agents", "input")
+    d.register("collect_loop_agents", "agents", "_handle_collect_loop_agents", "input")
     # no-arg
-    d.register("list_schedules", "_handle_list_schedules", "none")
-    d.register("list_loops", "_handle_list_loops", "none")
-    d.register("list_knowledge", "_handle_list_knowledge", "none")
+    d.register("list_schedules", "scheduling", "_handle_list_schedules", "none")
+    d.register("list_loops", "agents", "_handle_list_loops", "none")
+    d.register("list_knowledge", "knowledge", "_handle_list_knowledge", "none")
     # special shapes
-    d.register("list_agents", "_handle_list_agents", "msg_only")
-    d.register("ingest_document", "_handle_ingest_document", "author_input")
-    d.register("bulk_ingest_knowledge", "_handle_bulk_ingest", "author_input")
-    d.register("set_permission", "_handle_set_permission", "user_input")
+    d.register("list_agents", "agents", "_handle_list_agents", "msg_only")
+    d.register("ingest_document", "knowledge", "_handle_ingest_document", "author_input")
+    d.register("bulk_ingest_knowledge", "knowledge", "_handle_bulk_ingest", "author_input")
+    d.register("set_permission", "channel_ops", "_handle_set_permission", "user_input")

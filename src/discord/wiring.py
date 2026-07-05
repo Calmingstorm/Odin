@@ -584,20 +584,8 @@ def build_components(bot, services: BotServices) -> BotComponents:
         skill_manager=services.skill_manager,
     )
 
-    # One Discord-native dispatch table for both pipelines (RFC-001 P5a);
-    # handler bodies live in the domain modules, dispatched late through the
-    # host until P5 binds owners directly.
-    native_tools = NativeToolDispatcher(
-        handler_host=bot,
-        skill_manager=services.skill_manager,
-        tool_catalog=tool_catalog,
-        prompt_builder=prompt_builder,
-        channel_state=services.channel_state,
-        invoke_skill_missing_required=bot._invoke_skill_missing_required,
-    )
-    register_native_handlers(native_tools)
-
-    # Domain handler bundles (P5b)
+    # Domain handler bundles (P5b) — built BEFORE the dispatcher so they can
+    # be its owners (RFC-002 P5).
     scheduling_tools = SchedulingTools(scheduler=services.scheduler)
     knowledge_tools = KnowledgeTools(
         sessions=services.sessions,
@@ -614,6 +602,24 @@ def build_components(bot, services: BotServices) -> BotComponents:
         get_config=lambda: bot.config,
         browser_manager=services.browser_manager,
         tool_executor=services.tool_executor,
+    )
+
+    # One Discord-native dispatch table for both pipelines (RFC-001 P5a);
+    # handlers bind to the domain OWNERS late (RFC-002 P5). The agents
+    # domain is attached below after the tool loop exists (agents ->
+    # tool_loop -> dispatcher is the one construction cycle); registration
+    # runs after that attach, so it can assert every owner is present.
+    native_tools = NativeToolDispatcher(
+        owners={
+            "scheduling": scheduling_tools,
+            "knowledge": knowledge_tools,
+            "channel_ops": channel_ops_tools,
+            "media": media_tools,
+        },
+        skill_manager=services.skill_manager,
+        tool_catalog=tool_catalog,
+        prompt_builder=prompt_builder,
+        channel_state=services.channel_state,
     )
     delivery = ResponseDelivery(
         channel_state=services.channel_state,
@@ -679,6 +685,10 @@ def build_components(bot, services: BotServices) -> BotComponents:
             tool_catalog=tool_catalog,
         )
     )
+    # Second phase of the P5 owner wiring: the agents domain exists now.
+    native_tools.owners["agents"] = agent_task_tools
+    register_native_handlers(native_tools)
+
     scheduled_events = ScheduledEventHandlers(
         ScheduledEventsDeps(
             get_config=lambda: bot.config,

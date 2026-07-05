@@ -87,8 +87,8 @@ class TestCarveMutationSemantics:
             completion_order.append("list_schedules")
             return "fast-result"
 
-        bot._handle_parse_time = slow_parse_time
-        bot._handle_list_schedules = fast_list_schedules
+        bot.scheduling_tools._handle_parse_time = slow_parse_time
+        bot.scheduling_tools._handle_list_schedules = fast_list_schedules
 
         text, _, is_error, tools_used, _ = await bot._process_with_tools(
             FakeMessage("do both"), [{"role": "user", "content": "do both"}]
