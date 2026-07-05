@@ -173,6 +173,10 @@ class _FakeClient:
     _record_user_content = _C._record_user_content
 
     def __init__(self, enabled=True, cap=4000):
+        from src.discord.turn_recorder import TurnRecorder
+
+        # P10 migration: _record_user_content now delegates to TurnRecorder
+        self._turn_recorder = TurnRecorder(self)
         class _Obs:
             trajectory_user_content = enabled
             max_user_content_chars = cap
@@ -252,6 +256,16 @@ class _LoopIterClient:
 
     def __init__(self, responses, tool_output="hi out", result_cap=2000):
         from types import SimpleNamespace
+
+        # P8 migration: _run_loop_iteration is now a delegate to the
+        # host-based ToolLoopRunner — give the fake host its own runner so
+        # the test keeps driving the REAL loop body.
+        from src.discord.tool_loop import ToolLoopRunner
+
+        self._tool_loop_runner = ToolLoopRunner(self)
+        from src.discord.turn_recorder import TurnRecorder
+
+        self._turn_recorder = TurnRecorder(self)
 
         class _Obs:
             loop_trace = True
@@ -447,6 +461,8 @@ class TestAgentSaverWiring:
         # The omission hid for months because nothing asserted the call site.
         import inspect
 
-        from src.discord.client import OdinBot
-        src = inspect.getsource(OdinBot._handle_spawn_agent)
-        assert "trajectory_saver=self.agent_trajectory_saver" in src
+        # P5c: body moved to native_tools/agents_tasks.py (host-based)
+        from src.discord.native_tools.agents_tasks import AgentTaskTools
+
+        src = inspect.getsource(AgentTaskTools._handle_spawn_agent)
+        assert "trajectory_saver=bot.agent_trajectory_saver" in src

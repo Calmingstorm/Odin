@@ -9,8 +9,8 @@ priority: optional
 maintainer: Odin Maintainers <odin@localhost>
 description: |
   Odin — autonomous execution agent on Discord.
-  72 tools, shell access, browser automation, scheduled tasks,
-  sub-agents, knowledge base, and a 19-page web management UI.
+  74 tools, shell access, browser automation, scheduled tasks,
+  sub-agents, knowledge base, and a web management UI.
 vendor: Odin
 homepage: https://github.com/Calmingstorm/Odin
 license: MIT
