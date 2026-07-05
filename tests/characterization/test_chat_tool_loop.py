@@ -630,7 +630,7 @@ class TestToolSurfaceAndSkills:
         async def fake_analyze(message, tool_input):
             return {"__image_block__": block, "__prompt__": "describe it"}
 
-        bot._handle_analyze_image = fake_analyze
+        bot.media_tools._handle_analyze_image = fake_analyze
         text, _, _, _, _ = await run_loop(bot, FakeMessage("look at this"))
         assert text == "described the image"
         vision_msg = fake.messages_of_call(1)[-1]
