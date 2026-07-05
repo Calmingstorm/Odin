@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 
 import discord
 
@@ -25,7 +26,9 @@ from ..llm import CircuitOpenError
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
+from ..tools import ToolResult
 from ..tools.executor import _ERROR_RESULT_PREFIXES
+from .delivery import DISCORD_MAX_LEN
 from .response_guards import (
     _CODE_HEDGING_RETRY_MSG,
     _CONTINUATION_MSG,
@@ -61,6 +64,93 @@ def ensure_failure_visible(result_text: str, ok: bool) -> str:
     return f"Error (tool reported failure):\n{result_text}"
 
 
+class _LoopMessageProxy:
+    """Lightweight proxy providing a discord.Message-like interface for loop iterations.
+
+    Allows Discord-native tool handlers to be called from autonomous loop
+    iterations without a real Discord message object.
+    """
+
+    def __init__(self, channel: object, user_id: str, user_name: str = "loop") -> None:
+        self.channel = channel
+        self.id = 0  # No triggering message
+        self.webhook_id = None
+        self.author = _LoopAuthorProxy(user_id, user_name)
+
+
+class _LoopAuthorProxy:
+    """Lightweight proxy for message.author in loop context."""
+
+    def __init__(self, user_id: str, name: str) -> None:
+        self.id = int(user_id) if user_id.isdigit() else 0
+        self.bot = False
+        self._name = name
+
+    def __str__(self) -> str:
+        return self._name
+
+
+@dataclass(frozen=True)
+class LoopPolicy:
+    """The chat-vs-autonomous behavioral dimensions (RFC-001 §4.3) as data.
+
+    The load-bearing knobs are consulted by the shared machinery below;
+    the remaining fields document divergences that live in the two entry
+    points' control flow (guards/classifier/stuck/compression/typing/
+    cancellation/validation exist only in run(); CircuitOpenError re-raise,
+    prev-context exchange, and the reflection-gated finish only in
+    run_autonomous()). Do not "unify" a documented dimension without a
+    characterization pin saying so.
+    """
+
+    skill_file_delivery: str  # "send" (chat) | "stage" (autonomous)
+    trajectory_source: str  # "discord" | "loop"
+    audit_event_style: str  # "chat" (tool_start/tool_end) | "loop" (loop_tool)
+    iteration_cap_key: str  # config.tools.max_tool_iterations_{chat,loop}
+    llm_via_gateway: bool  # chat: call_with_tools; autonomous: raw active client
+    response_guards: bool
+    completion_classifier: bool
+
+
+CHAT_POLICY = LoopPolicy(
+    skill_file_delivery="send",
+    trajectory_source="discord",
+    audit_event_style="chat",
+    iteration_cap_key="chat",
+    llm_via_gateway=True,
+    response_guards=True,
+    completion_classifier=True,
+)
+
+AUTONOMOUS_POLICY = LoopPolicy(
+    skill_file_delivery="stage",
+    trajectory_source="loop",
+    audit_event_style="loop",
+    iteration_cap_key="loop",
+    llm_via_gateway=False,
+    response_guards=False,
+    completion_classifier=False,
+)
+
+
+def build_assistant_content(response) -> list[dict]:
+    """Assistant tool_use content blocks — the byte-identical fragment both
+    pipelines carried (RFC R5 seam extraction)."""
+    assistant_content: list[dict] = []
+    if response.text:
+        assistant_content.append({"type": "text", "text": response.text})
+    for tc in response.tool_calls:
+        assistant_content.append(
+            {
+                "type": "tool_use",
+                "id": tc.id,
+                "name": tc.name,
+                "input": tc.input,
+            }
+        )
+    return assistant_content
+
+
 class ToolLoopRunner:
     def __init__(self, host) -> None:
         self.host = host
@@ -71,6 +161,7 @@ class ToolLoopRunner:
         history: list[dict],
         system_prompt_override: str | None = None,
         trace=None,
+        policy: LoopPolicy = CHAT_POLICY,
     ) -> tuple[str, bool, bool, list[str], bool]:
         """Process a message with the tool loop — see module docstring.
 
@@ -215,7 +306,10 @@ class ToolLoopRunner:
             channel_id=str(getattr(message.channel, "id", "")),
             user_id=user_id,
             user_name=str(getattr(message.author, "display_name", "")),
-            source=str(_turn_ctx.get("source") or getattr(message, "_odin_source", "discord")),
+            source=str(
+                _turn_ctx.get("source")
+                or getattr(message, "_odin_source", policy.trajectory_source)
+            ),
         )
         bot._record_user_content(_trajectory, getattr(message, "content", "") or "")
         # No explicit reset — each message handler runs in its own asyncio
@@ -517,8 +611,7 @@ class ToolLoopRunner:
                                 {
                                     "role": "developer",
                                     "content": (
-                                        f"You are not done. {reason}. "
-                                        "Continue with tool calls now."
+                                        f"You are not done. {reason}. Continue with tool calls now."
                                     ),
                                 }
                             )
@@ -612,7 +705,7 @@ class ToolLoopRunner:
                             tool_input,
                             message=message,
                             user_id=user_id,
-                            skill_file_delivery="send",
+                            skill_file_delivery=policy.skill_file_delivery,
                         )
                         if _effects.rebuild_system_prompt:
                             system_prompt = bot._build_system_prompt(
@@ -630,9 +723,7 @@ class ToolLoopRunner:
                     error = str(e)
                     result = f"Tool {tool_name} timed out: {e}"
                     tool_result = None
-                    log.warning(
-                "Tool %s timed out after %.1fs", tool_name, time.monotonic() - t0
-            )
+                    log.warning("Tool %s timed out after %.1fs", tool_name, time.monotonic() - t0)
                 except (ValueError, KeyError, TypeError) as e:
                     error = str(e)
                     result = f"Tool {tool_name} input error: {e}"
@@ -864,3 +955,411 @@ class ToolLoopRunner:
             trace=trace,
         )
         return _cap_msg, False, True, tools_used_in_loop, False
+
+    async def run_autonomous(
+        self,
+        prompt: str,
+        channel: object,
+        prev_context: str | None,
+        user_id: str,
+        policy: LoopPolicy = AUTONOMOUS_POLICY,
+    ) -> str:
+        """Run a single loop iteration through Codex with full tool access.
+
+        Simplified version of _process_with_tools for autonomous loops:
+        same Codex + tool execution pipeline but without detection retries.
+        """
+        bot = self.host
+        from .client import _scrub_tool_input_for_storage
+
+        if not bot.llm_client:
+            return "LLM provider not available."
+
+        # Resolve requester name for audit logging and message proxy
+        requester_name = "loop"
+        for loop_info in bot.loop_manager._loops.values():
+            if loop_info.requester_id == user_id:
+                requester_name = loop_info.requester_name
+                break
+        msg_proxy = _LoopMessageProxy(channel, user_id, requester_name)
+
+        # Observability: loop iterations get the same trajectory + context
+        # trace coverage as chat turns (they were previously invisible —
+        # 10% of all tool executions had no recorded narrative).
+        _turn_ctx = get_turn() or {}
+        _loop_id = str(_turn_ctx.get("loop_id", ""))
+        _loop_iter = int(_turn_ctx.get("loop_iteration", 0) or 0)
+        from ..trajectories.saver import ToolIteration, TrajectoryTurn, stored_tool_results
+
+        _obs = getattr(bot.config, "observability", None)
+        _loop_trace_on = _obs is None or getattr(_obs, "loop_trace", True)
+        _result_store_cap = int(getattr(_obs, "max_tool_result_chars", 2000) or 2000)
+        _trace = bot._new_context_trace() if _loop_trace_on else None
+        _trajectory = None
+        _loop_details: list[dict] = []
+        if _loop_trace_on:
+            _trajectory = TrajectoryTurn(
+                message_id=str(_turn_ctx.get("turn_id", "")),
+                channel_id=str(getattr(channel, "id", "")),
+                user_id=user_id,
+                user_name=requester_name,
+                source=policy.trajectory_source,
+            )
+            bot._record_user_content(_trajectory, prompt)
+
+        # Build messages for the iteration
+        messages: list[dict] = []
+        if prev_context:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Previous iteration results:\n{prev_context}",
+                }
+            )
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "Understood, I have the context from previous iterations.",
+                }
+            )
+        messages.append({"role": "user", "content": prompt})
+
+        # Build system prompt and tool definitions
+        if _trace is not None:
+            with _trace.phase("system_prompt"):
+                system_prompt = bot._build_system_prompt(
+                    channel=channel,
+                    user_id=user_id,
+                    trace=_trace,
+                )
+            _trace.continuity("loop")
+            if prev_context:
+                _trace.section("loop_prev_context", tokens=len(prev_context) // 4)
+        else:
+            system_prompt = bot._build_system_prompt(channel=channel, user_id=user_id)
+        tools = bot._merged_tool_definitions() if bot.config.tools.enabled else None
+
+        async def _finish(
+            outcome_text: str,
+            *,
+            is_error: bool = False,
+            failure_class: str = "",
+            error_text: str = "",
+        ) -> str:
+            """Persist the loop turn and run gated reflection at every exit."""
+            if _trajectory is not None:
+                await bot._save_turn_trajectory(
+                    _trajectory,
+                    error=error_text if is_error else "",
+                    final_response=outcome_text if not is_error else "",
+                    tools_used=[d["tool"] for d in _loop_details],
+                    trace=_trace,
+                )
+            bot._maybe_loop_reflect(
+                loop_id=_loop_id or channel_id_str,
+                prompt=prompt,
+                outcome=outcome_text,
+                is_error=is_error,
+                failure_class=failure_class,
+                error_text=error_text,
+                tool_details=_loop_details,
+                user_id=user_id,
+            )
+            return outcome_text
+
+        final_text = ""
+        completed_naturally = False  # True only when a tool-free turn ended the loop
+        tool_timeout = bot.config.tools.tool_timeout_seconds
+        channel_id_str = str(getattr(channel, "id", ""))
+        loop_cap = bot.config.tools.max_tool_iterations_loop
+        tool_calls_made = 0
+
+        for _iteration in range(loop_cap):
+            try:
+                response = await bot.llm_client.chat_with_tools(
+                    messages=messages,
+                    system=system_prompt,
+                    tools=tools or [],
+                )
+            except CircuitOpenError:
+                raise
+            except Exception as e:
+                log.warning("Loop iteration Codex call failed: %s", e)
+                return await _finish(
+                    f"LLM call failed: {e}",
+                    is_error=True,
+                    failure_class="provider",
+                    error_text=str(e),
+                )
+
+            if _trajectory is not None:
+                _trajectory.iterations.append(
+                    ToolIteration(
+                        iteration=_iteration,
+                        tool_calls=[
+                            {"id": tc.id, "name": tc.name, "input": tc.input}
+                            for tc in (response.tool_calls or [])
+                        ],
+                        llm_text=response.text or "",
+                        input_tokens=getattr(response, "input_tokens", 0) or 0,
+                        output_tokens=getattr(response, "output_tokens", 0) or 0,
+                    )
+                )
+
+            if response.text:
+                final_text = response.text
+
+            if not response.tool_calls:
+                completed_naturally = True
+                break
+
+            tool_calls_made += len(response.tool_calls)
+
+            # Build assistant content with tool_use blocks (matches _process_with_tools format)
+            messages.append({"role": "assistant", "content": build_assistant_content(response)})
+
+            # Execute tools concurrently with per-tool timeout
+            async def _run_loop_tool(block):
+                nonlocal system_prompt
+                tool_name = block.name
+                tool_input = block.input
+                log.info("Loop tool call: %s(%s)", tool_name, tool_input)
+                # Provider couldn't parse the model's arguments — don't run
+                # the tool on a silently-empty input (see _run_tool).
+                if getattr(block, "parse_error", None):
+                    log.warning("Loop tool call %s not executed: %s", tool_name, block.parse_error)
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": (
+                            f"Error: {block.parse_error}. The tool was NOT executed — "
+                            "re-issue the call with valid JSON arguments."
+                        ),
+                    }
+
+                t0 = time.monotonic()
+                error = None
+                try:
+                    _t = 3660 if tool_name in _LONG_TIMEOUT_TOOL_SET else tool_timeout
+                    raw = await asyncio.wait_for(
+                        bot._dispatch_loop_tool(
+                            tool_name,
+                            tool_input,
+                            msg_proxy,
+                            user_id,
+                        ),
+                        timeout=_t,
+                    )
+                    # Skill CRUD invalidates caches
+                    if tool_name in (
+                        "create_skill",
+                        "edit_skill",
+                        "delete_skill",
+                        "enable_skill",
+                        "disable_skill",
+                        "install_skill",
+                    ):
+                        system_prompt = bot._build_system_prompt(
+                            channel=channel,
+                            user_id=user_id,
+                        )
+                except TimeoutError:
+                    error = f"Tool '{tool_name}' timed out after {_t}s"
+                    raw = error
+                except (ValueError, KeyError, TypeError) as e:
+                    error = str(e)
+                    raw = f"Tool {tool_name} input error: {e}"
+                except Exception as e:
+                    error = str(e)
+                    raw = f"Error executing {tool_name}: {e}"
+                    log.warning("Unexpected loop tool error for %s: %s", tool_name, e)
+
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+                # Handle image block returns from analyze_image
+                if isinstance(raw, dict) and "__image_block__" in raw:
+                    raw = f"[Image loaded: {raw.get('__prompt__', '')}]"
+
+                # Make structured failure visible (see _ensure_failure_visible)
+                # and propagate it into the audit error field.
+                if isinstance(raw, ToolResult):
+                    if not raw.ok and not error:
+                        error = raw.error or "tool reported failure"
+                    raw = bot._ensure_failure_visible(str(raw), raw.ok)
+
+                result = truncate_tool_output(scrub_output_secrets(str(raw)))
+
+                # Audit log
+                try:
+                    await bot.audit.log_execution(
+                        user_id=user_id,
+                        user_name=requester_name,
+                        channel_id=channel_id_str,
+                        tool_name=tool_name,
+                        tool_input=_scrub_tool_input_for_storage(tool_name, tool_input),
+                        approved=True,
+                        result_summary=result,
+                        execution_time_ms=elapsed_ms,
+                        error=error,
+                    )
+                except OSError as audit_err:
+                    log.warning("Audit write failed (I/O): %s", audit_err)
+                except Exception as audit_err:
+                    log.warning("Audit write failed: %s", audit_err)
+
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                }
+
+            tool_results = await asyncio.gather(
+                *[_run_loop_tool(tc) for tc in response.tool_calls],
+            )
+            messages.append({"role": "user", "content": list(tool_results)})
+
+            _results_by_id = {r.get("tool_use_id"): r for r in tool_results if isinstance(r, dict)}
+            for _tc in response.tool_calls:
+                if _trace is not None and _tc.id not in _results_by_id:
+                    _trace.warning(
+                        "TOOL_RESULT_CONTINUATION_MISMATCH",
+                        "error",
+                        f"loop tool {_tc.name} call has no paired result",
+                    )
+                _rcontent = str(_results_by_id.get(_tc.id, {}).get("content", ""))
+                _loop_details.append(
+                    {
+                        "tool": _tc.name,
+                        "input": _scrub_tool_input_for_storage(_tc.name, _tc.input),
+                        "result": _rcontent[:300],
+                        "error": _rcontent.lstrip()
+                        .lower()
+                        .startswith(
+                            (
+                                "error",
+                                "[error",
+                                "failed",
+                                "traceback",
+                                "script failed",
+                                "command failed",
+                            )
+                        ),
+                    }
+                )
+
+            # Persist results onto the iteration recorded before execution —
+            # without this the saved trajectory has calls but no outcomes.
+            if _trajectory is not None and _trajectory.iterations:
+                _trajectory.iterations[-1].tool_results = stored_tool_results(
+                    tool_results,
+                    _result_store_cap,
+                )
+
+        # Scrub final text; posting is handled by _post_response in LoopManager.
+        # Only treat final_text as a clean success when the loop ended NATURALLY
+        # (a tool-free response). If we fell out by exhausting the cap, any
+        # final_text is stale pre-tool text from some earlier iteration —
+        # returning it as is_error=False would silently hide the cap hit (the
+        # cap-warning path below was unreachable whenever any iteration produced
+        # text).
+        if final_text and completed_naturally:
+            final_text = scrub_output_secrets(final_text)
+            if len(final_text) > DISCORD_MAX_LEN:
+                final_text = final_text[: DISCORD_MAX_LEN - 50] + "\n... (truncated)"
+            _had_tool_errors = any(d.get("error") for d in _loop_details)
+            _first_err = next((d for d in _loop_details if d.get("error")), None)
+            # Iteration succeeded after a mid-flight tool error: the turn is
+            # saved as a success (is_error=False), but the failure detail is
+            # passed through so the reflection gate can learn from recovered
+            # errors without marking the trajectory failed.
+            return await _finish(
+                final_text,
+                is_error=False,
+                failure_class="command_failed" if _had_tool_errors else "",
+                error_text=_first_err["result"] if _first_err else "",
+            )
+
+        # Cap exhausted without a tool-free response. Surface it (optionally with
+        # the stale partial text) instead of hiding the truncation.
+        if tool_calls_made >= loop_cap or not completed_naturally:
+            log.warning(
+                "Loop tool-iteration cap hit (%d) after %d tool calls; "
+                "no tool-free summary from Codex",
+                loop_cap,
+                tool_calls_made,
+            )
+            _partial = ""
+            if final_text:
+                _partial = "\n\nLast partial output before the cap:\n" + scrub_output_secrets(
+                    final_text[:1000],
+                )
+            return await _finish(
+                f"Iteration hit the loop tool-iteration cap ({loop_cap}) "
+                f"after {tool_calls_made} tool calls without a final summary. "
+                f"Raise `tools.max_tool_iterations_loop` in config (or via the "
+                f"web UI) if this happens repeatedly." + _partial,
+                is_error=True,
+                failure_class="cancelled",
+                error_text=f"loop iteration cap {loop_cap} reached",
+            )
+
+        return await _finish("(no response)")
+
+    async def dispatch_loop_tool(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        msg_proxy: _LoopMessageProxy,
+        user_id: str,
+    ) -> str | dict:
+        """Dispatch a tool call to the correct handler within a loop iteration.
+
+        Mirrors the Discord-native tool dispatch in _process_with_tools, using
+        a lightweight message proxy instead of a real Discord message.
+        """
+        bot = self.host
+        t0 = time.monotonic()
+        result = await self.dispatch_loop_tool_inner(tool_name, tool_input, msg_proxy, user_id)
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        try:
+            await bot.audit.log_event(
+                event_type="loop_tool",
+                action=tool_name,
+                actor=user_id,
+                detail=str(result)[:200] if isinstance(result, str) else "",
+                channel_id=str(getattr(msg_proxy.channel, "id", "")),
+                metadata={
+                    "tool_input_keys": list((tool_input or {}).keys()),
+                    "elapsed_ms": elapsed_ms,
+                },
+            )
+        except Exception:
+            pass
+        return result
+
+    async def dispatch_loop_tool_inner(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        msg_proxy: _LoopMessageProxy,
+        user_id: str,
+    ) -> str | dict:
+        bot = self.host
+        # Central RBAC gate: same enforcement as the message tool loop — these
+        # handlers bypass ToolExecutor.execute(), so check permission for EVERY tool.
+        _rbac_denial = bot.tool_executor.check_permission(tool_name, user_id)
+        if isinstance(_rbac_denial, str) and _rbac_denial:  # str = deny, None = allow
+            log.warning("RBAC gate denied loop tool %s for user %s", tool_name, user_id)
+            return _rbac_denial
+        # One dispatch table for both pipelines (RFC-001 P5a).
+        if bot._native_tools.handles(tool_name):
+            result, _effects = await bot._native_tools.dispatch(
+                tool_name,
+                tool_input,
+                message=msg_proxy,
+                user_id=user_id,
+                skill_file_delivery="stage",
+            )
+            return result
+        # --- Executor-routed tools (run_command, run_script, SSH, etc.) ---
+        return await bot.tool_executor.execute(tool_name, tool_input, user_id=user_id)
