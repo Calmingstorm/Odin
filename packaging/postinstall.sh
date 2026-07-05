@@ -1,4 +1,12 @@
 #!/bin/bash
+# Odin .deb post-installation script.
+#
+# Debian policy forbids interactive prompts in maintainer scripts (they run
+# non-interactively under apt/dpkg, cloud-init, Ansible, CI, etc.). This
+# script is therefore fully non-interactive: it provisions the service and
+# prints next-steps. First-time configuration (Discord token, Codex login)
+# is done by the operator afterwards — see the printed instructions and the
+# README "First-time setup" section.
 set -e
 
 SERVICE_USER="odin"
@@ -7,6 +15,7 @@ APP_DIR="/opt/odin"
 CONFIG_DIR="/etc/odin"
 DATA_DIR="/var/lib/odin"
 LOG_DIR="/var/log/odin"
+WEB_PORT="3000"  # matches config.yml default web.port
 
 echo "Odin postinstall: setting up..."
 
@@ -26,11 +35,13 @@ mkdir -p "$CONFIG_DIR"
 mkdir -p "$DATA_DIR"/{sessions,context,skills,search,knowledge,trajectories}
 mkdir -p "$LOG_DIR"
 
-# Enable passwordless sudo for the odin user
+# Enable passwordless sudo for the odin user (Odin runs privileged host
+# operations; scope this down in /etc/sudoers.d/99-odin-passwordless if you
+# want to restrict what it can run — see docs/security.md).
 if [ ! -f /etc/sudoers.d/99-odin-passwordless ]; then
     printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$SERVICE_USER" > /etc/sudoers.d/99-odin-passwordless
     chmod 0440 /etc/sudoers.d/99-odin-passwordless
-    echo "  Passwordless sudo enabled for $SERVICE_USER"
+    echo "  Passwordless sudo enabled for $SERVICE_USER (restrict in /etc/sudoers.d/99-odin-passwordless)"
 fi
 
 # Install config templates (preserve existing on upgrade)
@@ -51,7 +62,6 @@ if [ ! -f "$CONFIG_DIR/.env" ]; then
 DISCORD_TOKEN=
 ENVEOF
     fi
-    FRESH_INSTALL=true
 fi
 
 # Create symlinks so the app sees config/data in its working directory
@@ -68,21 +78,20 @@ if [ ! -d "$APP_DIR/.venv" ]; then
 fi
 
 # Install Python dependencies from pyproject.toml
-echo "  Installing Python dependencies..."
+echo "  Installing Python dependencies (this can take a few minutes)..."
 if [ -f "$APP_DIR/pyproject.toml" ]; then
     "$APP_DIR/.venv/bin/pip" install --quiet "$APP_DIR" 2>/dev/null || \
-        echo "  Warning: pip install from pyproject.toml failed — install dependencies manually"
+        echo "  Warning: pip install failed — run '$APP_DIR/.venv/bin/pip install $APP_DIR' manually"
 fi
 
-# Install Playwright browsers for native browser support
+# Install Playwright browsers for native browser support (optional feature)
 "$APP_DIR/.venv/bin/playwright" install chromium 2>/dev/null || \
-    echo "  Warning: playwright install failed — browser tools may not work"
+    echo "  Note: playwright browser install skipped — the browser_* tools stay disabled until you run '$APP_DIR/.venv/bin/playwright install chromium'"
 
 # Generate SSH key for the odin user if none exists
 if [ ! -f "$APP_DIR/.ssh/id_ed25519" ]; then
     mkdir -p "$APP_DIR/.ssh"
     ssh-keygen -t ed25519 -f "$APP_DIR/.ssh/id_ed25519" -N "" -q
-    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR/.ssh"
     chmod 700 "$APP_DIR/.ssh"
     chmod 600 "$APP_DIR/.ssh/id_ed25519"
     echo "  SSH key generated at $APP_DIR/.ssh/id_ed25519"
@@ -94,99 +103,52 @@ chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR"
 chmod 600 "$CONFIG_DIR/.env"
 chown root:root /usr/lib/systemd/system/odin.service
 
-# Enable systemd service
+# Enable the service (do NOT auto-start on a fresh install — it would crash-loop
+# until the Discord token is set). On upgrades, restart only if already running.
 systemctl daemon-reload
-systemctl enable odin.service
+systemctl enable odin.service >/dev/null 2>&1 || true
+if [ "$FRESH_INSTALL" = false ] && systemctl is-active --quiet odin.service; then
+    echo "  Upgrade detected — restarting odin.service..."
+    systemctl restart odin.service || true
+fi
 
 echo ""
-echo "============================================"
-echo "  Odin installed successfully."
-echo "============================================"
+echo "============================================================"
+echo "  Odin installed."
+echo "============================================================"
 
 if [ "$FRESH_INSTALL" = true ]; then
-    echo ""
-    echo "=== Guided Setup ==="
-    echo ""
+    SSH_PUB="$(cat "$APP_DIR/.ssh/id_ed25519.pub" 2>/dev/null || echo '(key not generated)')"
+    cat << SETUPEOF
 
-    # Step 1: Discord token
-    echo "Step 1: Discord Bot Token"
-    echo "  Create a bot at https://discord.com/developers/applications"
-    echo "  Enable MESSAGE CONTENT INTENT under Bot settings"
-    echo ""
-    read -p "  Paste your Discord bot token (or press Enter to skip): " DISCORD_TOKEN_INPUT
-    if [ -n "$DISCORD_TOKEN_INPUT" ]; then
-        sed -i "s|^DISCORD_TOKEN=.*|DISCORD_TOKEN=$DISCORD_TOKEN_INPUT|" "$CONFIG_DIR/.env"
-        echo "  Token saved to $CONFIG_DIR/.env"
-    else
-        echo "  Skipped — set it later: sudo editor $CONFIG_DIR/.env"
-    fi
-    echo ""
+First-time setup (3 steps — the service is enabled but not started yet):
 
-    # Step 2: OpenAI Codex credentials
-    echo "Step 2: OpenAI Codex Credentials"
-    echo "  Odin needs an OpenAI ChatGPT Plus/Team account for the LLM backend."
-    echo "  Run this command to authenticate (opens a browser):"
-    echo ""
-    echo "    cd $APP_DIR && sudo -u $SERVICE_USER python3 scripts/codex_login.py"
-    echo ""
-    echo "  You can do this now or after setup completes."
-    echo "  Multiple accounts can be added for rate-limit rotation."
-    echo ""
+  1. Set your Discord bot token
+       sudoedit $CONFIG_DIR/.env         # set DISCORD_TOKEN=...
+     Create the bot at https://discord.com/developers/applications and
+     enable MESSAGE CONTENT INTENT under the Bot settings.
 
-    # Step 3: localhost host
-    echo "Step 3: Host Configuration"
-    echo "  Odin needs at least localhost configured to run shell commands."
-    if grep -q "hosts:" "$CONFIG_DIR/config.yml" 2>/dev/null; then
-        echo "  Hosts section already exists in config.yml"
-    else
-        echo "  Adding localhost to config.yml..."
-        cat >> "$CONFIG_DIR/config.yml" << 'HOSTEOF'
+  2. Authenticate the LLM backend (OpenAI Codex, ChatGPT Plus/Team account)
+       sudo -u $SERVICE_USER $APP_DIR/.venv/bin/python $APP_DIR/scripts/codex_login.py
+     Add --device on a headless server. Repeat to add more accounts for
+     rate-limit rotation. (Or configure Kimi/Ollama in the web UI instead.)
 
-tools:
-  hosts:
-    localhost:
-      address: 127.0.0.1
-      ssh_user: odin
-      os: linux
-HOSTEOF
-        echo "  localhost added."
-    fi
-    echo ""
+  3. Review config and start Odin
+       sudoedit $CONFIG_DIR/config.yml   # hosts, permissions, etc. (optional)
+       sudo systemctl start odin
+       sudo journalctl -u odin -f        # watch it come up
 
-    # Step 4: Permissions
-    echo "Step 4: Permissions"
-    read -p "  Are you the only user? Set default_tier to admin? (y/N): " ADMIN_CHOICE
-    if [ "$ADMIN_CHOICE" = "y" ] || [ "$ADMIN_CHOICE" = "Y" ]; then
-        if grep -q "default_tier:" "$CONFIG_DIR/config.yml" 2>/dev/null; then
-            sed -i 's|default_tier:.*|default_tier: admin|' "$CONFIG_DIR/config.yml"
-        else
-            cat >> "$CONFIG_DIR/config.yml" << 'PERMEOF'
+  Web dashboard:  http://localhost:$WEB_PORT
+  Config file:    $CONFIG_DIR/config.yml
+  Secrets (.env): $CONFIG_DIR/.env
+  Full guide:     https://github.com/Calmingstorm/Odin#first-time-setup
 
-permissions:
-  default_tier: admin
-PERMEOF
-        fi
-        echo "  Set to admin. All users have full access."
-    else
-        echo "  Keeping default (user tier). Grant admin per-user via web dashboard."
-    fi
-    echo ""
+  This host's SSH public key (add to remote hosts Odin should manage):
+  $SSH_PUB
 
-    # Summary
-    echo "============================================"
-    echo "  Setup Complete!"
-    echo "============================================"
-    echo ""
-    echo "  Start Odin:    sudo systemctl start odin"
-    echo "  Watch logs:    sudo journalctl -u odin -f"
-    echo "  Web dashboard: http://localhost:8080"
-    echo "  Config:        $CONFIG_DIR/config.yml"
-    echo "  Secrets:       $CONFIG_DIR/.env"
-    echo "  Codex login:   cd $APP_DIR && sudo -u $SERVICE_USER python3 scripts/codex_login.py"
-    echo ""
-    echo "  SSH public key (for remote hosts):"
-    echo "  $(cat $APP_DIR/.ssh/id_ed25519.pub 2>/dev/null || echo '  (not generated)')"
-    echo ""
+SETUPEOF
 else
-    echo "Existing config preserved. Restart with: sudo systemctl restart odin"
+    echo ""
+    echo "  Existing config preserved in $CONFIG_DIR."
+    echo "  If the service was not running, start it with: sudo systemctl start odin"
 fi

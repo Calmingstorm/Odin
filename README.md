@@ -89,27 +89,69 @@ Discord ──> OdinBot (client.py)
                ├── Knowledge Store ──> FTS5 + vector search
                ├── Session Manager ──> Per-channel history + compaction
                ├── Browser (native Playwright) ──> Screenshots, page reading, JS eval
-               └── Web API (aiohttp) ──> 154 REST endpoints + WebSocket
+               └── Web API (aiohttp) ──> 183 REST endpoints + WebSocket
 ```
 
-## Quick Start
+## Install
+
+### Debian / Ubuntu (recommended)
+
+Odin ships as a `.deb` on the [releases page](https://github.com/Calmingstorm/Odin/releases). It installs to `/opt/odin`, runs as a dedicated `odin` system user under systemd, and keeps config in `/etc/odin` and data in `/var/lib/odin` (FHS layout).
 
 ```bash
-# 1. Clone and install
+# Download the latest release .deb, then:
+sudo apt install ./odin_*.deb
+```
+
+The installer provisions the service (system user, Python venv + dependencies, SSH key, systemd unit) **non-interactively** and prints the first-time-setup steps. It does **not** start Odin automatically — you set the Discord token and LLM credentials first (below). Requires Python ≥ 3.11 (`python3-venv`); dependencies are pulled automatically.
+
+Upgrades preserve `/etc/odin` and `/var/lib/odin` and restart the service if it was running.
+
+### From source (development)
+
+```bash
 git clone https://github.com/Calmingstorm/Odin.git
 cd Odin
 pip install -e ".[dev]"
-playwright install chromium
+playwright install chromium          # optional — enables browser_* tools
 
-# 2. Configure
-cp .env.example .env        # Add your Discord bot token
-edit config.yml              # Set hosts, Codex credentials, etc.
-
-# 3. Run
+cp .env.example .env                 # set DISCORD_TOKEN
+$EDITOR config.yml                   # hosts, LLM, permissions
 python -m src
 ```
 
-The web UI starts automatically at the configured port (default 3000). Set `web.api_token` in config.yml to require authentication.
+The web UI starts automatically on the configured port (default **3000**). Set `web.api_token` in `config.yml` to require authentication.
+
+## First-time setup
+
+After installing the `.deb`, complete these three steps (the service is enabled but not yet started):
+
+**1. Discord bot token.** Create a bot at the [Discord developer portal](https://discord.com/developers/applications), enable **MESSAGE CONTENT INTENT** under Bot settings, then:
+
+```bash
+sudoedit /etc/odin/.env              # set DISCORD_TOKEN=...
+```
+
+**2. LLM backend.** Odin's primary backend is OpenAI Codex (a ChatGPT Plus/Team account). Authenticate as the `odin` user with the installed virtualenv:
+
+```bash
+sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py
+# headless server? add --device for the browserless device-code flow
+```
+
+Repeat to add more accounts for automatic rate-limit rotation. You can instead configure **Kimi** or **Ollama** from the web UI — see [LLM Configuration](#llm-configuration).
+
+**3. Review config and start.**
+
+```bash
+sudoedit /etc/odin/config.yml        # hosts, permissions (localhost + admin tier ship by default)
+sudo systemctl start odin
+sudo journalctl -u odin -f           # watch it connect
+```
+
+Then open the dashboard at **http://localhost:3000**. Set `web.api_token` in `config.yml` to require authentication before exposing it.
+
+*(From-source installs use `data/codex_auth.json` under the repo and `python scripts/codex_login.py` instead of the `/opt/odin` paths above.)*
 
 ## LLM Configuration
 
@@ -125,7 +167,7 @@ All providers are configured from the WebUI with inline auto-save — no config 
 
 ### Codex Authentication
 
-Codex uses OpenAI OAuth tokens stored in `data/codex_auth.json`.
+Codex uses OpenAI OAuth tokens stored in `data/codex_auth.json`. On a `.deb` install, run the login script with the installed virtualenv as the `odin` user (`sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py`); the commands below are the from-source equivalents.
 
 **Browser login** (machine with a browser):
 ```bash
@@ -174,7 +216,7 @@ Tokens auto-refresh at runtime. Re-run the login script if the bot is offline fo
 - **`web`**: port, API token, session timeout
 - **`permissions`**: default tier, per-user overrides
 
-## Tools (70)
+## Tools (74)
 
 | Category | Tools |
 |----------|-------|
@@ -186,17 +228,19 @@ Tokens auto-refresh at runtime. Re-run the login script if the bot is offline fo
 | Skills | `create_skill`, `edit_skill`, `delete_skill`, `list_skills`, `enable_skill`, `disable_skill`, `install_skill`, `export_skill`, `skill_status`, `invoke_skill` |
 | Knowledge & Memory | `memory_manage`, `manage_list`, `search_history`, `search_audit`, `search_knowledge`, `ingest_document`, `bulk_ingest_knowledge`, `list_knowledge`, `delete_knowledge` |
 | Web & Browser | `web_search`, `fetch_url`, `browser_screenshot`, `browser_read_page`, `browser_read_table`, `browser_click`, `browser_fill`, `browser_evaluate` |
+| Email | `email_send`, `email_search`, `email_read`, `email_list_recent` |
 | Discord | `read_channel`, `add_reaction`, `create_poll`, `purge_messages` |
 | Validation & Security | `validate_action`, `set_permission`, `issue_tracker` |
 
 ## Testing
 
 ```bash
-# Full suite (105 files, ~3,584 test functions)
+# Full suite (124 files, 6,000+ tests; asyncio auto mode)
 pytest tests/ -q
 
-# Skip slow/optional tests
-pytest tests/ --ignore=tests/test_tools -q
+# One file or pattern
+pytest tests/test_client.py -q
+pytest tests/ -k scheduler -q
 ```
 
 ## Project Structure
@@ -234,14 +278,14 @@ src/
   knowledge/store.py       FTS5 + vector knowledge base
   health/server.py         aiohttp web server + auth middleware
   web/
-    api.py                 154 REST endpoints
+    api.py                 183 REST endpoints
     websocket.py           Live event streaming + WS chat
   audit/logger.py          HMAC-chainable audit log
   learning/reflector.py    Cross-conversation learning (90-day expiry)
   trajectories/saver.py    Per-turn JSONL trajectory logging
 
 ui/                        Vue 3 + Tailwind web dashboard (19 pages)
-tests/                     105 files, ~3,584 test functions
+tests/                     124 files, 6,000+ tests
 config.yml                 Default configuration template
 ```
 
