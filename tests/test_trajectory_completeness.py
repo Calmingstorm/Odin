@@ -455,5 +455,8 @@ class TestAgentSaverWiring:
         import inspect
 
         from src.discord.client import OdinBot
-        src = inspect.getsource(OdinBot._handle_spawn_agent)
-        assert "trajectory_saver=self.agent_trajectory_saver" in src
+        # P5c: body moved to native_tools/agents_tasks.py (host-based)
+        from src.discord.native_tools.agents_tasks import AgentTaskTools
+
+        src = inspect.getsource(AgentTaskTools._handle_spawn_agent)
+        assert "trajectory_saver=bot.agent_trajectory_saver" in src

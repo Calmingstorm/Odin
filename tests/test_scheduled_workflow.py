@@ -75,7 +75,7 @@ class TestCollectAgentResult:
         return bot
 
     async def test_completed_agent_returns_ok(self):
-        from src.discord.client import OdinBot
+        from src.discord.native_tools.agents_tasks import AgentTaskTools
         wait_result = {
             "abc123": {
                 "status": "completed",
@@ -88,13 +88,14 @@ class TestCollectAgentResult:
             }
         }
         bot = self._make_bot_with_agent_manager(wait_result)
-        text, raw = await OdinBot._collect_agent_result(bot, "abc123", timeout=10)
+        text, raw = await AgentTaskTools(bot)._collect_agent_result("abc123", timeout=10)
         assert raw["status"] == "completed"
         assert raw["empty_result"] is False
         assert "All checks passed" in text
 
     async def test_failed_agent_returns_failure_data(self):
-        from src.discord.client import OdinBot
+        from src.discord.native_tools.agents_tasks import AgentTaskTools
+
         wait_result = {
             "def456": {
                 "status": "failed",
@@ -107,13 +108,14 @@ class TestCollectAgentResult:
             }
         }
         bot = self._make_bot_with_agent_manager(wait_result)
-        text, raw = await OdinBot._collect_agent_result(bot, "def456", timeout=10)
+        text, raw = await AgentTaskTools(bot)._collect_agent_result("def456", timeout=10)
         assert raw["status"] == "failed"
         assert raw["error"] == "All 3 Codex accounts failed"
         assert raw["empty_result"] is True
 
     async def test_completed_empty_result_flagged(self):
-        from src.discord.client import OdinBot
+        from src.discord.native_tools.agents_tasks import AgentTaskTools
+
         wait_result = {
             "ghi789": {
                 "status": "completed",
@@ -126,12 +128,13 @@ class TestCollectAgentResult:
             }
         }
         bot = self._make_bot_with_agent_manager(wait_result)
-        text, raw = await OdinBot._collect_agent_result(bot, "ghi789", timeout=10)
+        text, raw = await AgentTaskTools(bot)._collect_agent_result("ghi789", timeout=10)
         assert raw["status"] == "completed"
         assert raw["empty_result"] is True
 
     async def test_timed_out_agent(self):
-        from src.discord.client import OdinBot
+        from src.discord.native_tools.agents_tasks import AgentTaskTools
+
         wait_result = {
             "timeout1": {
                 "status": "running",
@@ -144,7 +147,7 @@ class TestCollectAgentResult:
             }
         }
         bot = self._make_bot_with_agent_manager(wait_result)
-        text, raw = await OdinBot._collect_agent_result(bot, "timeout1", timeout=1)
+        text, raw = await AgentTaskTools(bot)._collect_agent_result("timeout1", timeout=1)
         assert raw["status"] == "running"
 
 
