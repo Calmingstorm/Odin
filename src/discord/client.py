@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import io
 import os
@@ -30,6 +29,10 @@ from ..async_utils import fire_and_forget
 from .channel_state import ChannelStateRegistry
 from .llm_gateway import LLMGateway
 from .native_tools import NativeToolDispatcher, register_native_handlers
+from .native_tools.channel_ops import ChannelOpsTools
+from .native_tools.media import MediaTools
+from .native_tools.knowledge import KnowledgeTools
+from .native_tools.scheduling import SchedulingTools
 from .prompts import PromptBuilder
 from .tool_catalog import ToolCatalog
 from .voice import VoiceManager, VoiceMessageProxy
@@ -356,6 +359,26 @@ class OdinBot(commands.Bot):
         )
         register_native_handlers(self._native_tools)
 
+        # Domain handler bundles (P5b) — bodies moved out of the bot; the
+        # delegate methods below keep the dispatch host + test seam stable.
+        self._scheduling_tools = SchedulingTools(scheduler=self.scheduler)
+        self._knowledge_tools = KnowledgeTools(
+            sessions=self.sessions,
+            get_knowledge_store=lambda: self._knowledge_store,
+            embedder=self._embedder,
+            audit=self.audit,
+        )
+        self._channel_ops_tools = ChannelOpsTools(
+            sessions=self.sessions,
+            permissions=self.permissions,
+            get_channel=self.get_channel,
+        )
+        self._media_tools = MediaTools(
+            get_config=lambda: self.config,
+            browser_manager=self.browser_manager,
+            tool_executor=self.tool_executor,
+        )
+
 
         # Public `codex` / `knowledge` attributes are exposed as dynamic
         # properties defined below on the class — see the @property blocks.
@@ -565,76 +588,6 @@ class OdinBot(commands.Bot):
             return [f for f in required if f not in payload]
         except Exception:
             return []
-
-    def _validate_schedule_payload(self, inp: dict) -> str | None:
-        """Validate schedule_task input at creation time, not fire time.
-
-        Catches the class of LLM mistake where a 'check' action is queued
-        with no tool_input, or a 'workflow' step is missing tool_input —
-        those errors used to surface only at fire time as a crashing
-        coroutine, hours or days later. Returning a specific message
-        at creation makes the LLM retry with a complete payload.
-        """
-        action = inp.get("action", "reminder")
-        if action == "reminder":
-            if not inp.get("message"):
-                return "action=reminder requires a non-empty 'message'."
-        elif action == "check":
-            tool_name = inp.get("tool_name")
-            if not tool_name:
-                if inp.get("command"):
-                    inp["tool_name"] = "run_command"
-                    tool_name = "run_command"
-                else:
-                    return "action=check requires 'tool_name'."
-            tool_input = inp.get("tool_input")
-            if tool_input is None or (isinstance(tool_input, dict) and not tool_input):
-                shortcut_cmd = inp.get("command")
-                if shortcut_cmd and tool_name == "run_command":
-                    tool_input = {"host": inp.get("host", "localhost"), "command": shortcut_cmd}
-                    inp["tool_input"] = tool_input
-                else:
-                    tool_input = self._extract_tool_input_from_steps(inp)
-                    if tool_input:
-                        inp["tool_input"] = tool_input
-                    else:
-                        return (
-                            f"action=check with tool_name='{tool_name}' requires 'tool_input' "
-                            f"populated with the parameters that tool expects, OR use the "
-                            f"'command' shortcut field directly "
-                            f"(e.g. schedule_task(action='check', command='uname -r'))."
-                        )
-        elif action == "workflow":
-            steps = inp.get("steps")
-            if not steps or not isinstance(steps, list):
-                return "action=workflow requires a non-empty 'steps' array."
-            for i, step in enumerate(steps, 1):
-                if not isinstance(step, dict):
-                    return f"workflow step {i} must be an object."
-                if not step.get("tool_name"):
-                    return f"workflow step {i} is missing 'tool_name'."
-                step_input = step.get("tool_input")
-                if step.get("tool_name") in ("run_command", "run_script"):
-                    if not isinstance(step_input, dict) or not step_input:
-                        return (
-                            f"workflow step {i} ({step['tool_name']}) requires a non-empty "
-                            f"'tool_input' dict — for run_command include 'command', "
-                            f"for run_script include 'script'."
-                        )
-        return None
-
-    @staticmethod
-    def _extract_tool_input_from_steps(inp: dict) -> dict | None:
-        """Graceful fallback: gpt-5.4 consistently puts command params in
-        steps[].tool_input but omits top-level tool_input for action=check.
-        If steps has exactly one entry with a populated tool_input, use it."""
-        steps = inp.get("steps")
-        if not steps or not isinstance(steps, list):
-            return None
-        populated = [s for s in steps if isinstance(s, dict) and isinstance(s.get("tool_input"), dict) and s["tool_input"]]
-        if len(populated) == 1:
-            return populated[0]["tool_input"]
-        return None
 
     def _build_system_prompt(
         self, channel: discord.abc.GuildChannel | None = None,
@@ -2641,406 +2594,71 @@ class OdinBot(commands.Bot):
             return result_text
         return f"Error (tool reported failure):\n{result_text}"
 
-    @staticmethod
-    def _detect_image_type(data: bytes) -> str | None:
-        """Detect image media type from file magic bytes."""
-        if data[:8] == b"\x89PNG\r\n\x1a\n":
-            return "image/png"
-        if data[:2] == b"\xff\xd8":
-            return "image/jpeg"
-        if data[:4] == b"GIF8":
-            return "image/gif"
-        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-            return "image/webp"
-        return None
+    _detect_image_type = staticmethod(MediaTools._detect_image_type)
 
     async def _handle_purge(self, message: discord.Message, inp: dict) -> str:
-        """Delete recent messages in the channel."""
-        count = min(inp.get("count", 100), 500)
-        try:
-            deleted = await message.channel.purge(limit=count)
-            self.sessions.reset(str(message.channel.id))
-            return f"Deleted {len(deleted)} messages and reset conversation history."
-        except discord.Forbidden:
-            return "I don't have permission to delete messages in this channel."
-        except Exception as e:
-            return f"Failed to purge messages: {e}"
+        return await self._channel_ops_tools._handle_purge(message, inp)
+
+
+    # -- media handlers: bodies in native_tools/media.py (P5b) --
 
     async def _handle_browser_screenshot(self, message: discord.Message, inp: dict) -> str:
-        """Take a browser screenshot and post it as a Discord image."""
-        if not self.browser_manager:
-            return "Browser automation is not enabled. Set browser.enabled=true in config."
-        from ..tools.browser import handle_browser_screenshot
-        try:
-            text, screenshot_bytes = await handle_browser_screenshot(self.browser_manager, inp)
-            if screenshot_bytes:
-                discord_file = discord.File(io.BytesIO(screenshot_bytes), filename="screenshot.png")
-                await message.channel.send(file=discord_file)
-            return text
-        except Exception as e:
-            return f"Browser screenshot failed: {e}"
+        return await self._media_tools._handle_browser_screenshot(message, inp)
 
     async def _handle_generate_file(self, message: discord.Message, inp: dict) -> str:
-        """Generate a file from content and post it as a Discord attachment."""
-        filename = inp.get("filename", "output.txt")
-        content = inp.get("content", "")
-        caption = inp.get("caption", "")
-
-        file_bytes = content.encode("utf-8")
-        discord_file = discord.File(io.BytesIO(file_bytes), filename=filename)
-        try:
-            await message.channel.send(content=caption or None, file=discord_file)
-            return f"File `{filename}` ({len(file_bytes)} bytes) attached to channel."
-        except Exception as e:
-            return f"Failed to post file: {e}"
+        return await self._media_tools._handle_generate_file(message, inp)
 
     async def _handle_post_file(self, message: discord.Message, inp: dict) -> str:
-        """Fetch a file from a host and post it to Discord.
+        return await self._media_tools._handle_post_file(message, inp)
 
-        For localhost this reads directly from the local filesystem; for any
-        other host it falls back to SSH + base64 stream (handles binary safely).
-        Bypassing SSH for localhost avoids the host-key / ssh_key_path gauntlet
-        when Odin wants to post its own files.
-        """
-        host_alias = inp.get("host")
-        path = inp.get("path")
-        caption = inp.get("caption", "")
 
-        if not host_alias or not path:
-            return "Both 'host' and 'path' are required."
-
-        resolved = self.tool_executor._resolve_host(host_alias)
-        if not resolved:
-            return f"Unknown or disallowed host: {host_alias}"
-        address, ssh_user, _os = resolved
-
-        # Local fast path — no SSH gymnastics needed.
-        from ..tools.ssh import is_local_address
-        if is_local_address(address):
-            try:
-                with open(path, "rb") as f:
-                    file_bytes = f.read()
-            except FileNotFoundError:
-                return f"File not found: {path}"
-            except PermissionError:
-                return f"Permission denied reading file: {path}"
-            except OSError as exc:
-                return f"Failed to read file: {exc}"
-        else:
-            # Fetch file as base64 via SSH (handles binary safely)
-            import shlex
-            safe_path = shlex.quote(path)
-            ssh_args = [
-                "ssh",
-                "-i", self.config.tools.ssh_key_path,
-                "-o", f"UserKnownHostsFile={self.config.tools.ssh_known_hosts_path}",
-                "-o", "StrictHostKeyChecking=yes",
-                "-o", "ConnectTimeout=10",
-                "-o", "BatchMode=yes",
-                f"{ssh_user}@{address}",
-                f"base64 {safe_path}",
-            ]
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *ssh_args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-                if proc.returncode != 0:
-                    return f"Failed to fetch file: {stderr.decode('utf-8', errors='replace').strip()}"
-                file_bytes = base64.b64decode(stdout)
-            except asyncio.TimeoutError:
-                return "File fetch timed out (30s)."
-            except Exception as e:
-                return f"Failed to fetch file: {e}"
-
-        if not file_bytes:
-            return f"File not found or empty: {path}"
-
-        # Size check (Discord limit: 25MB for non-boosted servers)
-        if len(file_bytes) > 25 * 1024 * 1024:
-            return f"File too large to post ({len(file_bytes) / 1024 / 1024:.1f} MB). Discord limit is 25 MB."
-
-        filename = os.path.basename(path)
-        try:
-            file = discord.File(io.BytesIO(file_bytes), filename=filename)
-            await message.channel.send(content=caption or None, file=file)
-            return f"Posted `{filename}` ({len(file_bytes) / 1024:.1f} KB) to channel."
-        except discord.HTTPException as e:
-            return f"Failed to upload to Discord: {e}"
+    def _validate_schedule_payload(self, inp: dict) -> str | None:
+        return self._scheduling_tools._validate_schedule_payload(inp)
 
     async def _handle_schedule_task(self, message: discord.Message, inp: dict) -> str:
-        """Create a scheduled task."""
-        validation_error = self._validate_schedule_payload(inp)
-        if validation_error:
-            return f"Failed to create schedule: {validation_error}"
-        try:
-            schedule = await self.scheduler.add(
-                description=inp.get("description", "Unnamed task"),
-                action=inp.get("action", "reminder"),
-                channel_id=str(message.channel.id),
-                cron=inp.get("cron"),
-                run_at=inp.get("run_at"),
-                message=inp.get("message"),
-                tool_name=inp.get("tool_name"),
-                tool_input=inp.get("tool_input"),
-                steps=inp.get("steps"),
-                trigger=inp.get("trigger"),
-                cron_timezone=inp.get("cron_timezone"),
-                requester_id=str(message.author.id),
-            )
-            if schedule.get("trigger"):
-                trigger_desc = ", ".join(
-                    f"{k}={v}" for k, v in schedule["trigger"].items()
-                )
-                return (
-                    f"Scheduled webhook-triggered task (ID: {schedule['id']}): "
-                    f"{schedule['description']}. Trigger: {trigger_desc}"
-                )
-            next_run = schedule.get("next_run", "unknown")
-            stype = "recurring" if schedule.get("cron") else "one-time"
-            return (
-                f"Scheduled {stype} task (ID: {schedule['id']}): "
-                f"{schedule['description']}. Next run: {next_run}"
-            )
-        except ValueError as e:
-            return f"Failed to create schedule: {e}"
-        except Exception as e:
-            return f"Error creating schedule: {e}"
+        return await self._scheduling_tools._handle_schedule_task(message, inp)
 
     def _handle_list_schedules(self) -> str:
-        """List all scheduled tasks."""
-        schedules = self.scheduler.list_all()
-        if not schedules:
-            return "No scheduled tasks."
-        lines = []
-        for s in schedules:
-            if s.get("trigger"):
-                trigger_desc = ", ".join(
-                    f"{k}={v}" for k, v in s["trigger"].items()
-                )
-                stype = f"trigger: {trigger_desc}"
-            elif s.get("cron"):
-                stype = f"cron `{s['cron']}`"
-            else:
-                stype = "one-time"
-            next_run = s.get("next_run", "on trigger" if s.get("trigger") else "N/A")
-            last_run = s.get("last_run", "never")
-            paused_tag = " **[PAUSED]**" if s.get("paused") else ""
-            lines.append(
-                f"- **{s['id']}**: {s['description']} ({stype}){paused_tag} "
-                f"| next: {next_run} | last: {last_run}"
-            )
-        return f"**Scheduled tasks ({len(schedules)}):**\n" + "\n".join(lines)
+        return self._scheduling_tools._handle_list_schedules()
 
     async def _handle_update_schedule(self, inp: dict) -> str:
-        """Update an existing schedule."""
-        schedule_id = inp.get("schedule_id", "")
-        if not schedule_id:
-            return "Error: 'schedule_id' is required."
-        kwargs = {}
-        for key in ("description", "cron", "run_at", "message", "tool_name",
-                     "tool_input", "steps", "channel_id", "cron_timezone"):
-            if key in inp:
-                kwargs[key] = inp[key]
-        trigger = inp.get("trigger")
-        if trigger is not None:
-            kwargs["trigger"] = trigger
-        if "paused" in inp:
-            val = inp["paused"]
-            if not isinstance(val, bool):
-                return "Error: 'paused' must be a boolean (true/false)."
-            kwargs["paused"] = val
-        if not kwargs:
-            return "Error: no fields to update."
-        try:
-            result = await self.scheduler.update(schedule_id, **kwargs)
-        except ValueError as e:
-            return f"Error: {e}"
-        if result is None:
-            return f"Schedule {schedule_id} not found."
-        return f"Updated schedule {schedule_id}."
+        return await self._scheduling_tools._handle_update_schedule(inp)
 
     async def _handle_delete_schedule(self, inp: dict) -> str:
-        """Delete a scheduled task."""
-        schedule_id = inp.get("schedule_id", "")
-        if await self.scheduler.delete(schedule_id):
-            return f"Deleted schedule {schedule_id}."
-        return f"Schedule {schedule_id} not found."
+        return await self._scheduling_tools._handle_delete_schedule(inp)
 
     def _handle_parse_time(self, inp: dict) -> str:
-        """Parse a natural language time expression to ISO datetime."""
-        expression = inp.get("expression", "")
-        if not expression:
-            return "Error: 'expression' is required (e.g. 'in 2 hours', 'tomorrow at 9am')"
-        from ..tools.time_parser import parse_time
+        return self._scheduling_tools._handle_parse_time(inp)
 
-        try:
-            result = parse_time(expression)
-            return f"Parsed '{expression}' → {result}"
-        except ValueError as e:
-            return f"Error: {e}"
+
+    # -- knowledge/history handlers: bodies in native_tools/knowledge.py (P5b) --
 
     async def _handle_search_history(self, inp: dict) -> str:
-        """Search past conversation history."""
-        query = inp.get("query", "")
-        limit = min(inp.get("limit", 10), 20)
-        if not query:
-            return "A search query is required."
-
-        results = await self.sessions.search_history(query, limit=limit)
-        if not results:
-            return f"No past conversations found matching '{query}'."
-
-        lines = []
-        for r in results:
-            from datetime import datetime
-            ts = datetime.fromtimestamp(r["timestamp"]).strftime("%Y-%m-%d %H:%M")
-            role = r["type"]
-            content = r["content"].replace("\n", " ")[:300]
-            lines.append(f"[{ts}] ({role}): {content}")
-
-        return f"**Found {len(results)} result(s) for '{query}':**\n" + "\n".join(lines)
+        return await self._knowledge_tools._handle_search_history(inp)
 
     async def _handle_search_knowledge(self, inp: dict) -> str:
-        """Semantic + FTS search over the knowledge base."""
-        if not self._knowledge_store:
-            return "Knowledge base is not available (search not enabled or not initialized)."
-
-        query = inp.get("query", "")
-        limit = min(inp.get("limit", 5), 10)
-        if not query:
-            return "A search query is required."
-
-        results = await self._knowledge_store.search_hybrid(query, self._embedder, limit=limit)
-        if not results:
-            return f"No knowledge base results for '{query}'. Try web_search for external information."
-
-        lines = []
-        for r in results:
-            source = r["source"]
-            score = r.get("score", r.get("rrf_score", r.get("rank", 0)))
-            content = scrub_output_secrets(r["content"].replace("\n", " ")[:500])
-            lines.append(f"**[{source}]** (score: {score})\n{content}")
-
-        return f"**Found {len(results)} result(s) for '{query}':**\n\n" + "\n\n".join(lines)
+        return await self._knowledge_tools._handle_search_knowledge(inp)
 
     async def _handle_ingest_document(self, inp: dict, uploader: str) -> str:
-        """Ingest a document into the knowledge base."""
-        if not self._knowledge_store:
-            return "Knowledge base is not available (search not enabled or not initialized)."
-
-        source = inp.get("source", "")
-        content = inp.get("content", "")
-        if not source or not content:
-            return "Both 'source' and 'content' are required."
-
-        count = await self._knowledge_store.ingest(
-            content=content,
-            source=source,
-            embedder=self._embedder,
-            uploader=uploader,
-        )
-        if count == 0:
-            return f"Failed to ingest '{source}' — no chunks could be indexed."
-        return f"Ingested '{source}' into knowledge base ({count} chunks indexed)."
+        return await self._knowledge_tools._handle_ingest_document(inp, uploader)
 
     async def _handle_bulk_ingest(self, inp: dict, uploader: str) -> str:
-        """Bulk-import documents into the knowledge base."""
-        if not self._knowledge_store:
-            return "Knowledge base is not available."
-        items = inp.get("items")
-        if not items or not isinstance(items, list):
-            return "Error: 'items' (array) is required."
-        from ..knowledge.importer import BulkImporter
-        importer = BulkImporter(self._knowledge_store, self._embedder)
-        batch = await importer.import_batch(items, uploader=uploader)
-        lines = [f"Bulk import: {batch.succeeded} succeeded, {batch.failed} failed, {batch.skipped} skipped"]
-        for r in batch.results:
-            tag = r["status"].upper()
-            detail = f" ({r['chunks']} chunks)" if r["chunks"] else ""
-            err = f" — {r['error']}" if r["error"] else ""
-            lines.append(f"  [{tag}] {r['source']}{detail}{err}")
-        return "\n".join(lines)
+        return await self._knowledge_tools._handle_bulk_ingest(inp, uploader)
 
     def _handle_list_knowledge(self) -> str:
-        """List all documents in the knowledge base."""
-        if not self._knowledge_store:
-            return "Knowledge base is not available."
-
-        sources = self._knowledge_store.list_sources()
-        if not sources:
-            return "Knowledge base is empty. Use ingest_document to add documents."
-
-        lines = []
-        for s in sources:
-            lines.append(f"- **{s['source']}** ({s['chunks']} chunks, by {s['uploader']}, {s['ingested_at'][:10]})")
-        total = sum(s["chunks"] for s in sources)
-        return f"**Knowledge base: {len(sources)} document(s), {total} total chunks**\n" + "\n".join(lines)
+        return self._knowledge_tools._handle_list_knowledge()
 
     async def _handle_delete_knowledge(self, inp: dict) -> str:
-        """Delete a document from the knowledge base."""
-        if not self._knowledge_store:
-            return "Knowledge base is not available."
+        return await self._knowledge_tools._handle_delete_knowledge(inp)
 
-        source = inp.get("source", "")
-        if not source:
-            return "'source' is required."
-
-        count = await self._knowledge_store.delete_source_async(source)
-        if count == 0:
-            return f"No document found with source '{source}'."
-        return f"Deleted '{source}' from knowledge base ({count} chunks removed)."
 
     async def _handle_set_permission(self, caller_id: str, inp: dict) -> str:
-        """Set a user's permission tier. Only admins can call this."""
-        if not self.permissions.is_admin(caller_id):
-            return "Permission denied. Only admins can change permission tiers."
-        target_user_id = inp["user_id"]
-        tier = inp["tier"]
-        try:
-            await self.permissions.async_set_tier(target_user_id, tier)
-        except ValueError as e:
-            return str(e)
-        return f"Permission tier for user {target_user_id} set to **{tier}**."
+        return await self._channel_ops_tools._handle_set_permission(caller_id, inp)
+
 
     async def _handle_search_audit(self, inp: dict) -> str:
-        """Search the audit log."""
-        has_error = inp.get("has_error")
-        if has_error is not None:
-            has_error = bool(has_error)
-        min_dur = inp.get("min_duration_ms")
-        if min_dur is not None:
-            min_dur = int(min_dur)
-        results = await self.audit.search(
-            tool_name=inp.get("tool_name"),
-            user=inp.get("user"),
-            host=inp.get("host"),
-            keyword=inp.get("keyword"),
-            date=inp.get("date"),
-            status=inp.get("status"),
-            has_error=has_error,
-            min_duration_ms=min_dur,
-            limit=min(inp.get("limit", 20), 50),
-        )
-        if not results:
-            return "No audit log entries found matching the criteria."
+        return await self._knowledge_tools._handle_search_audit(inp)
 
-        lines = []
-        for entry in results:
-            ts = entry.get("timestamp", "?")[:19]
-            tool = entry.get("tool_name", "?")
-            user = entry.get("user_name", "?")
-            approved = "approved" if entry.get("approved") else "denied"
-            elapsed = entry.get("execution_time_ms", 0)
-            summary = entry.get("result_summary", "")[:200]
-            err = entry.get("error")
-            status = f"ERROR: {err}" if err else summary
-            lines.append(
-                f"[{ts}] **{tool}** by {user} ({approved}, {elapsed}ms)\n  {status}"
-            )
-        return f"**Audit log ({len(results)} entries):**\n" + "\n".join(lines)
 
     async def _on_scheduled_digest(self, schedule: dict) -> None:
         """Run the daily infrastructure digest and post results."""
@@ -4062,250 +3680,24 @@ class OdinBot(commands.Bot):
         # --- Executor-routed tools (run_command, run_script, SSH, etc.) ---
         return await self.tool_executor.execute(tool_name, tool_input, user_id=user_id)
 
+    # -- channel-ops handlers: bodies in native_tools/channel_ops.py (P5b) --
+
     async def _handle_read_channel(self, message: discord.Message, inp: dict) -> str:
-        """Read recent messages from a Discord channel.
-
-        Returns formatted channel history including messages from all users
-        and bots — not just the bot's own session history.
-        """
-        limit = min(int(inp.get("limit", 10)), 100)
-        channel_id = inp.get("channel_id")
-
-        # Resolve channel — fall back to current if channel_id is missing or non-numeric
-        if channel_id and channel_id.isdigit():
-            channel = self.get_channel(int(channel_id))
-            if not channel:
-                return f"Channel {channel_id} not found or not accessible."
-        else:
-            channel = getattr(message, "channel", None)
-            if not channel:
-                return "No channel context available."
-
-        try:
-            messages = []
-            async for msg in channel.history(limit=limit):
-                parts = []
-                # Timestamp
-                ts = msg.created_at.strftime("%H:%M:%S")
-                # Author
-                author = msg.author.display_name if hasattr(msg.author, "display_name") else str(msg.author)
-                is_bot = getattr(msg.author, "bot", False)
-                bot_tag = " [BOT]" if is_bot else ""
-                # Content
-                content = msg.content or ""
-                if content:
-                    parts.append(content)
-                # Attachments
-                for att in msg.attachments:
-                    parts.append(f"[attachment: {att.filename}]")
-                # Embeds
-                for embed in msg.embeds:
-                    embed_parts = []
-                    if embed.title:
-                        embed_parts.append(f"title: {embed.title}")
-                    if embed.description:
-                        desc = embed.description[:200]
-                        embed_parts.append(desc)
-                    if embed_parts:
-                        parts.append(f"[embed: {'; '.join(embed_parts)}]")
-
-                body = " ".join(parts) if parts else "(empty message)"
-                messages.append(f"[{ts}] {author}{bot_tag}: {body}")
-
-            if not messages:
-                return "No messages found in channel."
-
-            # Reverse so oldest is first (channel.history returns newest first)
-            messages.reverse()
-            result = "\n".join(messages)
-
-            # Scrub secrets
-            result = scrub_output_secrets(result)
-
-            # Prefix with instruction — these messages are context, not output
-            return (
-                f"[Channel history: {len(messages)} messages read. "
-                "This is context for YOU — do not paste or echo these messages. "
-                "Respond with your own summary, analysis, or action.]\n"
-                + result
-            )
-
-        except discord.Forbidden:
-            return "Permission denied — cannot read this channel."
-        except Exception as e:
-            return f"Failed to read channel: {e}"
+        return await self._channel_ops_tools._handle_read_channel(message, inp)
 
     async def _handle_add_reaction(self, message: discord.Message, inp: dict) -> str:
-        """Add an emoji reaction to a message."""
-        message_id = inp.get("message_id")
-        emoji = inp.get("emoji")
-        if not emoji:
-            return "'emoji' is required."
-        # Resolve "this"/"current"/empty to the triggering message
-        if not message_id or str(message_id).lower() in ("this", "current", "self"):
-            message_id = str(message.id)
-        try:
-            msg = await message.channel.fetch_message(int(message_id))
-            await msg.add_reaction(emoji)
-            return "Reaction added."
-        except discord.NotFound:
-            return f"Message {message_id} not found in this channel."
-        except discord.Forbidden:
-            return "Permission denied to add reaction."
-        except Exception as e:
-            return f"Failed to add reaction: {e}"
+        return await self._channel_ops_tools._handle_add_reaction(message, inp)
 
     async def _handle_create_poll(self, message: discord.Message, inp: dict) -> str:
-        """Create a Discord native poll in the current channel."""
-        from datetime import timedelta
+        return await self._channel_ops_tools._handle_create_poll(message, inp)
 
-        question = inp.get("question")
-        options = inp.get("options", [])
-        if not question or not options:
-            return "Both 'question' and 'options' are required."
-        if len(options) > 10:
-            return "Discord polls support a maximum of 10 options."
-        # Scrub secrets from poll content before sending to Discord
-        question = scrub_response_secrets(str(question))
-        options = [scrub_response_secrets(str(opt)) for opt in options]
-        duration_hours = min(inp.get("duration_hours", 24), 168)
-        multiple = inp.get("multiple", False)
-        try:
-            poll = discord.Poll(
-                question=question,
-                duration=timedelta(hours=duration_hours),
-                multiple=multiple,
-            )
-            for opt in options:
-                poll.add_answer(text=opt)
-            await message.channel.send(poll=poll)
-            return "Poll created."
-        except Exception as e:
-            return f"Failed to create poll: {e}"
 
     async def _handle_analyze_image(self, message: discord.Message, inp: dict) -> str | dict:
-        """Fetch an image and return a vision block for the LLM to analyze.
-
-        Returns either an error string or a dict with ``__image_block__`` key
-        that the tool loop injects as a vision content block.
-        """
-        import aiohttp
-
-        url = inp.get("url")
-        host = inp.get("host")
-        path = inp.get("path")
-        prompt = inp.get("prompt", "Describe this image in detail.")
-
-        image_bytes: bytes | None = None
-
-        if url:
-            # Validate URL scheme to prevent SSRF via file://, ftp://, etc.
-            if not url.startswith(("http://", "https://")):
-                return "Only http:// and https:// URLs are supported."
-            # DNS-rebind-aware SSRF guard — scheme-only validation let this
-            # reach 169.254.169.254 / internal hosts.
-            from ..tools.url_safety import is_url_blocked
-            if is_url_blocked(url):
-                return ("URL blocked: targets a private, loopback, link-local, "
-                        "or cloud-metadata address (SSRF protection).")
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False) as resp:
-                        if resp.status != 200:
-                            return f"Failed to fetch image from URL (HTTP {resp.status})"
-                        ct = resp.headers.get("Content-Type", "")
-                        if not ct.startswith("image/"):
-                            return f"URL does not point to an image (Content-Type: {ct})"
-                        image_bytes = await resp.read()
-            except Exception as e:
-                return f"Failed to fetch image from URL: {e}"
-        elif host and path:
-            # Use executor to fetch from host via base64
-            import shlex
-            resolved = self.tool_executor._resolve_host(host)
-            if not resolved:
-                return f"Unknown or disallowed host: {host}"
-            address, ssh_user, _os = resolved
-            safe_path = shlex.quote(path)
-            code, output = await self.tool_executor._exec_command(
-                address, f"base64 -w0 {safe_path}", ssh_user,
-            )
-            if code != 0:
-                return f"Failed to read image from host: {output}"
-            try:
-                image_bytes = base64.b64decode(output.strip())
-            except Exception as e:
-                return f"Failed to decode image data: {e}"
-        else:
-            return "Provide either 'url' or both 'host' and 'path'."
-
-        if not image_bytes:
-            return "No image data retrieved."
-
-        # Enforce 5MB limit (same as Discord attachment limit)
-        if len(image_bytes) > 5 * 1024 * 1024:
-            return "Image exceeds 5MB size limit."
-
-        media_type = self._detect_image_type(image_bytes)
-        if not media_type:
-            return "Unsupported image format. Supported: PNG, JPEG, GIF, WEBP."
-
-        b64 = base64.b64encode(image_bytes).decode("ascii")
-
-        # Return a special marker dict that the tool loop will inject as a
-        # vision content block.  The tool result text sent to the LLM will be
-        # the prompt, while the image block gets appended to the next user
-        # message so Codex can see it.
-        return {
-            "__image_block__": {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": b64,
-                },
-            },
-            "__prompt__": prompt,
-        }
+        return await self._media_tools._handle_analyze_image(message, inp)
 
     async def _handle_generate_image(self, message: discord.Message, inp: dict) -> str:
-        """Generate an image via ComfyUI and post as Discord attachment."""
-        if not self.config.comfyui.enabled:
-            return "Image generation is disabled. Enable ComfyUI in config to use this tool."
+        return await self._media_tools._handle_generate_image(message, inp)
 
-        prompt_text = inp.get("prompt", "")
-        if not prompt_text:
-            return "A 'prompt' describing the image is required."
-
-        negative = inp.get("negative", "")
-        width = inp.get("width", 1024)
-        height = inp.get("height", 1024)
-        model = inp.get("model", "")
-
-        # Clamp dimensions to reasonable range
-        width = max(64, min(2048, width))
-        height = max(64, min(2048, height))
-
-        from ..tools.comfyui import ComfyUIClient
-
-        client = ComfyUIClient(self.config.comfyui.url, default_checkpoint=self.config.comfyui.default_checkpoint)
-        image_bytes = await client.generate(
-            prompt=prompt_text,
-            negative=negative,
-            width=width,
-            height=height,
-            model=model,
-        )
-
-        if not image_bytes:
-            return "Image generation failed. ComfyUI may be unavailable or the request timed out."
-
-        try:
-            file = discord.File(io.BytesIO(image_bytes), filename="generated.png")
-            await message.channel.send(file=file)
-            return f"Image generated and posted ({len(image_bytes) / 1024:.1f} KB)."
-        except discord.HTTPException as e:
-            return f"Failed to upload generated image to Discord: {e}"
 
     async def _execute_scheduled_tool(
         self,
