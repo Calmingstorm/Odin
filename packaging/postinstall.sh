@@ -129,7 +129,8 @@ First-time setup (3 steps — the service is enabled but not started yet):
      enable MESSAGE CONTENT INTENT under the Bot settings.
 
   2. Authenticate the LLM backend (OpenAI Codex, ChatGPT Plus/Team account)
-       sudo -u $SERVICE_USER $APP_DIR/.venv/bin/python $APP_DIR/scripts/codex_login.py
+       sudo -u $SERVICE_USER $APP_DIR/.venv/bin/python $APP_DIR/scripts/codex_login.py \\
+            --credentials-path $DATA_DIR/codex_auth.json
      Add --device on a headless server. Repeat to add more accounts for
      rate-limit rotation. (Or configure Kimi/Ollama in the web UI instead.)
 

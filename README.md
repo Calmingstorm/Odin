@@ -135,7 +135,8 @@ sudoedit /etc/odin/.env              # set DISCORD_TOKEN=...
 **2. LLM backend.** Odin's primary backend is OpenAI Codex (a ChatGPT Plus/Team account). Authenticate as the `odin` user with the installed virtualenv:
 
 ```bash
-sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py
+sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py \
+     --credentials-path /var/lib/odin/codex_auth.json
 # headless server? add --device for the browserless device-code flow
 ```
 
@@ -167,7 +168,7 @@ All providers are configured from the WebUI with inline auto-save — no config 
 
 ### Codex Authentication
 
-Codex uses OpenAI OAuth tokens stored in `data/codex_auth.json`. On a `.deb` install, run the login script with the installed virtualenv as the `odin` user (`sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py`); the commands below are the from-source equivalents.
+Codex uses OpenAI OAuth tokens stored in `data/codex_auth.json`. On a `.deb` install, run the login script with the installed virtualenv as the `odin` user and an **absolute** credentials path (the script writes relative to the caller's cwd otherwise): `sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py --credentials-path /var/lib/odin/codex_auth.json`. The commands below are the from-source equivalents.
 
 **Browser login** (machine with a browser):
 ```bash
