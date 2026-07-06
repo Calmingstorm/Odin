@@ -15,21 +15,20 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 from croniter import croniter
 
-from ..config.schema import Config
-from ..odin_log import get_logger
-from ..setup_wizard import (
+from ...config.schema import Config
+from ...odin_log import get_logger
+from ...setup_wizard import (
     build_config,
     build_env,
     is_setup_needed,
     validate_token_format,
 )
-from ..tools.registry import get_tool_definitions
-from ..version import get_version
+from ...version import get_version
 
 # Shared helpers live in api_common (RFC-003 P1) — re-imported so existing
 # spellings (`from src.web.api import _redact_config`, internal uses) and
 # patch targets keep working through the carve.
-from .api_common import (  # noqa: F401 — re-exports
+from ..api_common import (  # noqa: F401 — re-exports
     _MAX_CODE_LEN,
     _MAX_CONTENT_LEN,
     _MAX_DESCRIPTION_LEN,
@@ -38,6 +37,7 @@ from .api_common import (  # noqa: F401 — re-exports
     _SENSITIVE_FIELDS,
     _SENSITIVE_KEY_SUBSTRINGS,
     _SESSION_ID_RE,
+    _codex_creds_lock,
     _contains_blocked_fields,
     _deep_merge,
     _is_sensitive_key,
@@ -49,124 +49,50 @@ from .api_common import (  # noqa: F401 — re-exports
     _validate_string,
     _write_config,
     _write_env_file,
+    admin_gate,
 )
-from .chat import MAX_CHAT_CONTENT_LEN, process_web_chat
+from ..chat import MAX_CHAT_CONTENT_LEN, process_web_chat
+from .llm_admin import (  # noqa: E501
+    register_codex_oauth,
+    register_connection_pools,
+    register_kimi_admin,
+    register_llm_provider,
+    register_ollama_admin,
+    register_provider_config,
+)
+from .observability import (
+    register_affordances,
+    register_aggregates,
+    register_audit_log,
+    register_branch_freshness,
+    register_bulkheads,
+    register_compression_stats,
+    register_log_search,
+    register_recovery_stats,
+    register_risk_classification,
+    register_routing_stats,
+    register_tools_meta,
+    register_usage_cost,
+    register_validation_stats,
+)
+from .security import (
+    register_api_tokens,
+    register_auth,
+    register_host_access,
+    register_permissions_rbac,
+)
 
 if TYPE_CHECKING:
-    from ..discord.client import OdinBot
+    from ...discord.client import OdinBot
 
 log = get_logger("web.api")
 
 def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     """Create all API route handlers bound to the given bot instance."""
-    import asyncio as _asyncio
-    _codex_creds_lock = _asyncio.Lock()
+    _require_admin = admin_gate(bot)
     routes = web.RouteTableDef()
 
-    # ------------------------------------------------------------------
-    # Auth (login / logout / session check)
-    # ------------------------------------------------------------------
-
-    @routes.post("/api/auth/login")
-    async def auth_login(request: web.Request) -> web.Response:
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-
-        token = (data.get("token") or "").strip()
-        if not token:
-            return web.json_response({"error": "token is required"}, status=400)
-
-        api_token = bot.config.web.api_token
-        tm = getattr(bot, "api_token_manager", None)
-        has_any_token = api_token or bot.config.web.api_tokens or (tm and tm.list_tokens())
-        if not has_any_token:
-            # No auth configured — dev mode, issue session anyway
-            sm = request.app.get("session_manager")
-            if sm:
-                sid, timeout = sm.create()
-                return web.json_response({
-                    "session_id": sid,
-                    "timeout_seconds": timeout,
-                })
-            return web.json_response({"error": "no session manager"}, status=500)
-
-        # Check dynamic token manager first, then static config tokens
-        tm = getattr(bot, "api_token_manager", None)
-        identity = tm.resolve(token) if tm else None
-        if identity is None:
-            identity = bot.config.web.resolve_api_identity(token)
-        if identity is not None:
-            sm = request.app.get("session_manager")
-            if not sm:
-                return web.json_response({"error": "no session manager"}, status=500)
-            sid, timeout = sm.create(identity=identity)
-            return web.json_response({
-                "session_id": sid,
-                "timeout_seconds": timeout,
-            })
-
-        # Fall back to legacy single token
-        import hmac as _hmac
-        if api_token and not _hmac.compare_digest(token, api_token):
-            return web.json_response({"error": "invalid token"}, status=401)
-        if not api_token:
-            return web.json_response({"error": "invalid token"}, status=401)
-
-        sm = request.app.get("session_manager")
-        if not sm:
-            return web.json_response({"error": "no session manager"}, status=500)
-
-        from ..config.schema import ApiTokenIdentity
-        legacy_identity = ApiTokenIdentity(
-            token="", user_id="api-admin",
-            username="Admin", tier="admin", label="default",
-        )
-        sid, timeout = sm.create(identity=legacy_identity)
-        return web.json_response({
-            "session_id": sid,
-            "timeout_seconds": timeout,
-        })
-
-    @routes.post("/api/auth/logout")
-    async def auth_logout(request: web.Request) -> web.Response:
-        sm = request.app.get("session_manager")
-        if not sm:
-            return web.json_response({"status": "ok"})
-
-        # Extract session ID from Authorization header
-        auth_header = request.headers.get("Authorization", "")
-        bearer_prefix = "Bearer "
-        if auth_header.startswith(bearer_prefix):
-            sid = auth_header[len(bearer_prefix):]
-            sm.destroy(sid)
-
-        return web.json_response({"status": "logged_out"})
-
-    @routes.get("/api/auth/session")
-    async def auth_session(request: web.Request) -> web.Response:
-        sm = request.app.get("session_manager")
-        auth_header = request.headers.get("Authorization", "")
-        is_authed = False
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            import hmac as _hmac
-            api_token = request.app.get("api_token", "")
-            if api_token and _hmac.compare_digest(token, api_token):
-                is_authed = True
-            elif sm and sm.validate(token):
-                is_authed = True
-        identity = getattr(request, "_api_identity", None)
-        user_id = identity.user_id if identity else "web-user"
-        timeout = sm.timeout_seconds if sm else 0
-        return web.json_response({
-            "authenticated": is_authed,
-            "timeout_seconds": timeout,
-            "active_sessions": sm.active_count if sm else 0,
-            "user_id": user_id,
-            "channel_id": user_id,
-        })
+    register_auth(routes, bot)
 
     # ------------------------------------------------------------------
     # Setup wizard (first-boot, no auth required)
@@ -347,7 +273,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             "session_count": bot.sessions.count(),
             "loop_count": bot.loop_manager.active_count,
             "schedule_count": len(bot.scheduler.list_all()),
-            "schedule_failing": sum(1 for s in bot.scheduler.list_all() if s.get("consecutive_failures", 0) > 0),
+            "schedule_failing": sum(
+                1 for s in bot.scheduler.list_all() if s.get("consecutive_failures", 0) > 0
+            ),
             "schedule_paused": sum(1 for s in bot.scheduler.list_all() if s.get("paused")),
             "agent_count": agent_count,
             "agent_running": agent_running,
@@ -449,12 +377,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.get("/api/health/components")
     async def get_health_components(_request: web.Request) -> web.Response:
-        from ..health.checker import check_all
+        from ...health.checker import check_all
         return web.json_response(check_all(bot))
 
     @routes.get("/api/resource-usage")
     async def get_resource_usage(_request: web.Request) -> web.Response:
-        from ..monitoring.resource_usage import collect_all
+        from ...monitoring.resource_usage import collect_all
         return web.json_response(collect_all(bot))
 
     @routes.get("/api/tool-streams")
@@ -512,12 +440,16 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             try:
                 await asyncio.to_thread(_write_config, config_path, current)
             except Exception:
-                log.warning("Config applied in memory but failed to persist to %s", config_path, exc_info=True)
+                log.warning(
+                    "Config applied in memory but failed to persist to %s",
+                    config_path,
+                    exc_info=True,
+                )
 
         # Compute config diff and record in audit log
         after_config = _redact_config(new_config.model_dump())
         try:
-            from ..audit.diff_tracker import compute_dict_diff
+            from ...audit.diff_tracker import compute_dict_diff
             config_diff = compute_dict_diff(before_config, after_config, label="config.yml")
         except Exception:
             config_diff = None
@@ -579,13 +511,23 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         custom_identity = data.get("custom_identity", "")
         custom_voice = data.get("custom_voice", "")
         from src.config.schema import PersonalityConfig
-        existing_user_presets = bot.config.personality.user_presets if hasattr(bot.config, "personality") else {}
+        existing_user_presets = (
+            bot.config.personality.user_presets if hasattr(bot.config, "personality") else {}
+        )
         bot.config.personality = PersonalityConfig(
-            preset=preset, custom_name=custom_name, custom_identity=custom_identity, custom_voice=custom_voice,
+            preset=preset,
+            custom_name=custom_name,
+            custom_identity=custom_identity,
+            custom_voice=custom_voice,
             user_presets=existing_user_presets,
         )
         from src.llm.system_prompt import register_user_presets
-        register_user_presets({k: {"name": v.name, "identity": v.identity, "voice": v.voice} for k, v in existing_user_presets.items()})
+        register_user_presets(
+            {
+                k: {"name": v.name, "identity": v.identity, "voice": v.voice}
+                for k, v in existing_user_presets.items()
+            }
+        )
         current = bot.config.model_dump()
         config_path = getattr(request.app, "_config_path", "config.yml")
         await asyncio.to_thread(_write_config, config_path, current)
@@ -605,19 +547,36 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not name:
             return web.json_response({"error": "name is required"}, status=400)
         if not _re.fullmatch(r"[a-z0-9_-]+", name):
-            return web.json_response({"error": "preset name must contain only lowercase letters, numbers, hyphens, and underscores"}, status=400)
+            return web.json_response(
+                {
+                    "error": (
+                        "preset name must contain only lowercase letters, "
+                        "numbers, hyphens, and underscores"
+                    )
+                },
+                status=400,
+            )
         from src.llm.system_prompt import PERSONALITY_PRESETS
         if name in PERSONALITY_PRESETS:
-            return web.json_response({"error": f"cannot overwrite built-in preset '{name}'"}, status=400)
+            return web.json_response(
+                {"error": f"cannot overwrite built-in preset '{name}'"}, status=400
+            )
         display_name = data.get("display_name", name)
         identity = data.get("identity", "")
         voice = data.get("voice", "")
         if not identity and not voice:
             return web.json_response({"error": "identity or voice is required"}, status=400)
         from src.config.schema import PersonalityPreset
-        bot.config.personality.user_presets[name] = PersonalityPreset(name=display_name, identity=identity, voice=voice)
+        bot.config.personality.user_presets[name] = PersonalityPreset(
+            name=display_name, identity=identity, voice=voice
+        )
         from src.llm.system_prompt import register_user_presets
-        register_user_presets({k: {"name": v.name, "identity": v.identity, "voice": v.voice} for k, v in bot.config.personality.user_presets.items()})
+        register_user_presets(
+            {
+                k: {"name": v.name, "identity": v.identity, "voice": v.voice}
+                for k, v in bot.config.personality.user_presets.items()
+            }
+        )
         current = bot.config.model_dump()
         config_path = getattr(request.app, "_config_path", "config.yml")
         await asyncio.to_thread(_write_config, config_path, current)
@@ -628,12 +587,19 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         name = request.match_info["name"]
         from src.llm.system_prompt import PERSONALITY_PRESETS
         if name in PERSONALITY_PRESETS:
-            return web.json_response({"error": f"cannot delete built-in preset '{name}'"}, status=400)
+            return web.json_response(
+                {"error": f"cannot delete built-in preset '{name}'"}, status=400
+            )
         if name not in bot.config.personality.user_presets:
             return web.json_response({"error": "preset not found"}, status=404)
         del bot.config.personality.user_presets[name]
         from src.llm.system_prompt import register_user_presets
-        register_user_presets({k: {"name": v.name, "identity": v.identity, "voice": v.voice} for k, v in bot.config.personality.user_presets.items()})
+        register_user_presets(
+            {
+                k: {"name": v.name, "identity": v.identity, "voice": v.voice}
+                for k, v in bot.config.personality.user_presets.items()
+            }
+        )
         if bot.config.personality.preset == name:
             bot.config.personality.preset = "odin"
             bot.prompt_builder.invalidate()
@@ -659,7 +625,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 capture_output=True, text=True, timeout=15,
             )
             if result.returncode != 0:
-                return web.json_response({"current": current, "error": "Failed to check GitHub"}, status=502)
+                return web.json_response(
+                    {"current": current, "error": "Failed to check GitHub"}, status=502
+                )
             lines = result.stdout.strip().split("\n", 1)
             latest_tag = lines[0].strip()
             changelog = lines[1].strip() if len(lines) > 1 else ""
@@ -676,7 +644,10 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     @routes.post("/api/update/apply")
     async def apply_update(request: web.Request) -> web.Response:
-        import re as _re, subprocess, os, shutil
+        import os
+        import re as _re
+        import shutil
+        import subprocess
         try:
             data = await request.json()
         except Exception:
@@ -691,7 +662,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 capture_output=True, text=True, timeout=15,
             )
             if r.returncode != 0 or not r.stdout.strip():
-                return web.json_response({"error": "Failed to resolve latest release tag"}, status=502)
+                return web.json_response(
+                    {"error": "Failed to resolve latest release tag"}, status=502
+                )
             target = r.stdout.strip()
 
         # Validate tag format
@@ -712,10 +685,15 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 ["git", "-C", base, "diff", "--name-only", "HEAD"],
                 capture_output=True, text=True, timeout=10,
             )
-            dirty = [f for f in r.stdout.strip().splitlines() if f.strip() and f.strip() not in _preserve]
+            dirty = [
+                f for f in r.stdout.strip().splitlines() if f.strip() and f.strip() not in _preserve
+            ]
             if dirty:
                 return web.json_response({
-                    "error": f"Worktree has unexpected modifications ({', '.join(dirty[:5])}). Only config.yml and .env are preserved automatically.",
+                    "error": (
+                        f"Worktree has unexpected modifications ({', '.join(dirty[:5])}). "
+                        "Only config.yml and .env are preserved automatically."
+                    ),
                 }, status=409)
 
             # Reset only the preserved config files for clean pull
@@ -740,8 +718,14 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             ]
             def _rollback(reason: str) -> web.Response:
                 if prev_ref:
-                    subprocess.run(["git", "-C", base, "checkout", "master"], capture_output=True, timeout=10)
-                    subprocess.run(["git", "-C", base, "reset", "--hard", prev_ref], capture_output=True, timeout=10)
+                    subprocess.run(
+                    ["git", "-C", base, "checkout", "master"], capture_output=True, timeout=10
+                )
+                    subprocess.run(
+                    ["git", "-C", base, "reset", "--hard", prev_ref],
+                    capture_output=True,
+                    timeout=10,
+                )
                 # Restore config backups even on failure
                 for fname, data in _backups.items():
                     open(os.path.join(base, fname), "wb").write(data)
@@ -759,7 +743,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             # Install/update dependencies
             venv_pip = os.path.join(base, ".venv", "bin", "pip")
             if os.path.exists(venv_pip):
-                r = subprocess.run([venv_pip, "install", "-q", base], capture_output=True, text=True, timeout=120)
+                r = subprocess.run(
+                    [venv_pip, "install", "-q", base], capture_output=True, text=True, timeout=120
+                )
                 if r.returncode != 0:
                     return _rollback(f"dependency install failed: {r.stderr.strip()}")
 
@@ -809,7 +795,11 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         username = identity.username if identity else "WebUser"
         tier = identity.tier if identity else None
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
-        token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
+        token_hosts = (
+            identity.allowed_hosts
+            if identity and isinstance(getattr(identity, "allowed_hosts", None), list)
+            else None
+        )
         token_default_host = getattr(identity, "default_host", "") if identity else ""
 
         # Optional caller-supplied session id for multi-request chat continuity.
@@ -889,7 +879,11 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         username = identity.username if identity else "API"
         token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
         tier = identity.tier if identity else None
-        token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
+        token_hosts = (
+            identity.allowed_hosts
+            if identity and isinstance(getattr(identity, "allowed_hosts", None), list)
+            else None
+        )
         token_default_host = getattr(identity, "default_host", "") if identity else ""
 
         result = await process_web_chat(
@@ -1065,7 +1059,11 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
                 lines.append(f"=== Summary ===\n{session.summary}\n")
             lines.append(f"=== Messages ({len(messages)}) ===")
             for m in messages:
-                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["timestamp"])) if m["timestamp"] else "?"
+                ts = (
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["timestamp"]))
+                    if m["timestamp"]
+                    else "?"
+                )
                 role = m["role"].upper()
                 uid = f" ({m['user_id']})" if m.get("user_id") else ""
                 lines.append(f"\n[{ts}] {role}{uid}:\n{m['content']}")
@@ -1117,169 +1115,15 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         cleared = bot.sessions.reset_many(channel_ids)
         return web.json_response({"status": "cleared", "count": cleared})
 
-    # ------------------------------------------------------------------
-    # Tools
-    # ------------------------------------------------------------------
+    register_tools_meta(routes, bot)
 
-    @routes.get("/api/tools")
-    async def list_tools(_request: web.Request) -> web.Response:
-        all_tools = get_tool_definitions()
-        tools_config = bot.config.tools
-        result = [
-            {
-                "name": tool["name"],
-                "description": tool["description"],
-                "timeout": tools_config.get_tool_timeout(tool["name"]),
-                "is_core": tool.get("is_core", False),
-            }
-            for tool in all_tools
-        ]
-        return web.json_response(result)
+    register_bulkheads(routes, bot)
 
-    @routes.get("/api/tools/stats")
-    async def tool_stats(_request: web.Request) -> web.Response:
-        counts = await bot.audit.count_by_tool()
-        return web.json_response(counts)
+    register_connection_pools(routes, bot)
 
-    @routes.get("/api/tools/timeouts")
-    async def get_tool_timeouts(_request: web.Request) -> web.Response:
-        tools_config = bot.config.tools
-        return web.json_response({
-            "default_timeout": tools_config.command_timeout_seconds,
-            "overrides": tools_config.tool_timeouts,
-        })
+    register_usage_cost(routes, bot)
 
-    @routes.put("/api/tools/timeouts")
-    async def set_tool_timeouts(request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        if not isinstance(body, dict):
-            return web.json_response({"error": "expected JSON object"}, status=400)
-        overrides = body.get("overrides")
-        if overrides is not None:
-            if not isinstance(overrides, dict):
-                return web.json_response({"error": "overrides must be a dict"}, status=400)
-            for k, v in overrides.items():
-                if not isinstance(k, str) or not isinstance(v, (int, float)) or v <= 0:
-                    return web.json_response(
-                        {"error": f"invalid timeout for '{k}': must be a positive number"}, status=400,
-                    )
-            bot.config.tools.tool_timeouts = {k: int(v) for k, v in overrides.items()}
-        default = body.get("default_timeout")
-        if default is not None:
-            if not isinstance(default, (int, float)) or default <= 0:
-                return web.json_response({"error": "default_timeout must be a positive number"}, status=400)
-            bot.config.tools.command_timeout_seconds = int(default)
-        return web.json_response({
-            "default_timeout": bot.config.tools.command_timeout_seconds,
-            "overrides": bot.config.tools.tool_timeouts,
-        })
-
-    # ------------------------------------------------------------------
-    # Bulkhead isolation status
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/tools/bulkheads")
-    async def get_bulkheads(_request: web.Request) -> web.Response:
-        executor = getattr(bot, "executor", None)
-        if executor is None or not hasattr(executor, "bulkheads"):
-            return web.json_response({"error": "bulkheads not available"}, status=503)
-        return web.json_response(executor.bulkheads.get_all_metrics())
-
-    # ------------------------------------------------------------------
-    # Connection pool status
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/pools/ssh")
-    async def get_ssh_pool(_request: web.Request) -> web.Response:
-        executor = getattr(bot, "executor", None)
-        if executor is None or not hasattr(executor, "ssh_pool") or executor.ssh_pool is None:
-            return web.json_response({"error": "SSH pool not available"}, status=503)
-        return web.json_response(executor.ssh_pool.get_metrics())
-
-    @routes.get("/api/pools/http")
-    async def get_http_pool(_request: web.Request) -> web.Response:
-        result = {}
-        codex = getattr(bot.llm_gateway, "codex_client", None)
-        if codex is not None and hasattr(codex, "get_pool_metrics"):
-            result["codex"] = codex.get_pool_metrics()
-        ollama = getattr(bot.llm_gateway, "ollama_client", None)
-        if ollama is not None:
-            result["ollama"] = ollama.pool_stats()
-        kimi = getattr(bot.llm_gateway, "kimi_client", None)
-        if kimi is not None:
-            result["kimi"] = kimi.pool_stats()
-        if not result:
-            return web.json_response({"error": "No HTTP pools available"}, status=503)
-        return web.json_response(result)
-
-    @routes.post("/api/pools/ssh/close")
-    async def close_ssh_pool_host(request: web.Request) -> web.Response:
-        executor = getattr(bot, "executor", None)
-        if executor is None or not hasattr(executor, "ssh_pool") or executor.ssh_pool is None:
-            return web.json_response({"error": "SSH pool not available"}, status=503)
-        try:
-            data = await request.json()
-        except Exception:
-            data = {}
-        host = data.get("host")
-        if host:
-            ssh_user = data.get("ssh_user", "root")
-            closed = await executor.ssh_pool.close_host(host, ssh_user)
-            return web.json_response({"closed": closed, "host": host})
-        count = await executor.ssh_pool.close_all()
-        return web.json_response({"closed_count": count})
-
-    # ------------------------------------------------------------------
-    # Usage / cost tracking
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/usage")
-    async def get_usage(_request: web.Request) -> web.Response:
-        tracker = getattr(bot, "cost_tracker", None)
-        if tracker is None:
-            return web.json_response({"error": "cost tracking not available"}, status=503)
-        return web.json_response(tracker.get_summary())
-
-    # ------------------------------------------------------------------
-    # Observability aggregates — passive exposure only (no alert delivery)
-    # ------------------------------------------------------------------
-
-    def _obs_window(request: web.Request) -> int:
-        try:
-            return max(1, min(int(request.query.get("window", "24")), 24 * 14))
-        except ValueError:
-            return 24
-
-    @routes.get("/api/observability/context")
-    async def get_observability_context(request: web.Request) -> web.Response:
-        obs_cfg = getattr(bot.config, "observability", None)
-        if obs_cfg is not None and not obs_cfg.prompt_budget_accounting:
-            return web.json_response({"error": "prompt budget accounting disabled"}, status=503)
-        from ..observability.aggregates import context_aggregates
-        directory = getattr(bot.config.tools, "trajectory_path", "./data/trajectories")
-        data = await asyncio.to_thread(
-            context_aggregates, directory, _obs_window(request),
-        )
-        return web.json_response(data)
-
-    @routes.get("/api/observability/failures")
-    async def get_observability_failures(request: web.Request) -> web.Response:
-        from ..observability.aggregates import failure_aggregates
-        audit_path = getattr(bot.config.tools, "audit_log_path", "./data/audit.jsonl")
-        data = await asyncio.to_thread(
-            failure_aggregates, audit_path, _obs_window(request),
-        )
-        return web.json_response(data)
-
-    @routes.get("/api/usage/totals")
-    async def get_usage_totals(_request: web.Request) -> web.Response:
-        tracker = getattr(bot, "cost_tracker", None)
-        if tracker is None:
-            return web.json_response({"error": "cost tracking not available"}, status=503)
-        return web.json_response(tracker.get_totals())
+    register_aggregates(routes, bot)
 
     # ------------------------------------------------------------------
     # Trajectories
@@ -1299,7 +1143,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if saver is None:
             return web.json_response({"error": "trajectory saving not available"}, status=503)
         filename = request.match_info["filename"]
-        if not filename.endswith(".jsonl") or "/" in filename or "\\" in filename or ".." in filename:
+        if (
+            not filename.endswith(".jsonl")
+            or "/" in filename
+            or "\\" in filename
+            or ".." in filename
+        ):
             return web.json_response({"error": "invalid filename"}, status=400)
         safe_path = (saver.directory / filename).resolve()
         if not safe_path.is_relative_to(saver.directory.resolve()):
@@ -1524,7 +1373,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         conn = mgr.get_server(name)
         if conn is None:
             return web.json_response({"error": "server not found"}, status=404)
-        from ..tools.mcp_client import make_tool_name
+        from ...tools.mcp_client import make_tool_name
         tools = [
             {
                 "name": make_tool_name(name, t["name"]),
@@ -1651,7 +1500,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not action:
             return web.json_response({"error": "action is required"}, status=400)
         try:
-            from ..notifications.issue_tracker import IssueTrackerError
+            from ...notifications.issue_tracker import IssueTrackerError
             result = await client.execute(action, data)
             return web.json_response({"ok": True, "result": result})
         except (ValueError, IssueTrackerError) as exc:
@@ -1670,7 +1519,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not title:
             return web.json_response({"error": "title is required"}, status=400)
         try:
-            from ..notifications.issue_tracker import IssueTrackerError
+            from ...notifications.issue_tracker import IssueTrackerError
             result = await client.execute("create_issue", data)
             return web.json_response({"ok": True, "issue": result}, status=201)
         except (ValueError, IssueTrackerError) as exc:
@@ -1721,7 +1570,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if not rule_id or not name_pattern:
             return web.json_response({"error": "id and name_pattern are required"}, status=400)
         try:
-            from ..health.grafana_alerts import RemediationRule
+            from ...health.grafana_alerts import RemediationRule
             rule = RemediationRule(
                 id=rule_id,
                 name_pattern=name_pattern,
@@ -1951,7 +1800,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         items = data.get("items")
         if not items or not isinstance(items, list):
             return web.json_response({"error": "items (array) is required"}, status=400)
-        from ..knowledge.importer import BulkImporter
+        from ...knowledge.importer import BulkImporter
         importer = BulkImporter(store, bot.embedder)
         batch = await importer.import_batch(items, uploader="web-api")
         return web.json_response({
@@ -2018,7 +1867,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         except Exception:
             return web.json_response({"error": "invalid JSON"}, status=400)
         if not isinstance(data, dict) or not data:
-            return web.json_response({"error": "request body must be a non-empty object"}, status=400)
+            return web.json_response(
+                {"error": "request body must be a non-empty object"}, status=400
+            )
         desc = data.get("description")
         if desc is not None:
             err = _validate_string(desc, "description", _MAX_DESCRIPTION_LEN)
@@ -2382,89 +2233,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             {"result": result}, status=404 if is_error else 200
         )
 
-    # ------------------------------------------------------------------
-    # Audit log
-    # ------------------------------------------------------------------
+    register_audit_log(routes, bot)
 
-    @routes.get("/api/audit")
-    async def search_audit(request: web.Request) -> web.Response:
-        tool_name = request.query.get("tool") or None
-        user = request.query.get("user") or None
-        host = request.query.get("host") or None
-        keyword = request.query.get("q") or None
-        date = request.query.get("date") or None
-        error_only = request.query.get("error_only", "").lower() in ("1", "true", "yes")
-        try:
-            limit = _safe_int_param(request, "limit", 50, hi=200)
-        except ValueError:
-            return web.json_response({"error": "limit must be an integer"}, status=400)
-        results = await bot.audit.search(
-            tool_name=tool_name,
-            user=user,
-            host=host,
-            keyword=keyword,
-            date=date,
-            limit=limit,
-        )
-        if error_only:
-            results = [r for r in results if r.get("error")]
-        return web.json_response(results)
-
-    @routes.get("/api/audit/diffs")
-    async def search_audit_diffs(request: web.Request) -> web.Response:
-        tool_name = request.query.get("tool") or None
-        user = request.query.get("user") or None
-        date = request.query.get("date") or None
-        try:
-            limit = _safe_int_param(request, "limit", 20, hi=100)
-        except ValueError:
-            return web.json_response({"error": "limit must be an integer"}, status=400)
-        results = await bot.audit.search_diffs(
-            tool_name=tool_name, user=user, date=date, limit=limit,
-        )
-        return web.json_response({"entries": results, "count": len(results)})
-
-    @routes.get("/api/audit/verify")
-    async def verify_audit_integrity(request: web.Request) -> web.Response:
-        result = await bot.audit.verify_integrity()
-        status = 200 if result["valid"] else 409
-        return web.json_response(result, status=status)
-
-    # ------------------------------------------------------------------
-    # Log search (server-side filtered log queries)
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/logs/search")
-    async def search_logs(request: web.Request) -> web.Response:
-        level = request.query.get("level") or None
-        if level and level not in ("error", "info", "all"):
-            return web.json_response(
-                {"error": "level must be 'error', 'info', or 'all'"}, status=400
-            )
-        start_time = request.query.get("start") or None
-        end_time = request.query.get("end") or None
-        keyword = request.query.get("q") or None
-        tool_name = request.query.get("tool") or None
-        try:
-            limit = _safe_int_param(request, "limit", 100, hi=500)
-        except ValueError:
-            return web.json_response(
-                {"error": "limit must be an integer"}, status=400
-            )
-        results = await bot.audit.search_logs(
-            level=level,
-            start_time=start_time,
-            end_time=end_time,
-            keyword=keyword,
-            tool_name=tool_name,
-            limit=limit,
-        )
-        return web.json_response({"entries": results, "count": len(results)})
-
-    @routes.get("/api/logs/stats")
-    async def log_stats(_request: web.Request) -> web.Response:
-        stats = await bot.audit.get_log_stats()
-        return web.json_response(stats)
+    register_log_search(routes, bot)
 
     # ------------------------------------------------------------------
     # Memory (persistent notes — global + per-user scopes)
@@ -2551,1258 +2322,29 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
         return web.json_response({"status": "deleted", "count": deleted})
 
-    # ------------------------------------------------------------------
-    # Risk classification (observability)
-    # ------------------------------------------------------------------
+    register_risk_classification(routes, bot)
 
-    @routes.get("/api/risk/stats")
-    async def risk_stats(_request: web.Request) -> web.Response:
-        executor = getattr(bot, "tool_executor", None)
-        if not executor:
-            return web.json_response({"error": "executor not available"}, status=503)
-        return web.json_response(executor.risk_stats.get_summary())
+    register_permissions_rbac(routes, bot)
 
-    @routes.get("/api/risk/recent")
-    async def risk_recent(request: web.Request) -> web.Response:
-        executor = getattr(bot, "tool_executor", None)
-        if not executor:
-            return web.json_response({"error": "executor not available"}, status=503)
-        try:
-            limit = _safe_int_param(request, "limit", 20, hi=100)
-        except ValueError:
-            return web.json_response({"error": "limit must be an integer"}, status=400)
-        return web.json_response({"entries": executor.risk_stats.get_recent(limit)})
+    register_codex_oauth(routes, bot)
 
-    @routes.get("/api/governor/stats")
-    async def governor_stats(_request: web.Request) -> web.Response:
-        executor = getattr(bot, "tool_executor", None)
-        if not executor or not getattr(executor, "command_governor", None):
-            return web.json_response({"error": "command governor not available"}, status=503)
-        return web.json_response(executor.command_governor.stats.get_summary())
+    register_llm_provider(routes, bot)
 
-    @routes.get("/api/audit/risk")
-    async def audit_by_risk(request: web.Request) -> web.Response:
-        risk_level = request.query.get("level") or None
-        tool_name = request.query.get("tool") or None
-        try:
-            limit = _safe_int_param(request, "limit", 20, hi=100)
-        except ValueError:
-            return web.json_response({"error": "limit must be an integer"}, status=400)
-        results = await bot.audit.search_by_risk(
-            risk_level=risk_level, tool_name=tool_name, limit=limit,
-        )
-        return web.json_response({"entries": results, "count": len(results)})
+    register_provider_config(routes, bot)
 
-    # ------------------------------------------------------------------
-    # Permissions / RBAC
-    # ------------------------------------------------------------------
+    register_ollama_admin(routes, bot)
 
-    @routes.get("/api/permissions/tiers")
-    async def list_tiers(_request: web.Request) -> web.Response:
-        # Bot attribute is `permissions` (PermissionManager); the old
-        # "permission_manager" name never resolved, so these RBAC endpoints 503'd.
-        pm = getattr(bot, "permissions", None)
-        if not pm:
-            return web.json_response({"error": "permission manager not available"}, status=503)
-        from ..permissions.manager import VALID_TIERS, USER_TIER_TOOLS
-        config_tiers = dict(pm._config_tiers)
-        overrides = dict(pm._overrides)
-        return web.json_response({
-            "valid_tiers": list(VALID_TIERS),
-            "default_tier": pm._default_tier,
-            "config_tiers": config_tiers,
-            "overrides": overrides,
-            "user_tier_tools": sorted(USER_TIER_TOOLS),
-        })
+    register_kimi_admin(routes, bot)
 
-    @routes.get("/api/permissions/user/{user_id}")
-    async def get_user_tier(request: web.Request) -> web.Response:
-        # Bot attribute is `permissions` (PermissionManager); the old
-        # "permission_manager" name never resolved, so these RBAC endpoints 503'd.
-        pm = getattr(bot, "permissions", None)
-        if not pm:
-            return web.json_response({"error": "permission manager not available"}, status=503)
-        uid = request.match_info["user_id"]
-        tier = pm.get_tier(uid)
-        allowed = pm.allowed_tool_names(uid)
-        return web.json_response({
-            "user_id": uid,
-            "tier": tier,
-            "allowed_tools": sorted(allowed) if allowed is not None else None,
-        })
+    register_host_access(routes, bot)
 
-    @routes.put("/api/permissions/user/{user_id}")
-    async def set_user_tier(request: web.Request) -> web.Response:
-        # Bot attribute is `permissions` (PermissionManager); the old
-        # "permission_manager" name never resolved, so these RBAC endpoints 503'd.
-        pm = getattr(bot, "permissions", None)
-        if not pm:
-            return web.json_response({"error": "permission manager not available"}, status=503)
-        uid = request.match_info["user_id"]
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-        tier = body.get("tier", "")
-        if not tier or not isinstance(tier, str):
-            return web.json_response({"error": "tier is required"}, status=400)
-        try:
-            await pm.async_set_tier(uid, tier)
-        except ValueError as e:
-            return web.json_response({"error": str(e)}, status=400)
-        try:
-            audit = getattr(bot, "audit", None)
-            if audit:
-                session_id = getattr(request, "_session_id", "web-api")
-                await audit.log_event(
-                    event_type="permission_change",
-                    action="set_tier",
-                    actor=f"web:{session_id}",
-                    detail=f"Set user {uid} to tier {tier}",
-                )
-        except Exception:
-            pass
-        return web.json_response({"user_id": uid, "tier": tier, "status": "updated"})
+    register_api_tokens(routes, bot)
 
-    @routes.delete("/api/permissions/user/{user_id}")
-    async def delete_user_tier(request: web.Request) -> web.Response:
-        # Bot attribute is `permissions` (PermissionManager); the old
-        # "permission_manager" name never resolved, so these RBAC endpoints 503'd.
-        pm = getattr(bot, "permissions", None)
-        if not pm:
-            return web.json_response({"error": "permission manager not available"}, status=503)
-        uid = request.match_info["user_id"]
-        if await pm.async_delete_tier(uid):
-            try:
-                audit = getattr(bot, "audit", None)
-                if audit:
-                    session_id = getattr(request, "_session_id", "web-api")
-                    await audit.log_event(
-                        event_type="permission_change",
-                        action="delete_tier",
-                        actor=f"web:{session_id}",
-                        detail=f"Removed tier override for user {uid}",
-                    )
-            except Exception:
-                pass
-            return web.json_response({"user_id": uid, "status": "override_removed"})
-        return web.json_response({"error": "no override found for user"}, status=404)
+    register_recovery_stats(routes, bot)
 
-    # ------------------------------------------------------------------
-    # Codex OAuth management
-    # ------------------------------------------------------------------
+    register_branch_freshness(routes, bot)
 
-    @routes.get("/api/codex/status")
-    async def codex_status(_request: web.Request) -> web.Response:
-        pool = getattr(bot.llm_gateway, "codex_client", None)
-        pool = getattr(pool, "auth", None) if pool else None
-        if pool is None:
-            pool = getattr(bot, "_codex_auth_pool", None)
-        if pool is None:
-            return web.json_response({"configured": False, "accounts": []})
-
-        import time as _time
-        from ..llm.codex_auth import _decode_jwt_payload
-
-        accounts = []
-        for i, auth in enumerate(pool._accounts):
-            try:
-                creds = auth._load()
-                payload = _decode_jwt_payload(creds.get("access_token", ""))
-                expires_at = creds.get("expires_at", 0)
-                accounts.append({
-                    "index": i,
-                    "label": creds.get("label", ""),
-                    "email": creds.get("email", payload.get("email", "unknown")),
-                    "account_id": creds.get("account_id", payload.get("chatgpt_account_id", "")),
-                    "plan_type": creds.get("plan_type", payload.get("chatgpt_plan_type", "")),
-                    "expires_at": expires_at,
-                    "expired": _time.time() >= expires_at,
-                    "rate_limited": auth.is_rate_limited(),
-                    "is_current": i == pool._current_index,
-                })
-            except Exception as e:
-                accounts.append({"index": i, "error": str(e)})
-
-        return web.json_response({
-            "configured": True,
-            "account_count": pool.account_count,
-            "current_index": pool._current_index,
-            "accounts": accounts,
-        })
-
-    @routes.post("/api/codex/device-code")
-    async def codex_device_code(_request: web.Request) -> web.Response:
-        from ..llm.codex_auth import CodexAuth
-        try:
-            result = await CodexAuth.request_device_code()
-            return web.json_response(result)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
-
-    @routes.post("/api/codex/device-poll")
-    async def codex_device_poll(request: web.Request) -> web.Response:
-        from ..llm.codex_auth import CodexAuth
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        device_auth_id = body.get("device_auth_id", "")
-        user_code = body.get("user_code", "")
-        interval = body.get("interval", 5)
-        if not device_auth_id or not user_code:
-            return web.json_response({"error": "device_auth_id and user_code required"}, status=400)
-
-        try:
-            creds = await CodexAuth.poll_device_auth(device_auth_id, user_code, interval=interval)
-        except TimeoutError:
-            return web.json_response({"error": "Authorization timed out"}, status=408)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
-
-        creds_path = bot.config.openai_codex.credentials_path
-        save_index = body.get("save_index")
-        if save_index is not None:
-            try:
-                save_index = int(save_index)
-            except (TypeError, ValueError):
-                return web.json_response({"error": "save_index must be an integer"}, status=400)
-
-        import json as _json
-        from pathlib import Path as _Path
-        from ..llm.codex_auth import _atomic_write_secure
-
-        path = _Path(creds_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        async with _codex_creds_lock:
-            try:
-                if path.exists():
-                    raw = _json.loads(path.read_text())
-                    if save_index is not None:
-                        if isinstance(raw, list) and 0 <= save_index < len(raw):
-                            raw[save_index] = creds
-                        elif isinstance(raw, list):
-                            raw.append(creds)
-                        else:
-                            raw = [raw, creds] if isinstance(raw, dict) else [creds]
-                    else:
-                        if isinstance(raw, list):
-                            raw.append(creds)
-                        elif isinstance(raw, dict):
-                            raw = [raw, creds]
-                        else:
-                            raw = [creds]
-                    _atomic_write_secure(path, _json.dumps(raw, indent=2))
-                else:
-                    _atomic_write_secure(path, _json.dumps([creds], indent=2))
-            except Exception as e:
-                bak = path.with_suffix(".bak")
-                if path.exists():
-                    try:
-                        import shutil
-                        shutil.copy2(path, bak)
-                    except Exception:
-                        pass
-                _atomic_write_secure(path, _json.dumps([creds], indent=2))
-                log.warning("Failed to merge credentials (backup at %s), wrote fresh: %s", bak, e)
-
-        await bot.llm_gateway.reload_codex()
-
-        return web.json_response({
-            "status": "authenticated",
-            "email": creds.get("email", "unknown"),
-            "account_id": creds.get("account_id", ""),
-        })
-
-    @routes.post("/api/codex/account/{index}/refresh")
-    async def codex_refresh_account(request: web.Request) -> web.Response:
-        try:
-            index = int(request.match_info["index"])
-        except ValueError:
-            return web.json_response({"error": "index must be an integer"}, status=400)
-
-        pool = getattr(bot.llm_gateway, "codex_client", None)
-        pool = getattr(pool, "auth", None) if pool else None
-        if pool is None:
-            return web.json_response({"error": "codex not configured"}, status=503)
-        if index < 0 or index >= len(pool._accounts):
-            return web.json_response({"error": f"index {index} out of range"}, status=400)
-
-        auth = pool._accounts[index]
-        try:
-            import json as _json
-            from pathlib import Path as _Path
-            from ..llm.codex_auth import _atomic_write_secure
-
-            creds = auth._load()
-            await auth._refresh(creds)
-            creds = auth._load()
-
-            async with _codex_creds_lock:
-                path = _Path(bot.config.openai_codex.credentials_path)
-                if path.exists():
-                    raw = _json.loads(path.read_text())
-                    if isinstance(raw, list) and index < len(raw):
-                        raw[index] = creds
-                        _atomic_write_secure(path, _json.dumps(raw, indent=2))
-
-            return web.json_response({
-                "status": "refreshed",
-                "email": creds.get("email", "unknown"),
-                "expired": False,
-            })
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
-
-    @routes.post("/api/codex/account/{index}/activate")
-    async def codex_activate_account(request: web.Request) -> web.Response:
-        try:
-            index = int(request.match_info["index"])
-        except ValueError:
-            return web.json_response({"error": "index must be an integer"}, status=400)
-
-        pool = getattr(bot.llm_gateway, "codex_client", None)
-        pool = getattr(pool, "auth", None) if pool else None
-        if pool is None:
-            return web.json_response({"error": "codex not configured"}, status=503)
-        try:
-            await pool.set_active(index)
-        except ValueError as e:
-            return web.json_response({"error": str(e)}, status=400)
-        return web.json_response({"status": "activated", "active_index": index})
-
-    @routes.post("/api/codex/reload")
-    async def codex_reload(_request: web.Request) -> web.Response:
-        result = await bot.llm_gateway.reload_codex()
-        status = 200 if result.get("configured") else 503
-        return web.json_response(result, status=status)
-
-    @routes.put("/api/codex/account/{index}/label")
-    async def codex_set_label(request: web.Request) -> web.Response:
-        import json as _json
-        from pathlib import Path as _Path
-        from ..llm.codex_auth import _atomic_write_secure
-
-        try:
-            index = int(request.match_info["index"])
-        except ValueError:
-            return web.json_response({"error": "index must be an integer"}, status=400)
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        label = body.get("label", "")
-        if not isinstance(label, str):
-            return web.json_response({"error": "label must be a string"}, status=400)
-
-        path = _Path(bot.config.openai_codex.credentials_path)
-        if not path.exists():
-            return web.json_response({"error": "no credentials file"}, status=404)
-
-        async with _codex_creds_lock:
-            try:
-                raw = _json.loads(path.read_text())
-            except Exception:
-                return web.json_response({"error": "failed to read credentials"}, status=500)
-
-            if isinstance(raw, list):
-                if index < 0 or index >= len(raw):
-                    return web.json_response({"error": f"index {index} out of range"}, status=400)
-                raw[index]["label"] = label
-            elif isinstance(raw, dict) and index == 0:
-                raw["label"] = label
-            else:
-                return web.json_response({"error": "invalid index"}, status=400)
-
-            _atomic_write_secure(path, _json.dumps(raw, indent=2))
-
-        # Also update the in-memory shadow file so status reflects immediately
-        pool = getattr(bot.llm_gateway, "codex_client", None)
-        pool = getattr(pool, "auth", None) if pool else None
-        if pool and index < len(pool._accounts):
-            try:
-                creds = pool._accounts[index]._load()
-                creds["label"] = label
-                pool._accounts[index]._save(creds)
-            except Exception:
-                pass
-
-        return web.json_response({"status": "updated", "label": label})
-
-    @routes.delete("/api/codex/account/{index}")
-    async def codex_delete_account(request: web.Request) -> web.Response:
-        import json as _json
-        from pathlib import Path as _Path
-        from ..llm.codex_auth import _atomic_write_secure
-
-        try:
-            index = int(request.match_info["index"])
-        except ValueError:
-            return web.json_response({"error": "index must be an integer"}, status=400)
-
-        path = _Path(bot.config.openai_codex.credentials_path)
-        if not path.exists():
-            return web.json_response({"error": "no credentials file"}, status=404)
-
-        async with _codex_creds_lock:
-            try:
-                raw = _json.loads(path.read_text())
-            except Exception:
-                return web.json_response({"error": "failed to read credentials"}, status=500)
-
-            if isinstance(raw, list):
-                if index < 0 or index >= len(raw):
-                    return web.json_response({"error": f"index {index} out of range (0-{len(raw)-1})"}, status=400)
-                removed = raw.pop(index)
-                _atomic_write_secure(path, _json.dumps(raw, indent=2))
-                email = removed.get("email", "unknown")
-            elif isinstance(raw, dict) and index == 0:
-                email = raw.get("email", "unknown")
-                _atomic_write_secure(path, _json.dumps([], indent=2))
-            else:
-                return web.json_response({"error": "invalid index"}, status=400)
-
-        pool = getattr(bot.llm_gateway, "codex_client", None)
-        pool = getattr(pool, "auth", None) if pool else None
-        if pool:
-            # reload() ignores the pool lock and can race in-flight token
-            # operations (account-mutation methods index the list after an
-            # await) — use the locked variant.
-            if hasattr(pool, "reload_async"):
-                await pool.reload_async()
-            else:
-                pool.reload()
-
-        return web.json_response({
-            "status": "deleted",
-            "email": email,
-        })
-
-    # ------------------------------------------------------------------
-    # LLM provider management
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/llm/status")
-    async def llm_status(_request: web.Request) -> web.Response:
-        provider_cfg = getattr(bot.config, "llm_provider", None)
-        active = provider_cfg.active_provider if provider_cfg else "codex"
-
-        codex_configured = bot.llm_gateway.codex_client is not None
-        ollama_configured = bot.llm_gateway.ollama_client is not None
-
-        ollama_cfg = getattr(bot.config, "ollama", None)
-        kimi_cfg = getattr(bot.config, "kimi", None)
-        kimi_has_key = bool(kimi_cfg and kimi_cfg.api_key)
-
-        result = {
-            "active_provider": active,
-            "codex": {
-                "configured": codex_configured,
-                "enabled": bot.config.openai_codex.enabled,
-                "model": bot.config.openai_codex.model,
-                "max_tokens": bot.config.openai_codex.max_tokens,
-            },
-            "ollama": {
-                "configured": ollama_configured,
-                "enabled": ollama_cfg.enabled if ollama_cfg else False,
-                "model": ollama_cfg.model if ollama_cfg else "",
-                "base_url": ollama_cfg.base_url if ollama_cfg else "",
-                "max_tokens": ollama_cfg.max_tokens if ollama_cfg else 4096,
-                "timeout": ollama_cfg.timeout if ollama_cfg else 300,
-                "has_api_key": bool(ollama_cfg and ollama_cfg.api_key),
-            },
-            "kimi": {
-                "configured": bot.llm_gateway.kimi_client is not None,
-                "enabled": kimi_cfg.enabled if kimi_cfg else False,
-                "model": kimi_cfg.model if kimi_cfg else "",
-                "max_tokens": kimi_cfg.max_tokens if kimi_cfg else 4096,
-                "has_api_key": kimi_has_key,
-            },
-        }
-
-        client = bot.llm_gateway.active_client
-        if client:
-            result["active_model"] = getattr(client, "model", "unknown")
-            result["active_provider_name"] = getattr(client, "provider_name", active)
-
-        return web.json_response(result)
-
-    @routes.post("/api/llm/switch")
-    async def llm_switch(request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        provider = body.get("provider", "")
-        if provider not in ("codex", "ollama", "kimi"):
-            return web.json_response({"error": "provider must be 'codex', 'ollama', or 'kimi'"}, status=400)
-
-        result = await bot.llm_gateway.switch_provider(provider)
-        if "error" in result:
-            return web.json_response(result, status=400)
-        await _persist_config()
-        return web.json_response(result)
-
-    # ------------------------------------------------------------------
-    # Provider config update (enable/disable, set keys, endpoints)
-    # ------------------------------------------------------------------
-
-    import ipaddress as _ipaddress
-    import urllib.parse as _urlparse
-
-    _ALLOWED_OLLAMA_HOSTS = frozenset({
-        "localhost", "127.0.0.1", "::1", "0.0.0.0",
-    })
-
-    def _validate_ollama_url(url: str) -> str:
-        """Validate Ollama base_url — restrict to local/private networks to prevent SSRF."""
-        if not url.startswith(("http://", "https://")):
-            raise ValueError("base_url must start with http:// or https://")
-        parsed = _urlparse.urlparse(url)
-        host = parsed.hostname or ""
-        if host in _ALLOWED_OLLAMA_HOSTS:
-            return url
-        try:
-            addr = _ipaddress.ip_address(host)
-            if addr.is_link_local:
-                raise ValueError(f"Link-local addresses not allowed: {host}")
-            if addr.is_private or addr.is_loopback:
-                return url
-            raise ValueError(f"Public IP not allowed for Ollama: {host}")
-        except ValueError as e:
-            if "not allowed" in str(e) or "Public IP" in str(e):
-                raise
-        except Exception:
-            pass
-        try:
-            import socket
-            resolved = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-            if not resolved:
-                raise ValueError(f"Could not resolve hostname: {host}")
-            for _, _, _, _, sockaddr in resolved:
-                addr = _ipaddress.ip_address(sockaddr[0])
-                if addr.is_link_local:
-                    raise ValueError(f"Link-local address not allowed: {sockaddr[0]}")
-                if not (addr.is_private or addr.is_loopback):
-                    raise ValueError(f"All resolved addresses must be private/local, got public: {sockaddr[0]}")
-            return url
-        except ValueError:
-            raise
-        except Exception:
-            pass
-        raise ValueError(f"Ollama base_url must point to a local/private network address, got: {host}")
-
-    def _parse_int(val, name: str, lo: int = 1, hi: int = 262000) -> int:
-        try:
-            v = int(val)
-        except (TypeError, ValueError):
-            raise ValueError(f"{name} must be an integer")
-        if v < lo or v > hi:
-            raise ValueError(f"{name} must be between {lo} and {hi}")
-        return v
-
-    _ui_set_secrets: set[str] = set()
-
-    def _safe_secret(key, existing_val, memory_val):
-        """Preserve env-var placeholders unless explicitly set via UI this session."""
-        if key in _ui_set_secrets:
-            return memory_val
-        if isinstance(existing_val, str) and "${" in existing_val:
-            return existing_val
-        return memory_val
-
-    def _persist_llm_sections_sync() -> None:
-        """Merge only LLM-related sections into config.yml using round-trip YAML.
-
-        Preserves comments, ordering, style, and env-var placeholders.
-        """
-        config_path = Path("config.yml")
-        if not config_path.exists():
-            return
-        from ruamel.yaml import YAML as _RuamelYAML
-        ry = _RuamelYAML()
-        ry.preserve_quotes = True
-        try:
-            with open(config_path) as f:
-                existing = ry.load(f)
-            if existing is None:
-                return
-        except Exception:
-            return
-
-        if "openai_codex" not in existing:
-            existing["openai_codex"] = {}
-        existing["openai_codex"]["enabled"] = bot.config.openai_codex.enabled
-        existing["openai_codex"]["model"] = bot.config.openai_codex.model
-        existing["openai_codex"]["max_tokens"] = bot.config.openai_codex.max_tokens
-
-        if "ollama" not in existing:
-            existing["ollama"] = {}
-        existing["ollama"]["enabled"] = bot.config.ollama.enabled
-        existing["ollama"]["base_url"] = bot.config.ollama.base_url
-        existing["ollama"]["model"] = bot.config.ollama.model
-        existing["ollama"]["max_tokens"] = bot.config.ollama.max_tokens
-        existing["ollama"]["timeout"] = bot.config.ollama.timeout
-        ex_ollama_key = existing["ollama"].get("api_key", "")
-        existing["ollama"]["api_key"] = _safe_secret("ollama.api_key", ex_ollama_key, bot.config.ollama.api_key)
-
-        if "kimi" not in existing:
-            existing["kimi"] = {}
-        existing["kimi"]["enabled"] = bot.config.kimi.enabled
-        existing["kimi"]["model"] = bot.config.kimi.model
-        existing["kimi"]["max_tokens"] = bot.config.kimi.max_tokens
-        existing["kimi"]["timeout"] = bot.config.kimi.timeout
-        ex_kimi_key = existing["kimi"].get("api_key", "")
-        existing["kimi"]["api_key"] = _safe_secret("kimi.api_key", ex_kimi_key, bot.config.kimi.api_key)
-
-        if "llm_provider" not in existing:
-            existing["llm_provider"] = {}
-        existing["llm_provider"]["active_provider"] = bot.config.llm_provider.active_provider
-
-        with open(config_path, "w") as f:
-            ry.dump(existing, f)
-
-    async def _persist_config() -> None:
-        """Persist LLM config sections without touching env vars or other settings."""
-        await _asyncio.to_thread(_persist_llm_sections_sync)
-
-    @routes.put("/api/llm/codex/config")
-    async def llm_codex_config(request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
-        if lock is None:
-            return web.json_response({"error": "provider lock not available"}, status=503)
-
-        try:
-            async with lock:
-                cfg = bot.config.openai_codex
-                changed = False
-                if "enabled" in body:
-                    cfg.enabled = bool(body["enabled"])
-                    changed = True
-                if "model" in body and body["model"]:
-                    cfg.model = str(body["model"])
-                    changed = True
-                if "max_tokens" in body:
-                    cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
-                    changed = True
-                if changed:
-                    await bot.llm_gateway.reload_codex_inner()
-                    await _persist_config()
-        except ValueError as e:
-            return web.json_response({"error": str(e)}, status=400)
-
-        return web.json_response({
-            "status": "updated",
-            "enabled": cfg.enabled,
-            "model": cfg.model,
-            "configured": bot.llm_gateway.codex_client is not None,
-        })
-
-    @routes.put("/api/llm/ollama/config")
-    async def llm_ollama_config(request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
-        if lock is None:
-            return web.json_response({"error": "provider lock not available"}, status=503)
-
-        try:
-            async with lock:
-                cfg = bot.config.ollama
-                changed = False
-                if "enabled" in body:
-                    cfg.enabled = bool(body["enabled"])
-                    changed = True
-                if "base_url" in body and body["base_url"]:
-                    cfg.base_url = _validate_ollama_url(str(body["base_url"]))
-                    changed = True
-                if "model" in body and body["model"]:
-                    cfg.model = str(body["model"])
-                    changed = True
-                if "max_tokens" in body:
-                    cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
-                    changed = True
-                if "api_key" in body:
-                    cfg.api_key = str(body["api_key"])
-                    _ui_set_secrets.add("ollama.api_key")
-                    changed = True
-                if "timeout" in body:
-                    cfg.timeout = _parse_int(body["timeout"], "timeout", 10, 3600)
-                    changed = True
-                if changed:
-                    await bot.llm_gateway.reload_ollama_inner()
-                    await _persist_config()
-        except ValueError as e:
-            return web.json_response({"error": str(e)}, status=400)
-
-        return web.json_response({
-            "status": "updated",
-            "enabled": cfg.enabled,
-            "model": cfg.model,
-            "base_url": cfg.base_url,
-            "configured": bot.llm_gateway.ollama_client is not None,
-        })
-
-    @routes.put("/api/llm/kimi/config")
-    async def llm_kimi_config(request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
-        if lock is None:
-            return web.json_response({"error": "provider lock not available"}, status=503)
-
-        try:
-            async with lock:
-                cfg = bot.config.kimi
-                changed = False
-                if "enabled" in body:
-                    cfg.enabled = bool(body["enabled"])
-                    changed = True
-                if "api_key" in body:
-                    cfg.api_key = str(body["api_key"])
-                    _ui_set_secrets.add("kimi.api_key")
-                    changed = True
-                if "model" in body and body["model"]:
-                    cfg.model = str(body["model"])
-                    changed = True
-                if "max_tokens" in body:
-                    cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 262000)
-                    changed = True
-                if "timeout" in body:
-                    cfg.timeout = _parse_int(body["timeout"], "timeout", 10, 3600)
-                    changed = True
-                if changed:
-                    await bot.llm_gateway.reload_kimi_inner()
-                    await _persist_config()
-        except ValueError as e:
-            return web.json_response({"error": str(e)}, status=400)
-
-        return web.json_response({
-            "status": "updated",
-            "enabled": cfg.enabled,
-            "model": cfg.model,
-            "configured": bot.llm_gateway.kimi_client is not None,
-        })
-
-    # ------------------------------------------------------------------
-    # Ollama provider management
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/ollama/status")
-    async def ollama_status(_request: web.Request) -> web.Response:
-        client = getattr(getattr(bot, "llm_gateway", None), "ollama_client", None)
-        if client is None:
-            return web.json_response({"configured": False, "enabled": False})
-
-        health = await client.health_check()
-        return web.json_response({
-            "configured": True,
-            "enabled": True,
-            "model": client.model,
-            "base_url": client.base_url,
-            "health": health,
-            "stats": client.pool_stats(),
-        })
-
-    @routes.post("/api/ollama/reload")
-    async def ollama_reload(_request: web.Request) -> web.Response:
-        result = await bot.llm_gateway.reload_ollama()
-        status = 200 if result.get("configured") else 503
-        return web.json_response(result, status=status)
-
-    @routes.post("/api/ollama/probe-models")
-    async def ollama_probe_models(request: web.Request) -> web.Response:
-        """Fetch models from an arbitrary Ollama base_url — works even when client is disabled."""
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-        base_url = (body.get("base_url") or "").rstrip("/")
-        try:
-            base_url = _validate_ollama_url(base_url)
-        except ValueError as e:
-            return web.json_response({"error": str(e)}, status=400)
-        if not base_url.startswith(("http://", "https://")):
-            return web.json_response({"error": "base_url must start with http:// or https://"}, status=400)
-        try:
-            import aiohttp as _aio
-            async with _aio.ClientSession(timeout=_aio.ClientTimeout(total=10)) as sess:
-                async with sess.get(f"{base_url}/api/tags") as resp:
-                    if resp.status != 200:
-                        return web.json_response({"error": f"HTTP {resp.status}"}, status=502)
-                    data = await resp.json()
-                    return web.json_response({"models": data.get("models", [])})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=502)
-
-    @routes.get("/api/ollama/models")
-    async def ollama_models(_request: web.Request) -> web.Response:
-        client = getattr(getattr(bot, "llm_gateway", None), "ollama_client", None)
-        if client is None:
-            return web.json_response({"error": "Ollama not configured"}, status=503)
-
-        try:
-            import aiohttp as _aiohttp
-            session = await client._get_session()
-            async with session.get(
-                f"{client.base_url}/api/tags",
-                headers=client._headers(),
-                timeout=_aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    return web.json_response({"error": f"HTTP {resp.status}"}, status=502)
-                data = await resp.json()
-                return web.json_response({
-                    "models": data.get("models", []),
-                    "active_model": client.model,
-                })
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=502)
-
-    @routes.post("/api/ollama/model")
-    async def ollama_set_model(request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        model = body.get("model", "").strip()
-        if not model:
-            return web.json_response({"error": "model is required"}, status=400)
-
-        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
-        if lock is None:
-            return web.json_response({"error": "provider lock not available"}, status=503)
-
-        async with lock:
-            client = getattr(getattr(bot, "llm_gateway", None), "ollama_client", None)
-            if client is None:
-                return web.json_response({"error": "Ollama not configured"}, status=503)
-
-            health = await client.health_check()
-            available = health.get("models", [])
-            if available and model not in available:
-                base = model.split(":")[0]
-                if not any(m.startswith(base + ":") for m in available):
-                    return web.json_response({
-                        "error": f"Model '{model}' not available. Pulled models: {', '.join(available[:10])}",
-                    }, status=400)
-
-            client.model = model
-            bot.config.ollama.model = model
-            await _persist_config()
-        return web.json_response({"status": "updated", "model": model})
-
-    # ------------------------------------------------------------------
-    # Kimi provider management
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/kimi/status")
-    async def kimi_status(_request: web.Request) -> web.Response:
-        client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
-        if client is None:
-            return web.json_response({"configured": False, "enabled": False})
-
-        health = await client.health_check()
-        return web.json_response({
-            "configured": True,
-            "enabled": True,
-            "model": client.model,
-            "base_url": client.base_url,
-            "health": health,
-            "stats": client.pool_stats(),
-        })
-
-    @routes.post("/api/kimi/reload")
-    async def kimi_reload(_request: web.Request) -> web.Response:
-        result = await bot.llm_gateway.reload_kimi()
-        status = 200 if result.get("configured") else 503
-        return web.json_response(result, status=status)
-
-    @routes.get("/api/kimi/models")
-    async def kimi_models(_request: web.Request) -> web.Response:
-        client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
-        if client is None:
-            return web.json_response({"error": "Kimi not configured"}, status=503)
-
-        health = await client.health_check()
-        if not health.get("healthy"):
-            return web.json_response({"error": health.get("error", "unhealthy")}, status=502)
-        return web.json_response({
-            "models": health.get("models", []),
-            "active_model": client.model,
-        })
-
-    @routes.post("/api/kimi/model")
-    async def kimi_set_model(request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        model = body.get("model", "").strip()
-        if not model:
-            return web.json_response({"error": "model is required"}, status=400)
-
-        lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
-        if lock is None:
-            return web.json_response({"error": "provider lock not available"}, status=503)
-
-        async with lock:
-            client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
-            if client is None:
-                return web.json_response({"error": "Kimi not configured"}, status=503)
-
-            health = await client.health_check()
-            available = health.get("models", [])
-            if available and model not in available:
-                return web.json_response({
-                    "error": f"Model '{model}' not available. Models: {', '.join(available[:10])}",
-                }, status=400)
-
-            client.model = model
-            bot.config.kimi.model = model
-            await _persist_config()
-        return web.json_response({"status": "updated", "model": model})
-
-    # ------------------------------------------------------------------
-    # Host access control
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/host-access")
-    async def get_host_access(_request: web.Request) -> web.Response:
-        ham = getattr(bot, "host_access_manager", None)
-        if not ham:
-            return web.json_response({"error": "host access manager not available"}, status=503)
-        return web.json_response({
-            "available_hosts": ham.available_hosts,
-            "default_policy": ham.default_policy.to_dict(),
-            "users": ham.list_users(),
-        })
-
-    @routes.put("/api/host-access/user/{user_id}")
-    async def set_host_access_user(request: web.Request) -> web.Response:
-        ham = getattr(bot, "host_access_manager", None)
-        if not ham:
-            return web.json_response({"error": "host access manager not available"}, status=503)
-        uid = request.match_info["user_id"]
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-        allowed_hosts = body.get("allowed_hosts")
-        default_host = body.get("default_host", "")
-        if allowed_hosts is not None and not isinstance(allowed_hosts, list):
-            return web.json_response({"error": "allowed_hosts must be a list or null"}, status=400)
-        if allowed_hosts is not None and not all(isinstance(h, str) for h in allowed_hosts):
-            return web.json_response({"error": "allowed_hosts entries must be strings"}, status=400)
-        if not isinstance(default_host, str):
-            return web.json_response({"error": "default_host must be a string"}, status=400)
-        await ham.set_user(uid, allowed_hosts, default_host)
-        try:
-            audit = getattr(bot, "audit", None)
-            if audit:
-                session_id = getattr(request, "_session_id", "web-api")
-                await audit.log_event(
-                    event_type="host_access_change",
-                    action="set_user",
-                    actor=f"web:{session_id}",
-                    detail=f"Set host access for user {uid}: hosts={allowed_hosts}, default={default_host}",
-                )
-        except Exception:
-            pass
-        return web.json_response({"user_id": uid, "status": "updated"})
-
-    @routes.delete("/api/host-access/user/{user_id}")
-    async def delete_host_access_user(request: web.Request) -> web.Response:
-        ham = getattr(bot, "host_access_manager", None)
-        if not ham:
-            return web.json_response({"error": "host access manager not available"}, status=503)
-        uid = request.match_info["user_id"]
-        if await ham.delete_user(uid):
-            return web.json_response({"user_id": uid, "status": "override_removed"})
-        return web.json_response({"error": "no override found for user"}, status=404)
-
-    @routes.put("/api/host-access/default-policy")
-    async def set_host_access_default(request: web.Request) -> web.Response:
-        ham = getattr(bot, "host_access_manager", None)
-        if not ham:
-            return web.json_response({"error": "host access manager not available"}, status=503)
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-        allowed_hosts = body.get("allowed_hosts")
-        default_host = body.get("default_host", "")
-        if allowed_hosts is not None and not isinstance(allowed_hosts, list):
-            return web.json_response({"error": "allowed_hosts must be a list or null"}, status=400)
-        if allowed_hosts is not None and not all(isinstance(h, str) for h in allowed_hosts):
-            return web.json_response({"error": "allowed_hosts entries must be strings"}, status=400)
-        if not isinstance(default_host, str):
-            return web.json_response({"error": "default_host must be a string"}, status=400)
-        await ham.set_default_policy(allowed_hosts, default_host)
-        return web.json_response({"status": "updated"})
-
-    # ------------------------------------------------------------------
-    # API Token Management
-    # ------------------------------------------------------------------
-
-    def _auth_configured() -> bool:
-        tm = getattr(bot, "api_token_manager", None)
-        return bool(
-            bot.config.web.api_token
-            or bot.config.web.api_tokens
-            or (tm and tm.list_tokens())
-        )
-
-    def _require_admin(request: web.Request) -> web.Response | None:
-        identity = getattr(request, "_api_identity", None)
-        if identity is None:
-            # Fail closed: a missing identity is allowed only in dev mode
-            # (no tokens configured, so auth is disabled wholesale).
-            if _auth_configured():
-                return web.json_response({"error": "admin access required"}, status=403)
-            return None
-        if getattr(identity, "tier", "admin") != "admin":
-            return web.json_response({"error": "admin access required"}, status=403)
-        return None
-
-    @routes.get("/api/tokens")
-    async def list_api_tokens(request: web.Request) -> web.Response:
-        denied = _require_admin(request)
-        if denied:
-            return denied
-        tm = getattr(bot, "api_token_manager", None)
-        tokens = tm.list_tokens() if tm else []
-        for t in bot.config.web.api_tokens:
-            d = t.model_dump()
-            d["token"] = d["token"][:8] + "..." if len(d.get("token", "")) > 8 else "***"
-            d["source"] = "config"
-            tokens.append(d)
-        ham = getattr(bot, "host_access_manager", None)
-        available_hosts = ham.available_hosts if ham else []
-        return web.json_response({"tokens": tokens, "available_hosts": available_hosts})
-
-    @routes.post("/api/tokens")
-    async def create_api_token(request: web.Request) -> web.Response:
-        denied = _require_admin(request)
-        if denied:
-            return denied
-        tm = getattr(bot, "api_token_manager", None)
-        if not tm:
-            return web.json_response({"error": "token manager not available"}, status=503)
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        user_id = (data.get("user_id") or "").strip()
-        if not user_id:
-            return web.json_response({"error": "user_id is required"}, status=400)
-        import re as _re
-        if not _re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", user_id):
-            return web.json_response({"error": "user_id must be alphanumeric/dash/underscore, max 64 chars"}, status=400)
-        tier = data.get("tier", "admin")
-        if tier not in ("admin", "user", "guest"):
-            return web.json_response({"error": "tier must be admin, user, or guest"}, status=400)
-        allowed_tools = data.get("allowed_tools") or []
-        raw_hosts = data.get("allowed_hosts")
-        if raw_hosts is None:
-            allowed_hosts = None
-        elif isinstance(raw_hosts, list) and all(isinstance(h, str) for h in raw_hosts):
-            allowed_hosts = raw_hosts
-        else:
-            return web.json_response({"error": "allowed_hosts must be a list of strings or null"}, status=400)
-        if not isinstance(allowed_tools, list) or not all(isinstance(t, str) for t in allowed_tools):
-            return web.json_response({"error": "allowed_tools must be a list of strings"}, status=400)
-        ham = getattr(bot, "host_access_manager", None)
-        if allowed_hosts and ham:
-            valid_hosts = set(ham.available_hosts)
-            bad = [h for h in allowed_hosts if h not in valid_hosts]
-            if bad:
-                return web.json_response({"error": f"unknown hosts: {', '.join(bad)}"}, status=400)
-        default_host = str(data.get("default_host") or "").strip()
-        if default_host:
-            if ham and default_host not in ham.available_hosts:
-                return web.json_response({"error": f"unknown default_host: {default_host}"}, status=400)
-            if isinstance(allowed_hosts, list) and default_host not in allowed_hosts:
-                return web.json_response({"error": "default_host must be in allowed_hosts"}, status=400)
-        try:
-            identity = await tm.create_token(
-                user_id=user_id,
-                username=data.get("username") or "API",
-                tier=tier,
-                label=data.get("label") or "",
-                allowed_tools=allowed_tools,
-                allowed_hosts=allowed_hosts,
-                default_host=default_host,
-            )
-        except ValueError as e:
-            return web.json_response({"error": str(e)}, status=409)
-        return web.json_response({
-            "user_id": identity.user_id,
-            "token": identity.token,
-            "username": identity.username,
-            "tier": identity.tier,
-            "label": identity.label,
-            "allowed_tools": identity.allowed_tools,
-            "allowed_hosts": identity.allowed_hosts,
-            "default_host": identity.default_host,
-        }, status=201)
-
-    @routes.put("/api/tokens/{user_id}")
-    async def update_api_token(request: web.Request) -> web.Response:
-        denied = _require_admin(request)
-        if denied:
-            return denied
-        tm = getattr(bot, "api_token_manager", None)
-        if not tm:
-            return web.json_response({"error": "token manager not available"}, status=503)
-        uid = request.match_info["user_id"]
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        kwargs = {}
-        for field in ("username", "tier", "label", "allowed_tools", "allowed_hosts", "default_host"):
-            if field in data:
-                kwargs[field] = data[field]
-        if "tier" in kwargs and kwargs["tier"] not in ("admin", "user", "guest"):
-            return web.json_response({"error": "tier must be admin, user, or guest"}, status=400)
-        if "allowed_tools" in kwargs:
-            if not isinstance(kwargs["allowed_tools"], list) or not all(isinstance(t, str) for t in kwargs["allowed_tools"]):
-                return web.json_response({"error": "allowed_tools must be a list of strings"}, status=400)
-        if "allowed_hosts" in kwargs:
-            if kwargs["allowed_hosts"] is not None:
-                if not isinstance(kwargs["allowed_hosts"], list) or not all(isinstance(h, str) for h in kwargs["allowed_hosts"]):
-                    return web.json_response({"error": "allowed_hosts must be a list of strings or null"}, status=400)
-            ham = getattr(bot, "host_access_manager", None)
-            if kwargs["allowed_hosts"] and ham:
-                valid_hosts = set(ham.available_hosts)
-                bad = [h for h in kwargs["allowed_hosts"] if h not in valid_hosts]
-                if bad:
-                    return web.json_response({"error": f"unknown hosts: {', '.join(bad)}"}, status=400)
-        if "default_host" in kwargs:
-            dh = str(kwargs["default_host"] or "").strip()
-            kwargs["default_host"] = dh
-            if dh:
-                ham = getattr(bot, "host_access_manager", None)
-                if ham and dh not in ham.available_hosts:
-                    return web.json_response({"error": f"unknown default_host: {dh}"}, status=400)
-                ah = kwargs.get("allowed_hosts")
-                if ah is None:
-                    existing = tm.get(uid)
-                    ah = existing.allowed_hosts if existing else None
-                if isinstance(ah, list) and dh not in ah:
-                    return web.json_response({"error": "default_host must be in allowed_hosts"}, status=400)
-        if not kwargs:
-            return web.json_response({"error": "no fields to update"}, status=400)
-        identity = await tm.update_token(uid, **kwargs)
-        if identity is None:
-            return web.json_response({"error": "token not found"}, status=404)
-        return web.json_response({"user_id": uid, "status": "updated"})
-
-    @routes.post("/api/tokens/{user_id}/regenerate")
-    async def regenerate_api_token(request: web.Request) -> web.Response:
-        denied = _require_admin(request)
-        if denied:
-            return denied
-        tm = getattr(bot, "api_token_manager", None)
-        if not tm:
-            return web.json_response({"error": "token manager not available"}, status=503)
-        uid = request.match_info["user_id"]
-        new_token = await tm.regenerate_token(uid)
-        if new_token is None:
-            return web.json_response({"error": "token not found"}, status=404)
-        sm = request.app.get("session_manager")
-        if sm:
-            sm.destroy_by_user_id(uid)
-        ws_mgr = request.app.get("ws_manager")
-        if ws_mgr:
-            await ws_mgr.close_by_user_id(uid)
-        return web.json_response({"user_id": uid, "token": new_token})
-
-    @routes.delete("/api/tokens/{user_id}")
-    async def delete_api_token(request: web.Request) -> web.Response:
-        denied = _require_admin(request)
-        if denied:
-            return denied
-        tm = getattr(bot, "api_token_manager", None)
-        if not tm:
-            return web.json_response({"error": "token manager not available"}, status=503)
-        uid = request.match_info["user_id"]
-        deleted = await tm.delete_token(uid)
-        if not deleted:
-            return web.json_response({"error": "token not found"}, status=404)
-        sm = request.app.get("session_manager")
-        if sm:
-            sm.destroy_by_user_id(uid)
-        ws_mgr = request.app.get("ws_manager")
-        if ws_mgr:
-            await ws_mgr.close_by_user_id(uid)
-        return web.json_response({"user_id": uid, "status": "deleted"})
-
-    # ------------------------------------------------------------------
-    # Recovery stats (observability)
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/recovery/stats")
-    async def recovery_stats(_request: web.Request) -> web.Response:
-        executor = getattr(bot, "tool_executor", None)
-        if not executor:
-            return web.json_response({"error": "executor not available"}, status=503)
-        return web.json_response(executor.recovery_stats.get_summary())
-
-    @routes.get("/api/recovery/recent")
-    async def recovery_recent(request: web.Request) -> web.Response:
-        executor = getattr(bot, "tool_executor", None)
-        if not executor:
-            return web.json_response({"error": "executor not available"}, status=503)
-        limit = _safe_int_param(request, "limit", 20, hi=100)
-        return web.json_response({"entries": executor.recovery_stats.get_recent(limit)})
-
-    # ------------------------------------------------------------------
-    # Branch freshness stats (observability)
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/freshness/stats")
-    async def freshness_stats(_request: web.Request) -> web.Response:
-        executor = getattr(bot, "tool_executor", None)
-        if not executor:
-            return web.json_response({"error": "executor not available"}, status=503)
-        return web.json_response(executor.freshness_stats.get_summary())
-
-    @routes.get("/api/freshness/recent")
-    async def freshness_recent(request: web.Request) -> web.Response:
-        executor = getattr(bot, "tool_executor", None)
-        if not executor:
-            return web.json_response({"error": "executor not available"}, status=503)
-        limit = _safe_int_param(request, "limit", 10, hi=50)
-        return web.json_response({"entries": executor.freshness_stats.get_recent(limit)})
-
-    # ------------------------------------------------------------------
-    # Tool result validation stats (observability)
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/validation/stats")
-    async def validation_stats(_request: web.Request) -> web.Response:
-        executor = getattr(bot, "tool_executor", None)
-        if not executor:
-            return web.json_response({"error": "executor not available"}, status=503)
-        return web.json_response(executor.validation_stats.as_dict())
+    register_validation_stats(routes, bot)
 
     # ------------------------------------------------------------------
     # Learned context (reflector)
@@ -3837,36 +2379,11 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response(updated)
         return web.json_response({"error": "entry not found"}, status=404)
 
-    # ------------------------------------------------------------------
-    # Tool affordances (cost/risk/latency metadata)
-    # ------------------------------------------------------------------
+    register_affordances(routes, bot)
 
-    @routes.get("/api/affordances")
-    async def affordances(_request: web.Request) -> web.Response:
-        from ..tools.affordances import all_affordances
-        return web.json_response({"affordances": all_affordances()})
+    register_compression_stats(routes, bot)
 
-    # ------------------------------------------------------------------
-    # Context compression stats (observability)
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/compression/stats")
-    async def compression_stats(_request: web.Request) -> web.Response:
-        tracker = getattr(bot, "compression_stats", None)
-        if tracker is None:
-            return web.json_response({"error": "compression stats not available"}, status=503)
-        return web.json_response(tracker.as_dict())
-
-    # ------------------------------------------------------------------
-    # Model routing stats (observability)
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/routing/stats")
-    async def routing_stats(_request: web.Request) -> web.Response:
-        router = getattr(bot, "model_router", None)
-        if router is None:
-            return web.json_response({"error": "model router not available"}, status=503)
-        return web.json_response(router.get_metrics())
+    register_routing_stats(routes, bot)
 
     # ------------------------------------------------------------------
     # Startup diagnostics (boot-time checks)
@@ -3938,7 +2455,12 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         if saver is None:
             return web.json_response({"error": "agent trajectory saving not available"}, status=503)
         filename = request.match_info["filename"]
-        if not filename.endswith(".jsonl") or "/" in filename or "\\" in filename or ".." in filename:
+        if (
+            not filename.endswith(".jsonl")
+            or "/" in filename
+            or "\\" in filename
+            or ".." in filename
+        ):
             return web.json_response({"error": "invalid filename"}, status=400)
         safe_path = (saver.directory / filename).resolve()
         if not safe_path.is_relative_to(saver.directory.resolve()):

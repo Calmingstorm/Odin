@@ -1,4 +1,4 @@
-"""Shared helpers for the web API handlers (RFC-003 P1).
+"""Shared helpers for the web API handlers (RFC-003 P1/P2).
 
 Moved verbatim from ``api.py`` — the single home for cross-domain helpers
 so the coming domain carve cannot fork copies (the RFC-001 lesson). The
@@ -8,6 +8,7 @@ targets keep working.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from typing import Any
@@ -149,3 +150,40 @@ def _write_env_file(path: Path, content: str) -> None:
     Delegates to the shared ``write_env_file`` from ``setup_wizard``.
     """
     write_env_file(path, content)
+
+
+# Guards concurrent writes to the Codex credential files. Module-level so
+# every registrar (and the composition root) shares ONE lock — the same
+# semantics the old single-closure table provided (RFC-003 P2).
+_codex_creds_lock = asyncio.Lock()
+
+
+def admin_gate(bot):
+    """Build the per-bot admin gate the handlers call as ``_require_admin``.
+
+    Verbatim logic from the old closure pair (``_auth_configured`` +
+    ``_require_admin``): fail closed when any auth is configured, allow
+    only in dev mode (no tokens anywhere), and require the admin tier.
+    """
+
+    def _auth_configured() -> bool:
+        tm = getattr(bot, "api_token_manager", None)
+        return bool(
+            bot.config.web.api_token
+            or bot.config.web.api_tokens
+            or (tm and tm.list_tokens())
+        )
+
+    def _require_admin(request: web.Request) -> web.Response | None:
+        identity = getattr(request, "_api_identity", None)
+        if identity is None:
+            # Fail closed: a missing identity is allowed only in dev mode
+            # (no tokens configured, so auth is disabled wholesale).
+            if _auth_configured():
+                return web.json_response({"error": "admin access required"}, status=403)
+            return None
+        if getattr(identity, "tier", "admin") != "admin":
+            return web.json_response({"error": "admin access required"}, status=403)
+        return None
+
+    return _require_admin
