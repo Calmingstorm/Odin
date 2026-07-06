@@ -97,8 +97,8 @@ class WebSocketManager:
         ws = web.WebSocketResponse(heartbeat=30.0)
         await ws.prepare(request)
         self._clients.add(ws)
-        ws._odin_session_id = getattr(request, "_session_id", None) or "ws-anon"
-        ws._odin_identity = identity
+        ws._odin_session_id = getattr(request, "_session_id", None) or "ws-anon"  # type: ignore[attr-defined]  # sanctioned dynamic attr
+        ws._odin_identity = identity  # type: ignore[attr-defined]  # sanctioned dynamic attr
         log.info("WebSocket client connected (%d total)", len(self._clients))
 
         log_task: asyncio.Task | None = None
@@ -175,11 +175,11 @@ class WebSocketManager:
         now = _time.monotonic()
         window_start = getattr(ws, "_chat_window_start", None)
         if window_start is None or not isinstance(window_start, (int, float)) or now - window_start > _WS_CHAT_RATE_WINDOW:
-            ws._chat_window_start = now
-            ws._chat_count = 0
+            ws._chat_window_start = now  # type: ignore[attr-defined]  # sanctioned dynamic attr
+            ws._chat_count = 0  # type: ignore[attr-defined]  # sanctioned dynamic attr
         chat_count = getattr(ws, "_chat_count", None)
-        ws._chat_count = (chat_count + 1) if isinstance(chat_count, int) else 1
-        if ws._chat_count > _WS_CHAT_RATE_LIMIT:
+        ws._chat_count = (chat_count + 1) if isinstance(chat_count, int) else 1  # type: ignore[attr-defined]  # sanctioned dynamic attr
+        if ws._chat_count > _WS_CHAT_RATE_LIMIT:  # type: ignore[attr-defined]  # sanctioned dynamic attr
             await ws.send_json({"type": "chat_error", "error": "rate limit exceeded (10/min)"})
             return
 

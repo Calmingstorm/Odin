@@ -42,3 +42,25 @@ jobs:
         run: pip install ruff
       - name: No new lint findings vs base
         run: python scripts/ci/lint_gate.py
+
+  types-no-new:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history: the gate merge-bases against the PR base ref
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # mypy needs the real dependency environment to resolve imports; the
+      # checker + stubs are version-pinned in the dev extra so findings are
+      # deterministic. Both trees are checked with HEAD's mypy + mypy.ini
+      # (two-tree evaluation) — see scripts/ci/type_gate.py.
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: No new type findings vs base
+        run: python scripts/ci/type_gate.py

@@ -17,6 +17,7 @@ import asyncio
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import discord
 
@@ -24,6 +25,13 @@ from ..odin_log import get_logger
 from ..tools import ToolResult
 from .response_guards import scrub_response_secrets
 from .tool_loop import _LoopMessageProxy
+
+if TYPE_CHECKING:
+    from ..audit.logger import AuditLogger
+    from ..tools.executor import ToolExecutor
+    from .llm_gateway import LLMGateway
+    from .native_tools.agents_tasks import AgentTaskTools
+    from .tool_loop import ToolLoopRunner
 
 log = get_logger("discord")
 
@@ -35,11 +43,11 @@ class ScheduledEventsDeps:
     get_config: Callable  # live root — replaced by config hot-reload
     get_channel: Callable  # discord.Client.get_channel (bound method)
     get_guilds: Callable  # live — the guild list changes at runtime
-    tool_executor: object
-    audit: object
-    llm_gateway: object  # owns the swappable provider clients
-    tool_loop: object  # ToolLoopRunner — shared dispatch path
-    agent_task_tools: object  # agent result collection in workflows
+    tool_executor: ToolExecutor
+    audit: AuditLogger
+    llm_gateway: LLMGateway  # owns the swappable provider clients
+    tool_loop: ToolLoopRunner  # shared dispatch path
+    agent_task_tools: AgentTaskTools  # agent result collection in workflows
 
 
 class ScheduledEventHandlers:
@@ -409,7 +417,7 @@ class ScheduledEventHandlers:
             req_name = schedule.get("requester") or schedule.get("created_by") or "scheduler"
             try:
                 result = await self._execute_scheduled_tool(
-                    tool_name,
+                    tool_name,  # type: ignore[arg-type]  # creation-time validation guarantees tool_name
                     tool_input,
                     channel,
                     req_id,

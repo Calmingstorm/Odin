@@ -76,7 +76,7 @@ def register_commands(bot) -> None:
             return
         count = min(count, 500)
         await interaction.response.defer(ephemeral=True)
-        deleted = await interaction.channel.purge(limit=count)
+        deleted = await interaction.channel.purge(limit=count)  # type: ignore[union-attr]  # guild-only command sync; these kinds unreachable
         bot.sessions.reset(str(interaction.channel_id))
         await interaction.followup.send(
             f"Deleted {len(deleted)} messages and reset conversation history.",

@@ -245,7 +245,8 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
         limit = _safe_int_param(request, "limit", 20, hi=50)
         channel_id = request.query.get("channel_id") or None
         if not is_admin:
-            channel_id = identity.user_id
+            # is_admin is only False when identity was truthy (see above).
+            channel_id = identity.user_id  # type: ignore[union-attr]
         user_id = request.query.get("user_id") or None
         after: float | None = None
         before: float | None = None

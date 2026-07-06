@@ -489,7 +489,9 @@ class IssueTrackerClient:
     # Unified dispatch
     # ------------------------------------------------------------------
 
-    async def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def execute(
+        self, action: str, params: dict[str, Any]
+    ) -> dict[str, Any] | list[dict[str, Any]]:
         action = validate_action(action)
         if self._scrub:
             for key in ("title", "description", "body", "comment"):
@@ -510,7 +512,9 @@ class IssueTrackerClient:
             self._error_count += 1
             raise IssueTrackerError(f"{self._provider} error: {exc}") from exc
 
-    async def _dispatch_linear(self, action: str, params: dict) -> dict[str, Any]:
+    async def _dispatch_linear(
+        self, action: str, params: dict
+    ) -> dict[str, Any] | list[dict[str, Any]]:
         if action == "create_issue":
             return await self._linear_create_issue(
                 title=params.get("title", ""),
@@ -541,7 +545,9 @@ class IssueTrackerClient:
             )
         return {}
 
-    async def _dispatch_jira(self, action: str, params: dict) -> dict[str, Any]:
+    async def _dispatch_jira(
+        self, action: str, params: dict
+    ) -> dict[str, Any] | list[dict[str, Any]]:
         if action == "create_issue":
             return await self._jira_create_issue(
                 title=params.get("title", ""),

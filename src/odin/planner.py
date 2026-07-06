@@ -9,7 +9,7 @@ from typing import Any
 from src.odin.context import ExecutionContext
 from src.odin.executor import StepExecutor
 from src.odin.registry import ToolRegistry
-from src.odin.types import PlanResult, PlanSpec, StepResult, StepStatus
+from src.odin.types import PlanResult, PlanSpec, StepResult, StepSpec, StepStatus
 
 
 class PlanValidationError(Exception):

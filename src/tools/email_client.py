@@ -57,7 +57,7 @@ def _extract_body(msg: email_lib.message.Message, max_chars: int) -> str:
                 payload = part.get_payload(decode=True)
                 if payload:
                     charset = part.get_content_charset() or "utf-8"
-                    text = payload.decode(charset, errors="replace")
+                    text = payload.decode(charset, errors="replace")  # type: ignore[union-attr]  # get_payload(decode=True) never returns Message
                     if len(text) > max_chars:
                         return (
                             text[:max_chars]
@@ -70,7 +70,7 @@ def _extract_body(msg: email_lib.message.Message, max_chars: int) -> str:
                 payload = part.get_payload(decode=True)
                 if payload:
                     charset = part.get_content_charset() or "utf-8"
-                    text = payload.decode(charset, errors="replace")
+                    text = payload.decode(charset, errors="replace")  # type: ignore[union-attr]  # get_payload(decode=True) never returns Message
                     if len(text) > max_chars:
                         return (
                             text[:max_chars]
@@ -81,7 +81,7 @@ def _extract_body(msg: email_lib.message.Message, max_chars: int) -> str:
     payload = msg.get_payload(decode=True)
     if payload:
         charset = msg.get_content_charset() or "utf-8"
-        text = payload.decode(charset, errors="replace")
+        text = payload.decode(charset, errors="replace")  # type: ignore[union-attr]  # get_payload(decode=True) never returns Message
         if len(text) > max_chars:
             return text[:max_chars] + f"\n\n[truncated at {max_chars} chars, original {len(text)}]"
         return text
@@ -234,9 +234,9 @@ def search_email(
 
         if _GMAIL_HOST_MARKER in imap_host.lower():
             escaped = query.replace("\\", "\\\\").replace('"', '\\"')
-            status, data = conn.uid("SEARCH", None, "X-GM-RAW", f'"{escaped}"')
+            status, data = conn.uid("SEARCH", None, "X-GM-RAW", f'"{escaped}"')  # type: ignore[arg-type]  # stdlib None-charset idiom; IMAP4._command skips None
         else:
-            status, data = conn.uid("SEARCH", None, query)
+            status, data = conn.uid("SEARCH", None, query)  # type: ignore[arg-type]  # stdlib None-charset idiom; IMAP4._command skips None
 
         if status != "OK":
             return []
@@ -330,7 +330,7 @@ def list_recent(
         conn.login(username, password)
         conn.select(f'"{folder}"', readonly=True)
 
-        status, data = conn.uid("SEARCH", None, "ALL")
+        status, data = conn.uid("SEARCH", None, "ALL")  # type: ignore[arg-type]  # stdlib None-charset idiom; IMAP4._command skips None
         if status != "OK" or not data[0]:
             return []
 

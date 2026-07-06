@@ -34,7 +34,7 @@ class Reminders(commands.Cog):
         self._next_id = 1
         self._check_reminders.start()
 
-    def cog_unload(self) -> None:
+    def cog_unload(self) -> None:  # type: ignore[override]  # Cog.cog_unload is documented maybecoro
         self._check_reminders.cancel()
 
     @tasks.loop(seconds=15)

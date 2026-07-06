@@ -15,6 +15,7 @@ from ..odin_log import get_logger
 
 if TYPE_CHECKING:
     from ..discord.client import OdinBot
+    from .subsystem_guard import SubsystemGuard
 
 log = get_logger("health.checker")
 
@@ -543,7 +544,7 @@ def check_all(bot: OdinBot) -> dict[str, Any]:
 
 def sync_guard_from_health(
     health_results: dict[str, Any],
-    guard: object,
+    guard: SubsystemGuard,
 ) -> None:
     """Bridge health check results into a SubsystemGuard.
 
@@ -552,8 +553,8 @@ def sync_guard_from_health(
     component that is registered with it.  Components in "unconfigured"
     status are ignored (they were never meant to run).
 
-    *guard* is typed as ``object`` to avoid circular imports — at
-    runtime it must be a ``SubsystemGuard`` instance.
+    The ``SubsystemGuard`` annotation is TYPE_CHECKING-only to avoid a
+    circular import at runtime.
     """
     components = health_results.get("components", [])
     for comp in components:

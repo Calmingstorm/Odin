@@ -10,8 +10,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
+
+if TYPE_CHECKING:
+    from playwright.async_api import Browser, Playwright
 
 log = get_logger("browser")
 
@@ -53,8 +57,8 @@ class BrowserManager:
         self._cdp_url = cdp_url
         self._default_timeout_ms = default_timeout_ms
         self._viewport = {"width": viewport_width, "height": viewport_height}
-        self._playwright = None
-        self._browser = None
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
         self._lock = asyncio.Lock()
         self._native = not bool(cdp_url)
         self.allowed_urls = allow_private_targets or []
@@ -123,7 +127,8 @@ class BrowserManager:
 
     async def _create_page(self, timeout_ms: int | None = None):
         """Create a new browser context and page. Returns (context, page)."""
-        context = await self._browser.new_context(
+        # _ensure_connected() (every caller) sets _browser before this.
+        context = await self._browser.new_context(  # type: ignore[union-attr]
             viewport=self._viewport,
             user_agent=DEFAULT_USER_AGENT,
         )

@@ -19,12 +19,15 @@ from __future__ import annotations
 
 import asyncio
 import io
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import discord
 
 from ...odin_log import get_logger
 from ..response_guards import scrub_response_secrets
+
+if TYPE_CHECKING:
+    from .registry import NativeToolEffects
 
 log = get_logger("discord")
 
@@ -79,7 +82,7 @@ class SkillTools:
         user_id: str,
         skill_file_delivery: Literal["send", "stage"],
         effects,
-    ) -> tuple[Any, object]:
+    ) -> tuple[Any, NativeToolEffects]:
         """Dispatch a skill-flavored tool. ``effects`` is the caller-owned
         NativeToolEffects instance (constructed in registry.dispatch) —
         passed in rather than imported to keep the module dependency

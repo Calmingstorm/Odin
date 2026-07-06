@@ -43,7 +43,7 @@ class Logging(commands.Cog):
         embed = log_embed(
             "Message Deleted",
             f"**Author:** {message.author.mention}\n"
-            f"**Channel:** {message.channel.mention}\n"
+            f"**Channel:** {message.channel.mention}\n"  # type: ignore[union-attr]  # guild-None early return above
             f"**Content:** {content}",
         )
         await self._send_log(message.guild, embed)
@@ -59,7 +59,7 @@ class Logging(commands.Cog):
         embed = log_embed(
             "Message Edited",
             f"**Author:** {before.author.mention}\n"
-            f"**Channel:** {before.channel.mention}\n"
+            f"**Channel:** {before.channel.mention}\n"  # type: ignore[union-attr]  # guild-None early return above
             f"**Before:** {before.content[:512]}\n"
             f"**After:** {after.content[:512]}",
         )

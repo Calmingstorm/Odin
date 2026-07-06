@@ -30,7 +30,13 @@ NEAR_DUPE_THRESHOLD = 0.8  # chunk overlap ratio to consider near-duplicate
 
 
 class KnowledgeStore:
-    """Semantic search over ingested documents (runbooks, configs, READMEs, etc.)."""
+    """Semantic search over ingested documents (runbooks, configs, READMEs, etc.).
+
+    Every public entry point checks ``self.available`` before touching
+    ``_conn``/``_fts``; the per-line union-attr ignores record that
+    invariant where mypy cannot see across the caller boundary.
+    """
+
 
     def __init__(self, db_path: str, fts_index: FullTextIndex | None = None) -> None:
         self._conn: sqlite3.Connection | None = None
@@ -269,7 +275,7 @@ class KnowledgeStore:
             chunk_id = f"{doc_hash}_{i}"
             chunk_hash = self._content_hash(chunk)
             try:
-                self._conn.execute(
+                self._conn.execute(  # type: ignore[union-attr]
                     "INSERT OR REPLACE INTO knowledge_chunks "
                     "(chunk_id, content, source, chunk_index, total_chunks, "
                     "uploader, ingested_at, content_hash, doc_content_hash) "
@@ -280,20 +286,20 @@ class KnowledgeStore:
                 if self._fts:
                     self._fts.index_knowledge_chunk(chunk_id, chunk, source, i)
                 if vectors[i] is not None:
-                    vec_bytes = serialize_vector(vectors[i])
+                    vec_bytes = serialize_vector(vectors[i])  # type: ignore[arg-type]  # guarded by is-not-None above
                     # vec0 tables don't honor INSERT OR REPLACE (same issue as
                     # session_vec) — delete-then-insert keeps re-ingest idempotent.
-                    self._conn.execute(
+                    self._conn.execute(  # type: ignore[union-attr]
                         "DELETE FROM knowledge_vec WHERE chunk_id = ?", (chunk_id,)
                     )
-                    self._conn.execute(
+                    self._conn.execute(  # type: ignore[union-attr]
                         "INSERT INTO knowledge_vec (chunk_id, embedding) VALUES (?, ?)",
                         (chunk_id, vec_bytes),
                     )
                 indexed += 1
             except Exception as e:
                 log.error("Failed to index chunk %d of '%s': %s", i, source, e)
-        self._conn.commit()
+        self._conn.commit()  # type: ignore[union-attr]
         return indexed
 
     async def search(
@@ -341,7 +347,7 @@ class KnowledgeStore:
 
     def _search_vec_sync(self, vec_bytes: bytes, limit: int) -> list:
         """Execute vector similarity search (sync, for use with asyncio.to_thread)."""
-        return self._conn.execute(
+        return self._conn.execute(  # type: ignore[union-attr]
             """
             SELECT v.chunk_id, v.distance, c.content, c.source, c.chunk_index
             FROM knowledge_vec v
@@ -359,7 +365,7 @@ class KnowledgeStore:
             return []
 
         try:
-            rows = self._conn.execute(
+            rows = self._conn.execute(  # type: ignore[union-attr]
                 """
                 SELECT source, COUNT(*) as chunks, uploader,
                        MAX(ingested_at) as ingested_at,
@@ -383,7 +389,7 @@ class KnowledgeStore:
             }
             # Add preview from first chunk
             try:
-                first = self._conn.execute(
+                first = self._conn.execute(  # type: ignore[union-attr]
                     "SELECT content FROM knowledge_chunks WHERE source = ? ORDER BY chunk_index LIMIT 1",
                     (r[0],),
                 ).fetchone()
@@ -402,7 +408,7 @@ class KnowledgeStore:
         if not self.available:
             return []
         try:
-            rows = self._conn.execute(
+            rows = self._conn.execute(  # type: ignore[union-attr]
                 "SELECT chunk_id, content, chunk_index, total_chunks, ingested_at "
                 "FROM knowledge_chunks WHERE source = ? ORDER BY chunk_index",
                 (source,),
@@ -426,7 +432,7 @@ class KnowledgeStore:
         if not self.available:
             return None
         try:
-            rows = self._conn.execute(
+            rows = self._conn.execute(  # type: ignore[union-attr]
                 "SELECT content FROM knowledge_chunks WHERE source = ? ORDER BY chunk_index",
                 (source,),
             ).fetchall()
@@ -445,7 +451,7 @@ class KnowledgeStore:
             # Get chunk IDs for this source
             ids = [
                 r[0] for r in
-                self._conn.execute(
+                self._conn.execute(  # type: ignore[union-attr]
                     "SELECT chunk_id FROM knowledge_chunks WHERE source = ?", (source,)
                 ).fetchall()
             ]
@@ -463,14 +469,14 @@ class KnowledgeStore:
             # Delete from vector table
             if self._has_vec:
                 for chunk_id in ids:
-                    self._conn.execute(
+                    self._conn.execute(  # type: ignore[union-attr]
                         "DELETE FROM knowledge_vec WHERE chunk_id = ?", (chunk_id,)
                     )
             # Delete from chunks table
-            self._conn.execute(
+            self._conn.execute(  # type: ignore[union-attr]
                 "DELETE FROM knowledge_chunks WHERE source = ?", (source,)
             )
-            self._conn.commit()
+            self._conn.commit()  # type: ignore[union-attr]
             # Delete from FTS
             if self._fts:
                 self._fts.delete_knowledge_source(source)
@@ -528,7 +534,7 @@ class KnowledgeStore:
         if not self._fts or not self.available:
             return 0
         try:
-            rows = self._conn.execute(
+            rows = self._conn.execute(  # type: ignore[union-attr]
                 "SELECT chunk_id, content, source, chunk_index FROM knowledge_chunks"
             ).fetchall()
         except Exception:
@@ -593,7 +599,7 @@ class KnowledgeStore:
         if not self.available:
             return []
         try:
-            rows = self._conn.execute(
+            rows = self._conn.execute(  # type: ignore[union-attr]
                 "SELECT doc_content_hash, GROUP_CONCAT(DISTINCT source) as sources, "
                 "COUNT(DISTINCT source) as src_count "
                 "FROM knowledge_chunks "
@@ -622,7 +628,7 @@ class KnowledgeStore:
         if not self.available:
             return []
         try:
-            sources = self._conn.execute(
+            sources = self._conn.execute(  # type: ignore[union-attr]
                 "SELECT DISTINCT source FROM knowledge_chunks "
                 "WHERE content_hash IS NOT NULL AND content_hash != ''"
             ).fetchall()
@@ -634,7 +640,7 @@ class KnowledgeStore:
         hash_sets: dict[str, set[str]] = {}
         for src in source_list:
             try:
-                rows = self._conn.execute(
+                rows = self._conn.execute(  # type: ignore[union-attr]
                     "SELECT content_hash FROM knowledge_chunks "
                     "WHERE source = ? AND content_hash IS NOT NULL",
                     (src,),
@@ -679,7 +685,7 @@ class KnowledgeStore:
         """
         if not self.available or keep_source == remove_source:
             return 0
-        keep_exists = self._conn.execute(
+        keep_exists = self._conn.execute(  # type: ignore[union-attr]
             "SELECT 1 FROM knowledge_chunks WHERE source = ? LIMIT 1",
             (keep_source,),
         ).fetchone()
@@ -693,7 +699,7 @@ class KnowledgeStore:
 
     def _next_version(self, source: str) -> int:
         """Return the next version number for *source*."""
-        row = self._conn.execute(
+        row = self._conn.execute(  # type: ignore[union-attr]
             "SELECT MAX(version) FROM knowledge_versions WHERE source = ?",
             (source,),
         ).fetchone()
@@ -754,7 +760,7 @@ class KnowledgeStore:
         if not self.available:
             return []
         try:
-            rows = self._conn.execute(
+            rows = self._conn.execute(  # type: ignore[union-attr]
                 "SELECT id, version, content_hash, chunk_count, uploader, "
                 "action, created_at, diff_summary "
                 "FROM knowledge_versions WHERE source = ? ORDER BY version DESC",
@@ -781,7 +787,7 @@ class KnowledgeStore:
         if not self.available:
             return None
         try:
-            row = self._conn.execute(
+            row = self._conn.execute(  # type: ignore[union-attr]
                 "SELECT id, version, content_hash, content, chunk_count, "
                 "uploader, action, created_at, diff_summary "
                 "FROM knowledge_versions WHERE source = ? AND version = ?",

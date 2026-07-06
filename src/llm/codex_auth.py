@@ -144,7 +144,9 @@ class CodexAuth:
                 if time.time() >= creds.get("expires_at", 0) - REFRESH_MARGIN:
                     log.info("Access token expired or expiring soon, refreshing...")
                     await self._refresh(creds)
-                creds = self._credentials
+                # _load()/_refresh() above always leave _credentials set;
+                # mypy only sees the Optional attribute declaration.
+                creds = self._credentials  # type: ignore[assignment]
 
         return creds["access_token"]
 
@@ -422,9 +424,11 @@ class CodexAuthPool:
                     and shadow.get("account_id") == creds.get("account_id")
                 )
                 if (
+                    # same_account (above) already requires shadow is not
+                    # None; mypy doesn't carry that through the variable.
                     same_account
-                    and shadow.get("access_token")
-                    and shadow.get("expires_at", 0) >= creds.get("expires_at", 0)
+                    and shadow.get("access_token")  # type: ignore[union-attr]
+                    and shadow.get("expires_at", 0) >= creds.get("expires_at", 0)  # type: ignore[union-attr]
                 ):
                     # Shadow holds newer (rotated) tokens — keep it and pull
                     # the canonical entry up to date instead of the reverse.

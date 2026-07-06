@@ -62,13 +62,13 @@ class Utility(commands.Cog):
         """Show information about a user."""
         member = member or ctx.author  # type: ignore[assignment]
         fields = {
-            "ID": str(member.id),
+            "ID": str(member.id),  # type: ignore[union-attr]  # member or ctx.author is never None
             "Joined": discord.utils.format_dt(member.joined_at, "R") if member.joined_at else "Unknown",
-            "Created": discord.utils.format_dt(member.created_at, "R"),
+            "Created": discord.utils.format_dt(member.created_at, "R"),  # type: ignore[union-attr]  # member or ctx.author is never None
             "Roles": ", ".join(r.mention for r in member.roles[1:]) or "None",
         }
         embed = info_embed(str(member), fields)
-        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_thumbnail(url=member.display_avatar.url)  # type: ignore[union-attr]  # member or ctx.author is never None
         await ctx.send(embed=embed)
 
     @commands.command()
@@ -78,7 +78,7 @@ class Utility(commands.Cog):
         """Show a user's avatar."""
         member = member or ctx.author  # type: ignore[assignment]
         embed = odin_embed(title=f"{member}'s Avatar")
-        embed.set_image(url=member.display_avatar.url)
+        embed.set_image(url=member.display_avatar.url)  # type: ignore[union-attr]  # member or ctx.author is never None
         await ctx.send(embed=embed)
 
 

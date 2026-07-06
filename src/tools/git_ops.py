@@ -7,6 +7,7 @@ log, and pull — with branch freshness checks before push.
 from __future__ import annotations
 
 import shlex
+from collections.abc import Callable
 
 ALLOWED_ACTIONS = frozenset(
     {
@@ -261,7 +262,7 @@ def _build_stash(params: dict) -> str:
     return " ".join(parts)
 
 
-_BUILDERS = {
+_BUILDERS: dict[str, Callable[[dict], str | list[str]]] = {
     "clone": _build_clone,
     "status": _build_status,
     "diff": _build_diff,

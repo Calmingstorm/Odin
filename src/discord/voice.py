@@ -9,14 +9,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum, auto
-from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import discord
+
 try:
-    from discord.ext import voice_recv
+    from discord.ext import voice_recv  # type: ignore[attr-defined]  # optional [voice] extra
 except ImportError:
     voice_recv = None
 
@@ -79,7 +80,7 @@ def _patch_voice_recv_dave():
 
             return _original_decode(self, packet)
 
-        _patched_decode._odin_dave_patched = True
+        _patched_decode._odin_dave_patched = True  # type: ignore[attr-defined]  # patch-once marker on the function object
         PacketDecoder._decode_packet = _patched_decode
         log.info("Patched voice_recv with DAVE decryption support")
     except ImportError:
@@ -146,12 +147,12 @@ class VoiceManager:
 
     def __init__(
         self,
-        config: "VoiceConfig",
+        config: VoiceConfig,
         bot: discord.Client,
     ) -> None:
         self._config = config
         self._bot = bot
-        self._voice_client = None
+        self._voice_client: discord.VoiceClient | None = None
         self._ws = None
         self._ws_task: asyncio.Task | None = None
         self._tts_buffer: bytearray = bytearray()
@@ -170,7 +171,7 @@ class VoiceManager:
         return self._voice_client is not None and self._voice_client.is_connected()
 
     @property
-    def current_channel(self) -> discord.VoiceChannel | None:
+    def current_channel(self) -> discord.VoiceChannel | discord.StageChannel | None:
         if self._voice_client and self._voice_client.is_connected():
             return self._voice_client.channel
         return None
@@ -181,11 +182,13 @@ class VoiceManager:
         if self._config.transcript_channel_id:
             ch = self._bot.get_channel(int(self._config.transcript_channel_id))
             if ch:
-                self._transcript_channel = ch
-                return ch
+                # transcript_channel_id is trusted config: assumed to
+                # reference a text channel (no runtime kind check).
+                self._transcript_channel = cast("discord.TextChannel", ch)
+                return self._transcript_channel
         return None
 
-    async def join_channel(self, channel: discord.VoiceChannel) -> str:
+    async def join_channel(self, channel: discord.VoiceChannel | discord.StageChannel) -> str:
         """Join a voice channel and start the full audio pipeline."""
         if not self._config.enabled:
             return "Voice support is disabled in config."
@@ -231,12 +234,12 @@ class VoiceManager:
         if not self.is_connected:
             return "Not in a voice channel."
 
-        channel_name = self._voice_client.channel.name
+        channel_name = self._voice_client.channel.name  # type: ignore[union-attr]  # is_connected property guards
         self._stop_listening()
         await self._ws_disconnect()
 
         try:
-            await self._voice_client.disconnect()
+            await self._voice_client.disconnect()  # type: ignore[union-attr]  # is_connected property guards
         except Exception as e:
             log.warning("Error disconnecting voice: %s", e)
 
@@ -282,7 +285,7 @@ class VoiceManager:
                     )
 
             sink = voice_recv.BasicSink(on_audio)
-            self._voice_client.listen(sink)
+            self._voice_client.listen(sink)  # type: ignore[attr-defined]  # VoiceRecvClient ([voice] extra) provides it
             log.info("Audio listening started via voice_recv")
         except Exception as e:
             log.error("Failed to start listening: %s", e, exc_info=True)
@@ -290,7 +293,7 @@ class VoiceManager:
     def _stop_listening(self) -> None:
         if self._voice_client:
             try:
-                self._voice_client.stop_listening()
+                self._voice_client.stop_listening()  # type: ignore[attr-defined]  # VoiceRecvClient ([voice] extra) provides it
             except Exception:
                 pass
 
@@ -475,8 +478,10 @@ class VoiceManager:
         if self._config.transcript_channel_id:
             ch = self._bot.get_channel(int(self._config.transcript_channel_id))
             if ch:
-                self._transcript_channel = ch
-                return ch
+                # transcript_channel_id is trusted config: assumed to
+                # reference a text channel (no runtime kind check).
+                self._transcript_channel = cast("discord.TextChannel", ch)
+                return self._transcript_channel
         if self._voice_client and self._voice_client.channel:
             for ch in self._voice_client.channel.guild.text_channels:
                 return ch
