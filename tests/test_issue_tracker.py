@@ -1331,7 +1331,7 @@ class TestExecutorHandler:
     async def test_no_client_configured(self):
         from src.tools.executor import ToolExecutor
         executor = ToolExecutor()
-        result = await executor._handle_issue_tracker({"action": "create_issue"})
+        result = await executor.comms_tools._handle_issue_tracker({"action": "create_issue"})
         assert "not configured" in result
 
     async def test_invalid_action(self):
@@ -1339,13 +1339,13 @@ class TestExecutorHandler:
         executor = ToolExecutor()
         mock_client = AsyncMock()
         executor._issue_tracker_client = mock_client
-        result = await executor._handle_issue_tracker({"action": "delete"})
+        result = await executor.comms_tools._handle_issue_tracker({"action": "delete"})
         assert "Error" in result
 
     async def test_missing_action(self):
         from src.tools.executor import ToolExecutor
         executor = ToolExecutor()
-        result = await executor._handle_issue_tracker({})
+        result = await executor.comms_tools._handle_issue_tracker({})
         assert "required" in result
 
     async def test_success(self):
@@ -1354,7 +1354,7 @@ class TestExecutorHandler:
         mock_client = AsyncMock()
         mock_client.execute = AsyncMock(return_value={"key": "ENG-42", "url": "https://linear.app/ENG-42"})
         executor._issue_tracker_client = mock_client
-        result = await executor._handle_issue_tracker({
+        result = await executor.comms_tools._handle_issue_tracker({
             "action": "create_issue",
             "title": "Test",
             "description": "Body",
@@ -1370,7 +1370,7 @@ class TestExecutorHandler:
             side_effect=IssueTrackerError("team_id required")
         )
         executor._issue_tracker_client = mock_client
-        result = await executor._handle_issue_tracker({
+        result = await executor.comms_tools._handle_issue_tracker({
             "action": "create_issue",
             "title": "Test",
         })

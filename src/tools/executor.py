@@ -37,11 +37,6 @@ from .ssh_pool import SSHConnectionPool
 
 log = get_logger("tools")
 
-# Max working-memory notes retained per section (global / per-user). The full
-# merged map is injected into every system prompt, so this bounds prompt bloat;
-# oldest-by-write notes are evicted past the cap.
-MEMORY_MAX_KEYS_PER_SECTION = 200
-
 # Output-text helpers moved to tool_text.py (RFC-004 P4) — re-exported here
 # because background_task, tool_loop_helpers, and tests import them from
 # executor. tool_text.py carries the semantics documentation.
@@ -87,8 +82,8 @@ EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
     "run_command_multi": ("system", "_handle_run_command_multi"),
     "read_file": ("files_docs", "_handle_read_file"),
     "write_file": ("files_docs", "_handle_write_file"),
-    "memory_manage": ("core", "_handle_memory_manage"),
-    "manage_list": ("core", "_handle_manage_list"),
+    "memory_manage": ("state", "_handle_memory_manage"),
+    "manage_list": ("state", "_handle_manage_list"),
     "manage_process": ("system", "_handle_manage_process"),
     "browser_read_page": ("browser_web", "_handle_browser_read_page"),
     "browser_read_table": ("browser_web", "_handle_browser_read_table"),
@@ -104,12 +99,12 @@ EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
     "kubectl": ("devops", "_handle_kubectl"),
     "docker_ops": ("devops", "_handle_docker_ops"),
     "terraform_ops": ("devops", "_handle_terraform_ops"),
-    "issue_tracker": ("core", "_handle_issue_tracker"),
-    "validate_action": ("core", "_handle_validate_action"),
-    "email_send": ("core", "_handle_email_send"),
-    "email_search": ("core", "_handle_email_search"),
-    "email_read": ("core", "_handle_email_read"),
-    "email_list_recent": ("core", "_handle_email_list_recent"),
+    "issue_tracker": ("comms", "_handle_issue_tracker"),
+    "validate_action": ("validation", "_handle_validate_action"),
+    "email_send": ("comms", "_handle_email_send"),
+    "email_search": ("comms", "_handle_email_search"),
+    "email_read": ("comms", "_handle_email_read"),
+    "email_list_recent": ("comms", "_handle_email_list_recent"),
 }
 
 
@@ -170,10 +165,13 @@ class ToolExecutor:
         # stateful objects are reached by identity (R1 blocker #3).
         from .handlers.browser_web import BrowserWebTools
         from .handlers.coding import CodingTools
+        from .handlers.comms import CommsTools
         from .handlers.deps import HandlerDeps
         from .handlers.devops import DevOpsTools
         from .handlers.files_docs import FilesDocsTools
+        from .handlers.state import StateTools
         from .handlers.system import SystemTools
+        from .handlers.validation import ValidationTools
 
         self._handler_deps = HandlerDeps(
             config=lambda: self.config,
@@ -184,12 +182,20 @@ class ToolExecutor:
             process_registry=lambda: self._ensure_process_registry(),
             browser_manager=lambda: self._browser_manager,
             bulkheads=lambda: self.bulkheads,
+            memory_path=lambda: self._memory_path,
+            memory_lock=lambda: self._memory_lock,
+            lists_lock=lambda: self._lists_lock,
+            email_config=lambda: self._email_config,
+            issue_tracker_client=lambda: getattr(self, "_issue_tracker_client", None),
+            command_governor=lambda: getattr(self, "command_governor", None),
             resolve_host=lambda alias: self._resolve_host(alias),
             resolve_default_host=lambda user_id: self._resolve_default_host(user_id),
             govern_command=lambda command, host=None: self._govern_command(command, host),
             exec_command=lambda *a, **k: self._exec_command(*a, **k),
             run_on_host=lambda *a, **k: self._run_on_host(*a, **k),
             annotate_with_freshness=lambda *a, **k: self._annotate_with_freshness(*a, **k),
+            load_all_memory=lambda *a, **k: self._load_all_memory(*a, **k),
+            save_all_memory=lambda *a, **k: self._save_all_memory(*a, **k),
         )
         # RFC-004 P2/P4: domain owners are PUBLIC attributes (the RFC-002
         # ``bot.media_tools`` convention) — tests call and patch handlers at
@@ -199,6 +205,9 @@ class ToolExecutor:
         self.browser_web_tools = BrowserWebTools(self._handler_deps)
         self.coding_tools = CodingTools(self._handler_deps)
         self.devops_tools = DevOpsTools(self._handler_deps)
+        self.state_tools = StateTools(self._handler_deps)
+        self.comms_tools = CommsTools(self._handler_deps)
+        self.validation_tools = ValidationTools(self._handler_deps)
         # Owners for EXECUTOR_HANDLERS resolution. "core" is the executor
         # itself for not-yet-moved handlers; domain owners are added as the
         # P4–P6 waves land.
@@ -209,6 +218,9 @@ class ToolExecutor:
             "browser_web": self.browser_web_tools,
             "coding": self.coding_tools,
             "devops": self.devops_tools,
+            "state": self.state_tools,
+            "comms": self.comms_tools,
+            "validation": self.validation_tools,
         }
 
     @property
@@ -698,600 +710,8 @@ class ToolExecutor:
             merged.update(all_mem.get(user_key, {}))
         return merged
 
-    async def _handle_memory_manage(self, inp: dict, *, user_id: str | None = None) -> str:
-        action = inp.get("action")
-        if not action:
-            return (
-                "memory_manage requires an 'action' field. "
-                "Valid actions: list, save, get, delete. "
-                "Example: {'action': 'get', 'key': 'foo'}."
-            )
-        scope = inp.get("scope", "personal")
-
-        async with self._memory_lock:
-            if action in ("get", "recall", "read"):
-                key = inp.get("key")
-                if not key:
-                    return "'key' is required for get."
-                all_mem = await asyncio.to_thread(self._load_all_memory)
-                user_key = f"user_{user_id}" if user_id else None
-                if user_key and key in all_mem.get(user_key, {}):
-                    return f"**{key}** (personal): {all_mem[user_key][key]}"
-                if key in all_mem.get("global", {}):
-                    return f"**{key}** (global): {all_mem['global'][key]}"
-                return f"No note found with key '{key}'."
-
-            if action == "list":
-                all_mem = await asyncio.to_thread(self._load_all_memory)
-                global_mem = all_mem.get("global", {})
-                user_mem = all_mem.get(f"user_{user_id}", {}) if user_id else {}
-                lines = []
-                if global_mem:
-                    lines.append("**Global notes:**")
-                    lines.extend(f"- **{k}**: {v}" for k, v in global_mem.items())
-                if user_mem:
-                    lines.append("**Your personal notes:**")
-                    lines.extend(f"- **{k}**: {v}" for k, v in user_mem.items())
-                return "\n".join(lines) if lines else "No notes saved yet."
-
-            elif action == "save":
-                key = inp.get("key")
-                value = inp.get("value")
-                if not key or not value:
-                    return "Both 'key' and 'value' are required for save."
-                all_mem = await asyncio.to_thread(self._load_all_memory)
-                if scope == "global":
-                    section = "global"
-                elif user_id:
-                    section = f"user_{user_id}"
-                else:
-                    section = "global"
-                section_map = all_mem.setdefault(section, {})
-                # Move-to-end + cap: working memory is injected into every
-                # system prompt, so it must not grow without bound. Re-inserting
-                # gives LRU-by-write order; evict the oldest keys beyond the cap
-                # (never the one just written).
-                section_map.pop(key, None)
-                section_map[key] = value
-                evicted = 0
-                while len(section_map) > MEMORY_MAX_KEYS_PER_SECTION:
-                    oldest = next(iter(section_map))
-                    if oldest == key:
-                        break
-                    del section_map[oldest]
-                    evicted += 1
-                await asyncio.to_thread(self._save_all_memory, all_mem)
-                scope_label = "global" if section == "global" else "personal"
-                suffix = (
-                    f" (evicted {evicted} oldest note(s) at cap {MEMORY_MAX_KEYS_PER_SECTION})"
-                    if evicted
-                    else ""
-                )
-                return f"Saved {scope_label} note '{key}'.{suffix}"
-
-            elif action == "delete":
-                key = inp.get("key")
-                if not key:
-                    return "'key' is required for delete."
-                all_mem = await asyncio.to_thread(self._load_all_memory)
-                user_key = f"user_{user_id}" if user_id else None
-                if user_key and key in all_mem.get(user_key, {}):
-                    del all_mem[user_key][key]
-                    await asyncio.to_thread(self._save_all_memory, all_mem)
-                    return f"Deleted personal note '{key}'."
-                elif key in all_mem.get("global", {}):
-                    del all_mem["global"][key]
-                    await asyncio.to_thread(self._save_all_memory, all_mem)
-                    return f"Deleted global note '{key}'."
-                return f"No note found with key '{key}'."
-
-        return f"Unknown memory action: {action}"
-
     # ------------------------------------------------------------------
     # Universal list management
     # ------------------------------------------------------------------
 
-    def _lists_path(self) -> Path | None:
-        """Return path to data/lists.json (sibling of memory.json)."""
-        if not self._memory_path:
-            return None
-        return self._memory_path.parent / "lists.json"
-
-    def _load_lists(self) -> dict:
-        """Load all lists. Migrates old grocery_list.json on first access.
-
-        Structure: {
-            "grocery": {
-                "owner": "shared",
-                "items": [{"name": "...", "added_by": "...", "added_at": "...", "done": false}, ...]
-            },
-            ...
-        }
-        """
-        path = self._lists_path()
-        if not path:
-            return {}
-        if path.exists():
-            try:
-                data = json.loads(path.read_text())
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
-        # Auto-migrate old grocery_list.json if it exists
-        old_grocery = path.parent / "grocery_list.json"
-        if old_grocery.exists():
-            try:
-                old_data = json.loads(old_grocery.read_text())
-                old_items = old_data.get("items", [])
-                migrated_items = []
-                for item in old_items:
-                    migrated_items.append(
-                        {
-                            "name": item.get("name", ""),
-                            "added_by": item.get("added_by", ""),
-                            "added_at": item.get("added_at", ""),
-                            "done": False,
-                        }
-                    )
-                lists = {"grocery": {"owner": "shared", "items": migrated_items}}
-                self._save_lists(lists)
-                return lists
-            except Exception:
-                pass
-        return {}
-
-    def _save_lists(self, data: dict) -> None:
-        path = self._lists_path()
-        if path:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, indent=2))
-            tmp.replace(path)
-
-    async def _handle_manage_list(self, inp: dict, *, user_id: str | None = None) -> str:
-        from datetime import datetime
-
-        action = inp["action"]
-        list_name = inp.get("list_name", "").strip().lower()
-        raw_items = inp.get("items", [])
-        owner_pref = inp.get("owner", "shared")
-
-        return await self._manage_list_locked(action, list_name, raw_items, owner_pref, user_id)
-
-    async def _manage_list_locked(self, action, list_name, raw_items, owner_pref, user_id):
-        from datetime import datetime
-
-        async with self._lists_lock:
-            lists = await asyncio.to_thread(self._load_lists)
-
-            if action == "list_all":
-                if not lists:
-                    return "No lists exist yet. Add items to create one."
-                lines = ["**Your Lists**\n"]
-                for name, lst in sorted(lists.items()):
-                    lst_owner = lst.get("owner", "shared")
-                    if lst_owner != "shared" and lst_owner != user_id:
-                        continue
-                    count = len(lst.get("items", []))
-                    done = sum(1 for i in lst.get("items", []) if i.get("done"))
-                    owner_label = "shared" if lst_owner == "shared" else "personal"
-                    if done:
-                        lines.append(f"- **{name}** ({count} items, {done} done) [{owner_label}]")
-                    else:
-                        lines.append(f"- **{name}** ({count} items) [{owner_label}]")
-                if len(lines) == 1:
-                    return "No lists visible to you."
-                return "\n".join(lines)
-
-            if not list_name:
-                return "list_name is required for this action."
-
-            # Resolve the list — check for personal or shared
-            lst = lists.get(list_name)
-            if lst and lst.get("owner") not in ("shared", user_id, None):
-                return f"You don't have access to the '{list_name}' list."
-
-            if action == "show":
-                if not lst or not lst.get("items"):
-                    return f"The '{list_name}' list is empty."
-                return self._format_list(list_name, lst)
-
-            if action == "clear":
-                if not lst or not lst.get("items"):
-                    return f"The '{list_name}' list is already empty."
-                count = len(lst["items"])
-                lst["items"] = []
-                await asyncio.to_thread(self._save_lists, lists)
-                return f"Cleared {count} item(s) from the '{list_name}' list."
-
-            if action == "add":
-                if not raw_items:
-                    return "No items specified to add."
-                # Create list on the fly if it doesn't exist
-                if not lst:
-                    owner = user_id if owner_pref == "personal" and user_id else "shared"
-                    lst = {"owner": owner, "items": []}
-                    lists[list_name] = lst
-                added, already = [], []
-                for name in raw_items:
-                    name = name.strip()
-                    if not name:
-                        continue
-                    if any(i["name"].lower() == name.lower() for i in lst["items"]):
-                        already.append(name)
-                        continue
-                    lst["items"].append(
-                        {
-                            "name": name,
-                            "added_by": user_id or "",
-                            "added_at": datetime.now().isoformat(),
-                            "done": False,
-                        }
-                    )
-                    added.append(name)
-                await asyncio.to_thread(self._save_lists, lists)
-                parts = []
-                if added:
-                    parts.append(f"Added to '{list_name}': {', '.join(added)}")
-                if already:
-                    parts.append(f"Already on the list: {', '.join(already)}")
-                parts.append(f"\n{self._format_list(list_name, lst)}")
-                return "\n".join(parts)
-
-            if action == "remove":
-                if not lst:
-                    return f"The '{list_name}' list doesn't exist."
-                if not raw_items:
-                    return "No items specified to remove."
-                removed, not_found = [], []
-                for name in raw_items:
-                    name = name.strip()
-                    if not name:
-                        continue
-                    q = name.lower()
-                    matches = [
-                        i for i, item in enumerate(lst["items"]) if q in item["name"].lower()
-                    ]
-                    if matches:
-                        for idx in sorted(matches, reverse=True):
-                            removed.append(lst["items"].pop(idx)["name"])
-                    else:
-                        not_found.append(name)
-                await asyncio.to_thread(self._save_lists, lists)
-                parts = []
-                if removed:
-                    parts.append(f"Removed from '{list_name}': {', '.join(removed)}")
-                if not_found:
-                    parts.append(f"Not found: {', '.join(not_found)}")
-                if lst["items"]:
-                    parts.append(f"\n{self._format_list(list_name, lst)}")
-                else:
-                    parts.append(f"\nThe '{list_name}' list is now empty.")
-                return "\n".join(parts)
-
-            if action == "mark_done":
-                if not lst:
-                    return f"The '{list_name}' list doesn't exist."
-                if not raw_items:
-                    return "No items specified to mark as done."
-                marked, not_found = [], []
-                for name in raw_items:
-                    q = name.strip().lower()
-                    if not q:
-                        continue
-                    found = False
-                    for item in lst["items"]:
-                        if q in item["name"].lower() and not item.get("done"):
-                            item["done"] = True
-                            marked.append(item["name"])
-                            found = True
-                            break
-                    if not found:
-                        not_found.append(name.strip())
-                await asyncio.to_thread(self._save_lists, lists)
-                parts = []
-                if marked:
-                    parts.append(f"Marked done: {', '.join(marked)}")
-                if not_found:
-                    parts.append(f"Not found or already done: {', '.join(not_found)}")
-                parts.append(f"\n{self._format_list(list_name, lst)}")
-                return "\n".join(parts)
-
-            if action == "mark_undone":
-                if not lst:
-                    return f"The '{list_name}' list doesn't exist."
-                if not raw_items:
-                    return "No items specified to mark as undone."
-                marked, not_found = [], []
-                for name in raw_items:
-                    q = name.strip().lower()
-                    if not q:
-                        continue
-                    found = False
-                    for item in lst["items"]:
-                        if q in item["name"].lower() and item.get("done"):
-                            item["done"] = False
-                            marked.append(item["name"])
-                            found = True
-                            break
-                    if not found:
-                        not_found.append(name.strip())
-                await asyncio.to_thread(self._save_lists, lists)
-                parts = []
-                if marked:
-                    parts.append(f"Marked undone: {', '.join(marked)}")
-                if not_found:
-                    parts.append(f"Not found or not done: {', '.join(not_found)}")
-                parts.append(f"\n{self._format_list(list_name, lst)}")
-                return "\n".join(parts)
-
-            return f"Unknown action: {action}"
-
-    @staticmethod
-    def _format_list(list_name: str, lst: dict) -> str:
-        items = lst.get("items", [])
-        if not items:
-            return f"The '{list_name}' list is empty."
-        lines = [f"**{list_name.title()} List** ({len(items)} items)\n"]
-        for i, item in enumerate(items, 1):
-            done_mark = "\u2705 " if item.get("done") else ""
-            strike = f"~~{item['name']}~~" if item.get("done") else item["name"]
-            added = item.get("added_by", "")
-            ts = item.get("added_at", "")
-            suffix = ""
-            if added or ts:
-                parts = []
-                if added:
-                    parts.append(added)
-                if ts:
-                    try:
-                        from datetime import datetime
-
-                        dt = datetime.fromisoformat(ts)
-                        parts.append(dt.strftime("%b %d"))
-                    except ValueError:
-                        pass
-                suffix = f"  _({', '.join(parts)})_"
-            lines.append(f"{i}. {done_mark}{strike}{suffix}")
-        return "\n".join(lines)
-
-    async def _handle_issue_tracker(self, inp: dict) -> str:
-        action = inp.get("action", "")
-        if not action:
-            return "Error: 'action' is required"
-
-        if not hasattr(self, "_issue_tracker_client") or self._issue_tracker_client is None:
-            return "Error: issue tracker not configured (set issue_tracker.enabled=true in config)"
-
-        try:
-            from ..notifications.issue_tracker import validate_action, IssueTrackerError
-
-            validate_action(action)
-        except ValueError as e:
-            return f"Error: {e}"
-
-        try:
-            result = await self._issue_tracker_client.execute(action, dict(inp))
-            import json
-
-            return json.dumps(result, indent=2)
-        except IssueTrackerError as e:
-            from ..llm.secret_scrubber import scrub_output_secrets
-
-            return f"issue_tracker error: {scrub_output_secrets(str(e))}"
-
-    async def _handle_validate_action(self, inp: dict) -> str:
-        from .post_validation import (
-            format_report_summary,
-            report_as_json,
-            run_bundle,
-        )
-
-        raw_checks = inp.get("checks")
-        if not isinstance(raw_checks, list) or not raw_checks:
-            return (
-                "Error: 'checks' must be a non-empty list. See tool description for check schema."
-            )
-
-        bundle_name = str(inp.get("bundle_name") or "unnamed").strip()[:120]
-        default_host = inp.get("default_host")
-        default_host = str(default_host).strip() if default_host else None
-        grace_seconds = int(inp.get("grace_seconds") or 0)
-        grace_seconds = max(0, min(grace_seconds, 60))
-        max_parallel = int(inp.get("max_parallel") or 12)
-        fmt = str(inp.get("format") or "summary").strip().lower()
-
-        governor = getattr(self, "command_governor", None)
-
-        async def _exec(
-            address: str, command: str, ssh_user: str, *, timeout: int
-        ) -> tuple[int, str]:
-            # Never mutate shared state here — concurrent checks would race.
-            # _exec_command accepts a per-call timeout, which is honored
-            # directly by the SSH/local primitives without touching self.
-            if governor is not None:
-                try:
-                    decision = governor.check(command)
-                except Exception as ge:
-                    # Fail-closed on governor exceptions: we advertise
-                    # command-type checks as going through the governor;
-                    # silently bypassing it if the governor blows up would
-                    # be exactly the "safe unless error path" foot-gun
-                    # Odin flagged. Emit the error into the result so the
-                    # operator sees it, and treat the check as errored.
-                    log.exception("governor check raised for validation command")
-                    return 1, f"validate_action: governor check raised {type(ge).__name__}: {ge}"
-                if not decision.allowed:
-                    return 1, f"governor-blocked: {decision.denial_message()}"
-            return await self._exec_command(address, command, ssh_user, timeout=timeout)
-
-        report = await run_bundle(
-            raw_checks,
-            bundle_name=bundle_name,
-            default_host=default_host,
-            resolve_host=self._resolve_host,
-            exec_command=_exec,
-            grace_seconds=grace_seconds,
-            max_parallel=max_parallel,
-        )
-
-        if fmt == "json":
-            return report_as_json(report)
-        return format_report_summary(report)
-
     # --- Email tools (SMTP/IMAP) ---
-
-    def _email_cfg(self):
-        cfg = self._email_config
-        if cfg is None or not cfg.enabled:
-            return None
-        return cfg
-
-    async def _handle_email_send(self, inp: dict) -> str:
-        from .email_client import send_email
-
-        cfg = self._email_cfg()
-        if cfg is None:
-            return "Error: email tools are not configured (email.enabled is false)"
-        to = inp.get("to")
-        if not to or not isinstance(to, list):
-            return "Error: 'to' must be a non-empty list of email addresses"
-        subject = str(inp.get("subject", ""))
-        body = str(inp.get("body", ""))
-        try:
-            # smtplib blocks; run it off the event loop so a slow mail server
-            # can't stall every other channel/task.
-            result = await asyncio.to_thread(
-                send_email,
-                smtp_host=cfg.smtp.host,
-                smtp_port=cfg.smtp.port,
-                username=cfg.smtp.username,
-                password=cfg.smtp.password,
-                from_address=cfg.smtp.from_address,
-                to=to,
-                subject=subject,
-                body=body,
-                cc=inp.get("cc"),
-                bcc=inp.get("bcc"),
-                reply_to=inp.get("reply_to"),
-                attachments=inp.get("attachments"),
-                allowed_dirs=cfg.allowed_attachment_dirs,
-                max_attachment_bytes=cfg.max_attachment_bytes,
-                timeout=cfg.connect_timeout_seconds,
-            )
-            parts = [
-                "Email sent successfully.",
-                f"Message-ID: {result['message_id']}",
-                f"To: {', '.join(result['to'])}",
-                f"Subject: {result['subject']}",
-            ]
-            if result.get("cc"):
-                parts.append(f"CC: {', '.join(result['cc'])}")
-            if result.get("attachments"):
-                parts.append(f"Attachments: {', '.join(result['attachments'])}")
-            return "\n".join(parts)
-        except (ValueError, RuntimeError) as e:
-            return f"Error: {e}"
-
-    async def _handle_email_search(self, inp: dict) -> str:
-        from .email_client import search_email
-
-        cfg = self._email_cfg()
-        if cfg is None:
-            return "Error: email tools are not configured (email.enabled is false)"
-        query = inp.get("query", "")
-        if not query:
-            return "Error: 'query' is required"
-        limit = max(1, min(int(inp.get("limit", 20)), cfg.max_results))
-        try:
-            results = await asyncio.to_thread(
-                search_email,
-                imap_host=cfg.imap.host,
-                imap_port=cfg.imap.port,
-                username=cfg.imap.username,
-                password=cfg.imap.password,
-                query=query,
-                folder=inp.get("folder", "INBOX"),
-                limit=limit,
-                timeout=cfg.connect_timeout_seconds,
-            )
-            if not results:
-                return "No messages found matching the query."
-            lines = [f"Found {len(results)} message(s):\n"]
-            for r in results:
-                att = " [has attachments]" if r.get("has_attachments") else ""
-                lines.append(f"UID {r['uid']} | {r['date']} | {r['from']} | {r['subject']}{att}")
-            return "\n".join(lines)
-        except (ValueError, RuntimeError) as e:
-            return f"Error: {e}"
-
-    async def _handle_email_read(self, inp: dict) -> str:
-        from .email_client import read_email
-
-        cfg = self._email_cfg()
-        if cfg is None:
-            return "Error: email tools are not configured (email.enabled is false)"
-        uid = str(inp.get("uid", ""))
-        if not uid:
-            return "Error: 'uid' is required"
-        try:
-            result = await asyncio.to_thread(
-                read_email,
-                imap_host=cfg.imap.host,
-                imap_port=cfg.imap.port,
-                username=cfg.imap.username,
-                password=cfg.imap.password,
-                uid=uid,
-                folder=inp.get("folder", "INBOX"),
-                max_body_chars=cfg.max_body_chars,
-                timeout=cfg.connect_timeout_seconds,
-            )
-            lines = [
-                f"From: {result['from']}",
-                f"To: {result['to']}",
-                f"Subject: {result['subject']}",
-                f"Date: {result['date']}",
-                f"Message-ID: {result['message_id']}",
-            ]
-            if result.get("attachments"):
-                att_list = ", ".join(
-                    f"{a['filename']} ({a['size_bytes']} bytes)" for a in result["attachments"]
-                )
-                lines.append(f"Attachments: {att_list}")
-            lines.append(f"\n{result['body']}")
-            return "\n".join(lines)
-        except (ValueError, RuntimeError) as e:
-            return f"Error: {e}"
-
-    async def _handle_email_list_recent(self, inp: dict) -> str:
-        from .email_client import list_recent
-
-        cfg = self._email_cfg()
-        if cfg is None:
-            return "Error: email tools are not configured (email.enabled is false)"
-        limit = max(1, min(int(inp.get("limit", 10)), cfg.max_results))
-        try:
-            results = await asyncio.to_thread(
-                list_recent,
-                imap_host=cfg.imap.host,
-                imap_port=cfg.imap.port,
-                username=cfg.imap.username,
-                password=cfg.imap.password,
-                folder=inp.get("folder", "INBOX"),
-                limit=limit,
-                timeout=cfg.connect_timeout_seconds,
-            )
-            if not results:
-                return "No messages found."
-            lines = [f"Recent {len(results)} message(s):\n"]
-            for r in results:
-                att = " [has attachments]" if r.get("has_attachments") else ""
-                size = f" ({r['size_bytes']} bytes)" if r.get("size_bytes") else ""
-                flags = f" [{' '.join(r['flags'])}]" if r.get("flags") else ""
-                lines.append(
-                    f"UID {r['uid']} | {r['date']} | {r['from']} | {r['subject']}{att}{size}{flags}"
-                )
-            return "\n".join(lines)
-        except (ValueError, RuntimeError) as e:
-            return f"Error: {e}"
