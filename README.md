@@ -275,6 +275,10 @@ src/
     post_validation.py     validate_action implementation
     recovery.py            Error classification + retry
     browser.py             Native Playwright browser
+  web/
+    api/                   REST API — composition root + 13 domain modules
+    api_common.py          Shared web helpers (redaction, validation, admin gate)
+    chat.py                Web chat pipeline entry
   llm/
     system_prompt.py       Identity, execution policy, tool hierarchy
     openai_codex.py        Codex streaming client
