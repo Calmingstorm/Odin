@@ -519,6 +519,7 @@ class AuditLogger:
                 "valid": False,
                 "total": 0,
                 "verified": 0,
+                "unsigned_prefix": 0,
                 "first_bad": None,
                 "error": "Signing not enabled (no hmac_key configured)",
             }

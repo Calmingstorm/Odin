@@ -338,7 +338,9 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
         log.warning(
             "Audit HMAC signing is DISABLED (config.audit.hmac_key is empty): "
             "audit.jsonl is NOT tamper-evident and verify_integrity() will fail. "
-            "Set audit.hmac_key to enable the integrity chain."
+            "Set audit.hmac_key to enable the integrity chain — enabling later is "
+            "safe: pre-enablement history is reported as unsigned_prefix and the "
+            "chain is verified from the first signed entry."
         )
     api_token_manager = ApiTokenManager("./data/api_tokens.json")
 
