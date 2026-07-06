@@ -30,6 +30,7 @@ import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal
 
 import discord
 
@@ -38,6 +39,24 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
 from ..tools import ToolResult
+
+if TYPE_CHECKING:
+    from ..audit.logger import AuditLogger
+    from ..observability.context_trace import ContextTraceCollector
+    from ..permissions.manager import PermissionManager
+    from ..tools.autonomous_loop import LoopManager
+    from ..tools.executor import ToolExecutor
+    from ..tools.skill_manager import SkillManager
+    from ..trajectories.saver import TrajectoryTurn
+    from .channel_state import ChannelStateRegistry
+    from .completion import CompletionClassifier
+    from .delivery import ResponseDelivery
+    from .llm_gateway import LLMGateway
+    from .native_tools.registry import NativeToolDispatcher
+    from .prompts import PromptBuilder
+    from .response_guards import StuckLoopTracker
+    from .tool_catalog import ToolCatalog
+    from .turn_recorder import TurnRecorder
 from .delivery import DISCORD_MAX_LEN, TOOL_STATUS_LABELS
 from .response_guards import (
     _CODE_HEDGING_RETRY_MSG,
@@ -106,7 +125,7 @@ class LoopPolicy:
     characterization pin saying so.
     """
 
-    skill_file_delivery: str  # "send" (chat) | "stage" (autonomous)
+    skill_file_delivery: Literal["send", "stage"]  # chat sends, autonomous stages
     trajectory_source: str  # "discord" | "loop"
     audit_event_style: str  # "chat" (tool_start/tool_end) | "loop" (loop_tool)
     iteration_cap_key: str  # config.tools.max_tool_iterations_{chat,loop}
@@ -165,14 +184,14 @@ class _ChatTurn:
 
     message: discord.Message
     policy: LoopPolicy
-    trace: object | None
+    trace: ContextTraceCollector | None
     system_prompt: str  # rebound on skill-CRUD prompt rebuilds (was `nonlocal`)
     tools: list | None
     messages: list
     user_id: str
     chat_cap: int
-    stuck_tracker: object
-    _trajectory: object
+    stuck_tracker: StuckLoopTracker
+    _trajectory: TrajectoryTurn
     _result_store_cap: int
     _cancel: asyncio.Event
     _ch_id: str
@@ -206,8 +225,8 @@ class _LoopTurn:
     msg_proxy: _LoopMessageProxy
     requester_name: str
     _loop_id: str
-    _trace: object | None
-    _trajectory: object | None
+    _trace: ContextTraceCollector | None
+    _trajectory: TrajectoryTurn | None
     _result_store_cap: int
     messages: list
     system_prompt: str  # rebound on skill-CRUD rebuilds (was `nonlocal`)
@@ -228,20 +247,20 @@ class ToolLoopDeps:
     get_config: Callable  # live root — replaced by config hot-reload
     get_default_system_prompt: Callable  # live — rebuilt on config/context reload
     get_context_compressor: Callable  # live read — tests swap it on the bot
-    llm_gateway: object  # owns the swappable provider clients + guarded calls
-    prompt_builder: object
-    tool_catalog: object
-    channel_state: object  # cancel events, active requests, op details, actions
-    delivery: object  # presence updates
-    turn_recorder: object  # trajectories, traces, lifecycle events, reflection
-    completion_classifier: object
-    native_tools: object  # the shared dispatch table
-    tool_executor: object
-    permissions: object
-    skill_manager: object
-    audit: object
-    loop_manager: object
-    stuck_loop_tracker_cls: type
+    llm_gateway: LLMGateway  # owns the swappable provider clients + guarded calls
+    prompt_builder: PromptBuilder
+    tool_catalog: ToolCatalog
+    channel_state: ChannelStateRegistry  # cancel events, active requests, op details
+    delivery: ResponseDelivery  # presence updates
+    turn_recorder: TurnRecorder  # trajectories, traces, lifecycle events, reflection
+    completion_classifier: CompletionClassifier
+    native_tools: NativeToolDispatcher  # the shared dispatch table
+    tool_executor: ToolExecutor
+    permissions: PermissionManager
+    skill_manager: SkillManager
+    audit: AuditLogger
+    loop_manager: LoopManager
+    stuck_loop_tracker_cls: type[StuckLoopTracker]
 
 
 class ToolLoopRunner:
@@ -383,7 +402,9 @@ class ToolLoopRunner:
         _ch_name = getattr(_ch, "name", None) or str(_ch.id)
         _is_thread = isinstance(_ch, discord.Thread)
         if _is_thread and getattr(_ch, "parent", None):
-            channel_ctx = f"Channel: #{_ch.parent.name} → thread: {_ch_name}"
+            # Guarded: _is_thread + the getattr probe exclude every
+            # parent-less/None case; mypy cannot narrow via the bool var.
+            channel_ctx = f"Channel: #{_ch.parent.name} → thread: {_ch_name}"  # type: ignore[union-attr]
         else:
             channel_ctx = f"Channel: #{_ch_name}"
         preamble = build_request_preamble(
@@ -1588,7 +1609,7 @@ class ToolLoopRunner:
         tool_input: dict,
         msg_proxy: _LoopMessageProxy,
         user_id: str,
-    ) -> str | dict:
+    ) -> str | dict | ToolResult:
         """Dispatch a tool call to the correct handler within a loop iteration.
 
         Mirrors the Discord-native tool dispatch in the chat pipeline, using
@@ -1619,7 +1640,7 @@ class ToolLoopRunner:
         tool_input: dict,
         msg_proxy: _LoopMessageProxy,
         user_id: str,
-    ) -> str | dict:
+    ) -> str | dict | ToolResult:
         # Central RBAC gate: same enforcement as the message tool loop — these
         # handlers bypass ToolExecutor.execute(), so check permission for EVERY tool.
         _rbac_denial = self._tool_executor.check_permission(tool_name, user_id)

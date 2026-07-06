@@ -85,7 +85,7 @@ class ReactionTriggers(commands.Cog):
             return
 
         # Ignore bot's own reactions
-        if payload.user_id == self.bot.user.id:
+        if payload.user_id == self.bot.user.id:  # type: ignore[union-attr]  # raw events fire post-READY
             return
 
         # Check channel allowlist
@@ -119,7 +119,7 @@ class ReactionTriggers(commands.Cog):
         )
 
         try:
-            fired = await self._scheduler.fire_triggers("discord_reaction", event_data)
+            fired = await self._scheduler.fire_triggers("discord_reaction", event_data)  # type: ignore[union-attr]  # self.enabled requires _scheduler
             if fired:
                 logger.info(
                     "Reaction %s fired %d trigger(s)",

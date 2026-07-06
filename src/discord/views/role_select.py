@@ -25,11 +25,13 @@ class RoleSelectView(discord.ui.View):
             discord.SelectOption(label=role.name, value=str(role.id))
             for role in roles[:25]
         ]
-        self.select = discord.ui.Select(
+        self.select: discord.ui.Select = discord.ui.Select(
             placeholder="Select a role…",
             options=options,
         )
-        self.select.callback = self._on_select
+        # Standard discord.py idiom for dynamically-built views: bind a
+        # per-instance callback over the base Item.callback method.
+        self.select.callback = self._on_select  # type: ignore[method-assign]
         self.add_item(self.select)
         self._role_map = {str(r.id): r for r in roles}
 

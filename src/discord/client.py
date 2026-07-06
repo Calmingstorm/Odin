@@ -15,14 +15,15 @@ from __future__ import annotations
 import os
 import time
 
-import discord
 from discord.ext import commands
 
+import discord
+
+from ..async_utils import fire_and_forget
 from ..config.schema import Config
 from ..monitoring import InfraWatcher
 from ..odin_log import get_logger
 from ..tools import get_tool_definitions
-from ..async_utils import fire_and_forget
 from .slash_commands import register_commands
 from .tool_loop_helpers import init_allowed_webhook_ids as _init_allowed_webhook_ids_impl
 from .voice import VoiceManager, VoiceMessageProxy
@@ -260,7 +261,7 @@ class OdinBot(commands.Bot):
         log.info("OdinBot shutdown complete")
 
     async def on_ready(self) -> None:
-        log.info("Logged in as %s (ID: %s)", self.user, self.user.id)
+        log.info("Logged in as %s (ID: %s)", self.user, self.user.id)  # type: ignore[union-attr]  # on_ready fires post-login
         log.info("Tools loaded: %d definitions", len(get_tool_definitions()))
         # Prune stale sessions loaded from disk.  load() reads ALL persisted
         # session files regardless of age; pruning here removes expired ones
@@ -288,7 +289,7 @@ class OdinBot(commands.Bot):
         """Backfill semantic search index and FTS5 with existing archive files."""
         try:
             archive_dir = self.sessions.persist_dir / "archive"
-            count = await self._vector_store.backfill(archive_dir, self._embedder)
+            count = await self._vector_store.backfill(archive_dir, self._embedder)  # type: ignore[union-attr, arg-type]  # built together under search.enabled
             if count:
                 log.info("Backfilled %d archive sessions into vector store", count)
             else:
@@ -356,6 +357,6 @@ class OdinBot(commands.Bot):
                 await self.voice_manager.speak(response)
 
         await self.pipeline.run(
-            proxy, text,
+            proxy, text,  # type: ignore[arg-type]  # documented duck-typed voice proxy
             voice_callback=voice_callback,
         )
