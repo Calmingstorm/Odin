@@ -143,7 +143,9 @@ class LoopManager:
                 return "No active loops to stop."
             return f"Stopped {len(stopped)} loop(s): {', '.join(stopped)}"
 
-        info = self._loops.get(loop_id)
+        # mypy binds `info` to the non-Optional loop var of the 'all'
+        # branch above (which always returns) — false conflict.
+        info = self._loops.get(loop_id)  # type: ignore[assignment]
         if not info:
             return f"No loop found with ID `{loop_id}`."
         if info.status != "running":

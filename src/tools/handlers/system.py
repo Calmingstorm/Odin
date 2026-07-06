@@ -24,7 +24,7 @@ from .deps import HandlerBase
 
 
 class SystemTools(HandlerBase):
-    async def _handle_run_command(self, inp: dict) -> str:
+    async def _handle_run_command(self, inp: dict) -> str | tuple[str, int]:
         command = inp.get("command")
         host = inp.get("host")
         if not command:
@@ -75,7 +75,7 @@ class SystemTools(HandlerBase):
         text = f"{governor_note}{output}" if governor_note else output
         return text, code
 
-    async def _handle_run_script(self, inp: dict) -> str:
+    async def _handle_run_script(self, inp: dict) -> str | tuple[str, int]:
         """Write a script to a temp file, execute it, and clean up."""
         host = inp.get("host")
         script = inp.get("script")
@@ -213,7 +213,7 @@ class SystemTools(HandlerBase):
                 parts.append(f"### {h}\n```\nError: {r}\n```")
                 any_run_error = True
             else:
-                markdown, host_err = r
+                markdown, host_err = r  # type: ignore[misc]  # gather() excs are filtered above; cancellation propagates before this
                 parts.append(markdown)
                 any_run_error = any_run_error or host_err
         for h, denial in blocked_hosts:

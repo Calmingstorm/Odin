@@ -594,7 +594,7 @@ class SkillManager:
         # executor's scoped memory structure (global/user_* namespaces).
         if memory_path:
             p = Path(memory_path)
-            self._memory_path = str(p.parent / f"{p.stem}_skills{p.suffix}")
+            self._memory_path: str | None = str(p.parent / f"{p.stem}_skills{p.suffix}")
         else:
             self._memory_path = None
         self._skills: dict[str, LoadedSkill] = {}
@@ -1011,7 +1011,9 @@ class SkillManager:
             errors.append("Missing 'execute' function (async def execute(inp, context)).")
 
         definition = None
-        definition_keys: list[str] = []
+        # Dead duplicate of the declaration 28 lines up (harmless; slated
+        # for a deliberate cleanup PR — removal is out of wave scope).
+        definition_keys: list[str] = []  # type: ignore[no-redef]
         for node in _ast.iter_child_nodes(tree):
             if isinstance(node, _ast.Assign):
                 for target in node.targets:

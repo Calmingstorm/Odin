@@ -13,7 +13,7 @@ from .deps import HandlerBase
 
 
 class DevOpsTools(HandlerBase):
-    async def _handle_git_ops(self, inp: dict) -> str:
+    async def _handle_git_ops(self, inp: dict) -> str | tuple[str, int]:
         from ..git_ops import ALLOWED_ACTIONS, build_git_command
 
         action = inp.get("action", "")
@@ -34,7 +34,8 @@ class DevOpsTools(HandlerBase):
             return f"git_ops error: {e}"
 
         if action == "push":
-            freshness_cmd, push_cmd = cmds
+            # action == 'push' always builds the 2-element list form.
+            freshness_cmd, push_cmd = cmds  # type: ignore[str-unpack]
             allowed, denial, _ = self._govern_command(push_cmd, host)
             if not allowed:
                 return denial
@@ -71,7 +72,7 @@ class DevOpsTools(HandlerBase):
                 else f"git {action} completed successfully."
             ), 0
 
-    async def _handle_kubectl(self, inp: dict) -> str:
+    async def _handle_kubectl(self, inp: dict) -> str | tuple[str, int]:
         from ..kubectl_ops import ALLOWED_ACTIONS as KUBECTL_ACTIONS
         from ..kubectl_ops import build_kubectl_command
 
@@ -107,7 +108,7 @@ class DevOpsTools(HandlerBase):
             else f"kubectl {action} completed successfully."
         ), 0
 
-    async def _handle_docker_ops(self, inp: dict) -> str:
+    async def _handle_docker_ops(self, inp: dict) -> str | tuple[str, int]:
         from ..docker_ops import ALLOWED_ACTIONS as DOCKER_ACTIONS
         from ..docker_ops import build_docker_command
 
@@ -141,7 +142,7 @@ class DevOpsTools(HandlerBase):
             else f"docker {action} completed successfully."
         ), 0
 
-    async def _handle_terraform_ops(self, inp: dict) -> str:
+    async def _handle_terraform_ops(self, inp: dict) -> str | tuple[str, int]:
         from ..terraform_ops import ALLOWED_ACTIONS as TF_ACTIONS
         from ..terraform_ops import build_terraform_command
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from typing import Any
 
 import aiohttp
 
@@ -13,7 +14,7 @@ log = get_logger("comfyui")
 
 # Default txt2img workflow template.
 # The {prompt}, {negative}, {width}, {height} placeholders are filled at runtime.
-_DEFAULT_WORKFLOW = {
+_DEFAULT_WORKFLOW: dict[str, Any] = {
     "3": {
         "class_type": "KSampler",
         "inputs": {
