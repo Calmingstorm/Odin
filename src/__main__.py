@@ -130,7 +130,14 @@ def main() -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+    # Fatal paths set this nonzero so supervisors (systemd Restart=on-failure,
+    # monitoring) can distinguish a crash from a clean stop. Historically every
+    # fatal startup error (bad token, boot-time DNS failure) exited 0 and only
+    # Restart=always kept the service recovering.
+    exit_code = 0
+
     async def run() -> None:
+        nonlocal exit_code
         await health.start()
 
         async def _webhook_send(channel_id: str, text: str) -> None:
@@ -158,6 +165,7 @@ def main() -> None:
             log.info("Connecting to Discord…")
             await bot.start(config.discord.token)
         except Exception as exc:
+            exit_code = 1
             log.error("Fatal error: %s", exc, exc_info=True)
             await shutdown()
 
@@ -191,11 +199,31 @@ def main() -> None:
 
     try:
         loop.run_until_complete(run())
-    except (KeyboardInterrupt, SystemExit):
+    except (KeyboardInterrupt, SystemExit) as exc:
+        # Ctrl-C stays a clean stop; an intentional SystemExit keeps its
+        # original code rather than being normalized.
+        if isinstance(exc, SystemExit) and exc.code:
+            exit_code = exc.code if isinstance(exc.code, int) else 1
         loop.run_until_complete(shutdown())
+    except asyncio.CancelledError:
+        # Cancellation reaching the top level is a shutdown path, not a
+        # fatal error — exit clean unless a fatal path already set a code.
+        loop.run_until_complete(shutdown())
+    except Exception:
+        # Failures outside run()'s own guard (e.g. the health server's port
+        # bind) previously tracebacked out with no clean shutdown. Cleanup
+        # failures are logged separately and never mask the fatal code.
+        exit_code = 1
+        log.exception("Fatal error during startup")
+        try:
+            loop.run_until_complete(shutdown())
+        except Exception:
+            log.exception("Cleanup after fatal startup error failed")
     finally:
         loop.close()
         log.info("Odin stopped")
+    if exit_code:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":
