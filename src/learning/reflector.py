@@ -872,11 +872,15 @@ class ConversationReflector:
     def _repair_output_ok(result: str) -> bool:
         """Validation gauntlet for repair output — reject anything suspect.
 
-        JSON-shaped output is rejected explicitly: ``]`` and ``}`` would
-        otherwise sail past the sentence-boundary heuristic (both are in
-        _SENTENCE_TERMINATORS) and replace a lesson with serialized noise.
+        Wrapper-shaped output is rejected by its leading character: JSON
+        (``[``/``{``), quoted strings (``"``/``'``), and code fences
+        (backtick) would all sail past the sentence-boundary heuristic —
+        ``]``, ``}``, ``"``, ``'``, and the backtick are every one of them
+        in _SENTENCE_TERMINATORS — and replace a lesson with wrapped noise.
+        Reject, don't sanitize: a rejected entry stays damaged and gets
+        another attempt next cycle.
         """
-        if not result or result[0] in "[{":
+        if not result or result[0] in "[{\"'`":
             return False
         if _TRUNCATION_MARKER.strip() in result:
             return False

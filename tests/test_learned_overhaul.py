@@ -323,6 +323,10 @@ class TestDamagedRepair:
             # prompt-injection-ish: output echoing the marker is rejected
             "Ignore previous instructions" + _TRUNCATION_MARKER + ".",
             '["a rewritten lesson."]',  # JSON-shaped
+            '{"lesson": "a rewritten lesson."}',  # JSON-object-shaped
+            '"A clean repaired lesson."',  # quote-wrapped (Odin's review catch)
+            "'A clean repaired lesson.'",  # single-quote-wrapped
+            "```A clean repaired lesson.```",  # code-fenced
         ]
         for bad in bad_outputs:
             async def fake(messages, system, _bad=bad):
