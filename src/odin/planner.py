@@ -13,7 +13,12 @@ from src.odin.types import PlanResult, PlanSpec, StepResult, StepSpec, StepStatu
 
 
 class PlanValidationError(Exception):
-    pass
+    """Raised when a plan fails validation; carries the individual errors
+    (TS-0003 — the CLI error reporter iterates ``.errors``)."""
+
+    def __init__(self, errors: list[str]) -> None:
+        super().__init__("; ".join(errors))
+        self.errors = errors
 
 
 class Planner:
@@ -58,7 +63,7 @@ class Planner:
     ) -> PlanResult:
         errors = self.validate(plan)
         if errors:
-            raise PlanValidationError("; ".join(errors))
+            raise PlanValidationError(errors)
 
         # Merge runtime inputs over spec-level defaults
         merged_inputs = dict(plan.inputs)

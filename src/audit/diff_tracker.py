@@ -87,9 +87,16 @@ class DiffTracker:
         host, path = target
         safe_path = shlex.quote(path)
         try:
-            content = await executor._run_on_host(host, f"cat {safe_path} 2>/dev/null || true")
-            if content.startswith("Unknown or disallowed host:"):
-                content = ""
+            # _run_on_host returns (output, exit_code) for resolved hosts and a
+            # bare denial string for unknown ones (TS-0002 — treating the tuple
+            # as str raised AttributeError on every snapshot, silently recording
+            # "" as the before-content of every overwrite).
+            raw = await executor._run_on_host(host, f"cat {safe_path} 2>/dev/null || true")
+            if isinstance(raw, tuple):
+                output, code = raw
+                content = output if code == 0 else ""
+            else:
+                content = ""  # host-denial message; nothing readable
         except Exception:
             content = ""
 

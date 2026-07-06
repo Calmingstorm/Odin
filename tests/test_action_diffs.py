@@ -189,7 +189,7 @@ class TestMaxDiffChars:
 class TestDiffTracker:
     async def test_capture_before_write_file(self):
         executor = MagicMock()
-        executor._run_on_host = AsyncMock(return_value="old content\n")
+        executor._run_on_host = AsyncMock(return_value=("old content\n", 0))
         tracker = DiffTracker()
         key = await tracker.capture_before(
             "write_file", {"host": "server1", "path": "/tmp/f.txt"}, executor,
@@ -228,7 +228,7 @@ class TestDiffTracker:
 
     async def test_compute_diff_write_file(self):
         executor = MagicMock()
-        executor._run_on_host = AsyncMock(return_value="old line\n")
+        executor._run_on_host = AsyncMock(return_value=("old line\n", 0))
         tracker = DiffTracker()
         key = await tracker.capture_before(
             "write_file", {"host": "h", "path": "/tmp/test.txt", "content": "new line\n"}, executor,
@@ -242,7 +242,7 @@ class TestDiffTracker:
 
     async def test_compute_diff_no_change(self):
         executor = MagicMock()
-        executor._run_on_host = AsyncMock(return_value="same\n")
+        executor._run_on_host = AsyncMock(return_value=("same\n", 0))
         tracker = DiffTracker()
         key = await tracker.capture_before(
             "write_file", {"host": "h", "path": "/tmp/f.txt", "content": "same\n"}, executor,
@@ -254,7 +254,7 @@ class TestDiffTracker:
 
     async def test_compute_diff_new_file(self):
         executor = MagicMock()
-        executor._run_on_host = AsyncMock(return_value="")
+        executor._run_on_host = AsyncMock(return_value=("", 0))
         tracker = DiffTracker()
         key = await tracker.capture_before(
             "write_file", {"host": "h", "path": "/tmp/new.txt", "content": "hello\n"}, executor,
@@ -277,7 +277,7 @@ class TestDiffTracker:
 
     async def test_snapshot_cleanup_after_compute(self):
         executor = MagicMock()
-        executor._run_on_host = AsyncMock(return_value="old\n")
+        executor._run_on_host = AsyncMock(return_value=("old\n", 0))
         tracker = DiffTracker()
         key = await tracker.capture_before(
             "write_file", {"host": "h", "path": "/tmp/f.txt", "content": "new\n"}, executor,
@@ -301,7 +301,7 @@ class TestDiffTracker:
 
     async def test_path_used_as_diff_label(self):
         executor = MagicMock()
-        executor._run_on_host = AsyncMock(return_value="old\n")
+        executor._run_on_host = AsyncMock(return_value=("old\n", 0))
         tracker = DiffTracker()
         key = await tracker.capture_before(
             "write_file", {"host": "h", "path": "/etc/nginx.conf", "content": "new\n"}, executor,
@@ -547,7 +547,7 @@ class TestBackgroundTaskDiffIntegration:
         executor = MagicMock()
         executor.config = MagicMock()
         executor.config.hosts = {"localhost": MagicMock()}
-        executor._run_on_host = AsyncMock(return_value="old content\n")
+        executor._run_on_host = AsyncMock(return_value=("old content\n", 0))
         executor.execute = AsyncMock(return_value="File written successfully")
 
         skill_manager = MagicMock()
@@ -811,7 +811,7 @@ class TestEdgeCases:
 
     async def test_multiple_writes_tracked_independently(self):
         executor = MagicMock()
-        executor._run_on_host = AsyncMock(side_effect=["old1\n", "old2\n"])
+        executor._run_on_host = AsyncMock(side_effect=[("old1\n", 0), ("old2\n", 0)])
         tracker = DiffTracker()
         key1 = await tracker.capture_before(
             "write_file", {"host": "h", "path": "/tmp/a.txt"}, executor,
@@ -860,7 +860,7 @@ class TestEdgeCases:
 
     async def test_capture_before_quotes_path(self):
         executor = MagicMock()
-        executor._run_on_host = AsyncMock(return_value="content")
+        executor._run_on_host = AsyncMock(return_value=("content", 0))
         tracker = DiffTracker()
         await tracker.capture_before(
             "write_file", {"host": "h", "path": "/tmp/file with spaces.txt"}, executor,

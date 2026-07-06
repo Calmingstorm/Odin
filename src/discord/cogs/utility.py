@@ -61,11 +61,23 @@ class Utility(commands.Cog):
     ) -> None:
         """Show information about a user."""
         member = member or ctx.author  # type: ignore[assignment]
+        # In DMs ctx.author is a plain discord.User: no joined_at, no roles
+        # (TS-0001 — this command used to raise AttributeError there). Inline
+        # isinstance checks so the narrowing is visible to the checker too.
         fields = {
             "ID": str(member.id),  # type: ignore[union-attr]  # member or ctx.author is never None
-            "Joined": discord.utils.format_dt(member.joined_at, "R") if member.joined_at else "Unknown",
+            "Joined": (
+                discord.utils.format_dt(member.joined_at, "R")
+                if isinstance(member, discord.Member) and member.joined_at
+                else "Unknown"
+            ),
             "Created": discord.utils.format_dt(member.created_at, "R"),  # type: ignore[union-attr]  # member or ctx.author is never None
-            "Roles": ", ".join(r.mention for r in member.roles[1:]) or "None",
+            "Roles": (
+                ", ".join(r.mention for r in member.roles[1:])
+                if isinstance(member, discord.Member)
+                else ""
+            )
+            or "None",
         }
         embed = info_embed(str(member), fields)
         embed.set_thumbnail(url=member.display_avatar.url)  # type: ignore[union-attr]  # member or ctx.author is never None
