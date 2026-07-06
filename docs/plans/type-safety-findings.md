@@ -67,12 +67,12 @@ mypy through `tool_loop`, `intake_pipeline`, `agents_tasks`, and
 All four annotation waves are merged; **the live mypy output equals the TS
 ledger + the dead import, exactly** (9 lines). Every non-ledgered finding in
 this file's appendix has been resolved; the appendix stays as the historical
-baseline record. Aaron ruled FIX on all five (2026-07-06); the fixes + regression tests ship as PR #186. Post-fix full-src mypy = 1 (the dead src.setup import, unruled).
+baseline record. Aaron ruled FIX on all five (2026-07-06); the fixes + regression tests shipped as PR #186 (v3.52.0). The final survivor — the dead src.setup import — was resolved by the housekeeping PR's wizard excision. **Full-src mypy = 0.**
 
 ## Wave guidance (observations, not runtime bugs)
 
 - `src/agents/manager.py` — a method literally named `list` shadows `builtins.list` in 14 findings' annotations under future-annotations. Wave fix is type-only: spell `builtins.list[...]` in that module (renaming the public method would be an API change — out of wave scope).
-- `src/setup_wizard.py:520` — imports `src.setup`, which does not exist anywhere; `SetupWizard`/`run_wizard` are never called from any entry point or test. Dead code; flagging for a future deliberate removal decision (not a wave's business).
+- `src/setup_wizard.py:520` — imported `src.setup`, which never existed. RESOLVED (housekeeping PR): the dead interactive-wizard layer (`SetupWizard`, `run_wizard`, orphan color helpers, the phantom CLI) was removed; the five live helpers backing the WebUI first-run flow (`/api/setup/*`) survive with targeted tests.
 - `src/tools/skill_manager.py:1014` — `definition_keys` re-declared to a fresh empty list 28 lines after its first declaration; harmless dead statement, tidy in the owning wave.
 - `src/health/server.py` — six `valid-type` findings use aiohttp's `@middleware` decorator *function* as a return annotation; the annotations are wrong today and are pure type-only fixes for the health wave.
 - The 88 NOISE findings are dominated by the `self._conn`-guarded storage modules (`knowledge/store.py`, `search/vectorstore.py`) where every public entry checks `self.available` first — wave treatment is reasoned ignores or small `assert`-free narrowing via typed properties, per §4 of the plan.
