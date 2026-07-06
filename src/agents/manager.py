@@ -7,6 +7,7 @@ up to a configurable nesting depth (default 2).
 from __future__ import annotations
 
 import asyncio
+import builtins
 import time
 import uuid
 from collections import deque
@@ -315,14 +316,14 @@ class AgentManager:
         iteration_callback: IterationCallback,
         tool_executor_callback: ToolExecutorCallback,
         announce_callback: AnnounceCallback | None = None,
-        tools: list[dict] | None = None,
+        tools: builtins.list[dict] | None = None,
         system_prompt: str = "",
         tool_timeouts: dict[str, int] | None = None,
         trajectory_saver: AgentTrajectorySaver | None = None,
         parent_id: str | None = None,
         max_depth: int = MAX_NESTING_DEPTH,
         max_iterations: int | None = None,
-        budget_warnings: list[int] | None = None,
+        budget_warnings: builtins.list[int] | None = None,
         context_compression_enabled: bool = False,
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
@@ -442,7 +443,7 @@ class AgentManager:
         if not message:
             return "Error: Message cannot be empty."
 
-        agent._inbox.put_nowait(message)
+        agent._inbox.put_nowait(message)  # type: ignore[union-attr]  # __post_init__ always sets it
         log.info("Sent message to agent %s (%s): %s", agent_id, agent.label, message[:80])
         return f"Message delivered to agent '{agent.label}'."
 
@@ -479,7 +480,7 @@ class AgentManager:
         run's `except CancelledError` + `finally` still finalize the
         trajectory cleanly.
         """
-        agent._cancel_event.set()
+        agent._cancel_event.set()  # type: ignore[union-attr]  # __post_init__ always sets it
         task = getattr(agent, "_task", None)
         if task is not None and not task.done():
             task.cancel()
@@ -538,7 +539,7 @@ class AgentManager:
             "children_ids": list(agent.children_ids),
         }
 
-    def get_children(self, agent_id: str) -> list[dict]:
+    def get_children(self, agent_id: str) -> builtins.list[dict]:
         """Get results of all direct children of an agent."""
         agent = self._agents.get(agent_id)
         if not agent:
@@ -550,7 +551,7 @@ class AgentManager:
                 results.append(r)
         return results
 
-    def get_lineage(self, agent_id: str) -> list[str]:
+    def get_lineage(self, agent_id: str) -> builtins.list[str]:
         """Get the chain of parent IDs from root to this agent (inclusive)."""
         lineage: list[str] = []
         current = agent_id
@@ -565,7 +566,7 @@ class AgentManager:
         lineage.reverse()
         return lineage
 
-    def get_descendants(self, agent_id: str) -> list[str]:
+    def get_descendants(self, agent_id: str) -> builtins.list[str]:
         """Get all descendant agent IDs (children, grandchildren, etc.)."""
         agent = self._agents.get(agent_id)
         if not agent:
@@ -586,7 +587,7 @@ class AgentManager:
 
     async def wait_for_agents(
         self,
-        agent_ids: list[str],
+        agent_ids: builtins.list[str],
         timeout: float = WAIT_DEFAULT_TIMEOUT,
         poll_interval: float = WAIT_POLL_INTERVAL,
     ) -> dict[str, dict]:
@@ -641,24 +642,24 @@ class AgentManager:
 
     def spawn_group(
         self,
-        tasks: list[dict],
+        tasks: builtins.list[dict],
         channel_id: str,
         requester_id: str,
         requester_name: str,
         iteration_callback: IterationCallback,
         tool_executor_callback: ToolExecutorCallback,
         announce_callback: AnnounceCallback | None = None,
-        tools: list[dict] | None = None,
+        tools: builtins.list[dict] | None = None,
         system_prompt: str = "",
         tool_timeouts: dict[str, int] | None = None,
         trajectory_saver: AgentTrajectorySaver | None = None,
         max_depth: int = MAX_NESTING_DEPTH,
         max_iterations: int | None = None,
-        budget_warnings: list[int] | None = None,
+        budget_warnings: builtins.list[int] | None = None,
         context_compression_enabled: bool = False,
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
-    ) -> list[str]:
+    ) -> builtins.list[str]:
         """Spawn multiple agents at once. Returns list of agent_ids (or error strings).
 
         Each task dict must have 'label' and 'goal' keys.
@@ -800,7 +801,7 @@ async def _run_agent(
     agent_start = time.time()
 
     def _check_kill() -> bool:
-        if agent._cancel_event.is_set():
+        if agent._cancel_event.is_set():  # type: ignore[union-attr]  # __post_init__ always sets it
             if agent._sm.is_terminal:
                 return True
             try:
@@ -835,9 +836,9 @@ async def _run_agent(
                 return
 
             # Check inbox for injected messages
-            while not agent._inbox.empty():
+            while not agent._inbox.empty():  # type: ignore[union-attr]  # __post_init__ always sets it
                 try:
-                    msg = agent._inbox.get_nowait()
+                    msg = agent._inbox.get_nowait()  # type: ignore[union-attr]  # __post_init__ always sets it
                     agent.messages.append({
                         "role": "user",
                         "content": f"[Message from parent] {msg}",

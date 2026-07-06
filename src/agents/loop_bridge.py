@@ -14,8 +14,18 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
+
+if TYPE_CHECKING:
+    from .manager import (
+        AgentManager,
+        AnnounceCallback,
+        IterationCallback,
+        ToolExecutorCallback,
+    )
+    from .trajectory import AgentTrajectorySaver
 
 log = get_logger("loop_bridge")
 
@@ -41,7 +51,11 @@ class LoopAgentRecord:
 class LoopAgentBridge:
     """Bridges LoopManager and AgentManager for agent-aware loops."""
 
-    def __init__(self, agent_manager: object, trajectory_saver: object | None = None) -> None:
+    def __init__(
+        self,
+        agent_manager: AgentManager,
+        trajectory_saver: AgentTrajectorySaver | None = None,
+    ) -> None:
         self._agent_manager = agent_manager
         self._trajectory_saver = trajectory_saver
         # loop_id → list of LoopAgentRecords
@@ -65,9 +79,9 @@ class LoopAgentBridge:
         channel_id: str,
         requester_id: str,
         requester_name: str,
-        iteration_callback: object,
-        tool_executor_callback: object,
-        announce_callback: object = None,
+        iteration_callback: IterationCallback,
+        tool_executor_callback: ToolExecutorCallback,
+        announce_callback: AnnounceCallback | None = None,
         tools: list[dict] | None = None,
         system_prompt: str = "",
         tool_timeouts: dict[str, int] | None = None,

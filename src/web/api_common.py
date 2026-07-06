@@ -82,7 +82,7 @@ def _scoped_chat_channel(user_id: str, session_id: str) -> str:
     return f"web:{user_id}:session:{session_id}"
 
 
-def _sanitize_error(msg: str) -> str:
+def _sanitize_error(msg: str | BaseException) -> str:
     """Scrub secrets from error messages before returning to clients."""
     return scrub_output_secrets(str(msg))
 
@@ -138,7 +138,7 @@ def _redact_config(obj: Any, *, _depth: int = 0) -> Any:
     return obj
 
 
-def _write_config(path: Path, data: dict) -> None:
+def _write_config(path: Path | str, data: dict) -> None:
     """Write config dict to YAML file."""
     with open(path, "w") as f:
         yaml.dump(data, f, default_flow_style=False)

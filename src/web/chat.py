@@ -145,7 +145,7 @@ class WebMessage:
         self.channel = _WebChannel(channel_id)
         self.author = _WebAuthor(user_id, username)
         self.webhook_id = None
-        self.attachments = []
+        self.attachments: list = []
         self.guild = None
         self.allowed_tools = allowed_tools
 
@@ -246,7 +246,10 @@ async def _do_process_web_chat(
         try:
             response, _already_sent, is_error, tools_used, handoff = (
                 await bot.tool_loop.run(
-                    msg, history, system_prompt_override=sp, trace=trace,
+                    # WebMessage is the documented duck-typed stand-in
+                    # for discord.Message (see class docstring).
+                    msg,  # type: ignore[arg-type]
+                    history, system_prompt_override=sp, trace=trace,
                 )
             )
         finally:
