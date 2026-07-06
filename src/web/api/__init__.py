@@ -8,12 +8,10 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from aiohttp import web
-from croniter import croniter
 
 from ...config.schema import Config
 from ...odin_log import get_logger
@@ -52,6 +50,11 @@ from ..api_common import (  # noqa: F401 — re-exports
     admin_gate,
 )
 from ..chat import MAX_CHAT_CONTENT_LEN, process_web_chat
+from .knowledge_mem import (
+    register_knowledge,
+    register_learned_context,
+    register_memory_notes,
+)
 from .llm_admin import (  # noqa: E501
     register_codex_oauth,
     register_connection_pools,
@@ -75,12 +78,14 @@ from .observability import (
     register_usage_cost,
     register_validation_stats,
 )
+from .schedules_api import register_schedules
 from .security import (
     register_api_tokens,
     register_auth,
     register_host_access,
     register_permissions_rbac,
 )
+from .skills_api import register_skills
 
 if TYPE_CHECKING:
     from ...discord.client import OdinBot
@@ -1187,171 +1192,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
         )
         return web.json_response({"results": results, "count": len(results)})
 
-    # ------------------------------------------------------------------
-    # Skills
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/skills")
-    async def list_skills(_request: web.Request) -> web.Response:
-        skills = bot.skill_manager.list_skills()
-        # Get usage counts from audit log
-        counts = await bot.audit.count_by_tool()
-        # Add source code and execution stats for each skill
-        for skill_info in skills:
-            name = skill_info["name"]
-            skill_info["code"] = None
-            loaded = bot.skill_manager._skills.get(name)
-            if loaded and loaded.file_path.exists():
-                try:
-                    skill_info["code"] = loaded.file_path.read_text()
-                except OSError:
-                    pass
-            skill_info["execution_count"] = counts.get(name, 0)
-        return web.json_response(skills)
-
-    @routes.post("/api/skills")
-    async def create_skill(request: web.Request) -> web.Response:
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-        name = data.get("name", "").strip()
-        code = data.get("code", "").strip()
-        if not name or not code:
-            return web.json_response(
-                {"error": "name and code are required"}, status=400
-            )
-        for err in (
-            _validate_string(name, "name", _MAX_NAME_LEN),
-            _validate_string(code, "code", _MAX_CODE_LEN),
-        ):
-            if err:
-                return web.json_response({"error": err}, status=400)
-        result = bot.skill_manager.create_skill(name, code)
-        bot.tool_catalog.invalidate()
-        bot.prompt_builder.cached_skills_text = None
-        is_error = "error" in result.lower() or "failed" in result.lower()
-        return web.json_response(
-            {"result": result},
-            status=400 if is_error else 201,
-        )
-
-    @routes.put("/api/skills/{name}")
-    async def update_skill(request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-        code = data.get("code", "").strip()
-        if not code:
-            return web.json_response({"error": "code is required"}, status=400)
-        err = _validate_string(code, "code", _MAX_CODE_LEN)
-        if err:
-            return web.json_response({"error": err}, status=400)
-        result = bot.skill_manager.edit_skill(name, code)
-        bot.tool_catalog.invalidate()
-        bot.prompt_builder.cached_skills_text = None
-        is_error = "error" in result.lower() or "failed" in result.lower()
-        return web.json_response(
-            {"result": result},
-            status=400 if is_error else 200,
-        )
-
-    @routes.post("/api/skills/{name}/test")
-    async def test_skill(request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        if not bot.skill_manager.has_skill(name):
-            return web.json_response({"error": "skill not found"}, status=404)
-        try:
-            result = await bot.skill_manager.execute(name, {})
-            is_error = result.startswith("Skill error:") or result.startswith("Skill '")
-            return web.json_response({
-                "result": result,
-                "is_error": is_error,
-            })
-        except Exception as e:
-            return web.json_response({"result": _sanitize_error(e), "is_error": True}, status=500)
-
-    @routes.delete("/api/skills/{name}")
-    async def delete_skill(request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        result = bot.skill_manager.delete_skill(name)
-        bot.tool_catalog.invalidate()
-        bot.prompt_builder.cached_skills_text = None
-        is_error = "error" in result.lower() or "not found" in result.lower()
-        return web.json_response(
-            {"result": result},
-            status=404 if is_error else 200,
-        )
-
-    @routes.get("/api/skills/{name}")
-    async def get_skill_detail(request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        info = bot.skill_manager.get_skill_info(name)
-        if not info:
-            return web.json_response({"error": "skill not found"}, status=404)
-        return web.json_response(info)
-
-    @routes.post("/api/skills/validate")
-    async def validate_skill(request: web.Request) -> web.Response:
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-        code = data.get("code", "").strip()
-        if not code:
-            return web.json_response({"error": "code is required"}, status=400)
-        err = _validate_string(code, "code", _MAX_CODE_LEN)
-        if err:
-            return web.json_response({"error": err}, status=400)
-        report = bot.skill_manager.validate_skill_code(code)
-        return web.json_response(report)
-
-    @routes.post("/api/skills/{name}/enable")
-    async def enable_skill(request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        result = bot.skill_manager.enable_skill(name)
-        if "not found" in result.lower():
-            return web.json_response({"result": result}, status=404)
-        bot.tool_catalog.invalidate()
-        bot.prompt_builder.cached_skills_text = None
-        return web.json_response({"result": result})
-
-    @routes.post("/api/skills/{name}/disable")
-    async def disable_skill_api(request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        result = bot.skill_manager.disable_skill(name)
-        if "not found" in result.lower():
-            return web.json_response({"result": result}, status=404)
-        bot.tool_catalog.invalidate()
-        bot.prompt_builder.cached_skills_text = None
-        return web.json_response({"result": result})
-
-    @routes.get("/api/skills/{name}/config")
-    async def get_skill_config(request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        if not bot.skill_manager.has_skill(name):
-            return web.json_response({"error": "skill not found"}, status=404)
-        info = bot.skill_manager.get_skill_info(name)
-        return web.json_response({
-            "config": bot.skill_manager.get_skill_config(name),
-            "schema": info["metadata"]["config_schema"] if info else {},
-        })
-
-    @routes.put("/api/skills/{name}/config")
-    async def set_skill_config(request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        if not bot.skill_manager.has_skill(name):
-            return web.json_response({"error": "skill not found"}, status=404)
-        data = await request.json()
-        values = data.get("config", {})
-        if not isinstance(values, dict):
-            return web.json_response({"error": "config must be a dict"}, status=400)
-        errors = bot.skill_manager.set_skill_config(name, values)
-        if errors:
-            return web.json_response({"errors": errors}, status=400)
-        return web.json_response({"config": bot.skill_manager.get_skill_config(name)})
+    register_skills(routes, bot)
 
     # ------------------------------------------------------------------
     # MCP servers
@@ -1607,372 +1448,9 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
             return web.json_response({"error": "Grafana alert handler not available"}, status=503)
         return web.json_response({"remediations": handler.get_remediations_list()})
 
-    # ------------------------------------------------------------------
-    # Knowledge
-    # ------------------------------------------------------------------
+    register_knowledge(routes, bot)
 
-    @routes.get("/api/knowledge")
-    async def list_knowledge(_request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        return web.json_response(await asyncio.to_thread(store.list_sources))
-
-    @routes.post("/api/knowledge")
-    async def ingest_knowledge(request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        data = await request.json()
-        source = data.get("source", "").strip()
-        content = data.get("content", "").strip()
-        if not source or not content:
-            return web.json_response(
-                {"error": "source and content are required"}, status=400
-            )
-        for err in (
-            _validate_string(source, "source", _MAX_NAME_LEN),
-            _validate_string(content, "content", _MAX_CONTENT_LEN),
-        ):
-            if err:
-                return web.json_response({"error": err}, status=400)
-        chunks = await store.ingest(content, source, embedder=bot.embedder, uploader="web-api")
-        return web.json_response({"source": source, "chunks": chunks}, status=201)
-
-    @routes.delete("/api/knowledge/{source}")
-    async def delete_knowledge(request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        source = request.match_info["source"]
-        deleted = await store.delete_source_async(source)
-        if deleted == 0:
-            return web.json_response({"error": "source not found"}, status=404)
-        return web.json_response({"status": "deleted", "chunks_removed": deleted})
-
-    @routes.post("/api/knowledge/{source}/reingest")
-    async def reingest_knowledge(request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        source = request.match_info["source"]
-        content = await asyncio.to_thread(store.get_source_content, source)
-        if content is None:
-            return web.json_response({"error": "source not found"}, status=404)
-        chunks = await store.ingest(content, source, embedder=bot.embedder, uploader="web-reingest")
-        return web.json_response({"source": source, "chunks": chunks})
-
-    @routes.get("/api/knowledge/search")
-    async def search_knowledge(request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        query = request.query.get("q", "").strip()
-        if not query:
-            return web.json_response({"error": "q parameter required"}, status=400)
-        try:
-            limit = _safe_int_param(request, "limit", 10, hi=50)
-        except ValueError:
-            return web.json_response({"error": "limit must be an integer"}, status=400)
-        results = await store.search_hybrid(query, embedder=bot.embedder, limit=limit)
-        return web.json_response(results)
-
-    @routes.get("/api/knowledge/{source}/chunks")
-    async def list_knowledge_chunks(request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        source = request.match_info["source"]
-        chunks = await asyncio.to_thread(store.get_source_chunks, source)
-        if not chunks:
-            return web.json_response({"error": "source not found or empty"}, status=404)
-        return web.json_response(chunks)
-
-    # Knowledge dedup
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/knowledge/duplicates")
-    async def list_knowledge_duplicates(_request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        exact = await asyncio.to_thread(store.find_duplicates)
-        threshold = 0.5
-        try:
-            threshold = float(_request.query.get("threshold", "0.5"))
-        except ValueError:
-            pass
-        near = await asyncio.to_thread(store.find_near_duplicates, threshold)
-        return web.json_response({"exact": exact, "near": near})
-
-    @routes.post("/api/knowledge/merge")
-    async def merge_knowledge(request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        keep = data.get("keep_source", "").strip()
-        remove = data.get("remove_source", "").strip()
-        if not keep or not remove:
-            return web.json_response(
-                {"error": "keep_source and remove_source are required"}, status=400
-            )
-        removed = await store.merge_sources_async(keep, remove)
-        if removed == 0:
-            return web.json_response(
-                {"error": "keep_source not found or nothing to merge"}, status=404
-            )
-        return web.json_response(
-            {"status": "merged", "kept": keep, "removed": remove, "chunks_removed": removed}
-        )
-
-    # Knowledge versioning
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/knowledge/{source}/versions")
-    async def list_knowledge_versions(request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        source = request.match_info["source"]
-        versions = await asyncio.to_thread(store.get_versions, source)
-        return web.json_response(versions)
-
-    @routes.get("/api/knowledge/{source}/versions/{version:\\d+}")
-    async def get_knowledge_version(request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        source = request.match_info["source"]
-        version = int(request.match_info["version"])
-        ver = await asyncio.to_thread(store.get_version, source, version)
-        if not ver:
-            return web.json_response({"error": "version not found"}, status=404)
-        return web.json_response(ver)
-
-    @routes.post("/api/knowledge/{source}/versions/{version:\\d+}/restore")
-    async def restore_knowledge_version(request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        source = request.match_info["source"]
-        version = int(request.match_info["version"])
-        ver = await asyncio.to_thread(store.get_version, source, version)
-        if not ver:
-            return web.json_response({"error": "version not found"}, status=404)
-        if not ver.get("content"):
-            return web.json_response(
-                {"error": "version has no content snapshot (delete version)"}, status=400
-            )
-        chunks = await store.restore_version(source, version, embedder=bot.embedder)
-        return web.json_response(
-            {"status": "restored", "source": source, "version": version, "chunks": chunks}
-        )
-
-    @routes.get("/api/knowledge/{source}/versions/{v1:\\d+}/diff/{v2:\\d+}")
-    async def diff_knowledge_versions(request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        source = request.match_info["source"]
-        v1 = int(request.match_info["v1"])
-        v2 = int(request.match_info["v2"])
-        diff = await asyncio.to_thread(store.get_version_diff, source, v1, v2)
-        if not diff:
-            return web.json_response({"error": "one or both versions not found"}, status=404)
-        return web.json_response(diff)
-
-    # Knowledge bulk import
-    # ------------------------------------------------------------------
-
-    @routes.post("/api/knowledge/import")
-    async def import_knowledge(request: web.Request) -> web.Response:
-        store = bot.knowledge
-        if not store or not store.available:
-            return web.json_response({"error": "knowledge store not available"}, status=503)
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        items = data.get("items")
-        if not items or not isinstance(items, list):
-            return web.json_response({"error": "items (array) is required"}, status=400)
-        from ...knowledge.importer import BulkImporter
-        importer = BulkImporter(store, bot.embedder)
-        batch = await importer.import_batch(items, uploader="web-api")
-        return web.json_response({
-            "total": batch.total,
-            "succeeded": batch.succeeded,
-            "failed": batch.failed,
-            "skipped": batch.skipped,
-            "results": batch.results,
-        })
-
-    # ------------------------------------------------------------------
-    # Schedules
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/schedules")
-    async def list_schedules(_request: web.Request) -> web.Response:
-        return web.json_response(bot.scheduler.list_all())
-
-    @routes.post("/api/schedules")
-    async def create_schedule(request: web.Request) -> web.Response:
-        data = await request.json()
-        description = data.get("description", "").strip()
-        action = data.get("action", "reminder")
-        channel_id = data.get("channel_id", "").strip()
-        if not description or not channel_id:
-            return web.json_response(
-                {"error": "description and channel_id are required"}, status=400
-            )
-        err = _validate_string(description, "description", _MAX_DESCRIPTION_LEN)
-        if err:
-            return web.json_response({"error": err}, status=400)
-        # Web API schedule creation is gated by the admin web token (auth
-        # middleware), so schedules created here carry system/admin authority:
-        # requester_id is intentionally left empty, so scheduled execution runs
-        # with user_id=None (unrestricted), matching the admin nature of the
-        # dashboard. Discord-created schedules instead persist the creator's id
-        # for per-user host/tier scoping. The API token identity is NOT a
-        # Discord-user-scoped principal, so passing it through would not map onto
-        # the permission/host-access namespace.
-        try:
-            schedule = await bot.scheduler.add(
-                description=description,
-                action=action,
-                channel_id=channel_id,
-                cron=data.get("cron"),
-                run_at=data.get("run_at"),
-                message=data.get("message"),
-                tool_name=data.get("tool_name"),
-                tool_input=data.get("tool_input"),
-                steps=data.get("steps"),
-                trigger=data.get("trigger"),
-                max_retries=data.get("max_retries"),
-                retry_backoff_seconds=data.get("retry_backoff_seconds"),
-            )
-            return web.json_response(schedule, status=201)
-        except (ValueError, TypeError) as e:
-            return web.json_response({"error": _sanitize_error(e)}, status=400)
-
-    @routes.put("/api/schedules/{schedule_id}")
-    async def update_schedule(request: web.Request) -> web.Response:
-        sid = request.match_info["schedule_id"]
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        if not isinstance(data, dict) or not data:
-            return web.json_response(
-                {"error": "request body must be a non-empty object"}, status=400
-            )
-        desc = data.get("description")
-        if desc is not None:
-            err = _validate_string(desc, "description", _MAX_DESCRIPTION_LEN)
-            if err:
-                return web.json_response({"error": err}, status=400)
-        paused = data.get("paused")
-        if paused is not None and not isinstance(paused, bool):
-            return web.json_response({"error": "'paused' must be a boolean"}, status=400)
-        try:
-            updated = await bot.scheduler.update(
-                sid,
-                description=data.get("description"),
-                cron=data.get("cron"),
-                run_at=data.get("run_at"),
-                message=data.get("message"),
-                tool_name=data.get("tool_name"),
-                tool_input=data.get("tool_input"),
-                steps=data.get("steps"),
-                trigger=data.get("trigger"),
-                channel_id=data.get("channel_id"),
-                max_retries=data.get("max_retries"),
-                retry_backoff_seconds=data.get("retry_backoff_seconds"),
-                paused=paused,
-            )
-        except (ValueError, TypeError) as e:
-            return web.json_response({"error": _sanitize_error(e)}, status=400)
-        if updated is None:
-            return web.json_response({"error": "schedule not found"}, status=404)
-        return web.json_response(updated)
-
-    @routes.delete("/api/schedules/{schedule_id}")
-    async def delete_schedule(request: web.Request) -> web.Response:
-        sid = request.match_info["schedule_id"]
-        if await bot.scheduler.delete(sid):
-            return web.json_response({"status": "deleted"})
-        return web.json_response({"error": "schedule not found"}, status=404)
-
-    @routes.post("/api/schedules/{schedule_id}/run")
-    async def run_schedule_now(request: web.Request) -> web.Response:
-        sid = request.match_info["schedule_id"]
-        try:
-            result = await bot.scheduler.run_now(sid)
-            return web.json_response(result)
-        except ValueError as e:
-            err = str(e)
-            if "not found" in err:
-                return web.json_response({"error": err}, status=404)
-            return web.json_response({"error": err}, status=503)
-        except Exception as e:
-            return web.json_response({"error": _sanitize_error(e)}, status=500)
-
-    @routes.post("/api/schedules/{schedule_id}/reset-failures")
-    async def reset_schedule_failures(request: web.Request) -> web.Response:
-        sid = request.match_info["schedule_id"]
-        result = await bot.scheduler.reset_failures(sid)
-        if result is None:
-            return web.json_response({"error": "schedule not found"}, status=404)
-        return web.json_response(result)
-
-    @routes.get("/api/schedules/history")
-    async def schedule_history_all(request: web.Request) -> web.Response:
-        """Global schedule execution history (most recent first)."""
-        limit = _safe_int_param(request, "limit", 50, hi=200)
-        status_filter = request.query.get("status")
-        entries = await bot.scheduler.history.query(
-            status=status_filter, limit=limit,
-        )
-        return web.json_response(entries)
-
-    @routes.get("/api/schedules/{schedule_id}/history")
-    async def schedule_history(request: web.Request) -> web.Response:
-        """Execution history for a specific schedule."""
-        sid = request.match_info["schedule_id"]
-        limit = _safe_int_param(request, "limit", 50, hi=200)
-        status_filter = request.query.get("status")
-        entries = await bot.scheduler.history.query(
-            sid, status=status_filter, limit=limit,
-        )
-        return web.json_response(entries)
-
-    @routes.get("/api/schedules/{schedule_id}/stats")
-    async def schedule_stats(request: web.Request) -> web.Response:
-        """Summary stats for a specific schedule."""
-        sid = request.match_info["schedule_id"]
-        stats = await bot.scheduler.history.stats(sid)
-        return web.json_response(stats)
-
-    @routes.post("/api/schedules/validate-cron")
-    async def validate_cron(request: web.Request) -> web.Response:
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        expr = data.get("expression", "").strip()
-        if not expr:
-            return web.json_response({"error": "expression is required"}, status=400)
-        if not croniter.is_valid(expr):
-            return web.json_response({"valid": False, "error": "Invalid cron expression"})
-        # Return next 5 run times
-        now = datetime.now()
-        cr = croniter(expr, now)
-        next_runs = [cr.get_next(datetime).isoformat() for _ in range(5)]
-        return web.json_response({"valid": True, "next_runs": next_runs})
+    register_schedules(routes, bot)
 
     # ------------------------------------------------------------------
     # Autonomous loops
@@ -2237,90 +1715,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     register_log_search(routes, bot)
 
-    # ------------------------------------------------------------------
-    # Memory (persistent notes — global + per-user scopes)
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/memory")
-    async def list_memory(_request: web.Request) -> web.Response:
-        all_mem = await asyncio.to_thread(
-            bot.tool_executor._load_all_memory
-        )
-        result = {}
-        for scope, entries in all_mem.items():
-            result[scope] = {
-                "keys": list(entries.keys()),
-                "count": len(entries),
-            }
-        return web.json_response(result)
-
-    @routes.get("/api/memory/{scope}/{key}")
-    async def get_memory(request: web.Request) -> web.Response:
-        scope = request.match_info["scope"]
-        key = request.match_info["key"]
-        all_mem = await asyncio.to_thread(
-            bot.tool_executor._load_all_memory
-        )
-        section = all_mem.get(scope, {})
-        if key not in section:
-            return web.json_response({"error": "key not found"}, status=404)
-        return web.json_response({"scope": scope, "key": key, "value": section[key]})
-
-    @routes.put("/api/memory/{scope}/{key}")
-    async def set_memory(request: web.Request) -> web.Response:
-        scope = request.match_info["scope"]
-        key = request.match_info["key"]
-        data = await request.json()
-        value = data.get("value")
-        if value is None:
-            return web.json_response({"error": "value is required"}, status=400)
-        all_mem = await asyncio.to_thread(
-            bot.tool_executor._load_all_memory
-        )
-        if scope not in all_mem:
-            all_mem[scope] = {}
-        all_mem[scope][key] = str(value)
-        await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
-        return web.json_response({"status": "saved", "scope": scope, "key": key})
-
-    @routes.delete("/api/memory/{scope}/{key}")
-    async def delete_memory(request: web.Request) -> web.Response:
-        scope = request.match_info["scope"]
-        key = request.match_info["key"]
-        all_mem = await asyncio.to_thread(
-            bot.tool_executor._load_all_memory
-        )
-        section = all_mem.get(scope, {})
-        if key not in section:
-            return web.json_response({"error": "key not found"}, status=404)
-        del all_mem[scope][key]
-        await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
-        return web.json_response({"status": "deleted", "scope": scope, "key": key})
-
-    @routes.post("/api/memory/bulk-delete")
-    async def bulk_delete_memory(request: web.Request) -> web.Response:
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        entries = data.get("entries", [])
-        if not isinstance(entries, list) or not entries:
-            return web.json_response(
-                {"error": "entries must be a non-empty list of {scope, key}"}, status=400
-            )
-        all_mem = await asyncio.to_thread(
-            bot.tool_executor._load_all_memory
-        )
-        deleted = 0
-        for entry in entries:
-            scope = entry.get("scope")
-            key = entry.get("key")
-            if scope and key and scope in all_mem and key in all_mem[scope]:
-                del all_mem[scope][key]
-                deleted += 1
-        if deleted:
-            await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
-        return web.json_response({"status": "deleted", "count": deleted})
+    register_memory_notes(routes, bot)
 
     register_risk_classification(routes, bot)
 
@@ -2346,38 +1741,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     register_validation_stats(routes, bot)
 
-    # ------------------------------------------------------------------
-    # Learned context (reflector)
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/learned")
-    async def list_learned(_request: web.Request) -> web.Response:
-        entries = bot.reflector.get_all_entries()
-        meta = bot.reflector.get_metadata()
-        return web.json_response({"entries": entries, **meta})
-
-    @routes.delete("/api/learned/{key}")
-    async def delete_learned(request: web.Request) -> web.Response:
-        key = request.match_info["key"]
-        if await bot.reflector.delete_entry_async(key):
-            return web.json_response({"status": "deleted", "key": key})
-        return web.json_response({"error": "entry not found"}, status=404)
-
-    @routes.put("/api/learned/{key}")
-    async def update_learned(request: web.Request) -> web.Response:
-        key = request.match_info["key"]
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
-        updated = await bot.reflector.update_entry_async(
-            key,
-            content=data.get("content"),
-            category=data.get("category"),
-        )
-        if updated:
-            return web.json_response(updated)
-        return web.json_response({"error": "entry not found"}, status=404)
+    register_learned_context(routes, bot)
 
     register_affordances(routes, bot)
 
