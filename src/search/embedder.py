@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
+from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
+
+if TYPE_CHECKING:
+    from fastembed import TextEmbedding
 
 log = get_logger("search.embedder")
 
@@ -18,7 +22,7 @@ class LocalEmbedder:
     DIMENSIONS = 384
 
     def __init__(self) -> None:
-        self._model = None
+        self._model: TextEmbedding | None = None
 
     def _ensure_model(self):
         if self._model is None:
@@ -40,5 +44,6 @@ class LocalEmbedder:
             return None
 
     def _embed_sync(self, text: str) -> list[float]:
-        vectors = list(self._model.embed([text]))
+        # _ensure_model() has run in every caller before dispatch here.
+        vectors = list(self._model.embed([text]))  # type: ignore[union-attr]
         return vectors[0].tolist()

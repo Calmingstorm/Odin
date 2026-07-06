@@ -502,7 +502,9 @@ def validate_release_workflow(config: dict[str, Any]) -> list[str]:
 
     # Trigger: must be push with v* tag
     # PyYAML converts the bare key 'on' to boolean True
-    on_config = config.get("on") or config.get(True, {})
+    # PyYAML parses a bare "on:" key as boolean True (see comment above);
+    # the True-key lookup is deliberate and outside the declared key type.
+    on_config = config.get("on") or config.get(True, {})  # type: ignore[call-overload]
     if isinstance(on_config, dict):
         push = on_config.get("push", {})
         if isinstance(push, dict):

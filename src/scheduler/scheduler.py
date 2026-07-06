@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
@@ -222,7 +222,9 @@ class Scheduler:
                     datetime.fromisoformat(run_at)
                 except (ValueError, TypeError):
                     raise ValueError(f"Invalid ISO datetime for run_at: {run_at!r}")
-            normalized = _utc_iso(datetime.fromisoformat(run_at))
+            # Validated above: a one-time schedule without run_at already
+            # raised; cast records the guarantee for the checker.
+            normalized = _utc_iso(datetime.fromisoformat(cast(str, run_at)))
             schedule["run_at"] = normalized
             schedule["next_run"] = normalized
             schedule["one_time"] = True
@@ -233,7 +235,10 @@ class Scheduler:
             schedule["tool_name"] = tool_name
             schedule["tool_input"] = tool_input or {}
         elif action == "webhook":
-            schedule["webhook_config"] = self._normalize_webhook_config(webhook_config)
+            # action == "webhook" already raised unless webhook_config is a dict.
+            schedule["webhook_config"] = self._normalize_webhook_config(
+                cast(dict, webhook_config)
+            )
         elif action == "workflow":
             schedule["steps"] = steps
 

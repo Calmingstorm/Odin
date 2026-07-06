@@ -786,7 +786,9 @@ def _warn_unknown_config_keys(data: dict) -> None:
     # Also accept field aliases if any are defined.
     for f in Config.model_fields.values():
         if getattr(f, "alias", None):
-            known.add(f.alias)
+            # The getattr probe above guarantees a truthy (str) alias, but
+            # mypy can't connect it to the direct attribute read.
+            known.add(f.alias)  # type: ignore[arg-type]
     unknown = [k for k in data if k not in known]
     if unknown:
         get_logger("config").warning(

@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import time
+from typing import Any
 
 from ..odin_log import get_logger
 
@@ -241,7 +242,7 @@ class ContextTraceCollector:
         try:
             duration_ms = round((time.monotonic() - self._started) * 1000, 2)
             total_tokens = sum(s.get("tokens", 0) for s in self._sections)
-            trace = {
+            trace: dict[str, Any] = {
                 "schema_version": TRACE_SCHEMA_VERSION,
                 "assembly": {
                     "version": ASSEMBLY_VERSION,

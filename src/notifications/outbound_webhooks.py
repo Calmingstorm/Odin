@@ -372,7 +372,9 @@ class OutboundWebhookDispatcher:
                     target.url,
                     data=payload_body,
                     headers=headers,
-                    ssl=ssl_ctx,
+                    # aiohttp accepts ssl=None ("use default") at
+                    # runtime; the public stub omits None.
+                    ssl=ssl_ctx,  # type: ignore[arg-type]
                 ) as resp:
                     latency = (time.monotonic() - t0) * 1000
                     success = 200 <= resp.status < 300

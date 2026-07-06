@@ -215,7 +215,7 @@ class AuditLogger:
     ) -> None:
         """Log a generic state-changing event (agents, schedules, permissions, etc.)."""
         elapsed = (metadata or {}).get("elapsed_ms")
-        entry = {
+        entry: dict = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": event_type,
             "action": action,
