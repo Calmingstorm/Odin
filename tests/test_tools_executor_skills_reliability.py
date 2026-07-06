@@ -53,7 +53,7 @@ def test_success_not_error_prefixed():
 async def test_run_command_multi_unknown_host_is_error():
     from src.config.schema import ToolsConfig
     exe = ToolExecutor(config=ToolsConfig())
-    result = await exe._handle_run_command_multi(
+    result = await exe.system_tools._handle_run_command_multi(
         {"hosts": ["missing"], "command": "echo hi"},
     )
     # Returns (aggregate, exit_code); an unknown host makes it non-zero so
@@ -72,7 +72,7 @@ async def test_run_command_multi_all_success_is_ok():
         "h1": type("H", (), {"address": "localhost", "ssh_user": "root", "os": "linux"})(),
     }
     exe._run_on_host = AsyncMock(return_value=("output", 0))
-    text, exit_code = await exe._handle_run_command_multi(
+    text, exit_code = await exe.system_tools._handle_run_command_multi(
         {"hosts": ["h1"], "command": "uptime"},
     )
     assert exit_code == 0  # clean run → ok

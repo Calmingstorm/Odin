@@ -808,7 +808,7 @@ class TestInvokeSkillTool:
         }
         exe = ToolExecutor(config=cfg)
         exe._run_on_host = AsyncMock(return_value="ok")
-        result = await exe._handle_run_command_multi({
+        result = await exe.system_tools._handle_run_command_multi({
             "hosts": ["dev", "prod"],
             "command": "systemctl restart nginx",
         })

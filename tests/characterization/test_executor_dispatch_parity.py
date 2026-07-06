@@ -87,19 +87,30 @@ class TestDispatchPartition:
     def test_every_executor_tool_resolves_a_handler(self):
         ex = _executor()
         for name in sorted(EXECUTOR_ROUTED):
-            handler = getattr(ex, f"_handle_{name}", None)
+            handler = ex._resolve_handler(name)
             assert callable(handler), f"no handler for executor-routed tool {name}"
 
-    def test_no_orphan_handlers(self):
+    def test_no_orphan_handlers_and_no_leftover_delegates(self):
+        """Owner-aware (P4+): the class defines exactly the CORE-owned
+        handlers; moved handlers must be GONE from ToolExecutor — no
+        delegate methods left behind (the RFC-002 facade lesson)."""
+        from src.tools.executor import EXECUTOR_HANDLERS
+
+        core_owned = {n for n, (o, _a) in EXECUTOR_HANDLERS.items() if o == "core"}
+        moved = set(EXECUTOR_ROUTED) - core_owned
         defined = {
             attr.removeprefix("_handle_")
             for attr in vars(ToolExecutor)
             if attr.startswith("_handle_")
         }
-        assert defined == set(EXECUTOR_ROUTED), (
-            f"handler set drifted: extra={sorted(defined - EXECUTOR_ROUTED)} "
-            f"missing={sorted(EXECUTOR_ROUTED - defined)}"
+        assert defined == core_owned, (
+            f"class handler set drifted: extra={sorted(defined - core_owned)} "
+            f"missing={sorted(core_owned - defined)}"
         )
+        for name in sorted(moved):
+            assert not hasattr(ToolExecutor, f"_handle_{name}"), (
+                f"{name} moved to a domain but a class-level delegate remains"
+            )
 
     def test_stateful_attr_inventory(self):
         ex = _executor()
@@ -125,15 +136,52 @@ class TestDispatchTable:
             assert owner_key in ex._handler_owners, f"{name}: unbound owner {owner_key!r}"
 
     def test_table_resolution_identical_to_legacy_getattr(self):
-        """Bridge assertion (plan §3.2): for every entry, the table resolves
-        the SAME function the legacy f-string getattr would."""
+        """Bridge assertion (plan §3.2), owner-aware since P4: CORE-owned
+        entries resolve the same function the legacy f-string getattr
+        would; DOMAIN-owned entries resolve a callable on their owner and
+        the executor has no legacy attr left."""
         from src.tools.executor import EXECUTOR_HANDLERS
 
         ex = _executor()
         for name, (owner_key, attr) in EXECUTOR_HANDLERS.items():
             table_handler = getattr(ex._handler_owners[owner_key], attr)
-            legacy_handler = getattr(ex, f"_handle_{name}")
-            assert table_handler == legacy_handler, f"{name} diverged from legacy resolution"
+            assert callable(table_handler), f"{name}: table resolves nothing"
+            if owner_key == "core":
+                legacy_handler = getattr(ex, f"_handle_{name}")
+                assert table_handler == legacy_handler, f"{name} diverged from legacy"
+            else:
+                assert not hasattr(ToolExecutor, f"_handle_{name}"), (
+                    f"{name} is domain-owned but ToolExecutor still defines it"
+                )
+
+    async def test_instance_override_beats_domain_owner(self):
+        """The historical executor-instance patch seam keeps governing even
+        for handlers whose real bodies moved to domain owners (13+ existing
+        test sites patch ``executor._handle_x = fake``)."""
+        ex = _executor()
+
+        async def fake(tool_input):
+            return "override-beats-domain"
+
+        ex._handle_run_command = fake  # run_command is system-owned since P4
+        assert ex._resolve_handler("run_command") is fake
+        res = await ex.execute("run_command", {"command": "x"})
+        assert res.output.strip() == "override-beats-domain"
+
+    def test_domain_state_identity(self):
+        """HandlerDeps identity contract (R1 blocker #3): domain-visible
+        state IS the executor's own objects, live on every access."""
+        ex = _executor()
+        system = ex._handler_owners["system"]
+        files = ex._handler_owners["files_docs"]
+        assert system.config is ex.config
+        assert files.config is ex.config
+        assert system.output_streamer is ex.output_streamer
+        assert system._host_access is ex._host_access
+        # live, not copied: swapping the executor's attr is seen by domains
+        sentinel = object()
+        ex.config = sentinel
+        assert system.config is sentinel
 
     async def test_table_resolves_instance_patch(self):
         """The seam holds THROUGH the table: an instance-attribute patch on
