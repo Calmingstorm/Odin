@@ -12,10 +12,7 @@ from __future__ import annotations
 import json
 import logging
 
-import pytest
-
-from src.audit.logger import AuditLogger, _cap_tool_input, DEFAULT_TOOL_INPUT_CAP
-
+from src.audit.logger import DEFAULT_TOOL_INPUT_CAP, AuditLogger, _cap_tool_input
 
 # ---------------------------------------------------------------------------
 # tool_input cap

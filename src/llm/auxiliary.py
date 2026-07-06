@@ -58,7 +58,8 @@ class AuxiliaryLLMClient:
     ) -> None:
         self.aux_client = aux_client
         self.primary_client = primary_client
-        self.enabled_tasks: set[str] = enabled_tasks if enabled_tasks is not None else set(KNOWN_TASKS)
+        self.enabled_tasks: set[str] = (
+            enabled_tasks if enabled_tasks is not None else set(KNOWN_TASKS))
         self.cost_tracker = cost_tracker
         self._aux_calls: int = 0
         self._fallback_calls: int = 0

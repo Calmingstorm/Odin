@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+
 from src.sessions.manager import _sanitize_summary
 
 
@@ -108,4 +109,5 @@ class TestHistoryReadOnlyMarker:
                 summary_idx = i
         assert marker_idx is not None, "HISTORY_READ_ONLY marker missing"
         assert summary_idx is not None, "Summary missing"
-        assert marker_idx < summary_idx, f"Marker at {marker_idx} must be before summary at {summary_idx}"
+        assert marker_idx < summary_idx, (f"Marker at {marker_idx} must be before summary at "
+                                          f"{summary_idx}")

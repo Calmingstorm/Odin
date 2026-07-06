@@ -1,8 +1,6 @@
 """Tests for src/tools/output_streamer.py — tool output streaming."""
 from __future__ import annotations
 
-import asyncio
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,7 +10,6 @@ from src.tools.output_streamer import (
     ToolOutputStreamer,
     _ActiveStream,
 )
-
 
 # ---------------------------------------------------------------------------
 # StreamChunk
@@ -589,7 +586,11 @@ class TestExecCommandStreaming:
 
         cb = AsyncMock()
         with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch("src.tools.executor.run_local_command", new_callable=AsyncMock, return_value=(0, "ok")) as mock_run:
+             patch(
+                 "src.tools.executor.run_local_command",
+                 new_callable=AsyncMock,
+                 return_value=(0, "ok"),
+             )as mock_run:
             await executor._exec_command("127.0.0.1", "echo hi", on_output=cb)
             mock_run.assert_awaited_once()
             _, kwargs = mock_run.call_args
@@ -612,7 +613,11 @@ class TestExecCommandStreaming:
 
         cb = AsyncMock()
         with patch("src.tools.executor.is_local_address", return_value=False), \
-             patch("src.tools.executor.run_ssh_command", new_callable=AsyncMock, return_value=(0, "ok")) as mock_run:
+             patch(
+                 "src.tools.executor.run_ssh_command",
+                 new_callable=AsyncMock,
+                 return_value=(0, "ok"),
+             )as mock_run:
             await executor._exec_command("10.0.0.1", "echo hi", on_output=cb)
             mock_run.assert_awaited_once()
             _, kwargs = mock_run.call_args
@@ -631,7 +636,11 @@ class TestExecCommandStreaming:
         executor.ssh_pool = None
 
         with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch("src.tools.executor.run_local_command", new_callable=AsyncMock, return_value=(0, "ok")) as mock_run:
+             patch(
+                 "src.tools.executor.run_local_command",
+                 new_callable=AsyncMock,
+                 return_value=(0, "ok"),
+             )as mock_run:
             await executor._exec_command("127.0.0.1", "echo hi")
             _, kwargs = mock_run.call_args
             assert kwargs["on_output"] is None
@@ -649,7 +658,11 @@ class TestHandleRunCommandStreaming:
         executor = ToolExecutor()
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
-        executor.config.hosts = {"myhost": MagicMock(address="127.0.0.1", ssh_user="root", os="linux")}
+        executor.config.hosts = {"myhost": MagicMock(
+            address="127.0.0.1",
+            ssh_user="root",
+            os="linux",
+        )}
         executor.bulkheads = MagicMock()
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
@@ -663,7 +676,11 @@ class TestHandleRunCommandStreaming:
         executor.output_streamer = streamer
 
         with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch("src.tools.executor.run_local_command", new_callable=AsyncMock, return_value=(0, "output")):
+             patch(
+                 "src.tools.executor.run_local_command",
+                 new_callable=AsyncMock,
+                 return_value=(0, "output"),
+             ):
             result = await executor.system_tools._handle_run_command(
                 {"host": "myhost", "command": "ls"}
             )
@@ -679,7 +696,11 @@ class TestHandleRunCommandStreaming:
         executor = ToolExecutor()
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
-        executor.config.hosts = {"myhost": MagicMock(address="127.0.0.1", ssh_user="root", os="linux")}
+        executor.config.hosts = {"myhost": MagicMock(
+            address="127.0.0.1",
+            ssh_user="root",
+            os="linux",
+        )}
         executor.bulkheads = MagicMock()
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
@@ -691,7 +712,11 @@ class TestHandleRunCommandStreaming:
         executor.output_streamer = streamer
 
         with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch("src.tools.executor.run_local_command", new_callable=AsyncMock, return_value=(0, "output")) as mock_run:
+             patch(
+                 "src.tools.executor.run_local_command",
+                 new_callable=AsyncMock,
+                 return_value=(0, "output"),
+             )as mock_run:
             await executor.system_tools._handle_run_command({"host": "myhost", "command": "ls"})
 
         streamer.create_callback.assert_not_called()
@@ -705,7 +730,11 @@ class TestHandleRunCommandStreaming:
         executor = ToolExecutor()
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
-        executor.config.hosts = {"myhost": MagicMock(address="127.0.0.1", ssh_user="root", os="linux")}
+        executor.config.hosts = {"myhost": MagicMock(
+            address="127.0.0.1",
+            ssh_user="root",
+            os="linux",
+        )}
         executor.bulkheads = MagicMock()
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
@@ -714,7 +743,11 @@ class TestHandleRunCommandStreaming:
         executor.output_streamer = None
 
         with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch("src.tools.executor.run_local_command", new_callable=AsyncMock, return_value=(0, "output")):
+             patch(
+                 "src.tools.executor.run_local_command",
+                 new_callable=AsyncMock,
+                 return_value=(0, "output"),
+             ):
             result = await executor.system_tools._handle_run_command(
                 {"host": "myhost", "command": "ls"}
             )
@@ -755,7 +788,11 @@ class TestHandleRunScriptStreaming:
         executor = ToolExecutor()
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
-        executor.config.hosts = {"myhost": MagicMock(address="127.0.0.1", ssh_user="root", os="linux")}
+        executor.config.hosts = {"myhost": MagicMock(
+            address="127.0.0.1",
+            ssh_user="root",
+            os="linux",
+        )}
         executor.bulkheads = MagicMock()
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
@@ -769,7 +806,11 @@ class TestHandleRunScriptStreaming:
         executor.output_streamer = streamer
 
         with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch("src.tools.executor.run_local_command", new_callable=AsyncMock, return_value=(0, "output")):
+             patch(
+                 "src.tools.executor.run_local_command",
+                 new_callable=AsyncMock,
+                 return_value=(0, "output"),
+             ):
             await executor.system_tools._handle_run_script({
                 "host": "myhost", "script": "echo hi", "interpreter": "bash",
             })
@@ -784,7 +825,11 @@ class TestHandleRunScriptStreaming:
         executor = ToolExecutor()
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
-        executor.config.hosts = {"myhost": MagicMock(address="127.0.0.1", ssh_user="root", os="linux")}
+        executor.config.hosts = {"myhost": MagicMock(
+            address="127.0.0.1",
+            ssh_user="root",
+            os="linux",
+        )}
         executor.bulkheads = MagicMock()
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
@@ -793,7 +838,11 @@ class TestHandleRunScriptStreaming:
         executor.output_streamer = None
 
         with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch("src.tools.executor.run_local_command", new_callable=AsyncMock, return_value=(0, "output")):
+             patch(
+                 "src.tools.executor.run_local_command",
+                 new_callable=AsyncMock,
+                 return_value=(0, "output"),
+             ):
             result = await executor.system_tools._handle_run_script({
                 "host": "myhost", "script": "echo hi", "interpreter": "bash",
             })
@@ -846,8 +895,9 @@ class TestStreamingConfig:
 class TestAPIEndpoint:
     @pytest.mark.asyncio
     async def test_no_executor(self):
-        from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
         from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         bot = MagicMock()
@@ -857,7 +907,6 @@ class TestAPIEndpoint:
         routes = create_api_routes(bot)
         app.router.add_routes(routes)
 
-        from aiohttp.test_utils import TestClient, TestServer
         async with TestClient(TestServer(app)) as client:
             resp = await client.get("/api/tool-streams")
             assert resp.status == 200
@@ -869,6 +918,7 @@ class TestAPIEndpoint:
     async def test_with_streamer(self):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         streamer = ToolOutputStreamer(enabled_tools={"run_command"})
@@ -894,6 +944,7 @@ class TestAPIEndpoint:
     async def test_with_active_stream(self):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         streamer = ToolOutputStreamer(enabled_tools={"run_command"})

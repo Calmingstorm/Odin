@@ -62,9 +62,24 @@ class CostTracker:
         self._total_requests: int = 0
 
         # Per-dimension counters: {key: {input_tokens, output_tokens, cost_usd, requests}}
-        self._by_user: dict[str, dict] = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "requests": 0})
-        self._by_channel: dict[str, dict] = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "requests": 0})
-        self._by_tool: dict[str, dict] = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "requests": 0})
+        self._by_user: dict[str, dict] = defaultdict(lambda: {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+            "requests": 0,
+        })
+        self._by_channel: dict[str, dict] = defaultdict(lambda: {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+            "requests": 0,
+        })
+        self._by_tool: dict[str, dict] = defaultdict(lambda: {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+            "requests": 0,
+        })
 
         # Recent records for time-windowed queries (bounded)
         self._recent: list[UsageRecord] = []

@@ -5,7 +5,6 @@ formatting, rate limiting per webhook URL, and secret scrubbing.
 """
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any
 
@@ -166,7 +165,7 @@ class SlackNotifier:
                 log.warning("Slack webhook returned %d: %s", resp.status, body[:200])
                 self._error_count += 1
                 return False
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("Slack webhook timed out for channel=%s", channel)
             self._error_count += 1
             return False

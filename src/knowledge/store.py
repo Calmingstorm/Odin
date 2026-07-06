@@ -10,7 +10,7 @@ import difflib
 import hashlib
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
@@ -390,7 +390,8 @@ class KnowledgeStore:
             # Add preview from first chunk
             try:
                 first = self._conn.execute(  # type: ignore[union-attr]
-                    "SELECT content FROM knowledge_chunks WHERE source = ? ORDER BY chunk_index LIMIT 1",
+                    "SELECT content FROM knowledge_chunks WHERE source = ? "
+                    "ORDER BY chunk_index LIMIT 1",
                     (r[0],),
                 ).fetchone()
                 if first and first[0]:
@@ -720,7 +721,7 @@ class KnowledgeStore:
             return 0
         try:
             version = self._next_version(source)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             self._conn.execute(
                 "INSERT INTO knowledge_versions "
                 "(source, version, content_hash, content, chunk_count, "
@@ -744,8 +745,8 @@ class KnowledgeStore:
         old_lines = old_content.splitlines(keepends=True)
         new_lines = new_content.splitlines(keepends=True)
         diff = list(difflib.unified_diff(old_lines, new_lines, n=0))
-        added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
-        removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+        added = sum(1 for ln in diff if ln.startswith("+") and not ln.startswith("+++"))
+        removed = sum(1 for ln in diff if ln.startswith("-") and not ln.startswith("---"))
         if added == 0 and removed == 0:
             return "no content changes"
         parts = []
@@ -823,8 +824,8 @@ class KnowledgeStore:
             old_lines, new_lines,
             fromfile=f"v{v1}", tofile=f"v{v2}",
         ))
-        added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
-        removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+        added = sum(1 for ln in diff_lines if ln.startswith("+") and not ln.startswith("+++"))
+        removed = sum(1 for ln in diff_lines if ln.startswith("-") and not ln.startswith("---"))
         return {
             "source": source,
             "from_version": v1,
@@ -840,7 +841,7 @@ class KnowledgeStore:
         self,
         source: str,
         version: int,
-        embedder: "LocalEmbedder | None" = None,
+        embedder: LocalEmbedder | None = None,
     ) -> int:
         """Restore a previous version by re-ingesting its content snapshot.
 

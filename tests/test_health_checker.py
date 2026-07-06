@@ -1,25 +1,26 @@
 """Tests for src.health.checker — component health dashboard."""
 from __future__ import annotations
 
+from unittest.mock import MagicMock, PropertyMock
+
 import pytest
-from unittest.mock import MagicMock, AsyncMock, PropertyMock, patch
+
 from src.health.checker import (
+    _ALL_CHECKERS,
     ComponentStatus,
+    check_agents,
     check_all,
-    check_discord,
+    check_browser,
     check_codex,
-    check_sessions,
+    check_discord,
     check_knowledge,
+    check_loops,
+    check_monitoring,
+    check_scheduler,
+    check_sessions,
     check_ssh_hosts,
     check_voice,
-    check_monitoring,
-    check_browser,
-    check_scheduler,
-    check_loops,
-    check_agents,
-    _ALL_CHECKERS,
 )
-
 
 # ---------------------------------------------------------------------------
 # ComponentStatus dataclass
@@ -724,7 +725,7 @@ class TestCheckerList:
 
 class TestExports:
     def test_health_init_exports(self):
-        from src.health import ComponentStatus, check_all, HealthServer
+        from src.health import ComponentStatus, HealthServer, check_all
         assert ComponentStatus is not None
         assert check_all is not None
         assert HealthServer is not None
@@ -782,6 +783,7 @@ class TestHealthAPI:
     async def test_health_components_endpoint(self, mock_bot):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         app = web.Application()
@@ -801,6 +803,7 @@ class TestHealthAPI:
     async def test_health_components_has_all_names(self, mock_bot):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         app = web.Application()

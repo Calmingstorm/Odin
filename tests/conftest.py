@@ -96,14 +96,23 @@ def odin_config():
 
 # ── Planner / DAG execution test support ──────────────────────
 
-import asyncio
-import time
-from typing import Any
+import asyncio  # noqa: E402 — deliberate import order (env/bootstrap before heavy imports)
+import time  # noqa: E402 — deliberate import order (env/bootstrap before heavy imports)
+from typing import Any  # noqa: E402 — deliberate import order (env/bootstrap before heavy imports)
 
-from src.odin.context import ExecutionContext
-from src.odin.registry import ToolRegistry
-from src.odin.tools.base import BaseTool
-from src.odin.types import PlanSpec, StepSpec
+from src.odin.context import (  # noqa: E402 — deliberate mid-file import (see block comment)
+    ExecutionContext,
+)
+from src.odin.registry import (  # noqa: E402 — deliberate mid-file import (see block comment)
+    ToolRegistry,
+)
+from src.odin.tools.base import (  # noqa: E402 — deliberate mid-file import (see block comment)
+    BaseTool,
+)
+from src.odin.types import (  # noqa: E402 — deliberate import order (env/bootstrap before heavy imports)
+    PlanSpec,
+    StepSpec,
+)
 
 
 class TimestampTool(BaseTool):

@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from aiohttp import web
@@ -24,7 +24,7 @@ def _make_bot(tmp_path: Path | None = None) -> MagicMock:
 
 
 def _iso(dt: datetime) -> str:
-    return dt.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.replace(tzinfo=UTC).isoformat().replace("+00:00", "Z")
 
 
 def _write_audit(path: Path, rows: list[dict]) -> None:

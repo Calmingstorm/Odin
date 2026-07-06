@@ -51,7 +51,8 @@ def bot_has_guild_permissions(**perms: bool):
         if ctx.guild is None:
             raise commands.NoPrivateMessage()
         bot_perms = ctx.guild.me.guild_permissions
-        missing = [p for p, required in perms.items() if required and not getattr(bot_perms, p, False)]
+        missing = [p for p, required in perms.items()
+            if required and not getattr(bot_perms, p, False)]
         if missing:
             raise commands.BotMissingPermissions(missing)
         return True

@@ -5,10 +5,7 @@ custom id_key, k parameter, empty inputs, and single-list passthrough.
 """
 from __future__ import annotations
 
-import pytest
-
 from src.search.hybrid import reciprocal_rank_fusion
-
 
 # ---------------------------------------------------------------------------
 # Basic merging

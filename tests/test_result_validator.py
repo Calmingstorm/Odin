@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import json
+
 import pytest
 
 from src.tools.result_validator import (
-    DEFAULT_SCHEMA,
-    RESULT_MAX_CHARS,
-    TOOL_SCHEMAS,
-    ToolResultSchema,
-    ValidationOutcome,
-    ResultValidationStats,
     _EMPTY_OK_TOOLS,
     _EMPTY_RESULT_PLACEHOLDER,
     _ERROR_PREFIXES,
     _JSON_TOOLS,
+    DEFAULT_SCHEMA,
+    RESULT_MAX_CHARS,
+    TOOL_SCHEMAS,
+    ResultValidationStats,
+    ToolResultSchema,
+    ValidationOutcome,
     _is_error_result,
     _truncate_smart,
     validate_tool_result,
@@ -339,7 +340,13 @@ class TestResultValidationStats:
     def test_as_dict_keys(self):
         stats = ResultValidationStats()
         d = stats.as_dict()
-        expected_keys = {"coerced_type", "replaced_empty", "truncated", "invalid_json", "total_validated"}
+        expected_keys = {
+            "coerced_type",
+            "replaced_empty",
+            "truncated",
+            "invalid_json",
+            "total_validated",
+        }
         assert set(d.keys()) == expected_keys
 
     def test_no_stats_object_works(self):
@@ -357,7 +364,7 @@ class TestMultipleViolations:
         assert "empty_result_replaced" in outcome.violations
 
     def test_coerced_and_truncated(self):
-        schema = ToolResultSchema(max_chars=5)
+        ToolResultSchema(max_chars=5)
         outcome = validate_tool_result("run_command", 12345678)
         # Coerced int to str, but may not be truncated with default max_chars
         assert "coerced_int_to_str" in outcome.violations
@@ -468,7 +475,7 @@ class TestExecutorIntegration:
     @pytest.mark.asyncio
     async def test_validation_stats_increment(self, executor):
         assert executor.validation_stats.total_validated == 0
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import patch
         async def mock_handler(inp):
             return "test output"
         executor._handle_test_tool = mock_handler
@@ -505,7 +512,9 @@ class TestExecutorIntegration:
         assert executor.validation_stats.replaced_empty == 1
 
 
-from unittest.mock import patch
+from unittest.mock import (  # noqa: E402 — deliberate mid-file import (see block comment)
+    patch,
+)
 
 
 # -----------------------------------------------------------------------

@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import platform
-from datetime import datetime, timezone
 
-import discord
 from discord.ext import commands
 
+import discord
 from src import __version__
 from src.constants import BOT_NAME
 from src.discord.helpers.embeds import info_embed, odin_embed

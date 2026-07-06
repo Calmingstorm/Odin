@@ -14,7 +14,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -37,7 +37,7 @@ _MAX_SECRET_LEN = 256
 _MAX_NAME_LEN = 128
 
 
-class EventType(str, Enum):
+class EventType(str, Enum):  # noqa: UP042 — str(member) output differs under StrEnum; deferred to a typed-verification pass
     """Categories of events that can trigger outbound webhooks."""
 
     TOOL_EXECUTION = "tool_execution"
@@ -69,7 +69,7 @@ class WebhookTarget:
 
     def __post_init__(self) -> None:
         if not self.created_at:
-            self.created_at = datetime.now(timezone.utc).isoformat()
+            self.created_at = datetime.now(UTC).isoformat()
 
     def accepts_event(self, event_type: str) -> bool:
         """Return True if this webhook subscribes to the given event type."""
@@ -107,7 +107,7 @@ class DeliveryResult:
 
     def __post_init__(self) -> None:
         if not self.timestamp:
-            self.timestamp = datetime.now(timezone.utc).isoformat()
+            self.timestamp = datetime.now(UTC).isoformat()
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -174,7 +174,7 @@ def build_event_payload(
     return {
         "event_id": event_id or uuid.uuid4().hex,
         "event_type": event_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "source": source,
         "data": data,
     }
@@ -243,7 +243,8 @@ class OutboundWebhookDispatcher:
             raise ValueError("URL must start with http:// or https://")
         from ..tools.url_safety import is_url_blocked
         if is_url_blocked(url):
-            raise ValueError("Webhook URL targets a blocked address (localhost, private IP, or metadata endpoint)")
+            raise ValueError("Webhook URL targets a blocked address (localhost, private IP, or "
+                             "metadata endpoint)")
         if len(name) > _MAX_NAME_LEN:
             raise ValueError(f"Name must be under {_MAX_NAME_LEN} characters")
         if len(secret) > _MAX_SECRET_LEN:
@@ -396,7 +397,7 @@ class OutboundWebhookDispatcher:
                     if success:
                         return last_result
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 latency = (time.monotonic() - t0) * 1000
                 last_result = DeliveryResult(
                     webhook_id=target.id,

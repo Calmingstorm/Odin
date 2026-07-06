@@ -189,20 +189,36 @@ async def process_web_chat(
       - tools_used: list[str] — tool names called during processing
       - is_error: bool — whether an error occurred
     """
-    from ..permissions.manager import PermissionManager
     from ..permissions.host_access import HostAccessManager
+    from ..permissions.manager import PermissionManager
 
     tier_token = PermissionManager.set_request_tier(tier) if tier else None
-    host_token = HostAccessManager.set_request_host_scope(token_allowed_hosts) if token_allowed_hosts is not None else None
-    default_host_token = HostAccessManager.set_request_default_host(token_default_host) if token_default_host else None
+    host_token = (HostAccessManager.set_request_host_scope(token_allowed_hosts)
+        if token_allowed_hosts is not None else None)
+    default_host_token = (HostAccessManager.set_request_default_host(token_default_host)
+        if token_default_host else None)
 
     try:
         if persist_channel_lock:
             lock = WEB_CHANNEL_LOCKS.setdefault(channel_id, asyncio.Lock())
             async with lock:
-                return await _do_process_web_chat(bot, content, channel_id, user_id, username, allowed_tools)
+                return await _do_process_web_chat(
+                    bot,
+                    content,
+                    channel_id,
+                    user_id,
+                    username,
+                    allowed_tools,
+                )
         else:
-            return await _do_process_web_chat(bot, content, channel_id, user_id, username, allowed_tools)
+            return await _do_process_web_chat(
+                bot,
+                content,
+                channel_id,
+                user_id,
+                username,
+                allowed_tools,
+            )
     finally:
         if tier_token is not None:
             PermissionManager.reset_request_tier(tier_token)
@@ -289,7 +305,8 @@ async def _do_process_web_chat(
         log.error("Web chat error: %s", e, exc_info=True)
         bot.sessions.remove_last_message(channel_id, "user")
         return {
-            "response": "Something went wrong processing your message. Check server logs for details.",
+            "response": "Something went wrong processing your message. "
+                        "Check server logs for details.",
             "tools_used": [],
             "is_error": True,
             "files": [],

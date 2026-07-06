@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import json
-import time
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import web
@@ -21,7 +20,6 @@ from src.trajectories.saver import (
     _collect_tools_used,
     _trajectory_filename,
 )
-
 
 # ---------------------------------------------------------------------------
 # ToolIteration
@@ -225,14 +223,14 @@ class TestCollectToolsUsed:
 
 class TestTrajectoryFilename:
     def test_format(self):
-        from datetime import datetime, timezone
-        dt = datetime(2026, 4, 15, 12, 0, 0, tzinfo=timezone.utc)
+        from datetime import datetime
+        dt = datetime(2026, 4, 15, 12, 0, 0, tzinfo=UTC)
         assert _trajectory_filename(dt) == "2026-04-15.jsonl"
 
     def test_different_dates(self):
-        from datetime import datetime, timezone
-        dt1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        dt2 = datetime(2026, 12, 31, tzinfo=timezone.utc)
+        from datetime import datetime
+        dt1 = datetime(2026, 1, 1, tzinfo=UTC)
+        dt2 = datetime(2026, 12, 31, tzinfo=UTC)
         assert _trajectory_filename(dt1) == "2026-01-01.jsonl"
         assert _trajectory_filename(dt2) == "2026-12-31.jsonl"
 
@@ -707,7 +705,7 @@ class TestTrajectoryAPIUnavailable:
 
 class TestTrajectoryImports:
     def test_import_from_package(self):
-        from src.trajectories import TrajectorySaver, TrajectoryTurn, ToolIteration
+        from src.trajectories import ToolIteration, TrajectorySaver, TrajectoryTurn
         assert TrajectorySaver is not None
         assert TrajectoryTurn is not None
         assert ToolIteration is not None

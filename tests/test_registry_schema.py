@@ -1,8 +1,7 @@
 """Schema consistency tests — generated from the tool registry."""
 from __future__ import annotations
 
-import pytest
-from src.tools.registry import TOOLS, TOOL_MAP
+from src.tools.registry import TOOL_MAP, TOOLS
 
 
 class TestRegistryConsistency:
@@ -29,7 +28,8 @@ class TestRegistryConsistency:
 
     def test_no_duplicate_names(self):
         names = [t["name"] for t in TOOLS]
-        assert len(names) == len(set(names)), f"Duplicate tool names: {[n for n in names if names.count(n) > 1]}"
+        assert len(names) == len(set(names)), (
+            f"Duplicate tool names: {[n for n in names if names.count(n) > 1]}")
 
     def test_executor_handles_shell_tools(self):
         """Shell execution tools must resolve to a handler through the

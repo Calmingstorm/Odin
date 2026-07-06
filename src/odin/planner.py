@@ -143,7 +143,8 @@ class Planner:
                 ctx.record(step_id, sr)
                 result.steps[step_id] = sr
 
-                if sr.status not in (StepStatus.SUCCESS,) and not step_map[step_id].continue_on_failure:
+                if (sr.status not in (StepStatus.SUCCESS,)
+                        and not step_map[step_id].continue_on_failure):
                     result.success = False
                     # cascade-skip dependents
                     for s in plan.steps:
@@ -155,9 +156,9 @@ class Planner:
         return result
 
 
-def _make_skip(spec: StepSpec) -> "StepResult":
+def _make_skip(spec: StepSpec) -> StepResult:
     from src.odin.types import StepResult
     return StepResult(
         status=StepStatus.SKIPPED,
-        error=f"skipped due to upstream failure",
+        error="skipped due to upstream failure",
     )

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import importlib
 import logging
-import sys
 
 
 class TestNoLoggingShadow:
@@ -21,7 +20,7 @@ class TestNoLoggingShadow:
 
     def test_odin_log_importable(self):
         """The renamed odin_log package must import cleanly."""
-        from src.odin_log import setup_logging, get_logger  # noqa: F401
+        from src.odin_log import get_logger, setup_logging  # noqa: F401
 
     def test_no_src_logging_package(self):
         """src/logging/ directory must not exist — it shadows stdlib."""

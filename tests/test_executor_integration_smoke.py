@@ -174,7 +174,7 @@ class TestOnMessageWiring:
     """on_message must invoke both the executor flow and cog command processing."""
 
     def test_on_message_is_overridden_on_odinbot(self):
-        bot = _make_bot()
+        _make_bot()
         # commands.Bot has its own on_message; OdinBot must override it
         from src.discord.client import OdinBot as Klass
         assert "on_message" in Klass.__dict__, (
@@ -189,6 +189,7 @@ class TestOnMessageWiring:
         # behavior is pinned in tests/characterization/test_intake_gating.py
         # (test_plain_message_reaches_handler asserts process_commands awaited).
         import inspect
+
         from src.discord.intake_pipeline import MessageIntake
         src = inspect.getsource(MessageIntake.handle)
         assert "process_commands" in src, (
@@ -207,6 +208,7 @@ class TestOnMessageWiring:
         # behaviorally pinned in tests/characterization/test_intake_gating.py
         # (test_secret_scrub_deletes_before_commands_and_handler).
         import inspect
+
         from src.discord.intake_pipeline import MessageIntake
         src = inspect.getsource(MessageIntake.handle)
         # P4: the intake owns the secret check as a module function now
@@ -287,6 +289,7 @@ class TestEthosPreservation:
         # Search the codex client for the literal "auto" tool_choice.
         # If a future change narrows this, the executor pattern is broken.
         import inspect
+
         from src.llm import openai_codex
         src = inspect.getsource(openai_codex)
         assert '"tool_choice": "auto"' in src or "'tool_choice': 'auto'" in src
@@ -432,8 +435,8 @@ class TestBuildLoopModuleWirings:
         assert bot.stuck_loop_tracker_cls is StuckLoopTracker
 
     def test_audit_signer_wired_when_key_set(self):
-        from src.config.schema import Config
         from src.audit.signer import AuditSigner
+        from src.config.schema import Config
         cfg = Config(discord={"token": "x"}, audit={"hmac_key": "k" * 16})
         bot = OdinBot(cfg)
         assert isinstance(bot.audit_signer, AuditSigner)
@@ -795,9 +798,10 @@ class TestInvokeSkillTool:
     @pytest.mark.asyncio
     async def test_run_command_multi_per_host_governor(self):
         """run_command_multi checks governor per-host before parallel dispatch."""
-        from src.tools.executor import ToolExecutor
-        from src.config.schema import ToolsConfig, GovernorConfig
         from unittest.mock import AsyncMock
+
+        from src.config.schema import GovernorConfig, ToolsConfig
+        from src.tools.executor import ToolExecutor
 
         cfg = ToolsConfig(
             governor=GovernorConfig(host_overrides={"prod": "strict"}),
@@ -823,12 +827,12 @@ class TestInvokeSkillTool:
     @pytest.mark.asyncio
     async def test_memory_manage_get_action(self, tmp_path):
         """memory_manage supports 'get' action — a single-key lookup."""
-        from src.tools.executor import ToolExecutor
         from src.config.schema import ToolsConfig
-        from src.tools.recovery import RecoveryStats
-        from src.tools.risk_classifier import RiskStats
         from src.tools.bulkhead import BulkheadRegistry
+        from src.tools.executor import ToolExecutor
+        from src.tools.recovery import RecoveryStats
         from src.tools.result_validator import ResultValidationStats
+        from src.tools.risk_classifier import RiskStats
 
         # Proper construction (RFC-004 P6) — the state domain reaches the
         # memory path/lock live through deps; overrides below still govern.

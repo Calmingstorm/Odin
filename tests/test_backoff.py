@@ -5,7 +5,6 @@ Tests the backoff module, Codex retry config integration, and SSH retry logic.
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -24,7 +23,6 @@ from src.tools.ssh import (
     _is_ssh_transient_failure,
     run_ssh_command,
 )
-
 
 # ---------------------------------------------------------------------------
 # compute_backoff
@@ -171,7 +169,10 @@ class TestCodexClientRetryConfig:
 
 class TestIsSSHTransientFailure:
     def test_connection_refused_255(self):
-        assert _is_ssh_transient_failure(255, "ssh: connect to host 10.0.0.1 port 22: Connection refused")
+        assert _is_ssh_transient_failure(
+            255,
+            "ssh: connect to host 10.0.0.1 port 22: Connection refused",
+        )
 
     def test_connection_reset_255(self):
         assert _is_ssh_transient_failure(255, "Connection reset by peer")
@@ -249,7 +250,10 @@ class TestSSHRetry:
         with patch("src.tools.ssh.asyncio.create_subprocess_exec") as mock_exec, \
              patch("src.tools.ssh.compute_backoff", return_value=0.0):
             fail_proc = AsyncMock()
-            fail_proc.communicate.return_value = (b"ssh: connect to host 10.0.0.1 port 22: Connection refused", b"")
+            fail_proc.communicate.return_value = (
+                b"ssh: connect to host 10.0.0.1 port 22: Connection refused",
+                b"",
+            )
             fail_proc.returncode = 255
 
             ok_proc = AsyncMock()
@@ -284,7 +288,7 @@ class TestSSHRetry:
             call_count += 1
             if call_count == 1:
                 proc = AsyncMock()
-                proc.communicate.side_effect = asyncio.TimeoutError()
+                proc.communicate.side_effect = TimeoutError()
                 proc.kill = MagicMock()
                 return proc
             proc = AsyncMock()

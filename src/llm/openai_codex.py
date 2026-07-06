@@ -275,7 +275,8 @@ class CodexChatClient:
         preserves tool call / tool result structure for the Responses API:
 
         - Assistant text → {"type": "message", "role": "assistant", "content": [output_text]}
-        - tool_use block → {"type": "function_call", "call_id": ..., "name": ..., "arguments": "..."}
+        - tool_use block →
+          {"type": "function_call", "call_id": ..., "name": ..., "arguments": "..."}
         - tool_result block → {"type": "function_call_output", "call_id": ..., "output": "..."}
         - User text → {"type": "message", "role": "user", "content": [input_text]}
         - Image blocks → {"type": "message", "role": "user", "content": [input_image]}
@@ -291,7 +292,8 @@ class CodexChatClient:
                 ct = "output_text" if role == "assistant" else "input_text"
                 codex_input.append({
                     "type": "message",
-                    "role": role if role in ("user", "assistant", "developer", "system") else "user",
+                    "role": (role
+                             if role in ("user", "assistant", "developer", "system") else "user"),
                     "content": [{"type": ct, "text": content}],
                 })
                 continue
@@ -326,7 +328,8 @@ class CodexChatClient:
                         "type": "function_call",
                         "call_id": block.get("id", ""),
                         "name": block.get("name", ""),
-                        "arguments": json.dumps(tool_input) if isinstance(tool_input, dict) else str(tool_input),
+                        "arguments": (json.dumps(tool_input)
+                                      if isinstance(tool_input, dict) else str(tool_input)),
                     })
 
                 elif btype == "tool_result":
@@ -369,7 +372,9 @@ class CodexChatClient:
                 if msg_content:
                     codex_input.append({
                         "type": "message",
-                        "role": role if role in ("user", "assistant", "developer", "system") else "user",
+                        "role": (role
+                                 if role in ("user", "assistant", "developer", "system")
+                                 else "user"),
                         "content": msg_content,
                     })
 
@@ -487,7 +492,11 @@ class CodexChatClient:
                             self.breaker.record_failure()
                             last_error = str(e)
                             if attempt < self.max_retries - 1:
-                                wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
+                                wait = compute_backoff(
+                                    attempt,
+                                    self.retry_base_delay,
+                                    self.retry_max_delay,
+                                )
                                 log.warning(
                                     "Codex stream failed (attempt %d/%d): %s. Retrying in %.1fs...",
                                     attempt + 1, self.max_retries, last_error, wait,
@@ -503,7 +512,11 @@ class CodexChatClient:
                             attempt + 1, self.max_retries,
                         )
                         if attempt < self.max_retries - 1:
-                            wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
+                            wait = compute_backoff(
+                                attempt,
+                                self.retry_base_delay,
+                                self.retry_max_delay,
+                            )
                             await asyncio.sleep(wait)
                             continue
                         self.breaker.record_failure()
@@ -522,7 +535,10 @@ class CodexChatClient:
                         # actually exercise the refresh token — merely dropping
                         # the cached token re-serves the same unexpired bearer —
                         # then retry the SAME account once.
-                        if attempt == 0 and not invalidated and await self._force_refresh(acct_idx, token):
+                        if attempt == 0 and not invalidated and await self._force_refresh(
+                            acct_idx,
+                            token,
+                        ):
                             log.warning("Codex auth 401, token refreshed, retrying...")
                             token, account_id = await self._token_for(acct_idx)
                             continue
@@ -544,9 +560,14 @@ class CodexChatClient:
                         self.breaker.record_failure()
                         last_error = f"HTTP 429: {error_body[:200]}"
                         if attempt < self.max_retries - 1:
-                            wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
+                            wait = compute_backoff(
+                                attempt,
+                                self.retry_base_delay,
+                                self.retry_max_delay,
+                            )
                             log.warning(
-                                "Codex rate limited (attempt %d/%d): %s. Rotating + retry in %.1fs...",
+                                "Codex rate limited (attempt %d/%d): %s. "
+                                "Rotating + retry in %.1fs...",
                                 attempt + 1, self.max_retries, last_error, wait,
                             )
                             await asyncio.sleep(wait)
@@ -558,7 +579,11 @@ class CodexChatClient:
                         self.breaker.record_failure()
                         last_error = f"HTTP {resp.status}: {error_body[:200]}"
                         if attempt < self.max_retries - 1:
-                            wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
+                            wait = compute_backoff(
+                                attempt,
+                                self.retry_base_delay,
+                                self.retry_max_delay,
+                            )
                             log.warning(
                                 "Codex API error (attempt %d/%d): %s. Retrying in %.1fs...",
                                 attempt + 1, self.max_retries, last_error, wait,
@@ -570,7 +595,7 @@ class CodexChatClient:
                     self.breaker.record_failure()
                     raise RuntimeError(f"Codex API error ({resp.status}): {error_body[:500]}")
 
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            except (TimeoutError, aiohttp.ClientError) as e:
                 # asyncio.TimeoutError: the 600s total timeout can fire
                 # mid-stream; it is not an aiohttp.ClientError and previously
                 # escaped both the retry loop and breaker bookkeeping.
@@ -664,8 +689,12 @@ class CodexChatClient:
                         parsed_args = json.loads(call_info["args"]) if call_info["args"] else {}
                     except json.JSONDecodeError:
                         parsed_args = {}
-                        parse_error = f"malformed tool arguments (invalid JSON): {call_info['args'][:200]}"
-                        log.warning("Failed to parse function call arguments: %s", call_info["args"][:200])
+                        parse_error = (f"malformed tool arguments (invalid JSON): "
+                                       f"{call_info['args'][:200]}")
+                        log.warning(
+                            "Failed to parse function call arguments: %s",
+                            call_info["args"][:200],
+                        )
                     tool_calls.append(ToolCall(
                         id=call_info["call_id"],
                         name=call_info["name"],
@@ -689,7 +718,8 @@ class CodexChatClient:
                             parsed_args = json.loads(args_str) if args_str else {}
                         except json.JSONDecodeError:
                             parsed_args = {}
-                            parse_error = f"malformed tool arguments (invalid JSON): {args_str[:200]}"
+                            parse_error = (f"malformed tool arguments (invalid JSON): "
+                                           f"{args_str[:200]}")
                         tool_calls.append(ToolCall(
                             id=call_info["call_id"],
                             name=call_info["name"],
@@ -709,8 +739,12 @@ class CodexChatClient:
             # but mark it so callers can tell it isn't a normal completion.
             elif event_type == "response.incomplete":
                 incomplete = True
-                reason = ((event.get("response") or {}).get("incomplete_details") or {}).get("reason") or "unknown"
-                log.warning("Codex stream incomplete (reason: %s) — returning partial output", reason)
+                reason = ((event.get("response") or {}).get("incomplete_details")
+                    or {}).get("reason") or "unknown"
+                log.warning(
+                    "Codex stream incomplete (reason: %s) — returning partial output",
+                    reason,
+                )
 
             # Final response object — fallback
             elif event_type == "response.completed":
@@ -733,7 +767,8 @@ class CodexChatClient:
                                 parsed_args = json.loads(args_str) if args_str else {}
                             except json.JSONDecodeError:
                                 parsed_args = {}
-                                parse_error = f"malformed tool arguments (invalid JSON): {args_str[:200]}"
+                                parse_error = (f"malformed tool arguments (invalid JSON): "
+                                               f"{args_str[:200]}")
                             tool_calls.append(ToolCall(
                                 id=call_id,
                                 name=item.get("name", ""),
@@ -796,8 +831,12 @@ class CodexChatClient:
                 raise CodexStreamError(f"{event_type}: {detail}")
 
             elif event_type == "response.incomplete":
-                reason = ((event.get("response") or {}).get("incomplete_details") or {}).get("reason") or "unknown"
-                log.warning("Codex stream incomplete (reason: %s) — returning partial output", reason)
+                reason = ((event.get("response") or {}).get("incomplete_details")
+                    or {}).get("reason") or "unknown"
+                log.warning(
+                    "Codex stream incomplete (reason: %s) — returning partial output",
+                    reason,
+                )
 
             # response.completed — final response object
             elif event_type == "response.completed":

@@ -36,8 +36,8 @@ def _is_public(path: str) -> bool:
 
 def _build_app(bot):
     """Build an app with the real API routes and auth middleware."""
+    from src.health.server import SessionManager, _make_auth_middleware
     from src.web.api import setup_api
-    from src.health.server import _make_auth_middleware, SessionManager
 
     sm = SessionManager(timeout_minutes=5)
     app = web.Application(middlewares=[

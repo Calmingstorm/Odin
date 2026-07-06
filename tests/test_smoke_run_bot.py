@@ -10,7 +10,6 @@ import importlib
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Entry point import
 # ---------------------------------------------------------------------------
@@ -247,8 +246,9 @@ class TestPhase5Imports:
         assert result == []
 
     def test_sqlite_vec(self):
-        from src.search.sqlite_vec import serialize_vector, deserialize_vector
         import struct
+
+        from src.search.sqlite_vec import serialize_vector
         data = serialize_vector([1.0, 2.0, 3.0])
         assert len(data) == 3 * struct.calcsize("f")
 
@@ -270,7 +270,7 @@ class TestPhase6Imports:
         assert signer is not None
 
     def test_risk_classifier(self):
-        from src.tools.risk_classifier import classify_command, RiskLevel
+        from src.tools.risk_classifier import RiskLevel, classify_command
         level, reason = classify_command("ls")
         assert isinstance(level, RiskLevel)
 
@@ -291,13 +291,13 @@ class TestPhase7Imports:
         assert sm.state == AgentState.SPAWNING
 
     def test_recovery(self):
-        from src.tools.recovery import classify_error, RecoveryStats
+        from src.tools.recovery import RecoveryStats
         stats = RecoveryStats()
         summary = stats.get_summary()
         assert summary["totals"]["attempts"] == 0
 
     def test_branch_freshness(self):
-        from src.tools.branch_freshness import is_test_command, FreshnessStats
+        from src.tools.branch_freshness import is_test_command
         assert is_test_command("pytest tests/") is True
         assert is_test_command("echo hello") is False
 
@@ -318,14 +318,14 @@ class TestPhase8Imports:
         assert ComponentStatus is not None
 
     def test_resource_usage(self):
-        from src.monitoring.resource_usage import collect_all, DirStats, scan_directory
+        from src.monitoring.resource_usage import DirStats, collect_all, scan_directory
         assert callable(collect_all)
         assert callable(scan_directory)
         ds = DirStats(path="/tmp", file_count=0, total_bytes=0)
         assert ds.file_count == 0
 
     def test_output_streamer(self):
-        from src.tools.output_streamer import ToolOutputStreamer, StreamChunk
+        from src.tools.output_streamer import ToolOutputStreamer
         streamer = ToolOutputStreamer()
         assert streamer is not None
 
@@ -342,11 +342,11 @@ class TestPhase8Imports:
 class TestPhase9Imports:
     def test_response_guards(self):
         from src.discord.response_guards import (
+            StuckLoopTracker,
             detect_fabrication,
             detect_hedging,
             detect_premature_failure,
             detect_stuck_loop,
-            StuckLoopTracker,
         )
         assert callable(detect_fabrication)
         assert callable(detect_hedging)
@@ -356,12 +356,16 @@ class TestPhase9Imports:
         assert tracker is not None
 
     def test_result_validator(self):
-        from src.tools.result_validator import validate_tool_result, ResultValidationStats
+        from src.tools.result_validator import ResultValidationStats
         stats = ResultValidationStats()
         assert stats.total_validated == 0
 
     def test_context_compressor(self):
-        from src.llm.context_compressor import compress_tool_context, PrefixTracker, CompressionStats
+        from src.llm.context_compressor import (
+            CompressionStats,
+            PrefixTracker,
+            compress_tool_context,
+        )
         assert callable(compress_tool_context)
         tracker = PrefixTracker()
         assert tracker is not None
@@ -369,7 +373,7 @@ class TestPhase9Imports:
         assert stats.compressions == 0
 
     def test_model_router(self):
-        from src.llm.model_router import ModelRouter, MessageIntent, RoutingStats
+        from src.llm.model_router import MessageIntent, RoutingStats
         assert MessageIntent.CHAT is not None
         assert MessageIntent.QUERY is not None
         assert MessageIntent.TASK is not None
@@ -385,7 +389,7 @@ class TestPhase9Imports:
 
 class TestPhase10Imports:
     def test_startup_diagnostics(self):
-        from src.health.startup import DiagnosticResult, StartupReport, run_startup_diagnostics
+        from src.health.startup import DiagnosticResult, run_startup_diagnostics
         assert callable(run_startup_diagnostics)
         dr = DiagnosticResult(name="test", passed=True, detail="ok")
         assert dr.passed is True
@@ -401,10 +405,10 @@ class TestPhase10Imports:
 
     def test_outbound_webhooks(self):
         from src.notifications.outbound_webhooks import (
-            OutboundWebhookDispatcher,
             EventType,
-            sign_payload,
+            OutboundWebhookDispatcher,
             build_event_payload,
+            sign_payload,
         )
         disp = OutboundWebhookDispatcher()
         assert len(disp.list_webhooks()) == 0

@@ -55,8 +55,12 @@ class ApiTokenManager:
                         log.warning("Skipping token %s: invalid tier '%s'", user_id, tier)
                         continue
                     allowed_tools = entry.get("allowed_tools", [])
-                    if not isinstance(allowed_tools, list) or not all(isinstance(t, str) for t in allowed_tools):
-                        log.warning("Skipping token %s: allowed_tools must be a list of strings", user_id)
+                    if (not isinstance(allowed_tools, list)
+                            or not all(isinstance(t, str) for t in allowed_tools)):
+                        log.warning(
+                            "Skipping token %s: allowed_tools must be a list of strings",
+                            user_id,
+                        )
                         continue
                     raw_hosts = entry.get("allowed_hosts")
                     if raw_hosts is None:
@@ -64,7 +68,10 @@ class ApiTokenManager:
                     elif isinstance(raw_hosts, list) and all(isinstance(h, str) for h in raw_hosts):
                         allowed_hosts = raw_hosts
                     else:
-                        log.warning("Skipping token %s: allowed_hosts must be a list of strings or null", user_id)
+                        log.warning(
+                            "Skipping token %s: allowed_hosts must be a list of strings or null",
+                            user_id,
+                        )
                         continue
                     default_host = str(entry.get("default_host", ""))
                     identity = ApiTokenIdentity(
@@ -160,7 +167,14 @@ class ApiTokenManager:
             st = self._tokens.get(user_id)
             if st is None:
                 return None
-            for field in ("username", "tier", "label", "allowed_tools", "allowed_hosts", "default_host"):
+            for field in (
+                "username",
+                "tier",
+                "label",
+                "allowed_tools",
+                "allowed_hosts",
+                "default_host",
+            ):
                 if field in kwargs:
                     setattr(st.identity, field, kwargs[field])
             self._save()

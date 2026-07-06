@@ -62,6 +62,15 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+# Long lines inside multi-line prompt/template string literals cannot be
+# wrapped without changing the string bytes (prompt content is behavior),
+# and a "#" inside a string is content, not a noqa comment. E501 is
+# therefore suppressed for the template-bearing files as a whole.
+"src/llm/system_prompt.py" = ["E501"]
+"src/learning/reflector.py" = ["E501"]
+"src/monitoring/watcher.py" = ["E501"]
+
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"

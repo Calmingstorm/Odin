@@ -1,8 +1,8 @@
 """Tests for HttpRequestTool."""
 
+import aiohttp
 import pytest
 
-import aiohttp
 _aiohttp_major_minor = tuple(int(x) for x in aiohttp.__version__.split(".")[:2])
 
 pytestmark = pytest.mark.skipif(
@@ -10,10 +10,16 @@ pytestmark = pytest.mark.skipif(
     reason="aioresponses 0.7.x incompatible with aiohttp >= 3.11 (stream_writer kwarg)",
 )
 
-from aioresponses import aioresponses
+from aioresponses import (  # noqa: E402 — deliberate mid-file import (see block comment)
+    aioresponses,
+)
 
-from src.odin.context import ExecutionContext
-from src.odin.tools.http import HttpRequestTool
+from src.odin.context import (  # noqa: E402 — deliberate mid-file import (see block comment)
+    ExecutionContext,
+)
+from src.odin.tools.http import (  # noqa: E402 — deliberate mid-file import (see block comment)
+    HttpRequestTool,
+)
 
 
 @pytest.mark.asyncio

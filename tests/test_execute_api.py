@@ -6,7 +6,6 @@ changes to the production handler must be reflected here.
 """
 from __future__ import annotations
 
-import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -53,7 +52,11 @@ def _make_app(bot):
         bot.sessions.reset(channel_id)
 
         status_code = 200 if not result["is_error"] else 502
-        resp = {"response": result["response"], "tools_used": result["tools_used"], "is_error": result["is_error"]}
+        resp = {
+            "response": result["response"],
+            "tools_used": result["tools_used"],
+            "is_error": result["is_error"],
+        }
         return web.json_response(resp, status=status_code)
 
     app.router.add_routes(routes)
@@ -221,7 +224,11 @@ class TestRealHandler:
             "is_error": False,
             "files": [],
         }
-        with patch("src.web.api.process_web_chat", new_callable=AsyncMock, return_value=mock_result):
+        with patch(
+            "src.web.api.process_web_chat",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
             from src.web.api import setup_api
             app = web.Application()
             setup_api(app, bot)
@@ -249,7 +256,11 @@ class TestRealHandler:
             "is_error": False,
             "files": [],
         }
-        with patch("src.web.api.process_web_chat", new_callable=AsyncMock, return_value=mock_result):
+        with patch(
+            "src.web.api.process_web_chat",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
             from src.web.api import setup_api
             app = web.Application()
             setup_api(app, bot)
@@ -278,7 +289,11 @@ class TestRealHandler:
             "is_error": False,
             "files": [],
         }
-        with patch("src.web.api.process_web_chat", new_callable=AsyncMock, return_value=mock_result):
+        with patch(
+            "src.web.api.process_web_chat",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
             from src.web.api import setup_api
             app = web.Application()
             setup_api(app, bot)

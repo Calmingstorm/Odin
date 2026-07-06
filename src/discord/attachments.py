@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import os
 import re
 import shutil
 import tarfile
@@ -47,12 +46,13 @@ _INGEST_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 _TASK_PATTERNS = re.compile(
-    r"\b(debug|analyze|review|look at|check|here are the|logs?|config|fix|help|explain|what.*(wrong|happening))\b",
+    r"\b(debug|analyze|review|look at|check|here are the|logs?|config|fix|help|explain"
+    r"|what.*(wrong|happening))\b",
     re.IGNORECASE,
 )
 
 
-class AttachmentIntent(str, Enum):
+class AttachmentIntent(str, Enum):  # noqa: UP042 — str(member) output differs under StrEnum; deferred to a typed-verification pass
     CURRENT_TASK = "current_task"
     INGEST_KNOWLEDGE = "ingest_knowledge"
     STORE_ONLY = "store_only"
@@ -194,7 +194,6 @@ class AttachmentProcessor:
         for att in attachments:
             filename = att.filename
             ext = _get_ext(filename)
-            size = att.size
 
             # Images
             is_image = ext in _IMAGE_EXTENSIONS or (
@@ -216,7 +215,15 @@ class AttachmentProcessor:
 
             # Text files
             if _is_text_file(filename, att.content_type):
-                await self._handle_text(att, ext, intent, channel_id, message_id, text_parts, result)
+                await self._handle_text(
+                    att,
+                    ext,
+                    intent,
+                    channel_id,
+                    message_id,
+                    text_parts,
+                    result,
+                )
                 continue
 
             # Unknown binary
@@ -288,7 +295,8 @@ class AttachmentProcessor:
 
             intent_note = ""
             if intent == AttachmentIntent.INGEST_KNOWLEDGE:
-                intent_note = " User requested knowledge ingestion; use ingest_document if appropriate."
+                intent_note = (" User requested knowledge ingestion; use ingest_document if "
+                               "appropriate.")
 
             if att.size <= self.inline_max_bytes:
                 preview = _preview_text(text, ext, self.preview_max_chars)
@@ -354,7 +362,8 @@ class AttachmentProcessor:
                 extracted = False
 
             manifest = "\n".join(manifest_lines[:50])
-            extract_note = f"Extracted to: `{extract_dir}`" if extracted else "Not extracted (limits exceeded or unsupported)"
+            extract_note = (f"Extracted to: `{extract_dir}`"
+                if extracted else "Not extracted (limits exceeded or unsupported)")
 
             # Preview small text files from the archive
             file_previews = ""
@@ -375,7 +384,12 @@ class AttachmentProcessor:
                 size=att.size, sha256=digest,
                 content_type=att.content_type, kind="archive",
             ))
-            log.info("Processed archive: %s (%d bytes, extracted=%s)", att.filename, att.size, extracted)
+            log.info(
+                "Processed archive: %s (%d bytes, extracted=%s)",
+                att.filename,
+                att.size,
+                extracted,
+            )
         except Exception as e:
             text_parts.append(f"[Archive: {att.filename} (failed: {e})]")
 
@@ -391,7 +405,8 @@ class AttachmentProcessor:
                 manifest.append(f"Too many files ({len(entries)} > {self.archive_max_files})")
                 return manifest, False
             if total_uncompressed > self.archive_extract_max_bytes:
-                manifest.append(f"Too large uncompressed ({total_uncompressed:,} > {self.archive_extract_max_bytes:,})")
+                manifest.append(f"Too large uncompressed ({total_uncompressed:,} > "
+                                f"{self.archive_extract_max_bytes:,})")
                 return manifest, False
 
             top_dirs = sorted({e.filename.split("/")[0] for e in entries if "/" in e.filename})
@@ -429,7 +444,7 @@ class AttachmentProcessor:
                 manifest.append(f"Too many files ({len(members)} > {self.archive_max_files})")
                 return manifest, False
             if total_size > self.archive_extract_max_bytes:
-                manifest.append(f"Too large uncompressed")
+                manifest.append("Too large uncompressed")
                 return manifest, False
 
             top_dirs = sorted({m.name.split("/")[0] for m in members if "/" in m.name})

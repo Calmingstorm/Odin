@@ -16,16 +16,17 @@ from __future__ import annotations
 
 import pytest
 
+from src.permissions.manager import USER_TIER_TOOLS
 from src.tools.executor import _ERROR_RESULT_PREFIXES, ToolExecutor
 from src.tools.git_ops import build_git_command
-from src.tools.recovery import UNSAFE_TO_RETRY
-from src.permissions.manager import USER_TIER_TOOLS
-from src.tools.skill_manager import (
-    is_safe_dependency_spec, _scan_url_skill_ast, _extract_skill_name_from_source,
-)
 from src.tools.post_validation import detect_mutation
-from src.tools.risk_classifier import classify_command, RiskLevel
-
+from src.tools.recovery import UNSAFE_TO_RETRY
+from src.tools.risk_classifier import RiskLevel, classify_command
+from src.tools.skill_manager import (
+    _extract_skill_name_from_source,
+    _scan_url_skill_ast,
+    is_safe_dependency_spec,
+)
 
 # ---------------------------------------------------------------------------
 # Error classification
@@ -66,6 +67,7 @@ async def test_run_command_multi_unknown_host_is_error():
 
 async def test_run_command_multi_all_success_is_ok():
     from unittest.mock import AsyncMock
+
     from src.config.schema import ToolsConfig
     exe = ToolExecutor(config=ToolsConfig())
     exe.config.hosts = {
@@ -124,7 +126,10 @@ def test_side_effecting_tools_unsafe_to_retry(tool):
 # Skill dependency validation (install-time RCE)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("spec", ["requests", "requests>=2.0", "Pillow[jpeg]", "numpy==1.26.4", "urllib3~=2.0"])
+@pytest.mark.parametrize(
+    "spec",
+    ["requests", "requests>=2.0", "Pillow[jpeg]", "numpy==1.26.4", "urllib3~=2.0"],
+)
 def test_safe_dependency_specs_allowed(spec):
     assert is_safe_dependency_spec(spec) is True
 

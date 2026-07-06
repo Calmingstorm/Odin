@@ -12,8 +12,6 @@ import os
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from src.config.schema import (
     Config,
     ConnectionPoolConfig,
@@ -21,15 +19,13 @@ from src.config.schema import (
     SSHPoolConfig,
     ToolsConfig,
 )
+from src.tools.executor import ToolExecutor
+from src.tools.ssh import run_ssh_command
 from src.tools.ssh_pool import (
     DEFAULT_CONTROL_PERSIST,
-    DEFAULT_SOCKET_DIR,
     SSHConnectionPool,
     _socket_path,
 )
-from src.tools.ssh import run_ssh_command
-from src.tools.executor import ToolExecutor
-
 
 # ---------------------------------------------------------------------------
 # SSHPoolConfig
@@ -92,7 +88,10 @@ class TestConnectionPoolConfig:
         assert cfg.connection_pool.max_connections == 5
 
     def test_from_dict(self):
-        cfg = OpenAICodexConfig(**{"connection_pool": {"max_connections": 15, "keepalive_timeout": 45}})
+        cfg = OpenAICodexConfig(**{"connection_pool": {
+            "max_connections": 15,
+            "keepalive_timeout": 45,
+        }})
         assert cfg.connection_pool.max_connections == 15
         assert cfg.connection_pool.keepalive_timeout == 45
 
@@ -120,7 +119,7 @@ class TestSSHConnectionPool:
     def test_creates_socket_dir(self):
         with tempfile.TemporaryDirectory() as td:
             socket_dir = os.path.join(td, "ssh_sockets")
-            pool = SSHConnectionPool(socket_dir=socket_dir)
+            SSHConnectionPool(socket_dir=socket_dir)
             assert os.path.isdir(socket_dir)
 
     def test_default_values(self):
@@ -180,7 +179,7 @@ class TestSSHPoolGetArgs:
             args = pool.get_ssh_args("host1", "ls", "/key", "/known", "root")
             assert "-o" in args
             assert "ControlMaster=auto" in args
-            assert f"ControlPersist=90" in args
+            assert "ControlPersist=90" in args
             assert f"ControlPath={td}/root@host1" in args
 
     def test_includes_standard_ssh_options(self):
@@ -241,7 +240,7 @@ class TestSSHPoolClose:
             pool._connections["root@host1"] = 1.0
             # The SSH -O exit command will fail since there's no real master,
             # but the fallback unlink should remove the socket
-            result = await pool.close_host("host1", "root")
+            await pool.close_host("host1", "root")
             assert "root@host1" not in pool._connections
 
     async def test_close_all_empty(self):
@@ -361,7 +360,7 @@ class TestSSHCommandWithPool:
                 call_args = mock_exec.call_args[0]
                 # Should include ControlMaster options
                 assert "ControlMaster=auto" in call_args
-                assert f"ControlPersist=120" in call_args
+                assert "ControlPersist=120" in call_args
 
     async def test_no_pool_no_control_master(self):
         with patch("src.tools.ssh.asyncio.create_subprocess_exec") as mock_exec:
@@ -601,6 +600,7 @@ def _make_bot(**overrides):
 
 def _make_app(bot):
     from aiohttp import web
+
     from src.web.api import setup_api
     app = web.Application()
     setup_api(app, bot)

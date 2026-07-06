@@ -9,28 +9,27 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from src.config.schema import Config, IssueTrackerConfig
 from src.notifications.issue_tracker import (
-    IssueTrackerClient,
-    IssueTrackerError,
+    _TIMEOUT,
+    _VALID_ACTIONS,
+    _VALID_PROVIDERS,
+    JIRA_PRIORITIES,
     LINEAR_API_URL,
     LINEAR_PRIORITIES,
-    JIRA_PRIORITIES,
-    MAX_TITLE_LEN,
     MAX_BODY_LEN,
-    _TIMEOUT,
-    _VALID_PROVIDERS,
-    _VALID_ACTIONS,
+    MAX_TITLE_LEN,
+    IssueTrackerClient,
+    IssueTrackerError,
     _truncate,
-    validate_provider,
     validate_action,
+    validate_provider,
 )
-from src.config.schema import Config, IssueTrackerConfig
-
 
 # ---------------------------------------------------------------------------
 # IssueTrackerConfig schema
@@ -423,7 +422,11 @@ class TestLinearComment:
             "data": {
                 "commentCreate": {
                     "success": True,
-                    "comment": {"id": "cmt-1", "body": "Hello", "createdAt": "2026-01-01T00:00:00Z"},
+                    "comment": {
+                        "id": "cmt-1",
+                        "body": "Hello",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                    },
                 }
             }
         }
@@ -1112,7 +1115,10 @@ class TestSecretScrubbing:
         mock_session.post = MagicMock(return_value=mock_resp)
 
         with patch.object(client, "_get_session", return_value=mock_session):
-            with patch("src.notifications.issue_tracker.scrub_output_secrets", return_value="[REDACTED]") as mock_scrub:
+            with patch(
+                "src.notifications.issue_tracker.scrub_output_secrets",
+                return_value="[REDACTED]",
+            )as mock_scrub:
                 await client.execute("create_issue", {
                     "title": "password=secret123",
                     "description": "test",
@@ -1217,19 +1223,34 @@ class TestUnifiedDispatch:
 
     async def test_linear_dispatch_create(self):
         client = IssueTrackerClient("linear", "tok", default_team_id="team-1")
-        with patch.object(client, "_linear_create_issue", new_callable=AsyncMock, return_value={"id": "x"}):
+        with patch.object(
+            client,
+            "_linear_create_issue",
+            new_callable=AsyncMock,
+            return_value={"id": "x"},
+        ):
             result = await client.execute("create_issue", {"title": "t", "description": "d"})
         assert result["id"] == "x"
 
     async def test_linear_dispatch_comment(self):
         client = IssueTrackerClient("linear", "tok", default_team_id="team-1")
-        with patch.object(client, "_linear_comment", new_callable=AsyncMock, return_value={"id": "c"}):
+        with patch.object(
+            client,
+            "_linear_comment",
+            new_callable=AsyncMock,
+            return_value={"id": "c"},
+        ):
             result = await client.execute("comment", {"issue_id": "uuid-1", "body": "hi"})
         assert result["id"] == "c"
 
     async def test_linear_dispatch_get(self):
         client = IssueTrackerClient("linear", "tok", default_team_id="team-1")
-        with patch.object(client, "_linear_get_issue", new_callable=AsyncMock, return_value={"key": "ENG-1"}):
+        with patch.object(
+            client,
+            "_linear_get_issue",
+            new_callable=AsyncMock,
+            return_value={"key": "ENG-1"},
+        ):
             result = await client.execute("get_issue", {"issue_id": "uuid-1"})
         assert result["key"] == "ENG-1"
 
@@ -1241,25 +1262,45 @@ class TestUnifiedDispatch:
 
     async def test_linear_dispatch_transition(self):
         client = IssueTrackerClient("linear", "tok", default_team_id="team-1")
-        with patch.object(client, "_linear_transition", new_callable=AsyncMock, return_value={"status": "Done"}):
+        with patch.object(
+            client,
+            "_linear_transition",
+            new_callable=AsyncMock,
+            return_value={"status": "Done"},
+        ):
             result = await client.execute("transition", {"issue_id": "uuid-1", "status": "Done"})
         assert result["status"] == "Done"
 
     async def test_jira_dispatch_create(self):
         client = IssueTrackerClient("jira", "tok", base_url="https://x.net", project_key="OPS")
-        with patch.object(client, "_jira_create_issue", new_callable=AsyncMock, return_value={"key": "OPS-1"}):
+        with patch.object(
+            client,
+            "_jira_create_issue",
+            new_callable=AsyncMock,
+            return_value={"key": "OPS-1"},
+        ):
             result = await client.execute("create_issue", {"title": "t", "description": "d"})
         assert result["key"] == "OPS-1"
 
     async def test_jira_dispatch_comment(self):
         client = IssueTrackerClient("jira", "tok", base_url="https://x.net", project_key="OPS")
-        with patch.object(client, "_jira_comment", new_callable=AsyncMock, return_value={"id": "c"}):
+        with patch.object(
+            client,
+            "_jira_comment",
+            new_callable=AsyncMock,
+            return_value={"id": "c"},
+        ):
             result = await client.execute("comment", {"issue_id": "OPS-42", "body": "hi"})
         assert result["id"] == "c"
 
     async def test_jira_dispatch_get(self):
         client = IssueTrackerClient("jira", "tok", base_url="https://x.net", project_key="OPS")
-        with patch.object(client, "_jira_get_issue", new_callable=AsyncMock, return_value={"key": "OPS-42"}):
+        with patch.object(
+            client,
+            "_jira_get_issue",
+            new_callable=AsyncMock,
+            return_value={"key": "OPS-42"},
+        ):
             result = await client.execute("get_issue", {"issue_id": "OPS-42"})
         assert result["key"] == "OPS-42"
 
@@ -1271,19 +1312,34 @@ class TestUnifiedDispatch:
 
     async def test_jira_dispatch_transition(self):
         client = IssueTrackerClient("jira", "tok", base_url="https://x.net", project_key="OPS")
-        with patch.object(client, "_jira_transition", new_callable=AsyncMock, return_value={"status": "Done"}):
+        with patch.object(
+            client,
+            "_jira_transition",
+            new_callable=AsyncMock,
+            return_value={"status": "Done"},
+        ):
             result = await client.execute("transition", {"issue_id": "OPS-42", "status": "Done"})
         assert result["status"] == "Done"
 
     async def test_timeout_error(self):
         client = IssueTrackerClient("linear", "tok", default_team_id="team-1")
-        with patch.object(client, "_linear_create_issue", new_callable=AsyncMock, side_effect=asyncio.TimeoutError):
+        with patch.object(
+            client,
+            "_linear_create_issue",
+            new_callable=AsyncMock,
+            side_effect=asyncio.TimeoutError,
+        ):
             with pytest.raises(IssueTrackerError, match="timed out"):
                 await client.execute("create_issue", {"title": "t", "description": "d"})
 
     async def test_generic_error(self):
         client = IssueTrackerClient("linear", "tok", default_team_id="team-1")
-        with patch.object(client, "_linear_create_issue", new_callable=AsyncMock, side_effect=RuntimeError("boom")):
+        with patch.object(
+            client,
+            "_linear_create_issue",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ):
             with pytest.raises(IssueTrackerError, match="boom"):
                 await client.execute("create_issue", {"title": "t", "description": "d"})
 
@@ -1295,7 +1351,7 @@ class TestUnifiedDispatch:
 
 class TestToolRegistration:
     def test_tool_in_registry(self):
-        from src.tools.registry import TOOLS, TOOL_MAP
+        from src.tools.registry import TOOL_MAP
         assert "issue_tracker" in TOOL_MAP
 
     def test_required_fields(self):
@@ -1408,8 +1464,9 @@ class TestIssueTrackerAPIEndpoints:
         return bot
 
     def _make_app(self, bot):
-        from src.web.api import create_api_routes
         from aiohttp import web
+
+        from src.web.api import create_api_routes
         app = web.Application()
         routes = create_api_routes(bot)
         app.router.add_routes(routes)

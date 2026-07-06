@@ -3,18 +3,14 @@ trail (Round 22).
 """
 from __future__ import annotations
 
-import asyncio
 import os
-import sqlite3
 import tempfile
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.knowledge.store import KnowledgeStore
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -655,7 +651,8 @@ class TestVersioningEdgeCases:
             await store.ingest(SHORT_DOC, "doc.md", dedup=False)
             ver = store.get_version("doc.md", 1)
             assert "T" in ver["created_at"]
-            assert "+" in ver["created_at"] or ver["created_at"].endswith("Z") or ":" in ver["created_at"]
+            assert ("+" in ver["created_at"] or ver["created_at"].endswith("Z")
+                    or ":" in ver["created_at"])
         finally:
             _cleanup(store)
 

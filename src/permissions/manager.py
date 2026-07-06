@@ -11,7 +11,10 @@ log = get_logger("permissions")
 
 VALID_TIERS = ("admin", "user", "guest")
 
-_request_tier: contextvars.ContextVar[str | None] = contextvars.ContextVar("_request_tier", default=None)
+_request_tier: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_request_tier",
+    default=None,
+)
 
 # Tools available to the "user" tier — read-only monitoring and search.
 # Everything else is admin-only.

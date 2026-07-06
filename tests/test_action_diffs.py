@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from src.audit.diff_tracker import (
     DIFF_TOOLS,
@@ -21,7 +19,6 @@ from src.audit.diff_tracker import (
     extract_file_target,
 )
 from src.audit.logger import AuditLogger
-
 
 # ---------------------------------------------------------------------------
 # compute_unified_diff
@@ -117,7 +114,7 @@ class TestComputeDictDiff:
     def test_sorts_keys(self):
         diff = compute_dict_diff({"z": 1, "a": 2}, {"z": 1, "a": 3})
         lines = diff.split("\n")
-        a_lines = [l for l in lines if '"a"' in l]
+        a_lines = [ln for ln in lines if '"a"' in ln]
         assert len(a_lines) >= 1
 
 
@@ -527,7 +524,7 @@ class TestSearchDiffs:
 class TestBackgroundTaskDiffIntegration:
     async def test_write_file_captures_diff(self):
         """Verify that run_background_task captures before/after diffs for write_file."""
-        from src.discord.background_task import run_background_task, BackgroundTask, DIFF_TOOLS
+        from src.discord.background_task import DIFF_TOOLS
 
         assert "write_file" in DIFF_TOOLS
 
@@ -539,9 +536,9 @@ class TestBackgroundTaskDiffIntegration:
 
     async def test_diff_passed_to_audit_log(self):
         """End-to-end: write_file tool → diff captured → passed to audit logger."""
-        import asyncio
-        from unittest.mock import patch, AsyncMock, MagicMock
-        from src.discord.background_task import run_background_task, BackgroundTask
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.discord.background_task import BackgroundTask, run_background_task
 
         # Set up mocks
         executor = MagicMock()
@@ -592,7 +589,7 @@ class TestBackgroundTaskDiffIntegration:
 
     async def test_non_diff_tool_no_diff_in_audit(self):
         """run_command should NOT produce a diff in the audit entry."""
-        from src.discord.background_task import run_background_task, BackgroundTask
+        from src.discord.background_task import BackgroundTask, run_background_task
 
         executor = MagicMock()
         executor.config = MagicMock()
@@ -643,6 +640,7 @@ class TestAuditDiffsAPI:
     async def test_empty_results(self, tmp_path):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         bot = self._make_bot(tmp_path)
@@ -660,6 +658,7 @@ class TestAuditDiffsAPI:
     async def test_returns_diff_entries(self, tmp_path):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         bot = self._make_bot(tmp_path)
@@ -690,6 +689,7 @@ class TestAuditDiffsAPI:
     async def test_filter_by_tool(self, tmp_path):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         bot = self._make_bot(tmp_path)
@@ -717,6 +717,7 @@ class TestAuditDiffsAPI:
     async def test_limit_parameter(self, tmp_path):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         bot = self._make_bot(tmp_path)
@@ -741,6 +742,7 @@ class TestAuditDiffsAPI:
     async def test_invalid_limit(self, tmp_path):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         bot = self._make_bot(tmp_path)
@@ -782,7 +784,7 @@ class TestModuleImports:
         assert DiffTracker is not None
 
     def test_compute_functions_importable(self):
-        from src.audit.diff_tracker import compute_unified_diff, compute_dict_diff
+        from src.audit.diff_tracker import compute_dict_diff, compute_unified_diff
         assert callable(compute_unified_diff)
         assert callable(compute_dict_diff)
 

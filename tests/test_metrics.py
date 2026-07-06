@@ -16,15 +16,11 @@ Covers:
 
 from __future__ import annotations
 
-import time
-
-import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import WebhookConfig
 from src.health.metrics import MetricsCollector, _escape_label_value, _format_metric
 from src.health.server import HealthServer
-
 
 # ---------------------------------------------------------------------------
 # Helpers

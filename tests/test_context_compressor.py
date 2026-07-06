@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import json
-import pytest
 
 from src.llm.context_compressor import (
+    _ERROR_PREFIXES,
     COMPRESSED_ITERATION_MAX_CHARS,
     DEFAULT_KEEP_RECENT,
     DEFAULT_MAX_CONTEXT_CHARS,
     CompressionStats,
     PrefixTracker,
-    _ERROR_PREFIXES,
     _hash_prefix,
     _is_tool_message,
     _is_tool_result_message,
@@ -21,7 +20,6 @@ from src.llm.context_compressor import (
     split_prefix_and_iterations,
     summarize_iteration,
 )
-
 
 # -----------------------------------------------------------------------
 # Helper factories
@@ -63,7 +61,7 @@ def _history_with_iterations(n_iterations: int, result_size: int = 100) -> list[
     for i in range(n_iterations):
         tid = f"tc{i}"
         msgs.extend([
-            _tool_use_msg(f"run_command", tid, {"cmd": f"check server-{i}"}),
+            _tool_use_msg("run_command", tid, {"cmd": f"check server-{i}"}),
             _tool_result_msg(tid, "x" * result_size),
         ])
     return msgs
@@ -341,7 +339,12 @@ class TestSummarizeIteration:
             {
                 "role": "assistant",
                 "content": [
-                    {"type": "tool_use", "id": f"tc{i}", "name": f"very_long_tool_name_{i}", "input": {}}
+                    {
+                        "type": "tool_use",
+                        "id": f"tc{i}",
+                        "name": f"very_long_tool_name_{i}",
+                        "input": {},
+                    }
                     for i in range(20)
                 ],
             },
@@ -836,8 +839,18 @@ class TestMultiToolIterations:
             {
                 "role": "assistant",
                 "content": [
-                    {"type": "tool_use", "id": "tc1", "name": "run_command", "input": {"cmd": "df"}},
-                    {"type": "tool_use", "id": "tc2", "name": "run_command", "input": {"cmd": "free"}},
+                    {
+                        "type": "tool_use",
+                        "id": "tc1",
+                        "name": "run_command",
+                        "input": {"cmd": "df"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "tc2",
+                        "name": "run_command",
+                        "input": {"cmd": "free"},
+                    },
                 ],
             },
             {

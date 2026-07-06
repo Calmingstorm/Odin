@@ -5,14 +5,11 @@ history polling, error handling, and the default workflow template.
 """
 from __future__ import annotations
 
-import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.tools.comfyui import ComfyUIClient, _DEFAULT_WORKFLOW
-
+from src.tools.comfyui import _DEFAULT_WORKFLOW, ComfyUIClient
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,11 +84,14 @@ class TestResolveCheckpoint:
         client = ComfyUIClient("http://localhost:8188")
         resp = _mock_response(json_data={
             "CheckpointLoaderSimple": {
-                "input": {"required": {"ckpt_name": [["model_a.safetensors", "model_b.safetensors"]]}}
+                "input": {"required": {"ckpt_name": [[
+                    "model_a.safetensors",
+                    "model_b.safetensors",
+                ]]}}
             }
         })
 
-        with patch("aiohttp.ClientSession") as MockSession:
+        with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
             session = AsyncMock()
             MockSession.return_value.__aenter__ = AsyncMock(return_value=session)
             MockSession.return_value.__aexit__ = AsyncMock()
@@ -109,7 +109,7 @@ class TestResolveCheckpoint:
             }
         })
 
-        with patch("aiohttp.ClientSession") as MockSession:
+        with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
             session = AsyncMock()
             MockSession.return_value.__aenter__ = AsyncMock(return_value=session)
             MockSession.return_value.__aexit__ = AsyncMock()
@@ -127,7 +127,7 @@ class TestResolveCheckpoint:
             }
         })
 
-        with patch("aiohttp.ClientSession") as MockSession:
+        with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
             session = AsyncMock()
             MockSession.return_value.__aenter__ = AsyncMock(return_value=session)
             MockSession.return_value.__aexit__ = AsyncMock()
@@ -141,7 +141,7 @@ class TestResolveCheckpoint:
         client = ComfyUIClient("http://localhost:8188")
         resp = _mock_response(status=500)
 
-        with patch("aiohttp.ClientSession") as MockSession:
+        with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
             session = AsyncMock()
             MockSession.return_value.__aenter__ = AsyncMock(return_value=session)
             MockSession.return_value.__aexit__ = AsyncMock()
@@ -154,9 +154,10 @@ class TestResolveCheckpoint:
     async def test_connection_error_returns_preferred(self):
         client = ComfyUIClient("http://localhost:8188")
 
-        with patch("aiohttp.ClientSession") as MockSession:
-            session = AsyncMock()
-            MockSession.return_value.__aenter__ = AsyncMock(side_effect=Exception("connection refused"))
+        with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
+            AsyncMock()
+            MockSession.return_value.__aenter__ = AsyncMock(
+                side_effect=Exception("connection refused"))
             MockSession.return_value.__aexit__ = AsyncMock()
 
             result = await client._resolve_checkpoint("preferred.safetensors")
@@ -193,7 +194,7 @@ class TestPollHistory:
         session = AsyncMock()
 
         # Return empty data on first 2 calls, then with result
-        call_count = 0
+        0
         empty_resp = _mock_response(json_data={})
         found_resp = _mock_response(json_data={
             "test_id": {"outputs": {"9": {"images": [{"filename": "result.png"}]}}}
@@ -229,10 +230,15 @@ class TestGenerate:
     @pytest.mark.asyncio
     async def test_generate_prompt_failure(self):
         client = ComfyUIClient("http://localhost:8188")
-        with patch.object(client, "_resolve_checkpoint", new_callable=AsyncMock, return_value="model.safetensors"):
+        with patch.object(
+            client,
+            "_resolve_checkpoint",
+            new_callable=AsyncMock,
+            return_value="model.safetensors",
+        ):
             prompt_resp = _mock_response(status=500, text="error")
 
-            with patch("aiohttp.ClientSession") as MockSession:
+            with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
                 session = AsyncMock()
                 MockSession.return_value.__aenter__ = AsyncMock(return_value=session)
                 MockSession.return_value.__aexit__ = AsyncMock()
@@ -244,10 +250,15 @@ class TestGenerate:
     @pytest.mark.asyncio
     async def test_generate_no_prompt_id(self):
         client = ComfyUIClient("http://localhost:8188")
-        with patch.object(client, "_resolve_checkpoint", new_callable=AsyncMock, return_value="model.safetensors"):
+        with patch.object(
+            client,
+            "_resolve_checkpoint",
+            new_callable=AsyncMock,
+            return_value="model.safetensors",
+        ):
             prompt_resp = _mock_response(json_data={})  # no prompt_id
 
-            with patch("aiohttp.ClientSession") as MockSession:
+            with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
                 session = AsyncMock()
                 MockSession.return_value.__aenter__ = AsyncMock(return_value=session)
                 MockSession.return_value.__aexit__ = AsyncMock()
@@ -259,10 +270,15 @@ class TestGenerate:
     @pytest.mark.asyncio
     async def test_generate_suspicious_prompt_id(self):
         client = ComfyUIClient("http://localhost:8188")
-        with patch.object(client, "_resolve_checkpoint", new_callable=AsyncMock, return_value="model.safetensors"):
+        with patch.object(
+            client,
+            "_resolve_checkpoint",
+            new_callable=AsyncMock,
+            return_value="model.safetensors",
+        ):
             prompt_resp = _mock_response(json_data={"prompt_id": "../../etc/passwd"})
 
-            with patch("aiohttp.ClientSession") as MockSession:
+            with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
                 session = AsyncMock()
                 MockSession.return_value.__aenter__ = AsyncMock(return_value=session)
                 MockSession.return_value.__aexit__ = AsyncMock()
@@ -274,12 +290,17 @@ class TestGenerate:
     @pytest.mark.asyncio
     async def test_generate_timeout(self):
         client = ComfyUIClient("http://localhost:8188")
-        with patch.object(client, "_resolve_checkpoint", new_callable=AsyncMock, return_value="model.safetensors"):
-            with patch("aiohttp.ClientSession") as MockSession:
+        with patch.object(
+            client,
+            "_resolve_checkpoint",
+            new_callable=AsyncMock,
+            return_value="model.safetensors",
+        ):
+            with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
                 session = AsyncMock()
                 MockSession.return_value.__aenter__ = AsyncMock(return_value=session)
                 MockSession.return_value.__aexit__ = AsyncMock()
-                session.post = MagicMock(side_effect=asyncio.TimeoutError())
+                session.post = MagicMock(side_effect=TimeoutError())
 
                 result = await client.generate("a cat")
         assert result is None
@@ -288,8 +309,13 @@ class TestGenerate:
     async def test_generate_connection_error(self):
         import aiohttp
         client = ComfyUIClient("http://localhost:8188")
-        with patch.object(client, "_resolve_checkpoint", new_callable=AsyncMock, return_value="model.safetensors"):
-            with patch("aiohttp.ClientSession") as MockSession:
+        with patch.object(
+            client,
+            "_resolve_checkpoint",
+            new_callable=AsyncMock,
+            return_value="model.safetensors",
+        ):
+            with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
                 session = AsyncMock()
                 MockSession.return_value.__aenter__ = AsyncMock(return_value=session)
                 MockSession.return_value.__aexit__ = AsyncMock()
@@ -308,14 +334,20 @@ class TestGenerate:
             captured_payload.update(json or {})
             return _MockContextManager(_mock_response(json_data={"prompt_id": "test123"}))
 
-        with patch.object(client, "_resolve_checkpoint", new_callable=AsyncMock, return_value="model.safetensors"):
+        with patch.object(
+            client,
+            "_resolve_checkpoint",
+            new_callable=AsyncMock,
+            return_value="model.safetensors",
+        ):
             with patch.object(client, "_poll_history", new_callable=AsyncMock, return_value=None):
-                with patch("aiohttp.ClientSession") as MockSession:
+                with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
                     session = AsyncMock()
                     MockSession.return_value.__aenter__ = AsyncMock(return_value=session)
                     MockSession.return_value.__aexit__ = AsyncMock()
                     session.post = capture_post
-                    session.get = MagicMock(return_value=_MockContextManager(_mock_response(status=404)))
+                    session.get = MagicMock(
+                        return_value=_MockContextManager(_mock_response(status=404)))
 
                     await client.generate("a cat", width=512, height=768)
 
@@ -333,14 +365,20 @@ class TestGenerate:
             captured_payload.update(json or {})
             return _MockContextManager(_mock_response(json_data={"prompt_id": "test123"}))
 
-        with patch.object(client, "_resolve_checkpoint", new_callable=AsyncMock, return_value="model.safetensors"):
+        with patch.object(
+            client,
+            "_resolve_checkpoint",
+            new_callable=AsyncMock,
+            return_value="model.safetensors",
+        ):
             with patch.object(client, "_poll_history", new_callable=AsyncMock, return_value=None):
-                with patch("aiohttp.ClientSession") as MockSession:
+                with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
                     session = AsyncMock()
                     MockSession.return_value.__aenter__ = AsyncMock(return_value=session)
                     MockSession.return_value.__aexit__ = AsyncMock()
                     session.post = capture_post
-                    session.get = MagicMock(return_value=_MockContextManager(_mock_response(status=404)))
+                    session.get = MagicMock(
+                        return_value=_MockContextManager(_mock_response(status=404)))
 
                     await client.generate("beautiful sunset", negative="ugly")
 
@@ -362,8 +400,13 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_generate_generic_exception(self):
         client = ComfyUIClient("http://localhost:8188")
-        with patch.object(client, "_resolve_checkpoint", new_callable=AsyncMock, return_value="model.safetensors"):
-            with patch("aiohttp.ClientSession") as MockSession:
+        with patch.object(
+            client,
+            "_resolve_checkpoint",
+            new_callable=AsyncMock,
+            return_value="model.safetensors",
+        ):
+            with patch("aiohttp.ClientSession") as MockSession:  # noqa: N806 — class stand-in, PascalCase deliberate
                 MockSession.return_value.__aenter__ = AsyncMock(side_effect=Exception("unexpected"))
                 MockSession.return_value.__aexit__ = AsyncMock()
 

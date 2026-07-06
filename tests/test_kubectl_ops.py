@@ -7,19 +7,18 @@ ToolExecutor._handle_kubectl handler (host resolution, execution dispatch).
 from __future__ import annotations
 
 import shlex
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
+from src.config.schema import ToolHost, ToolsConfig
+from src.tools.executor import ToolExecutor
 from src.tools.kubectl_ops import (
     ALLOWED_ACTIONS,
-    build_kubectl_command,
     _common_flags,
+    build_kubectl_command,
 )
-from src.config.schema import ToolsConfig, ToolHost
-from src.tools.executor import ToolExecutor
 from src.tools.registry import TOOL_MAP
-
 
 # ---------------------------------------------------------------------------
 # Tool registration

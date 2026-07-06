@@ -18,18 +18,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.tools.recovery import (
+    _ERROR_PREFIXES,
+    _RECOVERABLE_PATTERNS,
+    UNSAFE_TO_RETRY,
     RecoveryCategory,
     RecoveryEvent,
     RecoveryStats,
-    UNSAFE_TO_RETRY,
-    _CATEGORY_DELAYS,
-    _ERROR_PREFIXES,
-    _RECOVERABLE_PATTERNS,
     classify_error,
     classify_exception,
     get_retry_delay,
 )
-
 
 # ====================================================================
 # classify_error — result-string classification
@@ -101,7 +99,8 @@ class TestClassifyError:
         assert classify_error(result) == RecoveryCategory.RESOURCE_BUSY
 
     def test_bulkhead_full(self):
-        result = "Command failed (exit 1):\nError: SSH bulkhead full — too many concurrent SSH commands"
+        result = ("Command failed (exit 1):\nError: SSH bulkhead full — too many concurrent SSH "
+                  "commands")
         assert classify_error(result) == RecoveryCategory.BULKHEAD_FULL
 
     def test_rate_limit_exceeded(self):
@@ -117,7 +116,9 @@ class TestClassifyError:
         assert classify_error(result) == RecoveryCategory.RATE_LIMITED
 
     def test_timeout_skipped(self):
-        """Timeout errors are NOT recoverable at the result level (they have _SKIP_RESULT_CATEGORIES)."""
+        """Timeout errors are NOT recoverable at the result level (they have
+        _SKIP_RESULT_CATEGORIES).
+        """
         result = "Error: tool 'run_command' timed out after 300s"
         cat = classify_error(result)
         # timed out is in _SKIP_RESULT_CATEGORIES for classify_error
@@ -173,7 +174,8 @@ class TestClassifyException:
         assert classify_exception("Connection refused") == RecoveryCategory.SSH_TRANSIENT
 
     def test_connection_reset_error(self):
-        assert classify_exception("ConnectionResetError: peer closed") == RecoveryCategory.CONNECTION_ERROR
+        assert classify_exception("ConnectionResetError: peer "
+                                  "closed") == RecoveryCategory.CONNECTION_ERROR
 
     def test_database_locked(self):
         assert classify_exception("database is locked") == RecoveryCategory.RESOURCE_BUSY
@@ -725,8 +727,6 @@ class TestAgentPerIterationRecovery:
         from src.agents.manager import (
             AgentInfo,
             AgentState,
-            MAX_RECOVERY_ATTEMPTS,
-            _call_llm_with_recovery,
             _run_agent,
         )
 
@@ -741,7 +741,7 @@ class TestAgentPerIterationRecovery:
             nonlocal call_count
             call_count += 1
             if call_count in (1, 3):
-                raise asyncio.TimeoutError("LLM timeout")
+                raise TimeoutError("LLM timeout")
             if call_count in (2, 4):
                 return {"text": "working", "tool_calls": [{"name": "t1", "input": {}}]}
             return {"text": "done", "tool_calls": []}
@@ -775,7 +775,7 @@ class TestAgentPerIterationRecovery:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise asyncio.TimeoutError("timeout")
+                raise TimeoutError("timeout")
             if call_count == 2:
                 return {"text": "working", "tool_calls": [{"name": "t1", "input": {}}]}
             return {"text": "done", "tool_calls": []}
@@ -813,6 +813,7 @@ class TestRecoveryAPI:
     async def test_recovery_stats_endpoint(self, mock_bot):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         app = web.Application()
@@ -830,6 +831,7 @@ class TestRecoveryAPI:
     async def test_recovery_recent_endpoint(self, mock_bot):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         app = web.Application()
@@ -846,6 +848,7 @@ class TestRecoveryAPI:
     async def test_recovery_recent_limit(self, mock_bot):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         app = web.Application()
@@ -861,6 +864,7 @@ class TestRecoveryAPI:
     async def test_recovery_stats_no_executor(self):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         bot = MagicMock(spec=[])
@@ -875,6 +879,7 @@ class TestRecoveryAPI:
     async def test_recovery_recent_no_executor(self):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         bot = MagicMock(spec=[])
@@ -893,9 +898,6 @@ class TestRecoveryAPI:
 class TestModuleImports:
     def test_recovery_module_imports(self):
         from src.tools.recovery import (
-            RecoveryCategory,
-            RecoveryEvent,
-            RecoveryStats,
             classify_error,
             classify_exception,
             get_retry_delay,
@@ -1113,55 +1115,57 @@ class TestRecoveryPolicies:
 
 class TestNewCategoryClassification:
     def test_auth_failure_401(self):
-        from src.tools.recovery import classify_error, RecoveryCategory
-        assert classify_error("Error: 401 Unauthorized on /api/thing") == RecoveryCategory.AUTH_FAILURE
+        from src.tools.recovery import RecoveryCategory, classify_error
+        assert classify_error("Error: 401 Unauthorized on "
+                              "/api/thing") == RecoveryCategory.AUTH_FAILURE
 
     def test_auth_failure_ssh_publickey(self):
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         assert classify_error(
             "Command failed (exit 255):\nPermission denied (publickey,password)."
         ) == RecoveryCategory.AUTH_FAILURE
 
     def test_not_found_404(self):
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         assert classify_error("Error: 404 Not Found") == RecoveryCategory.NOT_FOUND
 
     def test_not_found_file(self):
-        from src.tools.recovery import classify_error, RecoveryCategory
-        assert classify_error("Error: No such file or directory: /foo") == RecoveryCategory.NOT_FOUND
+        from src.tools.recovery import RecoveryCategory, classify_error
+        assert classify_error("Error: No such file or directory: "
+                              "/foo") == RecoveryCategory.NOT_FOUND
 
     def test_disk_full_enospc(self):
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         assert classify_error("Error: write failed: ENOSPC") == RecoveryCategory.DISK_FULL
 
     def test_disk_full_no_space(self):
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         assert classify_error(
             "Command failed (exit 1):\nNo space left on device"
         ) == RecoveryCategory.DISK_FULL
 
     def test_dependency_module_not_found(self):
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         assert classify_error(
             "Command failed (exit 1):\nModuleNotFoundError: No module named 'requests'"
         ) == RecoveryCategory.DEPENDENCY_MISSING
 
     def test_dependency_command_not_found(self):
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         assert classify_error(
             "Command failed (exit 127):\nbash: kubectl: command not found"
         ) == RecoveryCategory.DEPENDENCY_MISSING
 
     def test_permission_denied_file(self):
         """Plain 'Permission denied' (no '(publickey' suffix) classifies as PERMISSION_DENIED."""
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         assert classify_error(
             "Error: Permission denied: /etc/shadow"
         ) == RecoveryCategory.PERMISSION_DENIED
 
     def test_auth_takes_precedence_over_permission(self):
         """SSH pubkey denial should hit AUTH_FAILURE, not PERMISSION_DENIED."""
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         # AUTH_FAILURE patterns are declared before PERMISSION_DENIED so its
         # longer, more specific 'Permission denied (publickey' wins.
         assert classify_error(
@@ -1169,7 +1173,7 @@ class TestNewCategoryClassification:
         ) == RecoveryCategory.AUTH_FAILURE
 
     def test_get_hint_returns_nonempty(self):
-        from src.tools.recovery import get_hint, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, get_hint
         assert "authentication" in get_hint(RecoveryCategory.AUTH_FAILURE).lower()
         assert "not found" in get_hint(RecoveryCategory.NOT_FOUND).lower()
         assert "disk" in get_hint(RecoveryCategory.DISK_FULL).lower()
@@ -1222,7 +1226,7 @@ class TestExecutorHintAndEscalate:
     @pytest.mark.asyncio
     async def test_hint_is_idempotent(self, executor):
         """If hint text is already in the result, don't append a duplicate."""
-        from src.tools.recovery import get_hint, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, get_hint
         hint = get_hint(RecoveryCategory.NOT_FOUND)
         async def _handler(inp):
             return f"Error: No such file or directory\n\n{hint}"
@@ -1257,32 +1261,34 @@ class TestDecideRecoveryAction:
         assert d.action == "skip"
 
     def test_hint_category_returns_hint(self):
-        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, decide_recovery_action
         d = decide_recovery_action(tool_name="run_command", category=RecoveryCategory.AUTH_FAILURE)
         assert d.action == "hint"
         assert "authentication" in d.hint_text.lower()
 
     def test_hint_category_safe_for_unsafe_tool(self):
-        """HINT_AND_ESCALATE never re-executes, so it's always safe — even for UNSAFE_TO_RETRY tools."""
-        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        """HINT_AND_ESCALATE never re-executes, so it's always safe — even for UNSAFE_TO_RETRY
+        tools.
+        """
+        from src.tools.recovery import RecoveryCategory, decide_recovery_action
         d = decide_recovery_action(tool_name="write_file", category=RecoveryCategory.DISK_FULL)
         assert d.action == "hint"
         assert d.hint_text
 
     def test_retry_blocked_for_unsafe_tool(self):
         """RETRY_WITH_DELAY must be downgraded to 'skip' when tool is UNSAFE_TO_RETRY."""
-        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, decide_recovery_action
         d = decide_recovery_action(tool_name="write_file", category=RecoveryCategory.SSH_TRANSIENT)
         assert d.action == "skip"
 
     def test_retry_allowed_for_safe_tool(self):
-        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, decide_recovery_action
         d = decide_recovery_action(tool_name="read_file", category=RecoveryCategory.SSH_TRANSIENT)
         assert d.action == "retry"
         assert d.delay_seconds > 0
 
     def test_timeout_is_skip(self):
-        from src.tools.recovery import decide_recovery_action, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, decide_recovery_action
         d = decide_recovery_action(tool_name="read_file", category=RecoveryCategory.TIMEOUT)
         assert d.action == "skip"
 
@@ -1290,7 +1296,7 @@ class TestDecideRecoveryAction:
 class TestClassificationPriority:
     def test_auth_wins_over_permission(self):
         """SSH pubkey denial must always classify as AUTH_FAILURE — order stable."""
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         for _ in range(5):
             cat = classify_error(
                 "Command failed (exit 255):\nPermission denied (publickey,password)."
@@ -1299,14 +1305,14 @@ class TestClassificationPriority:
 
     def test_not_found_wins_over_dependency_for_file_errors(self):
         """'No such file or directory' must classify as NOT_FOUND, not DEPENDENCY_MISSING."""
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         assert classify_error(
             "Error: No such file or directory: /etc/xyz"
         ) == RecoveryCategory.NOT_FOUND
 
     def test_transient_wins_over_everything(self):
         """Connection issues classify before AUTH / NOT_FOUND even if patterns overlap."""
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         assert classify_error(
             "Command failed (exit 255):\nConnection refused"
         ) == RecoveryCategory.SSH_TRANSIENT
@@ -1426,7 +1432,7 @@ class TestPatternCoverageGaps:
     def test_ubuntu_sh_missing_binary_classifies_as_dependency(self):
         """The exact shape Odin reproduced in smoke test: Ubuntu sh on
         a container with kubectl not installed."""
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         result = "Command failed (exit 127):\n/bin/sh: 1: kubectl: not found\n"
         assert classify_error(result) == RecoveryCategory.DEPENDENCY_MISSING
 
@@ -1434,7 +1440,7 @@ class TestPatternCoverageGaps:
         """Odin's PR #15 round-1 note: output truncated mid-line at the
         MAX_RESULT cap, or emitted without a trailing newline, must still
         classify. The unanchored ': not found' fallback covers this."""
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         result = "Command failed (exit 127):\n/bin/sh: 1: kubectl: not found"
         assert classify_error(result) == RecoveryCategory.DEPENDENCY_MISSING
 
@@ -1443,24 +1449,24 @@ class TestPatternCoverageGaps:
         checked before DEPENDENCY_MISSING, so prose like 'key: not found
         in map' routes to NOT_FOUND and doesn't miscategorize as a
         missing dependency despite the fallback pattern."""
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         result = "Command failed (exit 1):\nerror: config key: not found in map"
         assert classify_error(result) == RecoveryCategory.NOT_FOUND
 
     def test_fetch_url_404_is_classifiable(self):
         """fetch_url now prefixes non-2xx with 'Error:' so the classifier
         sees the error shape and tags NOT_FOUND. Locks the contract."""
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         result = "Error: HTTP 404: Not Found"
         assert classify_error(result) == RecoveryCategory.NOT_FOUND
 
     def test_fetch_url_401_classifies_as_auth(self):
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         result = "Error: HTTP 401: Unauthorized"
         assert classify_error(result) == RecoveryCategory.AUTH_FAILURE
 
     def test_fetch_url_403_classifies_as_auth(self):
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import RecoveryCategory, classify_error
         # 403 Forbidden is an auth pattern — verify it hits AUTH_FAILURE
         # (the priority list has AUTH before PERMISSION, so pubkey-style
         # HTTP errors don't mislabel as permission denied).
@@ -1477,8 +1483,10 @@ class TestPatternCoverageGaps:
         category here — the str form of aiohttp errors varies across
         versions, and classification of network errors is covered by
         the broader CONNECTION_ERROR tests using known patterns."""
-        import aiohttp
         from unittest.mock import AsyncMock, MagicMock, patch
+
+        import aiohttp
+
         from src.tools.web import fetch_url
 
         mock_session = MagicMock()
@@ -1500,8 +1508,9 @@ class TestPatternCoverageGaps:
         Not Found' and classify_error then tags NOT_FOUND. Proves the
         two PR halves (handler prefix + recovery pattern) compose."""
         from unittest.mock import AsyncMock, MagicMock, patch
+
+        from src.tools.recovery import RecoveryCategory, classify_error
         from src.tools.web import fetch_url
-        from src.tools.recovery import classify_error, RecoveryCategory
 
         mock_resp = MagicMock()
         mock_resp.status = 404
@@ -1524,7 +1533,7 @@ class TestPatternCoverageGaps:
         """5xx errors don't map to any recovery category we define, so
         they shouldn't falsely trigger a hint — only 4xx auth/not_found
         categories should fire."""
-        from src.tools.recovery import classify_error, RecoveryCategory
+        from src.tools.recovery import classify_error
         result = "Error: HTTP 503: Service Unavailable"
         # No category pattern matches this; classify returns None.
         assert classify_error(result) is None

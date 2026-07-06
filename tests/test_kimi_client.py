@@ -5,8 +5,7 @@ import json
 
 import pytest
 
-from src.llm.kimi import KimiClient, KIMI_TOOL_ENFORCEMENT
-from src.llm.types import LLMResponse, ToolCall
+from src.llm.kimi import KIMI_TOOL_ENFORCEMENT, KimiClient
 
 
 @pytest.fixture
@@ -129,8 +128,16 @@ class TestParseResponse:
                 "message": {
                     "content": None,
                     "tool_calls": [
-                        {"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "/tmp"}'}},
-                        {"id": "call_2", "type": "function", "function": {"name": "run_command", "arguments": '{"cmd": "ls"}'}},
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": '{"path": "/tmp"}'},
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "run_command", "arguments": '{"cmd": "ls"}'},
+                        },
                     ],
                 },
                 "finish_reason": "tool_calls",

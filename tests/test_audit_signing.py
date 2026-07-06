@@ -5,17 +5,12 @@ chain initialization, verify_integrity, AuditConfig, REST /api/audit/verify.
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
-from pathlib import Path
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
-from src.audit.signer import GENESIS_HASH, AuditSigner, _canonical, verify_log
 from src.audit.logger import AuditLogger
-
+from src.audit.signer import GENESIS_HASH, AuditSigner, _canonical, verify_log
 
 # ---------------------------------------------------------------------------
 # _canonical helper
@@ -50,8 +45,8 @@ class TestCanonical:
         assert parsed == {"a": {"z": 1, "a": 2}}
 
     def test_default_str_for_non_serializable(self):
-        from datetime import datetime, timezone
-        dt = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        from datetime import datetime
+        dt = datetime(2025, 1, 1, tzinfo=UTC)
         result = _canonical({"ts": dt})
         assert "2025" in result
 
@@ -720,8 +715,9 @@ class TestAuditVerifyAPI:
         return bot
 
     async def test_valid_log_returns_200(self, tmp_path):
-        from aiohttp.test_utils import TestClient, TestServer
         from aiohttp import web as aio_web
+        from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         p = tmp_path / "audit.jsonl"
@@ -744,8 +740,9 @@ class TestAuditVerifyAPI:
             assert data["verified"] == 1
 
     async def test_tampered_log_returns_409(self, tmp_path):
-        from aiohttp.test_utils import TestClient, TestServer
         from aiohttp import web as aio_web
+        from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         p = tmp_path / "audit.jsonl"
@@ -773,8 +770,9 @@ class TestAuditVerifyAPI:
             assert data["valid"] is False
 
     async def test_no_signing_returns_error(self, tmp_path):
-        from aiohttp.test_utils import TestClient, TestServer
         from aiohttp import web as aio_web
+        from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         logger = AuditLogger(path=str(tmp_path / "audit.jsonl"))
@@ -824,8 +822,9 @@ class TestAuditVerifyAPI:
             assert data["verified"] == 1
 
     async def test_empty_signed_log_returns_200(self, tmp_path):
-        from aiohttp.test_utils import TestClient, TestServer
         from aiohttp import web as aio_web
+        from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         p = tmp_path / "audit.jsonl"

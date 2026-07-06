@@ -1,6 +1,5 @@
 """Tests for the step executor."""
 
-import pytest
 
 from src.odin.context import ExecutionContext
 from src.odin.executor import StepExecutor

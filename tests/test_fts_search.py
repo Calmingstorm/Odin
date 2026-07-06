@@ -9,10 +9,7 @@ from __future__ import annotations
 import os
 import tempfile
 
-import pytest
-
-from src.search.fts import FullTextIndex, _prepare_query, _FTS5_KEYWORDS
-
+from src.search.fts import _FTS5_KEYWORDS, FullTextIndex, _prepare_query
 
 # ---------------------------------------------------------------------------
 # _prepare_query
@@ -47,23 +44,23 @@ class TestPrepareQuery:
         result = _prepare_query('say "hello"')
         assert '""' in result  # Internal quotes escaped
 
-    def test_reserved_keyword_AND(self):
+    def test_reserved_keyword_AND(self):  # noqa: N802 — established public name; rename is an API change
         result = _prepare_query("this AND that")
         assert '"AND"' in result
 
-    def test_reserved_keyword_OR(self):
+    def test_reserved_keyword_OR(self):  # noqa: N802 — established public name; rename is an API change
         result = _prepare_query("this OR that")
         assert '"OR"' in result
 
-    def test_reserved_keyword_NOT(self):
+    def test_reserved_keyword_NOT(self):  # noqa: N802 — established public name; rename is an API change
         result = _prepare_query("NOT error")
         assert '"NOT"' in result
 
-    def test_reserved_keyword_NEAR(self):
+    def test_reserved_keyword_NEAR(self):  # noqa: N802 — established public name; rename is an API change
         result = _prepare_query("NEAR match")
         assert '"NEAR"' in result
 
-    def test_reserved_keyword_TO(self):
+    def test_reserved_keyword_TO(self):  # noqa: N802 — established public name; rename is an API change
         result = _prepare_query("from TO end")
         assert '"TO"' in result
 
@@ -246,7 +243,12 @@ class TestChannelLogIndex:
 
     def test_index_and_search(self):
         msgs = [
-            {"content": "Server restarted successfully", "author": "admin", "channel_id": "ch1", "ts": 1000.0},
+            {
+                "content": "Server restarted successfully",
+                "author": "admin",
+                "channel_id": "ch1",
+                "ts": 1000.0,
+            },
         ]
         count = self.idx.index_channel_messages(msgs)
         assert count == 1
@@ -294,7 +296,12 @@ class TestChannelLogIndex:
 
     def test_search_limit(self):
         msgs = [
-            {"content": f"common term msg {i}", "author": "user", "channel_id": "ch1", "ts": float(i)}
+            {
+                "content": f"common term msg {i}",
+                "author": "user",
+                "channel_id": "ch1",
+                "ts": float(i),
+            }
             for i in range(10)
         ]
         self.idx.index_channel_messages(msgs)

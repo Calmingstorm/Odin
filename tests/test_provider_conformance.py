@@ -73,10 +73,19 @@ class TestOllamaConformance:
         # Sequence must be: assistant(call1) -> tool(result1) -> assistant(call2)
         # -> tool(result2), so order-based pairing is unambiguous.
         roles = [
-            ("assistant_tc" if (m.get("role") == "assistant" and m.get("tool_calls")) else m.get("role"))
+            ("assistant_tc"
+                if (m.get("role") == "assistant" and m.get("tool_calls")) else m.get("role"))
             for m in out
         ]
-        assert roles == ["system", "user", "assistant_tc", "tool", "assistant_tc", "tool", "assistant"]
+        assert roles == [
+            "system",
+            "user",
+            "assistant_tc",
+            "tool",
+            "assistant_tc",
+            "tool",
+            "assistant",
+        ]
 
     def test_tool_use_not_silently_dropped(self):
         # Regression for the old converter that did `pass` on tool_use blocks.

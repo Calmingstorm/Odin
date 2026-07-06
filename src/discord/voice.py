@@ -65,7 +65,11 @@ def _patch_voice_recv_dave():
                         packet.decrypted_data = decrypted
                         _dave_ok_count[0] += 1
                         if _dave_ok_count[0] <= 3 or _dave_ok_count[0] % 500 == 0:
-                            log.info("DAVE decrypt OK #%d (data=%d bytes)", _dave_ok_count[0], len(decrypted))
+                            log.info(
+                                "DAVE decrypt OK #%d (data=%d bytes)",
+                                _dave_ok_count[0],
+                                len(decrypted),
+                            )
                     else:
                         _dave_fail_count[0] += 1
                         if _dave_fail_count[0] <= 5 or _dave_fail_count[0] % 100 == 0:
@@ -164,7 +168,9 @@ class VoiceManager:
         self._loop: asyncio.AbstractEventLoop | None = None
 
         # Callback set by OdinBot to route transcriptions
-        self.on_transcription: Callable[[str, discord.Member, discord.TextChannel], Awaitable[None]] | None = None
+        self.on_transcription: (
+            Callable[[str, discord.Member, discord.TextChannel], Awaitable[None]] | None
+        ) = None
 
     @property
     def is_connected(self) -> bool:
@@ -216,7 +222,11 @@ class VoiceManager:
             # Connect using VoiceRecvClient for audio receive support (if available)
             connect_cls = voice_recv.VoiceRecvClient if voice_recv else discord.VoiceClient
             self._voice_client = await channel.connect(cls=connect_cls)
-            log.info("Joined voice channel: %s (is_connected=%s)", channel.name, self._voice_client.is_connected())
+            log.info(
+                "Joined voice channel: %s (is_connected=%s)",
+                channel.name,
+                self._voice_client.is_connected(),
+            )
         except Exception as e:
             log.error("Failed to join voice channel: %s", e, exc_info=True)
             self._voice_client = None

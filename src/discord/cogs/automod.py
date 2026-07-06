@@ -7,10 +7,10 @@ import re
 import time
 from collections import defaultdict
 
-import discord
 from discord.ext import commands
 
-from src.discord.helpers.embeds import log_embed, warning_embed
+import discord
+from src.discord.helpers.embeds import warning_embed
 from src.discord.helpers.permissions import is_admin
 
 logger = logging.getLogger("odin.cogs.automod")
@@ -112,7 +112,8 @@ class AutoMod(commands.Cog):
         lines = [
             f"Spam filter: {'on' if config['spam_enabled'] else 'off'}",
             f"Link filter: {'on' if config['link_filter_enabled'] else 'off'}",
-            f"Word filter: {'on' if config['word_filter_enabled'] else 'off'} ({len(config['filtered_words'])} words)",
+            f"Word filter: {'on' if config['word_filter_enabled'] else 'off'} "
+            f"({len(config['filtered_words'])} words)",
         ]
         from src.discord.helpers.embeds import info_embed
         await ctx.send(embed=info_embed("AutoMod Settings", {"Status": "\n".join(lines)}))
@@ -141,7 +142,8 @@ class AutoMod(commands.Cog):
         config["filtered_words"].append(word)
         config["word_filter_enabled"] = True
         from src.discord.helpers.embeds import success_embed
-        await ctx.send(embed=success_embed(f"Added `{word}` to filter ({len(config['filtered_words'])} total)."))
+        await ctx.send(embed=success_embed(f"Added `{word}` to filter "
+                                           f"({len(config['filtered_words'])} total)."))
 
 
 async def setup(bot: commands.Bot) -> None:

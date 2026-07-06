@@ -9,10 +9,7 @@ Covers:
 from __future__ import annotations
 
 import re
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
-
+from unittest.mock import AsyncMock, MagicMock
 
 # ---------------------------------------------------------------------------
 # Agent ID extraction
@@ -164,7 +161,12 @@ class TestWorkflowAgentFailurePropagation:
         from src.tools.result_validator import ToolResult
 
         agent_text = "**Agent: broken** (failed)\nError: LLM timeout"
-        agent_data = {"status": "failed", "error": "LLM timeout", "result": "", "empty_result": True}
+        agent_data = {
+            "status": "failed",
+            "error": "LLM timeout",
+            "result": "",
+            "empty_result": True,
+        }
 
         agent_ok = agent_data["status"] == "completed"
         result = ToolResult(output=agent_text, ok=agent_ok, tool_name="spawn_agent")

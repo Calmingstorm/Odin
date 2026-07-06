@@ -2,8 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -395,7 +394,7 @@ class TestFilterAgentToolsDepthBoundary:
     """filter_agent_tools must remove agent tools at exactly max_depth."""
 
     def test_at_max_depth_tools_removed(self):
-        from src.agents.manager import AGENT_MANAGEMENT_TOOLS, filter_agent_tools
+        from src.agents.manager import filter_agent_tools
 
         tools = [{"name": "spawn_agent"}, {"name": "run_command"}, {"name": "read_file"}]
         filtered = filter_agent_tools(tools, depth=2, max_depth=2)

@@ -9,7 +9,6 @@ import pytest
 from src.tools.post_validation import (
     Check,
     CheckResult,
-    ValidationReport,
     _build_command,
     _evaluate,
     compute_verdict,
@@ -56,7 +55,9 @@ class TestParseChecks:
         assert "too many checks" in errors[0]
 
     def test_compare_invalid_for_type_rejected(self):
-        """Round 2 review — compare='regex_match' on type 'http' is nonsense and must be rejected."""
+        """Round 2 review — compare='regex_match' on type 'http' is nonsense and must be
+        rejected.
+        """
         _, errors = parse_checks([
             {"type": "http", "target": "https://x", "compare": "regex_match", "expected": "ok"},
         ])
@@ -195,7 +196,12 @@ class TestEvaluate:
 
     def test_service_status_in_list(self):
         status, _ = _evaluate(
-            Check(type="service", target="nginx", compare="status_in", expected=["active", "activating"]),
+            Check(
+                type="service",
+                target="nginx",
+                compare="status_in",
+                expected=["active", "activating"],
+            ),
             0, "activating",
         )
         assert status == "pass"
@@ -487,9 +493,24 @@ class TestRunBundleIntegration:
 
         report = await run_bundle(
             [
-                {"type": "command", "target": "echo fast", "timeout_seconds": 3, "compare": "exit_zero"},
-                {"type": "command", "target": "echo slow", "timeout_seconds": 10, "compare": "exit_zero"},
-                {"type": "command", "target": "echo fast2", "timeout_seconds": 5, "compare": "exit_zero"},
+                {
+                    "type": "command",
+                    "target": "echo fast",
+                    "timeout_seconds": 3,
+                    "compare": "exit_zero",
+                },
+                {
+                    "type": "command",
+                    "target": "echo slow",
+                    "timeout_seconds": 10,
+                    "compare": "exit_zero",
+                },
+                {
+                    "type": "command",
+                    "target": "echo fast2",
+                    "timeout_seconds": 5,
+                    "compare": "exit_zero",
+                },
             ],
             bundle_name="concur",
             default_host="localhost",
@@ -660,7 +681,9 @@ class TestMutationDetection:
             result = detect_mutation("docker_ops", {"action": action})
             assert not result.detected, f"docker_ops {action} should not be a mutation"
 
-    def test_detects_kubectl_apply(self):
+    def test_detects_kubectl_tool_apply(self):
+        # Renamed from test_detects_kubectl_apply: the duplicate name shadowed
+        # the run_command variant above, which never ran.
         from src.tools.post_validation import detect_mutation
         result = detect_mutation("kubectl", {"action": "apply"})
         assert result.detected

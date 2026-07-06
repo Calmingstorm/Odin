@@ -90,7 +90,8 @@ class FullTextIndex:
                     "DELETE FROM session_fts WHERE doc_id = ?", (doc_id,),
                 )
                 self._conn.execute(
-                    "INSERT INTO session_fts (doc_id, content, channel_id, last_active) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO session_fts (doc_id, content, channel_id, last_active) "
+                    "VALUES (?, ?, ?, ?)",
                     (doc_id, content, channel_id, str(last_active)),
                 )
                 self._conn.commit()
@@ -161,7 +162,8 @@ class FullTextIndex:
                     "DELETE FROM knowledge_fts WHERE chunk_id = ?", (chunk_id,),
                 )
                 self._conn.execute(
-                    "INSERT INTO knowledge_fts (chunk_id, content, source, chunk_index) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO knowledge_fts (chunk_id, content, source, chunk_index) "
+                    "VALUES (?, ?, ?, ?)",
                     (chunk_id, content, source, str(chunk_index)),
                 )
                 self._conn.commit()

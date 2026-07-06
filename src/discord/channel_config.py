@@ -46,7 +46,12 @@ class ChannelConfigManager:
         }, indent=2))
         tmp.replace(self._path)
 
-    def should_respond_to_bots(self, guild_id: str | None, channel_id: str, global_default: bool = False) -> bool:
+    def should_respond_to_bots(
+        self,
+        guild_id: str | None,
+        channel_id: str,
+        global_default: bool = False,
+    ) -> bool:
         ch = self._channel_overrides.get(channel_id, {})
         if ch.get("respond_to_bots") is not None:
             return ch["respond_to_bots"]
@@ -56,7 +61,12 @@ class ChannelConfigManager:
                 return gd["respond_to_bots"]
         return global_default
 
-    def is_enabled(self, guild_id: str | None, channel_id: str, global_default: bool = True) -> bool:
+    def is_enabled(
+        self,
+        guild_id: str | None,
+        channel_id: str,
+        global_default: bool = True,
+    ) -> bool:
         ch = self._channel_overrides.get(channel_id, {})
         if "enabled" in ch:
             return ch["enabled"]
@@ -66,7 +76,12 @@ class ChannelConfigManager:
                 return gd["enabled"]
         return global_default
 
-    def should_require_mention(self, guild_id: str | None, channel_id: str, global_default: bool = False) -> bool:
+    def should_require_mention(
+        self,
+        guild_id: str | None,
+        channel_id: str,
+        global_default: bool = False,
+    ) -> bool:
         ch = self._channel_overrides.get(channel_id, {})
         if ch.get("require_mention") is not None:
             return ch["require_mention"]

@@ -1,10 +1,7 @@
 """Tests for tool-affordance metadata (cost/risk/latency/preconditions)."""
 from __future__ import annotations
 
-import pytest
-
 from src.tools.affordances import (
-    Affordance,
     Cost,
     Latency,
     Risk,

@@ -1,8 +1,7 @@
 """Tests for the DAG planner — execution, validation, and input interpolation."""
 
-import pytest
 
-from src.odin.planner import Planner, PlanValidationError
+from src.odin.planner import Planner
 from src.odin.types import PlanSpec, StepSpec, StepStatus
 
 
@@ -38,7 +37,12 @@ class TestExecution:
             name="chain",
             steps=(
                 StepSpec(id="a", tool="echo", params={"message": "first"}),
-                StepSpec(id="b", tool="echo", params={"message": "got ${a.output}"}, depends_on=("a",)),
+                StepSpec(
+                    id="b",
+                    tool="echo",
+                    params={"message": "got ${a.output}"},
+                    depends_on=("a",),
+                ),
             ),
         )
         p = Planner(ts_registry)
@@ -563,9 +567,24 @@ class TestParallelExecution:
             steps=(
                 StepSpec(id="root", tool="echo", params={"message": "ok"}),
                 StepSpec(id="ok_branch", tool="ts", params={"sleep": 0.01}, depends_on=("root",)),
-                StepSpec(id="bad_branch", tool="fail", params={"message": "boom"}, depends_on=("root",)),
-                StepSpec(id="after_ok", tool="echo", params={"message": "yes"}, depends_on=("ok_branch",)),
-                StepSpec(id="after_bad", tool="echo", params={"message": "no"}, depends_on=("bad_branch",)),
+                StepSpec(
+                    id="bad_branch",
+                    tool="fail",
+                    params={"message": "boom"},
+                    depends_on=("root",),
+                ),
+                StepSpec(
+                    id="after_ok",
+                    tool="echo",
+                    params={"message": "yes"},
+                    depends_on=("ok_branch",),
+                ),
+                StepSpec(
+                    id="after_bad",
+                    tool="echo",
+                    params={"message": "no"},
+                    depends_on=("bad_branch",),
+                ),
             ),
         )
         p = Planner(ts_registry)
@@ -582,8 +601,18 @@ class TestParallelExecution:
             name="serial",
             steps=(
                 StepSpec(id="a", tool="echo", params={"message": "1"}),
-                StepSpec(id="b", tool="echo", params={"message": "got ${a.output}"}, depends_on=("a",)),
-                StepSpec(id="c", tool="echo", params={"message": "got ${b.output}"}, depends_on=("b",)),
+                StepSpec(
+                    id="b",
+                    tool="echo",
+                    params={"message": "got ${a.output}"},
+                    depends_on=("a",),
+                ),
+                StepSpec(
+                    id="c",
+                    tool="echo",
+                    params={"message": "got ${b.output}"},
+                    depends_on=("b",),
+                ),
             ),
         )
         p = Planner(ts_registry)

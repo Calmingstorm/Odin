@@ -4,19 +4,16 @@ from __future__ import annotations
 import json
 import time
 
-import pytest
-
 from src.health.subsystem_guard import (
+    _DEFAULT_MESSAGES,
+    _FALLBACK_MESSAGE,
     DEFAULT_DEGRADED_THRESHOLD,
     DEFAULT_UNAVAILABLE_THRESHOLD,
     DegradationStats,
     SubsystemGuard,
     SubsystemInfo,
     SubsystemState,
-    _DEFAULT_MESSAGES,
-    _FALLBACK_MESSAGE,
 )
-
 
 # ---------------------------------------------------------------------------
 # SubsystemState enum
@@ -690,7 +687,8 @@ class TestGuardLifecycle:
         guard.check("knowledge")                   # blocked
         guard.record_success("knowledge")          # → AVAILABLE
 
-        assert guard.stats.total_transitions == 3  # available→degraded, degraded→unavailable, unavailable→available
+        # available→degraded, degraded→unavailable, unavailable→available
+        assert guard.stats.total_transitions == 3
         assert guard.stats.total_blocked == 1
         assert guard.stats.total_checks == 1
 
@@ -711,7 +709,8 @@ class TestDefaultMessages:
 
     def test_all_messages_mention_other_tools(self):
         for name, msg in _DEFAULT_MESSAGES.items():
-            assert "Other tools remain functional" in msg, f"Message for {name} should reassure about other tools"
+            assert "Other tools remain functional" in msg, (f"Message for {name} should reassure "
+                                                            f"about other tools")
 
     def test_fallback_message_template(self):
         msg = _FALLBACK_MESSAGE.format(name="custom")

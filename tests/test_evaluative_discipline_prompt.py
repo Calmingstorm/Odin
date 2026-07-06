@@ -7,10 +7,8 @@ counteract that, so a future edit can't silently remove it.
 """
 from __future__ import annotations
 
-import pytest
-
-from src.llm.system_prompt import build_system_prompt
 from src.discord.completion import CLASSIFIER_SYSTEM_PROMPT
+from src.llm.system_prompt import build_system_prompt
 
 
 class TestSystemPromptRule12:

@@ -13,7 +13,7 @@ import uuid
 import aiohttp
 
 from ..odin_log import get_logger
-from .backoff import compute_backoff, DEFAULT_MAX_RETRIES, DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY
+from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
 from .provider import LLMProvider
 from .types import LLMResponse, ToolCall
@@ -128,13 +128,17 @@ class KimiClient(LLMProvider):
                             tool_results.append({
                                 "role": "tool",
                                 "tool_call_id": block.get("tool_use_id", ""),
-                                "content": json.dumps(tr_content) if not isinstance(tr_content, str) else tr_content,
+                                "content": (json.dumps(tr_content)
+                                            if not isinstance(tr_content, str) else tr_content),
                             })
                     elif isinstance(block, str):
                         text_parts.append(block)
 
                 if text_parts or tool_calls:
-                    entry: dict = {"role": role, "content": "\n".join(text_parts) if text_parts else ""}
+                    entry: dict = {
+                        "role": role,
+                        "content": "\n".join(text_parts) if text_parts else "",
+                    }
                     if tool_calls and role == "assistant":
                         entry["tool_calls"] = tool_calls
                         if not entry["content"]:
@@ -228,14 +232,23 @@ class KimiClient(LLMProvider):
                     if resp.status == 429:
                         if attempt >= self.max_retries:
                             self.breaker.record_failure()
-                            raise RuntimeError(f"Kimi rate limited after {self.max_retries + 1} attempts: {text[:300]}")
+                            raise RuntimeError(f"Kimi rate limited after {self.max_retries + 1} "
+                                               f"attempts: {text[:300]}")
                         retry_after = resp.headers.get("Retry-After")
                         try:
-                            delay = min(float(retry_after), self.retry_max_delay) if retry_after else compute_backoff(
-                                attempt, self.retry_base_delay, self.retry_max_delay,
+                            delay = (
+                                min(float(retry_after), self.retry_max_delay)
+                                if retry_after
+                                else compute_backoff(
+                                    attempt, self.retry_base_delay, self.retry_max_delay,
+                                )
                             )
                         except (ValueError, TypeError):
-                            delay = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
+                            delay = compute_backoff(
+                                attempt,
+                                self.retry_base_delay,
+                                self.retry_max_delay,
+                            )
                         log.warning("Kimi rate limited (attempt %d/%d), retrying in %.1fs",
                                     attempt + 1, self.max_retries + 1, delay)
                         await asyncio.sleep(delay)
@@ -243,7 +256,11 @@ class KimiClient(LLMProvider):
 
                     if resp.status in (500, 502, 503, 504) and attempt < self.max_retries:
                         last_error = RuntimeError(f"Kimi {resp.status}: {text[:300]}")
-                        delay = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
+                        delay = compute_backoff(
+                            attempt,
+                            self.retry_base_delay,
+                            self.retry_max_delay,
+                        )
                         log.warning("Kimi %d (attempt %d/%d), retrying in %.1fs",
                                     resp.status, attempt + 1, self.max_retries + 1, delay)
                         await asyncio.sleep(delay)
@@ -251,7 +268,7 @@ class KimiClient(LLMProvider):
 
                     self.breaker.record_failure()
                     raise RuntimeError(f"Kimi {resp.status}: {text[:500]}")
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            except (TimeoutError, aiohttp.ClientError) as e:
                 last_error = e
                 self.breaker.record_failure()
                 if attempt < self.max_retries:
@@ -260,9 +277,11 @@ class KimiClient(LLMProvider):
                                 attempt + 1, self.max_retries + 1, e, delay)
                     await asyncio.sleep(delay)
                     continue
-                raise RuntimeError(f"Kimi connection error after {self.max_retries + 1} attempts: {e}") from e
+                raise RuntimeError(f"Kimi connection error after {self.max_retries + 1} attempts: "
+                                   f"{e}") from e
 
-        raise RuntimeError(f"Kimi request failed after {self.max_retries + 1} attempts: {last_error}")
+        raise RuntimeError(f"Kimi request failed after {self.max_retries + 1} attempts: "
+                           f"{last_error}")
 
     async def chat(
         self, messages: list[dict], system: str,

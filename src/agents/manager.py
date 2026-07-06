@@ -14,7 +14,6 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
 
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
@@ -68,7 +67,7 @@ def filter_agent_tools(
 # --- Agent State Machine ---
 
 
-class AgentState(str, Enum):
+class AgentState(str, Enum):  # noqa: UP042 — str(member) output differs under StrEnum; deferred to a typed-verification pass
     """Typed lifecycle states for agent workers."""
     SPAWNING = "spawning"
     READY = "ready"
@@ -129,7 +128,7 @@ _STATE_TO_LEGACY = {
 }
 
 
-class InvalidStateTransition(Exception):
+class InvalidStateTransition(Exception):  # noqa: N818 — established public exception name; rename is an API break
     """Raised when an invalid state transition is attempted."""
     def __init__(self, from_state: AgentState, to_state: AgentState) -> None:
         self.from_state = from_state
@@ -335,7 +334,8 @@ class AgentManager:
             if a.channel_id == channel_id and a._sm.is_active
         )
         if channel_count >= MAX_CONCURRENT_AGENTS:
-            return f"Error: Maximum concurrent agents ({MAX_CONCURRENT_AGENTS}) reached for this channel."
+            return (f"Error: Maximum concurrent agents ({MAX_CONCURRENT_AGENTS}) reached for this "
+                    f"channel.")
 
         if not label or not goal:
             return "Error: Both 'label' and 'goal' are required."
@@ -692,7 +692,9 @@ class AgentManager:
         return ids
 
     async def cleanup(self) -> int:
-        """Remove agents that have been in terminal state for > CLEANUP_DELAY. Returns count removed."""
+        """Remove agents that have been in terminal state for > CLEANUP_DELAY. Returns count
+        removed.
+        """
         now = time.time()
         to_remove = []
         for agent_id, agent in self._agents.items():
@@ -807,9 +809,18 @@ async def _run_agent(
             try:
                 agent.transition(AgentState.KILLED, "cancel signal")
                 agent.ended_at = time.time()
-                log.info("Agent %s (%s) killed after %ds", agent.id, agent.label, int(time.time() - agent.created_at))
+                log.info(
+                    "Agent %s (%s) killed after %ds",
+                    agent.id,
+                    agent.label,
+                    int(time.time() - agent.created_at),
+                )
             except InvalidStateTransition:
-                log.info("Agent %s already in terminal state %s when kill arrived", agent.id, agent._sm.state.value)
+                log.info(
+                    "Agent %s already in terminal state %s when kill arrived",
+                    agent.id,
+                    agent._sm.state.value,
+                )
             return True
         return False
 
@@ -819,7 +830,13 @@ async def _run_agent(
             agent.transition(AgentState.TIMEOUT, f"lifetime exceeded ({int(elapsed)}s)")
             agent.result = _get_last_progress(agent)
             agent.ended_at = time.time()
-            log.warning("Agent %s (%s) timed out after %ds, %d iterations", agent.id, agent.label, int(elapsed), agent.iteration_count)
+            log.warning(
+                "Agent %s (%s) timed out after %ds, %d iterations",
+                agent.id,
+                agent.label,
+                int(elapsed),
+                agent.iteration_count,
+            )
             return True
         return False
 
@@ -850,16 +867,24 @@ async def _run_agent(
             # Context compression: summarize older tool iterations when context grows too large
             if context_compression_enabled and iteration > 0:
                 try:
-                    from ..llm.context_compressor import compress_tool_context, estimate_message_chars
+                    from ..llm.context_compressor import (
+                        compress_tool_context,
+                        estimate_message_chars,
+                    )
                     if estimate_message_chars(agent.messages) > max_context_chars:
                         agent.messages, saved = compress_tool_context(
                             agent.messages,
                             max_context_chars=max_context_chars,
                             keep_recent=keep_recent_iterations,
                         )
-                        log.info("agent context_compressor: agent=%s trimmed %d chars", agent.id, saved)
+                        log.info(
+                            "agent context_compressor: agent=%s trimmed %d chars",
+                            agent.id,
+                            saved,
+                        )
                 except Exception:
-                    log.exception("agent context_compressor failed (non-fatal); continuing with full context")
+                    log.exception("agent context_compressor failed (non-fatal); continuing with "
+                                  "full context")
 
             # Budget warning: inject remaining-iterations notice before LLM call
             remaining = max_iterations - iteration
@@ -867,9 +892,14 @@ async def _run_agent(
                 if remaining == 1:
                     warn_text = "[Agent budget: FINAL iteration. Produce your final summary NOW.]"
                 elif remaining <= 5:
-                    warn_text = f"[Agent budget: {remaining} iterations remaining. Commit any changes, run validation, and produce your final summary.]"
+                    warn_text = (f"[Agent budget: {remaining} iterations remaining. Commit any "
+                                 f"changes, run validation, and produce your final summary.]")
                 else:
-                    warn_text = f"[Agent budget: {remaining} iterations remaining. Begin wrapping up — finish the smallest useful change, validate, and prepare your final summary.]"
+                    warn_text = (
+                        f"[Agent budget: {remaining} iterations remaining. "
+                        "Begin wrapping up — finish the smallest useful change, "
+                        "validate, and prepare your final summary.]"
+                    )
                 agent.messages.append({"role": "user", "content": warn_text})
 
             # Transition READY → EXECUTING for LLM call
@@ -904,7 +934,13 @@ async def _run_agent(
                 agent.result = text
                 agent.ended_at = time.time()
                 elapsed = time.time() - agent.created_at
-                log.info("Agent %s (%s) completed in %ds, %d tool calls", agent.id, agent.label, int(elapsed), len(agent.tools_used))
+                log.info(
+                    "Agent %s (%s) completed in %ds, %d tool calls",
+                    agent.id,
+                    agent.label,
+                    int(elapsed),
+                    len(agent.tools_used),
+                )
                 return
 
             # Execute tool calls
@@ -927,7 +963,7 @@ async def _run_agent(
                         timeout=tool_timeout,
                     )
                     result = scrub_output_secrets(str(result))
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     result = f"Error: Tool '{tool_name}' timed out after {tool_timeout}s"
                     log.warning("Agent %s tool %s timed out", agent.id, tool_name)
                 except Exception as e:
@@ -967,7 +1003,14 @@ async def _run_agent(
             agent.result = _synthesize_fallback(agent, max_iterations)
         agent.ended_at = time.time()
         elapsed = time.time() - agent.created_at
-        log.info("Agent %s (%s) completed in %ds after %d iterations (max reached), %d tool calls", agent.id, agent.label, int(elapsed), max_iterations, len(agent.tools_used))
+        log.info(
+            "Agent %s (%s) completed in %ds after %d iterations (max reached), %d tool calls",
+            agent.id,
+            agent.label,
+            int(elapsed),
+            max_iterations,
+            len(agent.tools_used),
+        )
 
     except asyncio.CancelledError:
         if not agent._sm.is_terminal:
@@ -1017,14 +1060,20 @@ async def _call_llm_with_recovery(
             iteration_callback(agent.messages, system_prompt, tools),
             timeout=ITERATION_CB_TIMEOUT,
         )
-    except (asyncio.TimeoutError, Exception) as first_err:
+    except (TimeoutError, Exception) as first_err:
         is_timeout = isinstance(first_err, asyncio.TimeoutError)
-        err_desc = f"LLM {'timeout' if is_timeout else 'error'}: {first_err}" if not is_timeout else f"LLM timeout after {ITERATION_CB_TIMEOUT}s"
+        err_desc = (f"LLM {'timeout' if is_timeout else 'error'}: {first_err}"
+            if not is_timeout else f"LLM timeout after {ITERATION_CB_TIMEOUT}s")
 
         if agent.recovery_attempts < MAX_RECOVERY_ATTEMPTS:
             agent.recovery_attempts += 1
             agent.transition(AgentState.RECOVERING, err_desc)
-            log.warning("Agent %s recovering (attempt %d): %s", agent.id, agent.recovery_attempts, err_desc)
+            log.warning(
+                "Agent %s recovering (attempt %d): %s",
+                agent.id,
+                agent.recovery_attempts,
+                err_desc,
+            )
 
             retry_delay = 1
             if hasattr(first_err, "retry_after"):
@@ -1039,7 +1088,7 @@ async def _call_llm_with_recovery(
                     iteration_callback(agent.messages, system_prompt, tools),
                     timeout=ITERATION_CB_TIMEOUT,
                 )
-            except (asyncio.TimeoutError, Exception) as retry_err:
+            except (TimeoutError, Exception) as retry_err:
                 retry_desc = f"retry failed: {retry_err}"
                 log.error("Agent %s recovery failed: %s", agent.id, retry_desc)
                 agent.transition(AgentState.FAILED, retry_desc)

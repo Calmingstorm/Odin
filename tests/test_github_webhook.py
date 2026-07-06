@@ -16,13 +16,11 @@ import hmac
 import json
 
 import pytest
-from aiohttp import web
-from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
+from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import WebhookConfig
 from src.health.server import HealthServer
 from src.scheduler.scheduler import Scheduler
-
 
 # ---------------------------------------------------------------------------
 # Helpers

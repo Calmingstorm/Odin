@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
@@ -140,7 +140,7 @@ You also manage infrastructure, but only when explicitly asked — don't mention
 
 def _format_datetime(tz_name: str = "UTC") -> str:
     """Format current datetime in the configured timezone with UTC reference."""
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     local_tz = _get_zone(tz_name)
     now_local = now_utc.astimezone(local_tz)
     tz_abbr = now_local.strftime("%Z")
@@ -159,7 +159,12 @@ def build_chat_system_prompt(
     personality_voice: str = "",
 ) -> str:
     """Build a lightweight system prompt for chat-routed messages."""
-    bot_name, identity, voice = _resolve_personality(personality_preset, personality_name, personality_identity, personality_voice)
+    bot_name, identity, voice = _resolve_personality(
+        personality_preset,
+        personality_name,
+        personality_identity,
+        personality_voice,
+    )
     return CHAT_SYSTEM_PROMPT_TEMPLATE.format(
         bot_name=bot_name,
         identity=identity,
@@ -211,8 +216,13 @@ def build_system_prompt(
 ) -> str:
     hosts_text = "\n".join(f"- `{alias}`: {addr}" for alias, addr in hosts.items())
     local_tz = _get_zone(tz)
-    tz_abbr = datetime.now(timezone.utc).astimezone(local_tz).strftime("%Z")
-    bot_name, identity, voice = _resolve_personality(personality_preset, personality_name, personality_identity, personality_voice)
+    tz_abbr = datetime.now(UTC).astimezone(local_tz).strftime("%Z")
+    bot_name, identity, voice = _resolve_personality(
+        personality_preset,
+        personality_name,
+        personality_identity,
+        personality_voice,
+    )
 
     return SYSTEM_PROMPT_TEMPLATE.format(
         bot_name=bot_name,

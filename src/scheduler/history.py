@@ -6,8 +6,7 @@ Supports querying by schedule ID with pagination and optional pruning.
 from __future__ import annotations
 
 import json
-import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +49,7 @@ class ScheduleHistory:
     ) -> dict[str, Any]:
         """Record a schedule execution. Returns the saved entry."""
         entry: dict[str, Any] = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "schedule_id": schedule_id,
             "description": description,
             "action": action,
@@ -95,7 +94,7 @@ class ScheduleHistory:
 
         results: list[dict] = []
         try:
-            async with aiofiles.open(self.path, "r") as f:
+            async with aiofiles.open(self.path) as f:
                 lines = await f.readlines()
         except Exception as e:
             log.error("Failed to read schedule history: %s", e)
@@ -159,7 +158,7 @@ class ScheduleHistory:
             return 0
 
         try:
-            async with aiofiles.open(self.path, "r") as f:
+            async with aiofiles.open(self.path) as f:
                 lines = await f.readlines()
         except Exception as e:
             log.error("Failed to read history for pruning: %s", e)

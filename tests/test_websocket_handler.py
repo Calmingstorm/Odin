@@ -6,14 +6,11 @@ and setup_websocket function.
 """
 from __future__ import annotations
 
-import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.web.websocket import WebSocketManager, setup_websocket, _LOG_TAIL_LINES
-
+from src.web.websocket import _LOG_TAIL_LINES, WebSocketManager, setup_websocket
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -146,7 +143,11 @@ class TestHandleChat:
             "is_error": False,
             "files": [],
         }
-        with patch("src.web.websocket.process_web_chat", new_callable=AsyncMock, return_value=mock_result):
+        with patch(
+            "src.web.websocket.process_web_chat",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
             await mgr._handle_chat(ws, {"content": "hi", "channel_id": "ch1"})
         resp = ws.send_json.call_args[0][0]
         assert resp["type"] == "chat_response"
@@ -162,7 +163,11 @@ class TestHandleChat:
             "is_error": False,
             "files": [{"filename": "img.png", "data": "base64data"}],
         }
-        with patch("src.web.websocket.process_web_chat", new_callable=AsyncMock, return_value=mock_result):
+        with patch(
+            "src.web.websocket.process_web_chat",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
             await mgr._handle_chat(ws, {"content": "make image"})
         resp = ws.send_json.call_args[0][0]
         assert "files" in resp
@@ -172,7 +177,11 @@ class TestHandleChat:
     async def test_chat_exception(self):
         mgr = WebSocketManager(_make_bot())
         ws = _make_ws()
-        with patch("src.web.websocket.process_web_chat", new_callable=AsyncMock, side_effect=RuntimeError("boom")):
+        with patch(
+            "src.web.websocket.process_web_chat",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ):
             await mgr._handle_chat(ws, {"content": "hello"})
         resp = ws.send_json.call_args[0][0]
         assert resp["type"] == "chat_error"
@@ -181,9 +190,19 @@ class TestHandleChat:
     async def test_chat_uses_identity_scoped_channel_id(self):
         mgr = WebSocketManager(_make_bot())
         ws = _make_ws()
-        ws._odin_identity = MagicMock(user_id="ci-bot", username="CI", tier="admin", allowed_tools=[], allowed_hosts=[])
+        ws._odin_identity = MagicMock(
+            user_id="ci-bot",
+            username="CI",
+            tier="admin",
+            allowed_tools=[],
+            allowed_hosts=[],
+        )
         mock_result = {"response": "ok", "tools_used": [], "is_error": False}
-        with patch("src.web.websocket.process_web_chat", new_callable=AsyncMock, return_value=mock_result) as mock_fn:
+        with patch(
+            "src.web.websocket.process_web_chat",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        )as mock_fn:
             await mgr._handle_chat(ws, {"content": "hi"})
         call_args = mock_fn.call_args
         assert call_args[0][2] == "ci-bot"
@@ -194,7 +213,11 @@ class TestHandleChat:
         ws = _make_ws()
         ws._odin_identity = None
         mock_result = {"response": "ok", "tools_used": [], "is_error": False}
-        with patch("src.web.websocket.process_web_chat", new_callable=AsyncMock, return_value=mock_result) as mock_fn:
+        with patch(
+            "src.web.websocket.process_web_chat",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        )as mock_fn:
             await mgr._handle_chat(ws, {"content": "hi"})
         call_args = mock_fn.call_args
         assert call_args[0][2] == "web-user"

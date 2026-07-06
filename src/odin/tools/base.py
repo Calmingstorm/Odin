@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from src.odin.context import ExecutionContext
@@ -13,7 +13,7 @@ class BaseTool(ABC):
     """Base class that all planner tools must implement."""
 
     @abstractmethod
-    async def execute(self, params: dict[str, Any], ctx: "ExecutionContext") -> Any:
+    async def execute(self, params: dict[str, Any], ctx: ExecutionContext) -> Any:
         """Execute the tool with given parameters and return output."""
 
     @classmethod

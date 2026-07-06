@@ -5,9 +5,8 @@ for the web UI resource-usage widget.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -282,6 +281,7 @@ def collect_all(bot: Any) -> dict[str, Any]:
         "knowledge": knowledge.to_dict(),
         "trajectories": trajectories.to_dict(),
         "storage_total_bytes": total_storage_bytes,
-        "storage_total_mb": round(total_storage_bytes / (1024 * 1024), 2) if total_storage_bytes else 0.0,
-        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "storage_total_mb": (round(total_storage_bytes / (1024 * 1024), 2)
+                             if total_storage_bytes else 0.0),
+        "collected_at": datetime.now(UTC).isoformat(),
     }

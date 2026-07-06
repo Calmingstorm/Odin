@@ -1,11 +1,7 @@
 """Tests for nested agent spawning — depth-limited sub-agent hierarchy."""
 from __future__ import annotations
 
-import asyncio
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from src.agents.manager import (
     AGENT_BLOCKED_TOOLS,
@@ -15,12 +11,10 @@ from src.agents.manager import (
     AgentInfo,
     AgentManager,
     AgentState,
-    AgentStateMachine,
     _run_agent,
     filter_agent_tools,
 )
 from src.agents.trajectory import AgentTrajectoryTurn
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -817,6 +811,7 @@ class TestRestApi:
     async def test_list_agents_includes_depth(self):
         from aiohttp import web
         from aiohttp.test_utils import make_mocked_request
+
         from src.web.api import setup_api
 
         bot = self._make_bot()
@@ -839,16 +834,8 @@ class TestRestApi:
         )
 
         # Call the handler directly
-        request = make_mocked_request("GET", "/api/agents", app=app)
+        make_mocked_request("GET", "/api/agents", app=app)
         # Find the handler
-        handler = None
-        for resource in app.router.resources():
-            if hasattr(resource, '_path') and resource._path == "/api/agents":
-                for route in resource:
-                    if route.method == "GET":
-                        handler = route.handler
-                        break
-        # If handler lookup fails, just verify the agent data exists
         entries = bot.agent_manager.list()
         child_entry = next(e for e in entries if e["id"] == c)
         assert child_entry["depth"] == 1
@@ -929,7 +916,6 @@ class TestExports:
             AGENT_MANAGEMENT_TOOLS,
             MAX_CHILDREN_PER_AGENT,
             MAX_NESTING_DEPTH,
-            filter_agent_tools,
         )
         assert MAX_NESTING_DEPTH == 2
         assert MAX_CHILDREN_PER_AGENT == 3

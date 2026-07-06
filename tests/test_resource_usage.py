@@ -1,11 +1,10 @@
 """Tests for src/monitoring/resource_usage.py — resource usage stats collector."""
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock
 
 
 def _mock_sessions(bot, sessions_dict: dict | None = None):
@@ -14,9 +13,9 @@ def _mock_sessions(bot, sessions_dict: dict | None = None):
     bot.sessions.count.return_value = len(d)
     bot.sessions.items_snapshot.return_value = list(d.items())
 
-import pytest
+import pytest  # noqa: E402 — deliberate import order (env/bootstrap before heavy imports)
 
-from src.monitoring.resource_usage import (
+from src.monitoring.resource_usage import (  # noqa: E402 — deliberate import order (env/bootstrap before heavy imports)
     DirStats,
     KnowledgeStats,
     SessionStats,
@@ -28,7 +27,6 @@ from src.monitoring.resource_usage import (
     scan_directory,
     scan_file,
 )
-
 
 # ---------------------------------------------------------------------------
 # DirStats
@@ -726,6 +724,7 @@ class TestResourceUsageAPI:
     async def test_resource_usage_endpoint(self):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         bot = self._make_bot()
@@ -747,6 +746,7 @@ class TestResourceUsageAPI:
     async def test_resource_usage_has_session_data(self):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         bot = self._make_bot()
@@ -770,6 +770,7 @@ class TestResourceUsageAPI:
     async def test_resource_usage_has_trajectory_section(self):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         bot = self._make_bot()
@@ -793,14 +794,7 @@ class TestResourceUsageAPI:
 class TestExports:
     def test_module_imports(self):
         from src.monitoring.resource_usage import (
-            DirStats,
-            KnowledgeStats,
-            SessionStats,
-            TrajectoryStats,
             collect_all,
-            collect_knowledge_stats,
-            collect_session_stats,
-            collect_trajectory_stats,
             scan_directory,
             scan_file,
         )
@@ -810,16 +804,7 @@ class TestExports:
 
     def test_init_exports(self):
         from src.monitoring import (
-            DirStats,
-            KnowledgeStats,
-            SessionStats,
-            TrajectoryStats,
             collect_all,
-            collect_knowledge_stats,
-            collect_session_stats,
-            collect_trajectory_stats,
-            scan_directory,
-            scan_file,
         )
         assert callable(collect_all)
 

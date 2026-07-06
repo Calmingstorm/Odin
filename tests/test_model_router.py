@@ -7,29 +7,28 @@ and edge cases.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.config.schema import ModelRoutingConfig, OpenAICodexConfig
 from src.llm.model_router import (
-    CHEAP_MODEL_INTENTS,
-    HEURISTIC_CONFIDENCE_THRESHOLD,
-    MessageIntent,
-    ModelRouter,
-    RoutingDecision,
-    RoutingStats,
-    STRONG_MODEL_INTENTS,
     _CHAT_PATTERNS,
     _CLASSIFY_SYSTEM,
     _COMPLEX_PATTERNS,
     _QUERY_PATTERNS,
     _TASK_PATTERNS,
+    CHEAP_MODEL_INTENTS,
+    HEURISTIC_CONFIDENCE_THRESHOLD,
+    STRONG_MODEL_INTENTS,
+    MessageIntent,
+    ModelRouter,
+    RoutingDecision,
+    RoutingStats,
     _build_reason,
     classify_heuristic,
     classify_with_llm,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -576,7 +575,7 @@ class TestClassifyWithLLM:
 
     async def test_timeout_falls_back_to_strong(self):
         aux = _make_aux_mock()
-        aux.chat = AsyncMock(side_effect=asyncio.TimeoutError())
+        aux.chat = AsyncMock(side_effect=TimeoutError())
         d = await classify_with_llm("test", aux)
         assert d.intent == MessageIntent.TASK
         assert d.use_strong is True
@@ -589,7 +588,7 @@ class TestClassifyWithLLM:
     async def test_message_truncated(self):
         aux = _make_aux_mock("CHAT")
         long_msg = "x" * 1000
-        d = await classify_with_llm(long_msg, aux)
+        await classify_with_llm(long_msg, aux)
         call_args = aux.chat.call_args
         msg_content = call_args[0][0][0]["content"]
         assert len(msg_content) <= 500
@@ -715,7 +714,7 @@ class TestModelRouterRouteLLM:
     async def test_llm_not_used_for_high_confidence(self):
         aux = _make_aux_mock("COMPLEX")
         router = ModelRouter(aux_client=aux, confidence_threshold=0.01)
-        d = await router.route("hello")
+        await router.route("hello")
         assert not aux.chat.called
 
     async def test_llm_error_still_routes(self):
@@ -882,7 +881,8 @@ class TestRealWorldScenarios:
 
     async def test_architecture_review(self):
         router = ModelRouter()
-        d = await router.route("review the microservices architecture and suggest improvements for scaling")
+        d = await router.route("review the microservices architecture and suggest improvements for "
+                               "scaling")
         assert d.intent == MessageIntent.COMPLEX
         assert d.use_strong is True
 
@@ -922,24 +922,13 @@ class TestRealWorldScenarios:
 
 class TestImports:
     def test_public_symbols(self):
-        from src.llm.model_router import (
-            MessageIntent,
-            ModelRouter,
-            RoutingDecision,
-            RoutingStats,
-            classify_heuristic,
-            classify_with_llm,
-        )
+        pass
 
     def test_constants(self):
-        from src.llm.model_router import (
-            CHEAP_MODEL_INTENTS,
-            HEURISTIC_CONFIDENCE_THRESHOLD,
-            STRONG_MODEL_INTENTS,
-        )
+        pass
 
     def test_config(self):
-        from src.config.schema import ModelRoutingConfig
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -974,7 +963,7 @@ class TestConfidenceThreshold:
     async def test_high_threshold_triggers_llm(self):
         aux = _make_aux_mock("CHAT")
         router = ModelRouter(aux_client=aux, confidence_threshold=0.99)
-        d = await router.route("hello there friend")
+        await router.route("hello there friend")
         # With threshold=0.99, heuristic confidence < 0.99 should trigger LLM
         # (if heuristic confidence was low enough)
 
@@ -1036,6 +1025,6 @@ class TestEdgeCases:
     async def test_repeated_routing(self):
         router = ModelRouter()
         for _ in range(100):
-            d = await router.route("hi")
+            await router.route("hi")
         assert router.stats.total_routed == 100
         assert router.stats.intent_counts["chat"] == 100

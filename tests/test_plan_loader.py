@@ -1,6 +1,7 @@
 """Tests for plan loading."""
 
 import json
+
 import pytest
 
 from src.odin.plan_loader import load_plan
@@ -30,7 +31,13 @@ class TestLoadPlan:
     def test_options(self):
         plan = load_plan({
             "name": "t",
-            "steps": [{"id": "a", "tool": "echo", "timeout": 10, "retries": 3, "continue_on_failure": True}],
+            "steps": [{
+                "id": "a",
+                "tool": "echo",
+                "timeout": 10,
+                "retries": 3,
+                "continue_on_failure": True,
+            }],
         })
         s = plan.steps[0]
         assert s.timeout == 10.0

@@ -14,7 +14,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-
 # Type for a callable that returns arbitrary metric data
 MetricSource = Callable[[], Any]
 
@@ -104,8 +103,9 @@ class MetricsCollector:
             try:
                 components = self._component_check()
                 if components:
-                    sections.append(f"# HELP odin_component_healthy Component health status (1=healthy, 0=unhealthy)")
-                    sections.append(f"# TYPE odin_component_healthy gauge")
+                    sections.append("# HELP odin_component_healthy Component health status "
+                                    "(1=healthy, 0=unhealthy)")
+                    sections.append("# TYPE odin_component_healthy gauge")
                     for name, info in sorted(components.items()):
                         healthy = 1 if info.get("healthy") else 0
                         sections.append(
@@ -124,8 +124,8 @@ class MetricsCollector:
             try:
                 tool_metrics = tool_source()
                 if tool_metrics:
-                    sections.append(f"# HELP odin_tool_calls_total Total tool invocations")
-                    sections.append(f"# TYPE odin_tool_calls_total counter")
+                    sections.append("# HELP odin_tool_calls_total Total tool invocations")
+                    sections.append("# TYPE odin_tool_calls_total counter")
                     for tool_name, counts in sorted(tool_metrics.items()):
                         calls = counts.get("calls", 0)
                         sections.append(_format_metric(
@@ -133,8 +133,8 @@ class MetricsCollector:
                             labels={"tool": tool_name},
                             include_header=False,
                         ))
-                    sections.append(f"# HELP odin_tool_errors_total Total tool errors")
-                    sections.append(f"# TYPE odin_tool_errors_total counter")
+                    sections.append("# HELP odin_tool_errors_total Total tool errors")
+                    sections.append("# TYPE odin_tool_errors_total counter")
                     for tool_name, counts in sorted(tool_metrics.items()):
                         errors = counts.get("errors", 0)
                         sections.append(_format_metric(
@@ -142,8 +142,8 @@ class MetricsCollector:
                             labels={"tool": tool_name},
                             include_header=False,
                         ))
-                    sections.append(f"# HELP odin_tool_timeouts_total Total tool timeouts")
-                    sections.append(f"# TYPE odin_tool_timeouts_total counter")
+                    sections.append("# HELP odin_tool_timeouts_total Total tool timeouts")
+                    sections.append("# TYPE odin_tool_timeouts_total counter")
                     for tool_name, counts in sorted(tool_metrics.items()):
                         timeouts = counts.get("timeouts", 0)
                         sections.append(_format_metric(
@@ -243,8 +243,8 @@ class MetricsCollector:
                     ))
                     by_user = cost_data.get("by_user", {})
                     if by_user:
-                        sections.append(f"# HELP odin_llm_user_cost_usd LLM cost in USD by user")
-                        sections.append(f"# TYPE odin_llm_user_cost_usd counter")
+                        sections.append("# HELP odin_llm_user_cost_usd LLM cost in USD by user")
+                        sections.append("# TYPE odin_llm_user_cost_usd counter")
                         for uid, info in sorted(by_user.items()):
                             sections.append(_format_metric(
                                 "odin_llm_user_cost_usd", info.get("cost_usd", 0),
@@ -253,8 +253,9 @@ class MetricsCollector:
                             ))
                     by_channel = cost_data.get("by_channel", {})
                     if by_channel:
-                        sections.append(f"# HELP odin_llm_channel_cost_usd LLM cost in USD by channel")
-                        sections.append(f"# TYPE odin_llm_channel_cost_usd counter")
+                        sections.append("# HELP odin_llm_channel_cost_usd LLM cost in USD by "
+                                        "channel")
+                        sections.append("# TYPE odin_llm_channel_cost_usd counter")
                         for cid, info in sorted(by_channel.items()):
                             sections.append(_format_metric(
                                 "odin_llm_channel_cost_usd", info.get("cost_usd", 0),
@@ -287,8 +288,8 @@ class MetricsCollector:
                     ))
                     per_session = token_data.get("per_session", {})
                     if per_session:
-                        sections.append(f"# HELP odin_session_tokens Estimated tokens per session")
-                        sections.append(f"# TYPE odin_session_tokens gauge")
+                        sections.append("# HELP odin_session_tokens Estimated tokens per session")
+                        sections.append("# TYPE odin_session_tokens gauge")
                         for cid, tokens in sorted(per_session.items()):
                             sections.append(_format_metric(
                                 "odin_session_tokens", tokens,
