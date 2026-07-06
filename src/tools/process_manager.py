@@ -49,6 +49,7 @@ class ProcessRegistry:
     async def start(self, host: str, command: str, timeout: int = 300) -> str:
         """Start a background process locally. Returns confirmation with PID."""
         from ..tools.ssh import is_local_address
+
         if not is_local_address(host):
             return (
                 f"manage_process only supports local execution. "
@@ -85,7 +86,10 @@ class ProcessRegistry:
 
         # Auto-kill after max lifetime
         from ..async_utils import fire_and_forget
-        fire_and_forget(self._enforce_lifetime(pid, MAX_LIFETIME_SECONDS), name=f"process_lifetime:{pid}")
+
+        fire_and_forget(
+            self._enforce_lifetime(pid, MAX_LIFETIME_SECONDS), name=f"process_lifetime:{pid}"
+        )
 
         log.info("Started process PID %d: %s", pid, command[:80])
         return f"Process started (PID {pid}): {command[:120]}"
@@ -140,7 +144,7 @@ class ProcessRegistry:
                 # Give it a moment to exit gracefully
                 try:
                     await asyncio.wait_for(info.process.wait(), timeout=5)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     info.process.kill()
             info.status = "failed"
             info.exit_code = -9
@@ -193,9 +197,9 @@ class ProcessRegistry:
         """Remove dead processes older than 1 hour. Returns count removed."""
         now = time.time()
         to_remove = [
-            pid for pid, info in self._processes.items()
-            if info.status != "running"
-            and (now - info.start_time) > MAX_LIFETIME_SECONDS
+            pid
+            for pid, info in self._processes.items()
+            if info.status != "running" and (now - info.start_time) > MAX_LIFETIME_SECONDS
         ]
         for pid in to_remove:
             info = self._processes.pop(pid)

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import ipaddress
 import json
 import re
 import threading
-from dataclasses import dataclass, field
-from pathlib import Path
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
 
 import aiohttp
 
@@ -26,9 +24,11 @@ if TYPE_CHECKING:
 # Resource tracking
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ResourceTracker:
     """Tracks resource usage during a single skill execution."""
+
     tool_calls: int = 0
     http_requests: int = 0
     messages_sent: int = 0
@@ -59,13 +59,13 @@ MAX_SKILL_FILES = 10
 
 # File path patterns that skills are NOT allowed to read.
 _DENIED_PATH_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"(^|/)\.env($|\.)"),       # .env, .env.local, etc.
-    re.compile(r"(^|/)config\.ya?ml$"),     # config.yml / config.yaml
-    re.compile(r"/etc/shadow$"),            # system shadow passwords
+    re.compile(r"(^|/)\.env($|\.)"),  # .env, .env.local, etc.
+    re.compile(r"(^|/)config\.ya?ml$"),  # config.yml / config.yaml
+    re.compile(r"/etc/shadow$"),  # system shadow passwords
     re.compile(r"(^|/)id_(rsa|ed25519|ecdsa|dsa)$"),  # SSH private keys
-    re.compile(r"(^|/)\.ssh/"),             # entire .ssh directory
-    re.compile(r"(^|/)credentials\.json$"), # service credentials
-    re.compile(r"(^|/)\.kube/config$"),     # kubernetes config
+    re.compile(r"(^|/)\.ssh/"),  # entire .ssh directory
+    re.compile(r"(^|/)credentials\.json$"),  # service credentials
+    re.compile(r"(^|/)\.kube/config$"),  # kubernetes config
 ]
 
 
@@ -92,29 +92,34 @@ def set_skill_allowed_urls(urls: list[str]) -> None:
 def is_url_blocked(url: str) -> bool:
     """Return True if a URL targets localhost, private IPs, or metadata endpoints."""
     from .url_safety import is_url_blocked as _shared_check
-    return _shared_check(url, allowed_urls=list(_SKILL_ALLOWED_URLS) if _SKILL_ALLOWED_URLS else None)
+
+    return _shared_check(
+        url, allowed_urls=list(_SKILL_ALLOWED_URLS) if _SKILL_ALLOWED_URLS else None
+    )
 
 
 # Tools that skills are allowed to call via execute_tool().
 # Only read-only / non-destructive tools are included.
-SKILL_SAFE_TOOLS: frozenset[str] = frozenset({
-    "read_file",
-    "search_history",
-    "search_audit",
-    "search_knowledge",
-    "list_knowledge",
-    "list_schedules",
-    "list_skills",
-    "list_tasks",
-    "memory_manage",
-    "parse_time",
-    "web_search",
-    "fetch_url",
-    "http_probe",
-    "browser_screenshot",
-    "browser_read_page",
-    "browser_read_table",
-})
+SKILL_SAFE_TOOLS: frozenset[str] = frozenset(
+    {
+        "read_file",
+        "search_history",
+        "search_audit",
+        "search_knowledge",
+        "list_knowledge",
+        "list_schedules",
+        "list_skills",
+        "list_tasks",
+        "memory_manage",
+        "parse_time",
+        "web_search",
+        "fetch_url",
+        "http_probe",
+        "browser_screenshot",
+        "browser_read_page",
+        "browser_read_table",
+    }
+)
 
 
 class SkillContext:
@@ -167,20 +172,33 @@ class SkillContext:
             return "No hosts configured to reach Prometheus."
         host = hosts[0]
         from urllib.parse import quote as url_quote
+
         encoded_query = url_quote(query)
-        return str(await self._executor.execute("run_command", {
-            "host": host,
-            "command": f"curl -sf 'http://localhost:9090/api/v1/query?query={encoded_query}'",
-        }))
+        return str(
+            await self._executor.execute(
+                "run_command",
+                {
+                    "host": host,
+                    "command": f"curl -sf 'http://localhost:9090/api/v1/query?query={encoded_query}'",
+                },
+            )
+        )
 
     async def read_file(self, host: str, path: str, lines: int = 200) -> str:
         """Read a file from a managed host. Returns file content."""
         if is_path_denied(path):
             self._log.warning("Skill attempted to read denied path: %s", path)
             return f"Access denied: '{path}' is a restricted path."
-        return str(await self._executor.execute("read_file", {
-            "host": host, "path": path, "lines": lines,
-        }))
+        return str(
+            await self._executor.execute(
+                "read_file",
+                {
+                    "host": host,
+                    "path": path,
+                    "lines": lines,
+                },
+            )
+        )
 
     async def post_message(self, text: str) -> None:
         """Send a message to the channel that invoked this skill."""
@@ -260,7 +278,9 @@ class SkillContext:
             merged.update(headers)
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                url, params=params, headers=merged,
+                url,
+                params=params,
+                headers=merged,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
                 ct = resp.content_type or ""
@@ -301,7 +321,10 @@ class SkillContext:
             merged.update(headers)
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                url, json=json, data=data, headers=merged or None,
+                url,
+                json=json,
+                data=data,
+                headers=merged or None,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
                 ct = resp.content_type or ""
@@ -381,7 +404,10 @@ class SkillContext:
         """
         if tool_name not in SKILL_SAFE_TOOLS:
             self._log.warning("Skill attempted blocked tool: %s", tool_name)
-            return f"Tool '{tool_name}' is not allowed from skills. Only read-only tools are permitted."
+            return (
+                f"Tool '{tool_name}' is not allowed from skills. "
+                "Only read-only tools are permitted."
+            )
         if self._tracker.tool_calls >= MAX_SKILL_TOOL_CALLS:
             return f"Tool call limit ({MAX_SKILL_TOOL_CALLS}) exceeded."
         self._tracker.tool_calls += 1

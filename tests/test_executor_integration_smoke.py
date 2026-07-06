@@ -808,7 +808,7 @@ class TestInvokeSkillTool:
         }
         exe = ToolExecutor(config=cfg)
         exe._run_on_host = AsyncMock(return_value="ok")
-        result = await exe._handle_run_command_multi({
+        result = await exe.system_tools._handle_run_command_multi({
             "hosts": ["dev", "prod"],
             "command": "systemctl restart nginx",
         })
@@ -830,9 +830,9 @@ class TestInvokeSkillTool:
         from src.tools.bulkhead import BulkheadRegistry
         from src.tools.result_validator import ResultValidationStats
 
-        exe = ToolExecutor.__new__(ToolExecutor)
-        exe.config = ToolsConfig()
-        exe._memory_path = tmp_path / "memory.json"
+        # Proper construction (RFC-004 P6) — the state domain reaches the
+        # memory path/lock live through deps; overrides below still govern.
+        exe = ToolExecutor(config=ToolsConfig(), memory_path=str(tmp_path / "memory.json"))
         exe._browser_manager = None
         exe._permission_manager = None
         exe.output_streamer = None
@@ -848,25 +848,25 @@ class TestInvokeSkillTool:
         exe.freshness_stats = None
         exe.ssh_pool = None
 
-        save_res = await exe._handle_memory_manage(
+        save_res = await exe.state_tools._handle_memory_manage(
             {"action": "save", "key": "k1", "value": "v1", "scope": "personal"},
             user_id="u123",
         )
         assert "Saved" in save_res
 
-        get_res = await exe._handle_memory_manage(
+        get_res = await exe.state_tools._handle_memory_manage(
             {"action": "get", "key": "k1"},
             user_id="u123",
         )
         assert "v1" in get_res
 
-        recall_res = await exe._handle_memory_manage(
+        recall_res = await exe.state_tools._handle_memory_manage(
             {"action": "recall", "key": "k1"},
             user_id="u123",
         )
         assert "v1" in recall_res
 
-        miss_res = await exe._handle_memory_manage(
+        miss_res = await exe.state_tools._handle_memory_manage(
             {"action": "get", "key": "nonexistent"},
             user_id="u123",
         )

@@ -372,7 +372,7 @@ class TestExecutorBulkheadIntegration:
 
         with patch("src.tools.browser.handle_browser_read_page", new_callable=AsyncMock) as mock_handler:
             mock_handler.return_value = "page content"
-            result = await ex._handle_browser_read_page({"url": "http://example.com"})
+            result = await ex.browser_web_tools._handle_browser_read_page({"url": "http://example.com"})
             assert str(result) == "page content"
             assert browser_bh.total == 1
 

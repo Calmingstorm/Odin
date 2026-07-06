@@ -3,6 +3,7 @@
 Each loop iteration triggers a full LLM reasoning cycle with tool access.
 The LLM decides what to check, how to interpret results, and what to report.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -43,6 +44,7 @@ LOOP_STOP_SENTINEL = "LOOP_STOP"
 @dataclass
 class LoopInfo:
     """Metadata for an active autonomous loop."""
+
     id: str
     goal: str
     mode: str  # "notify", "act", "silent"
@@ -88,7 +90,10 @@ class LoopManager:
     ) -> str:
         """Start a new autonomous loop. Returns the loop ID or an error string."""
         if self.active_count >= MAX_CONCURRENT_LOOPS:
-            return f"Error: Maximum concurrent loops ({MAX_CONCURRENT_LOOPS}) reached. Stop a loop first."
+            return (
+                f"Error: Maximum concurrent loops ({MAX_CONCURRENT_LOOPS}) reached. "
+                "Stop a loop first."
+            )
 
         if mode not in ("notify", "act", "silent"):
             mode = "notify"
@@ -113,13 +118,15 @@ class LoopManager:
         )
         self._loops[loop_id] = info
 
-        info._task = asyncio.create_task(
-            self._run_loop(info, channel, iteration_callback)
-        )
+        info._task = asyncio.create_task(self._run_loop(info, channel, iteration_callback))
 
         log.info(
             "Loop %s started: goal=%r interval=%ds mode=%s max=%d",
-            loop_id, goal, interval_seconds, mode, max_iterations,
+            loop_id,
+            goal,
+            interval_seconds,
+            mode,
+            max_iterations,
         )
         return loop_id
 
@@ -197,12 +204,14 @@ class LoopManager:
         if tasks:
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True), timeout,
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 log.warning(
                     "LoopManager shutdown: %d task(s) did not finish within %.0fs",
-                    len(tasks), timeout,
+                    len(tasks),
+                    timeout,
                 )
 
     async def _run_loop(
@@ -243,7 +252,9 @@ class LoopManager:
                 # Build previous context from iteration history
                 prev_context = None
                 if info._iteration_history:
-                    prev_context = "\n---\n".join(list(info._iteration_history)[-MAX_CONTEXT_HISTORY:])
+                    prev_context = "\n---\n".join(
+                        list(info._iteration_history)[-MAX_CONTEXT_HISTORY:]
+                    )
 
                 # Run the LLM iteration. The correlation context lets the
                 # iteration runner, audit logger, and trajectory saver stamp
@@ -253,6 +264,7 @@ class LoopManager:
                 # of the iteration about to run.
                 try:
                     from ..observability.correlation import reset_turn, set_turn
+
                     _turn_token = set_turn(
                         source="loop",
                         loop_id=info.id,
@@ -273,11 +285,15 @@ class LoopManager:
                         info.interval_seconds = max(info.interval_seconds, int(circuit_wait))
                         log.info(
                             "Loop %s: circuit breaker open, wait %.0fs",
-                            info.id, circuit_wait,
+                            info.id,
+                            circuit_wait,
                         )
                     log.warning(
                         "Loop %s iteration %d failed (%d consecutive): %s",
-                        info.id, info.iteration_count, consecutive_errors, e,
+                        info.id,
+                        info.iteration_count,
+                        consecutive_errors,
+                        e,
                     )
                     # Store error in history but don't crash the loop
                     info._iteration_history.append(
@@ -298,12 +314,14 @@ class LoopManager:
                     # skip the interval wait entirely, so a fast-failing
                     # callback hammered the failing endpoint at full speed.
                     backoff = min(
-                        info.interval_seconds * (2 ** consecutive_errors),
+                        info.interval_seconds * (2**consecutive_errors),
                         MAX_BACKOFF_SECONDS,
                     )
                     log.info(
                         "Loop %s: backing off %ds after %d consecutive error(s)",
-                        info.id, backoff, consecutive_errors,
+                        info.id,
+                        backoff,
+                        consecutive_errors,
                     )
                     if await self._interruptible_wait(info, backoff):
                         break
@@ -311,9 +329,7 @@ class LoopManager:
 
                 # Store iteration result (truncated) in history
                 summary = response[:500] if response else "(no output)"
-                info._iteration_history.append(
-                    f"Iteration {info.iteration_count}: {summary}"
-                )
+                info._iteration_history.append(f"Iteration {info.iteration_count}: {summary}")
 
                 # Check for LOOP_STOP sentinel
                 if LOOP_STOP_SENTINEL in response:
@@ -327,12 +343,15 @@ class LoopManager:
                     if consecutive_identical >= RUNAWAY_THRESHOLD:
                         old_interval = info.interval_seconds
                         info.interval_seconds = min(
-                            info.interval_seconds * 2, 3600,
+                            info.interval_seconds * 2,
+                            3600,
                         )
                         log.warning(
                             "Loop %s: %d identical outputs, interval %ds -> %ds",
-                            info.id, RUNAWAY_THRESHOLD,
-                            old_interval, info.interval_seconds,
+                            info.id,
+                            RUNAWAY_THRESHOLD,
+                            old_interval,
+                            info.interval_seconds,
                         )
                         try:
                             await channel.send(
@@ -427,11 +446,14 @@ class LoopManager:
         try:
             await asyncio.wait_for(info._cancel_event.wait(), timeout=seconds)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False
 
     async def _post_response(
-        self, info: LoopInfo, channel: Any, response: str,
+        self,
+        info: LoopInfo,
+        channel: Any,
+        response: str,
     ) -> None:
         """Post the loop iteration response to the channel, respecting mode.
 
@@ -442,7 +464,8 @@ class LoopManager:
             if "[NOTIFY]" not in response and "[ALERT]" not in response:
                 log.debug(
                     "Loop %s: silent mode suppressed output (%d chars)",
-                    info.id, len(response),
+                    info.id,
+                    len(response),
                 )
                 return
 

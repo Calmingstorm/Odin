@@ -12,9 +12,17 @@ from urllib.parse import urlparse
 
 from .url_safety import is_metadata_url
 
-ALLOWED_METHODS = frozenset({
-    "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
-})
+ALLOWED_METHODS = frozenset(
+    {
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "PATCH",
+        "HEAD",
+        "OPTIONS",
+    }
+)
 
 MAX_TIMEOUT = 120
 DEFAULT_TIMEOUT = 30
@@ -75,9 +83,7 @@ def validate_url(url: str) -> str:
     # we block only the metadata service (never a legitimate probe target and
     # the one that hands out instance credentials) rather than all private IPs.
     if is_metadata_url(url):
-        raise ValueError(
-            "URL blocked: targets a cloud-metadata endpoint (SSRF protection)."
-        )
+        raise ValueError("URL blocked: targets a cloud-metadata endpoint (SSRF protection).")
     return url
 
 
@@ -99,8 +105,7 @@ def build_http_probe_command(params: dict) -> str:
     method = params.get("method", "GET").upper()
     if method not in ALLOWED_METHODS:
         raise ValueError(
-            f"Invalid HTTP method: {method}. "
-            f"Allowed: {', '.join(sorted(ALLOWED_METHODS))}"
+            f"Invalid HTTP method: {method}. Allowed: {', '.join(sorted(ALLOWED_METHODS))}"
         )
 
     parts = ["curl", "-sS"]
@@ -116,9 +121,7 @@ def build_http_probe_command(params: dict) -> str:
         parts.append(f"-X {method}")
 
     # Timeout
-    timeout = _clamp_int(
-        params.get("timeout"), DEFAULT_TIMEOUT, 1, MAX_TIMEOUT
-    )
+    timeout = _clamp_int(params.get("timeout"), DEFAULT_TIMEOUT, 1, MAX_TIMEOUT)
     parts.append(f"--max-time {timeout}")
     parts.append(f"--connect-timeout {min(timeout, 10)}")
 
@@ -139,14 +142,10 @@ def build_http_probe_command(params: dict) -> str:
         parts.append("-k")
 
     # Retries
-    retries = _clamp_int(
-        params.get("retries"), DEFAULT_RETRIES, 0, MAX_RETRIES
-    )
+    retries = _clamp_int(params.get("retries"), DEFAULT_RETRIES, 0, MAX_RETRIES)
     if retries > 0:
         parts.append(f"--retry {retries}")
-        retry_delay = _clamp_int(
-            params.get("retry_delay"), DEFAULT_RETRY_DELAY, 0, MAX_RETRY_DELAY
-        )
+        retry_delay = _clamp_int(params.get("retry_delay"), DEFAULT_RETRY_DELAY, 0, MAX_RETRY_DELAY)
         parts.append(f"--retry-delay {retry_delay}")
 
     # Custom headers

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 
 import aiohttp
@@ -102,9 +101,7 @@ class ComfyUIClient:
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 # Queue the prompt
-                async with session.post(
-                    f"{self.base_url}/prompt", json=payload
-                ) as resp:
+                async with session.post(f"{self.base_url}/prompt", json=payload) as resp:
                     if resp.status != 200:
                         body = await resp.text()
                         log.warning("ComfyUI /prompt failed (%s): %s", resp.status, body[:200])
@@ -115,10 +112,14 @@ class ComfyUIClient:
                         log.warning("ComfyUI returned no prompt_id")
                         return None
                     # Validate prompt_id to prevent path traversal in URL
-                    if not isinstance(prompt_id, str) or not all(
-                        c.isalnum() or c in "-_" for c in prompt_id
-                    ) or len(prompt_id) > 100:
-                        log.warning("ComfyUI returned suspicious prompt_id: %s", str(prompt_id)[:50])
+                    if (
+                        not isinstance(prompt_id, str)
+                        or not all(c.isalnum() or c in "-_" for c in prompt_id)
+                        or len(prompt_id) > 100
+                    ):
+                        log.warning(
+                            "ComfyUI returned suspicious prompt_id: %s", str(prompt_id)[:50]
+                        )
                         return None
 
                 # Poll /history until complete
@@ -136,7 +137,7 @@ class ComfyUIClient:
                         return None
                     return await resp.read()
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("ComfyUI generation timed out (120s)")
             return None
         except aiohttp.ClientError as e:
@@ -167,16 +168,12 @@ class ComfyUIClient:
         except Exception:
             return preferred  # Can't check, try anyway
 
-    async def _poll_history(
-        self, session: aiohttp.ClientSession, prompt_id: str
-    ) -> str | None:
+    async def _poll_history(self, session: aiohttp.ClientSession, prompt_id: str) -> str | None:
         """Poll /history/{prompt_id} until the job completes. Returns filename."""
         for _ in range(120):  # 120 * 1s = 2 min max
             await asyncio.sleep(1)
             try:
-                async with session.get(
-                    f"{self.base_url}/history/{prompt_id}"
-                ) as resp:
+                async with session.get(f"{self.base_url}/history/{prompt_id}") as resp:
                     if resp.status != 200:
                         continue
                     data = await resp.json()

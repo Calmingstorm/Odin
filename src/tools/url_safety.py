@@ -4,6 +4,7 @@ Rejects URLs targeting localhost, private IP ranges, cloud metadata
 endpoints, and link-local addresses. Validates both literal hostnames
 and DNS-resolved IPs to prevent rebinding attacks.
 """
+
 from __future__ import annotations
 
 import ipaddress
@@ -88,7 +89,9 @@ def _matches_allowlist(parsed, allowed_urls: list[str]) -> bool:
     return False
 
 
-def is_url_blocked(url: str, allowed_urls: list[str] | None = None, resolve_dns: bool = True) -> bool:
+def is_url_blocked(
+    url: str, allowed_urls: list[str] | None = None, resolve_dns: bool = True
+) -> bool:
     """Return True if a URL targets localhost, private IPs, or metadata endpoints.
 
     When resolve_dns is True (default), also resolves the hostname and
@@ -139,6 +142,8 @@ def validate_url_safe(url: str, allowed_urls: list[str] | None = None) -> None:
         raise ValueError("URL is required")
     url = url.strip()
     if not any(url.lower().startswith(s) for s in ALLOWED_SCHEMES):
-        raise ValueError(f"URL must start with http:// or https://")
+        raise ValueError("URL must start with http:// or https://")
     if is_url_blocked(url, allowed_urls=allowed_urls):
-        raise ValueError("URL targets a blocked address (localhost, private IP, or metadata endpoint)")
+        raise ValueError(
+            "URL targets a blocked address (localhost, private IP, or metadata endpoint)"
+        )

@@ -4,6 +4,7 @@ When test commands fail, checks if the local branch is behind its remote
 tracking branch. Annotates the result so the LLM/loop knows the failure
 might be from outdated code rather than a real regression.
 """
+
 from __future__ import annotations
 
 import re
@@ -109,7 +110,7 @@ class FreshnessStats:
             self._stale_found += 1
         self._recent.append(event)
         if len(self._recent) > self._max_recent:
-            self._recent = self._recent[-self._max_recent:]
+            self._recent = self._recent[-self._max_recent :]
 
     def record_fetch_failure(self) -> None:
         self._fetch_failures += 1
@@ -155,34 +156,44 @@ async def check_branch_freshness(
     """
     try:
         code, branch_out = await exec_fn(
-            address, "git rev-parse --abbrev-ref HEAD 2>/dev/null", ssh_user,
+            address,
+            "git rev-parse --abbrev-ref HEAD 2>/dev/null",
+            ssh_user,
         )
     except Exception:
         return BranchStatus(
-            is_stale=False, commits_behind=0,
-            local_branch="unknown", remote_ref="unknown",
+            is_stale=False,
+            commits_behind=0,
+            local_branch="unknown",
+            remote_ref="unknown",
             error="exec_fn raised",
         )
 
     if code != 0:
         return BranchStatus(
-            is_stale=False, commits_behind=0,
-            local_branch="unknown", remote_ref="unknown",
+            is_stale=False,
+            commits_behind=0,
+            local_branch="unknown",
+            remote_ref="unknown",
             error="not a git repo",
         )
 
     branch = branch_out.strip()
     if not branch or branch == "HEAD":
         return BranchStatus(
-            is_stale=False, commits_behind=0,
-            local_branch=branch or "HEAD", remote_ref="unknown",
+            is_stale=False,
+            commits_behind=0,
+            local_branch=branch or "HEAD",
+            remote_ref="unknown",
             error="detached HEAD",
         )
 
     fetch_failed = False
     try:
         f_code, _ = await exec_fn(
-            address, "git fetch origin --quiet 2>&1", ssh_user,
+            address,
+            "git fetch origin --quiet 2>&1",
+            ssh_user,
         )
         if f_code != 0:
             fetch_failed = True
@@ -197,9 +208,12 @@ async def check_branch_freshness(
         )
     except Exception:
         return BranchStatus(
-            is_stale=False, commits_behind=0,
-            local_branch=branch, remote_ref=f"origin/{branch}",
-            fetch_failed=fetch_failed, error="rev-list failed",
+            is_stale=False,
+            commits_behind=0,
+            local_branch=branch,
+            remote_ref=f"origin/{branch}",
+            fetch_failed=fetch_failed,
+            error="rev-list failed",
         )
 
     try:

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 
 log = logging.getLogger("odin.tools.result_validator")
@@ -45,23 +44,27 @@ class ToolResultSchema:
 
 
 # Tools whose handlers may legitimately return an empty/blank string
-_EMPTY_OK_TOOLS = frozenset({
-    "write_file",
-    "browser_click",
-    "browser_fill",
-    "add_reaction",
-    "memory_manage",
-    "manage_list",
-    "delete_schedule",
-    "update_schedule",
-    "stop_loop",
-    "kill_agent",
-})
+_EMPTY_OK_TOOLS = frozenset(
+    {
+        "write_file",
+        "browser_click",
+        "browser_fill",
+        "add_reaction",
+        "memory_manage",
+        "manage_list",
+        "delete_schedule",
+        "update_schedule",
+        "stop_loop",
+        "kill_agent",
+    }
+)
 
 # Tools whose results should be valid JSON
-_JSON_TOOLS = frozenset({
-    "manage_process",
-})
+_JSON_TOOLS = frozenset(
+    {
+        "manage_process",
+    }
+)
 
 TOOL_SCHEMAS: dict[str, ToolResultSchema] = {}
 
@@ -157,11 +160,7 @@ def _truncate_smart(text: str, max_chars: int) -> str:
         return text
     half = max_chars // 2
     omitted = len(text) - max_chars
-    return (
-        text[:half]
-        + f"\n\n[... {omitted} characters omitted ...]\n\n"
-        + text[-half:]
-    )
+    return text[:half] + f"\n\n[... {omitted} characters omitted ...]\n\n" + text[-half:]
 
 
 def validate_tool_result(

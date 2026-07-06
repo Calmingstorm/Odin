@@ -21,30 +21,30 @@ to query — it reads alongside the normal description.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class Cost(str, Enum):
-    FREE = "free"          # in-process, no I/O
-    LOW = "low"            # local filesystem / short local subprocess
-    MEDIUM = "medium"      # one network round-trip or one SSH call
-    HIGH = "high"          # many calls / large I/O / browser page
+class Cost(StrEnum):
+    FREE = "free"  # in-process, no I/O
+    LOW = "low"  # local filesystem / short local subprocess
+    MEDIUM = "medium"  # one network round-trip or one SSH call
+    HIGH = "high"  # many calls / large I/O / browser page
     VERY_HIGH = "very_high"  # LLM-in-tool, multi-file analysis
 
 
-class Risk(str, Enum):
-    NONE = "none"          # read-only, no state change
-    LOW = "low"             # mostly read-only / reversible state change
-    MEDIUM = "medium"       # state change, but scoped/reversible
-    HIGH = "high"           # potentially destructive / side-effecty
-    CRITICAL = "critical"   # destructive by design (delete, kill, purge)
+class Risk(StrEnum):
+    NONE = "none"  # read-only, no state change
+    LOW = "low"  # mostly read-only / reversible state change
+    MEDIUM = "medium"  # state change, but scoped/reversible
+    HIGH = "high"  # potentially destructive / side-effecty
+    CRITICAL = "critical"  # destructive by design (delete, kill, purge)
 
 
-class Latency(str, Enum):
-    INSTANT = "instant"    # in-process, <10ms
-    FAST = "fast"          # tens of ms to a few seconds
-    SECONDS = "seconds"    # typical one-off network/SSH call
-    MINUTES = "minutes"    # large analysis, orchestrated workflows
+class Latency(StrEnum):
+    INSTANT = "instant"  # in-process, <10ms
+    FAST = "fast"  # tens of ms to a few seconds
+    SECONDS = "seconds"  # typical one-off network/SSH call
+    MINUTES = "minutes"  # large analysis, orchestrated workflows
     UNBOUNDED = "unbounded"  # depends on target (loops, agents)
 
 
@@ -63,26 +63,43 @@ class Affordance:
 # ---------------------------------------------------------------------------
 _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     # Shell execution on remote hosts
-    ("run_command", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS,
-        ("managed host alias configured", "SSH key available for non-local hosts"))),
-    ("run_script", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS,
-        ("managed host alias configured",))),
-    ("run_command_multi", Affordance(Cost.HIGH, Risk.HIGH, Latency.SECONDS,
-        ("managed host aliases configured",))),
+    (
+        "run_command",
+        Affordance(
+            Cost.MEDIUM,
+            Risk.HIGH,
+            Latency.SECONDS,
+            ("managed host alias configured", "SSH key available for non-local hosts"),
+        ),
+    ),
+    (
+        "run_script",
+        Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS, ("managed host alias configured",)),
+    ),
+    (
+        "run_command_multi",
+        Affordance(Cost.HIGH, Risk.HIGH, Latency.SECONDS, ("managed host aliases configured",)),
+    ),
     # File I/O
-    ("read_file", Affordance(Cost.LOW, Risk.NONE, Latency.FAST,
-        ("path accessible by ssh user",))),
-    ("write_file", Affordance(Cost.LOW, Risk.HIGH, Latency.FAST,
-        ("path writable by ssh user",))),
+    ("read_file", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ("path accessible by ssh user",))),
+    ("write_file", Affordance(Cost.LOW, Risk.HIGH, Latency.FAST, ("path writable by ssh user",))),
     # Browser
-    ("browser_read_", Affordance(Cost.MEDIUM, Risk.LOW, Latency.SECONDS,
-        ("browser session initialized",))),
-    ("browser_click", Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.SECONDS,
-        ("browser session initialized",))),
-    ("browser_fill", Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.SECONDS,
-        ("browser session initialized",))),
-    ("browser_evaluate", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS,
-        ("browser session initialized",))),
+    (
+        "browser_read_",
+        Affordance(Cost.MEDIUM, Risk.LOW, Latency.SECONDS, ("browser session initialized",)),
+    ),
+    (
+        "browser_click",
+        Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.SECONDS, ("browser session initialized",)),
+    ),
+    (
+        "browser_fill",
+        Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.SECONDS, ("browser session initialized",)),
+    ),
+    (
+        "browser_evaluate",
+        Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS, ("browser session initialized",)),
+    ),
     # Knowledge / search
     ("search_knowledge", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
     ("search_history", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
@@ -99,47 +116,113 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     ("generate_file", Affordance(Cost.MEDIUM, Risk.LOW, Latency.SECONDS, ())),
     ("purge_messages", Affordance(Cost.LOW, Risk.CRITICAL, Latency.FAST, ())),
     # Agents / loops / scheduler
-    ("spawn_agent", Affordance(Cost.VERY_HIGH, Risk.HIGH, Latency.UNBOUNDED,
-        ("agent tool enabled",))),
+    (
+        "spawn_agent",
+        Affordance(Cost.VERY_HIGH, Risk.HIGH, Latency.UNBOUNDED, ("agent tool enabled",)),
+    ),
     ("kill_agent", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
     ("wait_for_agents", Affordance(Cost.LOW, Risk.NONE, Latency.UNBOUNDED, ())),
     ("get_agent_results", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
     ("start_loop", Affordance(Cost.HIGH, Risk.HIGH, Latency.UNBOUNDED, ())),
     ("stop_loop", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
-    ("schedule_task", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, (),
-        ("workflow steps need populated tool_input with all required fields",
-         "run_at must be ISO format — use parse_time first for natural language"))),
+    (
+        "schedule_task",
+        Affordance(
+            Cost.LOW,
+            Risk.MEDIUM,
+            Latency.FAST,
+            (),
+            (
+                "workflow steps need populated tool_input with all required fields",
+                "run_at must be ISO format — use parse_time first for natural language",
+            ),
+        ),
+    ),
     ("delete_schedule", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
     ("update_schedule", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
-    ("delegate_task", Affordance(Cost.HIGH, Risk.HIGH, Latency.UNBOUNDED, (),
-        ("every run_command step needs tool_input.command",
-         "steps execute sequentially — use {prev_output} to chain results"))),
+    (
+        "delegate_task",
+        Affordance(
+            Cost.HIGH,
+            Risk.HIGH,
+            Latency.UNBOUNDED,
+            (),
+            (
+                "every run_command step needs tool_input.command",
+                "steps execute sequentially — use {prev_output} to chain results",
+            ),
+        ),
+    ),
     # Infra
-    ("git_ops", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS, (),
-        ("params go under params object, not top level",
-         "for complex git workflows, prefer run_command with raw git"))),
-    ("docker_ops", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS,
-        ("docker daemon reachable",),
-        ("action names are compose_up/compose_down, not up/down",
-         "for complex compose operations, prefer run_command with raw docker"))),
-    ("terraform_ops", Affordance(Cost.HIGH, Risk.CRITICAL, Latency.MINUTES,
-        ("terraform state accessible",))),
-    ("kubectl", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS,
-        ("kubeconfig configured",),
-        ("for complex kubectl operations, prefer run_command with raw kubectl",))),
+    (
+        "git_ops",
+        Affordance(
+            Cost.MEDIUM,
+            Risk.HIGH,
+            Latency.SECONDS,
+            (),
+            (
+                "params go under params object, not top level",
+                "for complex git workflows, prefer run_command with raw git",
+            ),
+        ),
+    ),
+    (
+        "docker_ops",
+        Affordance(
+            Cost.MEDIUM,
+            Risk.HIGH,
+            Latency.SECONDS,
+            ("docker daemon reachable",),
+            (
+                "action names are compose_up/compose_down, not up/down",
+                "for complex compose operations, prefer run_command with raw docker",
+            ),
+        ),
+    ),
+    (
+        "terraform_ops",
+        Affordance(Cost.HIGH, Risk.CRITICAL, Latency.MINUTES, ("terraform state accessible",)),
+    ),
+    (
+        "kubectl",
+        Affordance(
+            Cost.MEDIUM,
+            Risk.HIGH,
+            Latency.SECONDS,
+            ("kubeconfig configured",),
+            ("for complex kubectl operations, prefer run_command with raw kubectl",),
+        ),
+    ),
     ("manage_process", Affordance(Cost.LOW, Risk.HIGH, Latency.FAST, ())),
     ("http_probe", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS, ())),
     # LLM-in-tool
-    ("claude_code", Affordance(Cost.VERY_HIGH, Risk.MEDIUM, Latency.MINUTES,
-        ("CLAUDE_CODE_OAUTH_TOKEN or network access to API",))),
+    (
+        "claude_code",
+        Affordance(
+            Cost.VERY_HIGH,
+            Risk.MEDIUM,
+            Latency.MINUTES,
+            ("CLAUDE_CODE_OAUTH_TOKEN or network access to API",),
+        ),
+    ),
     # Skills
     ("create_skill", Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.FAST, ())),
     ("edit_skill", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
     ("delete_skill", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
-    ("invoke_skill", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.UNBOUNDED,
-        ("skill must exist",),
-        ("pass skill arguments under input, not at top level",
-         "use list_skills first if unsure about parameter names"))),
+    (
+        "invoke_skill",
+        Affordance(
+            Cost.MEDIUM,
+            Risk.HIGH,
+            Latency.UNBOUNDED,
+            ("skill must exist",),
+            (
+                "pass skill arguments under input, not at top level",
+                "use list_skills first if unsure about parameter names",
+            ),
+        ),
+    ),
     # Knowledge management
     ("ingest_document", Affordance(Cost.HIGH, Risk.LOW, Latency.SECONDS, ())),
     ("bulk_ingest_knowledge", Affordance(Cost.HIGH, Risk.LOW, Latency.MINUTES, ())),
@@ -150,14 +233,27 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     ("set_permission", Affordance(Cost.LOW, Risk.HIGH, Latency.FAST, ())),
     ("parse_time", Affordance(Cost.FREE, Risk.NONE, Latency.INSTANT, ())),
     # Image / media gen
-    ("generate_image", Affordance(Cost.VERY_HIGH, Risk.LOW, Latency.MINUTES,
-        ("ComfyUI / image backend reachable",))),
+    (
+        "generate_image",
+        Affordance(
+            Cost.VERY_HIGH, Risk.LOW, Latency.MINUTES, ("ComfyUI / image backend reachable",)
+        ),
+    ),
     # Issues / tickets
-    ("issue_tracker", Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.SECONDS,
-        ("issue tracker configured",))),
+    (
+        "issue_tracker",
+        Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.SECONDS, ("issue tracker configured",)),
+    ),
     # Post-action validation + runbook detection (our new tools)
-    ("validate_action", Affordance(Cost.MEDIUM, Risk.NONE, Latency.SECONDS,
-        ("validation checks reference reachable hosts",))),
+    (
+        "validate_action",
+        Affordance(
+            Cost.MEDIUM,
+            Risk.NONE,
+            Latency.SECONDS,
+            ("validation checks reference reachable hosts",),
+        ),
+    ),
     # Audit / search
     ("search_audit", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
     # Skill lifecycle (non-destructive toggles + packaging)
@@ -169,25 +265,47 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     # Task lifecycle
     ("cancel_task", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
     # Browser (explicit leaf entries alongside the prefix)
-    ("browser_screenshot", Affordance(Cost.MEDIUM, Risk.LOW, Latency.SECONDS,
-        ("browser session initialized",))),
+    (
+        "browser_screenshot",
+        Affordance(Cost.MEDIUM, Risk.LOW, Latency.SECONDS, ("browser session initialized",)),
+    ),
     # Discord surfaces
     ("read_channel", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
     # Agent messaging / orchestration
-    ("send_to_agent", Affordance(Cost.LOW, Risk.LOW, Latency.FAST,
-        ("target agent exists and is running",))),
-    ("spawn_loop_agents", Affordance(Cost.VERY_HIGH, Risk.HIGH, Latency.UNBOUNDED,
-        ("agent tool enabled",))),
+    (
+        "send_to_agent",
+        Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ("target agent exists and is running",)),
+    ),
+    (
+        "spawn_loop_agents",
+        Affordance(Cost.VERY_HIGH, Risk.HIGH, Latency.UNBOUNDED, ("agent tool enabled",)),
+    ),
     ("collect_loop_agents", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS, ())),
     # Email tools (SMTP/IMAP)
-    ("email_send", Affordance(Cost.LOW, Risk.MEDIUM, Latency.SECONDS,
-        ("email.enabled", "SMTP credentials configured"))),
-    ("email_search", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS,
-        ("email.enabled", "IMAP credentials configured"))),
-    ("email_read", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS,
-        ("email.enabled", "IMAP credentials configured"))),
-    ("email_list_recent", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS,
-        ("email.enabled", "IMAP credentials configured"))),
+    (
+        "email_send",
+        Affordance(
+            Cost.LOW, Risk.MEDIUM, Latency.SECONDS, ("email.enabled", "SMTP credentials configured")
+        ),
+    ),
+    (
+        "email_search",
+        Affordance(
+            Cost.LOW, Risk.NONE, Latency.SECONDS, ("email.enabled", "IMAP credentials configured")
+        ),
+    ),
+    (
+        "email_read",
+        Affordance(
+            Cost.LOW, Risk.NONE, Latency.SECONDS, ("email.enabled", "IMAP credentials configured")
+        ),
+    ),
+    (
+        "email_list_recent",
+        Affordance(
+            Cost.LOW, Risk.NONE, Latency.SECONDS, ("email.enabled", "IMAP credentials configured")
+        ),
+    ),
 ]
 
 # Default when no prefix matches. Deliberately conservative: unknown
