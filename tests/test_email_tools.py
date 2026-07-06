@@ -344,7 +344,7 @@ class TestDisabledFallback:
         executor = ToolExecutor(email_config=None)
         for handler_name in ("_handle_email_send", "_handle_email_search",
                              "_handle_email_read", "_handle_email_list_recent"):
-            handler = getattr(executor, handler_name)
+            handler = getattr(executor.comms_tools, handler_name)
             result = await handler({"to": ["a@b.com"], "subject": "Hi",
                                     "body": "Hello", "query": "test", "uid": "1"})
             assert "not configured" in result

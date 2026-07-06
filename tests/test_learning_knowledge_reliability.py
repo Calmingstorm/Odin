@@ -169,18 +169,19 @@ async def test_update_entry_async_applies(tmp_path):
 # ---------------------------------------------------------------------------
 
 async def test_working_memory_capped_per_section(tmp_path, monkeypatch):
-    import src.tools.executor as ex_mod
+    import src.tools.executor as ex_mod  # noqa: F401 — executor still hosts the persistence core
+    import src.tools.handlers.state as state_mod
     from src.tools.executor import ToolExecutor
 
-    monkeypatch.setattr(ex_mod, "MEMORY_MAX_KEYS_PER_SECTION", 5)
+    monkeypatch.setattr(state_mod, "MEMORY_MAX_KEYS_PER_SECTION", 5)
 
-    execu = ToolExecutor.__new__(ToolExecutor)
-    execu._memory_path = tmp_path / "memory.json"
-    execu._memory_lock = asyncio.Lock()
+    # Proper construction (RFC-004 P6): the state domain resolves the
+    # executor's memory path/lock LIVE through deps.
+    execu = ToolExecutor(memory_path=str(tmp_path / "memory.json"))
 
     # Write more keys than the cap into the global section.
     for i in range(8):
-        await execu._handle_memory_manage(
+        await execu.state_tools._handle_memory_manage(
             {"action": "save", "key": f"note{i}", "value": f"v{i}", "scope": "global"},
         )
 
@@ -192,15 +193,16 @@ async def test_working_memory_capped_per_section(tmp_path, monkeypatch):
 
 
 async def test_working_memory_update_existing_key_no_growth(tmp_path, monkeypatch):
-    import src.tools.executor as ex_mod
+    import src.tools.executor as ex_mod  # noqa: F401
+    import src.tools.handlers.state as state_mod
     from src.tools.executor import ToolExecutor
-    monkeypatch.setattr(ex_mod, "MEMORY_MAX_KEYS_PER_SECTION", 5)
+    monkeypatch.setattr(state_mod, "MEMORY_MAX_KEYS_PER_SECTION", 5)
 
-    execu = ToolExecutor.__new__(ToolExecutor)
-    execu._memory_path = tmp_path / "memory.json"
-    execu._memory_lock = asyncio.Lock()
+    # Proper construction (RFC-004 P6): the state domain resolves the
+    # executor's memory path/lock LIVE through deps.
+    execu = ToolExecutor(memory_path=str(tmp_path / "memory.json"))
     for _ in range(3):
-        await execu._handle_memory_manage(
+        await execu.state_tools._handle_memory_manage(
             {"action": "save", "key": "k", "value": "v", "scope": "global"},
         )
     data = json.loads((tmp_path / "memory.json").read_text())

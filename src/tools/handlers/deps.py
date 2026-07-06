@@ -36,6 +36,12 @@ class HandlerDeps:
     process_registry: Callable[[], Any]  # lazy-inits ON the executor (web API reads it there)
     browser_manager: Callable[[], Any]
     bulkheads: Callable[[], Any]
+    memory_path: Callable[[], Any]
+    memory_lock: Callable[[], Any]
+    lists_lock: Callable[[], Any]
+    email_config: Callable[[], Any]
+    issue_tracker_client: Callable[[], Any]
+    command_governor: Callable[[], Any]
     # method passthroughs (resolve the executor attr per call)
     resolve_host: Callable[..., Any]
     resolve_default_host: Callable[..., Any]
@@ -43,6 +49,10 @@ class HandlerDeps:
     exec_command: Callable[..., Any]  # async
     run_on_host: Callable[..., Any]  # async
     annotate_with_freshness: Callable[..., Any]  # async
+    # memory persistence primitives — STAY on the executor core (prompts.py
+    # and the web API call them there); the state domain uses passthroughs
+    load_all_memory: Callable[..., Any]
+    save_all_memory: Callable[..., Any]
 
 
 class HandlerBase:
