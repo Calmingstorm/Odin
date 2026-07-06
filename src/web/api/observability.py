@@ -389,3 +389,17 @@ def register_usage_cost(routes: web.RouteTableDef, bot) -> None:
         if tracker is None:
             return web.json_response({"error": "cost tracking not available"}, status=503)
         return web.json_response(tracker.get_summary())
+
+
+def register_degradation(routes: web.RouteTableDef, bot) -> None:
+    """Subsystem degradation status (verbatim from the monolith)."""
+    # ------------------------------------------------------------------
+    # Subsystem degradation status
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/subsystems/status")
+    async def subsystem_status(_request: web.Request) -> web.Response:
+        guard = getattr(bot, "subsystem_guard", None)
+        if guard is None:
+            return web.json_response({"error": "subsystem guard not available"}, status=503)
+        return web.json_response(guard.get_status())

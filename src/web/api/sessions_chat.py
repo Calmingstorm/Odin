@@ -455,3 +455,68 @@ def register_trajectories(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({"results": results, "count": len(results)})
 
 
+
+
+def register_agent_trajectories(routes: web.RouteTableDef, bot) -> None:
+    """Agent trajectories (verbatim from the monolith)."""
+    # ------------------------------------------------------------------
+    # Agent trajectories
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/agent-trajectories")
+    async def list_agent_trajectory_files(_request: web.Request) -> web.Response:
+        saver = getattr(bot, "agent_trajectory_saver", None)
+        if saver is None:
+            return web.json_response({"error": "agent trajectory saving not available"}, status=503)
+        files = await saver.list_files()
+        return web.json_response({"files": files, "count": saver.count})
+
+    @routes.get("/api/agent-trajectories/agent/{agent_id}")
+    async def get_agent_trajectory(request: web.Request) -> web.Response:
+        saver = getattr(bot, "agent_trajectory_saver", None)
+        if saver is None:
+            return web.json_response({"error": "agent trajectory saving not available"}, status=503)
+        agent_id = request.match_info["agent_id"]
+        entry = await saver.find_by_agent_id(agent_id)
+        if entry is None:
+            return web.json_response({"error": "agent trajectory not found"}, status=404)
+        return web.json_response({"entry": entry})
+
+    @routes.get("/api/agent-trajectories/search/query")
+    async def search_agent_trajectories(request: web.Request) -> web.Response:
+        saver = getattr(bot, "agent_trajectory_saver", None)
+        if saver is None:
+            return web.json_response({"error": "agent trajectory saving not available"}, status=503)
+        channel_id = request.query.get("channel_id")
+        requester_id = request.query.get("requester_id")
+        tool_name = request.query.get("tool_name")
+        state = request.query.get("state")
+        limit = _safe_int_param(request, "limit", 50, hi=500)
+        results = await saver.search(
+            channel_id=channel_id,
+            requester_id=requester_id,
+            tool_name=tool_name,
+            state=state,
+            limit=limit,
+        )
+        return web.json_response({"results": results, "count": len(results)})
+
+    @routes.get("/api/agent-trajectories/{filename}")
+    async def get_agent_trajectory_file(request: web.Request) -> web.Response:
+        saver = getattr(bot, "agent_trajectory_saver", None)
+        if saver is None:
+            return web.json_response({"error": "agent trajectory saving not available"}, status=503)
+        filename = request.match_info["filename"]
+        if (
+            not filename.endswith(".jsonl")
+            or "/" in filename
+            or "\\" in filename
+            or ".." in filename
+        ):
+            return web.json_response({"error": "invalid filename"}, status=400)
+        safe_path = (saver.directory / filename).resolve()
+        if not safe_path.is_relative_to(saver.directory.resolve()):
+            return web.json_response({"error": "invalid filename"}, status=400)
+        limit = _safe_int_param(request, "limit", 100, hi=500)
+        entries = await saver.read_file(filename, limit=limit)
+        return web.json_response({"entries": entries, "count": len(entries)})
