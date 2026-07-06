@@ -38,6 +38,15 @@ _HARD_CONTENT_CHARS = 1000
 _TRUNCATION_MARKER = " [truncated: needs resummary]"
 _SENTENCE_TERMINATORS = (".", "!", "?", "…", '"', "'", ")", "]", "`")
 
+# Damaged-entry repair (runs inside _consolidate): at most this many LLM
+# resummarization attempts per consolidation cycle, so a large damaged
+# backlog can never turn consolidation into a rewrite engine.
+_REPAIR_BUDGET = 5
+_REPAIR_SYSTEM = (
+    "You repair truncated learned-memory entries. "
+    "Return only the rewritten lesson text."
+)
+
 _LEARNED_SCHEMA_VERSION = 2
 
 # Category-aware expiry: corrections and preferences never auto-expire
@@ -794,13 +803,98 @@ class ConversationReflector:
             compact.append(item)
         return json.dumps(compact, indent=2)
 
+    async def _repair_damaged(
+        self, damaged: list[dict]
+    ) -> tuple[list[dict], list[dict]]:
+        """Resummarize clipped entries so the damage quarantine isn't permanent.
+
+        Attempts up to ``_REPAIR_BUDGET`` entries per cycle. A successful
+        repair replaces the content (truncation marker gone, ``damaged`` flag
+        cleared) so the entry rejoins the consolidation candidate pool. On
+        ANY failure — no backend, LLM error, rejected output, budget spent —
+        the original entry object passes through untouched, in order:
+        byte-for-byte the pre-repair passthrough behavior. Only ``content``
+        and the ``damaged`` flag are ever modified; repair is maintenance,
+        not evidence of reuse, so timestamps and expiry semantics stay as-is.
+        """
+        if not damaged or not self._text_fn:
+            return [], damaged
+        repaired: list[dict] = []
+        still_damaged: list[dict] = []
+        attempted = 0
+        for entry in damaged:
+            if attempted >= _REPAIR_BUDGET:
+                still_damaged.append(entry)
+                continue
+            attempted += 1
+            lesson = entry.get("content", "").replace(_TRUNCATION_MARKER, "").strip()
+            prompt = (
+                "This learned-memory lesson was truncated mid-thought. "
+                "Rewrite it as a complete, self-contained version.\n"
+                "STRICT RULES:\n"
+                "- Rewrite only the given lesson; do not infer missing details.\n"
+                "- Do not add examples, causes, or context that are not present.\n"
+                f"- Keep it under {_SOFT_CONTENT_CHARS} characters.\n"
+                "- End with a complete sentence.\n"
+                "- Return only the rewritten lesson text — no JSON, no quotes, "
+                "no commentary.\n\n"
+                "Lesson:\n" + lesson
+            )
+            try:
+                raw = await self._text_fn(
+                    [{"role": "user", "content": prompt}], _REPAIR_SYSTEM
+                )
+            except Exception as exc:
+                log.warning(
+                    "Damaged-entry repair errored for %r: %s", entry.get("key"), exc
+                )
+                still_damaged.append(entry)
+                continue
+            result = (raw or "").strip()
+            if not self._repair_output_ok(result):
+                log.warning(
+                    "Damaged-entry repair rejected for %r (%d chars)",
+                    entry.get("key"), len(result),
+                )
+                still_damaged.append(entry)
+                continue
+            entry["content"] = result
+            entry.pop("damaged", None)
+            repaired.append(entry)
+        if repaired or still_damaged:
+            log.info(
+                "Damaged-entry repair: %d repaired, %d still damaged (%d attempted)",
+                len(repaired), len(still_damaged), attempted,
+            )
+        return repaired, still_damaged
+
+    @staticmethod
+    def _repair_output_ok(result: str) -> bool:
+        """Validation gauntlet for repair output — reject anything suspect.
+
+        JSON-shaped output is rejected explicitly: ``]`` and ``}`` would
+        otherwise sail past the sentence-boundary heuristic (both are in
+        _SENTENCE_TERMINATORS) and replace a lesson with serialized noise.
+        """
+        if not result or result[0] in "[{":
+            return False
+        if _TRUNCATION_MARKER.strip() in result:
+            return False
+        if len(result) > _HARD_CONTENT_CHARS or _looks_chopped(result):
+            return False
+        probe = {"content": result}
+        _clip_content(probe)
+        return not probe.get("damaged")
+
     async def _consolidate(self, entries: list[dict]) -> list[dict]:
         """Ask the LLM to merge same-topic duplicates down to the target.
 
-        Damaged entries are passed through unmerged — consolidating already
-        clipped text compounds the damage. Unrelated topics are never packed
-        together to hit the target count; dropping low-value entries is the
-        sanctioned way to shrink.
+        Damaged entries are first offered repair (``_repair_damaged``);
+        successful repairs rejoin the candidate pool and give their slots
+        back. Entries still damaged pass through unmerged — consolidating
+        already clipped text compounds the damage. Unrelated topics are
+        never packed together to hit the target count; dropping low-value
+        entries is the sanctioned way to shrink.
         """
         import time as _time
         t0 = _time.monotonic()
@@ -811,6 +905,12 @@ class ConversationReflector:
 
         damaged = [e for e in entries if e.get("damaged")]
         candidates = [e for e in entries if not e.get("damaged")]
+
+        # Repair-then-consolidate: the target math below deliberately uses
+        # the REMAINING damaged count, so every successful repair reclaims
+        # its consolidation slot immediately.
+        repaired, damaged = await self._repair_damaged(damaged)
+        candidates.extend(repaired)
         if not candidates:
             return damaged
 

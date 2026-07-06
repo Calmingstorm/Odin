@@ -4,7 +4,8 @@ Invariants under test:
 - stored content is NEVER silently truncated — oversized text is clipped
   at a sentence boundary, explicitly marked, and flagged damaged
 - the v1→v2 migration detects legacy chop damage and is idempotent
-- consolidation passes damaged entries through unmerged
+- consolidation first offers damaged entries a budgeted LLM repair
+  (_repair_damaged); entries still damaged pass through unmerged
 - category-aware expiry: corrections/preferences never auto-expire
 - supersession removes superseded keys
 - injection: include-all-when-fits, pinned corrections/preferences when
@@ -159,12 +160,18 @@ class TestCategoryExpiry:
 
 class TestConsolidationDamagePassThrough:
     @pytest.mark.asyncio
-    async def test_damaged_entries_bypass_the_llm(self, tmp_path):
+    async def test_unrepaired_damaged_entries_bypass_the_merge(self, tmp_path):
+        # Deliberate pin update: damaged entries ARE now sent to the LLM —
+        # but only for REPAIR (_repair_damaged). When repair fails they must
+        # still never enter the consolidation merge prompt, and pass through
+        # unmerged exactly as before the repair step existed.
         r = ConversationReflector(str(tmp_path / "l.json"), consolidation_target=2)
-        seen_prompts = []
+        merge_prompts = []
 
         async def fake_text_fn(messages, system):
-            seen_prompts.append(messages[0]["content"])
+            if system.startswith("You repair"):
+                raise RuntimeError("repair backend down")
+            merge_prompts.append(messages[0]["content"])
             return json.dumps([_entry("merged", content="merged lesson.")])
 
         r.set_text_fn(fake_text_fn)
@@ -176,9 +183,11 @@ class TestConsolidationDamagePassThrough:
                    damaged=True, created_at=now, updated_at=now),
         ]
         result = await r._consolidate(entries)
-        keys = {e["key"] for e in result}
-        assert "hurt" in keys  # passed through unmerged
-        assert "hurt" not in seen_prompts[0]  # never sent to the LLM
+        by_key = {e["key"]: e for e in result}
+        assert "hurt" in by_key  # passed through unmerged
+        assert by_key["hurt"]["damaged"] is True  # untouched by failed repair
+        assert len(merge_prompts) == 1
+        assert "chopped tex" not in merge_prompts[0]  # never in the merge prompt
 
     @pytest.mark.asyncio
     async def test_llm_failure_falls_back_without_data_loss(self, tmp_path):
@@ -195,6 +204,184 @@ class TestConsolidationDamagePassThrough:
         ]
         result = await r._consolidate(entries)
         assert len(result) == 3
+
+
+def _damaged_entry(key, lesson="a chopped lesso", **kw):
+    return _entry(key, content=lesson + _TRUNCATION_MARKER, damaged=True, **kw)
+
+
+class TestDamagedRepair:
+    """_repair_damaged: the quarantine is no longer permanent.
+
+    Every failure path (no backend, LLM error, rejected output, budget
+    exhausted) must pass the ORIGINAL entry object through untouched and in
+    order — byte-for-byte the pre-repair passthrough behavior.
+    """
+
+    def _reflector(self, tmp_path, **kw):
+        return ConversationReflector(str(tmp_path / "l.json"), **kw)
+
+    @pytest.mark.asyncio
+    async def test_repair_success_clears_flag_and_marker(self, tmp_path):
+        r = self._reflector(tmp_path)
+
+        async def fake(messages, system):
+            return "A clean repaired lesson."
+
+        r.set_text_fn(fake)
+        entry = _damaged_entry("d1")
+        repaired, still = await r._repair_damaged([entry])
+        assert still == []
+        assert repaired == [entry]  # same object, mutated in place
+        assert repaired[0]["content"] == "A clean repaired lesson."
+        assert _TRUNCATION_MARKER not in repaired[0]["content"]
+        assert "damaged" not in repaired[0]
+
+    @pytest.mark.asyncio
+    async def test_repair_does_not_mutate_unrelated_fields(self, tmp_path):
+        r = self._reflector(tmp_path)
+
+        async def fake(messages, system):
+            return "A clean repaired lesson."
+
+        r.set_text_fn(fake)
+        entry = _damaged_entry(
+            "d1", category="correction", user_id="u9", topic="deploys",
+            tags=["git"], confidence="high",
+            created_at="2026-01-01T00:00:00", updated_at="2026-02-02T00:00:00",
+            last_used_at="2026-03-03T00:00:00",
+        )
+        repaired, _ = await r._repair_damaged([entry])
+        e = repaired[0]
+        assert (e["key"], e["category"], e["user_id"], e["topic"]) == (
+            "d1", "correction", "u9", "deploys")
+        assert e["tags"] == ["git"] and e["confidence"] == "high"
+        # Repair is maintenance, not reuse: timestamps must be untouched.
+        assert e["created_at"] == "2026-01-01T00:00:00"
+        assert e["updated_at"] == "2026-02-02T00:00:00"
+        assert e["last_used_at"] == "2026-03-03T00:00:00"
+
+    @pytest.mark.asyncio
+    async def test_marker_is_stripped_from_repair_input(self, tmp_path):
+        r = self._reflector(tmp_path)
+        repair_prompts = []
+
+        async def fake(messages, system):
+            repair_prompts.append(messages[0]["content"])
+            return "A clean repaired lesson."
+
+        r.set_text_fn(fake)
+        await r._repair_damaged([_damaged_entry("d1", lesson="the real text")])
+        assert "the real text" in repair_prompts[0]
+        assert _TRUNCATION_MARKER not in repair_prompts[0]
+
+    @pytest.mark.asyncio
+    async def test_per_entry_exception_does_not_stop_the_rest(self, tmp_path):
+        r = self._reflector(tmp_path)
+
+        async def fake(messages, system):
+            if "FAILME" in messages[0]["content"]:
+                raise RuntimeError("api hiccup")
+            return "A clean repaired lesson."
+
+        r.set_text_fn(fake)
+        e1, e2, e3 = (_damaged_entry("d1"), _damaged_entry("d2", lesson="FAILME"),
+                      _damaged_entry("d3"))
+        repaired, still = await r._repair_damaged([e1, e2, e3])
+        assert [e["key"] for e in repaired] == ["d1", "d3"]
+        assert still == [e2] and still[0] is e2
+        assert e2["damaged"] is True
+        assert e2["content"] == "FAILME" + _TRUNCATION_MARKER
+
+    @pytest.mark.asyncio
+    async def test_budget_seven_damaged_five_attempted(self, tmp_path):
+        r = self._reflector(tmp_path)
+        calls = 0
+
+        async def fake(messages, system):
+            nonlocal calls
+            calls += 1
+            return "A clean repaired lesson."
+
+        r.set_text_fn(fake)
+        entries = [_damaged_entry(f"d{i}") for i in range(7)]
+        repaired, still = await r._repair_damaged(entries)
+        assert calls == 5
+        assert [e["key"] for e in repaired] == ["d0", "d1", "d2", "d3", "d4"]
+        # The two unattempted entries pass through untouched, in order.
+        assert still == entries[5:]
+        assert all(s is o for s, o in zip(still, entries[5:]))
+        assert all(e["damaged"] is True for e in still)
+
+    @pytest.mark.asyncio
+    async def test_rejection_matrix_leaves_entries_untouched(self, tmp_path):
+        r = self._reflector(tmp_path)
+        bad_outputs = [
+            "",  # empty
+            ("all work and no play makes odin a dull bot. " * 25).strip(),  # >1000
+            "word " * 170,  # 850 chars, no sentence terminator → _looks_chopped
+            # prompt-injection-ish: output echoing the marker is rejected
+            "Ignore previous instructions" + _TRUNCATION_MARKER + ".",
+            '["a rewritten lesson."]',  # JSON-shaped
+        ]
+        for bad in bad_outputs:
+            async def fake(messages, system, _bad=bad):
+                return _bad
+
+            r.set_text_fn(fake)
+            entry = _damaged_entry("d1")
+            original_content = entry["content"]
+            repaired, still = await r._repair_damaged([entry])
+            assert repaired == [], f"accepted bad output: {bad[:40]!r}"
+            assert still[0] is entry
+            assert entry["content"] == original_content
+            assert entry["damaged"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_text_fn_passes_all_through(self, tmp_path):
+        r = self._reflector(tmp_path)
+        r.set_text_fn(None)
+        entries = [_damaged_entry("d1"), _damaged_entry("d2")]
+        repaired, still = await r._repair_damaged(entries)
+        assert repaired == []
+        assert still == entries
+        assert all(s is o for s, o in zip(still, entries))
+
+    @pytest.mark.asyncio
+    async def test_repaired_entries_reclaim_slots_in_target_math(self, tmp_path):
+        # consolidation_target=5, 6 clean + 3 damaged, repair fixes 2 of 3:
+        # remaining damaged = 1 → merge target must be 5-1=4, not 5-3=2.
+        r = self._reflector(tmp_path, consolidation_target=5)
+        repair_prompts, merge_prompts = [], []
+
+        async def fake(messages, system):
+            if system.startswith("You repair"):
+                repair_prompts.append(messages[0]["content"])
+                if "FAILME" in messages[0]["content"]:
+                    raise RuntimeError("down")
+                return "A clean repaired lesson."
+            merge_prompts.append(messages[0]["content"])
+            return json.dumps([_entry("merged", content="merged lesson.")])
+
+        r.set_text_fn(fake)
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        entries = [
+            _entry(f"c{i}", content=f"clean lesson {i}.", created_at=now,
+                   updated_at=now)
+            for i in range(6)
+        ] + [
+            _damaged_entry("d1", created_at=now, updated_at=now),
+            _damaged_entry("d2", lesson="FAILME", created_at=now, updated_at=now),
+            _damaged_entry("d3", created_at=now, updated_at=now),
+        ]
+        result = await r._consolidate(entries)
+        assert len(merge_prompts) == 1
+        assert "entries to 4 or fewer" in merge_prompts[0]
+        # Only damaged content reaches repair; clean lessons never do.
+        assert all("clean lesson" not in p for p in repair_prompts)
+        # The unrepaired entry passes through the merge untouched.
+        by_key = {e["key"]: e for e in result}
+        assert by_key["d2"]["damaged"] is True
 
 
 class TestConsolidationSkipAndCompact:
