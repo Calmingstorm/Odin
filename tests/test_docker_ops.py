@@ -718,19 +718,19 @@ class TestHandleDockerOps:
     @pytest.mark.asyncio
     async def test_unknown_host(self):
         ex = _make_executor()
-        result = await ex._handle_docker_ops({"host": "nope", "action": "ps"})
+        result = await ex.devops_tools._handle_docker_ops({"host": "nope", "action": "ps"})
         assert "Unknown or disallowed host" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_unknown_action(self):
         ex = _make_executor()
-        result = await ex._handle_docker_ops({"host": "prod", "action": "nope"})
+        result = await ex.devops_tools._handle_docker_ops({"host": "prod", "action": "nope"})
         assert "Unknown docker action" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_missing_action(self):
         ex = _make_executor()
-        result = await ex._handle_docker_ops({"host": "prod"})
+        result = await ex.devops_tools._handle_docker_ops({"host": "prod"})
         assert "Unknown docker action" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
@@ -738,7 +738,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "CONTAINER ID  IMAGE  STATUS\nabc  nginx  Up")
-            result = await ex._handle_docker_ops({"host": "prod", "action": "ps"})
+            result = await ex.devops_tools._handle_docker_ops({"host": "prod", "action": "ps"})
         assert "nginx" in (result[0] if isinstance(result, tuple) else result)
         mock_exec.assert_awaited_once()
         cmd_arg = mock_exec.call_args[0][1]
@@ -749,7 +749,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "abc123")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "run",
                 "params": {"image": "nginx", "detach": True},
             })
@@ -760,7 +760,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "file.txt")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "exec",
                 "params": {"container": "web", "command": "ls"},
             })
@@ -771,7 +771,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "log line 1\nlog line 2")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "logs",
                 "params": {"container": "web"},
             })
@@ -782,7 +782,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "Successfully built abc123")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "build",
                 "params": {"tag": "myapp:latest"},
             })
@@ -793,7 +793,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "Status: Downloaded newer image")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "pull",
                 "params": {"image": "nginx:latest"},
             })
@@ -804,7 +804,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "web")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "stop",
                 "params": {"container": "web"},
             })
@@ -815,7 +815,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "web")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "rm",
                 "params": {"container": "web"},
             })
@@ -826,7 +826,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, '{"State": {"Status": "running"}}')
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "inspect",
                 "params": {"target": "web"},
             })
@@ -837,7 +837,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "CONTAINER  CPU%  MEM%")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "stats",
                 "params": {},
             })
@@ -848,7 +848,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "Creating web_1 ... done")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "compose_up",
                 "params": {},
             })
@@ -859,7 +859,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "Stopping web_1 ... done")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "compose_down",
                 "params": {},
             })
@@ -870,7 +870,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "NAME  STATUS\nweb  running")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "compose_ps",
                 "params": {},
             })
@@ -881,7 +881,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "web_1  | Starting server")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "compose_logs",
                 "params": {},
             })
@@ -892,7 +892,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (1, "Error: No such container: web")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "logs",
                 "params": {"container": "web"},
             })
@@ -902,7 +902,7 @@ class TestHandleDockerOps:
     @pytest.mark.asyncio
     async def test_validation_error(self):
         ex = _make_executor()
-        result = await ex._handle_docker_ops({
+        result = await ex.devops_tools._handle_docker_ops({
             "host": "prod", "action": "run", "params": {},
         })
         assert "docker_ops error" in (result[0] if isinstance(result, tuple) else result)
@@ -912,7 +912,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "ps", "params": {},
             })
         assert "completed successfully" in (result[0] if isinstance(result, tuple) else result)
@@ -922,7 +922,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "docker ps output")
-            result = await ex._handle_docker_ops({
+            result = await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "ps",
             })
         assert "docker ps output" in (result[0] if isinstance(result, tuple) else result)
@@ -932,7 +932,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "ok")
-            await ex._handle_docker_ops({
+            await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "ps", "params": {},
             })
         _, kwargs = mock_exec.call_args if mock_exec.call_args.kwargs else (mock_exec.call_args[0], {})
@@ -945,7 +945,7 @@ class TestHandleDockerOps:
         ex = _make_executor()
         with patch.object(ex, "_exec_command", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = (0, "ok")
-            await ex._handle_docker_ops({
+            await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "ps", "params": {},
             })
         mock_exec.assert_awaited_once()

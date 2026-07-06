@@ -34,6 +34,8 @@ class HandlerDeps:
     branch_freshness_enabled: Callable[[], bool]
     current_user_id: Callable[[], str | None]
     process_registry: Callable[[], Any]  # lazy-inits ON the executor (web API reads it there)
+    browser_manager: Callable[[], Any]
+    bulkheads: Callable[[], Any]
     # method passthroughs (resolve the executor attr per call)
     resolve_host: Callable[..., Any]
     resolve_default_host: Callable[..., Any]
@@ -78,6 +80,14 @@ class HandlerBase:
     @property
     def _current_user_id(self) -> str | None:
         return self._deps.current_user_id()
+
+    @property
+    def _browser_manager(self):
+        return self._deps.browser_manager()
+
+    @property
+    def bulkheads(self):
+        return self._deps.bulkheads()
 
     def _process_registry(self):
         """The executor-owned ProcessRegistry (lazy-inited there — the web
