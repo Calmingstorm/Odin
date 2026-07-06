@@ -170,10 +170,12 @@ class LoopManager:
         for lid, info in self._loops.items():
             if info.status != "running":
                 # A loop stopped before its first iteration has no
-                # last_trigger — treat it as immediately stale.
-                ref = info.last_trigger or 0
-                if now - ref > 3600:  # 1 hour after finish
-                    to_remove.append(lid)
+                # last_trigger — treat it as immediately stale. (An `or 0`
+                # sentinel on the monotonic clock only looked stale on
+                # machines up longer than an hour; on a freshly booted host
+                # such loops lingered.)
+                if info.last_trigger is None or now - info.last_trigger > 3600:
+                    to_remove.append(lid)  # 1 hour after finish
         for lid in to_remove:
             del self._loops[lid]
 
