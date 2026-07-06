@@ -107,6 +107,46 @@ class TestDispatchPartition:
             assert hasattr(ex, attr), f"stateful attr {attr} vanished from ToolExecutor"
 
 
+class TestDispatchTable:
+    """RFC-004 P2 — the explicit late-bound table must mirror the legacy
+    f-string resolution exactly (the migration bridge assertion), stay
+    call-time-resolved, and cover precisely the executor-routed set."""
+
+    def test_table_keys_match_executor_routed(self):
+        from src.tools.executor import EXECUTOR_HANDLERS
+
+        assert set(EXECUTOR_HANDLERS) == set(EXECUTOR_ROUTED)
+
+    def test_every_owner_key_bound(self):
+        from src.tools.executor import EXECUTOR_HANDLERS
+
+        ex = _executor()
+        for name, (owner_key, _attr) in EXECUTOR_HANDLERS.items():
+            assert owner_key in ex._handler_owners, f"{name}: unbound owner {owner_key!r}"
+
+    def test_table_resolution_identical_to_legacy_getattr(self):
+        """Bridge assertion (plan §3.2): for every entry, the table resolves
+        the SAME function the legacy f-string getattr would."""
+        from src.tools.executor import EXECUTOR_HANDLERS
+
+        ex = _executor()
+        for name, (owner_key, attr) in EXECUTOR_HANDLERS.items():
+            table_handler = getattr(ex._handler_owners[owner_key], attr)
+            legacy_handler = getattr(ex, f"_handle_{name}")
+            assert table_handler == legacy_handler, f"{name} diverged from legacy resolution"
+
+    async def test_table_resolves_instance_patch(self):
+        """The seam holds THROUGH the table: an instance-attribute patch on
+        the owner is what resolution returns."""
+        ex = _executor()
+
+        async def fake(tool_input):
+            return "table-seam-ok"
+
+        ex._handle_run_command = fake
+        assert ex._resolve_handler("run_command") is fake
+
+
 class TestUnknownTool:
     async def test_unknown_tool_result_shape(self):
         ex = _executor()
