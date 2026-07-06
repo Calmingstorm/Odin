@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import discord
-
 from src.constants import CONFIRMATION_TIMEOUT
 
 

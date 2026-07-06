@@ -5,7 +5,6 @@ import pytest
 from src.odin.context import ExecutionContext
 from src.odin.types import StepResult, StepStatus
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -103,7 +102,10 @@ class TestPlanInputInterpolation:
     def test_mixed_step_and_input_refs(self):
         ctx = ExecutionContext(inputs={"base_url": "https://api.example.com"})
         ctx.record("auth", StepResult(status=StepStatus.SUCCESS, output={"token": "abc123"}))
-        r = ctx.resolve_params({"url": "${inputs.base_url}/data", "auth": "Bearer ${auth.output.token}"})
+        r = ctx.resolve_params({
+            "url": "${inputs.base_url}/data",
+            "auth": "Bearer ${auth.output.token}",
+        })
         assert r == {"url": "https://api.example.com/data", "auth": "Bearer abc123"}
 
     def test_input_in_nested_param_dict(self):

@@ -10,7 +10,7 @@ import json
 import os
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..odin_log import get_logger
@@ -143,7 +143,11 @@ class PlanStore:
             plan.status = "cancelled"
             self._save()
 
-    def list_pending(self, user_id: str | None = None, channel_id: str | None = None) -> list[ExecutionPlan]:
+    def list_pending(
+        self,
+        user_id: str | None = None,
+        channel_id: str | None = None,
+    ) -> list[ExecutionPlan]:
         self._prune_expired()
         results = []
         for p in self._plans.values():
@@ -157,7 +161,8 @@ class PlanStore:
         return sorted(results, key=lambda p: p.created_at, reverse=True)
 
     def _prune_expired(self) -> None:
-        expired = [pid for pid, p in self._plans.items() if p.is_expired() and p.status == "pending"]
+        expired = [pid for pid, p in self._plans.items()
+            if p.is_expired() and p.status == "pending"]
         for pid in expired:
             self._plans[pid].status = "expired"
         if expired:

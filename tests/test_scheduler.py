@@ -18,15 +18,13 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import json
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
 from src.scheduler.scheduler import Scheduler
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,7 +53,7 @@ class TestSchedulerAdd:
 
     async def test_add_one_time_schedule(self, tmp_path):
         s = _make_scheduler(tmp_path)
-        run_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        run_at = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         result = await s.add("one-time", "reminder", "chan1", run_at=run_at)
         assert result["one_time"] is True
         assert result["next_run"] == run_at
@@ -174,7 +172,7 @@ class TestSchedulerTick:
         s._callback = cb
 
         # Add a schedule with next_run in the past
-        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
         sched = await s.add("fire me", "reminder", "chan1", run_at=past)
 
         await s._tick()
@@ -185,7 +183,7 @@ class TestSchedulerTick:
         s = _make_scheduler(tmp_path)
         s._callback = AsyncMock()
 
-        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
         await s.add("one-shot", "reminder", "chan1", run_at=past)
         assert len(s.list_all()) == 1
 
@@ -198,12 +196,12 @@ class TestSchedulerTick:
 
         # Manually set next_run to the past so tick fires it
         sched = await s.add("cron job", "reminder", "chan1", cron="*/5 * * * *")
-        old_next = sched["next_run"]
+        sched["next_run"]
 
         # Force next_run far enough into the past that the next cron fire differs
         async with s._lock:
             s._schedules[0]["next_run"] = (
-                datetime.now(timezone.utc) - timedelta(minutes=10)
+                datetime.now(UTC) - timedelta(minutes=10)
             ).isoformat()
         forced_next = s.list_all()[0]["next_run"]
 
@@ -217,7 +215,7 @@ class TestSchedulerTick:
         cb = AsyncMock()
         s._callback = cb
 
-        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         await s.add("not yet", "reminder", "chan1", run_at=future)
 
         await s._tick()
@@ -228,7 +226,7 @@ class TestSchedulerTick:
         s = _make_scheduler(tmp_path)
         s._callback = AsyncMock(side_effect=RuntimeError("boom"))
 
-        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
         await s.add("boom", "reminder", "chan1", run_at=past)
 
         # Should not raise
@@ -313,7 +311,7 @@ class TestSchedulerConcurrency:
         s._callback = AsyncMock()
 
         # Add a schedule that will fire on tick
-        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
         await s.add("fire me", "reminder", "chan1", run_at=past)
 
         # Run tick and add concurrently
@@ -366,7 +364,7 @@ class TestSchedulerUpdate:
     async def test_update_cron_to_one_time(self, tmp_path):
         s = _make_scheduler(tmp_path)
         sched = await s.add("was cron", "reminder", "chan1", cron="*/5 * * * *")
-        run_at = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        run_at = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
         updated = await s.update(sched["id"], run_at=run_at)
         assert "cron" not in updated
         assert updated["run_at"] == run_at
@@ -374,7 +372,7 @@ class TestSchedulerUpdate:
 
     async def test_update_one_time_to_cron(self, tmp_path):
         s = _make_scheduler(tmp_path)
-        run_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        run_at = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         sched = await s.add("was one-time", "reminder", "chan1", run_at=run_at)
         updated = await s.update(sched["id"], cron="0 * * * *")
         assert "run_at" not in updated
@@ -510,8 +508,8 @@ class TestSchedulerRetry:
         s = _make_scheduler(tmp_path)
         s._callback = AsyncMock(side_effect=RuntimeError("disk full"))
 
-        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-        sched = await s.add("fail me", "reminder", "chan1", run_at=past)
+        past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+        await s.add("fail me", "reminder", "chan1", run_at=past)
 
         await s._tick()
 
@@ -519,12 +517,12 @@ class TestSchedulerRetry:
         # But let's test with cron to see state
         s2 = _make_scheduler(tmp_path)
         s2._callback = AsyncMock(side_effect=RuntimeError("disk full"))
-        cron_sched = await s2.add("cron fail", "reminder", "chan1", cron="*/5 * * * *")
+        await s2.add("cron fail", "reminder", "chan1", cron="*/5 * * * *")
 
         # Force next_run into the past
         async with s2._lock:
             s2._schedules[0]["next_run"] = (
-                datetime.now(timezone.utc) - timedelta(minutes=1)
+                datetime.now(UTC) - timedelta(minutes=1)
             ).isoformat()
 
         await s2._tick()
@@ -538,15 +536,15 @@ class TestSchedulerRetry:
         s = _make_scheduler(tmp_path)
         s._callback = AsyncMock()
 
-        sched = await s.add("recover", "reminder", "chan1", cron="*/5 * * * *")
+        await s.add("recover", "reminder", "chan1", cron="*/5 * * * *")
 
         # Manually set failure state
         async with s._lock:
             s._schedules[0]["consecutive_failures"] = 5
             s._schedules[0]["last_error"] = "old error"
-            s._schedules[0]["last_error_at"] = datetime.now(timezone.utc).isoformat()
+            s._schedules[0]["last_error_at"] = datetime.now(UTC).isoformat()
             s._schedules[0]["next_run"] = (
-                datetime.now(timezone.utc) - timedelta(minutes=1)
+                datetime.now(UTC) - timedelta(minutes=1)
             ).isoformat()
 
         await s._tick()
@@ -559,7 +557,7 @@ class TestSchedulerRetry:
         s = _make_scheduler(tmp_path)
         s._callback = AsyncMock(side_effect=RuntimeError("timeout"))
 
-        sched = await s.add(
+        await s.add(
             "retryable", "reminder", "chan1",
             cron="*/5 * * * *", max_retries=3, retry_backoff_seconds=60,
         )
@@ -567,7 +565,7 @@ class TestSchedulerRetry:
         # Force next_run into the past
         async with s._lock:
             s._schedules[0]["next_run"] = (
-                datetime.now(timezone.utc) - timedelta(minutes=1)
+                datetime.now(UTC) - timedelta(minutes=1)
             ).isoformat()
 
         await s._tick()
@@ -590,7 +588,7 @@ class TestSchedulerRetry:
 
         s._callback = flaky_callback
 
-        sched = await s.add(
+        await s.add(
             "flaky", "reminder", "chan1",
             cron="*/5 * * * *", max_retries=3, retry_backoff_seconds=60,
         )
@@ -598,7 +596,7 @@ class TestSchedulerRetry:
         # Force next_run into the past for first tick
         async with s._lock:
             s._schedules[0]["next_run"] = (
-                datetime.now(timezone.utc) - timedelta(minutes=1)
+                datetime.now(UTC) - timedelta(minutes=1)
             ).isoformat()
 
         await s._tick()
@@ -610,7 +608,7 @@ class TestSchedulerRetry:
         # Force retry_at into the past
         async with s._lock:
             s._schedules[0]["retry_at"] = (
-                datetime.now(timezone.utc) - timedelta(seconds=1)
+                datetime.now(UTC) - timedelta(seconds=1)
             ).isoformat()
 
         await s._tick()
@@ -625,7 +623,7 @@ class TestSchedulerRetry:
         s = _make_scheduler(tmp_path)
         s._callback = AsyncMock(side_effect=RuntimeError("permanent"))
 
-        sched = await s.add(
+        await s.add(
             "doomed", "reminder", "chan1",
             cron="*/5 * * * *", max_retries=2, retry_backoff_seconds=10,
         )
@@ -633,7 +631,7 @@ class TestSchedulerRetry:
         # Fire initial — schedules retry 1
         async with s._lock:
             s._schedules[0]["next_run"] = (
-                datetime.now(timezone.utc) - timedelta(minutes=1)
+                datetime.now(UTC) - timedelta(minutes=1)
             ).isoformat()
         await s._tick()
         assert s.list_all()[0]["retry_count"] == 1
@@ -641,7 +639,7 @@ class TestSchedulerRetry:
         # Fire retry 1 — schedules retry 2
         async with s._lock:
             s._schedules[0]["retry_at"] = (
-                datetime.now(timezone.utc) - timedelta(seconds=1)
+                datetime.now(UTC) - timedelta(seconds=1)
             ).isoformat()
         await s._tick()
         assert s.list_all()[0]["retry_count"] == 2
@@ -649,7 +647,7 @@ class TestSchedulerRetry:
         # Fire retry 2 — exhausted, no more retries
         async with s._lock:
             s._schedules[0]["retry_at"] = (
-                datetime.now(timezone.utc) - timedelta(seconds=1)
+                datetime.now(UTC) - timedelta(seconds=1)
             ).isoformat()
         await s._tick()
         state = s.list_all()[0]
@@ -661,7 +659,7 @@ class TestSchedulerRetry:
         s = _make_scheduler(tmp_path)
         s._callback = AsyncMock(side_effect=RuntimeError("fail"))
 
-        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
         await s.add(
             "one-shot retry", "reminder", "chan1",
             run_at=past, max_retries=2, retry_backoff_seconds=10,
@@ -703,7 +701,7 @@ class TestSchedulerRetry:
             "retry_count": 20,  # very high, would be 60 * 2^20 without cap
             "retry_backoff_seconds": 60,
         }
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         retry_at = datetime.fromisoformat(s._compute_retry_at(schedule))
         # Should be at most MAX_BACKOFF_SECONDS from now (+ small tolerance)
         diff = (retry_at - now).total_seconds()
@@ -754,13 +752,13 @@ class TestSchedulerFailureAlerts:
         alert_cb = AsyncMock()
         s._failure_callback = alert_cb
 
-        sched = await s.add("alertable", "reminder", "chan1", cron="*/5 * * * *")
+        await s.add("alertable", "reminder", "chan1", cron="*/5 * * * *")
 
         # Run 3 failures (DEFAULT_FAILURE_ALERT_THRESHOLD = 3)
         for i in range(3):
             async with s._lock:
                 s._schedules[0]["next_run"] = (
-                    datetime.now(timezone.utc) - timedelta(minutes=1)
+                    datetime.now(UTC) - timedelta(minutes=1)
                 ).isoformat()
                 # Clear retry_at to allow next_run to fire
                 s._schedules[0].pop("retry_at", None)
@@ -783,7 +781,7 @@ class TestSchedulerFailureAlerts:
         for i in range(6):
             async with s._lock:
                 s._schedules[0]["next_run"] = (
-                    datetime.now(timezone.utc) - timedelta(minutes=1)
+                    datetime.now(UTC) - timedelta(minutes=1)
                 ).isoformat()
                 s._schedules[0].pop("retry_at", None)
             await s._tick()
@@ -802,7 +800,7 @@ class TestSchedulerFailureAlerts:
         for i in range(2):
             async with s._lock:
                 s._schedules[0]["next_run"] = (
-                    datetime.now(timezone.utc) - timedelta(minutes=1)
+                    datetime.now(UTC) - timedelta(minutes=1)
                 ).isoformat()
                 s._schedules[0].pop("retry_at", None)
             await s._tick()
@@ -824,8 +822,8 @@ class TestSchedulerResetFailures:
             s._schedules[0]["consecutive_failures"] = 5
             s._schedules[0]["retry_count"] = 2
             s._schedules[0]["last_error"] = "some error"
-            s._schedules[0]["last_error_at"] = datetime.now(timezone.utc).isoformat()
-            s._schedules[0]["retry_at"] = datetime.now(timezone.utc).isoformat()
+            s._schedules[0]["last_error_at"] = datetime.now(UTC).isoformat()
+            s._schedules[0]["retry_at"] = datetime.now(UTC).isoformat()
 
         result = await s.reset_failures(sched["id"])
         assert result is not None
@@ -1014,8 +1012,8 @@ class TestSchedulerAdaptiveTickDelay:
 
     async def test_compute_tick_delay_picks_soonest(self, tmp_path):
         s = _make_scheduler(tmp_path)
-        soon = (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
-        later = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        soon = (datetime.now(UTC) + timedelta(seconds=10)).isoformat()
+        later = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
         await s.add("soon", "reminder", "c", run_at=soon, message="x")
         await s.add("later", "reminder", "c", run_at=later, message="x")
         delay = s._compute_tick_delay()
@@ -1024,19 +1022,19 @@ class TestSchedulerAdaptiveTickDelay:
     async def test_add_wakes_loop(self, tmp_path):
         s = _make_scheduler(tmp_path)
         assert not s._wake.is_set()
-        soon = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
+        soon = (datetime.now(UTC) + timedelta(seconds=5)).isoformat()
         await s.add("wake-me", "reminder", "c", run_at=soon, message="x")
         assert s._wake.is_set(), "adding a schedule must set _wake for the loop"
 
     def test_compute_tick_delay_caps_at_60(self, tmp_path):
         s = _make_scheduler(tmp_path)
-        far_future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+        far_future = (datetime.now(UTC) + timedelta(days=7)).isoformat()
         s._schedules.append({"next_run": far_future, "id": "x", "action": "reminder"})
         assert s._compute_tick_delay() == 60.0
 
     def test_compute_tick_delay_floors_at_1(self, tmp_path):
         s = _make_scheduler(tmp_path)
-        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
         s._schedules.append({"next_run": past, "id": "x", "action": "reminder"})
         assert s._compute_tick_delay() == 1.0
 
@@ -1079,7 +1077,7 @@ class TestSchedulerPause:
 
         async with s._lock:
             s._schedules[0]["next_run"] = (
-                datetime.now(timezone.utc) - timedelta(minutes=5)
+                datetime.now(UTC) - timedelta(minutes=5)
             ).isoformat()
 
         await s._tick()
@@ -1091,7 +1089,7 @@ class TestSchedulerPause:
         cb = AsyncMock()
         s._callback = cb
 
-        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
         sched = await s.add("paused one-time", "reminder", "chan1", run_at=past)
         await s.update(sched["id"], paused=True)
 
@@ -1113,7 +1111,7 @@ class TestSchedulerPause:
 
         async with s._lock:
             s._schedules[0]["retry_at"] = (
-                datetime.now(timezone.utc) - timedelta(seconds=1)
+                datetime.now(UTC) - timedelta(seconds=1)
             ).isoformat()
             s._schedules[0]["retry_count"] = 1
 
@@ -1145,7 +1143,7 @@ class TestSchedulerPause:
 
         async with s._lock:
             s._schedules[0]["next_run"] = (
-                datetime.now(timezone.utc) - timedelta(minutes=1)
+                datetime.now(UTC) - timedelta(minutes=1)
             ).isoformat()
 
         await s._tick()

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import os
 import time
 from pathlib import Path
-
-import asyncio
 
 import aiohttp
 
@@ -201,7 +200,10 @@ class CodexAuth:
         if not refresh_token:
             raise RuntimeError("No refresh token available. Run scripts/codex_login.py again.")
 
-        async with aiohttp.ClientSession(auto_decompress=False, timeout=aiohttp.ClientTimeout(total=30)) as session:
+        async with aiohttp.ClientSession(
+            auto_decompress=False,
+            timeout=aiohttp.ClientTimeout(total=30),
+        )as session:
             async with session.post(
                 TOKEN_URL,
                 data={
@@ -282,9 +284,16 @@ class CodexAuth:
         return f"{AUTH_URL}?{urlencode(params)}", code_verifier
 
     @staticmethod
-    async def exchange_code(code: str, code_verifier: str, redirect_uri: str = REDIRECT_URI) -> dict:
+    async def exchange_code(
+        code: str,
+        code_verifier: str,
+        redirect_uri: str = REDIRECT_URI,
+    ) -> dict:
         """Exchange authorization code for tokens."""
-        async with aiohttp.ClientSession(auto_decompress=False, timeout=aiohttp.ClientTimeout(total=30)) as session:
+        async with aiohttp.ClientSession(
+            auto_decompress=False,
+            timeout=aiohttp.ClientTimeout(total=30),
+        )as session:
             async with session.post(
                 TOKEN_URL,
                 data={
@@ -345,7 +354,12 @@ class CodexAuth:
         }
 
     @staticmethod
-    async def poll_device_auth(device_auth_id: str, user_code: str, interval: int = 5, timeout: int = 900) -> dict:
+    async def poll_device_auth(
+        device_auth_id: str,
+        user_code: str,
+        interval: int = 5,
+        timeout: int = 900,
+    ) -> dict:
         """Poll for device authorization completion, then exchange for tokens.
 
         Returns credentials dict on success, raises on timeout/error.
@@ -532,7 +546,8 @@ class CodexAuthPool:
                 errors.append((idx, str(e)))
                 async with self._pool_lock:
                     auth.mark_rate_limited()
-                    if len(self._accounts) > 1 and self._accounts[self._current_index % len(self._accounts)] is auth:
+                    if (len(self._accounts) > 1
+                            and self._accounts[self._current_index % len(self._accounts)] is auth):
                         self._rotate()
                 continue
             return token, auth.get_account_id(), idx

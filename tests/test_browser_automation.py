@@ -6,19 +6,17 @@ Browser tool handler functions are tested via mocked BrowserManager.
 """
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.tools.browser import (
+    _CONNECTION_ERROR_PATTERNS,
     ALLOWED_SCHEMES,
     DEFAULT_USER_AGENT,
     BrowserManager,
-    _CONNECTION_ERROR_PATTERNS,
     _validate_url,
 )
-
 
 # ---------------------------------------------------------------------------
 # _validate_url

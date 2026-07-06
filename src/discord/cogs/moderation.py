@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import logging
 
-import discord
 from discord.ext import commands
 
-from src.discord.helpers.converters import ReasonConverter
-from src.discord.helpers.embeds import moderation_embed, success_embed, error_embed
+import discord
+from src.discord.helpers.embeds import error_embed, moderation_embed, success_embed
 from src.discord.helpers.permissions import bot_has_guild_permissions, is_moderator
 
 logger = logging.getLogger("odin.cogs.moderation")
@@ -36,7 +35,8 @@ class Moderation(commands.Cog):
     ) -> None:
         """Ban a member from the server."""
         if member.top_role >= ctx.author.top_role:  # type: ignore[union-attr]
-            await ctx.send(embed=error_embed("You cannot ban someone with an equal or higher role."))
+            await ctx.send(embed=error_embed("You cannot ban someone with an equal or higher "
+                                             "role."))
             return
         await member.ban(reason=f"{ctx.author}: {reason}")
         embed = moderation_embed("Ban", ctx.author, member, reason)
@@ -59,7 +59,8 @@ class Moderation(commands.Cog):
     ) -> None:
         """Kick a member from the server."""
         if member.top_role >= ctx.author.top_role:  # type: ignore[union-attr]
-            await ctx.send(embed=error_embed("You cannot kick someone with an equal or higher role."))
+            await ctx.send(embed=error_embed("You cannot kick someone with an equal or higher "
+                                             "role."))
             return
         await member.kick(reason=f"{ctx.author}: {reason}")
         embed = moderation_embed("Kick", ctx.author, member, reason)

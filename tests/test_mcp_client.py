@@ -13,17 +13,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.config.schema import Config, MCPConfig, MCPServerConfig
 from src.tools.mcp_client import (
+    CLIENT_INFO,
+    PROTOCOL_VERSION,
     MCPError,
     MCPManager,
     MCPServerConnection,
     make_tool_name,
     parse_tool_name,
-    PROTOCOL_VERSION,
-    CLIENT_INFO,
 )
-from src.config.schema import MCPConfig, MCPServerConfig, Config
-
 
 # ---------------------------------------------------------------------------
 # Tool name helpers
@@ -1608,8 +1607,8 @@ class TestEdgeCases:
 
 class TestMCPRESTAPI:
     async def test_list_servers_no_manager(self):
-        from aiohttp.test_utils import TestClient, TestServer
         from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
 
         bot = MagicMock(spec=[])
 
@@ -1632,8 +1631,8 @@ class TestMCPRESTAPI:
             assert "not enabled" in data["error"]
 
     async def test_list_servers_with_manager(self):
-        from aiohttp.test_utils import TestClient, TestServer
         from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
 
         mock_mgr = MagicMock()
         mock_mgr.get_status = MagicMock(return_value=[
@@ -1664,8 +1663,8 @@ class TestMCPRESTAPI:
             assert data["servers"][0]["name"] == "fs"
 
     async def test_server_tools_endpoint(self):
-        from aiohttp.test_utils import TestClient, TestServer
         from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
 
         mock_conn = MagicMock()
         mock_conn.tools = [
@@ -1712,8 +1711,8 @@ class TestMCPRESTAPI:
             assert data["tools"][0]["original_name"] == "read"
 
     async def test_server_tools_not_found(self):
-        from aiohttp.test_utils import TestClient, TestServer
         from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
 
         mock_mgr = MagicMock()
         mock_mgr.get_server = MagicMock(return_value=None)

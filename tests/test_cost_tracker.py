@@ -3,14 +3,12 @@ from __future__ import annotations
 
 import time
 
-import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import WebhookConfig
 from src.health.metrics import MetricsCollector
 from src.health.server import HealthServer
 from src.llm.cost_tracker import CostTracker, UsageRecord, estimate_tokens
-
 
 # ---------------------------------------------------------------------------
 # estimate_tokens

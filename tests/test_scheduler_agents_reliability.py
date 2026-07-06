@@ -17,16 +17,15 @@ import asyncio
 import os
 import stat
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+from src.planning.store import PlanStore
 from src.scheduler.scheduler import Scheduler, _cron_next_run
 from src.tools.autonomous_loop import LoopInfo, LoopManager
-from src.planning.store import PlanStore
-
 
 # ---------------------------------------------------------------------------
 # 2.3 — autonomous-loop error backoff
@@ -202,7 +201,7 @@ def test_first_retry_waits_base_not_double(tmp_path):
     # retry_count is incremented to 1 before _compute_retry_at is called.
     schedule = {"retry_count": 1, "retry_backoff_seconds": 60}
     retry_at = datetime.fromisoformat(sched._compute_retry_at(schedule))
-    delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+    delay = (retry_at - datetime.now(UTC)).total_seconds()
     assert 55 <= delay <= 61  # ~base (60), not 120
 
 
@@ -210,13 +209,13 @@ def test_second_retry_doubles(tmp_path):
     sched = Scheduler(str(tmp_path / "schedules.json"))
     schedule = {"retry_count": 2, "retry_backoff_seconds": 60}
     retry_at = datetime.fromisoformat(sched._compute_retry_at(schedule))
-    delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+    delay = (retry_at - datetime.now(UTC)).total_seconds()
     assert 115 <= delay <= 121  # base·2¹ = 120
 
 
 def test_tick_delay_accounts_for_retry_at(tmp_path):
     sched = Scheduler(str(tmp_path / "schedules.json"))
-    soon = (datetime.now(timezone.utc) + timedelta(seconds=3)).isoformat()
+    soon = (datetime.now(UTC) + timedelta(seconds=3)).isoformat()
     sched._schedules = [{"id": "r", "retry_at": soon}]
     delay = sched._compute_tick_delay()
     assert delay <= 4  # would have been 60 when retry_at was ignored
@@ -231,13 +230,13 @@ def test_cron_next_run_respects_timezone():
     ny = _cron_next_run("0 9 * * *", "America/New_York")
     parsed = datetime.fromisoformat(ny)
     assert parsed.tzinfo is not None
-    assert parsed.astimezone(timezone.utc).hour in (13, 14)
+    assert parsed.astimezone(UTC).hour in (13, 14)
     assert parsed.minute == 0
 
 
 def test_cron_next_run_defaults_utc():
     utc = _cron_next_run("30 6 * * *", None)
-    parsed = datetime.fromisoformat(utc).astimezone(timezone.utc)
+    parsed = datetime.fromisoformat(utc).astimezone(UTC)
     assert parsed.hour == 6 and parsed.minute == 30
 
 
@@ -248,7 +247,7 @@ async def test_add_stores_timezone_and_future_next_run(tmp_path):
         cron="0 9 * * *", message="hi", cron_timezone="America/New_York",
     )
     assert s["timezone"] == "America/New_York"
-    assert datetime.fromisoformat(s["next_run"]).astimezone(timezone.utc) > datetime.now(timezone.utc)
+    assert datetime.fromisoformat(s["next_run"]).astimezone(UTC) > datetime.now(UTC)
 
 
 async def test_add_rejects_invalid_timezone(tmp_path):

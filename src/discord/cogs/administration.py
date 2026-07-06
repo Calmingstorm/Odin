@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 
-import discord
 from discord.ext import commands
 
-from src.discord.helpers.embeds import info_embed, success_embed, error_embed
+import discord
+from src.discord.helpers.embeds import error_embed, info_embed, success_embed
 from src.discord.helpers.permissions import is_admin
 
 logger = logging.getLogger("odin.cogs.admin")
@@ -67,7 +67,8 @@ class Administration(commands.Cog):
         settings = self._settings(ctx.guild.id)  # type: ignore[union-attr]
         fields = {
             "Prefix": f"`{settings['prefix']}`",
-            "Log Channel": f"<#{settings['log_channel']}>" if settings["log_channel"] else "Not set",
+            "Log Channel": (f"<#{settings['log_channel']}>"
+                            if settings["log_channel"] else "Not set"),
             "Auto-Role": f"<@&{settings['autorole']}>" if settings["autorole"] else "Not set",
         }
         await ctx.send(embed=info_embed("Server Settings", fields))

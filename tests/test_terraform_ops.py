@@ -6,10 +6,9 @@ import pytest
 
 from src.tools.terraform_ops import (
     ALLOWED_ACTIONS,
-    build_terraform_command,
     _chdir_flag,
+    build_terraform_command,
 )
-
 
 # ---------------------------------------------------------------------------
 # Registration
@@ -634,6 +633,7 @@ class TestHandleTerraformOps:
     @pytest.fixture
     def executor(self):
         from unittest.mock import AsyncMock, MagicMock
+
         from src.tools.executor import ToolExecutor
 
         config = MagicMock()
@@ -690,7 +690,8 @@ class TestHandleTerraformOps:
         executor._exec_command.assert_called_once()
         cmd = executor._exec_command.call_args[0][1]
         assert cmd.startswith("terraform init")
-        assert "Success" in result or "completed successfully" in (result[0] if isinstance(result, tuple) else result)
+        assert "Success" in result or "completed successfully" in (result[0]
+            if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_plan_dispatch(self, executor):

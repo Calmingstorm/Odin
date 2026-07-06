@@ -10,26 +10,19 @@ Covers:
 """
 from __future__ import annotations
 
-import hashlib
-import hmac as hmac_mod
 import json
-import os
-import sqlite3
-import tempfile
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import web as aio_web
 from aiohttp.test_utils import TestClient, TestServer
 
-from src.audit.signer import GENESIS_HASH, AuditSigner, _canonical, verify_log
 from src.audit.logger import AuditLogger
-from src.web.api import _safe_int_param, create_api_routes
+from src.audit.signer import GENESIS_HASH, AuditSigner, verify_log
 from src.knowledge.importer import BulkImporter, ImportResult
-from src.permissions.manager import PermissionManager, VALID_TIERS, USER_TIER_TOOLS
-from src.tools.risk_classifier import classify_command, classify_tool, RiskLevel
-
+from src.permissions.manager import USER_TIER_TOOLS, VALID_TIERS, PermissionManager
+from src.tools.risk_classifier import RiskLevel, classify_command, classify_tool
+from src.web.api import _safe_int_param, create_api_routes
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -484,7 +477,7 @@ class TestKnowledgeVersioningImports:
         assert hasattr(KnowledgeStore, "get_version_diff")
 
     def test_importer_imports(self):
-        from src.knowledge.importer import BulkImporter, ImportResult, BatchResult
+        from src.knowledge.importer import BatchResult, BulkImporter
         assert BulkImporter is not None
         assert ImportResult is not None
         assert BatchResult is not None
@@ -496,27 +489,22 @@ class TestKnowledgeVersioningImports:
 
 class TestModuleIntegration:
     def test_signer_exports(self):
-        from src.audit import AuditSigner, verify_log
+        from src.audit import verify_log
         assert callable(verify_log)
 
     def test_risk_classifier_exports(self):
         from src.tools.risk_classifier import (
-            RiskLevel, RiskAssessment, RiskStats,
-            classify_command, classify_tool,
+            RiskLevel,
         )
         assert RiskLevel.LOW.value == "low"
 
     def test_permission_manager_exports(self):
-        from src.permissions.manager import (
-            PermissionManager, VALID_TIERS, USER_TIER_TOOLS,
-        )
         assert "admin" in VALID_TIERS
         assert isinstance(USER_TIER_TOOLS, frozenset)
 
     def test_diff_tracker_exports(self):
         from src.audit.diff_tracker import (
-            DiffTracker, compute_unified_diff, compute_dict_diff,
-            extract_file_target, DIFF_TOOLS,
+            DIFF_TOOLS,
         )
         assert "write_file" in DIFF_TOOLS
 

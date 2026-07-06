@@ -9,9 +9,8 @@ under ``data/trajectories/agents/YYYY-MM-DD.jsonl``.
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiofiles
@@ -128,7 +127,7 @@ class AgentTrajectorySaver:
         self._count = 0
 
     async def save(self, turn: AgentTrajectoryTurn) -> Path:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if not turn.timestamp:
             turn.timestamp = now.isoformat()
 
@@ -176,7 +175,7 @@ class AgentTrajectorySaver:
             return []
         results: list[dict] = []
         try:
-            async with aiofiles.open(filepath, "r") as f:
+            async with aiofiles.open(filepath) as f:
                 lines = await f.readlines()
             for line in reversed(lines):
                 line = line.strip()
@@ -199,7 +198,7 @@ class AgentTrajectorySaver:
             if not filepath.exists():
                 continue
             try:
-                async with aiofiles.open(filepath, "r") as f:
+                async with aiofiles.open(filepath) as f:
                     lines = await f.readlines()
                 for line in reversed(lines):
                     line = line.strip()

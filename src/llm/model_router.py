@@ -25,7 +25,7 @@ log = get_logger("model_router")
 # Intent taxonomy
 # -----------------------------------------------------------------------
 
-class MessageIntent(str, Enum):
+class MessageIntent(str, Enum):  # noqa: UP042 — str(member) output differs under StrEnum; deferred to a typed-verification pass
     """Classified intent of an incoming message."""
     CHAT = "chat"
     QUERY = "query"
@@ -104,40 +104,73 @@ class RoutingStats:
 
 # Chat/greeting patterns — short, social, no technical content
 _CHAT_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^(?:hi|hey|hello|yo|sup|howdy|greetings|good\s+(?:morning|afternoon|evening|night)|gm|gn)\b", re.I),
-    re.compile(r"^(?:thanks|thank\s+you|thx|ty|cheers|awesome|nice|cool|great|lol|haha|lmao)\b", re.I),
+    re.compile(r"^(?:hi|hey|hello|yo|sup|howdy|greetings|good\s+(?:morning|afternoon|evening|night)"
+               r"|gm|gn)\b", re.I),
+    re.compile(
+        r"^(?:thanks|thank\s+you|thx|ty|cheers|awesome|nice|cool|great|lol|haha|lmao)\b",
+        re.I,
+    ),
     re.compile(r"^(?:bye|goodbye|later|see\s+ya|cya|peace|good\s*bye)\b", re.I),
-    re.compile(r"^(?:who\s+are\s+you|what\s+are\s+you|what(?:'s| is)\s+your\s+name|how\s+are\s+you)\b", re.I),
+    re.compile(
+        r"^(?:who\s+are\s+you|what\s+are\s+you|what(?:'s| is)\s+your\s+name|how\s+are\s+you)\b",
+        re.I,
+    ),
     re.compile(r"^(?:tell\s+me\s+(?:a\s+)?(?:joke|story|riddle)|make\s+me\s+laugh)\b", re.I),
 )
 
 # Query patterns — information lookup, status checks
 _QUERY_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^(?:what|when|where|who|which|how\s+(?:many|much|long|often))\b.*\?$", re.I | re.S),
-    re.compile(r"^(?:is|are|was|were|does|do|did|can|could|will|would|should|has|have)\b.*\?$", re.I | re.S),
+    re.compile(
+        r"^(?:what|when|where|who|which|how\s+(?:many|much|long|often))\b.*\?$",
+        re.I | re.S,
+    ),
+    re.compile(
+        r"^(?:is|are|was|were|does|do|did|can|could|will|would|should|has|have)\b.*\?$",
+        re.I | re.S,
+    ),
     re.compile(r"\b(?:status|uptime|version|info)\b", re.I),
-    re.compile(r"^(?:show|list|display|print|get)\s+(?:me\s+)?(?:the\s+)?(?:status|logs?|info|version|help)\b", re.I),
+    re.compile(r"^(?:show|list|display|print|get)\s+(?:me\s+)?(?:the\s+)?(?:status|logs?|info|versi"
+               r"on|help)\b", re.I),
 )
 
 # Task patterns — commands, file operations, deployments, tool-requiring work
 _TASK_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?:^|(?:and|then|please|can you|could you|go)\s+)(?:run|execute|deploy|restart|stop|start|install|update|upgrade|patch|build|compile)\b", re.I),
-    re.compile(r"\b(?:create|write|edit|modify|delete|remove|move|copy|rename|chmod|chown)\s+(?:a\s+)?(?:file|dir|folder|script|config)", re.I),
-    re.compile(r"\b(?:ssh|scp|rsync|curl|wget|docker|git|pip|npm|apt|yum|systemctl|journalctl)\b", re.I),
+    re.compile(r"(?:^|(?:and|then|please|can you|could you|go)\s+)(?:run|execute|deploy|restart|sto"
+               r"p|start|install|update|upgrade|patch|build|compile)\b", re.I),
+    re.compile(r"\b(?:create|write|edit|modify|delete|remove|move|copy|rename|chmod|chown)\s+(?:a\s"
+               r"+)?(?:file|dir|folder|script|config)", re.I),
+    re.compile(
+        r"\b(?:ssh|scp|rsync|curl|wget|docker|git|pip|npm|apt|yum|systemctl|journalctl)\b",
+        re.I,
+    ),
     re.compile(r"\b(?:fix|debug|troubleshoot|investigate|diagnose|resolve)\b", re.I),
-    re.compile(r"\b(?:check|scan|test|verify|validate)\s+(?:the\s+)?(?:server|service|host|container|pod|port|disk|cpu|memory|network)", re.I),
+    re.compile(r"\b(?:check|scan|test|verify|validate)\s+(?:the\s+)?(?:server|service|host|containe"
+               r"r|pod|port|disk|cpu|memory|network)", re.I),
     re.compile(r"\b(?:set\s+up|configure|provision|bootstrap|initialize)\b", re.I),
     re.compile(r"```", re.I),  # Code blocks suggest technical work
 )
 
 # Complex patterns — multi-step reasoning, analysis, planning
 _COMPLEX_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b(?:analyze|compare|evaluate|review|audit|assess|plan|design|architect|refactor)\b", re.I),
-    re.compile(r"\b(?:why\s+(?:is|are|does|did|was|were))\b.*(?:failing|broken|slow|down|error|crash)", re.I),
-    re.compile(r"\b(?:step.by.step|walk\s+me\s+through|explain\s+how|break\s+(?:it\s+)?down)\b", re.I),
+    re.compile(
+        r"\b(?:analyze|compare|evaluate|review|audit|assess|plan|design|architect|refactor)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:why\s+(?:is|are|does|did|was|were))\b.*(?:failing|broken|slow|down|error|crash)",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:step.by.step|walk\s+me\s+through|explain\s+how|break\s+(?:it\s+)?down)\b",
+        re.I,
+    ),
     re.compile(r"\b(?:migrate|migration|upgrade\s+from|convert|rewrite|port(?:ing)?)\b", re.I),
-    re.compile(r"\b(?:implement|build\s+(?:a|an|the)|develop|create\s+(?:a|an)\s+(?:\w+\s+)?(?:system|service|api|pipeline|workflow))\b", re.I),
-    re.compile(r"\b(?:across\s+(?:all|every|multiple)|each\s+(?:server|host|node|container))\b", re.I),
+    re.compile(r"\b(?:implement|build\s+(?:a|an|the)|develop|create\s+(?:a|an)\s+(?:\w+\s+)?(?:syst"
+               r"em|service|api|pipeline|workflow))\b", re.I),
+    re.compile(
+        r"\b(?:across\s+(?:all|every|multiple)|each\s+(?:server|host|node|container))\b",
+        re.I,
+    ),
 )
 
 
@@ -240,7 +273,7 @@ def classify_heuristic(text: str) -> RoutingDecision:
         )
 
     # Tiebreak priority: complex > task > query > chat (prefer conservative)
-    _PRIORITY = {
+    _PRIORITY = {  # noqa: N806 — function-local lookup table, constant-case deliberate
         MessageIntent.COMPLEX: 4,
         MessageIntent.TASK: 3,
         MessageIntent.QUERY: 2,

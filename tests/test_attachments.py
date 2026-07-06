@@ -33,13 +33,15 @@ class TestIntentClassifier:
         assert infer_attachment_intent("add to knowledge base") == AttachmentIntent.INGEST_KNOWLEDGE
 
     def test_remember_this(self):
-        assert infer_attachment_intent("remember this for later") == AttachmentIntent.INGEST_KNOWLEDGE
+        assert (infer_attachment_intent("remember this for later")
+                == AttachmentIntent.INGEST_KNOWLEDGE)
 
     def test_debug_keyword(self):
         assert infer_attachment_intent("debug this crash") == AttachmentIntent.CURRENT_TASK
 
     def test_here_are_logs(self):
-        assert infer_attachment_intent("here are the logs you asked for") == AttachmentIntent.CURRENT_TASK
+        assert infer_attachment_intent("here are the logs you asked "
+                                       "for") == AttachmentIntent.CURRENT_TASK
 
     def test_review_keyword(self):
         assert infer_attachment_intent("review this code") == AttachmentIntent.CURRENT_TASK
@@ -104,9 +106,13 @@ class TestAttachmentProcessor:
 
     @pytest.mark.asyncio
     async def test_log_head_tail_preview(self, tmp_path):
-        log_content = ("line %d\n" % i for i in range(5000))
+        log_content = (f"line {i}\n" for i in range(5000))
         data = "".join(log_content).encode()
-        proc = AttachmentProcessor(temp_dir=str(tmp_path), inline_max_bytes=100, large_preview_chars=500)
+        proc = AttachmentProcessor(
+            temp_dir=str(tmp_path),
+            inline_max_bytes=100,
+            large_preview_chars=500,
+        )
         att = _mock_attachment("app.log", len(data), "text/plain", data)
         result = await proc.process([att], "ch1", "msg1")
         assert "head and tail" in result.inline_text

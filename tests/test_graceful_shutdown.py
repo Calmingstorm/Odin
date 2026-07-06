@@ -8,16 +8,14 @@ ProcessRegistry.shutdown() terminates running processes.
 from __future__ import annotations
 
 import asyncio
-import sqlite3
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.discord.client import OdinBot
 from src.config.schema import Config
+from src.discord.client import OdinBot
 from src.knowledge.store import KnowledgeStore
 from src.tools.process_manager import ProcessRegistry
-
 
 # ── OdinBot.close() ──────────────────────────────────────────────────
 
@@ -217,7 +215,7 @@ class TestProcessRegistryShutdown:
     @pytest.mark.asyncio
     async def test_shutdown_cancels_reader_tasks(self):
         registry = ProcessRegistry()
-        result = await registry.start("localhost", "echo hello && sleep 0.1")
+        await registry.start("localhost", "echo hello && sleep 0.1")
         pid = next(iter(registry._processes))
         info = registry._processes[pid]
         # Let the reader task start
@@ -232,8 +230,8 @@ class TestProcessRegistryShutdown:
     @pytest.mark.asyncio
     async def test_shutdown_skips_already_finished(self):
         registry = ProcessRegistry()
-        result = await registry.start("localhost", "echo done")
-        pid = next(iter(registry._processes))
+        await registry.start("localhost", "echo done")
+        next(iter(registry._processes))
         # Wait for it to finish naturally
         await asyncio.sleep(0.5)
 

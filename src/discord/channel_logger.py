@@ -58,7 +58,8 @@ class ChannelLogger:
             author = getattr(message, "author", None)
 
             record = {
-                "ts": message.created_at.timestamp() if hasattr(message, "created_at") and message.created_at else 0.0,
+                "ts": (message.created_at.timestamp()
+                       if hasattr(message, "created_at") and message.created_at else 0.0),
                 "author_id": str(author.id) if author else "0",
                 "author": str(getattr(author, "display_name", getattr(author, "name", "Unknown"))),
                 "bot": bool(getattr(author, "bot", False)),
@@ -107,7 +108,7 @@ class ChannelLogger:
                 batch: list[dict] = []
                 max_ts = cutoff
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
+                    with open(path, encoding="utf-8") as f:
                         for line in f:
                             line = line.strip()
                             if not line:
@@ -154,7 +155,7 @@ class ChannelLogger:
                 if channel_id and path.stem != channel_id:
                     continue
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
+                    with open(path, encoding="utf-8") as f:
                         # Use deque to read lines newest-first without loading all into memory
                         lines = deque(f, maxlen=50000)  # cap at 50K most recent lines
                     for line in reversed(lines):

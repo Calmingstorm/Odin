@@ -23,13 +23,11 @@ import json
 import time
 from pathlib import Path
 
-import aiohttp
 import pytest
 
 from src.llm.codex_auth import CodexAuth, CodexAuthPool
-from src.llm.openai_codex import CodexChatClient, CodexStreamError
+from src.llm.openai_codex import CodexChatClient
 from src.llm.types import ToolCall
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -417,7 +415,7 @@ async def test_retried_429_then_success_counts_once_and_resets(monkeypatch):
 async def test_mid_stream_timeout_hits_breaker_and_retries(monkeypatch):
     client = _client(max_retries=2)
     session = FakeSession([
-        asyncio.TimeoutError(),
+        TimeoutError(),
         FakeResp(200, sse_lines=TEXT_OK_SSE),
     ])
     monkeypatch.setattr(client, "_get_session", lambda: _async_return(session))
@@ -429,7 +427,7 @@ async def test_mid_stream_timeout_hits_breaker_and_retries(monkeypatch):
 
 async def test_terminal_timeout_raises_wrapped_error(monkeypatch):
     client = _client(max_retries=1)
-    session = FakeSession([asyncio.TimeoutError()])
+    session = FakeSession([TimeoutError()])
     monkeypatch.setattr(client, "_get_session", lambda: _async_return(session))
 
     with pytest.raises(RuntimeError, match="connection failed"):
@@ -450,7 +448,10 @@ def _async_return(value):
 async def test_response_failed_event_is_retryable_error(monkeypatch):
     client = _client(max_retries=2)
     session = FakeSession([
-        FakeResp(200, sse_lines=_sse([{"type": "response.failed", "response": {"error": "x"}}], done=False)),
+        FakeResp(
+            200,
+            sse_lines=_sse([{"type": "response.failed", "response": {"error": "x"}}], done=False),
+        ),
         FakeResp(200, sse_lines=TEXT_OK_SSE),
     ])
     monkeypatch.setattr(client, "_get_session", lambda: _async_return(session))

@@ -6,15 +6,9 @@ edits can't silently regress the security/correctness properties.
 from __future__ import annotations
 
 import asyncio
-import json
-import sqlite3
-import tempfile
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-
 
 # ====================================================================
 # Finding #1 — Grafana webhook fail-close
@@ -26,22 +20,22 @@ class TestGrafanaWebhookFailClose:
     _verify_shared_secret now fails closed."""
 
     def test_verify_shared_secret_rejects_empty_secret(self):
-        from src.health.server import HealthServer
         from src.config.schema import WebhookConfig
+        from src.health.server import HealthServer
         hs = HealthServer.__new__(HealthServer)
         hs._webhook_config = WebhookConfig(secret="")
         assert hs._verify_shared_secret("any-value") is False
 
     def test_verify_shared_secret_rejects_bad_token(self):
-        from src.health.server import HealthServer
         from src.config.schema import WebhookConfig
+        from src.health.server import HealthServer
         hs = HealthServer.__new__(HealthServer)
         hs._webhook_config = WebhookConfig(secret="correct-secret")
         assert hs._verify_shared_secret("wrong") is False
 
     def test_verify_shared_secret_accepts_matching_token(self):
-        from src.health.server import HealthServer
         from src.config.schema import WebhookConfig
+        from src.health.server import HealthServer
         hs = HealthServer.__new__(HealthServer)
         hs._webhook_config = WebhookConfig(secret="correct-secret")
         assert hs._verify_shared_secret("correct-secret") is True
@@ -49,8 +43,8 @@ class TestGrafanaWebhookFailClose:
     def test_verify_shared_secret_rejects_empty_header(self):
         """An operator-supplied empty header with a real secret config
         must also fail — empty is not 'match anything'."""
-        from src.health.server import HealthServer
         from src.config.schema import WebhookConfig
+        from src.health.server import HealthServer
         hs = HealthServer.__new__(HealthServer)
         hs._webhook_config = WebhookConfig(secret="secret")
         assert hs._verify_shared_secret("") is False
@@ -67,6 +61,7 @@ class TestSetupCompleteGate:
         config/env silently."""
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         # Work in a tmpdir so is_setup_needed can see pre-configured files.

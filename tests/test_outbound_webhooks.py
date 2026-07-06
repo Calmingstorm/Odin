@@ -6,16 +6,18 @@ config schema, and REST API endpoints.
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac as hmac_mod
 import json
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.config.schema import Config, OutboundWebhooksConfig, OutboundWebhookTarget
 from src.notifications.outbound_webhooks import (
+    _MAX_NAME_LEN,
+    _MAX_SECRET_LEN,
+    _MAX_URL_LEN,
     ALL_EVENT_TYPES,
     MAX_PAYLOAD_CHARS,
     MAX_RECENT_DELIVERIES,
@@ -25,14 +27,10 @@ from src.notifications.outbound_webhooks import (
     OutboundWebhookDispatcher,
     WebhookStats,
     WebhookTarget,
+    _truncate_payload,
     build_event_payload,
     sign_payload,
-    _truncate_payload,
-    _MAX_URL_LEN,
-    _MAX_SECRET_LEN,
-    _MAX_NAME_LEN,
 )
-from src.config.schema import Config, OutboundWebhooksConfig, OutboundWebhookTarget
 
 
 def _make_mock_session(*, status=200, text="ok"):
@@ -584,7 +582,7 @@ class TestDispatchDelivery:
         dispatcher.register(name="test", url="https://x.com/hook", webhook_id="wh1")
 
         mock_session = AsyncMock()
-        mock_session.post = MagicMock(side_effect=asyncio.TimeoutError())
+        mock_session.post = MagicMock(side_effect=TimeoutError())
         mock_session.closed = False
         dispatcher._session = mock_session
 
@@ -1016,13 +1014,8 @@ class TestImports:
     def test_public_symbols(self):
         from src.notifications.outbound_webhooks import (
             EventType,
-            WebhookTarget,
-            DeliveryResult,
-            WebhookStats,
             OutboundWebhookDispatcher,
-            build_event_payload,
-            sign_payload,
-            ALL_EVENT_TYPES,
+            WebhookTarget,
         )
         assert EventType is not None
         assert WebhookTarget is not None
@@ -1171,9 +1164,15 @@ class TestRealWorldScenarios:
     async def test_multi_webhook_fanout(self):
         """Multiple webhooks subscribing to different events."""
         d = OutboundWebhookDispatcher(rate_limit_seconds=0)
-        d.register(name="ci", url="https://ci.com/hook", events=["tool_execution"], webhook_id="wh1")
+        d.register(
+            name="ci",
+            url="https://ci.com/hook",
+            events=["tool_execution"],
+            webhook_id="wh1",
+        )
         d.register(name="pager", url="https://pager.com/hook", events=["alert"], webhook_id="wh2")
-        d.register(name="all", url="https://all.com/hook", events=[], webhook_id="wh3")  # all events
+        # all events
+        d.register(name="all", url="https://all.com/hook", events=[], webhook_id="wh3")
 
         mock_session, _ = _make_mock_session(status=200)
         d._session = mock_session

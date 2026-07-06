@@ -12,26 +12,24 @@ Covers:
 """
 from __future__ import annotations
 
-import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.tools.branch_freshness import (
+    _TEST_COMMAND_PATTERNS,
+    _TEST_FAILURE_PATTERNS,
     FRESHNESS_CHECK_TIMEOUT,
     MAX_RECENT_CHECKS,
     BranchStatus,
     FreshnessEvent,
     FreshnessStats,
-    _TEST_COMMAND_PATTERNS,
-    _TEST_FAILURE_PATTERNS,
     check_branch_freshness,
     format_staleness_warning,
     is_test_command,
     is_test_failure,
 )
-
 
 # ====================================================================
 # is_test_command — test command detection
@@ -793,8 +791,8 @@ class TestFreshnessAPI:
     @pytest.fixture
     def mock_bot(self):
         bot = MagicMock()
-        from src.tools.executor import ToolExecutor
         from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
         executor = ToolExecutor(config=ToolsConfig())
         bot.tool_executor = executor
         return bot
@@ -809,7 +807,8 @@ class TestFreshnessAPI:
     @pytest.mark.asyncio
     async def test_stats_endpoint(self, mock_bot):
         from aiohttp import web
-        from aiohttp.test_utils import AioHTTPTestCase, TestServer, TestClient
+        from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
         app = web.Application()
         routes = create_api_routes(mock_bot)
@@ -824,7 +823,8 @@ class TestFreshnessAPI:
     @pytest.mark.asyncio
     async def test_recent_endpoint(self, mock_bot):
         from aiohttp import web
-        from aiohttp.test_utils import TestServer, TestClient
+        from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
         app = web.Application()
         routes = create_api_routes(mock_bot)
@@ -839,7 +839,8 @@ class TestFreshnessAPI:
     @pytest.mark.asyncio
     async def test_recent_with_limit(self, mock_bot):
         from aiohttp import web
-        from aiohttp.test_utils import TestServer, TestClient
+        from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
         app = web.Application()
         routes = create_api_routes(mock_bot)
@@ -851,7 +852,8 @@ class TestFreshnessAPI:
     @pytest.mark.asyncio
     async def test_stats_no_executor(self, mock_bot_no_executor):
         from aiohttp import web
-        from aiohttp.test_utils import TestServer, TestClient
+        from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
         app = web.Application()
         routes = create_api_routes(mock_bot_no_executor)
@@ -863,7 +865,8 @@ class TestFreshnessAPI:
     @pytest.mark.asyncio
     async def test_recent_no_executor(self, mock_bot_no_executor):
         from aiohttp import web
-        from aiohttp.test_utils import TestServer, TestClient
+        from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
         app = web.Application()
         routes = create_api_routes(mock_bot_no_executor)
@@ -999,10 +1002,10 @@ class TestEdgeCases:
 class TestFixtureCompatibility:
     def test_new_fixture_pattern(self):
         """Verify the __new__() fixture pattern works with freshness attributes."""
-        from src.tools.executor import ToolExecutor
-        from src.tools.risk_classifier import RiskStats
-        from src.tools.recovery import RecoveryStats
         from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+        from src.tools.recovery import RecoveryStats
+        from src.tools.risk_classifier import RiskStats
 
         exec_inst = ToolExecutor.__new__(ToolExecutor)
         exec_inst.config = ToolsConfig()

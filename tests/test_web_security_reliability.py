@@ -11,17 +11,15 @@ Covers:
 """
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from src.health.server import _is_admin_only_path, _client_ip, ADMIN_ONLY_PREFIXES
-from src.web.api import _redact_config, _is_sensitive_key
+from src.context.loader import MAX_CONTEXT_FILE_BYTES, ContextLoader
+from src.health.server import _client_ip, _is_admin_only_path
+from src.tools.http_probe_ops import build_http_probe_command, validate_url
 from src.tools.url_safety import is_metadata_url, is_url_blocked
-from src.tools.http_probe_ops import validate_url, build_http_probe_command
-from src.context.loader import ContextLoader, MAX_CONTEXT_FILE_BYTES
-
+from src.web.api import _is_sensitive_key, _redact_config
 
 # ---------------------------------------------------------------------------
 # Admin-only path matching

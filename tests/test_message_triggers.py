@@ -12,13 +12,13 @@ Covers:
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from src.config.schema import MessageTriggerConfig
 from src.discord.cogs.message_triggers import MessageTriggers
 from src.scheduler.scheduler import Scheduler
-
 
 # ---------------------------------------------------------------------------
 # Helpers

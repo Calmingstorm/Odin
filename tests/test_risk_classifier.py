@@ -7,24 +7,22 @@ REST API endpoints for risk stats.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.tools.risk_classifier import (
+    _CRITICAL_PATTERNS,
+    _HIGH_PATTERNS,
+    _LEVEL_ORDER,
+    _MEDIUM_PATTERNS,
+    _TOOL_RISK_MAP,
     RiskAssessment,
     RiskLevel,
     RiskStats,
-    _CRITICAL_PATTERNS,
-    _HIGH_PATTERNS,
-    _MEDIUM_PATTERNS,
-    _TOOL_RISK_MAP,
-    _LEVEL_ORDER,
     classify_command,
     classify_tool,
 )
-
 
 # ---------------------------------------------------------------------------
 # RiskLevel enum
@@ -689,17 +687,17 @@ class TestToolExecutorIntegration:
         # Use a real handler — read_file requires a host
         with patch("src.tools.executor.run_local_command", new_callable=AsyncMock) as mock_cmd:
             mock_cmd.return_value = (0, "file content")
-            from src.config.schema import ToolsConfig, ToolHost
+            from src.config.schema import ToolHost, ToolsConfig
             config = ToolsConfig(hosts={"local": ToolHost(address="127.0.0.1")})
             ex2 = ToolExecutor(config=config)
-            result = await ex2.execute("read_file", {"host": "local", "path": "/tmp/test"})
+            await ex2.execute("read_file", {"host": "local", "path": "/tmp/test"})
             assert ex2._last_risk_assessment is not None
             assert ex2._last_risk_assessment.level == RiskLevel.LOW
 
     @pytest.mark.asyncio
     async def test_execute_classifies_dangerous_command(self):
+        from src.config.schema import ToolHost, ToolsConfig
         from src.tools.executor import ToolExecutor
-        from src.config.schema import ToolsConfig, ToolHost
         config = ToolsConfig(hosts={"local": ToolHost(address="127.0.0.1")})
         ex = ToolExecutor(config=config)
         with patch("src.tools.executor.run_local_command", new_callable=AsyncMock) as mock_cmd:
@@ -944,6 +942,7 @@ class TestRiskAPI:
     async def test_risk_stats_endpoint(self, mock_bot):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         mock_bot.audit.search_by_risk = AsyncMock(return_value=[])
@@ -966,6 +965,7 @@ class TestRiskAPI:
     async def test_risk_recent_endpoint(self, mock_bot):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         mock_bot.audit.search_by_risk = AsyncMock(return_value=[])
@@ -988,6 +988,7 @@ class TestRiskAPI:
     async def test_risk_recent_invalid_limit(self, mock_bot):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         mock_bot.audit.search_by_risk = AsyncMock(return_value=[])
@@ -1004,6 +1005,7 @@ class TestRiskAPI:
     async def test_audit_by_risk_endpoint(self, mock_bot):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         mock_bot.audit.search_by_risk = AsyncMock(return_value=[
@@ -1024,6 +1026,7 @@ class TestRiskAPI:
     async def test_audit_by_risk_invalid_limit(self, mock_bot):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         mock_bot.audit.search_by_risk = AsyncMock(return_value=[])
@@ -1040,6 +1043,7 @@ class TestRiskAPI:
     async def test_risk_stats_no_executor(self):
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
         from src.web.api import create_api_routes
 
         bot = MagicMock(spec=[])
@@ -1181,4 +1185,4 @@ class TestSigningCompatibility:
         assert result["verified"] == 2
 
 
-import asyncio
+import asyncio  # noqa: E402 — deliberate import order (env/bootstrap before heavy imports)

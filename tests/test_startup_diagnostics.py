@@ -5,12 +5,12 @@ import json
 import os
 import sqlite3
 import time
-
-import pytest
-from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from src.health.startup import (
+    _CONFIG_CHECKS,
     DiagnosticResult,
     StartupReport,
     check_codex_credentials,
@@ -22,9 +22,7 @@ from src.health.startup import (
     check_sessions_directory,
     check_ssh_hosts,
     run_startup_diagnostics,
-    _CONFIG_CHECKS,
 )
-
 
 # ---------------------------------------------------------------------------
 # DiagnosticResult dataclass

@@ -5,7 +5,6 @@ issue status. Uses REST APIs with aiohttp — no external SDKs required.
 """
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 from urllib.parse import quote
 
@@ -41,7 +40,8 @@ def _truncate(text: str, limit: int) -> str:
 def validate_provider(provider: str) -> str:
     p = provider.lower().strip()
     if p not in _VALID_PROVIDERS:
-        raise ValueError(f"Unknown provider '{provider}'. Must be one of: {', '.join(_VALID_PROVIDERS)}")
+        raise ValueError(f"Unknown provider '{provider}'. "
+                         f"Must be one of: {', '.join(_VALID_PROVIDERS)}")
     return p
 
 
@@ -127,7 +127,8 @@ class IssueTrackerClient:
                 body = await resp.json()
                 if resp.status != 200:
                     self._error_count += 1
-                    msg = body.get("errors", [{}])[0].get("message", resp.reason) if isinstance(body, dict) else str(resp.status)
+                    msg = (body.get("errors", [{}])[0].get("message", resp.reason)
+                        if isinstance(body, dict) else str(resp.status))
                     raise IssueTrackerError(f"Linear API error ({resp.status}): {msg}")
                 if "errors" in body:
                     self._error_count += 1
@@ -145,7 +146,8 @@ class IssueTrackerClient:
     ) -> dict[str, Any]:
         tid = team_id or self._default_team_id
         if not tid:
-            raise IssueTrackerError("Linear requires a team_id (pass it or set default_team_id in config)")
+            raise IssueTrackerError("Linear requires a team_id (pass it or set default_team_id in "
+                                    "config)")
 
         mutation = """
         mutation CreateIssue($input: IssueCreateInput!) {
@@ -339,8 +341,10 @@ class IssueTrackerClient:
                     data = {}
                 if resp.status >= 400:
                     self._error_count += 1
-                    errors = data.get("errorMessages", []) or [data.get("message", str(resp.status))]
-                    raise IssueTrackerError(f"Jira API error ({resp.status}): {'; '.join(str(e) for e in errors)}")
+                    errors = (data.get("errorMessages", [])
+                        or [data.get("message", str(resp.status))])
+                    raise IssueTrackerError(
+                        f"Jira API error ({resp.status}): {'; '.join(str(e) for e in errors)}")
                 return data
         except aiohttp.ClientError as exc:
             self._request_count += 1
@@ -428,7 +432,8 @@ class IssueTrackerClient:
 
         data = await self._jira_request(
             "GET",
-            f"search?jql={quote(jql, safe='')}&maxResults={min(limit, 50)}&fields=summary,status,priority,assignee,created",
+            f"search?jql={quote(jql, safe='')}&maxResults={min(limit, 50)}"
+            "&fields=summary,status,priority,assignee,created",
         )
         issues = data.get("issues", [])
         return [
@@ -505,7 +510,7 @@ class IssueTrackerClient:
                 return await self._dispatch_jira(action, params)
         except IssueTrackerError:
             raise
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             self._error_count += 1
             raise IssueTrackerError(f"{self._provider} request timed out") from exc
         except Exception as exc:

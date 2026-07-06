@@ -11,14 +11,12 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.sessions.manager import Message, Session, SessionManager
-
 
 # ---------------------------------------------------------------------------
 # Helpers

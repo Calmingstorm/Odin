@@ -15,8 +15,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-import discord
 from discord.ext import commands
+
+import discord
 
 if TYPE_CHECKING:
     from src.config.schema import MessageTriggerConfig

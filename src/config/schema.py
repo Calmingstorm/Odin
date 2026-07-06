@@ -3,10 +3,9 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-
-import yaml
 from typing import Literal
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
@@ -114,7 +113,13 @@ class AgentsConfig(BaseModel):
     hard_max_iterations: int = 300
     final_warning_iterations: list[int] = Field(default_factory=lambda: [20, 10, 5, 1])
 
-    @field_validator("max_nesting_depth", "max_children_per_agent", "max_iterations", "scheduled_max_iterations", "hard_max_iterations")
+    @field_validator(
+        "max_nesting_depth",
+        "max_children_per_agent",
+        "max_iterations",
+        "scheduled_max_iterations",
+        "hard_max_iterations",
+    )
     @classmethod
     def _agents_non_negative(cls, v):
         if v < 1:
@@ -265,7 +270,12 @@ class AuxiliaryLLMConfig(BaseModel):
     max_tokens: int = 2048
     credentials_path: str = ""  # Empty = share main codex credentials
     tasks: list[str] = Field(
-        default_factory=lambda: ["compaction", "reflection", "consolidation", "background_followup"],
+        default_factory=lambda: [
+            "compaction",
+            "reflection",
+            "consolidation",
+            "background_followup",
+        ],
     )
 
 

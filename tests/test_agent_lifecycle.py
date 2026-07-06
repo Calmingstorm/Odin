@@ -14,12 +14,9 @@ import pytest
 
 from src.agents.manager import (
     ACTIVE_STATES,
-    ITERATION_CB_TIMEOUT,
-    MAX_AGENT_ITERATIONS,
     MAX_AGENT_LIFETIME,
     MAX_RECOVERY_ATTEMPTS,
     TERMINAL_STATES,
-    TOOL_EXEC_TIMEOUT,
     VALID_TRANSITIONS,
     AgentInfo,
     AgentManager,
@@ -28,11 +25,8 @@ from src.agents.manager import (
     InvalidStateTransition,
     StateTransition,
     _call_llm_with_recovery,
-    _get_last_progress,
     _run_agent,
-    filter_agent_tools,
 )
-
 
 # ---------------------------------------------------------------------------
 # AgentState enum
@@ -363,7 +357,11 @@ class TestAgentInfoCompat:
 class TestAgentManagerWithStates:
     async def test_spawned_agent_starts_spawning(self):
         mgr = AgentManager()
-        iter_cb = AsyncMock(return_value={"text": "done", "tool_calls": [], "stop_reason": "end_turn"})
+        iter_cb = AsyncMock(return_value={
+            "text": "done",
+            "tool_calls": [],
+            "stop_reason": "end_turn",
+        })
         tool_cb = AsyncMock(return_value="ok")
         aid = mgr.spawn(
             label="t", goal="test", channel_id="c1",
@@ -379,7 +377,11 @@ class TestAgentManagerWithStates:
 
     async def test_list_includes_state(self):
         mgr = AgentManager()
-        iter_cb = AsyncMock(return_value={"text": "done", "tool_calls": [], "stop_reason": "end_turn"})
+        iter_cb = AsyncMock(return_value={
+            "text": "done",
+            "tool_calls": [],
+            "stop_reason": "end_turn",
+        })
         tool_cb = AsyncMock(return_value="ok")
         aid = mgr.spawn(
             label="t", goal="test", channel_id="c1",
@@ -396,7 +398,11 @@ class TestAgentManagerWithStates:
 
     async def test_get_results_includes_state_info(self):
         mgr = AgentManager()
-        iter_cb = AsyncMock(return_value={"text": "done", "tool_calls": [], "stop_reason": "end_turn"})
+        iter_cb = AsyncMock(return_value={
+            "text": "done",
+            "tool_calls": [],
+            "stop_reason": "end_turn",
+        })
         tool_cb = AsyncMock(return_value="ok")
         aid = mgr.spawn(
             label="t", goal="test", channel_id="c1",
@@ -440,7 +446,11 @@ class TestAgentManagerWithStates:
 
     async def test_send_rejects_terminal_agent(self):
         mgr = AgentManager()
-        iter_cb = AsyncMock(return_value={"text": "done", "tool_calls": [], "stop_reason": "end_turn"})
+        iter_cb = AsyncMock(return_value={
+            "text": "done",
+            "tool_calls": [],
+            "stop_reason": "end_turn",
+        })
         tool_cb = AsyncMock(return_value="ok")
         aid = mgr.spawn(
             label="t", goal="test", channel_id="c1",
@@ -489,7 +499,11 @@ class TestRunAgentLifecycle:
             channel_id="c1", requester_id="u1", requester_name="user",
         )
         agent.messages = [{"role": "user", "content": "test"}]
-        iter_cb = AsyncMock(return_value={"text": "done", "tool_calls": [], "stop_reason": "end_turn"})
+        iter_cb = AsyncMock(return_value={
+            "text": "done",
+            "tool_calls": [],
+            "stop_reason": "end_turn",
+        })
         tool_cb = AsyncMock(return_value="ok")
 
         await _run_agent(agent, "sys", [], iter_cb, tool_cb)
@@ -637,7 +651,11 @@ class TestRunAgentLifecycle:
         agent.messages = [{"role": "user", "content": "test"}]
         agent._inbox.put_nowait("extra instruction")
 
-        iter_cb = AsyncMock(return_value={"text": "done", "tool_calls": [], "stop_reason": "end_turn"})
+        iter_cb = AsyncMock(return_value={
+            "text": "done",
+            "tool_calls": [],
+            "stop_reason": "end_turn",
+        })
         tool_cb = AsyncMock()
 
         await _run_agent(agent, "sys", [], iter_cb, tool_cb)
@@ -681,11 +699,14 @@ class TestLLMRecovery:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise asyncio.TimeoutError()
+                raise TimeoutError()
             return {"text": "ok after retry", "tool_calls": []}
 
         with patch("src.agents.manager.ITERATION_CB_TIMEOUT", 1):
-            with patch("src.agents.manager.asyncio.wait_for", side_effect=[asyncio.TimeoutError(), AsyncMock(return_value={"text": "ok", "tool_calls": []})()]):
+            with patch("src.agents.manager.asyncio.wait_for", side_effect=[
+                TimeoutError(),
+                AsyncMock(return_value={"text": "ok", "tool_calls": []})(),
+            ]):
                 # Use direct call pattern instead
                 pass
 
@@ -702,12 +723,12 @@ class TestLLMRecovery:
             nonlocal calls
             calls += 1
             if calls == 1:
-                raise asyncio.TimeoutError()
+                raise TimeoutError()
             return {"text": "recovered", "tool_calls": []}
 
         with patch("src.agents.manager.asyncio.sleep", new_callable=AsyncMock):
             with patch("src.agents.manager.asyncio.wait_for") as mock_wf:
-                mock_wf.side_effect = [asyncio.TimeoutError(), {"text": "recovered", "tool_calls": []}]
+                mock_wf.side_effect = [TimeoutError(), {"text": "recovered", "tool_calls": []}]
                 # wait_for is called with a coroutine, need a different approach
                 pass
 
@@ -728,9 +749,9 @@ class TestLLMRecovery:
             if call_count == 1:
                 try:
                     coro.close()
-                except:
+                except:  # noqa: E722 — deliberate maximum-breadth catch; narrowing changes cancellation semantics
                     pass
-                raise asyncio.TimeoutError()
+                raise TimeoutError()
             return await original_wait_for(coro, timeout=timeout)
 
         iter_cb = AsyncMock(return_value={"text": "recovered", "tool_calls": []})
@@ -757,14 +778,14 @@ class TestLLMRecovery:
         agent.transition(AgentState.READY)
         agent.transition(AgentState.EXECUTING)
 
-        original_wait_for = asyncio.wait_for
+        asyncio.wait_for
 
         async def always_timeout(coro, *, timeout=None):
             try:
                 coro.close()
-            except:
+            except:  # noqa: E722 — deliberate maximum-breadth catch; narrowing changes cancellation semantics
                 pass
-            raise asyncio.TimeoutError()
+            raise TimeoutError()
 
         iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
 
@@ -789,9 +810,9 @@ class TestLLMRecovery:
         async def timeout_coro(coro, *, timeout=None):
             try:
                 coro.close()
-            except:
+            except:  # noqa: E722 — deliberate maximum-breadth catch; narrowing changes cancellation semantics
                 pass
-            raise asyncio.TimeoutError()
+            raise TimeoutError()
 
         iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
 
@@ -822,7 +843,7 @@ class TestLLMRecovery:
             if call_count == 1:
                 try:
                     coro.close()
-                except:
+                except:  # noqa: E722 — deliberate maximum-breadth catch; narrowing changes cancellation semantics
                     pass
                 raise ConnectionError("transient error")
             return await original_wait_for(coro, timeout=timeout)
@@ -858,9 +879,9 @@ class TestRunAgentRecovery:
             if call_count == 1:
                 try:
                     coro.close()
-                except:
+                except:  # noqa: E722 — deliberate maximum-breadth catch; narrowing changes cancellation semantics
                     pass
-                raise asyncio.TimeoutError()
+                raise TimeoutError()
             return await original_wait_for(coro, timeout=timeout)
 
         iter_cb = AsyncMock(return_value={"text": "recovered", "tool_calls": []})
@@ -886,9 +907,9 @@ class TestRunAgentRecovery:
         async def always_fail(coro, *, timeout=None):
             try:
                 coro.close()
-            except:
+            except:  # noqa: E722 — deliberate maximum-breadth catch; narrowing changes cancellation semantics
                 pass
-            raise asyncio.TimeoutError()
+            raise TimeoutError()
 
         iter_cb = AsyncMock()
         tool_cb = AsyncMock()
@@ -1252,7 +1273,7 @@ class TestModuleExports:
         assert t.from_state == AgentState.SPAWNING
 
     def test_terminal_states_importable(self):
-        from src.agents import TERMINAL_STATES, ACTIVE_STATES
+        from src.agents import ACTIVE_STATES, TERMINAL_STATES
         assert len(TERMINAL_STATES) == 4
         assert len(ACTIVE_STATES) == 4
 
@@ -1323,8 +1344,22 @@ class TestEdgeCases:
         assert len(tool_msgs) == 2
 
     def test_state_machine_fresh_per_agent(self):
-        a1 = AgentInfo(id="f1", label="t", goal="t", channel_id="c", requester_id="u", requester_name="n")
-        a2 = AgentInfo(id="f2", label="t", goal="t", channel_id="c", requester_id="u", requester_name="n")
+        a1 = AgentInfo(
+            id="f1",
+            label="t",
+            goal="t",
+            channel_id="c",
+            requester_id="u",
+            requester_name="n",
+        )
+        a2 = AgentInfo(
+            id="f2",
+            label="t",
+            goal="t",
+            channel_id="c",
+            requester_id="u",
+            requester_name="n",
+        )
         a1.transition(AgentState.READY)
         assert a1.state == AgentState.READY
         assert a2.state == AgentState.SPAWNING

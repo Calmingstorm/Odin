@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -242,7 +242,7 @@ class ConversationReflector:
                     e["content"] = content
                 if category is not None:
                     e["category"] = category
-                e["updated_at"] = datetime.now(timezone.utc).isoformat()
+                e["updated_at"] = datetime.now(UTC).isoformat()
                 self._save(data)
                 return e
         return None
@@ -572,7 +572,7 @@ class ConversationReflector:
                 if len(merged) > self._max_entries:
                     merged = await self._consolidate(merged)
                 data["entries"] = merged
-                data["last_reflection"] = datetime.now(timezone.utc).isoformat()
+                data["last_reflection"] = datetime.now(UTC).isoformat()
                 await asyncio.to_thread(self._save, data)
                 self.invalidate_cache()
                 log.info("Operational reflection: %d new entries merged", len(new_entries))
@@ -704,7 +704,7 @@ class ConversationReflector:
                 merged = await self._consolidate(merged)
 
             data["entries"] = merged
-            data["last_reflection"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            data["last_reflection"] = datetime.now(UTC).isoformat(timespec="seconds")
             await asyncio.to_thread(self._save, data)
             self.invalidate_cache()
             log.info(
@@ -714,7 +714,7 @@ class ConversationReflector:
 
     @staticmethod
     def _merge_entries(existing: list[dict], new_entries: list[dict]) -> list[dict]:
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = datetime.now(UTC).isoformat(timespec="seconds")
         by_key = {e["key"]: e for e in existing}
         for entry in new_entries:
             _clip_content(entry)
@@ -753,7 +753,7 @@ class ConversationReflector:
         removes them). Operational and fact entries go stale when neither
         used nor updated within their _CATEGORY_EXPIRY_DAYS window.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         kept = []
         expired = 0
         for e in entries:
@@ -995,7 +995,7 @@ class ConversationReflector:
 
         # Preserve timestamps and metadata from originals where possible
         orig_by_key = {e["key"]: e for e in candidates}
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = datetime.now(UTC).isoformat(timespec="seconds")
         for entry in consolidated:
             _clip_content(entry)
             if entry["key"] in orig_by_key:

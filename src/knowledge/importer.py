@@ -34,7 +34,21 @@ MAX_PDF_BYTES = 50_000_000  # 50 MB
 FETCH_TIMEOUT = aiohttp.ClientTimeout(total=30)
 FETCH_MAX_CHARS = 100_000  # larger than tool output — we want full content for ingestion
 PDF_MAX_CHARS = 500_000
-DIR_ALLOWED_EXTENSIONS = {".md", ".txt", ".rst", ".adoc", ".log", ".csv", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".conf"}
+DIR_ALLOWED_EXTENSIONS = {
+    ".md",
+    ".txt",
+    ".rst",
+    ".adoc",
+    ".log",
+    ".csv",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".cfg",
+    ".ini",
+    ".conf",
+}
 
 
 @dataclass
@@ -83,7 +97,11 @@ class BulkImporter:
             if f.resolve().is_relative_to(resolved_base)
         )
         if not files:
-            return [ImportResult(source=directory, status="skipped", error="no files matched pattern")]
+            return [ImportResult(
+                source=directory,
+                status="skipped",
+                error="no files matched pattern",
+            )]
 
         count = 0
         for fpath in files:
@@ -108,9 +126,17 @@ class BulkImporter:
                     ))
                     count += 1
                     continue
-                content = await asyncio.to_thread(fpath.read_text, encoding="utf-8", errors="replace")
+                content = await asyncio.to_thread(
+                    fpath.read_text,
+                    encoding="utf-8",
+                    errors="replace",
+                )
                 if not content.strip():
-                    results.append(ImportResult(source=source_name, status="skipped", error="empty file"))
+                    results.append(ImportResult(
+                        source=source_name,
+                        status="skipped",
+                        error="empty file",
+                    ))
                     count += 1
                     continue
                 chunks = await self._store.ingest(
@@ -134,7 +160,11 @@ class BulkImporter:
 
         from ..tools.url_safety import is_url_blocked
         if is_url_blocked(url):
-            return ImportResult(source=url, status="error", error="URL targets a blocked address (private IP, localhost, or metadata endpoint)")
+            return ImportResult(
+                source=url,
+                status="error",
+                error="URL targets a blocked address (private IP, localhost, or metadata endpoint)",
+            )
 
         try:
             import fitz
@@ -152,7 +182,11 @@ class BulkImporter:
                     except (ValueError, TypeError):
                         cl = None
                     if cl is not None and cl > MAX_PDF_BYTES:
-                        return ImportResult(source=src, status="error", error=f"PDF too large ({cl} bytes, max {MAX_PDF_BYTES})")
+                        return ImportResult(
+                            source=src,
+                            status="error",
+                            error=f"PDF too large ({cl} bytes, max {MAX_PDF_BYTES})",
+                        )
                     pdf_bytes = await resp.read()
                     if len(pdf_bytes) > MAX_PDF_BYTES:
                         return ImportResult(source=src, status="error", error="PDF too large")
@@ -193,7 +227,11 @@ class BulkImporter:
 
         from ..tools.url_safety import is_url_blocked
         if is_url_blocked(url):
-            return ImportResult(source=url, status="error", error="URL targets a blocked address (private IP, localhost, or metadata endpoint)")
+            return ImportResult(
+                source=url,
+                status="error",
+                error="URL targets a blocked address (private IP, localhost, or metadata endpoint)",
+            )
 
         from ..tools.web import _html_to_text
 

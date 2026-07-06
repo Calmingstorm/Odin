@@ -1,6 +1,5 @@
 """Tests for process management tools."""
 
-import asyncio
 
 import pytest
 

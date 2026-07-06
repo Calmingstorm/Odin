@@ -11,14 +11,16 @@ Covers:
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
-import pytest
-
 from src.sessions.manager import (
-    SessionManager, Session, Message, _estimate_session_tokens,
-    MESSAGE_TOKEN_OVERHEAD, COMPACTION_SOURCE_MAX_CHARS, CHAT_RESPONSE_MAX_CHARS,
+    CHAT_RESPONSE_MAX_CHARS,
+    COMPACTION_SOURCE_MAX_CHARS,
+    MESSAGE_TOKEN_OVERHEAD,
+    Message,
+    Session,
+    SessionManager,
+    _estimate_session_tokens,
 )
 
 

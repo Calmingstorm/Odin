@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from src.config.schema import Config, SlackConfig
 from src.notifications.slack import (
     DEFAULT_COLOR,
     DEFAULT_RATE_LIMIT,
@@ -25,8 +25,6 @@ from src.notifications.slack import (
     build_formatted_payload,
     build_plain_payload,
 )
-from src.config.schema import Config, SlackConfig
-
 
 # ---------------------------------------------------------------------------
 # SlackConfig schema
@@ -686,14 +684,14 @@ class TestClose:
 
 class TestHealthServerSlackIntegration:
     def test_slack_disabled_by_default(self):
-        from src.health.server import HealthServer
         from src.config.schema import WebhookConfig
+        from src.health.server import HealthServer
         server = HealthServer(port=0, webhook_config=WebhookConfig(enabled=False))
         assert server.slack_notifier is None
 
     def test_slack_enabled(self):
-        from src.health.server import HealthServer
         from src.config.schema import WebhookConfig
+        from src.health.server import HealthServer
         slack_cfg = SlackConfig(
             enabled=True,
             default_webhook_url="https://hooks.slack.com/test",
@@ -707,8 +705,8 @@ class TestHealthServerSlackIntegration:
         assert server.slack_notifier.resolve_url() == "https://hooks.slack.com/test"
 
     def test_slack_notifier_property(self):
-        from src.health.server import HealthServer
         from src.config.schema import WebhookConfig
+        from src.health.server import HealthServer
         slack_cfg = SlackConfig(
             enabled=True,
             webhook_urls={"alerts": "https://hooks/a"},
@@ -723,8 +721,8 @@ class TestHealthServerSlackIntegration:
         assert "alerts" in notifier.configured_channels
 
     async def test_send_forwards_to_slack_when_enabled(self):
-        from src.health.server import HealthServer
         from src.config.schema import WebhookConfig
+        from src.health.server import HealthServer
         slack_cfg = SlackConfig(
             enabled=True,
             forward_webhooks=True,
@@ -744,15 +742,14 @@ class TestHealthServerSlackIntegration:
         mock_notifier = AsyncMock(spec=SlackNotifier)
         server._slack_notifier = mock_notifier
 
-        from aiohttp import web
         resp = await server._send("gitea", "test message")
         assert resp.status == 200
         discord_send.assert_called_once_with("123", "test message")
         mock_notifier.send_formatted.assert_called_once()
 
     async def test_send_no_slack_forward_when_disabled(self):
-        from src.health.server import HealthServer
         from src.config.schema import WebhookConfig
+        from src.health.server import HealthServer
         slack_cfg = SlackConfig(
             enabled=True,
             forward_webhooks=False,
@@ -778,8 +775,8 @@ class TestHealthServerSlackIntegration:
         mock_notifier.send_formatted.assert_not_called()
 
     async def test_slack_error_does_not_block_discord(self):
-        from src.health.server import HealthServer
         from src.config.schema import WebhookConfig
+        from src.health.server import HealthServer
         slack_cfg = SlackConfig(
             enabled=True,
             forward_webhooks=True,
@@ -805,8 +802,8 @@ class TestHealthServerSlackIntegration:
         discord_send.assert_called_once()
 
     async def test_stop_closes_slack(self):
-        from src.health.server import HealthServer
         from src.config.schema import WebhookConfig
+        from src.health.server import HealthServer
         slack_cfg = SlackConfig(
             enabled=True,
             default_webhook_url="https://hooks/test",
@@ -830,8 +827,8 @@ class TestHealthServerSlackIntegration:
 
 class TestWatcherSlackIntegration:
     def test_watcher_accepts_slack_notifier(self):
-        from src.monitoring.watcher import InfraWatcher
         from src.config.schema import MonitoringConfig
+        from src.monitoring.watcher import InfraWatcher
         mock_executor = MagicMock()
         mock_callback = AsyncMock()
         mock_notifier = MagicMock(spec=SlackNotifier)
@@ -844,8 +841,8 @@ class TestWatcherSlackIntegration:
         assert watcher._slack_notifier is mock_notifier
 
     def test_watcher_no_slack_default(self):
-        from src.monitoring.watcher import InfraWatcher
         from src.config.schema import MonitoringConfig
+        from src.monitoring.watcher import InfraWatcher
         watcher = InfraWatcher(
             config=MonitoringConfig(),
             executor=MagicMock(),
@@ -854,8 +851,8 @@ class TestWatcherSlackIntegration:
         assert watcher._slack_notifier is None
 
     async def test_alert_sends_to_discord_and_slack(self):
-        from src.monitoring.watcher import InfraWatcher
         from src.config.schema import MonitoringConfig
+        from src.monitoring.watcher import InfraWatcher
         mock_callback = AsyncMock()
         mock_notifier = AsyncMock(spec=SlackNotifier)
         watcher = InfraWatcher(
@@ -869,8 +866,8 @@ class TestWatcherSlackIntegration:
         mock_notifier.send_formatted.assert_called_once()
 
     async def test_alert_only_discord_when_no_slack(self):
-        from src.monitoring.watcher import InfraWatcher
         from src.config.schema import MonitoringConfig
+        from src.monitoring.watcher import InfraWatcher
         mock_callback = AsyncMock()
         watcher = InfraWatcher(
             config=MonitoringConfig(),
@@ -881,8 +878,8 @@ class TestWatcherSlackIntegration:
         mock_callback.assert_called_once_with("Test alert")
 
     async def test_alert_slack_error_does_not_block(self):
-        from src.monitoring.watcher import InfraWatcher
         from src.config.schema import MonitoringConfig
+        from src.monitoring.watcher import InfraWatcher
         mock_callback = AsyncMock()
         mock_notifier = AsyncMock(spec=SlackNotifier)
         mock_notifier.send_formatted.side_effect = Exception("boom")
@@ -896,8 +893,8 @@ class TestWatcherSlackIntegration:
         mock_callback.assert_called_once_with("Test alert")
 
     async def test_alert_formatted_params(self):
-        from src.monitoring.watcher import InfraWatcher
         from src.config.schema import MonitoringConfig
+        from src.monitoring.watcher import InfraWatcher
         mock_callback = AsyncMock()
         mock_notifier = AsyncMock(spec=SlackNotifier)
         watcher = InfraWatcher(
@@ -933,8 +930,9 @@ class TestSlackAPIEndpoints:
         return bot
 
     def _make_app(self, bot):
-        from src.web.api import create_api_routes
         from aiohttp import web
+
+        from src.web.api import create_api_routes
         app = web.Application()
         routes = create_api_routes(bot)
         app.router.add_routes(routes)
@@ -1231,7 +1229,7 @@ class TestRound20RateLimitFix:
 
 class TestModuleImports:
     def test_notifications_package(self):
-        from src.notifications import SlackNotifier as SN
+        from src.notifications import SlackNotifier as SN  # noqa: N817 — established import alias
         assert SN is SlackNotifier
 
     def test_slack_notifier_class(self):

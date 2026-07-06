@@ -5,15 +5,17 @@ import copy
 import json
 import re
 import time
-from datetime import datetime
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..llm.cost_tracker import estimate_tokens
 from ..odin_log import get_logger
-from ..relevance import rank as relevance_rank, score as relevance_score
+from ..relevance import rank as relevance_rank
+from ..relevance import score as relevance_score
+
 if TYPE_CHECKING:
     from ..learning.reflector import ConversationReflector
     from ..search.embedder import LocalEmbedder
@@ -765,7 +767,8 @@ class SessionManager:
                 "message_count": len(session.messages),
                 "has_summary": bool(session.summary),
                 "budget": self.token_budget,
-                "budget_pct": round(tokens / self.token_budget * 100, 1) if self.token_budget > 0 else 0.0,
+                "budget_pct": (round(tokens / self.token_budget * 100, 1)
+                               if self.token_budget > 0 else 0.0),
                 "last_active": session.last_active,
             }
         return result
@@ -1221,7 +1224,11 @@ class SessionManager:
             evict_order += [f for f in files if f in protected]
 
             pruned = 0
-            over_cap = lambda: total_bytes > self.archive_max_bytes or len(files) > self.archive_max_files
+
+            def over_cap() -> bool:
+                return (total_bytes > self.archive_max_bytes
+                        or len(files) > self.archive_max_files)
+
             for f in evict_order:
                 if not over_cap():
                     break
@@ -1478,7 +1485,8 @@ class SessionManager:
         # Only scheduled by _archive_session inside "if self._reflector and ...".
         try:
             await self._reflector.reflect_on_session(  # type: ignore[union-attr]
-                session, user_ids=user_ids or ([session.last_user_id] if session.last_user_id else []),
+                session, user_ids=user_ids or ([session.last_user_id]
+                    if session.last_user_id else []),
             )
         except Exception as e:
             log.error("Session reflection failed: %s", e)

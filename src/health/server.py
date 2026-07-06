@@ -214,7 +214,8 @@ def _make_auth_middleware(
         # Skip auth if no token configured (dev mode)
         token = web_config.api_token
         tm = request.app.get("token_manager")
-        has_any_token = token or getattr(web_config, "api_tokens", None) or (tm and tm.list_tokens())
+        has_any_token = token or getattr(web_config, "api_tokens", None) or (tm
+            and tm.list_tokens())
         if not has_any_token:
             return await handler(request)
 
@@ -720,7 +721,10 @@ class HealthServer:
         all_healthy = all(c["healthy"] for c in components.values())
         status_code = 200 if all_healthy else 503
         status_text = "ready" if all_healthy else "degraded"
-        return web.json_response({"status": status_text, "components": components}, status=status_code)
+        return web.json_response(
+            {"status": status_text, "components": components},
+            status=status_code,
+        )
 
     async def _metrics(self, _request: web.Request) -> web.Response:
         """Prometheus metrics endpoint.
@@ -851,7 +855,8 @@ class HealthServer:
                 msg = c.get("message", "").split("\n")[0][:80]
                 commit_lines.append(f"  \u2022 `{c.get('id', '')[:7]}` {msg}")
             commits_text = "\n".join(commit_lines)
-            text = f"**Gitea Push** \u2014 `{repo}` (`{ref}`)\nBy: {pusher} | {len(commits)} commit(s)\n{commits_text}"
+            text = (f"**Gitea Push** \u2014 `{repo}` (`{ref}`)\nBy: {pusher} | {len(commits)} "
+                    f"commit(s)\n{commits_text}")
 
         elif event in ("pull_request", "pull_request_approved", "pull_request_rejected"):
             pr = data.get("pull_request", {})
@@ -916,7 +921,8 @@ class HealthServer:
                     )
 
         if spawned_loops:
-            text += f"\n\n\U0001f527 Auto-remediation started: {', '.join(f'`{lid}`' for lid in spawned_loops)}"
+            text += ("\n\n\U0001f527 Auto-remediation started: "
+                     f"{', '.join(f'`{lid}`' for lid in spawned_loops)}")
 
         # Build event data for trigger matching
         alert_name = ""
@@ -990,7 +996,8 @@ class HealthServer:
                 msg = c.get("message", "").split("\n")[0][:80]
                 commit_lines.append(f"  \u2022 `{c.get('id', '')[:7]}` {msg}")
             commits_text = "\n".join(commit_lines)
-            text = f"**GitHub Push** \u2014 `{repo}` (`{ref}`)\nBy: {pusher} | {len(commits)} commit(s)\n{commits_text}"
+            text = (f"**GitHub Push** \u2014 `{repo}` (`{ref}`)\nBy: {pusher} | {len(commits)} "
+                    f"commit(s)\n{commits_text}")
 
         elif event == "pull_request":
             pr = data.get("pull_request", {})
@@ -1022,7 +1029,8 @@ class HealthServer:
             conclusion = workflow.get("conclusion", "")
             branch = workflow.get("head_branch", "")
             status_part = f" ({conclusion})" if conclusion else ""
-            text = f"**GitHub Workflow** \u2014 `{repo}`\n{action}: **{name}**{status_part} on `{branch}`"
+            text = (f"**GitHub Workflow** \u2014 `{repo}`\n{action}: **{name}**{status_part} on "
+                    f"`{branch}`")
 
         else:
             text = f"**GitHub** \u2014 `{repo}` \u2014 event: `{event}`"
@@ -1060,7 +1068,8 @@ class HealthServer:
                 msg = c.get("message", "").split("\n")[0][:80]
                 commit_lines.append(f"  \u2022 `{c.get('id', '')[:7]}` {msg}")
             commits_text = "\n".join(commit_lines)
-            text = f"**GitLab Push** \u2014 `{repo}` (`{ref}`)\nBy: {user} | {len(commits)} commit(s)\n{commits_text}"
+            text = (f"**GitLab Push** \u2014 `{repo}` (`{ref}`)\nBy: {user} | {len(commits)} "
+                    f"commit(s)\n{commits_text}")
 
         elif event == "merge_request":
             attrs = data.get("object_attributes", {})
@@ -1081,7 +1090,8 @@ class HealthServer:
             ref = attrs.get("ref", "")
             pipeline_id = attrs.get("id", "")
             user = data.get("user", {}).get("name", "unknown")
-            text = f"**GitLab Pipeline #{pipeline_id}** \u2014 `{repo}`\nStatus: **{status}** on `{ref}` by {user}"
+            text = (f"**GitLab Pipeline #{pipeline_id}** \u2014 `{repo}`\nStatus: **{status}** on "
+                    f"`{ref}` by {user}")
 
         else:
             text = f"**GitLab** \u2014 `{repo}` \u2014 event: `{event}`"

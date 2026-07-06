@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.odin.cli import build_parser, _dispatch
+from src.odin.cli import _dispatch, build_parser
 
 
 @pytest.fixture

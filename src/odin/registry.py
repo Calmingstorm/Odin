@@ -14,10 +14,10 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, type[BaseTool]] = {}
 
-    def register(self, name: str, tool_cls: type["BaseTool"]) -> None:
+    def register(self, name: str, tool_cls: type[BaseTool]) -> None:
         self._tools[name] = tool_cls
 
-    def get(self, name: str) -> type["BaseTool"]:
+    def get(self, name: str) -> type[BaseTool]:
         if name not in self._tools:
             raise KeyError(f"Unknown tool: {name}")
         return self._tools[name]
@@ -29,11 +29,11 @@ class ToolRegistry:
         return sorted(self._tools)
 
     @classmethod
-    def with_defaults(cls) -> "ToolRegistry":
+    def with_defaults(cls) -> ToolRegistry:
         """Return a registry pre-loaded with built-in tools."""
-        from src.odin.tools.shell import ShellTool
-        from src.odin.tools.file_ops import ReadFileTool, WriteFileTool, ListDirTool
+        from src.odin.tools.file_ops import ListDirTool, ReadFileTool, WriteFileTool
         from src.odin.tools.http import HttpRequestTool
+        from src.odin.tools.shell import ShellTool
 
         reg = cls()
         reg.register("shell", ShellTool)

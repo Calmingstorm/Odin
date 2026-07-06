@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import traceback
 
-import discord
 from discord.ext import commands
 
 from src.discord.helpers.embeds import error_embed

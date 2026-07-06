@@ -1,9 +1,7 @@
 """Tests for bulk knowledge import — markdown dirs, PDFs, web URLs (Round 25)."""
 from __future__ import annotations
 
-import asyncio
 import os
-import sqlite3
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,20 +11,20 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.knowledge.importer import (
-    BulkImporter,
-    BatchResult,
-    ImportResult,
+    DIR_ALLOWED_EXTENSIONS,
+    FETCH_MAX_CHARS,
     MAX_BATCH_SIZE,
     MAX_FILE_BYTES,
     MAX_PDF_BYTES,
-    FETCH_MAX_CHARS,
     PDF_MAX_CHARS,
-    DIR_ALLOWED_EXTENSIONS,
+    BatchResult,
+    BulkImporter,
+    ImportResult,
 )
 from src.knowledge.store import KnowledgeStore
 
 try:
-    import fitz
+    import fitz  # noqa: F401 — availability probe for the [pdf] extra
     HAS_FITZ = True
 except ImportError:
     HAS_FITZ = False
@@ -223,7 +221,8 @@ class TestImportDirectory:
                     (Path(tmpdir) / f"doc_{i:03d}.md").write_text(f"Content {i}")
                 results = await importer.import_directory(tmpdir)
                 ok_count = sum(1 for r in results if r.status == "ok")
-                skip_count = sum(1 for r in results if r.status == "skipped" and "batch limit" in r.error)
+                skip_count = sum(1 for r in results
+                    if r.status == "skipped" and "batch limit" in r.error)
                 assert ok_count == MAX_BATCH_SIZE
                 assert skip_count > 0
         finally:
@@ -345,7 +344,8 @@ class TestImportPdfUrl:
     async def test_successful_pdf_import(self):
         importer, store = _make_importer()
         try:
-            doc = _mock_fitz_doc(text_per_page=["Test PDF content for knowledge import."], page_count=1)
+            doc = _mock_fitz_doc(
+                text_per_page=["Test PDF content for knowledge import."], page_count=1)
             mock_fitz = MagicMock()
             mock_fitz.open.return_value = doc
             mock_session = _mock_aiohttp_response(status=200, read_data=b"fake pdf bytes")
@@ -496,7 +496,8 @@ class TestImportWebUrl:
         try:
             mock_session = _mock_aiohttp_response(
                 status=200,
-                text_data="<html><body><p>Important knowledge content for testing.</p></body></html>",
+                text_data=("<html><body><p>Important knowledge content "
+                           "for testing.</p></body></html>"),
                 headers={"Content-Type": "text/html; charset=utf-8"},
             )
             with patch("aiohttp.ClientSession", return_value=mock_session):
@@ -1069,7 +1070,7 @@ class TestModuleImports:
         assert BulkImporter is not None
 
     def test_result_types_importable(self):
-        from src.knowledge.importer import ImportResult, BatchResult
+        from src.knowledge.importer import BatchResult, ImportResult
         assert ImportResult is not None
         assert BatchResult is not None
 

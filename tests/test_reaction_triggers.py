@@ -12,15 +12,13 @@ Covers:
 
 from __future__ import annotations
 
-import json
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.config.schema import ReactionTriggerConfig
 from src.discord.cogs.reaction_triggers import ReactionTriggers
 from src.scheduler.scheduler import Scheduler
-
 
 # ---------------------------------------------------------------------------
 # Helpers

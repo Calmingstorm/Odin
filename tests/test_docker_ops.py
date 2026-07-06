@@ -11,15 +11,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from src.config.schema import ToolHost, ToolsConfig
 from src.tools.docker_ops import (
     ALLOWED_ACTIONS,
-    build_docker_command,
     _compose_file_flags,
+    build_docker_command,
 )
-from src.config.schema import ToolsConfig, ToolHost
 from src.tools.executor import ToolExecutor
 from src.tools.registry import TOOL_MAP
-
 
 # ---------------------------------------------------------------------------
 # Tool registration
@@ -661,7 +660,7 @@ class TestShellInjectionSafety:
             "command": "ls; cat /etc/passwd",
         })
         tokens = shlex.split(cmd)
-        sh_idx = tokens.index("sh")
+        tokens.index("sh")
         c_idx = tokens.index("-c")
         cmd_val = tokens[c_idx + 1]
         assert cmd_val == "ls; cat /etc/passwd"
@@ -935,7 +934,10 @@ class TestHandleDockerOps:
             await ex.devops_tools._handle_docker_ops({
                 "host": "prod", "action": "ps", "params": {},
             })
-        _, kwargs = mock_exec.call_args if mock_exec.call_args.kwargs else (mock_exec.call_args[0], {})
+        _, kwargs = mock_exec.call_args if mock_exec.call_args.kwargs else (
+            mock_exec.call_args[0],
+            {},
+        )
         args = mock_exec.call_args[0]
         assert args[0] == "10.0.0.1"
         assert args[2] == "deploy"

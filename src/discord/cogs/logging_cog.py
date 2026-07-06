@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 
-import discord
 from discord.ext import commands
 
+import discord
 from src.discord.helpers.embeds import log_embed
 
 logger = logging.getLogger("odin.cogs.logging")

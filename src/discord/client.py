@@ -185,13 +185,16 @@ class OdinBot(commands.Bot):
         """Log configuration summary at startup to help users verify setup."""
         cfg = self.config
         if not cfg.tools.hosts:
-            log.warning("No hosts configured — SSH tools will not work until hosts are added to config.yml")
+            log.warning("No hosts configured — SSH tools will not work until hosts are added to "
+                        "config.yml")
         else:
             log.info("Configured hosts: %s", ", ".join(cfg.tools.hosts.keys()))
         if not cfg.tools.claude_code_host:
-            log.info("claude_code_host not set — claude -p code generation requires a configured host")
+            log.info("claude_code_host not set — claude -p code generation requires a configured "
+                     "host")
         if cfg.openai_codex.enabled and not self.llm_gateway.codex_client:
-            log.warning("Codex enabled but not configured — session compaction and learning reflection disabled")
+            log.warning("Codex enabled but not configured — session compaction and learning "
+                        "reflection disabled")
         if cfg.discord.respond_to_bots:
             log.info("Bot interaction enabled — will respond to other bots")
         if cfg.discord.require_mention:
@@ -324,7 +327,8 @@ class OdinBot(commands.Bot):
                 await self.voice_manager.join_channel(after.channel)
         # User left — if we're in that channel and it's now empty (minus bot), leave
         elif before.channel is not None and after.channel is None:
-            if self.voice_manager.is_connected and self.voice_manager.current_channel == before.channel:
+            if (self.voice_manager.is_connected
+                    and self.voice_manager.current_channel == before.channel):
                 humans = [m for m in before.channel.members if not m.bot]
                 if not humans:
                     log.info("All users left voice channel, disconnecting")

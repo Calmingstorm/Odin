@@ -10,16 +10,12 @@ Covers:
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-import pytest
-
 from src.scheduler.history import ScheduleHistory
 from src.scheduler.scheduler import Scheduler
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -77,16 +73,46 @@ class TestScheduleHistory:
 
     async def test_query_all_schedules(self, tmp_path):
         h = _make_history(tmp_path)
-        await h.record(schedule_id="a", description="a", action="check", status="success", duration_ms=10)
-        await h.record(schedule_id="b", description="b", action="check", status="failure", duration_ms=20)
+        await h.record(
+            schedule_id="a",
+            description="a",
+            action="check",
+            status="success",
+            duration_ms=10,
+        )
+        await h.record(
+            schedule_id="b",
+            description="b",
+            action="check",
+            status="failure",
+            duration_ms=20,
+        )
         entries = await h.query()
         assert len(entries) == 2
 
     async def test_query_with_status_filter(self, tmp_path):
         h = _make_history(tmp_path)
-        await h.record(schedule_id="a", description="a", action="check", status="success", duration_ms=10)
-        await h.record(schedule_id="a", description="a", action="check", status="failure", duration_ms=20)
-        await h.record(schedule_id="a", description="a", action="check", status="success", duration_ms=30)
+        await h.record(
+            schedule_id="a",
+            description="a",
+            action="check",
+            status="success",
+            duration_ms=10,
+        )
+        await h.record(
+            schedule_id="a",
+            description="a",
+            action="check",
+            status="failure",
+            duration_ms=20,
+        )
+        await h.record(
+            schedule_id="a",
+            description="a",
+            action="check",
+            status="success",
+            duration_ms=30,
+        )
 
         successes = await h.query("a", status="success")
         assert len(successes) == 2
@@ -96,7 +122,13 @@ class TestScheduleHistory:
     async def test_query_limit(self, tmp_path):
         h = _make_history(tmp_path)
         for i in range(10):
-            await h.record(schedule_id="a", description="a", action="check", status="success", duration_ms=i)
+            await h.record(
+                schedule_id="a",
+                description="a",
+                action="check",
+                status="success",
+                duration_ms=i,
+            )
         entries = await h.query("a", limit=3)
         assert len(entries) == 3
         # Most recent first (last written has highest duration_ms)
@@ -109,9 +141,27 @@ class TestScheduleHistory:
 
     async def test_stats(self, tmp_path):
         h = _make_history(tmp_path)
-        await h.record(schedule_id="x", description="x", action="check", status="success", duration_ms=100)
-        await h.record(schedule_id="x", description="x", action="check", status="success", duration_ms=200)
-        await h.record(schedule_id="x", description="x", action="check", status="failure", duration_ms=50)
+        await h.record(
+            schedule_id="x",
+            description="x",
+            action="check",
+            status="success",
+            duration_ms=100,
+        )
+        await h.record(
+            schedule_id="x",
+            description="x",
+            action="check",
+            status="success",
+            duration_ms=200,
+        )
+        await h.record(
+            schedule_id="x",
+            description="x",
+            action="check",
+            status="failure",
+            duration_ms=50,
+        )
 
         stats = await h.stats("x")
         assert stats["total_runs"] == 3
@@ -128,7 +178,13 @@ class TestScheduleHistory:
 
     async def test_prune_under_threshold(self, tmp_path):
         h = _make_history(tmp_path)
-        await h.record(schedule_id="a", description="a", action="check", status="success", duration_ms=10)
+        await h.record(
+            schedule_id="a",
+            description="a",
+            action="check",
+            status="success",
+            duration_ms=10,
+        )
         removed = await h.prune()
         assert removed == 0
 
@@ -140,7 +196,13 @@ class TestScheduleHistory:
         hist_mod.MAX_TOTAL_ENTRIES = 10
         try:
             for i in range(15):
-                await h.record(schedule_id="a", description="a", action="check", status="success", duration_ms=i)
+                await h.record(
+                    schedule_id="a",
+                    description="a",
+                    action="check",
+                    status="success",
+                    duration_ms=i,
+                )
             removed = await h.prune()
             assert removed == 10  # 15 - 5 kept
             entries = await h.query("a")
@@ -200,7 +262,7 @@ class TestSchedulerHistoryIntegration:
         s._callback = callback
 
         # Add a cron schedule with next_run in the past so _tick fires it
-        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
         schedule = await s.add("tick test", "reminder", "chan1", cron="*/5 * * * *")
         # Force next_run to past
         s._schedules[0]["next_run"] = past

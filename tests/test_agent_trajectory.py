@@ -11,21 +11,18 @@ import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
-from src.agents.trajectory import (
-    DEFAULT_AGENT_TRAJECTORY_DIR,
-    AgentTrajectorySaver,
-    AgentTrajectoryTurn,
-)
 from src.agents.manager import (
     AgentInfo,
     AgentManager,
     AgentState,
     _run_agent,
 )
+from src.agents.trajectory import (
+    DEFAULT_AGENT_TRAJECTORY_DIR,
+    AgentTrajectorySaver,
+    AgentTrajectoryTurn,
+)
 from src.trajectories.saver import ToolIteration
-
 
 # ---------------------------------------------------------------------------
 # AgentTrajectoryTurn
@@ -822,9 +819,10 @@ class TestAgentTrajectoryAPI:
         return bot
 
     async def test_list_no_saver(self):
-        from src.web.api import create_api_routes
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
+        from src.web.api import create_api_routes
 
         bot = self._make_bot()
         app = web.Application()
@@ -836,9 +834,10 @@ class TestAgentTrajectoryAPI:
             assert resp.status == 503
 
     async def test_list_with_saver(self, tmp_path):
-        from src.web.api import create_api_routes
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
+        from src.web.api import create_api_routes
 
         saver = AgentTrajectorySaver(directory=str(tmp_path))
         turn = AgentTrajectoryTurn(agent_id="a1")
@@ -858,9 +857,10 @@ class TestAgentTrajectoryAPI:
             assert len(data["files"]) == 1
 
     async def test_find_by_agent_id(self, tmp_path):
-        from src.web.api import create_api_routes
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
+        from src.web.api import create_api_routes
 
         saver = AgentTrajectorySaver(directory=str(tmp_path))
         turn = AgentTrajectoryTurn(agent_id="abc123", label="finder")
@@ -879,9 +879,10 @@ class TestAgentTrajectoryAPI:
             assert data["entry"]["agent_id"] == "abc123"
 
     async def test_find_agent_not_found(self, tmp_path):
-        from src.web.api import create_api_routes
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
+        from src.web.api import create_api_routes
 
         saver = AgentTrajectorySaver(directory=str(tmp_path))
         bot = self._make_bot(saver)
@@ -894,9 +895,10 @@ class TestAgentTrajectoryAPI:
             assert resp.status == 404
 
     async def test_search_endpoint(self, tmp_path):
-        from src.web.api import create_api_routes
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
+        from src.web.api import create_api_routes
 
         saver = AgentTrajectorySaver(directory=str(tmp_path))
         for ch in ["ch1", "ch2"]:
@@ -917,9 +919,10 @@ class TestAgentTrajectoryAPI:
             assert data["results"][0]["channel_id"] == "ch1"
 
     async def test_search_no_saver(self):
-        from src.web.api import create_api_routes
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
+        from src.web.api import create_api_routes
 
         bot = self._make_bot()
         app = web.Application()
@@ -931,9 +934,10 @@ class TestAgentTrajectoryAPI:
             assert resp.status == 503
 
     async def test_read_file_endpoint(self, tmp_path):
-        from src.web.api import create_api_routes
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
+        from src.web.api import create_api_routes
 
         saver = AgentTrajectorySaver(directory=str(tmp_path))
         turn = AgentTrajectoryTurn(agent_id="a1")
@@ -953,9 +957,10 @@ class TestAgentTrajectoryAPI:
             assert data["count"] == 1
 
     async def test_read_file_invalid_name(self, tmp_path):
-        from src.web.api import create_api_routes
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
+        from src.web.api import create_api_routes
 
         saver = AgentTrajectorySaver(directory=str(tmp_path))
         bot = self._make_bot(saver)
@@ -968,9 +973,10 @@ class TestAgentTrajectoryAPI:
             assert resp.status == 400
 
     async def test_read_file_no_saver(self):
-        from src.web.api import create_api_routes
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
+
+        from src.web.api import create_api_routes
 
         bot = self._make_bot()
         app = web.Application()

@@ -6,11 +6,9 @@ integration with the retry message.
 """
 from __future__ import annotations
 
-import pytest
-
 from src.discord.response_guards import (
-    StuckLoopTracker,
     _STUCK_LOOP_RETRY_MSG,
+    StuckLoopTracker,
     _detect_stuck_from_fingerprints,
     _fingerprint_tool_calls,
     detect_stuck_loop,

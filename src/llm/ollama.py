@@ -13,7 +13,7 @@ import uuid
 import aiohttp
 
 from ..odin_log import get_logger
-from .backoff import compute_backoff, DEFAULT_MAX_RETRIES, DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY
+from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
 from .cost_tracker import estimate_tokens
 from .provider import LLMProvider
@@ -196,14 +196,18 @@ class OllamaClient(LLMProvider):
                     text = await resp.text()
                     if resp.status in (500, 502, 503, 504) and attempt < self.max_retries:
                         last_error = RuntimeError(f"Ollama {resp.status}: {text[:300]}")
-                        delay = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
+                        delay = compute_backoff(
+                            attempt,
+                            self.retry_base_delay,
+                            self.retry_max_delay,
+                        )
                         log.warning("Ollama %d (attempt %d/%d), retrying in %.1fs",
                                     resp.status, attempt + 1, self.max_retries + 1, delay)
                         await asyncio.sleep(delay)
                         continue
                     self.breaker.record_failure()
                     raise RuntimeError(f"Ollama {resp.status}: {text[:500]}")
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            except (TimeoutError, aiohttp.ClientError) as e:
                 last_error = e
                 self.breaker.record_failure()
                 if attempt < self.max_retries:
@@ -212,9 +216,11 @@ class OllamaClient(LLMProvider):
                                 attempt + 1, self.max_retries + 1, e, delay)
                     await asyncio.sleep(delay)
                     continue
-                raise RuntimeError(f"Ollama connection error after {self.max_retries + 1} attempts: {e}") from e
+                raise RuntimeError(f"Ollama connection error after {self.max_retries + 1} "
+                                   f"attempts: {e}") from e
 
-        raise RuntimeError(f"Ollama request failed after {self.max_retries + 1} attempts: {last_error}")
+        raise RuntimeError(f"Ollama request failed after {self.max_retries + 1} attempts: "
+                           f"{last_error}")
 
     async def chat(
         self, messages: list[dict], system: str,

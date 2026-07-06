@@ -16,7 +16,7 @@ Tests cover:
 from __future__ import annotations
 
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -24,8 +24,8 @@ from src.config.schema import SessionsConfig
 from src.health.metrics import MetricsCollector
 from src.llm.cost_tracker import estimate_tokens
 from src.sessions.manager import (
-    DEFAULT_SESSION_TOKEN_BUDGET,
     COMPACTION_THRESHOLD,
+    DEFAULT_SESSION_TOKEN_BUDGET,
     MESSAGE_TOKEN_OVERHEAD,
     Message,
     Session,
@@ -33,12 +33,15 @@ from src.sessions.manager import (
     _estimate_session_tokens,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_session(channel_id: str = "ch1", messages: list | None = None, summary: str = "") -> Session:
+def _make_session(
+    channel_id: str = "ch1",
+    messages: list | None = None,
+    summary: str = "",
+) -> Session:
     msgs = messages or []
     return Session(
         channel_id=channel_id,
@@ -343,14 +346,14 @@ class TestSessionsConfigTokenBudget:
 class TestEstimateTokensConsolidation:
     def test_sessions_manager_uses_cost_tracker_estimate(self):
         """sessions/manager.py imports estimate_tokens from cost_tracker, not local copy."""
-        from src.sessions import manager
         from src.llm import cost_tracker
+        from src.sessions import manager
         assert manager.estimate_tokens is cost_tracker.estimate_tokens
 
     def test_consistent_results(self):
         text = "test " * 100
-        from src.sessions.manager import estimate_tokens as session_et
         from src.llm.cost_tracker import estimate_tokens as cost_et
+        from src.sessions.manager import estimate_tokens as session_et
         assert session_et(text) == cost_et(text)
 
 
@@ -363,7 +366,9 @@ class TestDefaultSessionTokenBudget:
         assert DEFAULT_SESSION_TOKEN_BUDGET == 256_000
 
     def test_exported_from_init(self):
-        from src.sessions import DEFAULT_SESSION_TOKEN_BUDGET as exported
+        from src.sessions import (
+            DEFAULT_SESSION_TOKEN_BUDGET as exported,  # noqa: N811 — established import alias
+        )
         assert exported == 256_000
 
 
@@ -398,7 +403,6 @@ class TestAPISessionTokenUsage:
         return bot
 
     def test_token_usage_endpoint_returns_data(self, mock_bot_with_sessions):
-        from src.web.api import create_api_routes
         bot = mock_bot_with_sessions
         usage = bot.sessions.get_session_token_usage()
         assert "ch1" in usage

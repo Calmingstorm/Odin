@@ -7,8 +7,8 @@ and optional metadata dict.
 """
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 from ..odin_log import get_logger
@@ -226,7 +226,8 @@ def check_ssh_hosts(bot: OdinBot) -> ComponentStatus:
             metadata={
                 "hosts": host_list,
                 "pool_enabled": pool is not None,
-                **({k: v for k, v in pool_metrics.items() if k != "active_hosts"} if pool_metrics else {}),
+                **({k: v for k, v in pool_metrics.items() if k != "active_hosts"}
+                    if pool_metrics else {}),
             },
         )
     except Exception as exc:
@@ -252,7 +253,11 @@ def check_voice(bot: OdinBot) -> ComponentStatus:
             return ComponentStatus(
                 name="voice", healthy=True, status="ok",
                 detail=f"Connected to #{channel.name}",
-                metadata={"channel": channel.name, "channel_id": str(channel.id), "ws_connected": ws_connected},
+                metadata={
+                    "channel": channel.name,
+                    "channel_id": str(channel.id),
+                    "ws_connected": ws_connected,
+                },
             )
         elif ws_connected:
             return ComponentStatus(
@@ -313,7 +318,8 @@ def check_browser(bot: OdinBot) -> ComponentStatus:
         )
     try:
         browser = getattr(browser_mgr, "_browser", None)
-        connected = browser is not None and hasattr(browser, "is_connected") and browser.is_connected()
+        connected = (browser is not None and hasattr(browser, "is_connected")
+            and browser.is_connected())
         if connected:
             return ComponentStatus(
                 name="browser", healthy=True, status="ok",
@@ -529,7 +535,7 @@ def check_all(bot: OdinBot) -> dict[str, Any]:
     else:
         overall = "healthy"
 
-    from datetime import datetime, timezone
+    from datetime import datetime
     return {
         "overall": overall,
         "components": results,
@@ -538,7 +544,7 @@ def check_all(bot: OdinBot) -> dict[str, Any]:
         "down_count": down_count,
         "unconfigured_count": unconfigured_count,
         "total": len(results),
-        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checked_at": datetime.now(UTC).isoformat(),
     }
 
 

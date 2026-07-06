@@ -16,7 +16,7 @@ Tests cover:
 from __future__ import annotations
 
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -43,7 +43,6 @@ from src.sessions.manager import (
     adaptive_summary_chars,
     compute_activity_rate,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -79,7 +78,11 @@ def _make_manager(
     )
 
 
-def _make_timed_messages(count: int, interval_seconds: float, start: float | None = None) -> list[Message]:
+def _make_timed_messages(
+    count: int,
+    interval_seconds: float,
+    start: float | None = None,
+) -> list[Message]:
     """Create *count* messages spaced *interval_seconds* apart."""
     base = start or time.time()
     return [
@@ -402,7 +405,8 @@ class TestCompactAdaptive:
         # Check the system instruction passed to compaction_fn
         call_args = fn.call_args
         system_instruction = call_args[0][1]
-        assert f"under {ADAPTIVE_SUMMARY_HIGH}" in system_instruction or "under 5" in system_instruction
+        assert (f"under {ADAPTIVE_SUMMARY_HIGH}" in system_instruction
+                or "under 5" in system_instruction)
 
     async def test_oversized_segment_clipped_with_marker(self, mgr_adaptive):
         from src.sessions.manager import SEGMENT_HARD_CHARS, SEGMENT_TRUNCATION_MARKER
@@ -426,7 +430,7 @@ class TestCompactAdaptive:
         msgs = _make_timed_messages(50, interval_seconds=60, start=now - 3000)
         session = _make_session(messages=msgs)
         mgr._sessions["ch1"] = session
-        original_count = len(session.messages)
+        len(session.messages)
         await mgr._compact(session)
         # Fallback: trim to max_history
         assert len(session.messages) <= mgr.max_history
@@ -438,7 +442,7 @@ class TestCompactAdaptive:
         msgs = _make_timed_messages(85, interval_seconds=30, start=now - 2550)
         session = _make_session(channel_id="ch2", messages=msgs)
         mgr._sessions["ch2"] = session
-        history = await mgr.get_history_with_compaction("ch2")
+        await mgr.get_history_with_compaction("ch2")
         # Should have compacted (threshold 80) since we have 85 msgs
         assert fn.called
 
@@ -448,7 +452,7 @@ class TestCompactAdaptive:
         msgs = _make_timed_messages(85, interval_seconds=30, start=now - 2550)
         session = _make_session(channel_id="ch3", messages=msgs)
         mgr._sessions["ch3"] = session
-        history = await mgr.get_task_history("ch3")
+        await mgr.get_task_history("ch3")
         assert fn.called
 
 
@@ -570,8 +574,8 @@ class TestModuleImports:
     def test_adaptive_functions_importable(self):
         from src.sessions.manager import (
             adaptive_compaction_threshold,
-            adaptive_summary_chars,
             adaptive_keep_ratio,
+            adaptive_summary_chars,
         )
         assert callable(adaptive_compaction_threshold)
         assert callable(adaptive_summary_chars)

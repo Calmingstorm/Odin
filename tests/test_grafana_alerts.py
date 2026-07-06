@@ -6,14 +6,18 @@ remediation spawning, config schema, health server integration, and REST API end
 
 from __future__ import annotations
 
-import asyncio
-import json
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from src.config.schema import (
+    Config,
+    GrafanaAlertConfig,
+    GrafanaRemediationRuleConfig,
+    WebhookConfig,
+)
 from src.health.grafana_alerts import (
     DEFAULT_COOLDOWN_SECONDS,
     DEFAULT_REMEDIATION_INTERVAL,
@@ -26,20 +30,13 @@ from src.health.grafana_alerts import (
     GrafanaAlertHandler,
     RemediationRecord,
     RemediationRule,
+    _make_fingerprint,
     build_remediation_prompt,
     format_alert_message,
     matches_rule,
     parse_grafana_payload,
-    _make_fingerprint,
-)
-from src.config.schema import (
-    Config,
-    GrafanaAlertConfig,
-    GrafanaRemediationRuleConfig,
-    WebhookConfig,
 )
 from src.health.server import HealthServer
-
 
 # ---------------------------------------------------------------------------
 # Sample payloads
@@ -1459,7 +1456,7 @@ class TestRound20CooldownCleanup:
         handler.add_rule(rule)
         handler._cooldowns["fp1::r1"] = time.monotonic() - 700
         handler._cooldowns["fp2::r1"] = time.monotonic() - 10
-        removed = handler.cleanup_old_remediations()
+        handler.cleanup_old_remediations()
         assert "fp1::r1" not in handler._cooldowns
         assert "fp2::r1" in handler._cooldowns
 
@@ -1468,7 +1465,7 @@ class TestRound20CooldownCleanup:
         rule = self._make_rule()
         handler.add_rule(rule)
         handler._cooldowns["fp1::r1"] = time.monotonic() - 5
-        removed = handler.cleanup_old_remediations()
+        handler.cleanup_old_remediations()
         assert "fp1::r1" in handler._cooldowns
 
     def test_cleanup_removes_both_remediations_and_cooldowns(self):

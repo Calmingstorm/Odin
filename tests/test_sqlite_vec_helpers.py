@@ -8,10 +8,7 @@ from __future__ import annotations
 import struct
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from src.search.sqlite_vec import deserialize_vector, load_extension, serialize_vector
-
 
 # ---------------------------------------------------------------------------
 # serialize_vector

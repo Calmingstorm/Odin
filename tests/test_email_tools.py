@@ -8,7 +8,6 @@ and password redaction in errors.
 from __future__ import annotations
 
 import email as email_lib
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,7 +18,6 @@ from src.tools.email_client import (
     search_email,
     send_email,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

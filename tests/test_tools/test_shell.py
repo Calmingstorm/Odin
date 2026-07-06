@@ -49,7 +49,11 @@ async def test_env():
     # env replaces the full env, so this might not work on all systems.
     # Instead, test with printenv which is more reliable:
     result = await tool.execute(
-        {"command": "printenv MY_VAR || echo ''", "env": {"MY_VAR": "odin", "PATH": "/usr/bin:/bin"}, "check": False},
+        {
+            "command": "printenv MY_VAR || echo ''",
+            "env": {"MY_VAR": "odin", "PATH": "/usr/bin:/bin"},
+            "check": False,
+        },
         ExecutionContext(),
     )
     assert "odin" in result["stdout"]

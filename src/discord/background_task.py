@@ -8,9 +8,9 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 import discord
@@ -18,9 +18,9 @@ import discord
 from ..audit.diff_tracker import DIFF_TOOLS, DiffTracker
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
-from ..tools.risk_classifier import classify_tool
 from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..tools.result_validator import ToolResult
+from ..tools.risk_classifier import classify_tool
 from .tool_loop_helpers import ensure_failure_visible
 
 _EMAIL_BODY_TOOLS = frozenset({"email_send"})
@@ -40,11 +40,11 @@ def _scrub_email_input(tool_name: str, tool_input: dict) -> dict:
 
 if TYPE_CHECKING:
     from ..audit.logger import AuditLogger
-    from ..tools.executor import ToolExecutor
-    from ..tools.skill_manager import SkillManager
-    from ..tools.mcp_client import MCPManager
     from ..knowledge.store import KnowledgeStore
     from ..search.embedder import LocalEmbedder
+    from ..tools.executor import ToolExecutor
+    from ..tools.mcp_client import MCPManager
+    from ..tools.skill_manager import SkillManager
 
 # Type for Codex chat callback: takes (messages, system, max_tokens) -> response text
 CodexCallback = Callable[[list[dict], str, int], Awaitable[str]]
@@ -388,7 +388,8 @@ async def _execute_tool(
         from ..knowledge.importer import BulkImporter
         importer = BulkImporter(knowledge_store, embedder)
         batch = await importer.import_batch(items, uploader=requester)
-        lines = [f"Bulk import: {batch.succeeded} succeeded, {batch.failed} failed, {batch.skipped} skipped"]
+        lines = [f"Bulk import: {batch.succeeded} succeeded, {batch.failed} failed, "
+                 f"{batch.skipped} skipped"]
         for r in batch.results:
             tag = r["status"].upper()
             detail = f" ({r['chunks']} chunks)" if r["chunks"] else ""
@@ -537,7 +538,6 @@ async def _send_summary(task: BackgroundTask) -> None:
     """Post a natural language summary of the completed task."""
     ok = [r for r in task.results if r.status == "ok"]
     errors = [r for r in task.results if r.status == "error"]
-    skipped = [r for r in task.results if r.status == "skipped"]
 
     lines = [f"**Task complete: {task.description}**"]
 
@@ -546,7 +546,8 @@ async def _send_summary(task: BackgroundTask) -> None:
     elif task.status == "completed" and errors:
         lines.append(f"{len(ok)} succeeded, {len(errors)} failed.")
     elif task.status == "failed":
-        lines.append(f"Task aborted after {len(task.results)} of {len(task.steps)} steps ({len(errors)} error(s)).")
+        lines.append(f"Task aborted after {len(task.results)} of {len(task.steps)} steps "
+                     f"({len(errors)} error(s)).")
     elif task.status == "cancelled":
         lines.append(f"Task was cancelled after {len(task.results)} of {len(task.steps)} steps.")
 
@@ -556,7 +557,6 @@ async def _send_summary(task: BackgroundTask) -> None:
         for r in task.results:
             if r.status == "skipped":
                 continue
-            icon = "+" if r.status == "ok" else "x"
             # Show meaningful output, not just truncated first line
             output = r.output.strip()
             if len(output) > 200:

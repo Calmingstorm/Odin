@@ -12,7 +12,6 @@ exposed via the ``/api/startup/diagnostics`` REST endpoint for operators.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -126,7 +125,8 @@ def check_codex_credentials(codex_config: Any) -> DiagnosticResult:
             name="codex_credentials",
             passed=False,
             detail="Codex credentials_path is empty",
-            recommendation="Set openai_codex.credentials_path in config.yml (default: ./data/codex_auth.json).",
+            recommendation="Set openai_codex.credentials_path in config.yml "
+                           "(default: ./data/codex_auth.json).",
         )
 
     path = Path(creds_path)

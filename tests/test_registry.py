@@ -6,7 +6,6 @@ import pytest
 
 from src.odin.registry import ToolRegistry
 from src.odin.tools.base import BaseTool
-from src.odin.context import ExecutionContext
 
 
 class DummyTool(BaseTool):

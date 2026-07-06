@@ -1,13 +1,10 @@
 """Tests for the Ollama LLM client."""
 from __future__ import annotations
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
-
 import pytest
 
 from src.llm.ollama import OllamaClient
-from src.llm.types import LLMResponse, ToolCall
+from src.llm.types import LLMResponse
 
 
 @pytest.fixture

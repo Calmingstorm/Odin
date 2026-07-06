@@ -14,13 +14,11 @@ from __future__ import annotations
 import json
 
 import pytest
-from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import WebhookConfig
 from src.health.server import HealthServer
 from src.scheduler.scheduler import Scheduler
-
 
 # ---------------------------------------------------------------------------
 # Helpers

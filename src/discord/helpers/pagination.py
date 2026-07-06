@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import discord
-from discord.ext import commands
-
 from src.constants import PAGINATION_TIMEOUT, PAGINATOR_PAGE_SIZE
 
 

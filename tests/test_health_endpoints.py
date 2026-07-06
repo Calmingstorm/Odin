@@ -11,12 +11,10 @@ Covers:
 
 from __future__ import annotations
 
-import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import WebhookConfig
 from src.health.server import HealthServer
-
 
 # ---------------------------------------------------------------------------
 # Helpers

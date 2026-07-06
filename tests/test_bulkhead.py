@@ -7,9 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.tools.bulkhead import Bulkhead, BulkheadFullError, BulkheadRegistry
 from src.config.schema import BulkheadConfig, ToolHost, ToolsConfig
-
+from src.tools.bulkhead import Bulkhead, BulkheadFullError, BulkheadRegistry
 
 # =====================================================================
 # Bulkhead core
@@ -311,7 +310,7 @@ class TestExecutorBulkheadIntegration:
             bulkhead=BulkheadConfig(ssh_max_concurrent=1, ssh_max_queued=1),
         )
         ex = ToolExecutor(config=cfg)
-        ssh_bh = ex.bulkheads.get("ssh")
+        ex.bulkheads.get("ssh")
         gate = asyncio.Event()
 
         async def _slow_ssh(*a, **kw):
@@ -370,7 +369,10 @@ class TestExecutorBulkheadIntegration:
         ex = ToolExecutor(config=cfg, browser_manager=mock_browser)
         browser_bh = ex.bulkheads.get("browser")
 
-        with patch("src.tools.browser.handle_browser_read_page", new_callable=AsyncMock) as mock_handler:
+        with patch(
+            "src.tools.browser.handle_browser_read_page",
+            new_callable=AsyncMock,
+        )as mock_handler:
             mock_handler.return_value = "page content"
             result = await ex.browser_web_tools._handle_browser_read_page({"url": "http://example.com"})
             assert str(result) == "page content"

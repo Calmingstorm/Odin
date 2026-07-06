@@ -8,10 +8,10 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from dataclasses import dataclass, field
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 
-from ..config.schema import MonitoringConfig, MonitorCheck
+from ..config.schema import MonitorCheck, MonitoringConfig
 from ..notifications.slack import SlackNotifier
 from ..odin_log import get_logger
 from ..tools.executor import ToolExecutor
@@ -164,7 +164,10 @@ class InfraWatcher:
                             pct = int(used / total * 100)
                             if pct >= check.threshold:
                                 key = f"{check.name}:{host}"
-                                if self._alert_state.should_alert(key, self.config.cooldown_minutes * 60):
+                                if self._alert_state.should_alert(
+                                    key,
+                                    self.config.cooldown_minutes * 60,
+                                ):
                                     await self._alert(
                                         f"**Memory Alert** on `{host}`: **{pct}%** used "
                                         f"(threshold: {check.threshold}%)"

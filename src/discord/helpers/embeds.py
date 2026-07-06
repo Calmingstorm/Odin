@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import discord
-
 from src.constants import (
     BOT_NAME,
     COLOR_ERROR,
@@ -26,7 +25,7 @@ def odin_embed(
         title=title,
         description=description,
         color=color,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     embed.set_footer(text=BOT_NAME)
     return embed

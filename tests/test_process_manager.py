@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -19,7 +19,6 @@ from src.tools.process_manager import (
     ProcessInfo,
     ProcessRegistry,
 )
-
 
 # ---------------------------------------------------------------------------
 # ProcessInfo
@@ -149,7 +148,13 @@ class TestProcessRegistryWrite:
     @pytest.mark.asyncio
     async def test_write_not_running(self):
         reg = ProcessRegistry()
-        info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time(), status="completed")
+        info = ProcessInfo(
+            pid=1,
+            command="test",
+            host="local",
+            start_time=time.time(),
+            status="completed",
+        )
         reg._processes[1] = info
         result = await reg.write(1, "test")
         assert "not running" in result
@@ -159,7 +164,13 @@ class TestProcessRegistryWrite:
         reg = ProcessRegistry()
         mock_proc = MagicMock()
         mock_proc.stdin = None
-        info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time(), process=mock_proc)
+        info = ProcessInfo(
+            pid=1,
+            command="test",
+            host="local",
+            start_time=time.time(),
+            process=mock_proc,
+        )
         reg._processes[1] = info
         result = await reg.write(1, "test")
         assert "no stdin" in result
@@ -172,7 +183,13 @@ class TestProcessRegistryWrite:
         mock_stdin.drain = AsyncMock()  # StreamWriter.drain() is async
         mock_proc = MagicMock()
         mock_proc.stdin = mock_stdin
-        info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time(), process=mock_proc)
+        info = ProcessInfo(
+            pid=1,
+            command="test",
+            host="local",
+            start_time=time.time(),
+            process=mock_proc,
+        )
         reg._processes[1] = info
         result = await reg.write(1, "hello")
         assert "Wrote" in result
@@ -195,7 +212,13 @@ class TestProcessRegistryKill:
     @pytest.mark.asyncio
     async def test_kill_already_completed(self):
         reg = ProcessRegistry()
-        info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time(), status="completed")
+        info = ProcessInfo(
+            pid=1,
+            command="test",
+            host="local",
+            start_time=time.time(),
+            status="completed",
+        )
         reg._processes[1] = info
         result = await reg.kill(1)
         assert "already completed" in result
@@ -207,7 +230,13 @@ class TestProcessRegistryKill:
         mock_proc.terminate = MagicMock()
         mock_proc.kill = MagicMock()
         mock_proc.wait = AsyncMock()
-        info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time(), process=mock_proc)
+        info = ProcessInfo(
+            pid=1,
+            command="test",
+            host="local",
+            start_time=time.time(),
+            process=mock_proc,
+        )
         reg._processes[1] = info
         result = await reg.kill(1)
         assert "killed" in result
@@ -279,7 +308,13 @@ class TestProcessRegistryShutdown:
         mock_proc.terminate = MagicMock()
         mock_proc.kill = MagicMock()
         mock_proc.wait = AsyncMock()
-        info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time(), process=mock_proc)
+        info = ProcessInfo(
+            pid=1,
+            command="test",
+            host="local",
+            start_time=time.time(),
+            process=mock_proc,
+        )
         reg._processes[1] = info
         killed = await reg.shutdown()
         assert killed == 1
@@ -287,7 +322,13 @@ class TestProcessRegistryShutdown:
     @pytest.mark.asyncio
     async def test_shutdown_skips_completed(self):
         reg = ProcessRegistry()
-        info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time(), status="completed")
+        info = ProcessInfo(
+            pid=1,
+            command="test",
+            host="local",
+            start_time=time.time(),
+            status="completed",
+        )
         reg._processes[1] = info
         killed = await reg.shutdown()
         assert killed == 0

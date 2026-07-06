@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
-import discord
 from discord.ext import commands, tasks
 
+import discord
 from src.discord.helpers.converters import DurationConverter
 from src.discord.helpers.embeds import odin_embed, success_embed
 
@@ -39,7 +38,7 @@ class Reminders(commands.Cog):
 
     @tasks.loop(seconds=15)
     async def _check_reminders(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         due = [r for r in self._reminders if r.fire_at <= now]
         for reminder in due:
             self._reminders.remove(reminder)
@@ -71,7 +70,7 @@ class Reminders(commands.Cog):
         """Set a reminder. Usage: !remind 1h30m Take out the trash."""
         converter = DurationConverter()
         td = await converter.convert(ctx, duration)
-        fire_at = datetime.now(timezone.utc) + td
+        fire_at = datetime.now(UTC) + td
         reminder = Reminder(
             user_id=ctx.author.id,
             channel_id=ctx.channel.id,

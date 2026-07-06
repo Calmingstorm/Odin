@@ -24,7 +24,7 @@ log = get_logger("health.subsystem_guard")
 
 # ── Subsystem state ──────────────────────────────────────────────────
 
-class SubsystemState(str, Enum):
+class SubsystemState(str, Enum):  # noqa: UP042 — str(member) output differs under StrEnum; deferred to a typed-verification pass
     """Availability state of a tracked subsystem."""
     AVAILABLE = "available"
     DEGRADED = "degraded"
@@ -198,7 +198,12 @@ class SubsystemGuard:
 
     # ── Registration ─────────────────────────────────────────────────
 
-    def register(self, name: str, *, initial_state: SubsystemState = SubsystemState.AVAILABLE) -> None:
+    def register(
+        self,
+        name: str,
+        *,
+        initial_state: SubsystemState = SubsystemState.AVAILABLE,
+    ) -> None:
         """Register a subsystem for tracking."""
         if name in self._subsystems:
             return  # idempotent
@@ -322,7 +327,12 @@ class SubsystemGuard:
 
         if new != old:
             info.state = new
-            self.stats.record_transition(name, old, new, reason or f"{info.consecutive_failures} consecutive failures")
+            self.stats.record_transition(
+                name,
+                old,
+                new,
+                reason or f"{info.consecutive_failures} consecutive failures",
+            )
             log.warning(
                 "Subsystem %r transitioned %s → %s after %d failures: %s",
                 name, old.value, new.value, info.consecutive_failures, reason,
@@ -347,7 +357,12 @@ class SubsystemGuard:
         old = info.state
         if old != SubsystemState.AVAILABLE:
             info.state = SubsystemState.AVAILABLE
-            self.stats.record_transition(name, old, SubsystemState.AVAILABLE, "success after recovery")
+            self.stats.record_transition(
+                name,
+                old,
+                SubsystemState.AVAILABLE,
+                "success after recovery",
+            )
             log.info("Subsystem %r recovered → AVAILABLE", name)
 
         return info.state
@@ -360,9 +375,12 @@ class SubsystemGuard:
     def get_status(self) -> dict[str, Any]:
         """Full status snapshot for the REST API."""
         subsystems = [info.to_dict() for info in self._subsystems.values()]
-        available_count = sum(1 for i in self._subsystems.values() if i.state == SubsystemState.AVAILABLE)
-        degraded_count = sum(1 for i in self._subsystems.values() if i.state == SubsystemState.DEGRADED)
-        unavailable_count = sum(1 for i in self._subsystems.values() if i.state == SubsystemState.UNAVAILABLE)
+        available_count = sum(1 for i in self._subsystems.values()
+            if i.state == SubsystemState.AVAILABLE)
+        degraded_count = sum(1 for i in self._subsystems.values()
+            if i.state == SubsystemState.DEGRADED)
+        unavailable_count = sum(1 for i in self._subsystems.values()
+            if i.state == SubsystemState.UNAVAILABLE)
         total = len(self._subsystems)
 
         if unavailable_count > 0:

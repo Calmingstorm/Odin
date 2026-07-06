@@ -8,18 +8,17 @@ push freshness check).
 from __future__ import annotations
 
 import shlex
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
+from src.config.schema import ToolHost, ToolsConfig
+from src.tools.executor import ToolExecutor
 from src.tools.git_ops import (
     ALLOWED_ACTIONS,
     build_git_command,
 )
-from src.config.schema import ToolsConfig, ToolHost
-from src.tools.executor import ToolExecutor
-from src.tools.registry import TOOLS, TOOL_MAP
-
+from src.tools.registry import TOOL_MAP
 
 # ---------------------------------------------------------------------------
 # Tool registration
@@ -695,7 +694,7 @@ class TestPushFreshnessCheck:
             (0, "Everything up-to-date\n"),
         ]
         exe = self._make_executor()
-        result = await exe.execute("git_ops", {
+        await exe.execute("git_ops", {
             "host": "myserver",
             "action": "push",
         })
@@ -708,7 +707,7 @@ class TestPushFreshnessCheck:
             (0, "new branch\n"),
         ]
         exe = self._make_executor()
-        result = await exe.execute("git_ops", {
+        await exe.execute("git_ops", {
             "host": "myserver",
             "action": "push",
             "params": {"set_upstream": True},

@@ -3,24 +3,19 @@ detection, near-duplicate detection, merge, and REST API endpoints (Round 21).
 """
 from __future__ import annotations
 
-import asyncio
 import os
-import sqlite3
 import tempfile
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.knowledge.store import (
-    CHUNK_OVERLAP,
     CHUNK_SIZE,
-    KnowledgeStore,
     NEAR_DUPE_THRESHOLD,
     VECTOR_DIM,
+    KnowledgeStore,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -801,7 +796,7 @@ class TestEdgeCases:
         try:
             await store.ingest(SHORT_DOC, "keep.md", dedup=False)
             await store.ingest(SHORT_DOC_V2, "remove.md")
-            before = store.count()
+            store.count()
             store.merge_sources("keep.md", "remove.md")
             # keep.md chunks should still exist
             keep_chunks = store.get_source_chunks("keep.md")

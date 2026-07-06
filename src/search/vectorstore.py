@@ -38,7 +38,8 @@ class SessionVectorStore:
             conn.execute("PRAGMA journal_mode=WAL")
             self._has_vec = load_extension(conn)
             if not self._has_vec:
-                log.warning("sqlite-vec not available — semantic session search disabled, FTS-only mode")
+                log.warning("sqlite-vec not available — semantic session search disabled, FTS-only "
+                            "mode")
             # Metadata table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS session_archives (

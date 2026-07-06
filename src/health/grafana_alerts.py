@@ -7,11 +7,9 @@ loops for matching firing alerts.
 from __future__ import annotations
 
 import fnmatch
-import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
 
 from ..odin_log import get_logger
@@ -283,7 +281,10 @@ class GrafanaAlertHandler:
                 return rule
         return None
 
-    def process_alerts(self, alerts: list[GrafanaAlert]) -> list[tuple[GrafanaAlert, RemediationRule]]:
+    def process_alerts(
+        self,
+        alerts: list[GrafanaAlert],
+    ) -> list[tuple[GrafanaAlert, RemediationRule]]:
         """Process alerts and return (alert, rule) pairs that should spawn remediations.
 
         Only firing alerts are considered for remediation. Resolved alerts are

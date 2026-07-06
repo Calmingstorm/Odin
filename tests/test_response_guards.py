@@ -329,7 +329,8 @@ class TestScrubOutputSecrets:
 
     def test_scrub_jwt_token(self):
         # Real-format JWT (header.payload.signature)
-        text = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        text = ("Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+                ".eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U")
         result = scrub_output_secrets(text)
         assert "eyJ" not in result
         assert "[REDACTED]" in result

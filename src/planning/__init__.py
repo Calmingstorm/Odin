@@ -1,3 +1,3 @@
-from .store import PlanStore, ExecutionPlan
+from .store import ExecutionPlan, PlanStore
 
 __all__ = ["PlanStore", "ExecutionPlan"]

@@ -7,7 +7,6 @@ from typing import Any
 
 from src.odin.types import PlanResult, StepStatus
 
-
 _STATUS_ICONS = {
     StepStatus.SUCCESS: "[OK]",
     StepStatus.FAILED: "[FAIL]",

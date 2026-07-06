@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import os
 from collections import deque
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -111,7 +110,7 @@ class AuditLogger:
         for path in self._rotated_paths_newest_first():
             per_file: deque[dict] = deque(maxlen=limit)
             try:
-                async with aiofiles.open(path, "r") as f:
+                async with aiofiles.open(path) as f:
                     async for line in f:
                         line = line.strip()
                         if not line:
@@ -175,7 +174,7 @@ class AuditLogger:
         risk_reason: str | None = None,
     ) -> None:
         entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "user_id": user_id,
             "user_name": user_name,
             "channel_id": channel_id,
@@ -216,7 +215,7 @@ class AuditLogger:
         """Log a generic state-changing event (agents, schedules, permissions, etc.)."""
         elapsed = (metadata or {}).get("elapsed_ms")
         entry: dict = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "type": event_type,
             "action": action,
             "actor": actor,
@@ -247,7 +246,7 @@ class AuditLogger:
     ) -> None:
         """Log a web UI API action (state-changing requests)."""
         entry: dict = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "type": "web_action",
             "method": method,
             "path": path,
@@ -275,7 +274,7 @@ class AuditLogger:
             return {}
         counts: dict[str, int] = {}
         try:
-            async with aiofiles.open(self.path, "r") as f:
+            async with aiofiles.open(self.path) as f:
                 async for line in f:
                     line = line.strip()
                     if not line:
@@ -408,7 +407,7 @@ class AuditLogger:
         web_actions = 0
 
         try:
-            async with aiofiles.open(self.path, "r") as f:
+            async with aiofiles.open(self.path) as f:
                 async for line in f:
                     line = line.strip()
                     if not line:
@@ -490,7 +489,7 @@ class AuditLogger:
         if not self._signer or not self.path.exists():
             return
         try:
-            async with aiofiles.open(self.path, "r") as f:
+            async with aiofiles.open(self.path) as f:
                 lines = await f.readlines()
         except Exception as exc:
             log.error("Failed to read audit log for chain init: %s", exc)

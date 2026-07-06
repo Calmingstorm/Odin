@@ -6,18 +6,16 @@ import pytest
 
 from src.tools.http_probe_ops import (
     ALLOWED_METHODS,
-    MAX_TIMEOUT,
-    DEFAULT_TIMEOUT,
-    MAX_RETRIES,
-    DEFAULT_RETRIES,
-    MAX_RETRY_DELAY,
     DEFAULT_RETRY_DELAY,
+    DEFAULT_TIMEOUT,
     MAX_BODY_SIZE,
+    MAX_RETRIES,
+    MAX_RETRY_DELAY,
+    MAX_TIMEOUT,
+    _clamp_int,
     build_http_probe_command,
     validate_url,
-    _clamp_int,
 )
-
 
 # ---------------------------------------------------------------------------
 # Registration
@@ -618,6 +616,7 @@ class TestHandleHttpProbe:
     @pytest.fixture
     def executor(self):
         from unittest.mock import AsyncMock, MagicMock
+
         from src.tools.executor import ToolExecutor
 
         config = MagicMock()

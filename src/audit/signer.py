@@ -77,8 +77,9 @@ async def verify_log(path, key: str) -> dict:
     (signed entries verified, int), ``unsigned_prefix`` (int), ``first_bad``
     (int or None — 1-indexed line number), and ``error`` (str or None).
     """
-    import aiofiles
     from pathlib import Path
+
+    import aiofiles
 
     p = Path(path)
     if not p.exists():
@@ -98,7 +99,7 @@ async def verify_log(path, key: str) -> dict:
     unsigned_prefix = 0
 
     try:
-        async with aiofiles.open(p, "r") as f:
+        async with aiofiles.open(p) as f:
             lines = await f.readlines()
     except Exception as exc:
         return {

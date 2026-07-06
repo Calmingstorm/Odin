@@ -40,7 +40,14 @@ _WS_CHAT_TIMEOUT = 300.0
 class WebSocketManager:
     """Manages WebSocket connections and broadcasts events."""
 
-    def __init__(self, bot: OdinBot, *, api_token: str = "", session_manager=None, web_config=None) -> None:
+    def __init__(
+        self,
+        bot: OdinBot,
+        *,
+        api_token: str = "",
+        session_manager=None,
+        web_config=None,
+    ) -> None:
         self._bot = bot
         self._api_token = api_token
         self._session_manager = session_manager
@@ -174,7 +181,8 @@ class WebSocketManager:
         import time as _time
         now = _time.monotonic()
         window_start = getattr(ws, "_chat_window_start", None)
-        if window_start is None or not isinstance(window_start, (int, float)) or now - window_start > _WS_CHAT_RATE_WINDOW:
+        if (window_start is None or not isinstance(window_start, (int, float))
+                or now - window_start > _WS_CHAT_RATE_WINDOW):
             ws._chat_window_start = now  # type: ignore[attr-defined]  # sanctioned dynamic attr
             ws._chat_count = 0  # type: ignore[attr-defined]  # sanctioned dynamic attr
         chat_count = getattr(ws, "_chat_count", None)
@@ -189,7 +197,8 @@ class WebSocketManager:
         username = identity.username if identity else "WebUser"
         tier = identity.tier if identity else None
         allowed_tools = identity.allowed_tools if identity and identity.allowed_tools else None
-        token_hosts = identity.allowed_hosts if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None
+        token_hosts = (identity.allowed_hosts
+            if identity and isinstance(getattr(identity, "allowed_hosts", None), list) else None)
         token_default_host = getattr(identity, "default_host", "") if identity else ""
 
         log.info("WebSocket chat from %s (tier=%s): %s", username, tier or "default", content[:80])
@@ -214,10 +223,11 @@ class WebSocketManager:
             if files:
                 resp["files"] = files
             await ws.send_json(resp)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await ws.send_json({
                 "type": "chat_error",
-                "error": f"Request timed out after {int(_WS_CHAT_TIMEOUT)}s. The operation may still be running.",
+                "error": f"Request timed out after {int(_WS_CHAT_TIMEOUT)}s. "
+                         "The operation may still be running.",
             })
         except Exception as e:
             log.error("WebSocket chat error: %s", e, exc_info=True)
@@ -257,7 +267,11 @@ class WebSocketManager:
             self._log_subscribers.discard(ws)
             self._event_subscribers.discard(ws)
         if to_close:
-            log.info("Closed %d WebSocket connection(s) for revoked user_id=%s", len(to_close), user_id)
+            log.info(
+                "Closed %d WebSocket connection(s) for revoked user_id=%s",
+                len(to_close),
+                user_id,
+            )
         return len(to_close)
 
     async def _tail_logs(self, ws: web.WebSocketResponse) -> None:
@@ -290,7 +304,7 @@ class WebSocketManager:
                     if current_size < last_pos:
                         last_pos = 0  # File was truncated/rotated
                     continue
-                with open(log_path, "r") as f:
+                with open(log_path) as f:
                     f.seek(last_pos)
                     new_data = f.read()
                     last_pos = f.tell()
@@ -308,7 +322,12 @@ def setup_websocket(
 ) -> WebSocketManager:
     """Register the WebSocket endpoint and return the manager."""
     session_manager = app.get("session_manager")
-    manager = WebSocketManager(bot, api_token=api_token, session_manager=session_manager, web_config=web_config)
+    manager = WebSocketManager(
+        bot,
+        api_token=api_token,
+        session_manager=session_manager,
+        web_config=web_config,
+    )
     app.router.add_get("/api/ws", manager.handle)
     log.info("WebSocket endpoint registered at /api/ws")
     return manager

@@ -6,9 +6,9 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -24,9 +24,9 @@ log = get_logger("scheduler")
 def _utc_iso(dt: datetime) -> str:
     """Ensure datetime is serialized with explicit UTC offset."""
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     else:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(UTC)
     return dt.isoformat()
 
 
@@ -44,7 +44,7 @@ def _cron_next_run(cron_expr: str, tz_name: str | None = None) -> str:
             return _utc_iso(cr.get_next(datetime))
         except (ZoneInfoNotFoundError, ValueError):
             log.warning("Unknown schedule timezone %r; evaluating cron in UTC", tz_name)
-    cr = croniter(cron_expr, datetime.now(timezone.utc))
+    cr = croniter(cron_expr, datetime.now(UTC))
     return _utc_iso(cr.get_next(datetime))
 
 
@@ -116,7 +116,7 @@ class Scheduler:
         next_run to the next future occurrence so the schedule resumes on
         its normal cadence.
         """
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(UTC).replace(tzinfo=None)
         advanced = 0
         for schedule in self._schedules:
             cron_expr = schedule.get("cron")
@@ -200,7 +200,7 @@ class Scheduler:
             "action": action,
             "channel_id": channel_id,
             "requester_id": requester_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "last_run": None,
         }
 
@@ -246,7 +246,8 @@ class Scheduler:
         retries = max_retries if max_retries is not None else DEFAULT_MAX_RETRIES
         if retries < 0:
             raise ValueError("max_retries must be >= 0")
-        backoff = retry_backoff_seconds if retry_backoff_seconds is not None else DEFAULT_RETRY_BACKOFF_SECONDS
+        backoff = (retry_backoff_seconds
+            if retry_backoff_seconds is not None else DEFAULT_RETRY_BACKOFF_SECONDS)
         if backoff < 1:
             raise ValueError("retry_backoff_seconds must be >= 1")
         schedule["max_retries"] = retries
@@ -288,7 +289,15 @@ class Scheduler:
         unknown = set(trigger.keys()) - valid_keys
         if unknown:
             raise ValueError(f"Unknown trigger keys: {', '.join(sorted(unknown))}")
-        valid_sources = {"gitea", "grafana", "generic", "github", "gitlab", "discord_reaction", "discord_message"}
+        valid_sources = {
+            "gitea",
+            "grafana",
+            "generic",
+            "github",
+            "gitlab",
+            "discord_reaction",
+            "discord_message",
+        }
         source = trigger.get("source")
         if source and source not in valid_sources:
             raise ValueError(
@@ -357,7 +366,8 @@ class Scheduler:
             for code in expected_status:
                 if not isinstance(code, int) or not (100 <= code <= 599):
                     raise ValueError(
-                        "webhook_config.expected_status_codes must contain valid HTTP status codes (100-599)"
+                        "webhook_config.expected_status_codes must contain "
+                        "valid HTTP status codes (100-599)"
                     )
 
     @staticmethod
@@ -481,7 +491,7 @@ class Scheduler:
 
         matched: list[dict] = []
         async with self._lock:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             for schedule in self._schedules:
                 if schedule.get("paused"):
                     continue
@@ -665,7 +675,7 @@ class Scheduler:
                     break
             if schedule is None:
                 raise ValueError(f"Schedule '{schedule_id}' not found")
-            schedule["last_run"] = datetime.now(timezone.utc).isoformat()
+            schedule["last_run"] = datetime.now(UTC).isoformat()
             try:
                 await asyncio.to_thread(self._save)
             except Exception as e:
@@ -730,7 +740,7 @@ class Scheduler:
                 delay = self._compute_tick_delay()
                 try:
                     await asyncio.wait_for(self._wake.wait(), timeout=delay)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 await self._tick()
             except asyncio.CancelledError:
@@ -745,7 +755,7 @@ class Scheduler:
         miss its run_at by up to 58s. Now we peek at the earliest pending
         next_run and sleep that long (min 1s, max 60s)."""
         try:
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            now = datetime.now(UTC).replace(tzinfo=None)
             soonest: datetime | None = None
             for schedule in self._schedules:
                 if schedule.get("paused"):
@@ -780,7 +790,7 @@ class Scheduler:
         attempt = schedule.get("retry_count", 1)
         base = schedule.get("retry_backoff_seconds", DEFAULT_RETRY_BACKOFF_SECONDS)
         delay = min(base * (2 ** max(0, attempt - 1)), MAX_BACKOFF_SECONDS)
-        retry_time = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        retry_time = datetime.now(UTC) + timedelta(seconds=delay)
         return retry_time.isoformat()
 
     async def _execute_and_record(self, schedule: dict) -> None:
@@ -879,7 +889,7 @@ class Scheduler:
 
     async def _handle_failure(self, schedule: dict, error: Exception) -> None:
         """Track failure and schedule retry if within limits."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         schedule["consecutive_failures"] = schedule.get("consecutive_failures", 0) + 1
         schedule["last_error"] = str(error)[:500]
         schedule["last_error_at"] = now.isoformat()
@@ -918,7 +928,7 @@ class Scheduler:
         to_fire: list[dict] = []
 
         async with self._lock:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             now_naive = now.replace(tzinfo=None)
 
             for schedule in self._schedules:

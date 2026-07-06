@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import sys
 
 from src.odin.plan_loader import load_plan
-from src.odin.planner import PlanValidationError, Planner
+from src.odin.planner import Planner, PlanValidationError
 from src.odin.registry import ToolRegistry
 from src.odin.reporter import Reporter
 

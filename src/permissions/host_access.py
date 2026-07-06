@@ -9,8 +9,14 @@ from ..odin_log import get_logger
 
 log = get_logger("host_access")
 
-_request_host_scope: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("_request_host_scope", default=None)
-_request_default_host: contextvars.ContextVar[str] = contextvars.ContextVar("_request_default_host", default="")
+_request_host_scope: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "_request_host_scope",
+    default=None,
+)
+_request_default_host: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_request_default_host",
+    default="",
+)
 
 
 class HostAccessEntry:
@@ -38,7 +44,11 @@ class HostAccessEntry:
 class HostAccessManager:
     """Per-user host access control with defaults and persistence."""
 
-    def __init__(self, path: str = "./data/host_access.json", available_hosts: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        path: str = "./data/host_access.json",
+        available_hosts: list[str] | None = None,
+    ) -> None:
         self._path = Path(path)
         self._lock = asyncio.Lock()
         self._users: dict[str, HostAccessEntry] = {}
@@ -157,7 +167,12 @@ class HostAccessManager:
             result[uid] = entry.to_dict()
         return result
 
-    async def set_user(self, user_id: str, allowed_hosts: list[str] | None, default_host: str) -> None:
+    async def set_user(
+        self,
+        user_id: str,
+        allowed_hosts: list[str] | None,
+        default_host: str,
+    ) -> None:
         async with self._lock:
             if allowed_hosts is None:
                 valid_hosts = None
@@ -177,7 +192,12 @@ class HostAccessManager:
                 default_host=default_host,
             )
             self._save()
-            log.info("Host access updated for user %s: hosts=%s, default=%s", user_id, valid_hosts, default_host)
+            log.info(
+                "Host access updated for user %s: hosts=%s, default=%s",
+                user_id,
+                valid_hosts,
+                default_host,
+            )
 
     async def delete_user(self, user_id: str) -> bool:
         async with self._lock:
@@ -203,4 +223,8 @@ class HostAccessManager:
                 default_host=default_host,
             )
             self._save()
-            log.info("Default host access policy updated: hosts=%s, default=%s", valid_hosts, default_host)
+            log.info(
+                "Default host access policy updated: hosts=%s, default=%s",
+                valid_hosts,
+                default_host,
+            )

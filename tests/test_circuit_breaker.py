@@ -6,12 +6,10 @@ CircuitOpenError, thread safety, and configuration.
 from __future__ import annotations
 
 import time
-from unittest.mock import patch
 
 import pytest
 
 from src.llm.circuit_breaker import CircuitBreaker, CircuitOpenError
-
 
 # ---------------------------------------------------------------------------
 # CircuitOpenError

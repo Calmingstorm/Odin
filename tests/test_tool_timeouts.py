@@ -12,8 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.config.schema import ToolsConfig, Config
-
+from src.config.schema import Config, ToolsConfig
 
 # ---------------------------------------------------------------------------
 # ToolsConfig.tool_timeouts
@@ -146,7 +145,7 @@ class TestExecutorPerToolTimeout:
 
         def close_and_raise(coro, *, timeout=None):
             coro.close()
-            raise asyncio.TimeoutError
+            raise TimeoutError
 
         with patch("asyncio.wait_for", side_effect=close_and_raise):
             result = await executor.execute("run_command", {"command": "sleep 100"})
@@ -162,7 +161,7 @@ class TestExecutorPerToolTimeout:
 
         def close_and_raise(coro, *, timeout=None):
             coro.close()
-            raise asyncio.TimeoutError
+            raise TimeoutError
 
         with patch("asyncio.wait_for", side_effect=close_and_raise):
             result = await executor.execute("write_file", {})
@@ -177,7 +176,7 @@ class TestExecutorPerToolTimeout:
 
         def close_and_raise(coro, *, timeout=None):
             coro.close()
-            raise asyncio.TimeoutError
+            raise TimeoutError
 
         with patch("asyncio.wait_for", side_effect=close_and_raise):
             await executor.execute("run_command", {"command": "slow"})
@@ -211,8 +210,8 @@ class TestAgentPerToolTimeout:
         mgr.kill(agent_id)
 
     async def test_agent_uses_per_tool_timeout(self):
-        from src.agents.manager import _run_agent, AgentInfo, TOOL_EXEC_TIMEOUT
-        import time
+
+        from src.agents.manager import AgentInfo, _run_agent
 
         agent = AgentInfo(
             id="test1", label="test", goal="test", channel_id="ch1",
@@ -255,7 +254,7 @@ class TestAgentPerToolTimeout:
         assert 45 in tool_timeouts_used
 
     async def test_agent_default_timeout_without_override(self):
-        from src.agents.manager import _run_agent, AgentInfo, TOOL_EXEC_TIMEOUT
+        from src.agents.manager import TOOL_EXEC_TIMEOUT, AgentInfo, _run_agent
 
         agent = AgentInfo(
             id="test2", label="test", goal="test", channel_id="ch1",
@@ -304,8 +303,8 @@ class TestAgentPerToolTimeout:
 
 class TestSkillManagerPerToolTimeout:
     def test_accepts_tool_timeouts(self, tmp_path):
-        from src.tools.skill_manager import SkillManager
         from src.tools.executor import ToolExecutor
+        from src.tools.skill_manager import SkillManager
         executor = ToolExecutor()
         mgr = SkillManager(
             str(tmp_path), executor, tool_timeouts={"my_skill": 30},
@@ -313,8 +312,8 @@ class TestSkillManagerPerToolTimeout:
         assert mgr._tool_timeouts == {"my_skill": 30}
 
     def test_default_empty_timeouts(self, tmp_path):
-        from src.tools.skill_manager import SkillManager
         from src.tools.executor import ToolExecutor
+        from src.tools.skill_manager import SkillManager
         executor = ToolExecutor()
         mgr = SkillManager(str(tmp_path), executor)
         assert mgr._tool_timeouts == {}
@@ -361,6 +360,7 @@ class TestConfigYAMLCompat:
 class TestToolTimeoutsAPI:
     def _make_app(self, bot):
         from aiohttp import web
+
         from src.tools.registry import get_tool_definitions
 
         app = web.Application()
@@ -389,13 +389,17 @@ class TestToolTimeoutsAPI:
                 for k, v in overrides.items():
                     if not isinstance(k, str) or not isinstance(v, (int, float)) or v <= 0:
                         return web.json_response(
-                            {"error": f"invalid timeout for '{k}': must be a positive number"}, status=400,
+                            {"error": f"invalid timeout for '{k}': must be a positive "
+                                      f"number"}, status=400,
                         )
                 bot.config.tools.tool_timeouts = {k: int(v) for k, v in overrides.items()}
             default = body.get("default_timeout")
             if default is not None:
                 if not isinstance(default, (int, float)) or default <= 0:
-                    return web.json_response({"error": "default_timeout must be a positive number"}, status=400)
+                    return web.json_response(
+                        {"error": "default_timeout must be a positive number"},
+                        status=400,
+                    )
                 bot.config.tools.command_timeout_seconds = int(default)
             return web.json_response({
                 "default_timeout": bot.config.tools.command_timeout_seconds,
