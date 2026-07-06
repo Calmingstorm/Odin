@@ -167,6 +167,47 @@ class TestToolParity:
             assert TOOL_MAP[t["name"]] is t, "TOOL_MAP values must BE the TOOLS entries"
 
 
+class TestBackendGatedVisibility:
+    """Backend-gated tools must be INVISIBLE to the model when their
+    backend isn't configured (tool_catalog.merged_definitions) — otherwise
+    the LLM keeps calling tools that can only fail. Previously untested;
+    pinned during RFC-004 soak at Aaron's request (2026-07-06).
+
+    Gated groups: claude_code (needs tools.claude_code_host), the four
+    email tools (need email.enabled), issue_tracker (needs
+    issue_tracker.enabled).
+    """
+
+    GATED = {"claude_code", "email_send", "email_search", "email_read",
+             "email_list_recent", "issue_tracker"}
+
+    def _catalog_names(self, **config_kwargs) -> set[str]:
+        from src.config.schema import Config
+        from src.discord.client import OdinBot
+
+        bot = OdinBot(
+            Config(discord={"token": "pin"}, permissions={"default_tier": "admin"},
+                   **config_kwargs)
+        )
+        return {t["name"] for t in bot.tool_catalog.merged_definitions()}
+
+    def test_unconfigured_backends_are_invisible(self):
+        names = self._catalog_names()
+        leaked = self.GATED & names
+        assert not leaked, f"backend-gated tools visible without config: {sorted(leaked)}"
+        # exact arithmetic: full registry minus the six gated tools
+        assert len(names) == len(EXPECTED_TOOL_ORDER) - len(self.GATED)
+
+    def test_configured_claude_code_is_visible(self):
+        names = self._catalog_names(
+            tools={
+                "claude_code_host": "localhost",
+                "hosts": {"localhost": {"address": "127.0.0.1", "ssh_user": "root", "os": "linux"}},
+            }
+        )
+        assert "claude_code" in names
+
+
 class TestRegistryMutabilitySemantics:
     """Current semantics, pinned as-is (R1 advisory #3): TOOL_MAP builds once;
     the defs cache rebuilds from the live TOOLS list on invalidation."""
