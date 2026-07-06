@@ -1,6 +1,6 @@
 # RFC-003: CI Test Gate + Web API Decomposition
 
-**Status:** DRAFT — awaiting Odin review
+**Status:** PLAN OF RECORD — Odin LGTM 2026-07-05 conditional on the R1 amendments, applied below
 **Author:** Claude (with Aaron's directive)
 **Reviewer:** Odin
 **Depends on:** RFC-002 (facade retirement, shipped v3.46.0)
@@ -28,14 +28,14 @@ Non-goals: zero behavior change, zero endpoint URL/schema changes, no new endpoi
 
 ### 3.1 P0 — the CI gate (`.github/workflows/test.yml` + `scripts/ci/lint_gate.py`)
 
-- Triggers: `pull_request` (all branches) + `push` to master. Concurrency-cancel per ref.
+- Triggers: `pull_request` (all branches) + `push` to master. Concurrency-cancel per ref. `actions/checkout` with `fetch-depth: 0` (R1) — the lint gate needs real history for `git merge-base` on PR merge refs.
 - Job `tests` (ubuntu-latest, Python 3.12, pip cache): `pip install -e ".[dev]"` → `pytest -q` (asyncio auto; ~2 min). The 4 local skips must skip identically in CI; anything newly failing in CI gets a skip-with-reason or a fix in P0 itself — the gate merges green.
 - Job `lint-no-new`: full `ruff check` cannot gate (1,470 pre-existing findings), so the gate is the finding-set DIFF: `scripts/ci/lint_gate.py` (committed, stdlib-only — the content-normalized comparator proven during RFC-002) runs ruff at the PR merge-base and at HEAD (via `git worktree`), normalizes findings to (file, code, source-line-text), and fails on any NEW finding while printing resolved ones. Push-to-master runs report-only.
 - Explicitly NOT in P0: coverage gates, Windows matrix, pyright — future work, listed §7.
 
 ### 3.2 The carve — domain modules under `src/web/api/`
 
-`src/web/api.py` becomes a package: `src/web/api/__init__.py` keeps the public entry `create_api_routes(bot)` (same name, same import path `from src.web.api import create_api_routes` — `src/health/server.py` and tests keep working) and composes per-domain registrars:
+`src/web/api.py` becomes a package: `src/web/api/__init__.py` keeps the public entry `create_api_routes(bot)` AND (R1) the full compatibility surface live consumers actually use — `setup_api(app, bot)`, re-exports of `_is_sensitive_key`/`_redact_config`/`_safe_int_param` from `common.py`, and a module-level `process_web_chat` binding so `patch("src.web.api.process_web_chat", ...)` seams keep working. P1 lands an import-compatibility pin (a test importing every one of those names from `src.web.api`) BEFORE the swap, so P5 cannot break them undetected. Composition:
 
 ```
 src/web/api/
@@ -65,14 +65,14 @@ P1 lands `tests/characterization/test_api_route_parity.py` BEFORE any carve:
 
 ### 3.4 Lint burn-down (scoped)
 
-After the carve, each domain module is small enough to clean. P6 fixes ALL ruff findings inside `src/web/api/` (est. several hundred of the baseline — mostly E501) and re-baselines the CI lint gate accordingly. Debt outside `src/web/` stays untouched (explicitly out of scope).
+After the carve, each domain module is small enough to clean. P6 fixes ALL ruff findings inside `src/web/api/` (measured: 59 — 49×E501, 7×I001, 1 each E401/N806/N811; R1 corrected the earlier overestimate) and re-baselines the CI lint gate accordingly. Debt outside `src/web/` stays untouched (explicitly out of scope).
 
 ## 4. Phases (one PR each into `refactor/api-decomposition`; every PR Odin-reviewed; CI green required from P1 on)
 
 | Phase | Scope | Key gates |
 |---|---|---|
 | **P0** | `test.yml` + `scripts/ci/lint_gate.py`; fix/skip-with-reason anything CI-red that is green locally | both jobs green on the P0 PR itself; suite time ≤ ~5 min |
-| **P1** | Route-parity characterization (set + order + dispatch spot-checks); `common.py` extracted with api.py re-imports (no handler moves yet) | parity test green pre-carve; zero new lint |
+| **P1** | Route-parity characterization (set + order + dispatch spot-checks); import-compatibility pin for `create_api_routes`/`setup_api`/helpers/`process_web_chat` (R1); `common.py` extracted with api.py re-imports (no handler moves yet) | parity + import pins green pre-carve; zero new lint |
 | **P2** | Carve wave 1: `llm_admin`, `security`, `observability` | parity green; per-domain web tests green; api.py shrinks accordingly |
 | **P3** | Carve wave 2: `knowledge_mem`, `skills_api`, `schedules_api` | same |
 | **P4** | Carve wave 3: `sessions_chat`, `agents_loops` | same |
@@ -107,4 +107,5 @@ Windows CI matrix; pyright/Protocol typing for the Deps surfaces; coverage measu
 
 ## 8. Revision log
 
+- R1 (2026-07-05, from Odin's review): package `__init__` preserves the FULL live import surface (`setup_api`, `_is_sensitive_key`, `_redact_config`, `_safe_int_param`, `process_web_chat` patch seam), pinned by a P1 import-compatibility test before the swap; P0 checkout uses `fetch-depth: 0` for merge-base availability; lint burn-down estimate corrected to the measured 59 findings.
 - R0 (2026-07-05): initial draft for Odin review.
