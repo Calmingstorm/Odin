@@ -5,12 +5,13 @@ cascading into others by capping how many concurrent operations each category
 can have in flight. When a bulkhead is full, new requests either queue (up to
 a configurable depth) or are rejected immediately.
 """
+
 from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from ..odin_log import get_logger
 
@@ -89,7 +90,10 @@ class Bulkhead:
             self._last_rejection = time.monotonic()
             log.warning(
                 "Bulkhead '%s' rejecting request: %d active, %d queued (max %d)",
-                self.name, self._active, self._queued, self._max_queued,
+                self.name,
+                self._active,
+                self._queued,
+                self._max_queued,
             )
             raise BulkheadFullError(self.name, self._max_concurrent, self._max_queued)
 
@@ -146,8 +150,12 @@ class BulkheadRegistry:
         """Create and register a named bulkhead. Returns the bulkhead."""
         bh = Bulkhead(name, max_concurrent, max_queued)
         self._bulkheads[name] = bh
-        log.info("Registered bulkhead '%s': max_concurrent=%d, max_queued=%d",
-                 name, max_concurrent, max_queued)
+        log.info(
+            "Registered bulkhead '%s': max_concurrent=%d, max_queued=%d",
+            name,
+            max_concurrent,
+            max_queued,
+        )
         return bh
 
     def get(self, name: str) -> Bulkhead | None:
@@ -179,7 +187,6 @@ class BulkheadRegistry:
         result: dict = {"bulkhead_count": len(self._bulkheads)}
         for name, bh in self._bulkheads.items():
             m = bh.get_metrics()
-            for key in ("active", "queued", "total", "rejected", "errors",
-                        "max_concurrent"):
+            for key in ("active", "queued", "total", "rejected", "errors", "max_concurrent"):
                 result[f"bulkhead_{name}_{key}"] = m[key]
         return result

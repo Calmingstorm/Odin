@@ -8,10 +8,21 @@ from __future__ import annotations
 
 import shlex
 
-ALLOWED_ACTIONS = frozenset({
-    "clone", "status", "diff", "branch", "commit", "push", "log", "pull",
-    "checkout", "fetch", "stash",
-})
+ALLOWED_ACTIONS = frozenset(
+    {
+        "clone",
+        "status",
+        "diff",
+        "branch",
+        "commit",
+        "push",
+        "log",
+        "pull",
+        "checkout",
+        "fetch",
+        "stash",
+    }
+)
 
 _MAX_LOG_ENTRIES = 50
 _DEFAULT_LOG_ENTRIES = 20
@@ -30,8 +41,7 @@ def build_git_command(action: str, params: dict) -> str | list[str]:
     """
     if action not in ALLOWED_ACTIONS:
         raise ValueError(
-            f"Unknown git action: {action}. "
-            f"Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
+            f"Unknown git action: {action}. Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
         )
 
     builder = _BUILDERS.get(action)
@@ -149,8 +159,10 @@ def _build_push(params: dict) -> list[str]:
     freshness_script = (
         f"git -C {sq_repo} fetch {sq_remote} --quiet 2>&1 && "
         f"LOCAL=$(git -C {sq_repo} rev-parse HEAD) && "
-        f"MERGE_BASE=$(git -C {sq_repo} merge-base HEAD {sq_remote}/$(git -C {sq_repo} rev-parse --abbrev-ref HEAD) 2>/dev/null || echo NONE) && "
-        f"REMOTE=$(git -C {sq_repo} rev-parse {sq_remote}/$(git -C {sq_repo} rev-parse --abbrev-ref HEAD) 2>/dev/null || echo NONE) && "
+        f"MERGE_BASE=$(git -C {sq_repo} merge-base HEAD "
+        f"{sq_remote}/$(git -C {sq_repo} rev-parse --abbrev-ref HEAD) 2>/dev/null || echo NONE) && "
+        f"REMOTE=$(git -C {sq_repo} rev-parse "
+        f"{sq_remote}/$(git -C {sq_repo} rev-parse --abbrev-ref HEAD) 2>/dev/null || echo NONE) && "
         f'if [ "$REMOTE" = "NONE" ]; then echo "FRESH:no_remote_tracking"; '
         f'elif [ "$LOCAL" = "$REMOTE" ]; then echo "FRESH:up_to_date"; '
         f'elif [ "$MERGE_BASE" = "$REMOTE" ]; then echo "FRESH:ahead"; '

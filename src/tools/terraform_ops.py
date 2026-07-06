@@ -9,10 +9,20 @@ from __future__ import annotations
 
 import shlex
 
-ALLOWED_ACTIONS = frozenset({
-    "init", "plan", "apply", "output", "show", "validate",
-    "fmt", "state", "workspace", "import",
-})
+ALLOWED_ACTIONS = frozenset(
+    {
+        "init",
+        "plan",
+        "apply",
+        "output",
+        "show",
+        "validate",
+        "fmt",
+        "state",
+        "workspace",
+        "import",
+    }
+)
 
 
 def _sq(value: str) -> str:
@@ -34,8 +44,7 @@ def build_terraform_command(action: str, params: dict) -> str:
     """
     if action not in ALLOWED_ACTIONS:
         raise ValueError(
-            f"Unknown terraform action: {action}. "
-            f"Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
+            f"Unknown terraform action: {action}. Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
         )
     builder = _BUILDERS.get(action)
     if builder is None:
@@ -56,7 +65,7 @@ def _build_init(params: dict) -> str:
         parts.append("-reconfigure")
     if migrate_state:
         parts.append("-migrate-state")
-    for k, v in (backend_config.items() if isinstance(backend_config, dict) else []):
+    for k, v in backend_config.items() if isinstance(backend_config, dict) else []:
         parts.append(f"-backend-config={_sq(f'{k}={v}')}")
     parts.append("-input=false")
     return " ".join(parts)
@@ -73,11 +82,11 @@ def _build_plan(params: dict) -> str:
     parts = ["terraform"] + _chdir_flag(params) + ["plan"]
     if destroy:
         parts.append("-destroy")
-    for k, v in (var.items() if isinstance(var, dict) else []):
+    for k, v in var.items() if isinstance(var, dict) else []:
         parts.append(f"-var={_sq(f'{k}={v}')}")
     if var_file:
         parts.append(f"-var-file={_sq(var_file)}")
-    for t in (target if isinstance(target, list) else []):
+    for t in target if isinstance(target, list) else []:
         parts.append(f"-target={_sq(str(t))}")
     if out:
         parts.append(f"-out={_sq(out)}")
@@ -154,8 +163,7 @@ def _build_state(params: dict) -> str:
     allowed = {"list", "show", "mv", "rm", "pull"}
     if subaction not in allowed:
         raise ValueError(
-            f"Unknown state subaction: {subaction}. "
-            f"Allowed: {', '.join(sorted(allowed))}"
+            f"Unknown state subaction: {subaction}. Allowed: {', '.join(sorted(allowed))}"
         )
 
     parts = ["terraform"] + _chdir_flag(params) + ["state", subaction]
@@ -189,8 +197,7 @@ def _build_workspace(params: dict) -> str:
     allowed = {"list", "select", "new", "delete", "show"}
     if subaction not in allowed:
         raise ValueError(
-            f"Unknown workspace subaction: {subaction}. "
-            f"Allowed: {', '.join(sorted(allowed))}"
+            f"Unknown workspace subaction: {subaction}. Allowed: {', '.join(sorted(allowed))}"
         )
 
     parts = ["terraform"] + _chdir_flag(params) + ["workspace", subaction]
@@ -215,7 +222,7 @@ def _build_import(params: dict) -> str:
     var_file = params.get("var_file", "")
 
     parts = ["terraform"] + _chdir_flag(params) + ["import"]
-    for k, v in (var.items() if isinstance(var, dict) else []):
+    for k, v in var.items() if isinstance(var, dict) else []:
         parts.append(f"-var={_sq(f'{k}={v}')}")
     if var_file:
         parts.append(f"-var-file={_sq(var_file)}")

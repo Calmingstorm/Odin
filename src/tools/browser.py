@@ -4,11 +4,12 @@ Launches a local headless Chromium on first use and reuses it across calls.
 All operations use isolated browser contexts (incognito) that are cleaned up
 after each call. Falls back to a remote CDP URL if configured.
 """
+
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from ..odin_log import get_logger
 
@@ -34,6 +35,7 @@ DEFAULT_USER_AGENT = (
 def _validate_url(url: str, allowed_urls: list[str] | None = None) -> None:
     """Reject dangerous URL schemes and SSRF targets."""
     from .url_safety import validate_url_safe
+
     validate_url_safe(url, allowed_urls=allowed_urls)
 
 
@@ -106,9 +108,7 @@ class BrowserManager:
                     )
                     log.info("Launched native headless Chromium")
                 else:
-                    self._browser = await self._playwright.chromium.connect_over_cdp(
-                        self._cdp_url
-                    )
+                    self._browser = await self._playwright.chromium.connect_over_cdp(self._cdp_url)
                     log.info("Connected to remote browser at %s", self._cdp_url.split("?")[0])
                 self._browser.on("disconnected", self._on_browser_disconnected)
             except Exception as e:
@@ -132,12 +132,15 @@ class BrowserManager:
         if not self._native:
             try:
                 cdp = await page.context.new_cdp_session(page)
-                await cdp.send("Emulation.setDeviceMetricsOverride", {
-                    "width": self._viewport["width"],
-                    "height": self._viewport["height"],
-                    "deviceScaleFactor": 1,
-                    "mobile": False,
-                })
+                await cdp.send(
+                    "Emulation.setDeviceMetricsOverride",
+                    {
+                        "width": self._viewport["width"],
+                        "height": self._viewport["height"],
+                        "deviceScaleFactor": 1,
+                        "mobile": False,
+                    },
+                )
             except Exception:
                 pass
         return context, page
@@ -190,7 +193,8 @@ class BrowserManager:
 
 
 async def handle_browser_screenshot(
-    manager: BrowserManager, inp: dict,
+    manager: BrowserManager,
+    inp: dict,
 ) -> tuple[str, bytes | None]:
     """Navigate to a URL, take a screenshot, return (description, png_bytes)."""
     url = inp["url"]
@@ -213,7 +217,8 @@ async def handle_browser_screenshot(
 
 
 async def handle_browser_read_page(
-    manager: BrowserManager, inp: dict,
+    manager: BrowserManager,
+    inp: dict,
 ) -> str:
     """Navigate to a URL, extract visible text content."""
     url = inp["url"]
@@ -245,7 +250,8 @@ async def handle_browser_read_page(
 
 
 async def handle_browser_read_table(
-    manager: BrowserManager, inp: dict,
+    manager: BrowserManager,
+    inp: dict,
 ) -> str:
     """Navigate to a URL, extract a table as markdown."""
     url = inp["url"]
@@ -259,7 +265,8 @@ async def handle_browser_read_table(
         if wait_seconds:
             await page.wait_for_timeout(wait_seconds * 1000)
 
-        table_data = await page.evaluate("""(index) => {
+        table_data = await page.evaluate(
+            """(index) => {
             const tables = document.querySelectorAll('table');
             if (index >= tables.length) return null;
             const table = tables[index];
@@ -272,7 +279,9 @@ async def handle_browser_read_table(
                 if (cells.length > 0) rows.push(cells);
             }
             return rows;
-        }""", table_index)
+        }""",
+            table_index,
+        )
 
         title = await page.title()
         table_count = await page.evaluate("document.querySelectorAll('table').length")
@@ -300,7 +309,8 @@ async def handle_browser_read_table(
 
 
 async def handle_browser_click(
-    manager: BrowserManager, inp: dict,
+    manager: BrowserManager,
+    inp: dict,
 ) -> str:
     """Click an element on a page by CSS selector."""
     url = inp["url"]
@@ -328,7 +338,8 @@ async def handle_browser_click(
 
 
 async def handle_browser_fill(
-    manager: BrowserManager, inp: dict,
+    manager: BrowserManager,
+    inp: dict,
 ) -> str:
     """Fill a form field on a page by CSS selector."""
     url = inp["url"]
@@ -363,7 +374,8 @@ async def handle_browser_fill(
 
 
 async def handle_browser_evaluate(
-    manager: BrowserManager, inp: dict,
+    manager: BrowserManager,
+    inp: dict,
 ) -> str:
     """Run JavaScript on a page and return the result."""
     url = inp["url"]
@@ -385,6 +397,7 @@ async def handle_browser_evaluate(
     # Convert result to string
     if isinstance(result, (dict, list)):
         import json
+
         text = json.dumps(result, indent=2, default=str)
     else:
         text = str(result)

@@ -6,6 +6,7 @@ short-lived (created per call, closed after) — no pool, no persistent
 state.  Gmail's X-GM-RAW search extension is auto-detected from the IMAP
 host and used transparently when available.
 """
+
 from __future__ import annotations
 
 import email as email_lib
@@ -58,7 +59,10 @@ def _extract_body(msg: email_lib.message.Message, max_chars: int) -> str:
                     charset = part.get_content_charset() or "utf-8"
                     text = payload.decode(charset, errors="replace")
                     if len(text) > max_chars:
-                        return text[:max_chars] + f"\n\n[truncated at {max_chars} chars, original {len(text)}]"
+                        return (
+                            text[:max_chars]
+                            + f"\n\n[truncated at {max_chars} chars, original {len(text)}]"
+                        )
                     return text
         for part in msg.walk():
             ct = part.get_content_type()
@@ -68,7 +72,10 @@ def _extract_body(msg: email_lib.message.Message, max_chars: int) -> str:
                     charset = part.get_content_charset() or "utf-8"
                     text = payload.decode(charset, errors="replace")
                     if len(text) > max_chars:
-                        return text[:max_chars] + f"\n\n[truncated at {max_chars} chars, original {len(text)}]"
+                        return (
+                            text[:max_chars]
+                            + f"\n\n[truncated at {max_chars} chars, original {len(text)}]"
+                        )
                     return f"[HTML content]\n{text}"
         return "[no text body found]"
     payload = msg.get_payload(decode=True)
@@ -89,11 +96,13 @@ def _attachment_metadata(msg: email_lib.message.Message) -> list[dict]:
             filename = part.get_filename() or "(unnamed)"
             filename = _decode_header_value(filename)
             size = len(part.get_payload(decode=True) or b"")
-            attachments.append({
-                "filename": filename,
-                "content_type": part.get_content_type(),
-                "size_bytes": size,
-            })
+            attachments.append(
+                {
+                    "filename": filename,
+                    "content_type": part.get_content_type(),
+                    "size_bytes": size,
+                }
+            )
     return attachments
 
 
@@ -158,16 +167,13 @@ def send_email(
         for filepath in attachments:
             real = os.path.realpath(filepath)
             if not any(real.startswith(d + os.sep) or real == d for d in resolved_allowed):
-                raise ValueError(
-                    f"Attachment path '{filepath}' is outside allowed directories"
-                )
+                raise ValueError(f"Attachment path '{filepath}' is outside allowed directories")
             if not os.path.isfile(real):
                 raise ValueError(f"Attachment '{filepath}' is not a file")
             size = os.path.getsize(real)
             if size > max_attachment_bytes:
                 raise ValueError(
-                    f"Attachment '{filepath}' is {size} bytes "
-                    f"(limit {max_attachment_bytes})"
+                    f"Attachment '{filepath}' is {size} bytes (limit {max_attachment_bytes})"
                 )
             ctype, _ = mimetypes.guess_type(real)
             if ctype is None:
@@ -178,7 +184,8 @@ def send_email(
                 att.set_payload(f.read())
             email_lib.encoders.encode_base64(att)
             att.add_header(
-                "Content-Disposition", "attachment",
+                "Content-Disposition",
+                "attachment",
                 filename=Path(real).name,
             )
             msg.attach(att)
@@ -191,8 +198,9 @@ def send_email(
     except Exception as e:
         raise RuntimeError(f"SMTP send failed: {_safe_error(e, password)}") from None
 
-    log.info("Email sent to %s, subject=%r, message_id=%s",
-             all_recipients, subject, msg["Message-ID"])
+    log.info(
+        "Email sent to %s, subject=%r, message_id=%s", all_recipients, subject, msg["Message-ID"]
+    )
 
     return {
         "status": "sent",
@@ -245,7 +253,9 @@ def search_email(
             raw = msg_data[0][1] if isinstance(msg_data[0], tuple) else msg_data[0]
             if isinstance(raw, bytes):
                 msg = email_lib.message_from_bytes(raw)
-                results.append(_message_summary(msg, uid.decode() if isinstance(uid, bytes) else str(uid)))
+                results.append(
+                    _message_summary(msg, uid.decode() if isinstance(uid, bytes) else str(uid))
+                )
 
         return results
     except RuntimeError:
@@ -336,18 +346,22 @@ def list_recent(
             raw_tuple = msg_data[0]
             if isinstance(raw_tuple, tuple):
                 raw = raw_tuple[1]
-                meta_line = raw_tuple[0].decode() if isinstance(raw_tuple[0], bytes) else str(raw_tuple[0])
+                meta_line = (
+                    raw_tuple[0].decode() if isinstance(raw_tuple[0], bytes) else str(raw_tuple[0])
+                )
             else:
                 continue
             msg = email_lib.message_from_bytes(raw)
             summary = _message_summary(msg, uid.decode() if isinstance(uid, bytes) else str(uid))
             if "RFC822.SIZE" in meta_line:
                 import re
+
                 m = re.search(r"RFC822\.SIZE\s+(\d+)", meta_line)
                 if m:
                     summary["size_bytes"] = int(m.group(1))
             if "FLAGS" in meta_line:
                 import re
+
                 m = re.search(r"FLAGS\s*\(([^)]*)\)", meta_line)
                 if m:
                     summary["flags"] = m.group(1).split()

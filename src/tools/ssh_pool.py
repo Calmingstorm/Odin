@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from pathlib import Path
 
 from ..odin_log import get_logger
 
@@ -63,14 +62,22 @@ class SSHConnectionPool:
 
         return [
             "ssh",
-            "-i", ssh_key_path,
-            "-o", f"UserKnownHostsFile={known_hosts_path}",
-            "-o", "StrictHostKeyChecking=yes",
-            "-o", "ConnectTimeout=10",
-            "-o", "BatchMode=yes",
-            "-o", "ControlMaster=auto",
-            "-o", f"ControlPath={socket}",
-            "-o", f"ControlPersist={self.control_persist}",
+            "-i",
+            ssh_key_path,
+            "-o",
+            f"UserKnownHostsFile={known_hosts_path}",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            f"ControlPath={socket}",
+            "-o",
+            f"ControlPersist={self.control_persist}",
             f"{ssh_user}@{host}",
             command,
         ]
@@ -83,8 +90,7 @@ class SSHConnectionPool:
     def get_active_hosts(self) -> list[str]:
         """Return list of host keys with active sockets."""
         return [
-            key for key in self._connections
-            if os.path.exists(os.path.join(self.socket_dir, key))
+            key for key in self._connections if os.path.exists(os.path.join(self.socket_dir, key))
         ]
 
     async def close_host(self, host: str, ssh_user: str = "root") -> bool:
@@ -98,7 +104,11 @@ class SSHConnectionPool:
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "ssh", "-o", f"ControlPath={socket}", "-O", "exit",
+                "ssh",
+                "-o",
+                f"ControlPath={socket}",
+                "-O",
+                "exit",
                 f"{ssh_user}@{host}",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
@@ -107,7 +117,7 @@ class SSHConnectionPool:
             self._connections.pop(key, None)
             log.info("Closed SSH connection to %s@%s", ssh_user, host)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("Timeout closing SSH connection to %s@%s, killing process", ssh_user, host)
             try:
                 proc.kill()

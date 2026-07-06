@@ -76,6 +76,18 @@ registry.py < 250 · executor.py **target < 700, hard ceiling 800** — coherenc
 
 Every phase is one revertable merge commit on the campaign branch; campaign→master is a single merge commit (`git revert -m1` path). Live install rides the campaign branch only during soak, master otherwise.
 
+## R2 — results (code-complete, 2026-07-06)
+
+**Registry**: `registry.py` 1,978 → **84 lines** (composition root + TOOL_MAP + defs cache + startup dup-assertion); 9 positional section modules in `src/tools/defs/` (129–326 lines each). Exact 74-tool order held throughout — every one of the 135 inherited long-line rewraps proven value-identical by the schema-hash contract.
+
+**Executor**: `executor.py` 1,893 → **~730 lines** — the middleware core (execute pipeline, `_try_tool`, recovery, RBAC/risk, SSH plumbing, contextvars, memory persistence primitives) plus the dispatch table. ALL 28 handlers live in 8 domain modules in `src/tools/handlers/` (system, files_docs, browser_web, coding, devops, state, comms, validation — each < 320 lines) behind the late-resolving `HandlerDeps` seam; domain owners are public attributes. The f-string dispatch is retired: the table is the only class-level path, the executor-instance `__dict__` override remains the sanctioned patch seam, and the characterization contract's AST scan permits exactly ONE dynamic `_handle_` spelling in src/ (the resolver's probe).
+
+**Native residue**: skill CRUD/meta/invoke dispatch extracted to `native_tools/skills_tools.py` (registry.py 324 → 193).
+
+**Quality**: `src/tools/` package + touched native files at **ZERO ruff findings** (~230 pre-existing findings resolved campaign-wide, incl. 7 verified StrEnum conversions); suite 6,079 → **6,12x green** throughout (+40 P0 contracts and wave additions); every phase PR CI-gated, new=0 at every step.
+
+**Declared deviations from R1**: (1) the production startup assertion pins INVARIANTS (no duplicate tool names; every table entry resolves on its owner at construction) rather than the literal `len(TOOLS)==74` — a hardcoded count in prod would fail the next legitimate tool addition in the wrong place; the 74-count/order pin lives in the characterization contract where changing it is a reviewed edit. (2) The historical executor-instance patch seam was RETAINED via `__dict__`-override precedence instead of re-pointing the 13+ existing patch sites — strictly better than the planned re-pointing (zero churn on patchers, both seams live).
+
 ## R1 amendment log (Odin plan review, 2026-07-05)
 
 Blockers, all fixed: **B1** dispatch table is late-bound `name → (owner_key, attr)` resolved at call time, never pre-bound (§3.2); **B2** patch-seam contract added to P0, re-pointed per wave (§4); **B3** HandlerDeps stateful inventory enumerated with identity contract (§3.3, §4); **B4** native skill-dispatch pins added to P0, gating the extraction (§4); **B5** lint scope stated precisely (§6). Advisories, all adopted: **A1** skill extraction resequenced to P3, ahead of handler waves; **A2** `state.py` split out of wave 1 into P6 for isolated lock review; **A3** TOOLS/TOOL_MAP mutability semantics pinned as-is; **A4** positional-slice discipline reaffirmed; **A5** production startup assertions in P7; **A6** middleware pins expanded (contextvars, denial metrics, timeout error, unknown-tool bypass); **A7** analyze_pdf helpers stay local; **A8** browser/static-web stay merged; **A9** executor core soft 700 / hard 800, no line-count theater; **A10** negative-path soak battery specified in P7. Path correction applied (`src/discord/native_tools/registry.py`). Re-review verdict: **LGTM, no remaining blockers**; final advisory adopted — P7 spelling-ban scan is AST/token-aware rather than raw grep.
