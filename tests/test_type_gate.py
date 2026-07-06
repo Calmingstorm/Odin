@@ -57,6 +57,27 @@ class TestParseFinding:
             "src/foo.py", "?", "Something odd")
 
 
+class TestToothlessGateRefusal:
+    """Odin's PR #179 blocker: a failed mypy launch (exit 1, nothing
+    parseable, complaint on stderr) must be a SETUP error, never a clean
+    zero-findings pass on both trees."""
+
+    def test_exit_1_with_no_parseable_findings_is_setup_error(self):
+        import pytest
+        with pytest.raises(SystemExit) as excinfo:
+            type_gate.parse_output(
+                "", 1, "/usr/bin/python3: No module named mypy\n")
+        assert excinfo.value.code == 2
+
+    def test_exit_1_with_findings_parses_normally(self):
+        out = 'src/foo.py:1: error: Bad  [arg-type]\n'
+        result = type_gate.parse_output(out, 1, "")
+        assert sum(result.values()) == 1
+
+    def test_exit_0_clean_tree_is_fine(self):
+        assert type_gate.parse_output("", 0, "") == Counter()
+
+
 class TestMultisetDiff:
     def test_duplicate_identical_error_is_a_regression(self):
         # R1 blocker B1: base has ONE of this key; head has TWO. A plain set

@@ -42,8 +42,9 @@ from pathlib import Path
 
 
 def run(cmd: list[str], cwd: str | None = None, check: bool = True) -> str:
+    """Small subprocess helper (git plumbing; mypy runs live in findings())."""
     res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-    if check and res.returncode not in (0, 1):  # mypy exits 1 when findings exist
+    if check and res.returncode != 0:
         sys.stderr.write(res.stdout + res.stderr)
         raise SystemExit(2)
     return res.stdout
@@ -77,6 +78,29 @@ def parse_finding(line: str) -> tuple[str, str, str] | None:
     return (parts[0], code, message)
 
 
+def parse_output(stdout: str, returncode: int, stderr: str) -> Counter:
+    """Parse a completed mypy run into the finding multiset — or refuse.
+
+    A gate must never be silently toothless: ``python -m mypy`` exits 1
+    both when findings exist AND when the interpreter can't even import
+    mypy ("No module named mypy" — empty stdout, message on stderr). Exit
+    code 1 therefore carries a hard invariant: at least one parseable
+    finding line. Violating it (missing mypy, output-format drift breaking
+    the parser) is a SETUP failure, exit 2 — never a clean pass.
+    """
+    normalized: Counter = Counter()
+    for line in stdout.splitlines():
+        key = parse_finding(line)
+        if key is not None:
+            normalized[key] += 1
+    if returncode == 1 and not normalized:
+        sys.stderr.write(stderr)
+        print("type-gate: mypy exited 1 but produced no parseable findings — "
+              "refusing to pass a toothless gate", file=sys.stderr)
+        raise SystemExit(2)
+    return normalized
+
+
 def findings(tree: str, config: Path) -> Counter:
     """Normalized finding multiset for a checked-out tree.
 
@@ -85,20 +109,18 @@ def findings(tree: str, config: Path) -> Counter:
     gets a throwaway cache dir: deterministic, no cross-tree contamination,
     nothing written into the tree.
     """
-    normalized: Counter = Counter()
     with tempfile.TemporaryDirectory(prefix="type-gate-cache-") as cache:
-        out = run(
+        res = subprocess.run(
             [sys.executable, "-m", "mypy", "src/",
              "--config-file", str(config),
              "--cache-dir", cache,
              "--no-error-summary", "--no-pretty"],
-            cwd=tree,
+            cwd=tree, capture_output=True, text=True,
         )
-    for line in out.splitlines():
-        key = parse_finding(line)
-        if key is not None:
-            normalized[key] += 1
-    return normalized
+    if res.returncode not in (0, 1):
+        sys.stderr.write(res.stdout + res.stderr)
+        raise SystemExit(2)
+    return parse_output(res.stdout, res.returncode, res.stderr)
 
 
 def main() -> int:
@@ -124,6 +146,19 @@ def main() -> int:
     config = Path.cwd() / "mypy.ini"
     if not config.exists():
         print("type-gate: mypy.ini not found in HEAD tree", file=sys.stderr)
+        return 2
+
+    # Fail setup loudly if mypy can't even run (missing module, broken
+    # env) — otherwise both trees would parse to zero findings and the
+    # gate would pass green while checking nothing.
+    probe = subprocess.run(
+        [sys.executable, "-m", "mypy", "--version"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
+        sys.stderr.write(probe.stdout + probe.stderr)
+        print("type-gate: mypy is not runnable in this environment "
+              "(pip install -e '.[dev]')", file=sys.stderr)
         return 2
 
     head_findings = findings(".", config)
