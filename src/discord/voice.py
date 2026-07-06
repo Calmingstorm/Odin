@@ -80,7 +80,7 @@ def _patch_voice_recv_dave():
 
             return _original_decode(self, packet)
 
-        _patched_decode._odin_dave_patched = True
+        _patched_decode._odin_dave_patched = True  # type: ignore[attr-defined]  # patch-once marker on the function object
         PacketDecoder._decode_packet = _patched_decode
         log.info("Patched voice_recv with DAVE decryption support")
     except ImportError:

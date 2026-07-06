@@ -62,6 +62,13 @@ mypy through `tool_loop`, `intake_pipeline`, `agents_tasks`, and
 - Proposed fix: import alias (`import json as _json`) or rename the parameter (`json_body=` keeping `json=` at the aiohttp call); regression test with a text/plain response.
 - Aaron verdict: PENDING · Status: OPEN
 
+## Campaign close-out (P5, 2026-07-06)
+
+All four annotation waves are merged; **the live mypy output equals the TS
+ledger + the dead import, exactly** (9 lines). Every non-ledgered finding in
+this file's appendix has been resolved; the appendix stays as the historical
+baseline record. Verdict fields below remain PENDING until Aaron rules.
+
 ## Wave guidance (observations, not runtime bugs)
 
 - `src/agents/manager.py` — a method literally named `list` shadows `builtins.list` in 14 findings' annotations under future-annotations. Wave fix is type-only: spell `builtins.list[...]` in that module (renaming the public method would be an API change — out of wave scope).

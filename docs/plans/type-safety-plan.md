@@ -71,6 +71,15 @@ Blocker, fixed: **B1** — the type gate compares **Counter multisets** of norma
 
 No wall-clock pressure between phases; the gate protects from P0 onward regardless of wave pace.
 
+## 6b. R2 — results (code-complete, 2026-07-06)
+
+**Baseline 388 → 9, and the nine survivors are exactly the findings ledger**: TS-0001 (`utility.py:66,68`), TS-0002 (`diff_tracker.py:91,97`), TS-0003 (`odin/cli.py:76`), TS-0004 (`skill_context.py:162`), TS-0005 (`:336` ×2), and the dead `src.setup` import. The checker's remaining output and the suspected-real-bug ledger are the same list — the campaign's intended end state.
+
+- Waves: P1 small packages −50 (PR #180) · P2 web+agents −37 (#181) · P3 knowledge+tools −75 (#182) · P4 discord −217 (#183). Every wave Odin-reviewed; suite pinned at 6,164 passed / 4 skipped throughout; both gates `new=0` on every PR. Odin's wave verification evolved into an AST-equivalence check (strip annotations/TYPE_CHECKING → compare) — stronger than the plan's checklist and recommended for any future annotation work.
+- The single highest-leverage mechanic: typing the RFC-002 narrow-deps dataclass fields via `TYPE_CHECKING` imports (~180 findings). Each collapse lit up a handful of previously-invisible findings (§1's reach effect), several of which were annotation *lies* worth fixing (`-> str` handlers returning tuples, a Literal-valued policy field, decorator-as-type middleware annotations).
+- **P5 executed as amended (measured deviation):** `check_untyped_defs = True` adopted globally — measured cost was exactly ONE finding (a monkey-patch marker attr, reasoned ignore), so every function body is now checked. The planned per-package `disallow_untyped_defs` flips were **measured at 228 findings and deferred** to a possible future campaign: flipping mid-P5 would either violate the campaign's own `new=0` discipline or smuggle a fifth annotation wave into a config phase. The operative regression lock is the Counter-multiset gate + full-body checking: new errors of any kind, in any file, block the PR.
+- Bugs found by the campaign before any fix shipped: 5 confirmed (TS-0001…0005), two sharing the `_run_on_host` tuple-return root cause, one hiding behind a pre-existing `type: ignore`.
+
 ## 7. Risks
 
 - **pydantic + `from __future__ import annotations` interplay** (`config/schema.py` wave): pydantic v2 resolves stringified annotations routinely; the extensive config test coverage plus full suite gates the wave. If a specific model misbehaves, that module skips the future-import (annotations stay evaluated — also inert).
