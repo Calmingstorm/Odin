@@ -4,6 +4,7 @@ import asyncio
 import contextvars
 import json
 from pathlib import Path
+from typing import Any
 
 from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
@@ -34,7 +35,12 @@ from .recovery import (
 )
 from .result_validator import ResultValidationStats, ToolResult, validate_tool_result
 from .risk_classifier import RiskStats, classify_tool
-from .ssh import is_local_address, run_local_command, run_ssh_command
+from .ssh import (
+    OutputCallback,
+    is_local_address,
+    run_local_command,
+    run_ssh_command,
+)
 from .ssh_pool import SSHConnectionPool
 
 log = get_logger("tools")
@@ -344,9 +350,11 @@ class ToolExecutor:
 
         denial = self.check_permission(tool_name, user_id)
         if denial:
+            # A truthy denial implies _permission_manager and user_id were
+            # both set (check_permission returns None otherwise).
             log.warning(
                 "RBAC denied %s for user %s on tool %s",
-                self._permission_manager.get_tier(user_id),
+                self._permission_manager.get_tier(user_id),  # type: ignore[union-attr, arg-type]
                 user_id,
                 tool_name,
             )
@@ -578,7 +586,7 @@ class ToolExecutor:
         command: str,
         ssh_user: str = "root",
         timeout: int | None = None,
-        on_output: object | None = None,
+        on_output: OutputCallback | None = None,
     ) -> tuple[int, str]:
         """Execute a command locally or via SSH depending on host address.
 
@@ -606,7 +614,7 @@ class ToolExecutor:
                     return 1, "Error: subprocess bulkhead full — too many concurrent local commands"
             return await run_local_command(command, timeout=timeout, on_output=on_output)
         ssh_retry = self.config.ssh_retry
-        ssh_kwargs = dict(
+        ssh_kwargs: dict[str, Any] = dict(
             host=address,
             command=command,
             ssh_key_path=self.config.ssh_key_path,

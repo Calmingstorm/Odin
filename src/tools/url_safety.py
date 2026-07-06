@@ -127,7 +127,9 @@ def is_url_blocked(
             resolved = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
             for _family, _type, _proto, _canonname, sockaddr in resolved:
                 ip = sockaddr[0]
-                if _is_ip_blocked(ip):
+                # AF_UNSPEC+SOCK_STREAM resolution yields only AF_INET/6
+                # sockaddrs, whose first element is always str.
+                if _is_ip_blocked(ip):  # type: ignore[arg-type]
                     log.warning("DNS rebinding blocked: %s resolves to private IP %s", host, ip)
                     return True
         except socket.gaierror:
