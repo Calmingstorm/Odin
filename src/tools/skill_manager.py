@@ -9,12 +9,12 @@ import subprocess
 import sys
 import time
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
-from collections.abc import Callable
 from typing import Any
 
 from ..odin_log import get_logger
@@ -54,28 +54,74 @@ _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 # trusted (admin-authored) and stays unrestricted; install_skill fetches code
 # from a prompt-influenceable URL, so URL installs get this AST denylist as
 # defense-in-depth against injected-instruction RCE.
-_URL_SKILL_DENIED_IMPORTS = frozenset({
-    "os", "subprocess", "socket", "sys", "ctypes", "shutil",
-    "multiprocessing", "importlib", "pty", "fcntl", "resource", "signal",
-    # Added: low-level / interpreter-escape modules the original list missed
-    # (e.g. `import posix; posix.system(...)`, `runpy.run_path`, pickle/marshal
-    # code execution, pdb shell-out).
-    "posix", "nt", "builtins", "runpy", "pdb", "pickle", "marshal",
-    "code", "codeop", "gc", "cProfile", "commands", "popen2",
-})
+_URL_SKILL_DENIED_IMPORTS = frozenset(
+    {
+        "os",
+        "subprocess",
+        "socket",
+        "sys",
+        "ctypes",
+        "shutil",
+        "multiprocessing",
+        "importlib",
+        "pty",
+        "fcntl",
+        "resource",
+        "signal",
+        # Added: low-level / interpreter-escape modules the original list missed
+        # (e.g. `import posix; posix.system(...)`, `runpy.run_path`, pickle/marshal
+        # code execution, pdb shell-out).
+        "posix",
+        "nt",
+        "builtins",
+        "runpy",
+        "pdb",
+        "pickle",
+        "marshal",
+        "code",
+        "codeop",
+        "gc",
+        "cProfile",
+        "commands",
+        "popen2",
+    }
+)
 _URL_SKILL_DENIED_CALLS = frozenset({"eval", "exec", "compile", "__import__", "open"})
 # Attribute-form calls a URL skill must not make — catches things the bare-Name
 # check missed, e.g. `builtins.__import__("os")`, `x.system(...)`, `y.popen(...)`.
-_URL_SKILL_DENIED_ATTR_CALLS = frozenset({
-    "system", "popen", "popen2", "popen3", "spawn", "spawnl", "spawnv",
-    "execv", "execve", "execl", "fork", "__import__", "run_path", "run_module",
-    "loads", "load",  # pickle/marshal deserialization
-})
+_URL_SKILL_DENIED_ATTR_CALLS = frozenset(
+    {
+        "system",
+        "popen",
+        "popen2",
+        "popen3",
+        "spawn",
+        "spawnl",
+        "spawnv",
+        "execv",
+        "execve",
+        "execl",
+        "fork",
+        "__import__",
+        "run_path",
+        "run_module",
+        "loads",
+        "load",  # pickle/marshal deserialization
+    }
+)
 # Dunder escape hatches (sandbox breakouts) denied anywhere in URL skills.
-_URL_SKILL_DENIED_DUNDERS = frozenset({
-    "__import__", "__builtins__", "__globals__", "__subclasses__",
-    "__bases__", "__mro__", "__code__", "__loader__",
-})
+_URL_SKILL_DENIED_DUNDERS = frozenset(
+    {
+        "__import__",
+        "__builtins__",
+        "__globals__",
+        "__subclasses__",
+        "__bases__",
+        "__mro__",
+        "__code__",
+        "__loader__",
+    }
+)
 
 
 def _scan_url_skill_ast(code: str) -> list[str]:
@@ -137,9 +183,10 @@ def is_safe_dependency_spec(spec: str) -> bool:
     if (
         "@" in s
         or "://" in s
-        or ";" in s          # environment markers / command chaining
+        or ";" in s  # environment markers / command chaining
         or s.startswith("-")  # pip options (-e, --index-url, etc.)
-        or "/" in s or "\\" in s
+        or "/" in s
+        or "\\" in s
         or any(lowered.startswith(v + "+") for v in ("git", "hg", "svn", "bzr"))
         or any(c.isspace() for c in s)
     ):
@@ -148,7 +195,7 @@ def is_safe_dependency_spec(spec: str) -> bool:
     if not name:
         return False
     # Whatever follows the name[extras] must be a plain version specifier.
-    remainder = s.split("]", 1)[1] if "[" in s and "]" in s else s[len(name):]
+    remainder = s.split("]", 1)[1] if "[" in s and "]" in s else s[len(name) :]
     return bool(_DEP_VERSION_RE.match(remainder.strip()))
 
 
@@ -167,7 +214,9 @@ def _install_packages(specs: list[str], timeout: int = _PIP_INSTALL_TIMEOUT) -> 
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check"]
             + specs,
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         output = (result.stdout + result.stderr).strip()
         return result.returncode == 0, output
@@ -226,7 +275,7 @@ def _extract_skill_name_from_source(source: str) -> str:
     return ""
 
 
-def resolve_dependencies(deps: list[str]) -> tuple[list[str], list[str], list["SkillDiagnostic"]]:
+def resolve_dependencies(deps: list[str]) -> tuple[list[str], list[str], list[SkillDiagnostic]]:
     """Resolve skill pip dependencies.
 
     Returns ``(already_installed, newly_installed, diagnostics)``.
@@ -237,10 +286,12 @@ def resolve_dependencies(deps: list[str]) -> tuple[list[str], list[str], list["S
         return [], [], diagnostics
 
     if len(deps) > MAX_SKILL_DEPENDENCIES:
-        diagnostics.append(SkillDiagnostic(
-            "error",
-            f"Too many dependencies ({len(deps)}). Maximum is {MAX_SKILL_DEPENDENCIES}.",
-        ))
+        diagnostics.append(
+            SkillDiagnostic(
+                "error",
+                f"Too many dependencies ({len(deps)}). Maximum is {MAX_SKILL_DEPENDENCIES}.",
+            )
+        )
         return [], [], diagnostics
 
     already_installed: list[str] = []
@@ -250,12 +301,14 @@ def resolve_dependencies(deps: list[str]) -> tuple[list[str], list[str], list["S
         # Block install-time RCE via direct-reference / URL / VCS / path specs
         # BEFORE anything reaches pip.
         if not is_safe_dependency_spec(spec):
-            diagnostics.append(SkillDiagnostic(
-                "error",
-                f"Refused unsafe dependency spec {spec!r}: only plain "
-                "'name[extras]<version>' from a package index is allowed "
-                "(no URLs, @ direct references, VCS, or local paths).",
-            ))
+            diagnostics.append(
+                SkillDiagnostic(
+                    "error",
+                    f"Refused unsafe dependency spec {spec!r}: only plain "
+                    "'name[extras]<version>' from a package index is allowed "
+                    "(no URLs, @ direct references, VCS, or local paths).",
+                )
+            )
             return [], [], diagnostics
         name = _parse_package_name(spec)
         if not name:
@@ -271,13 +324,19 @@ def resolve_dependencies(deps: list[str]) -> tuple[list[str], list[str], list["S
         success, output = _install_packages(to_install)
         if success:
             newly_installed = to_install
-            diagnostics.append(SkillDiagnostic(
-                "warn", f"Auto-installed dependencies: {', '.join(to_install)}",
-            ))
+            diagnostics.append(
+                SkillDiagnostic(
+                    "warn",
+                    f"Auto-installed dependencies: {', '.join(to_install)}",
+                )
+            )
         else:
-            diagnostics.append(SkillDiagnostic(
-                "error", f"Failed to install dependencies [{', '.join(to_install)}]: {output}",
-            ))
+            diagnostics.append(
+                SkillDiagnostic(
+                    "error",
+                    f"Failed to install dependencies [{', '.join(to_install)}]: {output}",
+                )
+            )
 
     return already_installed, newly_installed, diagnostics
 
@@ -309,7 +368,11 @@ def validate_config_value(field_name: str, field_schema: dict, value: Any) -> st
         return f"'{field_name}': value {value!r} not in allowed values {enum}"
 
     # Numeric constraints
-    if ftype in ("integer", "number") and isinstance(value, (int, float)) and not isinstance(value, bool):
+    if (
+        ftype in ("integer", "number")
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+    ):
         minimum = field_schema.get("minimum")
         if minimum is not None and value < minimum:
             return f"'{field_name}': value {value} is below minimum {minimum}"
@@ -378,8 +441,9 @@ def apply_defaults(schema: dict, values: dict) -> dict:
     return result
 
 
-class SkillStatus(str, Enum):
+class SkillStatus(StrEnum):
     """Lifecycle state of a skill."""
+
     LOADED = "loaded"
     DISABLED = "disabled"
     ERROR = "error"
@@ -388,6 +452,7 @@ class SkillStatus(str, Enum):
 @dataclass
 class SkillDiagnostic:
     """A warning or error collected during skill load/validation."""
+
     level: str  # "warn" or "error"
     message: str
 
@@ -395,6 +460,7 @@ class SkillDiagnostic:
 @dataclass
 class SkillMetadata:
     """Rich metadata parsed from SKILL_DEFINITION."""
+
     version: str = "0.0.0"
     author: str = ""
     homepage: str = ""
@@ -412,9 +478,13 @@ class SkillMetadata:
         raw_version = definition.get("version", "0.0.0")
         if isinstance(raw_version, str):
             if raw_version and not _SEMVER_PATTERN.match(raw_version):
-                diagnostics.append(SkillDiagnostic(
-                    "warn", f"Invalid version '{raw_version}', expected semver (e.g. 1.0.0). Using 0.0.0.",
-                ))
+                diagnostics.append(
+                    SkillDiagnostic(
+                        "warn",
+                        f"Invalid version '{raw_version}', expected semver (e.g. 1.0.0). "
+                        "Using 0.0.0.",
+                    )
+                )
                 kwargs["version"] = "0.0.0"
             else:
                 kwargs["version"] = raw_version or "0.0.0"
@@ -448,7 +518,9 @@ class SkillMetadata:
         if isinstance(raw_deps, list) and all(isinstance(d, str) for d in raw_deps):
             kwargs["dependencies"] = raw_deps
         elif raw_deps:
-            diagnostics.append(SkillDiagnostic("warn", "dependencies must be a list of strings. Ignored."))
+            diagnostics.append(
+                SkillDiagnostic("warn", "dependencies must be a list of strings. Ignored.")
+            )
 
         # config_schema (JSON Schema dict)
         raw_cs = definition.get("config_schema", {})
@@ -463,6 +535,7 @@ class SkillMetadata:
 @dataclass
 class SkillExecutionStats:
     """Resource usage from a single skill execution."""
+
     wall_time_ms: float = 0.0
     output_chars: int = 0
     truncated: bool = False
@@ -504,7 +577,9 @@ class SkillManager:
     """Manages user-created Python skill files in data/skills/."""
 
     def __init__(
-        self, skills_dir: str, tool_executor: ToolExecutor,
+        self,
+        skills_dir: str,
+        tool_executor: ToolExecutor,
         memory_path: str | None = None,
         tool_timeouts: dict[str, int] | None = None,
     ) -> None:
@@ -688,12 +763,18 @@ class SkillManager:
         skill = self._load_skill(path)
         if not skill:
             path.unlink(missing_ok=True)
-            return f"Skill file written but failed to load. Check syntax and required exports (SKILL_DEFINITION dict + async execute function)."
+            return (
+                "Skill file written but failed to load. Check syntax and required "
+                "exports (SKILL_DEFINITION dict + async execute function)."
+            )
 
         if skill.name != name:
             self._unload_skill(skill.name)
             path.unlink(missing_ok=True)
-            return f"SKILL_DEFINITION.name ('{skill.name}') doesn't match filename ('{name}'). They must be identical."
+            return (
+                f"SKILL_DEFINITION.name ('{skill.name}') doesn't match filename "
+                f"('{name}'). They must be identical."
+            )
 
         self._skills[name] = skill
         return f"Skill '{name}' created and loaded successfully. It's now available as a tool."
@@ -719,7 +800,7 @@ class SkillManager:
             old_skill = self._load_skill(path)
             if old_skill:
                 self._skills[name] = old_skill
-            return f"New code failed to load. Reverted to previous version."
+            return "New code failed to load. Reverted to previous version."
 
         if skill.name != name:
             # Name mismatch — revert to old code
@@ -836,10 +917,7 @@ class SkillManager:
                 "tags": s.metadata.tags,
                 "dependencies": s.metadata.dependencies,
                 "has_config": bool(s.metadata.config_schema),
-                "diagnostics": [
-                    {"level": d.level, "message": d.message}
-                    for d in s.diagnostics
-                ],
+                "diagnostics": [{"level": d.level, "message": d.message} for d in s.diagnostics],
                 "total_executions": s.total_executions,
                 "last_execution": s.last_execution.to_dict() if s.last_execution else None,
             }
@@ -864,11 +942,13 @@ class SkillManager:
         results = []
         for spec in deps:
             pkg_name = _parse_package_name(spec)
-            results.append({
-                "spec": spec,
-                "package": pkg_name,
-                "installed": _is_package_installed(pkg_name) if pkg_name else False,
-            })
+            results.append(
+                {
+                    "spec": spec,
+                    "package": pkg_name,
+                    "installed": _is_package_installed(pkg_name) if pkg_name else False,
+                }
+            )
         return {
             "dependencies": results,
             "all_satisfied": all(r["installed"] for r in results),
@@ -911,17 +991,20 @@ class SkillManager:
         except SyntaxError as e:
             errors.append(f"Syntax error at line {e.lineno}: {e.msg}")
             return {
-                "valid": False, "errors": errors, "warnings": warnings,
-                "metadata": None, "definition_keys": [],
+                "valid": False,
+                "errors": errors,
+                "warnings": warnings,
+                "metadata": None,
+                "definition_keys": [],
             }
 
         # 2. Static analysis — extract SKILL_DEFINITION from AST without exec
         import ast as _ast
+
         tree = _ast.parse(code, filename)
 
         has_execute = any(
-            isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
-            and node.name == "execute"
+            isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and node.name == "execute"
             for node in _ast.walk(tree)
         )
         if not has_execute:
@@ -936,7 +1019,10 @@ class SkillManager:
                         try:
                             definition = _ast.literal_eval(node.value)
                         except Exception:
-                            warnings.append("SKILL_DEFINITION is not a static literal — will be validated at load time.")
+                            warnings.append(
+                                "SKILL_DEFINITION is not a static literal — "
+                                "will be validated at load time."
+                            )
 
         if definition is None and not any("SKILL_DEFINITION" in e for e in errors):
             errors.append("Missing or invalid SKILL_DEFINITION dict.")
@@ -958,8 +1044,10 @@ class SkillManager:
             # Parse metadata
             meta, diags = SkillMetadata.from_definition(definition)
             metadata_out = {
-                "version": meta.version, "author": meta.author,
-                "homepage": meta.homepage, "tags": meta.tags,
+                "version": meta.version,
+                "author": meta.author,
+                "homepage": meta.homepage,
+                "tags": meta.tags,
                 "dependencies": meta.dependencies,
                 "has_config": bool(meta.config_schema),
             }
@@ -972,7 +1060,9 @@ class SkillManager:
             for node in _ast.walk(tree)
         )
         if has_execute and not execute_is_async:
-            warnings.append("execute() is not async. It should be 'async def execute(inp, context)'.")
+            warnings.append(
+                "execute() is not async. It should be 'async def execute(inp, context)'."
+            )
 
         return {
             "valid": len(errors) == 0,
@@ -1009,10 +1099,7 @@ class SkillManager:
                 "config_schema": skill.metadata.config_schema,
             },
             "config": self.get_skill_config(name),
-            "diagnostics": [
-                {"level": d.level, "message": d.message}
-                for d in skill.diagnostics
-            ],
+            "diagnostics": [{"level": d.level, "message": d.message} for d in skill.diagnostics],
             "handoff_to_codex": skill.definition.get("handoff_to_codex", False),
             "code": code,
             "total_executions": skill.total_executions,
@@ -1020,7 +1107,9 @@ class SkillManager:
         }
 
     async def execute(
-        self, tool_name: str, tool_input: dict,
+        self,
+        tool_name: str,
+        tool_input: dict,
         message_callback: Callable | None = None,
         file_callback: Callable | None = None,
     ) -> str:
@@ -1036,7 +1125,8 @@ class SkillManager:
 
         tracker = ResourceTracker()
         context = SkillContext(
-            self._executor, tool_name,
+            self._executor,
+            tool_name,
             memory_path=self._memory_path,
             message_callback=message_callback,
             file_callback=file_callback,
@@ -1061,11 +1151,14 @@ class SkillManager:
                 result = str(result)
             # Enforce output limit
             if len(result) > MAX_SKILL_OUTPUT_CHARS:
-                result = result[:MAX_SKILL_OUTPUT_CHARS] + f"\n... [truncated at {MAX_SKILL_OUTPUT_CHARS} chars]"
+                result = (
+                    result[:MAX_SKILL_OUTPUT_CHARS]
+                    + f"\n... [truncated at {MAX_SKILL_OUTPUT_CHARS} chars]"
+                )
                 truncated = True
             output_chars = len(result)
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return f"Skill '{tool_name}' timed out after {skill_timeout}s."
         except Exception as e:
             log.error("Skill %s execution error: %s", tool_name, e, exc_info=True)
@@ -1100,12 +1193,14 @@ class SkillManager:
         if not parsed.netloc:
             return "Invalid URL: no host specified."
         from .url_safety import is_url_blocked
+
         if is_url_blocked(url):
             return "Error: blocked URL (localhost / private IP / cloud-metadata address)."
 
         # Download
         try:
             import aiohttp
+
             timeout = aiohttp.ClientTimeout(total=_URL_DOWNLOAD_TIMEOUT)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(url) as resp:
@@ -1114,14 +1209,19 @@ class SkillManager:
                     # Check content length header if available
                     cl = resp.content_length
                     if cl and cl > MAX_SKILL_DOWNLOAD_BYTES:
-                        return f"File too large ({cl} bytes). Maximum is {MAX_SKILL_DOWNLOAD_BYTES}."
+                        return (
+                            f"File too large ({cl} bytes). Maximum is {MAX_SKILL_DOWNLOAD_BYTES}."
+                        )
                     data = await resp.content.read(MAX_SKILL_DOWNLOAD_BYTES + 1)
                     if len(data) > MAX_SKILL_DOWNLOAD_BYTES:
-                        return f"File too large (>{MAX_SKILL_DOWNLOAD_BYTES} bytes). Maximum is {MAX_SKILL_DOWNLOAD_BYTES}."
+                        return (
+                            f"File too large (>{MAX_SKILL_DOWNLOAD_BYTES} bytes). "
+                            f"Maximum is {MAX_SKILL_DOWNLOAD_BYTES}."
+                        )
                     code = data.decode("utf-8")
         except UnicodeDecodeError:
             return "Downloaded file is not valid UTF-8 text."
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return f"Download timed out after {_URL_DOWNLOAD_TIMEOUT}s."
         except Exception as e:
             return f"Download error: {e}"
@@ -1147,9 +1247,11 @@ class SkillManager:
                 "create_skill instead."
             )
         import hashlib
+
         log.warning(
             "Installing skill from URL %s (sha256=%s)",
-            url, hashlib.sha256(code.encode()).hexdigest()[:16],
+            url,
+            hashlib.sha256(code.encode()).hexdigest()[:16],
         )
 
         # Extract skill name STATICALLY — never exec URL code just to read a
@@ -1200,7 +1302,9 @@ class SkillManager:
 
         if skill.last_execution:
             ex = skill.last_execution
-            lines.append(f"Last execution: {ex.timestamp} ({ex.wall_time_ms:.0f}ms, {ex.output_chars} chars)")
+            lines.append(
+                f"Last execution: {ex.timestamp} ({ex.wall_time_ms:.0f}ms, {ex.output_chars} chars)"
+            )
 
         if skill.metadata.dependencies:
             dep_status = self.check_dependencies(name)
@@ -1208,7 +1312,7 @@ class SkillManager:
             for d in dep_status.get("dependencies", []):
                 status = "installed" if d["installed"] else "MISSING"
                 dep_lines.append(f"  {d['spec']} [{status}]")
-            lines.append(f"Dependencies:\n" + "\n".join(dep_lines))
+            lines.append("Dependencies:\n" + "\n".join(dep_lines))
 
         if skill.metadata.config_schema:
             config = self.get_skill_config(name)
@@ -1216,6 +1320,6 @@ class SkillManager:
 
         if skill.diagnostics:
             diag_lines = [f"  [{d.level}] {d.message}" for d in skill.diagnostics]
-            lines.append(f"Diagnostics:\n" + "\n".join(diag_lines))
+            lines.append("Diagnostics:\n" + "\n".join(diag_lines))
 
         return "\n".join(lines)

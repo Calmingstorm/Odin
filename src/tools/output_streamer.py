@@ -5,13 +5,13 @@ Emits ``StreamChunk`` objects to registered async listeners (WebSocket, etc.).
 Rate-limited to avoid spamming: at most one chunk per ``chunk_interval``
 seconds per active stream.  A final chunk (``finished=True``) is always sent.
 """
+
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from ..odin_log import get_logger
 
@@ -119,7 +119,9 @@ class ToolOutputStreamer:
                 log.debug("Stream listener error", exc_info=True)
 
     def create_callback(
-        self, tool_name: str, channel_id: str = "",
+        self,
+        tool_name: str,
+        channel_id: str = "",
     ) -> tuple[str, Callable[[str], Awaitable[None]], Callable[[], Awaitable[None]]]:
         """Create a streaming callback for one tool invocation.
 
@@ -145,7 +147,7 @@ class ToolOutputStreamer:
             if now - stream.last_emit >= self._chunk_interval and stream.buffered:
                 chunk_text = stream.buffered[: self._max_chunk_chars]
                 stream.buffered = stream.buffered[self._max_chunk_chars :]
-                ts = datetime.now(timezone.utc).isoformat()
+                ts = datetime.now(UTC).isoformat()
                 chunk = StreamChunk(
                     tool_name=tool_name,
                     chunk=chunk_text,
@@ -158,7 +160,7 @@ class ToolOutputStreamer:
                 await self._emit(chunk)
 
         async def finish() -> None:
-            ts = datetime.now(timezone.utc).isoformat()
+            ts = datetime.now(UTC).isoformat()
             while stream.buffered:
                 chunk_text = stream.buffered[: self._max_chunk_chars]
                 stream.buffered = stream.buffered[self._max_chunk_chars :]

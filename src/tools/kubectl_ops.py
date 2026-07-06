@@ -8,10 +8,20 @@ from __future__ import annotations
 
 import shlex
 
-ALLOWED_ACTIONS = frozenset({
-    "get", "describe", "logs", "apply", "delete", "exec",
-    "rollout", "scale", "top", "config",
-})
+ALLOWED_ACTIONS = frozenset(
+    {
+        "get",
+        "describe",
+        "logs",
+        "apply",
+        "delete",
+        "exec",
+        "rollout",
+        "scale",
+        "top",
+        "config",
+    }
+)
 
 _MAX_LOG_LINES = 500
 _DEFAULT_LOG_LINES = 100
@@ -44,8 +54,7 @@ def build_kubectl_command(action: str, params: dict) -> str:
     """
     if action not in ALLOWED_ACTIONS:
         raise ValueError(
-            f"Unknown kubectl action: {action}. "
-            f"Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
+            f"Unknown kubectl action: {action}. Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
         )
     builder = _BUILDERS.get(action)
     if builder is None:
@@ -201,9 +210,7 @@ def _build_rollout(params: dict) -> str:
     subaction = params.get("subaction", "status")
     allowed_subs = {"status", "restart", "undo", "history", "pause", "resume"}
     if subaction not in allowed_subs:
-        raise ValueError(
-            f"rollout subaction must be one of: {', '.join(sorted(allowed_subs))}"
-        )
+        raise ValueError(f"rollout subaction must be one of: {', '.join(sorted(allowed_subs))}")
     resource = params.get("resource", "")
     if not resource:
         raise ValueError("rollout requires 'resource' (e.g. deployment/my-app)")
@@ -263,9 +270,7 @@ def _build_config(params: dict) -> str:
     subaction = params.get("subaction", "get-contexts")
     allowed_subs = {"get-contexts", "use-context", "current-context", "view"}
     if subaction not in allowed_subs:
-        raise ValueError(
-            f"config subaction must be one of: {', '.join(sorted(allowed_subs))}"
-        )
+        raise ValueError(f"config subaction must be one of: {', '.join(sorted(allowed_subs))}")
 
     parts = ["kubectl", "config", subaction]
     kubeconfig = params.get("kubeconfig", "")

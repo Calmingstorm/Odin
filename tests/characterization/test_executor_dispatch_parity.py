@@ -154,6 +154,46 @@ class TestDispatchTable:
                     f"{name} is domain-owned but ToolExecutor still defines it"
                 )
 
+    def test_dynamic_handle_spelling_banned_outside_resolver(self):
+        """P7 (AST/token-aware, per the plan-review advisory): the f-string
+        ``_handle_`` spelling — dynamic handler-name construction — is
+        allowed in exactly ONE place in src/: ToolExecutor._resolve_handler
+        (the patch-seam __dict__ probe). Raw grep would flag comments,
+        fixture names, and literal attr strings; this scan walks the AST
+        and only flags JoinedStr (f-string) nodes that build a
+        ``_handle_...`` name."""
+        import ast as _ast
+        from pathlib import Path as _Path
+
+        src_root = _Path(__file__).resolve().parents[2] / "src"
+        offenders: list[str] = []
+        for py in sorted(src_root.rglob("*.py")):
+            tree = _ast.parse(py.read_text(), filename=str(py))
+            for node in _ast.walk(tree):
+                if isinstance(node, _ast.JoinedStr):
+                    for part in node.values:
+                        if (
+                            isinstance(part, _ast.Constant)
+                            and isinstance(part.value, str)
+                            and "_handle_" in part.value
+                        ):
+                            offenders.append(f"{py.relative_to(src_root)}:{node.lineno}")
+        allowed = {"tools/executor.py"}
+        bad = [o for o in offenders if o.split(":")[0] not in allowed]
+        assert not bad, f"dynamic _handle_ f-string spelling outside the resolver: {bad}"
+        # exactly one sanctioned site remains (the __dict__ patch-seam probe)
+        sanctioned = [o for o in offenders if o.split(":")[0] in allowed]
+        assert len(sanctioned) == 1, (
+            f"expected exactly 1 sanctioned dynamic spelling in executor.py, found: {sanctioned}"
+        )
+
+    async def test_retired_fallback_unknown_entry_returns_none(self):
+        """P7: with the legacy fallback retired, a name absent from the
+        table resolves to None (→ unknown_tool) even if a same-named
+        class-level method existed — the table is the only class path."""
+        ex = _executor()
+        assert ex._resolve_handler("definitely_not_a_tool") is None
+
     async def test_instance_override_beats_domain_owner(self):
         """The historical executor-instance patch seam keeps governing even
         for handlers whose real bodies moved to domain owners (13+ existing

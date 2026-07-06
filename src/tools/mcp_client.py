@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from typing import Any
 
 from ..odin_log import get_logger
@@ -38,7 +37,7 @@ def parse_tool_name(namespaced: str) -> tuple[str, str] | None:
     idx = rest.find("_")
     if idx <= 0:
         return None
-    return rest[:idx], rest[idx + 1:]
+    return rest[:idx], rest[idx + 1 :]
 
 
 class MCPError(Exception):
@@ -127,6 +126,7 @@ class MCPServerConnection:
             raise MCPError(f"Server {self.name}: stdio transport requires 'command'")
 
         import os
+
         merged_env = {**os.environ, **self.env} if self.env else None
 
         try:
@@ -229,8 +229,10 @@ class MCPServerConnection:
 
             result = await asyncio.wait_for(future, timeout=self.timeout)
             return result
-        except asyncio.TimeoutError:
-            raise MCPError(f"Server {self.name}: request '{method}' timed out after {self.timeout}s")
+        except TimeoutError:
+            raise MCPError(
+                f"Server {self.name}: request '{method}' timed out after {self.timeout}s"
+            )
         finally:
             self._pending.pop(req_id, None)
 
@@ -255,13 +257,14 @@ class MCPServerConnection:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    self.url, json=request, headers=hdrs, timeout=aiohttp.ClientTimeout(total=self.timeout)
+                    self.url,
+                    json=request,
+                    headers=hdrs,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout),
                 ) as resp:
                     if resp.status != 200:
                         body = await resp.text()
-                        raise MCPError(
-                            f"Server {self.name}: HTTP {resp.status}: {body[:500]}"
-                        )
+                        raise MCPError(f"Server {self.name}: HTTP {resp.status}: {body[:500]}")
                     return await resp.json()
         except aiohttp.ClientError as e:
             raise MCPError(f"Server {self.name}: HTTP error: {e}")
@@ -281,18 +284,19 @@ class MCPServerConnection:
     async def _initialize(self) -> None:
         """Perform the MCP initialize handshake."""
         resp = await asyncio.wait_for(
-            self._send_request("initialize", {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": CLIENT_INFO,
-            }),
+            self._send_request(
+                "initialize",
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": CLIENT_INFO,
+                },
+            ),
             timeout=_INIT_TIMEOUT,
         )
 
         if "error" in resp:
-            raise MCPError(
-                f"Server {self.name}: initialize failed: {resp['error']}"
-            )
+            raise MCPError(f"Server {self.name}: initialize failed: {resp['error']}")
 
         result = resp.get("result", {})
         self._server_info = result.get("serverInfo", {})
@@ -305,16 +309,17 @@ class MCPServerConnection:
 
     async def _initialize_http(self) -> None:
         """HTTP initialize handshake."""
-        resp = await self._send_http_request("initialize", {
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {},
-            "clientInfo": CLIENT_INFO,
-        })
+        resp = await self._send_http_request(
+            "initialize",
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": CLIENT_INFO,
+            },
+        )
 
         if "error" in resp:
-            raise MCPError(
-                f"Server {self.name}: initialize failed: {resp['error']}"
-            )
+            raise MCPError(f"Server {self.name}: initialize failed: {resp['error']}")
 
         result = resp.get("result", {})
         self._server_info = result.get("serverInfo", {})
@@ -331,9 +336,7 @@ class MCPServerConnection:
         resp = await self._send_request("tools/list")
 
         if "error" in resp:
-            raise MCPError(
-                f"Server {self.name}: tools/list failed: {resp['error']}"
-            )
+            raise MCPError(f"Server {self.name}: tools/list failed: {resp['error']}")
 
         result = resp.get("result", {})
         raw_tools = result.get("tools", [])
@@ -342,11 +345,13 @@ class MCPServerConnection:
             name = t.get("name", "")
             if not name:
                 continue
-            self._tools.append({
-                "name": name,
-                "description": t.get("description", ""),
-                "inputSchema": t.get("inputSchema", {"type": "object", "properties": {}}),
-            })
+            self._tools.append(
+                {
+                    "name": name,
+                    "description": t.get("description", ""),
+                    "inputSchema": t.get("inputSchema", {"type": "object", "properties": {}}),
+                }
+            )
 
         log.info("MCP %s: discovered %d tools", self.name, len(self._tools))
         return self._tools
@@ -378,10 +383,13 @@ class MCPServerConnection:
         """Invoke a tool on the server and return the result as text."""
         await self._ensure_connected()
 
-        resp = await self._send_request("tools/call", {
-            "name": tool_name,
-            "arguments": arguments,
-        })
+        resp = await self._send_request(
+            "tools/call",
+            {
+                "name": tool_name,
+                "arguments": arguments,
+            },
+        )
 
         if "error" in resp:
             err = resp["error"]
@@ -431,7 +439,7 @@ class MCPServerConnection:
                 self._process.terminate()
                 try:
                     await asyncio.wait_for(self._process.wait(), timeout=5)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     self._process.kill()
             except ProcessLookupError:
                 pass
@@ -479,9 +487,13 @@ class MCPManager:
             )
 
         conn = MCPServerConnection(
-            name, transport,
-            command=command, args=args, url=url,
-            headers=headers, env=env,
+            name,
+            transport,
+            command=command,
+            args=args,
+            url=url,
+            headers=headers,
+            env=env,
             timeout=timeout or self._tool_timeout,
         )
 
@@ -529,11 +541,13 @@ class MCPManager:
                 continue
             for t in conn.tools:
                 namespaced = make_tool_name(server_name, t["name"])
-                defs.append({
-                    "name": namespaced,
-                    "description": f"[MCP:{server_name}] {t.get('description', '')}",
-                    "input_schema": t.get("inputSchema", {"type": "object", "properties": {}}),
-                })
+                defs.append(
+                    {
+                        "name": namespaced,
+                        "description": f"[MCP:{server_name}] {t.get('description', '')}",
+                        "input_schema": t.get("inputSchema", {"type": "object", "properties": {}}),
+                    }
+                )
 
         self._tool_cache = defs
         return defs
@@ -554,7 +568,7 @@ class MCPManager:
                 conn.call_tool(original_name, tool_input),
                 timeout=conn.timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return f"MCP tool '{tool_name}' timed out after {conn.timeout}s"
         except MCPError as e:
             return f"MCP error: {e}"
@@ -566,14 +580,16 @@ class MCPManager:
         """Return status of all registered servers."""
         result = []
         for name, conn in self._servers.items():
-            result.append({
-                "name": name,
-                "transport": conn.transport,
-                "connected": conn.connected,
-                "server_info": conn.server_info,
-                "tool_count": len(conn.tools),
-                "tools": [make_tool_name(name, t["name"]) for t in conn.tools],
-            })
+            result.append(
+                {
+                    "name": name,
+                    "transport": conn.transport,
+                    "connected": conn.connected,
+                    "server_info": conn.server_info,
+                    "tool_count": len(conn.tools),
+                    "tools": [make_tool_name(name, t["name"]) for t in conn.tools],
+                }
+            )
         return result
 
     async def shutdown(self) -> None:

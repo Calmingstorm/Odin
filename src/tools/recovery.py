@@ -4,15 +4,16 @@ Classifies error strings into recoverable categories and provides
 single-retry recovery with appropriate delays. Known transient failure
 patterns are retried once automatically before surfacing to the user.
 """
+
 from __future__ import annotations
 
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import dataclass
+from enum import StrEnum
 
 
-class RecoveryCategory(str, Enum):
+class RecoveryCategory(StrEnum):
     SSH_TRANSIENT = "ssh_transient"
     CONNECTION_ERROR = "connection_error"
     RESOURCE_BUSY = "resource_busy"
@@ -29,7 +30,7 @@ class RecoveryCategory(str, Enum):
     PERMISSION_DENIED = "permission_denied"
 
 
-class RecoveryStrategy(str, Enum):
+class RecoveryStrategy(StrEnum):
     """What to do when a category fires.
 
     RETRY_WITH_DELAY — sleep and try the same call once more (legacy behavior).
@@ -39,58 +40,61 @@ class RecoveryStrategy(str, Enum):
     NO_ACTION — don't retry, don't annotate (e.g. the error is already
         self-explanatory or the tool declines recovery).
     """
+
     RETRY_WITH_DELAY = "retry"
     HINT_AND_ESCALATE = "hint"
     NO_ACTION = "none"
 
 
-UNSAFE_TO_RETRY: frozenset[str] = frozenset({
-    "run_command",
-    "run_script",
-    "run_command_multi",
-    "write_file",
-    "git_ops",
-    "manage_process",
-    "claude_code",
-    "delete_knowledge",
-    "delete_schedule",
-    "update_schedule",
-    "purge_messages",
-    "create_skill",
-    "edit_skill",
-    "delete_skill",
-    "invoke_skill",
-    "spawn_agent",
-    "kill_agent",
-    "start_loop",
-    "stop_loop",
-    "schedule_task",
-    "delegate_task",
-    "generate_image",
-    "browser_click",
-    "browser_fill",
-    "browser_evaluate",
-    "post_file",
-    "generate_file",
-    "add_reaction",
-    "create_poll",
-    "set_permission",
-    "memory_manage",
-    "manage_list",
-    "ingest_document",
-    "bulk_ingest_knowledge",
-    "docker_ops",
-    "terraform_ops",
-    "kubectl",
-    "issue_tracker",
-    # Side-effecting tools missing from the original set. email_send is the
-    # dangerous one: SMTP can fail after DATA is accepted, so an auto-retry
-    # duplicates the mail.
-    "email_send",
-    "install_skill",
-    "send_to_agent",
-    "cancel_task",
-})
+UNSAFE_TO_RETRY: frozenset[str] = frozenset(
+    {
+        "run_command",
+        "run_script",
+        "run_command_multi",
+        "write_file",
+        "git_ops",
+        "manage_process",
+        "claude_code",
+        "delete_knowledge",
+        "delete_schedule",
+        "update_schedule",
+        "purge_messages",
+        "create_skill",
+        "edit_skill",
+        "delete_skill",
+        "invoke_skill",
+        "spawn_agent",
+        "kill_agent",
+        "start_loop",
+        "stop_loop",
+        "schedule_task",
+        "delegate_task",
+        "generate_image",
+        "browser_click",
+        "browser_fill",
+        "browser_evaluate",
+        "post_file",
+        "generate_file",
+        "add_reaction",
+        "create_poll",
+        "set_permission",
+        "memory_manage",
+        "manage_list",
+        "ingest_document",
+        "bulk_ingest_knowledge",
+        "docker_ops",
+        "terraform_ops",
+        "kubectl",
+        "issue_tracker",
+        # Side-effecting tools missing from the original set. email_send is the
+        # dangerous one: SMTP can fail after DATA is accepted, so an auto-retry
+        # duplicates the mail.
+        "email_send",
+        "install_skill",
+        "send_to_agent",
+        "cancel_task",
+    }
+)
 
 
 # Substrings that indicate a transient, recoverable failure.
@@ -118,18 +122,14 @@ _RECOVERABLE_PATTERNS: dict[RecoveryCategory, tuple[str, ...]] = {
         "resource temporarily unavailable",
         "Resource temporarily unavailable",
     ),
-    RecoveryCategory.TIMEOUT: (
-        "timed out",
-    ),
+    RecoveryCategory.TIMEOUT: ("timed out",),
     RecoveryCategory.RATE_LIMITED: (
         "rate limit exceeded",
         "Rate limit exceeded",
         "RateLimitError",
         "Too Many Requests",
     ),
-    RecoveryCategory.BULKHEAD_FULL: (
-        "bulkhead full",
-    ),
+    RecoveryCategory.BULKHEAD_FULL: ("bulkhead full",),
     RecoveryCategory.AUTH_FAILURE: (
         "authentication failed",
         "Authentication failed",
@@ -206,9 +206,11 @@ _CATEGORY_DELAYS: dict[RecoveryCategory, float] = {
 
 # Categories that should NOT be retried at the tool-result level
 # (they already have their own internal retry logic).
-_SKIP_RESULT_CATEGORIES = frozenset({
-    RecoveryCategory.TIMEOUT,
-})
+_SKIP_RESULT_CATEGORIES = frozenset(
+    {
+        RecoveryCategory.TIMEOUT,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -221,6 +223,7 @@ class RecoveryPolicy:
     identical-retry is often wasted effort; a different next step is
     frequently the actual recovery.
     """
+
     strategy: RecoveryStrategy
     delay_seconds: float = 1.0
     hint: str = ""
@@ -231,25 +234,32 @@ class RecoveryPolicy:
 # (retrying a 401 produces a second 401 — escalate to the LLM instead).
 _DEFAULT_POLICIES: dict[RecoveryCategory, RecoveryPolicy] = {
     RecoveryCategory.SSH_TRANSIENT: RecoveryPolicy(
-        RecoveryStrategy.RETRY_WITH_DELAY, 2.0,
+        RecoveryStrategy.RETRY_WITH_DELAY,
+        2.0,
     ),
     RecoveryCategory.CONNECTION_ERROR: RecoveryPolicy(
-        RecoveryStrategy.RETRY_WITH_DELAY, 1.0,
+        RecoveryStrategy.RETRY_WITH_DELAY,
+        1.0,
     ),
     RecoveryCategory.RESOURCE_BUSY: RecoveryPolicy(
-        RecoveryStrategy.RETRY_WITH_DELAY, 1.0,
+        RecoveryStrategy.RETRY_WITH_DELAY,
+        1.0,
     ),
     RecoveryCategory.TIMEOUT: RecoveryPolicy(
-        RecoveryStrategy.NO_ACTION, 0.0,
+        RecoveryStrategy.NO_ACTION,
+        0.0,
     ),
     RecoveryCategory.RATE_LIMITED: RecoveryPolicy(
-        RecoveryStrategy.RETRY_WITH_DELAY, 2.0,
+        RecoveryStrategy.RETRY_WITH_DELAY,
+        2.0,
     ),
     RecoveryCategory.BULKHEAD_FULL: RecoveryPolicy(
-        RecoveryStrategy.RETRY_WITH_DELAY, 1.0,
+        RecoveryStrategy.RETRY_WITH_DELAY,
+        1.0,
     ),
     RecoveryCategory.AUTH_FAILURE: RecoveryPolicy(
-        RecoveryStrategy.HINT_AND_ESCALATE, 0.0,
+        RecoveryStrategy.HINT_AND_ESCALATE,
+        0.0,
         hint=(
             "[recovery hint: authentication failure — do not retry the same "
             "call. Verify credentials, refresh the token/key, or escalate to "
@@ -258,7 +268,8 @@ _DEFAULT_POLICIES: dict[RecoveryCategory, RecoveryPolicy] = {
         ),
     ),
     RecoveryCategory.NOT_FOUND: RecoveryPolicy(
-        RecoveryStrategy.HINT_AND_ESCALATE, 0.0,
+        RecoveryStrategy.HINT_AND_ESCALATE,
+        0.0,
         hint=(
             "[recovery hint: target not found — do not retry with the same "
             "path/URL. Use read_file or http_probe on a parent path to locate "
@@ -266,7 +277,8 @@ _DEFAULT_POLICIES: dict[RecoveryCategory, RecoveryPolicy] = {
         ),
     ),
     RecoveryCategory.DISK_FULL: RecoveryPolicy(
-        RecoveryStrategy.HINT_AND_ESCALATE, 0.0,
+        RecoveryStrategy.HINT_AND_ESCALATE,
+        0.0,
         hint=(
             "[recovery hint: disk full on target host — do not retry. Run "
             "'df -h' to confirm, then identify a cleanup candidate (logs, "
@@ -274,7 +286,8 @@ _DEFAULT_POLICIES: dict[RecoveryCategory, RecoveryPolicy] = {
         ),
     ),
     RecoveryCategory.DEPENDENCY_MISSING: RecoveryPolicy(
-        RecoveryStrategy.HINT_AND_ESCALATE, 0.0,
+        RecoveryStrategy.HINT_AND_ESCALATE,
+        0.0,
         hint=(
             "[recovery hint: missing dependency — do not retry. The command "
             "or module is not installed on the target. Propose an install "
@@ -283,7 +296,8 @@ _DEFAULT_POLICIES: dict[RecoveryCategory, RecoveryPolicy] = {
         ),
     ),
     RecoveryCategory.PERMISSION_DENIED: RecoveryPolicy(
-        RecoveryStrategy.HINT_AND_ESCALATE, 0.0,
+        RecoveryStrategy.HINT_AND_ESCALATE,
+        0.0,
         hint=(
             "[recovery hint: permission denied — do not retry with the same "
             "user. Verify file mode/owner (ls -l), consider sudo if the "
@@ -341,6 +355,7 @@ class RecoveryAction:
     accidentally bypass the UNSAFE_TO_RETRY guard, because this function
     is the sole place the guard is consulted.
     """
+
     action: str  # "retry" | "hint" | "skip"
     category: RecoveryCategory | None
     delay_seconds: float = 0.0
@@ -348,7 +363,9 @@ class RecoveryAction:
 
 
 def decide_recovery_action(
-    *, tool_name: str, category: RecoveryCategory | None,
+    *,
+    tool_name: str,
+    category: RecoveryCategory | None,
 ) -> RecoveryAction:
     """Single source of truth for 'what do we do about this failure'.
 
@@ -364,7 +381,9 @@ def decide_recovery_action(
     policy = get_policy(category)
     if policy.strategy == RecoveryStrategy.HINT_AND_ESCALATE:
         return RecoveryAction(
-            action="hint", category=category, hint_text=policy.hint,
+            action="hint",
+            category=category,
+            hint_text=policy.hint,
         )
     if policy.strategy == RecoveryStrategy.NO_ACTION:
         return RecoveryAction(action="skip", category=category)
@@ -373,7 +392,9 @@ def decide_recovery_action(
         return RecoveryAction(action="skip", category=category)
     delay = policy.delay_seconds if policy.delay_seconds else get_retry_delay(category)
     return RecoveryAction(
-        action="retry", category=category, delay_seconds=delay,
+        action="retry",
+        category=category,
+        delay_seconds=delay,
     )
 
 
@@ -423,6 +444,7 @@ def get_retry_delay(category: RecoveryCategory) -> float:
 @dataclass
 class RecoveryEvent:
     """Record of a single recovery attempt."""
+
     tool_name: str
     category: str
     succeeded: bool
@@ -442,22 +464,32 @@ class RecoveryStats:
         self._recent: list[RecoveryEvent] = []
         self._max_recent = max_recent
 
-    def record_attempt(self, tool_name: str, category: RecoveryCategory, error_snippet: str = "") -> None:
+    def record_attempt(
+        self, tool_name: str, category: RecoveryCategory, error_snippet: str = ""
+    ) -> None:
         self._attempts[category.value] += 1
         self._tool_attempts[tool_name] += 1
 
-    def record_success(self, tool_name: str, category: RecoveryCategory, error_snippet: str = "") -> None:
+    def record_success(
+        self, tool_name: str, category: RecoveryCategory, error_snippet: str = ""
+    ) -> None:
         self._successes[category.value] += 1
         self._tool_successes[tool_name] += 1
-        self._recent.append(RecoveryEvent(tool_name, category.value, True, time.time(), error_snippet))
+        self._recent.append(
+            RecoveryEvent(tool_name, category.value, True, time.time(), error_snippet)
+        )
         if len(self._recent) > self._max_recent:
-            self._recent = self._recent[-self._max_recent:]
+            self._recent = self._recent[-self._max_recent :]
 
-    def record_failure(self, tool_name: str, category: RecoveryCategory, error_snippet: str = "") -> None:
+    def record_failure(
+        self, tool_name: str, category: RecoveryCategory, error_snippet: str = ""
+    ) -> None:
         self._failures[category.value] += 1
-        self._recent.append(RecoveryEvent(tool_name, category.value, False, time.time(), error_snippet))
+        self._recent.append(
+            RecoveryEvent(tool_name, category.value, False, time.time(), error_snippet)
+        )
         if len(self._recent) > self._max_recent:
-            self._recent = self._recent[-self._max_recent:]
+            self._recent = self._recent[-self._max_recent :]
 
     def get_summary(self) -> dict:
         all_cats = set(list(self._attempts) + list(self._successes) + list(self._failures))

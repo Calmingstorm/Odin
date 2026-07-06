@@ -28,6 +28,12 @@ TOOLS: list[dict] = [
 
 TOOL_MAP: dict[str, dict] = {t["name"]: t for t in TOOLS}
 
+# RFC-004 P7 startup assertion (plan advisory #5): duplicate names in the
+# section slices would collapse silently in TOOL_MAP — fail at import
+# instead. (The exact count/order is pinned by the characterization
+# contract, where changing it is a reviewed edit rather than a prod crash.)
+assert len(TOOL_MAP) == len(TOOLS), "duplicate tool name across defs/ sections"
+
 # NOTE: the old MUTATING_TOOLS / READ_ONLY_TOOLS frozensets were removed — they
 # were imported only by a schema test and NOT consulted by any runtime
 # authorization path (the governor uses risk_classifier; mutation detection uses

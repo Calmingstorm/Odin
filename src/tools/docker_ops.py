@@ -9,11 +9,24 @@ from __future__ import annotations
 
 import shlex
 
-ALLOWED_ACTIONS = frozenset({
-    "ps", "run", "exec", "logs", "build", "pull", "stop", "rm",
-    "inspect", "stats", "compose_up", "compose_down", "compose_ps",
-    "compose_logs",
-})
+ALLOWED_ACTIONS = frozenset(
+    {
+        "ps",
+        "run",
+        "exec",
+        "logs",
+        "build",
+        "pull",
+        "stop",
+        "rm",
+        "inspect",
+        "stats",
+        "compose_up",
+        "compose_down",
+        "compose_ps",
+        "compose_logs",
+    }
+)
 
 _MAX_LOG_LINES = 500
 _DEFAULT_LOG_LINES = 100
@@ -30,8 +43,7 @@ def build_docker_command(action: str, params: dict) -> str:
     """
     if action not in ALLOWED_ACTIONS:
         raise ValueError(
-            f"Unknown docker action: {action}. "
-            f"Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
+            f"Unknown docker action: {action}. Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
         )
     builder = _BUILDERS.get(action)
     if builder is None:
@@ -77,11 +89,11 @@ def _build_run(params: dict) -> str:
         parts += ["--name", _sq(name)]
     if network:
         parts += ["--network", _sq(network)]
-    for k, v in (env.items() if isinstance(env, dict) else []):
+    for k, v in env.items() if isinstance(env, dict) else []:
         parts += ["-e", _sq(f"{k}={v}")]
-    for p in (ports if isinstance(ports, list) else []):
+    for p in ports if isinstance(ports, list) else []:
         parts += ["-p", _sq(str(p))]
-    for v in (volumes if isinstance(volumes, list) else []):
+    for v in volumes if isinstance(volumes, list) else []:
         parts += ["-v", _sq(str(v))]
     if extra_args:
         parts.append(_sq(str(extra_args)))
@@ -107,7 +119,7 @@ def _build_exec(params: dict) -> str:
         parts += ["-w", _sq(workdir)]
     if user:
         parts += ["-u", _sq(user)]
-    for k, v in (env.items() if isinstance(env, dict) else []):
+    for k, v in env.items() if isinstance(env, dict) else []:
         parts += ["-e", _sq(f"{k}={v}")]
     parts.append(_sq(container))
     parts += ["sh", "-c", _sq(command)]
@@ -165,7 +177,7 @@ def _build_build(params: dict) -> str:
         parts += ["--target", _sq(target)]
     if no_cache:
         parts.append("--no-cache")
-    for k, v in (build_args.items() if isinstance(build_args, dict) else []):
+    for k, v in build_args.items() if isinstance(build_args, dict) else []:
         parts += ["--build-arg", _sq(f"{k}={v}")]
     parts.append(_sq(path))
     return " ".join(parts)
@@ -268,7 +280,7 @@ def _build_compose_up(params: dict) -> str:
         parts.append("--build")
     if force_recreate:
         parts.append("--force-recreate")
-    for s in (services if isinstance(services, list) else []):
+    for s in services if isinstance(services, list) else []:
         parts.append(_sq(str(s)))
     return " ".join(parts)
 
@@ -304,7 +316,7 @@ def _build_compose_ps(params: dict) -> str:
     parts.append("ps")
     if format_str:
         parts += ["--format", _sq(format_str)]
-    for s in (services if isinstance(services, list) else []):
+    for s in services if isinstance(services, list) else []:
         parts.append(_sq(str(s)))
     return " ".join(parts)
 
@@ -339,7 +351,7 @@ def _build_compose_logs(params: dict) -> str:
     else:
         parts += ["--tail", str(_DEFAULT_LOG_LINES)]
 
-    for s in (services if isinstance(services, list) else []):
+    for s in services if isinstance(services, list) else []:
         parts.append(_sq(str(s)))
     return " ".join(parts)
 

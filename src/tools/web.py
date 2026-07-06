@@ -2,6 +2,7 @@
 
 Replaces the fragile fetch_url and search_news skills with proper built-in tools.
 """
+
 from __future__ import annotations
 
 import re
@@ -19,7 +20,10 @@ FETCH_TIMEOUT = aiohttp.ClientTimeout(total=15)
 SEARCH_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 # User-Agent to avoid bot blocking
-USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 class _HTMLToText(HTMLParser):
@@ -66,6 +70,7 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
     and plain text. Truncates to max_chars.
     """
     from .url_safety import is_url_blocked
+
     if is_url_blocked(url):
         return "Error: URL targets a blocked address (localhost, private IP, or metadata endpoint)"
     try:
@@ -166,9 +171,10 @@ def _parse_ddg_results(html: str, max_results: int) -> str:
             actual = re.search(r"uddg=([^&]+)", url)
             if actual:
                 from urllib.parse import unquote
+
                 url = unquote(actual.group(1))
 
-        result = f"**{i+1}. {clean_title}**\n{url}"
+        result = f"**{i + 1}. {clean_title}**\n{url}"
         if clean_snippet:
             result += f"\n{clean_snippet}"
         results.append(result)

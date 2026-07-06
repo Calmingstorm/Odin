@@ -5,12 +5,13 @@ high, critical) so operators can monitor dangerous operations.  Never blocks
 execution — the classification is logged in audit entries and exposed via
 metrics.
 """
+
 from __future__ import annotations
 
 import re
 import threading
 from collections import defaultdict
-from enum import Enum
+from enum import StrEnum
 from typing import NamedTuple
 
 from ..odin_log import get_logger
@@ -18,7 +19,7 @@ from ..odin_log import get_logger
 log = get_logger("risk_classifier")
 
 
-class RiskLevel(str, Enum):
+class RiskLevel(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -40,13 +41,19 @@ _CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bmkfs\b"), "filesystem format"),
     (re.compile(r"\bdd\s+.*\bif="), "raw disk write"),
     (re.compile(r":\(\)\s*\{\s*:\|:&\s*\}\s*;"), "fork bomb"),
-    (re.compile(r"(?:^|[;&|]\s*|sudo\s+)(?:/sbin/)?(shutdown|poweroff|halt)\b", re.MULTILINE), "system shutdown"),
+    (
+        re.compile(r"(?:^|[;&|]\s*|sudo\s+)(?:/sbin/)?(shutdown|poweroff|halt)\b", re.MULTILINE),
+        "system shutdown",
+    ),
     (re.compile(r"\binit\s+0\b"), "system shutdown"),
     (re.compile(r"(?:^|[;&|]\s*|sudo\s+)(?:/sbin/)?reboot\b", re.MULTILINE), "system reboot"),
     (re.compile(r"\bchmod\s+.*-[a-zA-Z]*R.*\s+777\s+/"), "recursive world-writable root"),
     (re.compile(r"\biptables\s+.*-F\b"), "firewall flush"),
     (re.compile(r"\bufw\s+disable\b"), "firewall disable"),
-    (re.compile(r"\b(DROP|TRUNCATE)\s+(DATABASE|TABLE)\b", re.IGNORECASE), "database drop/truncate"),
+    (
+        re.compile(r"\b(DROP|TRUNCATE)\s+(DATABASE|TABLE)\b", re.IGNORECASE),
+        "database drop/truncate",
+    ),
     (re.compile(r"\bcrontab\s+.*-r\b"), "crontab remove all"),
     (re.compile(r">\s*/dev/sd[a-z]"), "write to block device"),
     # Bypass closures — the root-delete rules above anchor on a trailing "/",
@@ -55,15 +62,20 @@ _CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     # catastrophic forms the original set missed.
     (re.compile(r"\brm\s+.*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\*"), "recursive delete on root glob"),
     (re.compile(r"\brm\s+.*--no-preserve-root"), "delete overriding root guard"),
-    (re.compile(r"\brm\s+.*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\s*[;&|]"), "recursive delete on root (chained)"),
+    (
+        re.compile(r"\brm\s+.*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\s*[;&|]"),
+        "recursive delete on root (chained)",
+    ),
     (re.compile(r"\bfind\s+/\s+.*-delete\b"), "recursive delete from root via find"),
     (re.compile(r"\bfind\s+/\s+.*-exec\s+rm\b"), "recursive delete from root via find -exec"),
     (re.compile(r"\bdd\s+.*\bof=/dev/(sd|nvme|vd|xvd|mmcblk)"), "raw write to block device"),
     # chmod 777 on root, either flag order (chmod -R 777 / or chmod 777 -R /).
     (re.compile(r"\bchmod\s+.*\b777\b.*\s+/\s*($|[;&|])"), "world-writable on root"),
     # Decode/download piped into a shell — arbitrary remote code execution.
-    (re.compile(r"\bbase64\s+.*(--decode|-d)\b.*\|\s*(sudo\s+)?(sh|bash|zsh)\b"),
-     "base64 decode piped to shell"),
+    (
+        re.compile(r"\bbase64\s+.*(--decode|-d)\b.*\|\s*(sudo\s+)?(sh|bash|zsh)\b"),
+        "base64 decode piped to shell",
+    ),
     (re.compile(r"\|\s*sudo\s+(sh|bash|zsh)\b"), "piped into privileged shell"),
 ]
 
@@ -89,7 +101,10 @@ _HIGH_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bchown\s+.*-[a-zA-Z]*R"), "recursive ownership change"),
     (re.compile(r"\bDELETE\s+FROM\b", re.IGNORECASE), "database delete"),
     (re.compile(r"\bALTER\s+TABLE\b", re.IGNORECASE), "database schema change"),
-    (re.compile(r"\bDROP\s+(INDEX|VIEW|FUNCTION|TRIGGER)\b", re.IGNORECASE), "database object drop"),
+    (
+        re.compile(r"\bDROP\s+(INDEX|VIEW|FUNCTION|TRIGGER)\b", re.IGNORECASE),
+        "database object drop",
+    ),
 ]
 
 _MEDIUM_PATTERNS: list[tuple[re.Pattern, str]] = [
@@ -239,6 +254,7 @@ _EXFIL_PATTERNS: list[tuple[re.Pattern, str]] = [
 
 class CommandGovernorResult:
     """Result of a command governor check."""
+
     __slots__ = ("allowed", "risk", "reason", "suggestion")
 
     def __init__(self, allowed: bool, risk: RiskLevel, reason: str, suggestion: str = ""):
@@ -298,7 +314,7 @@ class CommandGovernor:
         self._stats = GovernorStats()
 
     @property
-    def stats(self) -> "GovernorStats":
+    def stats(self) -> GovernorStats:
         return self._stats
 
     def check(
@@ -326,12 +342,19 @@ class CommandGovernor:
                     if is_admin and self._admin_can_override:
                         log.warning(
                             "Governor ALLOWED (admin override, exfil): %s — %s",
-                            reason, command[:200],
+                            reason,
+                            command[:200],
                         )
-                        self._stats.record_allow(command, RiskAssessment(RiskLevel.CRITICAL, reason))
-                        return CommandGovernorResult(True, RiskLevel.CRITICAL, f"{reason} (admin override)")
+                        self._stats.record_allow(
+                            command, RiskAssessment(RiskLevel.CRITICAL, reason)
+                        )
+                        return CommandGovernorResult(
+                            True, RiskLevel.CRITICAL, f"{reason} (admin override)"
+                        )
                     result = CommandGovernorResult(
-                        False, RiskLevel.CRITICAL, reason,
+                        False,
+                        RiskLevel.CRITICAL,
+                        reason,
                         _SUGGESTION_MAP.get(reason, ""),
                     )
                     self._stats.record_block(command, result)
@@ -345,12 +368,17 @@ class CommandGovernor:
             if is_admin and self._admin_can_override:
                 log.warning(
                     "Governor ALLOWED (admin override, critical): %s — %s",
-                    assessment.reason, command[:200],
+                    assessment.reason,
+                    command[:200],
                 )
                 self._stats.record_allow(command, assessment)
-                return CommandGovernorResult(True, RiskLevel.CRITICAL, f"{assessment.reason} (admin override)")
+                return CommandGovernorResult(
+                    True, RiskLevel.CRITICAL, f"{assessment.reason} (admin override)"
+                )
             result = CommandGovernorResult(
-                False, RiskLevel.CRITICAL, assessment.reason,
+                False,
+                RiskLevel.CRITICAL,
+                assessment.reason,
                 _SUGGESTION_MAP.get(assessment.reason, ""),
             )
             self._stats.record_block(command, result)
@@ -360,11 +388,15 @@ class CommandGovernor:
         host_policy = self._host_overrides.get(host, "") if host else ""
         if host_policy == "strict" and assessment.level == RiskLevel.HIGH:
             result = CommandGovernorResult(
-                False, assessment.level, f"{assessment.reason} (host '{host}' is strict-mode)",
+                False,
+                assessment.level,
+                f"{assessment.reason} (host '{host}' is strict-mode)",
                 _SUGGESTION_MAP.get(assessment.reason, ""),
             )
             self._stats.record_block(command, result)
-            log.warning("Governor BLOCKED (strict host %s): %s — %s", host, assessment.reason, command[:200])
+            log.warning(
+                "Governor BLOCKED (strict host %s): %s — %s", host, assessment.reason, command[:200]
+            )
             return result
 
         if assessment.level == RiskLevel.HIGH:
@@ -387,22 +419,26 @@ class GovernorStats:
     def record_block(self, command: str, result: CommandGovernorResult) -> None:
         with self._lock:
             self._block_count += 1
-            self._blocked.append({
-                "command": command[:200],
-                "risk": result.risk.value,
-                "reason": result.reason,
-            })
+            self._blocked.append(
+                {
+                    "command": command[:200],
+                    "risk": result.risk.value,
+                    "reason": result.reason,
+                }
+            )
             if len(self._blocked) > 50:
                 self._blocked = self._blocked[-50:]
 
     def record_allow(self, command: str, assessment: RiskAssessment) -> None:
         with self._lock:
             self._allow_count += 1
-            self._allowed_high.append({
-                "command": command[:200],
-                "risk": assessment.level.value,
-                "reason": assessment.reason,
-            })
+            self._allowed_high.append(
+                {
+                    "command": command[:200],
+                    "risk": assessment.level.value,
+                    "reason": assessment.reason,
+                }
+            )
             if len(self._allowed_high) > 50:
                 self._allowed_high = self._allowed_high[-50:]
 
@@ -438,7 +474,7 @@ class RiskStats:
             }
             self._recent.append(entry)
             if len(self._recent) > self._max_recent:
-                self._recent = self._recent[-self._max_recent:]
+                self._recent = self._recent[-self._max_recent :]
 
     def get_summary(self) -> dict:
         """Return aggregated risk statistics."""

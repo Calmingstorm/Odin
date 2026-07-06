@@ -18,20 +18,50 @@ def set_default_timezone(tz_name: str) -> None:
     global _default_tz
     _default_tz = ZoneInfo(tz_name)
 
+
 # Day name → weekday number (Monday=0)
 DAY_NAMES = {
-    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-    "friday": 4, "saturday": 5, "sunday": 6,
-    "mon": 0, "tue": 1, "tues": 1, "wed": 2, "thu": 3, "thur": 3,
-    "thurs": 3, "fri": 4, "sat": 5, "sun": 6,
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+    "mon": 0,
+    "tue": 1,
+    "tues": 1,
+    "wed": 2,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "fri": 4,
+    "sat": 5,
+    "sun": 6,
 }
 
 UNIT_SECONDS = {
-    "second": 1, "seconds": 1, "sec": 1, "secs": 1, "s": 1,
-    "minute": 60, "minutes": 60, "min": 60, "mins": 60, "m": 60,
-    "hour": 3600, "hours": 3600, "hr": 3600, "hrs": 3600, "h": 3600,
-    "day": 86400, "days": 86400, "d": 86400,
-    "week": 604800, "weeks": 604800, "w": 604800,
+    "second": 1,
+    "seconds": 1,
+    "sec": 1,
+    "secs": 1,
+    "s": 1,
+    "minute": 60,
+    "minutes": 60,
+    "min": 60,
+    "mins": 60,
+    "m": 60,
+    "hour": 3600,
+    "hours": 3600,
+    "hr": 3600,
+    "hrs": 3600,
+    "h": 3600,
+    "day": 86400,
+    "days": 86400,
+    "d": 86400,
+    "week": 604800,
+    "weeks": 604800,
+    "w": 604800,
 }
 
 

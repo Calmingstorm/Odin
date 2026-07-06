@@ -79,9 +79,9 @@ async def _read_lines_with_callback(
         # Wait for process exit with a bounded timeout to avoid indefinite hang
         try:
             await asyncio.wait_for(proc.wait(), timeout=min(timeout, 10))
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
-    except (asyncio.TimeoutError, TimeoutError):
+    except TimeoutError:
         proc.kill()
         return 1, f"Command timed out after {timeout} seconds"
     output = "".join(lines)
@@ -113,7 +113,7 @@ async def run_local_command(
         output = stdout.decode("utf-8", errors="replace")
         return proc.returncode or 0, _truncate_output(output)
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         return 1, f"Command timed out after {timeout} seconds"
     except Exception as e:
@@ -145,16 +145,25 @@ async def run_ssh_command(
     """
     if pool is not None:
         ssh_args = pool.get_ssh_args(
-            host, command, ssh_key_path, known_hosts_path, ssh_user,
+            host,
+            command,
+            ssh_key_path,
+            known_hosts_path,
+            ssh_user,
         )
     else:
         ssh_args = [
             "ssh",
-            "-i", ssh_key_path,
-            "-o", f"UserKnownHostsFile={known_hosts_path}",
-            "-o", "StrictHostKeyChecking=yes",
-            "-o", "ConnectTimeout=10",
-            "-o", "BatchMode=yes",
+            "-i",
+            ssh_key_path,
+            "-o",
+            f"UserKnownHostsFile={known_hosts_path}",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "BatchMode=yes",
             f"{ssh_user}@{host}",
             command,
         ]
@@ -172,7 +181,9 @@ async def run_ssh_command(
             )
             if on_output is not None:
                 exit_code, output = await _read_lines_with_callback(
-                    proc, timeout, on_output,
+                    proc,
+                    timeout,
+                    on_output,
                 )
             else:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -189,23 +200,33 @@ async def run_ssh_command(
                 wait = compute_backoff(attempt, retry_base_delay, retry_max_delay)
                 log.warning(
                     "SSH transient failure to %s (attempt %d/%d): %s. Retrying in %.1fs...",
-                    host, attempt + 1, max_retries, output.strip()[:200], wait,
+                    host,
+                    attempt + 1,
+                    max_retries,
+                    output.strip()[:200],
+                    wait,
                 )
                 await asyncio.sleep(wait)
             else:
                 log.warning(
                     "SSH transient failure to %s (attempt %d/%d, exhausted): %s",
-                    host, attempt + 1, max_retries, output.strip()[:200],
+                    host,
+                    attempt + 1,
+                    max_retries,
+                    output.strip()[:200],
                 )
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             last_exit_code = 1
             last_output = f"Command timed out after {timeout} seconds"
             if attempt < max_retries - 1:
                 wait = compute_backoff(attempt, retry_base_delay, retry_max_delay)
                 log.warning(
                     "SSH timeout to %s (attempt %d/%d). Retrying in %.1fs...",
-                    host, attempt + 1, max_retries, wait,
+                    host,
+                    attempt + 1,
+                    max_retries,
+                    wait,
                 )
                 await asyncio.sleep(wait)
             else:

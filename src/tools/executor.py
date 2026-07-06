@@ -10,28 +10,30 @@ from ..odin_log import get_logger
 from ..permissions.host_access import HostAccessManager
 from ..permissions.manager import PermissionManager
 from .branch_freshness import (
-    BranchStatus,
     FreshnessEvent,
     FreshnessStats,
     check_branch_freshness,
     format_staleness_warning,
 )
 from .bulkhead import BulkheadFullError, BulkheadRegistry
+from .output_streamer import ToolOutputStreamer
+from .post_validation import annotate_if_mutation
 from .recovery import (
+    UNSAFE_TO_RETRY,
     RecoveryCategory,
     RecoveryStats,
-    RecoveryStrategy,
-    UNSAFE_TO_RETRY,
-    classify_error as _classify_error,
-    classify_exception as _classify_exception,
-    decide_recovery_action as _decide_recovery_action,
-    get_policy as _get_recovery_policy,
-    get_retry_delay as _get_retry_delay,
 )
-from .post_validation import annotate_if_mutation
+from .recovery import (
+    classify_error as _classify_error,
+)
+from .recovery import (
+    classify_exception as _classify_exception,
+)
+from .recovery import (
+    decide_recovery_action as _decide_recovery_action,
+)
 from .result_validator import ResultValidationStats, ToolResult, validate_tool_result
-from .risk_classifier import RiskLevel, RiskStats, classify_tool
-from .output_streamer import ToolOutputStreamer
+from .risk_classifier import RiskStats, classify_tool
 from .ssh import is_local_address, run_local_command, run_ssh_command
 from .ssh_pool import SSHConnectionPool
 
@@ -70,12 +72,14 @@ def _build_bulkhead_registry(config: ToolsConfig) -> BulkheadRegistry:
     return registry
 
 
-# RFC-004 P2: explicit late-bound dispatch table — tool name -> (owner_key, attr).
+# RFC-004: THE explicit late-bound dispatch table — tool name -> (owner_key, attr).
 # Handlers are resolved via getattr(owner, attr) at CALL time, never pre-bound,
 # so instance-attribute patches (``executor._handle_x = fake``) keep governing
-# execution (the patch-seam contract in test_executor_dispatch_parity). All
-# entries point at the "core" owner until the P4–P6 waves rebind them to domain
-# owners. The characterization contract pins table keys == executor-routed set.
+# execution (the patch-seam contract in test_executor_dispatch_parity). Every
+# handler body lives on a domain owner in src/tools/handlers/; the "core" owner
+# key remains available for future middleware-adjacent handlers. The
+# characterization contract pins table keys == executor-routed set, and
+# __init__ asserts every entry resolves on its owner at construction.
 EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
     "run_command": ("system", "_handle_run_command"),
     "run_script": ("system", "_handle_run_script"),
@@ -222,6 +226,16 @@ class ToolExecutor:
             "comms": self.comms_tools,
             "validation": self.validation_tools,
         }
+        # RFC-004 P7 startup assertion (plan advisory #5): every dispatch-table
+        # entry must resolve to a callable on its bound owner — a rebind typo
+        # or missing domain method fails HERE, at construction, not on the
+        # first live tool call.
+        for _name, (_owner_key, _attr) in EXECUTOR_HANDLERS.items():
+            _owner = self._handler_owners.get(_owner_key)
+            assert _owner is not None, f"EXECUTOR_HANDLERS[{_name!r}]: unbound owner {_owner_key!r}"
+            assert callable(getattr(_owner, _attr, None)), (
+                f"EXECUTOR_HANDLERS[{_name!r}]: {_owner_key}.{_attr} does not resolve"
+            )
 
     @property
     def _current_user_id(self) -> str | None:
@@ -284,39 +298,30 @@ class ToolExecutor:
         return None
 
     def _resolve_handler(self, tool_name: str):
-        """Resolve a tool handler at CALL time (RFC-004 P2).
+        """Resolve a tool handler at CALL time (RFC-004 P2, fallback retired P7).
 
-        Table-first: EXECUTOR_HANDLERS maps name -> (owner_key, attr) and the
-        handler is fetched with getattr(owner, attr) NOW — never pre-bound —
-        so instance-attribute patches keep governing execution. The legacy
-        f-string lookup remains as a logged fallback until P7 retires it.
+        Instance-attribute overrides win FIRST — the historical patch seam
+        (``executor._handle_x = fake``, 13+ test sites) keeps governing even
+        for handlers whose real bodies live on domain owners; checked via
+        ``__dict__`` so class-level methods can't short-circuit the table.
+        Otherwise EXECUTOR_HANDLERS maps name -> (owner_key, attr) and the
+        handler is fetched with getattr(owner, attr) NOW — never pre-bound.
+        This method is the ONLY sanctioned dynamic ``_handle_`` spelling in
+        src/ (the characterization contract's AST scan enforces that).
         """
-        # Instance-attribute overrides win FIRST — this is the historical
-        # patch seam (13+ test sites do ``executor._handle_x = fake``) and it
-        # must keep governing even for handlers whose real bodies now live on
-        # domain owners. Checked via __dict__ so class-level methods don't
-        # short-circuit table resolution.
         override = self.__dict__.get(f"_handle_{tool_name}")
         if override is not None:
             return override
         entry = EXECUTOR_HANDLERS.get(tool_name)
         # getattr: tolerate __init__-bypassing construction (ToolExecutor.__new__
-        # in older fixtures) — resolution then falls through to the legacy path.
+        # in older fixtures) — such instances resolve nothing table-side.
         owners = getattr(self, "_handler_owners", None)
-        if entry is not None and owners is not None:
-            owner_key, attr = entry
-            owner = owners.get(owner_key)
-            if owner is not None:
-                handler = getattr(owner, attr, None)
-                if handler is not None:
-                    return handler
-        legacy = getattr(self, f"_handle_{tool_name}", None)
-        if legacy is not None:
-            log.warning(
-                "Tool %s resolved via legacy getattr fallback — missing EXECUTOR_HANDLERS entry",
-                tool_name,
-            )
-        return legacy
+        if entry is None or owners is None:
+            return None
+        owner = owners.get(entry[0])
+        if owner is None:
+            return None
+        return getattr(owner, entry[1], None)
 
     async def execute(
         self, tool_name: str, tool_input: dict, *, user_id: str | None = None
@@ -394,7 +399,8 @@ class ToolExecutor:
                 elif decision.action == "skip":
                     if tool_name in UNSAFE_TO_RETRY:
                         log.warning(
-                            "Recovery skipped for %s (%s): tool is not safe to retry (may have already executed)",
+                            "Recovery skipped for %s (%s): tool is not safe to retry "
+                            "(may have already executed)",
                             tool_name,
                             category.value,
                         )
@@ -482,7 +488,7 @@ class ToolExecutor:
             self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
             self._metrics[tool_name]["calls"] += 1
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
             self._metrics[tool_name]["errors"] += 1
             self._metrics[tool_name]["timeouts"] += 1

@@ -24,8 +24,9 @@ import json
 import re
 import shlex
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from ..odin_log import get_logger
 
@@ -63,19 +64,40 @@ _REDOS_HEURISTIC = re.compile(
     re.VERBOSE,
 )
 
-VALID_TYPES = frozenset({
-    "http", "port", "service", "process", "log_absent", "log_present", "command",
-})
+VALID_TYPES = frozenset(
+    {
+        "http",
+        "port",
+        "service",
+        "process",
+        "log_absent",
+        "log_present",
+        "command",
+    }
+)
 VALID_SEVERITIES = frozenset({"critical", "warn", "info"})
-VALID_COMPARE_OPS = frozenset({
-    "equals", "status_in", "contains", "not_contains",
-    "exit_zero", "exit_nonzero", "regex_match",
-})
+VALID_COMPARE_OPS = frozenset(
+    {
+        "equals",
+        "status_in",
+        "contains",
+        "not_contains",
+        "exit_zero",
+        "exit_nonzero",
+        "regex_match",
+    }
+)
 
 # compare ops that require a non-empty 'expected' value
-_COMPARE_OPS_REQUIRING_EXPECTED = frozenset({
-    "equals", "contains", "not_contains", "regex_match", "status_in",
-})
+_COMPARE_OPS_REQUIRING_EXPECTED = frozenset(
+    {
+        "equals",
+        "contains",
+        "not_contains",
+        "regex_match",
+        "status_in",
+    }
+)
 
 # compare ops that are valid for each check type (others are rejected at parse
 # time so the API never silently promises flexibility it won't deliver).
@@ -86,10 +108,16 @@ _ALLOWED_COMPARE_FOR_TYPE: dict[str, frozenset[str]] = {
     "process": frozenset({"exit_zero"}),
     "log_absent": frozenset({"not_contains"}),
     "log_present": frozenset({"contains"}),
-    "command": frozenset({
-        "exit_zero", "exit_nonzero", "equals", "contains",
-        "not_contains", "regex_match",
-    }),
+    "command": frozenset(
+        {
+            "exit_zero",
+            "exit_nonzero",
+            "equals",
+            "contains",
+            "not_contains",
+            "regex_match",
+        }
+    ),
 }
 
 
@@ -171,7 +199,9 @@ def parse_checks(raw_checks: list[dict]) -> tuple[list[Check], list[str]]:
         if compare is not None:
             compare = str(compare).strip().lower()
             if compare not in VALID_COMPARE_OPS:
-                errors.append(f"check[{i}]: invalid compare '{compare}' (valid: {sorted(VALID_COMPARE_OPS)})")
+                errors.append(
+                    f"check[{i}]: invalid compare '{compare}' (valid: {sorted(VALID_COMPARE_OPS)})"
+                )
                 continue
             allowed_for_type = _ALLOWED_COMPARE_FOR_TYPE.get(c_type, frozenset())
             if compare not in allowed_for_type:
@@ -188,12 +218,13 @@ def parse_checks(raw_checks: list[dict]) -> tuple[list[Check], list[str]]:
         needs_expected = (
             compare is not None
             and compare in _COMPARE_OPS_REQUIRING_EXPECTED
-            and (expected is None or (isinstance(expected, (str, list, tuple)) and len(expected) == 0))
+            and (
+                expected is None
+                or (isinstance(expected, (str, list, tuple)) and len(expected) == 0)
+            )
         )
         if needs_expected:
-            errors.append(
-                f"check[{i}]: compare '{compare}' requires a non-empty 'expected' value"
-            )
+            errors.append(f"check[{i}]: compare '{compare}' requires a non-empty 'expected' value")
             continue
         timeout = int(raw.get("timeout_seconds", DEFAULT_CHECK_TIMEOUT))
         timeout = max(1, min(timeout, 120))
@@ -202,17 +233,19 @@ def parse_checks(raw_checks: list[dict]) -> tuple[list[Check], list[str]]:
         host = raw.get("host")
         host = str(host).strip() if host else None
 
-        checks.append(Check(
-            type=c_type,
-            target=target,
-            expected=raw.get("expected"),
-            severity=severity,
-            host=host,
-            compare=compare,
-            window_seconds=window,
-            timeout_seconds=timeout,
-            name=str(raw.get("name") or "").strip() or None,
-        ))
+        checks.append(
+            Check(
+                type=c_type,
+                target=target,
+                expected=raw.get("expected"),
+                severity=severity,
+                host=host,
+                compare=compare,
+                window_seconds=window,
+                timeout_seconds=timeout,
+                name=str(raw.get("name") or "").strip() or None,
+            )
+        )
     return checks, errors
 
 
@@ -252,7 +285,10 @@ def _build_command(check: Check) -> str | None:
             h, p = "127.0.0.1", tgt
         if not p.isdigit():
             return None
-        return f"timeout {timeout} bash -c 'cat < /dev/null > /dev/tcp/{shlex.quote(h)}/{p}' && echo OPEN || echo CLOSED"
+        return (
+            f"timeout {timeout} bash -c 'cat < /dev/null > /dev/tcp/{shlex.quote(h)}/{p}'"
+            " && echo OPEN || echo CLOSED"
+        )
     if t == "service":
         return f"systemctl is-active {shlex.quote(tgt)} 2>/dev/null || true"
     if t == "process":
@@ -301,8 +337,7 @@ def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
         else:
             return "error", f"invalid 'expected' for http check: {expected!r}"
         expected_codes = {
-            str(int(c)) for c in expected_list
-            if isinstance(c, (int, str)) and str(c).isdigit()
+            str(int(c)) for c in expected_list if isinstance(c, (int, str)) and str(c).isdigit()
         }
         if not expected_codes:
             return "error", f"'expected' for http check yielded no status codes: {expected!r}"
@@ -347,9 +382,17 @@ def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
 
     if check.type == "command":
         if compare == "exit_zero":
-            return ("pass", "") if exit_code == 0 else ("fail", f"exit {exit_code}: {out_stripped[:200]}")
+            return (
+                ("pass", "")
+                if exit_code == 0
+                else ("fail", f"exit {exit_code}: {out_stripped[:200]}")
+            )
         if compare == "exit_nonzero":
-            return ("pass", "") if exit_code != 0 else ("fail", "command succeeded but expected failure")
+            return (
+                ("pass", "")
+                if exit_code != 0
+                else ("fail", "command succeeded but expected failure")
+            )
         expected = check.expected
         if compare == "contains":
             if expected and str(expected) in output:
@@ -431,15 +474,24 @@ async def run_bundle(
     if parse_errors:
         dummies = [
             CheckResult(
-                name=f"parse_error[{i}]", type="parse", target="", severity="critical",
-                status="error", error=e,
+                name=f"parse_error[{i}]",
+                type="parse",
+                target="",
+                severity="critical",
+                status="error",
+                error=e,
             )
             for i, e in enumerate(parse_errors)
         ]
         return ValidationReport(
-            verdict="error", passed=0, failed=0, errored=len(dummies),
-            total=len(dummies), duration_ms=int((time.monotonic() - start) * 1000),
-            bundle=bundle_name, checks=dummies,
+            verdict="error",
+            passed=0,
+            failed=0,
+            errored=len(dummies),
+            total=len(dummies),
+            duration_ms=int((time.monotonic() - start) * 1000),
+            bundle=bundle_name,
+            checks=dummies,
         )
 
     # Bundle-level semaphore bounds fan-out so a 25-check bundle doesn't
@@ -451,8 +503,12 @@ async def run_bundle(
         resolved_host = check.host or default_host or "localhost"
         name = check.name or f"{check.type}[{idx}]"
         result = CheckResult(
-            name=name, type=check.type, target=check.target,
-            severity=check.severity, status="error", host=resolved_host,
+            name=name,
+            type=check.type,
+            target=check.target,
+            severity=check.severity,
+            status="error",
+            host=resolved_host,
         )
         t0 = time.monotonic()
         async with sem:
@@ -464,14 +520,16 @@ async def run_bundle(
                 address, ssh_user, _os = resolved
                 command = _build_command(check)
                 if command is None:
-                    result.error = f"could not build command for check type '{check.type}' (bad target?)"
+                    result.error = (
+                        f"could not build command for check type '{check.type}' (bad target?)"
+                    )
                     return result
                 try:
                     exit_code, output = await asyncio.wait_for(
                         exec_command(address, command, ssh_user, timeout=check.timeout_seconds),
                         timeout=check.timeout_seconds + 5,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     result.status = "error"
                     result.error = f"timed out after {check.timeout_seconds}s"
                     return result
@@ -498,12 +556,23 @@ async def run_bundle(
     duration = int((time.monotonic() - start) * 1000)
 
     report = ValidationReport(
-        verdict=verdict, passed=passed, failed=failed, errored=errored,
-        total=len(results), duration_ms=duration, bundle=bundle_name, checks=results,
+        verdict=verdict,
+        passed=passed,
+        failed=failed,
+        errored=errored,
+        total=len(results),
+        duration_ms=duration,
+        bundle=bundle_name,
+        checks=results,
     )
     log.info(
         "validation bundle=%s verdict=%s passed=%d failed=%d errored=%d duration_ms=%d",
-        bundle_name, verdict, passed, failed, errored, duration,
+        bundle_name,
+        verdict,
+        passed,
+        failed,
+        errored,
+        duration,
     )
     return report
 
@@ -539,9 +608,15 @@ def report_as_json(report: ValidationReport) -> str:
 # into enforced code.
 
 _MUTATION_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\bsystemctl\s+(restart|stop|start|reload|enable|disable)\b"), "service lifecycle change"),
+    (
+        re.compile(r"\bsystemctl\s+(restart|stop|start|reload|enable|disable)\b"),
+        "service lifecycle change",
+    ),
     (re.compile(r"\bservice\s+\S+\s+(restart|stop|start)\b"), "service lifecycle change"),
-    (re.compile(r"\bdocker\s+(compose\s+)?(up|down|restart|stop|start|rm)\b"), "container operation"),
+    (
+        re.compile(r"\bdocker\s+(compose\s+)?(up|down|restart|stop|start|rm)\b"),
+        "container operation",
+    ),
     (re.compile(r"\bdocker-compose\s+(up|down|restart|stop)\b"), "compose operation"),
     (re.compile(r"\bkubectl\s+(apply|delete|rollout|scale|patch)\b"), "kubernetes mutation"),
     (re.compile(r"\bterraform\s+(apply|destroy)\b"), "infrastructure mutation"),
@@ -608,7 +683,9 @@ def detect_mutation(tool_name: str, tool_input: dict) -> MutationDetection:
         command = tool_input.get("command", "")
     elif tool_name == "write_file":
         path = tool_input.get("path", "")
-        if any(p in path for p in ("/etc/", "/opt/", "nginx", "apache", "systemd", ".service", ".conf")):
+        if any(
+            p in path for p in ("/etc/", "/opt/", "nginx", "apache", "systemd", ".service", ".conf")
+        ):
             return MutationDetection(True, f"config write: {path}")
 
     if command:
@@ -620,7 +697,9 @@ def detect_mutation(tool_name: str, tool_input: dict) -> MutationDetection:
 
 
 def annotate_if_mutation(
-    tool_name: str, tool_input: dict, output: str,
+    tool_name: str,
+    tool_input: dict,
+    output: str,
 ) -> tuple[str, MutationDetection]:
     """Append a validation hint if a mutation was detected.
 
