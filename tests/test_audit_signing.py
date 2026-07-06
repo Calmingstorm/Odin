@@ -319,13 +319,21 @@ class TestVerifyLog:
         assert result["valid"] is False
         assert "invalid JSON" in result["error"]
 
-    async def test_missing_hmac_field(self, tmp_path):
+    async def test_missing_hmac_field_is_tolerated_as_prefix(self, tmp_path):
+        # Migration semantics (deliberate change from the original strict
+        # pin): entries written BEFORE hmac_key was enabled are not
+        # retroactively signed, so an unsigned prefix is tolerated and
+        # reported instead of failing the whole file — otherwise enabling
+        # signing on an existing install permanently breaks verification.
+        # Unsigned entries AFTER the chain begins still fail (see
+        # TestUnsignedPrefix).
         p = tmp_path / "audit.jsonl"
         entry = {"data": "unsigned"}
         p.write_text(json.dumps(entry) + "\n")
         result = await verify_log(p, "key")
-        assert result["valid"] is False
-        assert "missing _hmac" in result["error"]
+        assert result["valid"] is True
+        assert result["verified"] == 0
+        assert result["unsigned_prefix"] == 1
 
     async def test_wrong_key(self, tmp_path):
         p = tmp_path / "audit.jsonl"
@@ -356,6 +364,92 @@ class TestVerifyLog:
         assert result["valid"] is True
         assert result["total"] == 1
         assert result["verified"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Unsigned prefix: enabling hmac_key over pre-existing unsigned history
+# ---------------------------------------------------------------------------
+
+class TestUnsignedPrefix:
+    """Verification of files whose history predates signing enablement.
+
+    ``unsigned* signed+`` is valid (the prefix is reported, the chain is
+    verified from the first signed entry); ``signed+ unsigned`` is tamper
+    evidence and stays invalid.
+    """
+
+    def _write_mixed(self, path, unsigned: int, signed: int, key: str = "key"):
+        """Unsigned prefix + signed suffix, as produced by enabling a key on
+        an existing file: initialize_chain finds no signed entry, so the
+        first signed entry chains from GENESIS."""
+        lines = [json.dumps({"seq": i, "legacy": True}) for i in range(unsigned)]
+        signer = AuditSigner(key)
+        for i in range(signed):
+            entry = {"seq": unsigned + i, "data": f"signed-{i}"}
+            signer.sign(entry)
+            lines.append(json.dumps(entry, default=str))
+        path.write_text("\n".join(lines) + "\n")
+
+    async def test_all_unsigned_with_key_enabled(self, tmp_path):
+        p = tmp_path / "audit.jsonl"
+        self._write_mixed(p, unsigned=4, signed=0)
+        result = await verify_log(p, "key")
+        assert result["valid"] is True
+        assert result["verified"] == 0
+        assert result["unsigned_prefix"] == 4
+        assert result["total"] == 4
+
+    async def test_unsigned_prefix_then_valid_chain(self, tmp_path):
+        p = tmp_path / "audit.jsonl"
+        self._write_mixed(p, unsigned=3, signed=5)
+        result = await verify_log(p, "key")
+        assert result["valid"] is True
+        assert result["unsigned_prefix"] == 3
+        assert result["verified"] == 5
+        assert result["total"] == 8
+        assert result["first_bad"] is None
+
+    async def test_unsigned_entry_after_signed_is_invalid(self, tmp_path):
+        p = tmp_path / "audit.jsonl"
+        self._write_mixed(p, unsigned=2, signed=2)
+        with p.open("a") as f:
+            f.write(json.dumps({"sneaky": "append"}) + "\n")
+        result = await verify_log(p, "key")
+        assert result["valid"] is False
+        assert result["first_bad"] == 5
+        assert "after chain began" in result["error"]
+        assert result["unsigned_prefix"] == 2
+        assert result["verified"] == 2
+
+    async def test_bad_hmac_after_unsigned_prefix_is_invalid(self, tmp_path):
+        p = tmp_path / "audit.jsonl"
+        self._write_mixed(p, unsigned=2, signed=3)
+        lines = p.read_text().splitlines()
+        tampered = json.loads(lines[3])
+        tampered["data"] = "edited"
+        lines[3] = json.dumps(tampered, default=str)
+        p.write_text("\n".join(lines) + "\n")
+        result = await verify_log(p, "key")
+        assert result["valid"] is False
+        assert result["first_bad"] == 4
+        assert result["unsigned_prefix"] == 2
+
+    async def test_fully_signed_reports_zero_prefix(self, tmp_path):
+        # Stable response shape: unsigned_prefix present even when zero.
+        p = tmp_path / "audit.jsonl"
+        self._write_mixed(p, unsigned=0, signed=3)
+        result = await verify_log(p, "key")
+        assert result["valid"] is True
+        assert result["unsigned_prefix"] == 0
+        assert result["verified"] == 3
+
+    async def test_empty_and_missing_files_report_zero_prefix(self, tmp_path):
+        empty = tmp_path / "audit.jsonl"
+        empty.write_text("")
+        result = await verify_log(empty, "key")
+        assert result["unsigned_prefix"] == 0
+        result = await verify_log(tmp_path / "missing.jsonl", "key")
+        assert result["unsigned_prefix"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +668,8 @@ class TestVerifyIntegrity:
         result = await logger.verify_integrity()
         assert result["valid"] is False
         assert "not enabled" in result["error"]
+        # Stable response shape across all verify outcomes
+        assert result["unsigned_prefix"] == 0
 
     async def test_empty_log(self, tmp_path):
         p = tmp_path / "audit.jsonl"
@@ -693,6 +789,39 @@ class TestAuditVerifyAPI:
             data = await resp.json()
             assert data["valid"] is False
             assert "not enabled" in data["error"]
+            assert data["unsigned_prefix"] == 0
+
+    async def test_unsigned_prefix_returns_200_with_count(self, tmp_path):
+        # Signing enabled over an existing unsigned history: verification
+        # succeeds and reports how many legacy entries predate the chain.
+        from aiohttp import web as aio_web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from src.web.api import create_api_routes
+
+        p = tmp_path / "audit.jsonl"
+        p.write_text(
+            "\n".join(json.dumps({"seq": i, "legacy": True}) for i in range(3)) + "\n"
+        )
+        logger = AuditLogger(path=str(p), hmac_key="key")
+        await logger.initialize_chain()
+        await logger.log_execution(
+            user_id="u1", user_name="test", channel_id="c1",
+            tool_name="t1", tool_input={},
+            approved=True, result_summary="ok", execution_time_ms=1,
+        )
+        bot = self._make_bot(logger)
+        routes = create_api_routes(bot)
+        app = aio_web.Application()
+        app.router.add_routes(routes)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/audit/verify")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["valid"] is True
+            assert data["unsigned_prefix"] == 3
+            assert data["verified"] == 1
 
     async def test_empty_signed_log_returns_200(self, tmp_path):
         from aiohttp.test_utils import TestClient, TestServer

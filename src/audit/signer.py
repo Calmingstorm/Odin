@@ -64,26 +64,51 @@ def _canonical(entry: dict) -> str:
 async def verify_log(path, key: str) -> dict:
     """Verify the full HMAC chain of an audit log file.
 
-    Returns a dict with ``valid`` (bool), ``total`` (int), ``verified`` (int),
-    ``first_bad`` (int or None — 1-indexed line number), and ``error`` (str or None).
+    Entries written before signing was enabled (no ``_hmac`` field) are
+    tolerated as an *unsigned prefix*: counted in ``unsigned_prefix`` and
+    skipped, with the chain verified strictly from the first signed entry.
+    Enabling a key does not retroactively sign history — the chain simply
+    begins at GENESIS_HASH at the first entry written after enablement, so
+    tamper evidence covers the signed suffix only. An unsigned entry
+    appearing AFTER the first signed one still fails verification: once a
+    chain exists, gaps in it are tamper evidence.
+
+    Returns a dict with ``valid`` (bool), ``total`` (int), ``verified``
+    (signed entries verified, int), ``unsigned_prefix`` (int), ``first_bad``
+    (int or None — 1-indexed line number), and ``error`` (str or None).
     """
     import aiofiles
     from pathlib import Path
 
     p = Path(path)
     if not p.exists():
-        return {"valid": True, "total": 0, "verified": 0, "first_bad": None, "error": None}
+        return {
+            "valid": True,
+            "total": 0,
+            "verified": 0,
+            "unsigned_prefix": 0,
+            "first_bad": None,
+            "error": None,
+        }
 
     signer = AuditSigner(key)
     prev = GENESIS_HASH
     total = 0
     verified = 0
+    unsigned_prefix = 0
 
     try:
         async with aiofiles.open(p, "r") as f:
             lines = await f.readlines()
     except Exception as exc:
-        return {"valid": False, "total": 0, "verified": 0, "first_bad": None, "error": str(exc)}
+        return {
+            "valid": False,
+            "total": 0,
+            "verified": 0,
+            "unsigned_prefix": 0,
+            "first_bad": None,
+            "error": str(exc),
+        }
 
     for i, line in enumerate(lines, 1):
         line = line.strip()
@@ -98,17 +123,25 @@ async def verify_log(path, key: str) -> dict:
                 "valid": False,
                 "total": total,
                 "verified": verified,
+                "unsigned_prefix": unsigned_prefix,
                 "first_bad": i,
                 "error": f"Line {i}: invalid JSON",
             }
 
         if "_hmac" not in entry:
+            # verified == 0 ⟺ no signed entry seen yet (a signed entry that
+            # fails returns immediately), i.e. still in the pre-enablement
+            # prefix.
+            if verified == 0:
+                unsigned_prefix += 1
+                continue
             return {
                 "valid": False,
                 "total": total,
                 "verified": verified,
+                "unsigned_prefix": unsigned_prefix,
                 "first_bad": i,
-                "error": f"Line {i}: missing _hmac field (unsigned entry)",
+                "error": f"Line {i}: missing _hmac field (unsigned entry after chain began)",
             }
 
         if not signer.verify_entry(entry, prev):
@@ -116,6 +149,7 @@ async def verify_log(path, key: str) -> dict:
                 "valid": False,
                 "total": total,
                 "verified": verified,
+                "unsigned_prefix": unsigned_prefix,
                 "first_bad": i,
                 "error": f"Line {i}: HMAC verification failed (tampered or reordered)",
             }
@@ -123,4 +157,11 @@ async def verify_log(path, key: str) -> dict:
         prev = entry["_hmac"]
         verified += 1
 
-    return {"valid": True, "total": total, "verified": verified, "first_bad": None, "error": None}
+    return {
+        "valid": True,
+        "total": total,
+        "verified": verified,
+        "unsigned_prefix": unsigned_prefix,
+        "first_bad": None,
+        "error": None,
+    }

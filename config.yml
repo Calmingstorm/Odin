@@ -144,6 +144,10 @@ attachments:
   retention_hours: 24
 
 # Audit log integrity — HMAC signing for audit.jsonl entries
+# Generate a key with: openssl rand -hex 32
+# Enabling on an existing install is safe: history written before enablement
+# is not retroactively signed — /api/audit/verify reports it as
+# unsigned_prefix and verifies the chain from the first signed entry on.
 audit:
   hmac_key: ''  # Set a secret to enable HMAC-SHA256 signing; empty = disabled
 
