@@ -32,42 +32,42 @@ mypy through `tool_loop`, `intake_pipeline`, `agents_tasks`, and
 - `member = member or ctx.author` falls back to a plain `discord.User` in DMs; `User` has no `.joined_at` (line 66 raises before its own truthiness check) and no `.roles` (68). `!userinfo` in a DM dies with AttributeError; the pre-existing `# type: ignore[assignment]` on line 63 silenced the warning pointing at exactly this.
 - Impact: LOW — cosmetic command, guild usage unaffected.
 - Proposed fix: branch on `isinstance(member, discord.Member)` for the guild-only fields.
-- Aaron verdict: PENDING · Status: OPEN
+- Aaron verdict: FIX (2026-07-06) · Status: FIXED (PR #186)
 
 ### TS-0002 — audit diff-tracker records fiction on every overwrite
 - `src/audit/diff_tracker.py:91,97` · union-attr / assignment
 - `capture_before` calls `.startswith()` on `_run_on_host`'s return, which is a `(output, exit_code)` **tuple** for every resolvable host → AttributeError on every snapshot, swallowed by the bare `except Exception` → the "before" content is always `""`. Every audit diff for a file overwrite shows the file as previously empty; real prior content has never been captured. Silent — no log line.
 - Impact: MEDIUM — the audit `diff` field (and `search_diffs`) is actively misleading for overwrites; forensics-relevant.
 - Proposed fix: unpack the tuple (`output, _code = …`) and keep the unknown-host str branch; add a regression test with a fake executor.
-- Aaron verdict: PENDING · Status: OPEN
+- Aaron verdict: FIX (2026-07-06) · Status: FIXED (PR #186)
 
 ### TS-0003 — plan-CLI error reporter crashes instead of reporting
 - `src/odin/cli.py:76` · attr-defined
 - `except PlanValidationError as exc: for e in exc.errors:` — but `PlanValidationError` is a bare `Exception` subclass raised as `PlanValidationError("; ".join(errors))`; `.errors` has never existed. `odin run <plan>` with any invalid plan (duplicate step id, unknown tool, dangling dep, cycle) tracebacks in the error handler instead of printing errors and exiting 2.
 - Impact: LOW-MEDIUM — plan-runner CLI surface; the failure path has never worked.
 - Proposed fix: either give `PlanValidationError` an `errors: list[str]` field or print `str(exc)`; pin with a CLI test.
-- Aaron verdict: PENDING · Status: OPEN
+- Aaron verdict: FIX (2026-07-06) · Status: FIXED (PR #186)
 
 ### TS-0004 — `SkillContext.run_on_host` violates its documented contract
 - `src/tools/skill_context.py:162` · return-value
 - Declared `-> str`, docstring "Returns output string", skills.md documents the same — but it forwards `_run_on_host`'s raw `(output, exit_code)` tuple for every resolved host (only unknown-host returns str). Any skill treating the result as a string per the docs breaks. Same root cause as TS-0002: two independent victims of the `_run_on_host` tuple-return change.
 - Impact: MEDIUM — public skill API contract is false.
 - Proposed fix: unpack and return output (preserving the unknown-host message), or return a typed result; audit installed skills for accidental tuple-dependence before choosing.
-- Aaron verdict: PENDING · Status: OPEN
+- Aaron verdict: FIX (2026-07-06) · Status: FIXED (PR #186)
 
 ### TS-0005 — `SkillContext.http_post` shadows the `json` module
 - `src/tools/skill_context.py:336` (×2 union members) · union-attr
 - The parameter `json: dict | None` shadows the stdlib import, so `json.loads(text)` calls `.loads` on the parameter — AttributeError whether it's None or a dict, and the surrounding `except (ValueError, TypeError)` doesn't catch it. Works only when the response advertises a JSON content-type (the `resp.json()` path), which is why it half-works in the wild.
 - Impact: MEDIUM — any skill POSTing to an endpoint that returns non-JSON content-type crashes.
 - Proposed fix: import alias (`import json as _json`) or rename the parameter (`json_body=` keeping `json=` at the aiohttp call); regression test with a text/plain response.
-- Aaron verdict: PENDING · Status: OPEN
+- Aaron verdict: FIX (2026-07-06) · Status: FIXED (PR #186)
 
 ## Campaign close-out (P5, 2026-07-06)
 
 All four annotation waves are merged; **the live mypy output equals the TS
 ledger + the dead import, exactly** (9 lines). Every non-ledgered finding in
 this file's appendix has been resolved; the appendix stays as the historical
-baseline record. Verdict fields below remain PENDING until Aaron rules.
+baseline record. Aaron ruled FIX on all five (2026-07-06); the fixes + regression tests ship as PR #186. Post-fix full-src mypy = 1 (the dead src.setup import, unruled).
 
 ## Wave guidance (observations, not runtime bugs)
 

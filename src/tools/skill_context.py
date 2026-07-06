@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import json as _json  # http_post's `json=` parameter shadows the module (TS-0005)
 import re
 import threading
 from collections.abc import Awaitable, Callable
@@ -159,7 +160,13 @@ class SkillContext:
 
     async def run_on_host(self, alias: str, command: str) -> str:
         """Run a shell command on a managed host via SSH. Returns output string."""
-        return await self._executor._run_on_host(alias, command)
+        # _run_on_host returns (output, exit_code) for resolved hosts and a bare
+        # denial string for unknown ones (TS-0004 — forwarding the raw tuple
+        # violated this method's documented str contract for every real host).
+        raw = await self._executor._run_on_host(alias, command)
+        if isinstance(raw, tuple):
+            return raw[0]
+        return raw
 
     async def query_prometheus(self, query: str) -> str:
         """Run a PromQL instant query against Prometheus via curl.
@@ -294,7 +301,7 @@ class SkillContext:
                 text = await resp.text()
                 self._tracker.bytes_downloaded += len(text.encode())
                 try:
-                    return json.loads(text)
+                    return _json.loads(text)
                 except (ValueError, TypeError):
                     return text
 
@@ -333,7 +340,7 @@ class SkillContext:
                 text = await resp.text()
                 self._tracker.bytes_downloaded += len(text.encode())
                 try:
-                    return json.loads(text)
+                    return _json.loads(text)
                 except (ValueError, TypeError):
                     return text
 
