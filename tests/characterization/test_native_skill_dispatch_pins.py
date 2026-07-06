@@ -200,9 +200,11 @@ class TestFileDelivery:
         assert not msg.channel.send.called
 
     async def test_file_cb_stage_mode_appends_pending(self):
+        # Re-pointed at the skill domain owner (RFC-004 P3) — the callback
+        # factories moved verbatim from the dispatcher to SkillTools.
         d = _dispatcher()
         msg = _message(channel_id=42)
-        cb = d._skill_file_cb(msg, "stage")
+        cb = d.skills._skill_file_cb(msg, "stage")
         await cb(b"data", "out.txt")
         assert d.channel_state.pending_files["42"] == [(b"data", "out.txt")]
         assert not msg.channel.send.called
@@ -210,7 +212,7 @@ class TestFileDelivery:
     async def test_file_cb_send_mode_posts_to_channel(self):
         d = _dispatcher()
         msg = _message(channel_id=42)
-        cb = d._skill_file_cb(msg, "send")
+        cb = d.skills._skill_file_cb(msg, "send")
         await cb(b"data", "out.txt", "caption")
         assert msg.channel.send.called
         assert d.channel_state.pending_files == {}
