@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import discord
 
@@ -25,6 +26,22 @@ from ...odin_log import get_logger
 from ..background_task import MAX_STEPS, BackgroundTask, create_task_id, run_background_task
 from ..tool_loop import _LoopMessageProxy
 
+if TYPE_CHECKING:
+    from ...agents.loop_bridge import LoopAgentBridge
+    from ...agents.manager import AgentManager
+    from ...agents.trajectory import AgentTrajectorySaver
+    from ...audit.logger import AuditLogger
+    from ...search.embedder import LocalEmbedder
+    from ...tools.autonomous_loop import LoopManager
+    from ...tools.executor import ToolExecutor
+    from ...tools.skill_manager import SkillManager
+    from ..channel_state import ChannelStateRegistry
+    from ..llm_gateway import LLMGateway
+    from ..prompts import PromptBuilder
+    from ..tool_catalog import ToolCatalog
+    from ..tool_loop import ToolLoopRunner
+    from ..turn_recorder import TurnRecorder
+
 log = get_logger("discord")
 
 
@@ -33,22 +50,22 @@ class AgentTaskDeps:
     """The true dependency surface of the agents/tasks/loops handlers."""
 
     get_config: Callable  # live root — replaced by config hot-reload
-    llm_gateway: object  # owns the swappable provider clients
-    channel_state: object  # background-task registry + caps
-    tool_executor: object
-    skill_manager: object
+    llm_gateway: LLMGateway  # owns the swappable provider clients
+    channel_state: ChannelStateRegistry  # background-task registry + caps
+    tool_executor: ToolExecutor
+    skill_manager: SkillManager
     get_knowledge_store: Callable  # swappable via bot.knowledge reloads
-    embedder: object
-    audit: object
-    agent_manager: object
-    loop_manager: object
-    loop_agent_bridge: object
-    agent_trajectory_saver: object
+    embedder: LocalEmbedder | None
+    audit: AuditLogger
+    agent_manager: AgentManager
+    loop_manager: LoopManager
+    loop_agent_bridge: LoopAgentBridge
+    agent_trajectory_saver: AgentTrajectorySaver | None
     get_context_compressor: Callable  # live read — tests swap it on the bot
-    tool_loop: object  # ToolLoopRunner — loop iterations + tool dispatch
-    turn_recorder: object  # lifecycle webhook emission
-    prompt_builder: object
-    tool_catalog: object
+    tool_loop: ToolLoopRunner  # loop iterations + tool dispatch
+    turn_recorder: TurnRecorder  # lifecycle webhook emission
+    prompt_builder: PromptBuilder
+    tool_catalog: ToolCatalog
 
 
 class AgentTaskTools:

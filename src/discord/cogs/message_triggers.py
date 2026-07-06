@@ -102,7 +102,7 @@ class MessageTriggers(commands.Cog):
         )
 
         try:
-            fired = await self._scheduler.fire_triggers("discord_message", event_data)
+            fired = await self._scheduler.fire_triggers("discord_message", event_data)  # type: ignore[union-attr]  # self.enabled requires _scheduler
             if fired:
                 logger.info(
                     "Message from %s fired %d trigger(s) in channel %s",

@@ -24,6 +24,7 @@ import io
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import discord
 
@@ -32,6 +33,19 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
 from .response_guards import combine_bot_messages, scrub_response_secrets
+
+if TYPE_CHECKING:
+    from ..permissions.manager import PermissionManager
+    from ..sessions.manager import SessionManager
+    from .channel_config import ChannelConfigManager
+    from .channel_logger import ChannelLogger
+    from .channel_state import ChannelStateRegistry
+    from .delivery import ResponseDelivery
+    from .housekeeping import Housekeeping
+    from .llm_gateway import LLMGateway
+    from .prompts import PromptBuilder
+    from .tool_loop import ToolLoopRunner
+    from .turn_recorder import TurnRecorder
 
 log = get_logger("discord")
 
@@ -58,11 +72,11 @@ class MessageIntakeDeps:
     get_user: Callable  # live — None until the gateway login completes
     get_voice_manager: Callable  # live — constructed on the bot, may be None
     process_commands: Callable  # cog prefix-command dispatch (bot-bound)
-    channel_logger: object
-    channel_config: object
-    channel_state: object
-    sessions: object
-    pipeline: object  # MessagePipeline — the post-gate hand-off
+    channel_logger: ChannelLogger
+    channel_config: ChannelConfigManager
+    channel_state: ChannelStateRegistry
+    sessions: SessionManager
+    pipeline: MessagePipeline  # the post-gate hand-off
 
 
 class MessageIntake:
@@ -428,15 +442,15 @@ class MessageIntake:
 class MessagePipelineDeps:
     """The true dependency surface of the message pipeline."""
 
-    channel_state: object  # per-channel locks, pending files, op details
-    sessions: object
-    permissions: object  # guest-tier routing
-    llm_gateway: object  # owns the swappable provider clients
-    prompt_builder: object
-    turn_recorder: object  # context traces + operational reflection
-    tool_loop: object  # ToolLoopRunner — the tools route
-    delivery: object  # status, retries, chunked sends
-    housekeeping: object  # post-turn cache maintenance
+    channel_state: ChannelStateRegistry  # per-channel locks, pending files, ops
+    sessions: SessionManager
+    permissions: PermissionManager  # guest-tier routing
+    llm_gateway: LLMGateway  # owns the swappable provider clients
+    prompt_builder: PromptBuilder
+    turn_recorder: TurnRecorder  # context traces + operational reflection
+    tool_loop: ToolLoopRunner  # the tools route
+    delivery: ResponseDelivery  # status, retries, chunked sends
+    housekeeping: Housekeeping  # post-turn cache maintenance
 
 
 class MessagePipeline:
@@ -550,9 +564,11 @@ class MessagePipeline:
                             if isinstance(last_msg["content"], str)
                             else str(last_msg["content"])
                         )
+                        # Vision turns legitimately swap str content for
+                        # a block list; the LLM layer handles both shapes.
                         history[-1] = {
                             "role": "user",
-                            "content": image_blocks + [{"type": "text", "text": text_content}],
+                            "content": image_blocks + [{"type": "text", "text": text_content}],  # type: ignore[dict-item]
                         }
                     log.info("Attached %d image(s) to message for Claude vision", len(image_blocks))
                 if self._llm_gateway.active_client:
@@ -627,9 +643,11 @@ class MessagePipeline:
                         if isinstance(last["content"], str)
                         else str(last["content"])
                     )
+                    # Vision turns legitimately swap str content for
+                    # a block list; the LLM layer handles both shapes.
                     task_history[-1] = {
                         "role": "user",
-                        "content": image_blocks + [{"type": "text", "text": text}],
+                        "content": image_blocks + [{"type": "text", "text": text}],  # type: ignore[dict-item]
                     }
                     log.info("Attached %d image(s) to message for Claude vision", len(image_blocks))
                 try:

@@ -15,9 +15,9 @@ import hashlib
 import os
 import re
 import shutil
+import tarfile
 import time
 import zipfile
-import tarfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -128,7 +128,9 @@ def _preview_text(text: str, ext: str, max_chars: int = 12000) -> str:
     return text[:max_chars] + f"\n\n[... truncated at {max_chars:,} chars ...]"
 
 
-def _is_text_file(filename: str, content_type: str | None) -> bool:
+def _is_text_file(filename: str, content_type: str | None) -> bool | str | None:
+    # Truthiness contract: both call sites only test the result; the
+    # and/or chain legitimately yields "" / None for falsy inputs.
     ext = _get_ext(filename)
     return ext in _TEXT_EXTENSIONS or (content_type and "text" in content_type)
 
@@ -336,7 +338,7 @@ class AttachmentProcessor:
             archive_path.write_bytes(data)
 
             ext = _get_ext(att.filename)
-            manifest_lines = []
+            manifest_lines: list[str] = []
             extract_dir = ws / safe.rsplit(".", 1)[0]
 
             if ext == ".zip":
@@ -415,7 +417,9 @@ class AttachmentProcessor:
     def _extract_tar(self, archive_path: Path, extract_dir: Path) -> tuple[list[str], bool]:
         manifest = []
         mode = "r:gz" if str(archive_path).endswith((".tar.gz", ".tgz")) else "r"
-        with tarfile.open(archive_path, mode) as tf:
+        # mode is always one of the literal read modes; the ternary widens
+        # it to plain str, which the Literal-only stub overloads reject.
+        with tarfile.open(archive_path, mode) as tf:  # type: ignore[call-overload]
             members = tf.getmembers()
             manifest.append(f"Entries: {len(members)}")
             total_size = sum(m.size for m in members if m.isfile())

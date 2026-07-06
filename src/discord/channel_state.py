@@ -18,8 +18,12 @@ from __future__ import annotations
 import asyncio
 import collections
 import time
+from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
+
+if TYPE_CHECKING:
+    from .background_task import BackgroundTask
 
 log = get_logger("discord")
 
@@ -63,7 +67,7 @@ class ChannelStateRegistry:
         self.recent_actions_max = recent_actions_max
         self.recent_actions_expiry = recent_actions_expiry  # seconds
         # Background task tracking
-        self.background_tasks: dict[str, object] = {}
+        self.background_tasks: dict[str, BackgroundTask] = {}
         self.background_tasks_max = background_tasks_max
         # Throttled housekeeping
         self.last_cleanup: float = 0.0

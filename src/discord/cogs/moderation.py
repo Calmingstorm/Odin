@@ -161,7 +161,8 @@ class Moderation(commands.Cog):
     ) -> None:
         """Delete messages from the current channel (default 10, max 100)."""
         count = min(max(count, 1), 100)
-        deleted = await ctx.channel.purge(limit=count + 1)  # +1 for command msg
+        # +1 for the command message itself.
+        deleted = await ctx.channel.purge(limit=count + 1)  # type: ignore[union-attr]  # bot_has_guild_permissions precludes DMs
         await ctx.send(
             embed=success_embed(f"Deleted {len(deleted) - 1} messages."),
             delete_after=5,

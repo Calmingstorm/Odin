@@ -138,7 +138,7 @@ class LLMGateway:
             self.ollama_client = None
             if old:
                 asyncio.get_event_loop().call_later(
-                    5, lambda: asyncio.ensure_future(old.close())
+                    5, lambda: asyncio.ensure_future(old.close())  # type: ignore[union-attr]  # deferred close inside if old:
                 )
             return {"configured": False, "reason": "ollama disabled in config"}
 
@@ -174,7 +174,7 @@ class LLMGateway:
             self.kimi_client = None
             if old:
                 asyncio.get_event_loop().call_later(
-                    5, lambda: asyncio.ensure_future(old.close())
+                    5, lambda: asyncio.ensure_future(old.close())  # type: ignore[union-attr]  # deferred close inside if old:
                 )
             return {"configured": False, "reason": "kimi disabled in config"}
         if not kimi_cfg.api_key:
