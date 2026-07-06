@@ -628,7 +628,7 @@ class TestHandleHttpProbe:
         config.tools.tool_timeouts = {}
         config.tools.tool_timeout_seconds = 300
 
-        exec_inst = ToolExecutor.__new__(ToolExecutor)
+        exec_inst = ToolExecutor()
         exec_inst.config = config
         exec_inst._metrics = {}
         exec_inst._permission_manager = None
@@ -648,7 +648,7 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_local_probe_no_host(self, executor):
-        result = await executor._handle_http_probe({
+        await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
         })
         executor._exec_command.assert_called_once()
@@ -657,7 +657,7 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_remote_probe_with_host(self, executor):
-        result = await executor._handle_http_probe({
+        await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
             "host": "web",
         })
@@ -667,7 +667,7 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_unknown_host(self, executor):
-        result = await executor._handle_http_probe({
+        result = await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
             "host": "nohost",
         })
@@ -675,7 +675,7 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_correct_ssh_user(self, executor):
-        await executor._handle_http_probe({
+        await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
             "host": "web",
         })
@@ -684,7 +684,7 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_local_uses_default_ssh_user(self, executor):
-        await executor._handle_http_probe({
+        await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
         })
         ssh_user = executor._exec_command.call_args[0][2]
@@ -692,7 +692,7 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_curl_command_built(self, executor):
-        await executor._handle_http_probe({
+        await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
             "method": "POST",
         })
@@ -702,20 +702,20 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_validation_error_returned(self, executor):
-        result = await executor._handle_http_probe({
+        result = await executor.browser_web_tools._handle_http_probe({
             "url": "ftp://example.com",
         })
         assert "http_probe error" in result
 
     @pytest.mark.asyncio
     async def test_missing_url_error(self, executor):
-        result = await executor._handle_http_probe({})
+        result = await executor.browser_web_tools._handle_http_probe({})
         assert "http_probe error" in result
 
     @pytest.mark.asyncio
     async def test_command_failure_with_output(self, executor):
         executor._exec_command.return_value = (7, "curl: (7) Failed to connect")
-        result = await executor._handle_http_probe({
+        result = await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
         })
         assert "Failed to connect" in result
@@ -723,7 +723,7 @@ class TestHandleHttpProbe:
     @pytest.mark.asyncio
     async def test_command_failure_no_output(self, executor):
         executor._exec_command.return_value = (1, "")
-        result = await executor._handle_http_probe({
+        result = await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
         })
         assert "http_probe failed" in result
@@ -732,7 +732,7 @@ class TestHandleHttpProbe:
     @pytest.mark.asyncio
     async def test_empty_success(self, executor):
         executor._exec_command.return_value = (0, "")
-        result = await executor._handle_http_probe({
+        result = await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
         })
         assert "no response received" in result
@@ -743,7 +743,7 @@ class TestHandleHttpProbe:
             0,
             "HTTP/1.1 200 OK\nContent-Type: text/plain\n\nHello"
         )
-        result = await executor._handle_http_probe({
+        result = await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
         })
         assert "HTTP/1.1 200 OK" in result
@@ -751,7 +751,7 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_get_dispatch(self, executor):
-        await executor._handle_http_probe({
+        await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
         })
         cmd = executor._exec_command.call_args[0][1]
@@ -760,7 +760,7 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_post_with_body_dispatch(self, executor):
-        await executor._handle_http_probe({
+        await executor.browser_web_tools._handle_http_probe({
             "url": "https://api.example.com/data",
             "method": "POST",
             "body": '{"key": "val"}',
@@ -773,7 +773,7 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_retries_dispatch(self, executor):
-        await executor._handle_http_probe({
+        await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
             "retries": 3,
             "retry_delay": 2,
@@ -784,7 +784,7 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_ssl_off_dispatch(self, executor):
-        await executor._handle_http_probe({
+        await executor.browser_web_tools._handle_http_probe({
             "url": "https://self-signed.example.com",
             "verify_ssl": False,
         })
@@ -793,7 +793,7 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_no_redirects_dispatch(self, executor):
-        await executor._handle_http_probe({
+        await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
             "follow_redirects": False,
         })

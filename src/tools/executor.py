@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
-import shlex
 from pathlib import Path
 
 from ..config.schema import ToolsConfig
@@ -91,20 +90,20 @@ EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
     "memory_manage": ("core", "_handle_memory_manage"),
     "manage_list": ("core", "_handle_manage_list"),
     "manage_process": ("system", "_handle_manage_process"),
-    "browser_read_page": ("core", "_handle_browser_read_page"),
-    "browser_read_table": ("core", "_handle_browser_read_table"),
-    "browser_click": ("core", "_handle_browser_click"),
-    "browser_fill": ("core", "_handle_browser_fill"),
-    "browser_evaluate": ("core", "_handle_browser_evaluate"),
-    "web_search": ("core", "_handle_web_search"),
-    "fetch_url": ("core", "_handle_fetch_url"),
-    "http_probe": ("core", "_handle_http_probe"),
+    "browser_read_page": ("browser_web", "_handle_browser_read_page"),
+    "browser_read_table": ("browser_web", "_handle_browser_read_table"),
+    "browser_click": ("browser_web", "_handle_browser_click"),
+    "browser_fill": ("browser_web", "_handle_browser_fill"),
+    "browser_evaluate": ("browser_web", "_handle_browser_evaluate"),
+    "web_search": ("browser_web", "_handle_web_search"),
+    "fetch_url": ("browser_web", "_handle_fetch_url"),
+    "http_probe": ("browser_web", "_handle_http_probe"),
     "analyze_pdf": ("files_docs", "_handle_analyze_pdf"),
-    "claude_code": ("core", "_handle_claude_code"),
-    "git_ops": ("core", "_handle_git_ops"),
-    "kubectl": ("core", "_handle_kubectl"),
-    "docker_ops": ("core", "_handle_docker_ops"),
-    "terraform_ops": ("core", "_handle_terraform_ops"),
+    "claude_code": ("coding", "_handle_claude_code"),
+    "git_ops": ("devops", "_handle_git_ops"),
+    "kubectl": ("devops", "_handle_kubectl"),
+    "docker_ops": ("devops", "_handle_docker_ops"),
+    "terraform_ops": ("devops", "_handle_terraform_ops"),
     "issue_tracker": ("core", "_handle_issue_tracker"),
     "validate_action": ("core", "_handle_validate_action"),
     "email_send": ("core", "_handle_email_send"),
@@ -169,7 +168,10 @@ class ToolExecutor:
         # variable) — attribute lookup happens per call, so instance/class
         # monkeypatches on the executor keep governing domain behavior, and
         # stateful objects are reached by identity (R1 blocker #3).
+        from .handlers.browser_web import BrowserWebTools
+        from .handlers.coding import CodingTools
         from .handlers.deps import HandlerDeps
+        from .handlers.devops import DevOpsTools
         from .handlers.files_docs import FilesDocsTools
         from .handlers.system import SystemTools
 
@@ -180,6 +182,8 @@ class ToolExecutor:
             branch_freshness_enabled=lambda: self._branch_freshness_enabled,
             current_user_id=lambda: self._current_user_id,
             process_registry=lambda: self._ensure_process_registry(),
+            browser_manager=lambda: self._browser_manager,
+            bulkheads=lambda: self.bulkheads,
             resolve_host=lambda alias: self._resolve_host(alias),
             resolve_default_host=lambda user_id: self._resolve_default_host(user_id),
             govern_command=lambda command, host=None: self._govern_command(command, host),
@@ -192,6 +196,9 @@ class ToolExecutor:
         # the domain level, e.g. ``executor.system_tools._handle_run_command``.
         self.system_tools = SystemTools(self._handler_deps)
         self.files_docs_tools = FilesDocsTools(self._handler_deps)
+        self.browser_web_tools = BrowserWebTools(self._handler_deps)
+        self.coding_tools = CodingTools(self._handler_deps)
+        self.devops_tools = DevOpsTools(self._handler_deps)
         # Owners for EXECUTOR_HANDLERS resolution. "core" is the executor
         # itself for not-yet-moved handlers; domain owners are added as the
         # P4–P6 waves land.
@@ -199,6 +206,9 @@ class ToolExecutor:
             "core": self,
             "system": self.system_tools,
             "files_docs": self.files_docs_tools,
+            "browser_web": self.browser_web_tools,
+            "coding": self.coding_tools,
+            "devops": self.devops_tools,
         }
 
     @property
@@ -630,258 +640,13 @@ class ToolExecutor:
 
     # --- Browser tools (text-returning, screenshot handled in client.py) ---
 
-    async def _browser_with_bulkhead(self, coro):
-        """Wrap a browser coroutine with the browser bulkhead."""
-        bh = self.bulkheads.get("browser")
-        if bh:
-            try:
-                async with bh.acquire():
-                    return await coro
-            except BulkheadFullError:
-                return "Error: browser bulkhead full — too many concurrent browser operations"
-        return await coro
-
-    async def _handle_browser_read_page(self, inp: dict) -> str:
-        if not self._browser_manager:
-            return "Browser automation is not enabled. Set browser.enabled=true in config."
-        from .browser import handle_browser_read_page
-
-        return await self._browser_with_bulkhead(
-            handle_browser_read_page(self._browser_manager, inp)
-        )
-
-    async def _handle_browser_read_table(self, inp: dict) -> str:
-        if not self._browser_manager:
-            return "Browser automation is not enabled. Set browser.enabled=true in config."
-        from .browser import handle_browser_read_table
-
-        return await self._browser_with_bulkhead(
-            handle_browser_read_table(self._browser_manager, inp)
-        )
-
-    async def _handle_browser_click(self, inp: dict) -> str:
-        if not self._browser_manager:
-            return "Browser automation is not enabled. Set browser.enabled=true in config."
-        from .browser import handle_browser_click
-
-        return await self._browser_with_bulkhead(handle_browser_click(self._browser_manager, inp))
-
-    async def _handle_browser_fill(self, inp: dict) -> str:
-        if not self._browser_manager:
-            return "Browser automation is not enabled. Set browser.enabled=true in config."
-        from .browser import handle_browser_fill
-
-        return await self._browser_with_bulkhead(handle_browser_fill(self._browser_manager, inp))
-
-    async def _handle_browser_evaluate(self, inp: dict) -> str:
-        if not self._browser_manager:
-            return "Browser automation is not enabled. Set browser.enabled=true in config."
-        from .browser import handle_browser_evaluate
-
-        return await self._browser_with_bulkhead(
-            handle_browser_evaluate(self._browser_manager, inp)
-        )
-
     # --- Web tools ---
-
-    async def _handle_web_search(self, inp: dict) -> str:
-        from .web import web_search
-
-        max_results = min(inp.get("max_results", 5), 10)
-        return await web_search(inp["query"], max_results=max_results)
-
-    async def _handle_fetch_url(self, inp: dict) -> str:
-        from .web import fetch_url
-
-        return await fetch_url(inp["url"])
 
     # --- PDF analysis ---
 
     # --- Process management ---
 
     # --- Claude Code ---
-
-    async def _handle_claude_code(self, inp: dict) -> str:
-        host = inp.get("host") or self.config.claude_code_host
-        if not host:
-            return "claude_code_host not configured in tools config"
-        working_dir = inp["working_directory"]
-        prompt = inp["prompt"]
-        allowed_tools = inp.get("allowed_tools")
-        allow_edits = inp.get("allow_edits", False)
-
-        resolved = self._resolve_host(host)
-        if not resolved:
-            return f"Unknown or disallowed host: {host}"
-        address, ssh_user, _os = resolved
-
-        claude_user = self.config.claude_code_user
-        import os
-
-        _already_claude_user = (os.getenv("USER", "") == claude_user) if claude_user else False
-        if allow_edits and not claude_user:
-            return "claude_code_user not configured — required for allow_edits=true"
-
-        import base64 as b64mod
-
-        encoded_prompt = b64mod.b64encode(prompt.encode()).decode()
-
-        claude_args = [
-            "claude",
-            "--print",
-            "--output-format stream-json",
-            "--verbose",
-            "--no-session-persistence",
-        ]
-        if allow_edits:
-            claude_args.append("--dangerously-skip-permissions")
-        if allowed_tools:
-            claude_args.append(f"--allowedTools {shlex.quote(allowed_tools)}")
-
-        claude_cmd = " ".join(claude_args)
-        safe_wd = shlex.quote(working_dir)
-
-        if allow_edits:
-            safe_user = shlex.quote(claude_user)
-            inner = (
-                f"cd {safe_wd} && echo '{encoded_prompt}' | base64 -d | timeout 3600 {claude_cmd}"
-            )
-            if _already_claude_user:
-                cmd = inner
-            else:
-                cmd = f"su - {safe_user} -c {shlex.quote(inner)}"
-        else:
-            cmd = f"cd {safe_wd} && echo '{encoded_prompt}' | base64 -d | timeout 3600 {claude_cmd}"
-
-        on_output = None
-        finish_cb = None
-        if self.output_streamer and self.output_streamer.is_enabled("claude_code"):
-            _, on_output, finish_cb = self.output_streamer.create_callback(
-                "claude_code",
-                channel_id=host,
-            )
-
-        code, output = await self._exec_command(
-            address,
-            cmd,
-            ssh_user,
-            timeout=3660,
-            on_output=on_output,
-        )
-        if finish_cb:
-            try:
-                await finish_cb()
-            except Exception:
-                pass
-
-        if code != 0:
-            return f"Claude Code failed (exit {code}):\n{output[-2000:]}"
-
-        response_text, activity = self._parse_claude_stream_json(output)
-
-        max_output = inp.get("max_output_chars", 6000)
-        if len(response_text) > max_output:
-            half = max_output // 2
-            response_text = response_text[:half] + "[... truncated ...]" + response_text[-half:]
-        return response_text + activity
-
-    @staticmethod
-    def _parse_claude_stream_json(raw_output: str) -> tuple[str, str]:
-        """Parse stream-json output into (response_text, activity_summary)."""
-        response_text = ""
-        tool_calls: list[dict] = []
-        cost = 0.0
-        num_turns = 0
-        duration_ms = 0
-
-        for line in raw_output.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            msg_type = d.get("type", "")
-
-            if msg_type == "assistant":
-                for block in (d.get("message") or {}).get("content", []):
-                    bt = block.get("type", "")
-                    if bt == "tool_use":
-                        inp = block.get("input", {})
-                        entry = {"tool": block.get("name", "?"), "input": inp}
-                        tool_calls.append(entry)
-
-            elif msg_type == "result":
-                response_text = d.get("result", "") or ""
-                cost = d.get("total_cost_usd", 0)
-                num_turns = d.get("num_turns", 0)
-                duration_ms = d.get("duration_ms", 0)
-
-        if not tool_calls and not cost:
-            return raw_output, ""
-
-        lines = ["\n\n--- claude_code activity ---"]
-        lines.append(
-            f"Turns: {num_turns} | Cost: ${cost:.4f} | Duration: {duration_ms / 1000:.1f}s"
-        )
-
-        reads = []
-        edits = []
-        writes = []
-        commands = []
-        other = []
-
-        for tc in tool_calls:
-            tool = tc["tool"]
-            inp = tc["input"]
-            if tool == "Read":
-                path = inp.get("file_path", "?")
-                if path not in reads:
-                    reads.append(path)
-            elif tool == "Edit":
-                path = inp.get("file_path", "?")
-                old = inp.get("old_string", "")
-                new = inp.get("new_string", "")
-                edits.append(f"{path}: '{old[:40]}' → '{new[:40]}'")
-            elif tool == "Write":
-                path = inp.get("file_path", "?")
-                size = len(inp.get("content", ""))
-                writes.append(f"{path} ({size} chars)")
-            elif tool in ("Bash", "bash"):
-                cmd = inp.get("command", "?")
-                commands.append(cmd[:100])
-            else:
-                desc = inp.get("description", "") or inp.get("query", "") or inp.get("pattern", "")
-                other.append(f"{tool}: {desc[:60]}" if desc else tool)
-
-        if reads:
-            shown = reads[:10]
-            extra = f" (+{len(reads) - 10} more)" if len(reads) > 10 else ""
-            lines.append(f"Files read: {', '.join(shown)}{extra}")
-        if edits:
-            lines.append("Files edited:")
-            for e in edits[:8]:
-                lines.append(f"  {e}")
-            if len(edits) > 8:
-                lines.append(f"  (+{len(edits) - 8} more)")
-        if writes:
-            lines.append(f"Files written: {', '.join(writes[:8])}")
-        if commands:
-            lines.append("Commands run:")
-            for c in commands[:8]:
-                lines.append(f"  $ {c}")
-            if len(commands) > 8:
-                lines.append(f"  (+{len(commands) - 8} more)")
-        if other:
-            lines.append(f"Other tools: {', '.join(other[:8])}")
-
-        activity = "\n".join(lines)
-        if len(activity) > 2000:
-            activity = activity[:1997] + "..."
-
-        return response_text, activity
 
     def set_user_context(self, user_id: str | None) -> None:
         """Deprecated: user_id is now passed directly to execute().
@@ -1291,165 +1056,6 @@ class ToolExecutor:
             lines.append(f"{i}. {done_mark}{strike}{suffix}")
         return "\n".join(lines)
 
-    async def _handle_git_ops(self, inp: dict) -> str:
-        from .git_ops import ALLOWED_ACTIONS, build_git_command
-
-        action = inp.get("action", "")
-        if action not in ALLOWED_ACTIONS:
-            return f"Unknown git action: {action}. Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
-
-        host = inp.get("host", "")
-        resolved = self._resolve_host(host)
-        if not resolved:
-            return f"Unknown or disallowed host: {host}"
-        address, ssh_user, _os = resolved
-
-        params = inp.get("params") or {}
-
-        try:
-            cmds = build_git_command(action, params)
-        except ValueError as e:
-            return f"git_ops error: {e}"
-
-        if action == "push":
-            freshness_cmd, push_cmd = cmds
-            allowed, denial, _ = self._govern_command(push_cmd, host)
-            if not allowed:
-                return denial
-            code, output = await self._exec_command(
-                address,
-                freshness_cmd,
-                ssh_user,
-            )
-            if code != 0:
-                return f"Branch freshness check failed (exit {code}):\n{output}", code
-            if output.strip().startswith("STALE:"):
-                return f"Push blocked — {output.strip().split(':', 1)[1].strip()}", 1
-            code, output = await self._exec_command(
-                address,
-                push_cmd,
-                ssh_user,
-            )
-            if code != 0:
-                return f"Push failed (exit {code}):\n{_truncate_lines(output)}", code
-            return (
-                _truncate_lines(output) if output.strip() else "Push completed successfully."
-            ), 0
-        else:
-            cmd = cmds
-            allowed, denial, _ = self._govern_command(cmd, host)
-            if not allowed:
-                return denial
-            code, output = await self._exec_command(address, cmd, ssh_user)
-            if code != 0:
-                return f"git {action} failed (exit {code}):\n{_truncate_lines(output)}", code
-            return (
-                _truncate_lines(output)
-                if output.strip()
-                else f"git {action} completed successfully."
-            ), 0
-
-    async def _handle_kubectl(self, inp: dict) -> str:
-        from .kubectl_ops import ALLOWED_ACTIONS as KUBECTL_ACTIONS, build_kubectl_command
-
-        action = inp.get("action", "")
-        if action not in KUBECTL_ACTIONS:
-            return (
-                f"Unknown kubectl action: {action}. Allowed: {', '.join(sorted(KUBECTL_ACTIONS))}"
-            )
-
-        host = inp.get("host", "")
-        resolved = self._resolve_host(host)
-        if not resolved:
-            return f"Unknown or disallowed host: {host}"
-        address, ssh_user, _os = resolved
-
-        params = inp.get("params") or {}
-
-        try:
-            cmd = build_kubectl_command(action, params)
-        except ValueError as e:
-            return f"kubectl error: {e}"
-
-        allowed, denial, _ = self._govern_command(cmd, host)
-        if not allowed:
-            return denial
-
-        code, output = await self._exec_command(address, cmd, ssh_user)
-        if code != 0:
-            return f"kubectl {action} failed (exit {code}):\n{_truncate_lines(output)}", code
-        return (
-            _truncate_lines(output)
-            if output.strip()
-            else f"kubectl {action} completed successfully."
-        ), 0
-
-    async def _handle_docker_ops(self, inp: dict) -> str:
-        from .docker_ops import ALLOWED_ACTIONS as DOCKER_ACTIONS, build_docker_command
-
-        action = inp.get("action", "")
-        if action not in DOCKER_ACTIONS:
-            return f"Unknown docker action: {action}. Allowed: {', '.join(sorted(DOCKER_ACTIONS))}"
-
-        host = inp.get("host", "")
-        resolved = self._resolve_host(host)
-        if not resolved:
-            return f"Unknown or disallowed host: {host}"
-        address, ssh_user, _os = resolved
-
-        params = inp.get("params") or {}
-
-        try:
-            cmd = build_docker_command(action, params)
-        except ValueError as e:
-            return f"docker_ops error: {e}"
-
-        allowed, denial, _ = self._govern_command(cmd, host)
-        if not allowed:
-            return denial
-
-        code, output = await self._exec_command(address, cmd, ssh_user)
-        if code != 0:
-            return f"docker {action} failed (exit {code}):\n{_truncate_lines(output)}", code
-        return (
-            _truncate_lines(output)
-            if output.strip()
-            else f"docker {action} completed successfully."
-        ), 0
-
-    async def _handle_terraform_ops(self, inp: dict) -> str:
-        from .terraform_ops import ALLOWED_ACTIONS as TF_ACTIONS, build_terraform_command
-
-        action = inp.get("action", "")
-        if action not in TF_ACTIONS:
-            return f"Unknown terraform action: {action}. Allowed: {', '.join(sorted(TF_ACTIONS))}"
-
-        host = inp.get("host", "")
-        resolved = self._resolve_host(host)
-        if not resolved:
-            return f"Unknown or disallowed host: {host}"
-        address, ssh_user, _os = resolved
-
-        params = inp.get("params") or {}
-
-        try:
-            cmd = build_terraform_command(action, params)
-        except ValueError as e:
-            return f"terraform_ops error: {e}"
-
-        allowed, denial, _ = self._govern_command(cmd, host)
-        if not allowed:
-            return denial
-
-        code, output = await self._exec_command(address, cmd, ssh_user)
-        if code != 0:
-            return f"terraform {action} failed (exit {code}):\n{_truncate_lines(output)}", code
-        return (
-            _truncate_lines(output)
-            if output.strip()
-            else f"terraform {action} completed successfully."
-        ), 0
-
     async def _handle_issue_tracker(self, inp: dict) -> str:
         action = inp.get("action", "")
         if not action:
@@ -1474,29 +1080,6 @@ class ToolExecutor:
             from ..llm.secret_scrubber import scrub_output_secrets
 
             return f"issue_tracker error: {scrub_output_secrets(str(e))}"
-
-    async def _handle_http_probe(self, inp: dict) -> str:
-        from .http_probe_ops import build_http_probe_command
-
-        host = inp.get("host", "")
-        if host:
-            resolved = self._resolve_host(host)
-            if not resolved:
-                return f"Unknown or disallowed host: {host}"
-            address, ssh_user, _os = resolved
-        else:
-            address = "127.0.0.1"
-            ssh_user = "root"
-
-        try:
-            cmd = build_http_probe_command(inp)
-        except ValueError as e:
-            return f"http_probe error: {e}"
-
-        code, output = await self._exec_command(address, cmd, ssh_user)
-        if code != 0 and not output.strip():
-            return f"http_probe failed (exit {code}): curl returned no output"
-        return _truncate_lines(output) if output.strip() else "http_probe: no response received"
 
     async def _handle_validate_action(self, inp: dict) -> str:
         from .post_validation import (

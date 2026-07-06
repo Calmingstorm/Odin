@@ -644,7 +644,7 @@ class TestHandleTerraformOps:
         config.tools.tool_timeouts = {}
         config.tools.tool_timeout_seconds = 300
 
-        exec_inst = ToolExecutor.__new__(ToolExecutor)
+        exec_inst = ToolExecutor()
         exec_inst.config = config
         exec_inst._metrics = {}
         exec_inst._permission_manager = None
@@ -660,7 +660,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_unknown_host(self, executor):
-        result = await executor._handle_terraform_ops({
+        result = await executor.devops_tools._handle_terraform_ops({
             "host": "nohost",
             "action": "plan",
         })
@@ -668,7 +668,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_unknown_action(self, executor):
-        result = await executor._handle_terraform_ops({
+        result = await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "deploy",
         })
@@ -676,14 +676,14 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_missing_action(self, executor):
-        result = await executor._handle_terraform_ops({
+        result = await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
         })
         assert "Unknown terraform action" in (result[0] if isinstance(result, tuple) else result)
 
     @pytest.mark.asyncio
     async def test_init_dispatch(self, executor):
-        result = await executor._handle_terraform_ops({
+        result = await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "init",
         })
@@ -694,7 +694,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_plan_dispatch(self, executor):
-        result = await executor._handle_terraform_ops({
+        await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "plan",
             "params": {"out": "tf.plan"},
@@ -705,7 +705,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_apply_dispatch(self, executor):
-        result = await executor._handle_terraform_ops({
+        await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "apply",
             "params": {"plan_file": "tf.plan"},
@@ -716,7 +716,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_apply_validation_error(self, executor):
-        result = await executor._handle_terraform_ops({
+        result = await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "apply",
             "params": {},
@@ -726,7 +726,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_output_dispatch(self, executor):
-        await executor._handle_terraform_ops({
+        await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "output",
             "params": {"json": True},
@@ -737,7 +737,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_show_dispatch(self, executor):
-        await executor._handle_terraform_ops({
+        await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "show",
             "params": {"plan_file": "tf.plan"},
@@ -747,7 +747,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_validate_dispatch(self, executor):
-        await executor._handle_terraform_ops({
+        await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "validate",
         })
@@ -756,7 +756,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_fmt_dispatch(self, executor):
-        await executor._handle_terraform_ops({
+        await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "fmt",
             "params": {"check": True},
@@ -767,7 +767,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_state_dispatch(self, executor):
-        await executor._handle_terraform_ops({
+        await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "state",
             "params": {"subaction": "list"},
@@ -777,7 +777,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_workspace_dispatch(self, executor):
-        await executor._handle_terraform_ops({
+        await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "workspace",
             "params": {"subaction": "select", "name": "prod"},
@@ -787,7 +787,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_import_dispatch(self, executor):
-        await executor._handle_terraform_ops({
+        await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "import",
             "params": {"address": "aws_instance.web", "id": "i-abc123"},
@@ -800,7 +800,7 @@ class TestHandleTerraformOps:
     @pytest.mark.asyncio
     async def test_command_failure(self, executor):
         executor._exec_command.return_value = (1, "Error: No configuration files")
-        result = await executor._handle_terraform_ops({
+        result = await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "init",
         })
@@ -810,7 +810,7 @@ class TestHandleTerraformOps:
     @pytest.mark.asyncio
     async def test_empty_output(self, executor):
         executor._exec_command.return_value = (0, "")
-        result = await executor._handle_terraform_ops({
+        result = await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "validate",
         })
@@ -818,7 +818,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_no_params_default(self, executor):
-        result = await executor._handle_terraform_ops({
+        await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "plan",
         })
@@ -827,7 +827,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_correct_ssh_user(self, executor):
-        await executor._handle_terraform_ops({
+        await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "plan",
         })
@@ -837,7 +837,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_state_validation_error(self, executor):
-        result = await executor._handle_terraform_ops({
+        result = await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "state",
             "params": {"subaction": "show"},
@@ -847,7 +847,7 @@ class TestHandleTerraformOps:
 
     @pytest.mark.asyncio
     async def test_import_validation_error(self, executor):
-        result = await executor._handle_terraform_ops({
+        result = await executor.devops_tools._handle_terraform_ops({
             "host": "infra",
             "action": "import",
             "params": {"address": "aws_instance.web"},
