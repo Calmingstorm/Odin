@@ -101,11 +101,21 @@ Rollback: phase merges are merge commits on the campaign branch; `git revert -m1
 4. `ruff check src/web/api/` completely clean; CI lint baseline re-anchored.
 5. Full suite green; soak on /opt/odin healthy with a web-focused battery PASS.
 
+## 6.1 Results (carve complete, 2026-07-06)
+
+- `src/web/api/__init__.py`: **4,155 → 217 lines** of pure composition (imports, the ordered registrar call list, `setup_api`, the R1 re-export surface).
+- **13 domain modules + `api_common`** (`llm_admin` 589, `config_admin` 586, `security`/`sessions_chat` 522, `observability` 405, `integrations` 383, `knowledge_mem` 357, `codex_admin`, `agents_loops`, `self_update`, `schedules_api`, `skills_api`, plus `api_common` 189) — none over the ~600 gate; two size splits enforced it (codex OAuth, self-update).
+- Route parity: **183 routes, exact registration order**, held through every wave; **48 registrars**, each called exactly once from the root (composition assertions executable in the carve tooling after the wave-1 aggregates incident).
+- The R1 pins earned their keep operationally: they guarded the file→package swap, and the `process_web_chat` patch seam caught its own severance in wave 3 (fixed via call-time resolution through the package attribute).
+- **P6 was paid per-wave**: `ruff check src/web/api/ src/web/api_common.py` = **zero findings**; the file rename made all pre-existing api.py debt visible to the gate in wave 1, and each wave left its modules clean. The CI lint baseline needs no re-anchor — the gate's merge-base comparison self-adjusts.
+- CI (P0) gated every phase PR; suite 6,079 throughout.
+
 ## 7. Deferred (named, not forgotten)
 
 Windows CI matrix; pyright/Protocol typing for the Deps surfaces; coverage measurement; the small quality batch (exit-nonzero on fatal startup, fetch_url SPA message, old-skill-format docs note, atcharpentier Codex 401).
 
 ## 8. Revision log
 
+- R2 (2026-07-06): P6 absorbed into the waves — the package rename surfaced all pre-existing api.py findings to the gate in wave 1, so each wave's PR left its modules lint-clean; the package finished at zero findings with no separate burn-down phase. Two size-gate splits added (`codex_admin.py`, `self_update.py`). `agent trajectories` landed in `sessions_chat` (its true domain) rather than a config bucket; `degradation` in `observability`.
 - R1 (2026-07-05, from Odin's review): package `__init__` preserves the FULL live import surface (`setup_api`, `_is_sensitive_key`, `_redact_config`, `_safe_int_param`, `process_web_chat` patch seam), pinned by a P1 import-compatibility test before the swap; P0 checkout uses `fetch-depth: 0` for merge-base availability; lint burn-down estimate corrected to the measured 59 findings.
 - R0 (2026-07-05): initial draft for Odin review.
