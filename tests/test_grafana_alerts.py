@@ -1508,3 +1508,46 @@ class TestModuleImports:
         from src.config.schema import GrafanaAlertConfig, GrafanaRemediationRuleConfig
         assert GrafanaAlertConfig is not None
         assert GrafanaRemediationRuleConfig is not None
+
+
+class TestFreshBootClock:
+    """Regression: a `0` cooldown sentinel on the monotonic clock read as
+    "on cooldown since boot" — every alert was silently dropped for the
+    first cooldown window after a host reboot. Caught by the first CI run
+    on a fresh runner (uptime < cooldown), invisible on long-uptime dev
+    machines (RFC-003 P0)."""
+
+    def test_never_remediated_alert_matches_on_fresh_boot(self, monkeypatch):
+        import time as _time
+
+        monkeypatch.setattr(_time, "monotonic", lambda: 10.0)  # 10s uptime
+        handler = GrafanaAlertHandler(auto_remediate=True, cooldown_seconds=300)
+        handler.add_rule(RemediationRule(id="r1", name_pattern="High*", cooldown_seconds=300))
+        alert = GrafanaAlert(
+            fingerprint="fb1", status="firing", alert_name="HighCPU",
+            labels={"severity": "critical"}, annotations={}, starts_at="",
+            ends_at="", generator_url="", silence_url="", dashboard_url="",
+            panel_url="", values={}, severity="critical", instance="",
+            summary="", description="",
+        )
+        matches = handler.process_alerts([alert])
+        assert len(matches) == 1, "fresh-boot clock must not fake a cooldown"
+
+    def test_real_cooldown_still_enforced_on_fresh_boot(self, monkeypatch):
+        import time as _time
+
+        clock = {"now": 10.0}
+        monkeypatch.setattr(_time, "monotonic", lambda: clock["now"])
+        handler = GrafanaAlertHandler(auto_remediate=True, cooldown_seconds=300)
+        handler.add_rule(RemediationRule(id="r1", name_pattern="*", cooldown_seconds=300))
+        handler._cooldowns["fb2:r1"] = 5.0  # remediated 5s after boot
+        alert = GrafanaAlert(
+            fingerprint="fb2", status="firing", alert_name="Anything",
+            labels={}, annotations={}, starts_at="", ends_at="",
+            generator_url="", silence_url="", dashboard_url="", panel_url="",
+            values={}, severity="unknown", instance="", summary="",
+            description="",
+        )
+        assert handler.process_alerts([alert]) == []  # genuinely on cooldown
+        clock["now"] = 320.0  # past the window
+        assert len(handler.process_alerts([alert])) == 1

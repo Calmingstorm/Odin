@@ -363,7 +363,14 @@ class GrafanaAlertHandler:
                 rec.status = "completed"
 
     def _is_on_cooldown(self, key: str, cooldown_seconds: int) -> bool:
-        last = self._cooldowns.get(key, 0)
+        last = self._cooldowns.get(key)
+        if last is None:
+            # Never remediated. A `0` sentinel here reads as "on cooldown
+            # since boot" on the monotonic clock, silently dropping every
+            # alert for the first cooldown_seconds after a host reboot —
+            # exactly the window when alerts fire (caught by the first CI
+            # run on a fresh runner, RFC-003 P0).
+            return False
         return (time.monotonic() - last) < cooldown_seconds
 
     def _count_active(self) -> int:

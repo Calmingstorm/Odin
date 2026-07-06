@@ -342,3 +342,20 @@ def test_plans_file_is_not_world_readable(tmp_path):
     store.create(user_id="u", channel_id="c", original_request="secret request", summary="s")
     mode = stat.S_IMODE(os.stat(path).st_mode)
     assert mode == 0o600
+
+
+def test_cleanup_removes_untriggered_loop_even_on_fresh_boot(monkeypatch):
+    """Regression: `last_trigger or 0` on the monotonic clock kept
+    never-triggered stopped loops alive for an hour after a fresh boot
+    (monotonic < 3600); the intent was "immediately stale" (RFC-003 P0)."""
+    import time as _time
+
+    monkeypatch.setattr(_time, "monotonic", lambda: 42.0)  # young machine
+    manager = LoopManager()
+    info = _loop_info()
+    info.status = "stopped"
+    info.last_trigger = None
+    manager._loops[info.id] = info
+
+    manager.cleanup_finished()
+    assert info.id not in manager._loops
