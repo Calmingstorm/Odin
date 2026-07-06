@@ -40,6 +40,12 @@ dev = [
     "pytest-cov",
     "ruff",
     "aioresponses>=0.7",
+    # Type gate (RFC-005): checker + stubs pinned so CI findings are
+    # deterministic — upgrades are deliberate PRs, never ambient drift.
+    "mypy==2.1.0",
+    "types-aiofiles==25.1.0.20260518",
+    "types-PyYAML==6.0.12.20260518",
+    "types-croniter==6.2.3.20260704",
 ]
 
 [project.scripts]
