@@ -106,6 +106,44 @@ def _build_bulkhead_registry(config: ToolsConfig) -> BulkheadRegistry:
     return registry
 
 
+# RFC-004 P2: explicit late-bound dispatch table — tool name -> (owner_key, attr).
+# Handlers are resolved via getattr(owner, attr) at CALL time, never pre-bound,
+# so instance-attribute patches (``executor._handle_x = fake``) keep governing
+# execution (the patch-seam contract in test_executor_dispatch_parity). All
+# entries point at the "core" owner until the P4–P6 waves rebind them to domain
+# owners. The characterization contract pins table keys == executor-routed set.
+EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
+    "run_command": ("core", "_handle_run_command"),
+    "run_script": ("core", "_handle_run_script"),
+    "run_command_multi": ("core", "_handle_run_command_multi"),
+    "read_file": ("core", "_handle_read_file"),
+    "write_file": ("core", "_handle_write_file"),
+    "memory_manage": ("core", "_handle_memory_manage"),
+    "manage_list": ("core", "_handle_manage_list"),
+    "manage_process": ("core", "_handle_manage_process"),
+    "browser_read_page": ("core", "_handle_browser_read_page"),
+    "browser_read_table": ("core", "_handle_browser_read_table"),
+    "browser_click": ("core", "_handle_browser_click"),
+    "browser_fill": ("core", "_handle_browser_fill"),
+    "browser_evaluate": ("core", "_handle_browser_evaluate"),
+    "web_search": ("core", "_handle_web_search"),
+    "fetch_url": ("core", "_handle_fetch_url"),
+    "http_probe": ("core", "_handle_http_probe"),
+    "analyze_pdf": ("core", "_handle_analyze_pdf"),
+    "claude_code": ("core", "_handle_claude_code"),
+    "git_ops": ("core", "_handle_git_ops"),
+    "kubectl": ("core", "_handle_kubectl"),
+    "docker_ops": ("core", "_handle_docker_ops"),
+    "terraform_ops": ("core", "_handle_terraform_ops"),
+    "issue_tracker": ("core", "_handle_issue_tracker"),
+    "validate_action": ("core", "_handle_validate_action"),
+    "email_send": ("core", "_handle_email_send"),
+    "email_search": ("core", "_handle_email_search"),
+    "email_read": ("core", "_handle_email_read"),
+    "email_list_recent": ("core", "_handle_email_list_recent"),
+}
+
+
 class ToolExecutor:
     def __init__(
         self, config: ToolsConfig | None = None, memory_path: str | None = None,
@@ -122,6 +160,10 @@ class ToolExecutor:
         self._permission_manager = permission_manager
         self.output_streamer = output_streamer
         self._host_access = host_access_manager
+        # RFC-004 P2: owners for EXECUTOR_HANDLERS resolution. The P4–P6
+        # waves add domain-owner instances here; "core" stays the executor
+        # itself for middleware-adjacent handlers.
+        self._handler_owners: dict[str, object] = {"core": self}
         self._metrics: dict[str, dict[str, int]] = {}
         self._memory_lock = asyncio.Lock()
         self._lists_lock = asyncio.Lock()
@@ -201,8 +243,36 @@ class ToolExecutor:
             )
         return None
 
+    def _resolve_handler(self, tool_name: str):
+        """Resolve a tool handler at CALL time (RFC-004 P2).
+
+        Table-first: EXECUTOR_HANDLERS maps name -> (owner_key, attr) and the
+        handler is fetched with getattr(owner, attr) NOW — never pre-bound —
+        so instance-attribute patches keep governing execution. The legacy
+        f-string lookup remains as a logged fallback until P7 retires it.
+        """
+        entry = EXECUTOR_HANDLERS.get(tool_name)
+        # getattr: tolerate __init__-bypassing construction (ToolExecutor.__new__
+        # in older fixtures) — resolution then falls through to the legacy path,
+        # which is behavior-identical while every entry points at "core".
+        owners = getattr(self, "_handler_owners", None)
+        if entry is not None and owners is not None:
+            owner_key, attr = entry
+            owner = owners.get(owner_key)
+            if owner is not None:
+                handler = getattr(owner, attr, None)
+                if handler is not None:
+                    return handler
+        legacy = getattr(self, f"_handle_{tool_name}", None)
+        if legacy is not None:
+            log.warning(
+                "Tool %s resolved via legacy getattr fallback — missing EXECUTOR_HANDLERS entry",
+                tool_name,
+            )
+        return legacy
+
     async def execute(self, tool_name: str, tool_input: dict, *, user_id: str | None = None) -> ToolResult:
-        handler = getattr(self, f"_handle_{tool_name}", None)
+        handler = self._resolve_handler(tool_name)
         if handler is None:
             return ToolResult(output=f"Unknown tool: {tool_name}", ok=False, error="unknown_tool", tool_name=tool_name)
 
