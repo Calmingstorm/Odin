@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextvars
 import json
-import os
 import shlex
 from pathlib import Path
-
 
 from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
@@ -19,8 +16,6 @@ from .branch_freshness import (
     FreshnessStats,
     check_branch_freshness,
     format_staleness_warning,
-    is_test_command,
-    is_test_failure,
 )
 from .bulkhead import BulkheadFullError, BulkheadRegistry
 from .recovery import (
@@ -48,13 +43,13 @@ log = get_logger("tools")
 # oldest-by-write notes are evicted past the cap.
 MEMORY_MAX_KEYS_PER_SECTION = 200
 
-# Prefixes that mark a tool result string as a failure. A governor block
-# ("Blocked [risk]: ...") and a host-access denial ("Unknown or disallowed
-# host: ...") were previously NOT recognized, so a refused action was reported
-# to the LLM and audit log as ok=True — a refused command looked successful.
-_ERROR_RESULT_PREFIXES = (
-    "Error", "Command failed", "Script failed",
-    "Blocked", "Unknown or disallowed host",
+# Output-text helpers moved to tool_text.py (RFC-004 P4) — re-exported here
+# because background_task, tool_loop_helpers, and tests import them from
+# executor. tool_text.py carries the semantics documentation.
+from .tool_text import (  # noqa: E402, F401 — public re-export seam
+    _ERROR_RESULT_PREFIXES,
+    _RUN_COMMAND_MAX_LINES,
+    _truncate_lines,
 )
 
 # Request-scoped caller identity, backed by contextvars. asyncio gives each
@@ -69,31 +64,6 @@ _user_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _user_tier_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "odin_tool_user_tier", default=None
 )
-
-# Maximum lines of output from run_command / run_command_multi before
-# truncation.  The LLM can always re-run with head/tail/grep to see
-# specific portions.
-_RUN_COMMAND_MAX_LINES = 200
-
-
-def _truncate_lines(text: str, max_lines: int = _RUN_COMMAND_MAX_LINES) -> str:
-    """Truncate command output to *max_lines*, keeping first and last halves.
-
-    Unlike the central character-based ``truncate_tool_output`` in
-    ``client.py``, this cuts at line boundaries so the LLM always sees
-    complete lines.  A notice is inserted in the middle telling the LLM
-    how to get more specific output.
-    """
-    lines = text.split("\n")
-    if len(lines) <= max_lines:
-        return text
-    keep = max_lines // 2
-    omitted = len(lines) - max_lines
-    return "\n".join(
-        lines[:keep]
-        + [f"[... {omitted} lines omitted — pipe through head/tail/grep for specific output ...]"]
-        + lines[-keep:]
-    )
 
 
 def _build_bulkhead_registry(config: ToolsConfig) -> BulkheadRegistry:
@@ -113,14 +83,14 @@ def _build_bulkhead_registry(config: ToolsConfig) -> BulkheadRegistry:
 # entries point at the "core" owner until the P4–P6 waves rebind them to domain
 # owners. The characterization contract pins table keys == executor-routed set.
 EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
-    "run_command": ("core", "_handle_run_command"),
-    "run_script": ("core", "_handle_run_script"),
-    "run_command_multi": ("core", "_handle_run_command_multi"),
-    "read_file": ("core", "_handle_read_file"),
-    "write_file": ("core", "_handle_write_file"),
+    "run_command": ("system", "_handle_run_command"),
+    "run_script": ("system", "_handle_run_script"),
+    "run_command_multi": ("system", "_handle_run_command_multi"),
+    "read_file": ("files_docs", "_handle_read_file"),
+    "write_file": ("files_docs", "_handle_write_file"),
     "memory_manage": ("core", "_handle_memory_manage"),
     "manage_list": ("core", "_handle_manage_list"),
-    "manage_process": ("core", "_handle_manage_process"),
+    "manage_process": ("system", "_handle_manage_process"),
     "browser_read_page": ("core", "_handle_browser_read_page"),
     "browser_read_table": ("core", "_handle_browser_read_table"),
     "browser_click": ("core", "_handle_browser_click"),
@@ -129,7 +99,7 @@ EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
     "web_search": ("core", "_handle_web_search"),
     "fetch_url": ("core", "_handle_fetch_url"),
     "http_probe": ("core", "_handle_http_probe"),
-    "analyze_pdf": ("core", "_handle_analyze_pdf"),
+    "analyze_pdf": ("files_docs", "_handle_analyze_pdf"),
     "claude_code": ("core", "_handle_claude_code"),
     "git_ops": ("core", "_handle_git_ops"),
     "kubectl": ("core", "_handle_kubectl"),
@@ -146,7 +116,9 @@ EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
 
 class ToolExecutor:
     def __init__(
-        self, config: ToolsConfig | None = None, memory_path: str | None = None,
+        self,
+        config: ToolsConfig | None = None,
+        memory_path: str | None = None,
         browser_manager: object | None = None,
         permission_manager: PermissionManager | None = None,
         output_streamer: ToolOutputStreamer | None = None,
@@ -160,10 +132,6 @@ class ToolExecutor:
         self._permission_manager = permission_manager
         self.output_streamer = output_streamer
         self._host_access = host_access_manager
-        # RFC-004 P2: owners for EXECUTOR_HANDLERS resolution. The P4–P6
-        # waves add domain-owner instances here; "core" stays the executor
-        # itself for middleware-adjacent handlers.
-        self._handler_owners: dict[str, object] = {"core": self}
         self._metrics: dict[str, dict[str, int]] = {}
         self._memory_lock = asyncio.Lock()
         self._lists_lock = asyncio.Lock()
@@ -171,6 +139,7 @@ class ToolExecutor:
         self.recovery_stats = RecoveryStats()
         self.validation_stats = ResultValidationStats()
         from .risk_classifier import CommandGovernor
+
         gov_cfg = getattr(self.config, "governor", None)
         if gov_cfg:
             self.command_governor = CommandGovernor(
@@ -195,6 +164,42 @@ class ToolExecutor:
             if pool_cfg.enabled
             else None
         )
+        # RFC-004 P4: the narrow seam handler domains use. Every field is a
+        # LATE-RESOLVING callable closing over ``self`` (the executor
+        # variable) — attribute lookup happens per call, so instance/class
+        # monkeypatches on the executor keep governing domain behavior, and
+        # stateful objects are reached by identity (R1 blocker #3).
+        from .handlers.deps import HandlerDeps
+        from .handlers.files_docs import FilesDocsTools
+        from .handlers.system import SystemTools
+
+        self._handler_deps = HandlerDeps(
+            config=lambda: self.config,
+            output_streamer=lambda: self.output_streamer,
+            host_access=lambda: self._host_access,
+            branch_freshness_enabled=lambda: self._branch_freshness_enabled,
+            current_user_id=lambda: self._current_user_id,
+            process_registry=lambda: self._ensure_process_registry(),
+            resolve_host=lambda alias: self._resolve_host(alias),
+            resolve_default_host=lambda user_id: self._resolve_default_host(user_id),
+            govern_command=lambda command, host=None: self._govern_command(command, host),
+            exec_command=lambda *a, **k: self._exec_command(*a, **k),
+            run_on_host=lambda *a, **k: self._run_on_host(*a, **k),
+            annotate_with_freshness=lambda *a, **k: self._annotate_with_freshness(*a, **k),
+        )
+        # RFC-004 P2/P4: domain owners are PUBLIC attributes (the RFC-002
+        # ``bot.media_tools`` convention) — tests call and patch handlers at
+        # the domain level, e.g. ``executor.system_tools._handle_run_command``.
+        self.system_tools = SystemTools(self._handler_deps)
+        self.files_docs_tools = FilesDocsTools(self._handler_deps)
+        # Owners for EXECUTOR_HANDLERS resolution. "core" is the executor
+        # itself for not-yet-moved handlers; domain owners are added as the
+        # P4–P6 waves land.
+        self._handler_owners: dict[str, object] = {
+            "core": self,
+            "system": self.system_tools,
+            "files_docs": self.files_docs_tools,
+        }
 
     @property
     def _current_user_id(self) -> str | None:
@@ -225,6 +230,19 @@ class ToolExecutor:
         hosts = list(self.config.hosts.keys())
         return hosts[0] if hosts else ""
 
+    def _ensure_process_registry(self):
+        """Lazy-init the ProcessRegistry ON THE EXECUTOR (RFC-004 P4).
+
+        The attribute stays here — not on the system domain — because the
+        web API (agents_loops, config_admin) and graceful shutdown read
+        ``tool_executor._process_registry`` directly.
+        """
+        if not hasattr(self, "_process_registry"):
+            from .process_manager import ProcessRegistry
+
+            self._process_registry = ProcessRegistry()
+        return self._process_registry
+
     def check_permission(self, tool_name: str, user_id: str | None) -> str | None:
         """Check if user has permission to use the tool.
 
@@ -251,10 +269,17 @@ class ToolExecutor:
         so instance-attribute patches keep governing execution. The legacy
         f-string lookup remains as a logged fallback until P7 retires it.
         """
+        # Instance-attribute overrides win FIRST — this is the historical
+        # patch seam (13+ test sites do ``executor._handle_x = fake``) and it
+        # must keep governing even for handlers whose real bodies now live on
+        # domain owners. Checked via __dict__ so class-level methods don't
+        # short-circuit table resolution.
+        override = self.__dict__.get(f"_handle_{tool_name}")
+        if override is not None:
+            return override
         entry = EXECUTOR_HANDLERS.get(tool_name)
         # getattr: tolerate __init__-bypassing construction (ToolExecutor.__new__
-        # in older fixtures) — resolution then falls through to the legacy path,
-        # which is behavior-identical while every entry points at "core".
+        # in older fixtures) — resolution then falls through to the legacy path.
         owners = getattr(self, "_handler_owners", None)
         if entry is not None and owners is not None:
             owner_key, attr = entry
@@ -271,29 +296,48 @@ class ToolExecutor:
             )
         return legacy
 
-    async def execute(self, tool_name: str, tool_input: dict, *, user_id: str | None = None) -> ToolResult:
+    async def execute(
+        self, tool_name: str, tool_input: dict, *, user_id: str | None = None
+    ) -> ToolResult:
         handler = self._resolve_handler(tool_name)
         if handler is None:
-            return ToolResult(output=f"Unknown tool: {tool_name}", ok=False, error="unknown_tool", tool_name=tool_name)
+            return ToolResult(
+                output=f"Unknown tool: {tool_name}",
+                ok=False,
+                error="unknown_tool",
+                tool_name=tool_name,
+            )
 
         _user_id_ctx.set(user_id)
         _user_tier_ctx.set(
-            self._permission_manager.get_tier(user_id) if self._permission_manager and user_id else None
+            self._permission_manager.get_tier(user_id)
+            if self._permission_manager and user_id
+            else None
         )
 
         denial = self.check_permission(tool_name, user_id)
         if denial:
-            log.warning("RBAC denied %s for user %s on tool %s", self._permission_manager.get_tier(user_id), user_id, tool_name)
+            log.warning(
+                "RBAC denied %s for user %s on tool %s",
+                self._permission_manager.get_tier(user_id),
+                user_id,
+                tool_name,
+            )
             self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
             self._metrics[tool_name]["errors"] += 1
-            return ToolResult(output=denial, ok=False, error="permission_denied", tool_name=tool_name)
+            return ToolResult(
+                output=denial, ok=False, error="permission_denied", tool_name=tool_name
+            )
 
         assessment = classify_tool(tool_name, tool_input)
         self.risk_stats.record(tool_name, assessment)
         self._last_risk_assessment = assessment
         if assessment.level.value in ("high", "critical"):
             log.warning(
-                "Risk %s for %s: %s", assessment.level.value, tool_name, assessment.reason,
+                "Risk %s for %s: %s",
+                assessment.level.value,
+                tool_name,
+                assessment.reason,
             )
 
         timeout = self.config.get_tool_timeout(tool_name)
@@ -319,7 +363,8 @@ class ToolExecutor:
                     self.recovery_stats.record_failure(tool_name, category, snippet)
                     log.info(
                         "Recovery hint for %s (%s): not retrying, annotating result",
-                        tool_name, category.value,
+                        tool_name,
+                        category.value,
                     )
                     hint = decision.hint_text
                     if hint and isinstance(raw_result, str) and hint not in raw_result:
@@ -328,16 +373,24 @@ class ToolExecutor:
                     if tool_name in UNSAFE_TO_RETRY:
                         log.warning(
                             "Recovery skipped for %s (%s): tool is not safe to retry (may have already executed)",
-                            tool_name, category.value,
+                            tool_name,
+                            category.value,
                         )
                     self.recovery_stats.record_failure(tool_name, category, snippet)
                 else:
                     delay = decision.delay_seconds
                     self.recovery_stats.record_attempt(tool_name, category, snippet)
-                    log.info("Recovery for %s (%s): retrying after %.1fs", tool_name, category.value, delay)
+                    log.info(
+                        "Recovery for %s (%s): retrying after %.1fs",
+                        tool_name,
+                        category.value,
+                        delay,
+                    )
                     if delay > 0:
                         await asyncio.sleep(delay)
-                    retry_raw = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
+                    retry_raw = await self._try_tool(
+                        tool_name, handler, tool_input, timeout, user_id
+                    )
                     if isinstance(retry_raw, tuple):
                         raw_result, exit_code = retry_raw[0], retry_raw[1]
                         is_error = exit_code != 0
@@ -348,7 +401,9 @@ class ToolExecutor:
                         self.recovery_stats.record_failure(tool_name, category, snippet)
                     else:
                         self.recovery_stats.record_success(tool_name, category, snippet)
-                        is_error = isinstance(raw_result, str) and raw_result.startswith(_ERROR_RESULT_PREFIXES)
+                        is_error = isinstance(raw_result, str) and raw_result.startswith(
+                            _ERROR_RESULT_PREFIXES
+                        )
 
         mutation_detected = False
         mutation_reason = ""
@@ -362,6 +417,7 @@ class ToolExecutor:
         # Extract exit code from string if handler didn't return one
         if exit_code is None and isinstance(raw_result, str):
             import re as _re
+
             m = _re.search(r"\(exit (\d+)\)", raw_result)
             if m:
                 exit_code = int(m.group(1))
@@ -381,8 +437,12 @@ class ToolExecutor:
         )
 
     async def _try_tool(
-        self, tool_name: str, handler, tool_input: dict,
-        timeout: int, user_id: str | None,
+        self,
+        tool_name: str,
+        handler,
+        tool_input: dict,
+        timeout: int,
+        user_id: str | None,
     ) -> str | tuple[str, int]:
         """Single attempt at executing a tool handler.
 
@@ -432,7 +492,11 @@ class ToolExecutor:
         return None
 
     async def _annotate_with_freshness(
-        self, result: str, host_alias: str, tool_name: str, command: str,
+        self,
+        result: str,
+        host_alias: str,
+        tool_name: str,
+        command: str,
     ) -> str:
         """Check branch freshness and annotate test failure result if stale."""
         resolved = self._resolve_host(host_alias)
@@ -441,7 +505,9 @@ class ToolExecutor:
         address, ssh_user, _ = resolved
         try:
             status = await check_branch_freshness(
-                self._exec_command, address, ssh_user,
+                self._exec_command,
+                address,
+                ssh_user,
             )
         except Exception as e:
             log.warning("Branch freshness check failed: %s", e)
@@ -463,7 +529,9 @@ class ToolExecutor:
         if warning:
             log.info(
                 "Branch %s is %d commit(s) behind %s — test failure may be stale",
-                status.local_branch, status.commits_behind, status.remote_ref,
+                status.local_branch,
+                status.commits_behind,
+                status.remote_ref,
             )
             return result + warning
         return result
@@ -503,7 +571,9 @@ class ToolExecutor:
             if bh:
                 try:
                     async with bh.acquire():
-                        return await run_local_command(command, timeout=timeout, on_output=on_output)
+                        return await run_local_command(
+                            command, timeout=timeout, on_output=on_output
+                        )
                 except BulkheadFullError:
                     return 1, "Error: subprocess bulkhead full — too many concurrent local commands"
             return await run_local_command(command, timeout=timeout, on_output=on_output)
@@ -545,7 +615,9 @@ class ToolExecutor:
         if not getattr(self, "command_governor", None):
             return True, "", ""
         check = self.command_governor.check(
-            command, user_tier=getattr(self, "_current_user_tier", None), host=host,
+            command,
+            user_tier=getattr(self, "_current_user_tier", None),
+            host=host,
         )
         if not check.allowed:
             return False, check.denial_message(), ""
@@ -554,226 +626,7 @@ class ToolExecutor:
             note = f"[governor: allowed — {check.risk.value} risk, {check.reason}]\n"
         return True, "", note
 
-    async def _handle_run_command(self, inp: dict) -> str:
-        command = inp.get("command")
-        host = inp.get("host")
-        if not command:
-            return "Error: 'command' is required for run_command."
-        if not host:
-            host = self._resolve_default_host(self._current_user_id)
-            if not host:
-                return "Error: 'host' is required for run_command."
-
-        allowed, denial, governor_note = self._govern_command(command, host)
-        if not allowed:
-            return denial
-
-        # Stream output if enabled for this tool
-        on_output = None
-        finish_cb = None
-        if self.output_streamer and self.output_streamer.is_enabled("run_command"):
-            _, on_output, finish_cb = self.output_streamer.create_callback(
-                "run_command", channel_id=host,
-            )
-
-        resolved = self._resolve_host(host)
-        if not resolved:
-            if finish_cb:
-                try:
-                    await finish_cb()
-                except Exception:
-                    pass
-            return f"Unknown or disallowed host: {host}"
-        address, ssh_user, _os = resolved
-        code, output = await self._exec_command(
-            address, command, ssh_user, on_output=on_output,
-        )
-        if finish_cb:
-            try:
-                await finish_cb()
-            except Exception:
-                pass
-        if code != 0:
-            output = f"Command failed (exit {code}):\n{output}"
-        output = _truncate_lines(output)
-        if self._branch_freshness_enabled and is_test_command(command) and is_test_failure(output):
-            output = await self._annotate_with_freshness(output, host, "run_command", command)
-        text = f"{governor_note}{output}" if governor_note else output
-        return text, code
-
-    async def _handle_run_script(self, inp: dict) -> str:
-        """Write a script to a temp file, execute it, and clean up."""
-        host = inp.get("host")
-        script = inp.get("script")
-        if not host:
-            host = self._resolve_default_host(self._current_user_id)
-            if not host:
-                return "Error: 'host' is required for run_script."
-        if not script:
-            return "Error: 'script' is required for run_script."
-        interpreter = inp.get("interpreter", "bash")
-
-        allowed, denial, governor_note = self._govern_command(script, host)
-        if not allowed:
-            return denial
-
-        # Map interpreter to file extension
-        ext_map = {
-            "bash": ".sh", "sh": ".sh", "python3": ".py", "python": ".py",
-            "node": ".js", "ruby": ".rb", "perl": ".pl",
-        }
-        ext = ext_map.get(interpreter, ".sh")
-        filename = inp.get("filename") or f"odin_script{ext}"
-
-        # Sanitize interpreter to prevent injection
-        allowed_interpreters = {"bash", "sh", "python3", "python", "node", "ruby", "perl"}
-        if interpreter not in allowed_interpreters:
-            return f"Unsupported interpreter: {interpreter}. Use one of: {', '.join(sorted(allowed_interpreters))}"
-
-        resolved = self._resolve_host(host)
-        if not resolved:
-            return f"Unknown or disallowed host: {host}"
-        address, ssh_user, _os = resolved
-
-        # Base64-encode script to avoid all quoting/heredoc issues
-        encoded = base64.b64encode(script.encode()).decode()
-
-        safe_filename = shlex.quote(os.path.basename(filename))
-        # Write to temp file, execute, capture output, clean up
-        cmd = (
-            f"TMPF=$(mktemp /tmp/{safe_filename}.XXXXXXXX) && "
-            f"echo '{encoded}' | base64 -d > \"$TMPF\" && "
-            f"chmod +x \"$TMPF\" && "
-            f"{interpreter} \"$TMPF\" 2>&1; EXIT=$?; "
-            f"rm -f \"$TMPF\"; exit $EXIT"
-        )
-
-        # Stream output if enabled for this tool
-        on_output = None
-        finish_cb = None
-        if self.output_streamer and self.output_streamer.is_enabled("run_script"):
-            _, on_output, finish_cb = self.output_streamer.create_callback(
-                "run_script", channel_id=host,
-            )
-
-        code, output = await self._exec_command(
-            address, cmd, ssh_user, on_output=on_output,
-        )
-        if finish_cb:
-            try:
-                await finish_cb()
-            except Exception:
-                pass
-        if code != 0:
-            result = f"Script failed (exit {code}):\n{_truncate_lines(output)}"
-            if self._branch_freshness_enabled and is_test_command(script) and is_test_failure(result):
-                result = await self._annotate_with_freshness(result, host, "run_script", script[:120])
-            text = f"{governor_note}{result}" if governor_note else result
-            return text, code
-        output = _truncate_lines(output)
-        text = f"{governor_note}{output}" if governor_note else output
-        return text, 0
-
-    async def _handle_read_file(self, inp: dict) -> str:
-        path = inp.get("path")
-        host = inp.get("host")
-        if not path:
-            return "Error: 'path' is required for read_file."
-        if not host:
-            return "Error: 'host' is required for read_file."
-        try:
-            lines = min(int(inp.get("lines", 200)), 1000)
-        except (TypeError, ValueError):
-            lines = 200
-        safe_path = shlex.quote(path)
-        return await self._run_on_host(
-            host,
-            f"head -n {lines} {safe_path}",
-        )
-
-    async def _handle_write_file(self, inp: dict) -> str:
-        path = inp.get("path")
-        content = inp.get("content")
-        host = inp.get("host")
-        if not path:
-            return "Error: 'path' is required for write_file."
-        if content is None:
-            return "Error: 'content' is required for write_file."
-        if not host:
-            return "Error: 'host' is required for write_file."
-        safe_path = shlex.quote(path)
-        # Govern the write before executing — write_file reaches the filesystem
-        # via _run_on_host, which does NOT itself govern. Check a representative
-        # redirect-to-path command so policy (e.g. writes to sensitive targets)
-        # applies here as it does for run_command.
-        allowed, denial, _ = self._govern_command(f"write_file > {safe_path}", host)
-        if not allowed:
-            return denial
-        # Base64-encode content to avoid shell injection via heredoc delimiter
-        encoded = base64.b64encode(content.encode()).decode()
-        cmd = f"mkdir -p $(dirname {safe_path}) && echo '{encoded}' | base64 -d > {safe_path}"
-        return await self._run_on_host(host, cmd)
-
     # --- Multi-host tools ---
-
-    async def _handle_run_command_multi(self, inp: dict) -> str | tuple[str, int]:
-        hosts = inp["hosts"]
-        command = inp["command"]
-
-        if hosts == ["all"] or hosts == "all":
-            if self._host_access and self._current_user_id:
-                hosts = self._host_access.get_allowed_hosts(self._current_user_id)
-            else:
-                hosts = list(self.config.hosts.keys())
-
-        # Per-host access + governor check before launching parallel tasks
-        blocked_hosts = []
-        allowed_hosts = []
-        for h in hosts:
-            if self._host_access and self._current_user_id:
-                if not self._host_access.is_host_allowed(self._current_user_id, h):
-                    blocked_hosts.append((h, f"Host access denied: {h}"))
-                    continue
-            allowed, denial, _ = self._govern_command(command, h)
-            if not allowed:
-                blocked_hosts.append((h, denial))
-            else:
-                allowed_hosts.append(h)
-
-        async def _run_one(alias: str) -> tuple[str, bool]:
-            raw = await self._run_on_host(alias, command)
-            if isinstance(raw, tuple):
-                text, code = raw[0], raw[1]
-                host_err = code != 0
-            else:
-                text = raw
-                # e.g. "Unknown or disallowed host: ..." / "Command failed ..."
-                host_err = isinstance(raw, str) and raw.startswith(_ERROR_RESULT_PREFIXES)
-            text = _truncate_lines(text)
-            return f"### {alias}\n```\n{text.strip()}\n```", host_err
-
-        tasks = [_run_one(h) for h in allowed_hosts]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        parts = []
-        any_run_error = False
-        for h, r in zip(allowed_hosts, results):
-            if isinstance(r, Exception):
-                parts.append(f"### {h}\n```\nError: {r}\n```")
-                any_run_error = True
-            else:
-                markdown, host_err = r
-                parts.append(markdown)
-                any_run_error = any_run_error or host_err
-        for h, denial in blocked_hosts:
-            parts.append(f"### {h}\n```\n{denial}\n```")
-        aggregate = "\n\n".join(parts)
-        # Return a non-zero exit code when any host was preflight-denied
-        # (host-access or governor), any host errored, or nothing ran. The
-        # aggregate wraps per-host denials in markdown sections, so a
-        # string-prefix check in execute() would miss them and report a refused
-        # action as ok=True.
-        exit_code = 1 if (blocked_hosts or any_run_error or not allowed_hosts) else 0
-        return aggregate, exit_code
 
     # --- Browser tools (text-returning, screenshot handled in client.py) ---
 
@@ -792,203 +645,59 @@ class ToolExecutor:
         if not self._browser_manager:
             return "Browser automation is not enabled. Set browser.enabled=true in config."
         from .browser import handle_browser_read_page
-        return await self._browser_with_bulkhead(handle_browser_read_page(self._browser_manager, inp))
+
+        return await self._browser_with_bulkhead(
+            handle_browser_read_page(self._browser_manager, inp)
+        )
 
     async def _handle_browser_read_table(self, inp: dict) -> str:
         if not self._browser_manager:
             return "Browser automation is not enabled. Set browser.enabled=true in config."
         from .browser import handle_browser_read_table
-        return await self._browser_with_bulkhead(handle_browser_read_table(self._browser_manager, inp))
+
+        return await self._browser_with_bulkhead(
+            handle_browser_read_table(self._browser_manager, inp)
+        )
 
     async def _handle_browser_click(self, inp: dict) -> str:
         if not self._browser_manager:
             return "Browser automation is not enabled. Set browser.enabled=true in config."
         from .browser import handle_browser_click
+
         return await self._browser_with_bulkhead(handle_browser_click(self._browser_manager, inp))
 
     async def _handle_browser_fill(self, inp: dict) -> str:
         if not self._browser_manager:
             return "Browser automation is not enabled. Set browser.enabled=true in config."
         from .browser import handle_browser_fill
+
         return await self._browser_with_bulkhead(handle_browser_fill(self._browser_manager, inp))
 
     async def _handle_browser_evaluate(self, inp: dict) -> str:
         if not self._browser_manager:
             return "Browser automation is not enabled. Set browser.enabled=true in config."
         from .browser import handle_browser_evaluate
-        return await self._browser_with_bulkhead(handle_browser_evaluate(self._browser_manager, inp))
+
+        return await self._browser_with_bulkhead(
+            handle_browser_evaluate(self._browser_manager, inp)
+        )
 
     # --- Web tools ---
 
     async def _handle_web_search(self, inp: dict) -> str:
         from .web import web_search
+
         max_results = min(inp.get("max_results", 5), 10)
         return await web_search(inp["query"], max_results=max_results)
 
     async def _handle_fetch_url(self, inp: dict) -> str:
         from .web import fetch_url
+
         return await fetch_url(inp["url"])
 
     # --- PDF analysis ---
 
-    @staticmethod
-    def _parse_page_range(pages: str, total: int) -> list[int]:
-        """Parse a page range string like '1-5' or '3' into 0-indexed page indices."""
-        pages = pages.strip()
-        if "-" in pages:
-            parts = pages.split("-", 1)
-            try:
-                start = max(int(parts[0]) - 1, 0)
-                end = min(int(parts[1]), total)
-                return list(range(start, end))
-            except ValueError:
-                return list(range(total))
-        else:
-            try:
-                idx = int(pages) - 1
-                if 0 <= idx < total:
-                    return [idx]
-                return list(range(total))
-            except ValueError:
-                return list(range(total))
-
-    async def _handle_analyze_pdf(self, inp: dict) -> str:
-        url = inp.get("url")
-        host = inp.get("host")
-        path = inp.get("path")
-        pages_str = inp.get("pages")
-
-        # Validate URL scheme early (before heavy imports) to prevent SSRF
-        if url and not url.startswith(("http://", "https://")):
-            return "Only http:// and https:// URLs are supported."
-        # Block private/loopback/link-local/metadata targets (DNS-rebinding aware) —
-        # the same guard fetch_url/browser/skill HTTP use. The scheme check alone is
-        # NOT SSRF-safe (e.g. http://169.254.169.254/... passes it).
-        if url:
-            from .url_safety import is_url_blocked
-            if is_url_blocked(url):
-                return "Error: blocked URL (localhost / private IP / cloud-metadata address)."
-
-        import fitz
-
-        pdf_bytes: bytes | None = None
-
-        if url:
-            # Download PDF from URL
-            import aiohttp
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        if resp.status != 200:
-                            return f"Failed to fetch PDF from URL (HTTP {resp.status})"
-                        pdf_bytes = await resp.read()
-            except Exception as e:
-                return f"Failed to fetch PDF from URL: {e}"
-        elif host and path:
-            # Fetch from host via base64
-            resolved = self._resolve_host(host)
-            if not resolved:
-                return f"Unknown or disallowed host: {host}"
-            address, ssh_user, _os = resolved
-            safe_path = shlex.quote(path)
-            code, output = await self._exec_command(
-                address, f"base64 -w0 {safe_path}", ssh_user,
-            )
-            if code != 0:
-                return f"Failed to read PDF from host: {output}"
-            try:
-                pdf_bytes = base64.b64decode(output.strip())
-            except Exception as e:
-                return f"Failed to decode PDF data: {e}"
-        else:
-            return "Provide either 'url' or both 'host' and 'path'."
-
-        try:
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        except Exception as e:
-            return f"Failed to open PDF: {e}"
-
-        try:
-            total = doc.page_count
-            if pages_str:
-                indices = self._parse_page_range(pages_str, total)
-            else:
-                indices = list(range(total))
-
-            parts = []
-            for i in indices:
-                page = doc[i]
-                text = page.get_text()
-                parts.append(f"## Page {i + 1}\n{text}")
-
-            result = "\n\n".join(parts)
-            # Truncate to TOOL_OUTPUT_MAX_CHARS (handled by caller, but be safe)
-            if len(result) > 12000:
-                result = result[:12000] + "\n\n[... truncated — use pages parameter for specific pages ...]"
-            return result if result.strip() else "PDF contains no extractable text. Try browser_screenshot for image-heavy PDFs."
-        finally:
-            doc.close()
-
     # --- Process management ---
-
-    async def _handle_manage_process(self, inp: dict) -> str:
-        # Lazy-init the process registry
-        if not hasattr(self, "_process_registry"):
-            from .process_manager import ProcessRegistry
-            self._process_registry = ProcessRegistry()
-
-        action = inp.get("action", "list")
-        registry = self._process_registry
-
-        if action == "start":
-            command = inp.get("command")
-            host = inp.get("host")
-            if not command:
-                return "command is required for start action."
-            if not host:
-                return "host is required for start action."
-            allowed, denial, _ = self._govern_command(command, host)
-            if not allowed:
-                return denial
-            # Validate host against configured hosts
-            resolved = self._resolve_host(host)
-            if not resolved:
-                return f"Unknown or disallowed host: {host}"
-            # Periodic cleanup
-            registry.cleanup()
-            return await registry.start(host, command)
-
-        elif action == "poll":
-            pid = inp.get("pid")
-            if pid is None:
-                return "pid is required for poll action."
-            return registry.poll(int(pid))
-
-        elif action == "write":
-            pid = inp.get("pid")
-            text = inp.get("input_text", "")
-            if pid is None:
-                return "pid is required for write action."
-            if not text:
-                return "input_text is required for write action."
-            # Writing to a managed process's stdin can drive an interactive
-            # shell — govern the input as a command so a `rm -rf /`-class line
-            # is caught, matching run_command.
-            allowed, denial, _ = self._govern_command(text)
-            if not allowed:
-                return denial
-            return await registry.write(int(pid), text)
-
-        elif action == "kill":
-            pid = inp.get("pid")
-            if pid is None:
-                return "pid is required for kill action."
-            return await registry.kill(int(pid))
-
-        elif action == "list":
-            return registry.list_all()
-
-        return f"Unknown action: {action}"
 
     # --- Claude Code ---
 
@@ -1008,11 +717,13 @@ class ToolExecutor:
 
         claude_user = self.config.claude_code_user
         import os
+
         _already_claude_user = (os.getenv("USER", "") == claude_user) if claude_user else False
         if allow_edits and not claude_user:
             return "claude_code_user not configured — required for allow_edits=true"
 
         import base64 as b64mod
+
         encoded_prompt = b64mod.b64encode(prompt.encode()).decode()
 
         claude_args = [
@@ -1032,7 +743,9 @@ class ToolExecutor:
 
         if allow_edits:
             safe_user = shlex.quote(claude_user)
-            inner = f"cd {safe_wd} && echo '{encoded_prompt}' | base64 -d | timeout 3600 {claude_cmd}"
+            inner = (
+                f"cd {safe_wd} && echo '{encoded_prompt}' | base64 -d | timeout 3600 {claude_cmd}"
+            )
             if _already_claude_user:
                 cmd = inner
             else:
@@ -1044,11 +757,16 @@ class ToolExecutor:
         finish_cb = None
         if self.output_streamer and self.output_streamer.is_enabled("claude_code"):
             _, on_output, finish_cb = self.output_streamer.create_callback(
-                "claude_code", channel_id=host,
+                "claude_code",
+                channel_id=host,
             )
 
         code, output = await self._exec_command(
-            address, cmd, ssh_user, timeout=3660, on_output=on_output,
+            address,
+            cmd,
+            ssh_user,
+            timeout=3660,
+            on_output=on_output,
         )
         if finish_cb:
             try:
@@ -1105,7 +823,9 @@ class ToolExecutor:
             return raw_output, ""
 
         lines = ["\n\n--- claude_code activity ---"]
-        lines.append(f"Turns: {num_turns} | Cost: ${cost:.4f} | Duration: {duration_ms / 1000:.1f}s")
+        lines.append(
+            f"Turns: {num_turns} | Cost: ${cost:.4f} | Duration: {duration_ms / 1000:.1f}s"
+        )
 
         reads = []
         edits = []
@@ -1277,7 +997,11 @@ class ToolExecutor:
                     evicted += 1
                 await asyncio.to_thread(self._save_all_memory, all_mem)
                 scope_label = "global" if section == "global" else "personal"
-                suffix = f" (evicted {evicted} oldest note(s) at cap {MEMORY_MAX_KEYS_PER_SECTION})" if evicted else ""
+                suffix = (
+                    f" (evicted {evicted} oldest note(s) at cap {MEMORY_MAX_KEYS_PER_SECTION})"
+                    if evicted
+                    else ""
+                )
                 return f"Saved {scope_label} note '{key}'.{suffix}"
 
             elif action == "delete":
@@ -1337,12 +1061,14 @@ class ToolExecutor:
                 old_items = old_data.get("items", [])
                 migrated_items = []
                 for item in old_items:
-                    migrated_items.append({
-                        "name": item.get("name", ""),
-                        "added_by": item.get("added_by", ""),
-                        "added_at": item.get("added_at", ""),
-                        "done": False,
-                    })
+                    migrated_items.append(
+                        {
+                            "name": item.get("name", ""),
+                            "added_by": item.get("added_by", ""),
+                            "added_at": item.get("added_at", ""),
+                            "done": False,
+                        }
+                    )
                 lists = {"grocery": {"owner": "shared", "items": migrated_items}}
                 self._save_lists(lists)
                 return lists
@@ -1392,20 +1118,20 @@ class ToolExecutor:
                 if len(lines) == 1:
                     return "No lists visible to you."
                 return "\n".join(lines)
-    
+
             if not list_name:
                 return "list_name is required for this action."
-    
+
             # Resolve the list — check for personal or shared
             lst = lists.get(list_name)
             if lst and lst.get("owner") not in ("shared", user_id, None):
                 return f"You don't have access to the '{list_name}' list."
-    
+
             if action == "show":
                 if not lst or not lst.get("items"):
                     return f"The '{list_name}' list is empty."
                 return self._format_list(list_name, lst)
-    
+
             if action == "clear":
                 if not lst or not lst.get("items"):
                     return f"The '{list_name}' list is already empty."
@@ -1413,7 +1139,7 @@ class ToolExecutor:
                 lst["items"] = []
                 await asyncio.to_thread(self._save_lists, lists)
                 return f"Cleared {count} item(s) from the '{list_name}' list."
-    
+
             if action == "add":
                 if not raw_items:
                     return "No items specified to add."
@@ -1430,12 +1156,14 @@ class ToolExecutor:
                     if any(i["name"].lower() == name.lower() for i in lst["items"]):
                         already.append(name)
                         continue
-                    lst["items"].append({
-                        "name": name,
-                        "added_by": user_id or "",
-                        "added_at": datetime.now().isoformat(),
-                        "done": False,
-                    })
+                    lst["items"].append(
+                        {
+                            "name": name,
+                            "added_by": user_id or "",
+                            "added_at": datetime.now().isoformat(),
+                            "done": False,
+                        }
+                    )
                     added.append(name)
                 await asyncio.to_thread(self._save_lists, lists)
                 parts = []
@@ -1445,7 +1173,7 @@ class ToolExecutor:
                     parts.append(f"Already on the list: {', '.join(already)}")
                 parts.append(f"\n{self._format_list(list_name, lst)}")
                 return "\n".join(parts)
-    
+
             if action == "remove":
                 if not lst:
                     return f"The '{list_name}' list doesn't exist."
@@ -1457,7 +1185,9 @@ class ToolExecutor:
                     if not name:
                         continue
                     q = name.lower()
-                    matches = [i for i, item in enumerate(lst["items"]) if q in item["name"].lower()]
+                    matches = [
+                        i for i, item in enumerate(lst["items"]) if q in item["name"].lower()
+                    ]
                     if matches:
                         for idx in sorted(matches, reverse=True):
                             removed.append(lst["items"].pop(idx)["name"])
@@ -1474,7 +1204,7 @@ class ToolExecutor:
                 else:
                     parts.append(f"\nThe '{list_name}' list is now empty.")
                 return "\n".join(parts)
-    
+
             if action == "mark_done":
                 if not lst:
                     return f"The '{list_name}' list doesn't exist."
@@ -1502,7 +1232,7 @@ class ToolExecutor:
                     parts.append(f"Not found or already done: {', '.join(not_found)}")
                 parts.append(f"\n{self._format_list(list_name, lst)}")
                 return "\n".join(parts)
-    
+
             if action == "mark_undone":
                 if not lst:
                     return f"The '{list_name}' list doesn't exist."
@@ -1530,7 +1260,7 @@ class ToolExecutor:
                     parts.append(f"Not found or not done: {', '.join(not_found)}")
                 parts.append(f"\n{self._format_list(list_name, lst)}")
                 return "\n".join(parts)
-    
+
             return f"Unknown action: {action}"
 
     @staticmethod
@@ -1552,6 +1282,7 @@ class ToolExecutor:
                 if ts:
                     try:
                         from datetime import datetime
+
                         dt = datetime.fromisoformat(ts)
                         parts.append(dt.strftime("%b %d"))
                     except ValueError:
@@ -1565,10 +1296,7 @@ class ToolExecutor:
 
         action = inp.get("action", "")
         if action not in ALLOWED_ACTIONS:
-            return (
-                f"Unknown git action: {action}. "
-                f"Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
-            )
+            return f"Unknown git action: {action}. Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
 
         host = inp.get("host", "")
         resolved = self._resolve_host(host)
@@ -1589,18 +1317,24 @@ class ToolExecutor:
             if not allowed:
                 return denial
             code, output = await self._exec_command(
-                address, freshness_cmd, ssh_user,
+                address,
+                freshness_cmd,
+                ssh_user,
             )
             if code != 0:
                 return f"Branch freshness check failed (exit {code}):\n{output}", code
             if output.strip().startswith("STALE:"):
                 return f"Push blocked — {output.strip().split(':', 1)[1].strip()}", 1
             code, output = await self._exec_command(
-                address, push_cmd, ssh_user,
+                address,
+                push_cmd,
+                ssh_user,
             )
             if code != 0:
                 return f"Push failed (exit {code}):\n{_truncate_lines(output)}", code
-            return (_truncate_lines(output) if output.strip() else "Push completed successfully."), 0
+            return (
+                _truncate_lines(output) if output.strip() else "Push completed successfully."
+            ), 0
         else:
             cmd = cmds
             allowed, denial, _ = self._govern_command(cmd, host)
@@ -1609,7 +1343,11 @@ class ToolExecutor:
             code, output = await self._exec_command(address, cmd, ssh_user)
             if code != 0:
                 return f"git {action} failed (exit {code}):\n{_truncate_lines(output)}", code
-            return (_truncate_lines(output) if output.strip() else f"git {action} completed successfully."), 0
+            return (
+                _truncate_lines(output)
+                if output.strip()
+                else f"git {action} completed successfully."
+            ), 0
 
     async def _handle_kubectl(self, inp: dict) -> str:
         from .kubectl_ops import ALLOWED_ACTIONS as KUBECTL_ACTIONS, build_kubectl_command
@@ -1617,8 +1355,7 @@ class ToolExecutor:
         action = inp.get("action", "")
         if action not in KUBECTL_ACTIONS:
             return (
-                f"Unknown kubectl action: {action}. "
-                f"Allowed: {', '.join(sorted(KUBECTL_ACTIONS))}"
+                f"Unknown kubectl action: {action}. Allowed: {', '.join(sorted(KUBECTL_ACTIONS))}"
             )
 
         host = inp.get("host", "")
@@ -1641,17 +1378,18 @@ class ToolExecutor:
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:
             return f"kubectl {action} failed (exit {code}):\n{_truncate_lines(output)}", code
-        return (_truncate_lines(output) if output.strip() else f"kubectl {action} completed successfully."), 0
+        return (
+            _truncate_lines(output)
+            if output.strip()
+            else f"kubectl {action} completed successfully."
+        ), 0
 
     async def _handle_docker_ops(self, inp: dict) -> str:
         from .docker_ops import ALLOWED_ACTIONS as DOCKER_ACTIONS, build_docker_command
 
         action = inp.get("action", "")
         if action not in DOCKER_ACTIONS:
-            return (
-                f"Unknown docker action: {action}. "
-                f"Allowed: {', '.join(sorted(DOCKER_ACTIONS))}"
-            )
+            return f"Unknown docker action: {action}. Allowed: {', '.join(sorted(DOCKER_ACTIONS))}"
 
         host = inp.get("host", "")
         resolved = self._resolve_host(host)
@@ -1673,17 +1411,18 @@ class ToolExecutor:
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:
             return f"docker {action} failed (exit {code}):\n{_truncate_lines(output)}", code
-        return (_truncate_lines(output) if output.strip() else f"docker {action} completed successfully."), 0
+        return (
+            _truncate_lines(output)
+            if output.strip()
+            else f"docker {action} completed successfully."
+        ), 0
 
     async def _handle_terraform_ops(self, inp: dict) -> str:
         from .terraform_ops import ALLOWED_ACTIONS as TF_ACTIONS, build_terraform_command
 
         action = inp.get("action", "")
         if action not in TF_ACTIONS:
-            return (
-                f"Unknown terraform action: {action}. "
-                f"Allowed: {', '.join(sorted(TF_ACTIONS))}"
-            )
+            return f"Unknown terraform action: {action}. Allowed: {', '.join(sorted(TF_ACTIONS))}"
 
         host = inp.get("host", "")
         resolved = self._resolve_host(host)
@@ -1705,7 +1444,11 @@ class ToolExecutor:
         code, output = await self._exec_command(address, cmd, ssh_user)
         if code != 0:
             return f"terraform {action} failed (exit {code}):\n{_truncate_lines(output)}", code
-        return (_truncate_lines(output) if output.strip() else f"terraform {action} completed successfully."), 0
+        return (
+            _truncate_lines(output)
+            if output.strip()
+            else f"terraform {action} completed successfully."
+        ), 0
 
     async def _handle_issue_tracker(self, inp: dict) -> str:
         action = inp.get("action", "")
@@ -1717,6 +1460,7 @@ class ToolExecutor:
 
         try:
             from ..notifications.issue_tracker import validate_action, IssueTrackerError
+
             validate_action(action)
         except ValueError as e:
             return f"Error: {e}"
@@ -1724,9 +1468,11 @@ class ToolExecutor:
         try:
             result = await self._issue_tracker_client.execute(action, dict(inp))
             import json
+
             return json.dumps(result, indent=2)
         except IssueTrackerError as e:
             from ..llm.secret_scrubber import scrub_output_secrets
+
             return f"issue_tracker error: {scrub_output_secrets(str(e))}"
 
     async def _handle_http_probe(self, inp: dict) -> str:
@@ -1761,7 +1507,9 @@ class ToolExecutor:
 
         raw_checks = inp.get("checks")
         if not isinstance(raw_checks, list) or not raw_checks:
-            return "Error: 'checks' must be a non-empty list. See tool description for check schema."
+            return (
+                "Error: 'checks' must be a non-empty list. See tool description for check schema."
+            )
 
         bundle_name = str(inp.get("bundle_name") or "unnamed").strip()[:120]
         default_host = inp.get("default_host")
@@ -1773,7 +1521,9 @@ class ToolExecutor:
 
         governor = getattr(self, "command_governor", None)
 
-        async def _exec(address: str, command: str, ssh_user: str, *, timeout: int) -> tuple[int, str]:
+        async def _exec(
+            address: str, command: str, ssh_user: str, *, timeout: int
+        ) -> tuple[int, str]:
             # Never mutate shared state here — concurrent checks would race.
             # _exec_command accepts a per-call timeout, which is honored
             # directly by the SSH/local primitives without touching self.
@@ -1817,6 +1567,7 @@ class ToolExecutor:
 
     async def _handle_email_send(self, inp: dict) -> str:
         from .email_client import send_email
+
         cfg = self._email_cfg()
         if cfg is None:
             return "Error: email tools are not configured (email.enabled is false)"
@@ -1862,6 +1613,7 @@ class ToolExecutor:
 
     async def _handle_email_search(self, inp: dict) -> str:
         from .email_client import search_email
+
         cfg = self._email_cfg()
         if cfg is None:
             return "Error: email tools are not configured (email.enabled is false)"
@@ -1886,15 +1638,14 @@ class ToolExecutor:
             lines = [f"Found {len(results)} message(s):\n"]
             for r in results:
                 att = " [has attachments]" if r.get("has_attachments") else ""
-                lines.append(
-                    f"UID {r['uid']} | {r['date']} | {r['from']} | {r['subject']}{att}"
-                )
+                lines.append(f"UID {r['uid']} | {r['date']} | {r['from']} | {r['subject']}{att}")
             return "\n".join(lines)
         except (ValueError, RuntimeError) as e:
             return f"Error: {e}"
 
     async def _handle_email_read(self, inp: dict) -> str:
         from .email_client import read_email
+
         cfg = self._email_cfg()
         if cfg is None:
             return "Error: email tools are not configured (email.enabled is false)"
@@ -1932,6 +1683,7 @@ class ToolExecutor:
 
     async def _handle_email_list_recent(self, inp: dict) -> str:
         from .email_client import list_recent
+
         cfg = self._email_cfg()
         if cfg is None:
             return "Error: email tools are not configured (email.enabled is false)"
@@ -1960,4 +1712,3 @@ class ToolExecutor:
             return "\n".join(lines)
         except (ValueError, RuntimeError) as e:
             return f"Error: {e}"
-

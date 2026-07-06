@@ -565,7 +565,9 @@ class TestExecutorFreshnessIntegration:
         executor._exec_command = mock_exec_command
         executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
-        result = await executor._handle_run_command({"host": "local", "command": "pytest tests/ -q"})
+        result = await executor.system_tools._handle_run_command(
+            {"host": "local", "command": "pytest tests/ -q"}
+        )
         assert "[STALE BRANCH]" in (result[0] if isinstance(result, tuple) else result)
         assert "5 commit(s) behind" in (result[0] if isinstance(result, tuple) else result)
         assert executor.freshness_stats.get_summary()["total_checks"] == 1
@@ -588,7 +590,9 @@ class TestExecutorFreshnessIntegration:
         executor._exec_command = mock_exec_command
         executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
-        result = await executor._handle_run_command({"host": "local", "command": "pytest tests/"})
+        result = await executor.system_tools._handle_run_command(
+            {"host": "local", "command": "pytest tests/"}
+        )
         assert "[STALE BRANCH]" not in (result[0] if isinstance(result, tuple) else result)
         assert executor.freshness_stats.get_summary()["total_checks"] == 1
         assert executor.freshness_stats.get_summary()["stale_found"] == 0
@@ -601,7 +605,9 @@ class TestExecutorFreshnessIntegration:
 
         executor._run_on_host = mock_run_on_host
 
-        result = await executor._handle_run_command({"host": "local", "command": "ls /nonexistent"})
+        result = await executor.system_tools._handle_run_command(
+            {"host": "local", "command": "ls /nonexistent"}
+        )
         assert "[STALE BRANCH]" not in (result[0] if isinstance(result, tuple) else result)
         assert executor.freshness_stats.get_summary()["total_checks"] == 0
 
@@ -613,7 +619,9 @@ class TestExecutorFreshnessIntegration:
 
         executor._run_on_host = mock_run_on_host
 
-        result = await executor._handle_run_command({"host": "local", "command": "pytest tests/"})
+        result = await executor.system_tools._handle_run_command(
+            {"host": "local", "command": "pytest tests/"}
+        )
         assert "[STALE BRANCH]" not in (result[0] if isinstance(result, tuple) else result)
         assert executor.freshness_stats.get_summary()["total_checks"] == 0
 
@@ -627,7 +635,9 @@ class TestExecutorFreshnessIntegration:
 
         executor._run_on_host = mock_run_on_host
 
-        result = await executor._handle_run_command({"host": "local", "command": "pytest tests/"})
+        result = await executor.system_tools._handle_run_command(
+            {"host": "local", "command": "pytest tests/"}
+        )
         assert "[STALE BRANCH]" not in (result[0] if isinstance(result, tuple) else result)
         assert executor.freshness_stats.get_summary()["total_checks"] == 0
 
@@ -642,7 +652,9 @@ class TestExecutorFreshnessIntegration:
         executor._exec_command = mock_exec_command
         executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
-        result = await executor._handle_run_command({"host": "local", "command": "pytest tests/"})
+        result = await executor.system_tools._handle_run_command(
+            {"host": "local", "command": "pytest tests/"}
+        )
         assert "3 failed" in (result[0] if isinstance(result, tuple) else result)
         assert "[STALE BRANCH]" not in (result[0] if isinstance(result, tuple) else result)
 
@@ -663,7 +675,9 @@ class TestExecutorFreshnessIntegration:
         executor._exec_command = mock_exec_command
         executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
-        await executor._handle_run_command({"host": "local", "command": "pytest tests/"})
+        await executor.system_tools._handle_run_command(
+            {"host": "local", "command": "pytest tests/"}
+        )
         assert executor.freshness_stats.get_summary()["fetch_failures"] == 1
 
 
@@ -691,7 +705,7 @@ class TestExecutorRunScriptFreshness:
         executor._exec_command = mock_exec_command
         executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
-        result = await executor._handle_run_script({
+        result = await executor.system_tools._handle_run_script({
             "host": "local",
             "script": "#!/bin/bash\npytest tests/ -q",
             "interpreter": "bash",
@@ -709,7 +723,7 @@ class TestExecutorRunScriptFreshness:
         executor._exec_command = mock_exec_command
         executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
 
-        result = await executor._handle_run_script({
+        result = await executor.system_tools._handle_run_script({
             "host": "local",
             "script": "#!/bin/bash\nls /nonexistent",
             "interpreter": "bash",

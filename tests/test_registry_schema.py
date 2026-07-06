@@ -32,10 +32,12 @@ class TestRegistryConsistency:
         assert len(names) == len(set(names)), f"Duplicate tool names: {[n for n in names if names.count(n) > 1]}"
 
     def test_executor_handles_shell_tools(self):
-        """Shell execution tools must have _handle_ methods in ToolExecutor."""
+        """Shell execution tools must resolve to a handler through the
+        executor's dispatch table (owner-aware since RFC-004 P4 — the
+        bodies live on domain owners, resolved at call time)."""
         from src.tools.executor import ToolExecutor
         exe = ToolExecutor()
         shell_tools = {"run_command", "run_script", "run_command_multi", "read_file", "write_file"}
         for name in shell_tools:
-            handler = getattr(exe, f"_handle_{name}", None)
-            assert handler is not None, f"Shell tool '{name}' has no _handle_{name} in ToolExecutor"
+            handler = exe._resolve_handler(name)
+            assert handler is not None, f"Shell tool '{name}' does not resolve to a handler"
