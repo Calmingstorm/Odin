@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import zipfile
-import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,10 +10,9 @@ import pytest
 from src.discord.attachments import (
     AttachmentIntent,
     AttachmentProcessor,
-    AttachmentResult,
-    infer_attachment_intent,
-    _safe_filename,
     _preview_text,
+    _safe_filename,
+    infer_attachment_intent,
 )
 
 
@@ -88,8 +86,8 @@ class TestPreviewText:
 
 class TestAttachmentProcessor:
     @pytest.mark.asyncio
-    async def test_small_text_inlined_no_ingestion(self):
-        proc = AttachmentProcessor()
+    async def test_small_text_inlined_no_ingestion(self, tmp_path):
+        proc = AttachmentProcessor(temp_dir=str(tmp_path))
         att = _mock_attachment("notes.txt", 500, "text/plain", b"hello world")
         result = await proc.process([att], "ch1", "msg1")
         assert "hello world" in result.inline_text
@@ -98,17 +96,17 @@ class TestAttachmentProcessor:
         assert "current task" in result.inline_text.lower()
 
     @pytest.mark.asyncio
-    async def test_md_no_ingestion_hint(self):
-        proc = AttachmentProcessor()
+    async def test_md_no_ingestion_hint(self, tmp_path):
+        proc = AttachmentProcessor(temp_dir=str(tmp_path))
         att = _mock_attachment("README.md", 200, "text/markdown", b"# Hello")
         result = await proc.process([att], "ch1", "msg1")
         assert "ingest" not in result.inline_text.lower()
 
     @pytest.mark.asyncio
-    async def test_log_head_tail_preview(self):
+    async def test_log_head_tail_preview(self, tmp_path):
         log_content = ("line %d\n" % i for i in range(5000))
         data = "".join(log_content).encode()
-        proc = AttachmentProcessor(inline_max_bytes=100, large_preview_chars=500)
+        proc = AttachmentProcessor(temp_dir=str(tmp_path), inline_max_bytes=100, large_preview_chars=500)
         att = _mock_attachment("app.log", len(data), "text/plain", data)
         result = await proc.process([att], "ch1", "msg1")
         assert "head and tail" in result.inline_text
@@ -150,17 +148,17 @@ class TestAttachmentProcessor:
         assert Path(result.saved_files[0].path).exists()
 
     @pytest.mark.asyncio
-    async def test_image_produces_vision_block(self):
+    async def test_image_produces_vision_block(self, tmp_path):
         png_header = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
-        proc = AttachmentProcessor()
+        proc = AttachmentProcessor(temp_dir=str(tmp_path))
         att = _mock_attachment("screenshot.png", len(png_header), "image/png", png_header)
         result = await proc.process([att], "ch1", "msg1")
         assert len(result.image_blocks) == 1
         assert result.image_blocks[0]["type"] == "image"
 
     @pytest.mark.asyncio
-    async def test_ingest_intent_produces_marker_not_auto_ingest(self):
-        proc = AttachmentProcessor()
+    async def test_ingest_intent_produces_marker_not_auto_ingest(self, tmp_path):
+        proc = AttachmentProcessor(temp_dir=str(tmp_path))
         att = _mock_attachment("data.txt", 50, "text/plain", b"some data")
         result = await proc.process(
             [att], "ch1", "msg1", intent=AttachmentIntent.INGEST_KNOWLEDGE,
