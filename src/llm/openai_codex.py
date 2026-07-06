@@ -679,7 +679,9 @@ class CodexChatClient:
                 idx = event.get("output_index", 0)
                 if item.get("type") == "function_call" and idx in pending_calls:
                     # If arguments.done wasn't received, try to parse from the done item
-                    call_info = pending_calls.pop(idx, None)
+                    # Standard pop-with-None-sentinel idiom; guarded by
+                    # the truthiness check on the next line.
+                    call_info = pending_calls.pop(idx, None)  # type: ignore[arg-type]
                     if call_info and not any(tc.id == call_info["call_id"] for tc in tool_calls):
                         args_str = item.get("arguments", call_info.get("args", ""))
                         parse_error = None

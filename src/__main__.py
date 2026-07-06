@@ -143,7 +143,9 @@ def main() -> None:
         async def _webhook_send(channel_id: str, text: str) -> None:
             channel = bot.get_channel(int(channel_id))
             if channel:
-                await channel.send(scrub_response_secrets(text))
+                # Admin-configured webhook target; kind not enforced, so the
+                # union includes send-less channel types (Category/Forum).
+                await channel.send(scrub_response_secrets(text))  # type: ignore[union-attr]
             else:
                 log.warning("Webhook: channel %s not found", channel_id)
 
@@ -172,8 +174,19 @@ def main() -> None:
     async def shutdown() -> None:
         log.info("Shutting down…")
         for label, action in (
-            ("voice", lambda: getattr(bot, "voice_manager", None) and bot.voice_manager.shutdown()),
-            ("browser", lambda: getattr(bot, "browser_manager", None) and bot.browser_manager.shutdown()),
+            # The getattr-and-call lambdas short-circuit on absent/None
+            # managers; mypy can't relate the getattr probe to the direct
+            # attribute access that follows it.
+            (
+                "voice",
+                lambda: getattr(bot, "voice_manager", None)
+                and bot.voice_manager.shutdown(),  # type: ignore[union-attr]
+            ),
+            (
+                "browser",
+                lambda: getattr(bot, "browser_manager", None)
+                and bot.browser_manager.shutdown(),  # type: ignore[attr-defined]
+            ),
             ("scheduler", lambda: getattr(bot, "scheduler", None) and bot.scheduler.stop()),
         ):
             try:

@@ -6,7 +6,7 @@ import json
 import re
 import time
 from datetime import datetime
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1240,8 +1240,12 @@ class SessionManager:
 
     async def _safe_index(self, archive_path: Path) -> None:
         """Index an archived session for semantic search, catching all errors."""
+        # Only scheduled by _archive_session inside
+        # "if self._vector_store and self._vector_store.available:".
         try:
-            await self._vector_store.index_session(archive_path, self._embedder)
+            await self._vector_store.index_session(  # type: ignore[union-attr]
+                archive_path, self._embedder,  # type: ignore[arg-type]
+            )
         except Exception as e:
             log.error("Session indexing failed for %s: %s", archive_path, e)
 
@@ -1333,7 +1337,7 @@ class SessionManager:
             return True
 
         # Step 1: keyword search on current sessions
-        sessions_iter = self._sessions.values()
+        sessions_iter: Iterable[Session] = self._sessions.values()
         if channel_id:
             s = self._sessions.get(channel_id)
             sessions_iter = [s] if s else []
@@ -1471,8 +1475,9 @@ class SessionManager:
         user_ids: list[str] | None = None,
     ) -> None:
         """Reflect on a completed session, catching all errors."""
+        # Only scheduled by _archive_session inside "if self._reflector and ...".
         try:
-            await self._reflector.reflect_on_session(
+            await self._reflector.reflect_on_session(  # type: ignore[union-attr]
                 session, user_ids=user_ids or ([session.last_user_id] if session.last_user_id else []),
             )
         except Exception as e:
@@ -1483,8 +1488,9 @@ class SessionManager:
         user_ids: list[str] | None = None,
     ) -> None:
         """Reflect on compacted messages, catching all errors."""
+        # Only scheduled by the compaction path inside "if self._reflector and ...".
         try:
-            await self._reflector.reflect_on_compacted(
+            await self._reflector.reflect_on_compacted(  # type: ignore[union-attr]
                 messages, summary, user_ids=user_ids or [],
             )
         except Exception as e:

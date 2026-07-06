@@ -123,14 +123,16 @@ class SessionVectorStore:
         vector: list[float] | None,
     ) -> None:
         """Write session metadata, FTS, and vector to database (sync)."""
-        self._conn.execute(
+        # Only dispatched by callers that checked self.available first,
+        # which requires _conn (and _fts where used) to be set.
+        self._conn.execute(  # type: ignore[union-attr]
             "INSERT OR REPLACE INTO session_archives "
             "(doc_id, content, channel_id, last_active, message_count) "
             "VALUES (?, ?, ?, ?, ?)",
             (doc_id, doc_text, channel_id, last_active, message_count),
         )
         if self._fts:
-            self._fts.index_session(doc_id, doc_text, channel_id, last_active)
+            self._fts.index_session(doc_id, doc_text, channel_id, last_active)  # type: ignore[union-attr]
         if vector is not None:
             vec_bytes = serialize_vector(vector)
             # vec0 virtual tables do NOT honor INSERT OR REPLACE conflict
@@ -139,12 +141,14 @@ class SessionVectorStore:
             # Delete-then-insert makes re-indexing idempotent. (The backfill
             # existence check is keyed on session_archives, so a doc_id present
             # only in session_vec would otherwise error on every startup.)
-            self._conn.execute("DELETE FROM session_vec WHERE doc_id = ?", (doc_id,))
-            self._conn.execute(
+            self._conn.execute(  # type: ignore[union-attr]
+                "DELETE FROM session_vec WHERE doc_id = ?", (doc_id,)
+            )
+            self._conn.execute(  # type: ignore[union-attr]
                 "INSERT INTO session_vec (doc_id, embedding) VALUES (?, ?)",
                 (doc_id, vec_bytes),
             )
-        self._conn.commit()
+        self._conn.commit()  # type: ignore[union-attr]
 
     async def search(self, query: str, embedder: LocalEmbedder, limit: int = 10) -> list[dict]:
         """Semantic search across archived sessions."""
@@ -179,7 +183,8 @@ class SessionVectorStore:
 
     def _search_vec_sync(self, vec_bytes: bytes, limit: int) -> list:
         """Execute vector similarity search (sync, for use with asyncio.to_thread)."""
-        return self._conn.execute(
+        # Caller (search) checks self.available first.
+        return self._conn.execute(  # type: ignore[union-attr]
             """
             SELECT v.doc_id, v.distance, a.content, a.channel_id, a.last_active
             FROM session_vec v
@@ -220,22 +225,26 @@ class SessionVectorStore:
 
     def _get_indexed_ids_sync(self) -> set[str]:
         """Get set of already-indexed doc IDs (sync)."""
+        # Caller (backfill) checks self.available first.
         return {
             r[0] for r in
-            self._conn.execute("SELECT doc_id FROM session_archives").fetchall()
+            self._conn.execute(  # type: ignore[union-attr]
+                "SELECT doc_id FROM session_archives"
+            ).fetchall()
         }
 
     def _backfill_fts_sync(self, archive_dir: Path) -> None:
         """Backfill FTS5 index from archive JSON files (sync)."""
         for path in sorted(archive_dir.glob("*.json")):
             doc_id = path.stem
-            if self._fts.has_session(doc_id):
+            # Caller (backfill) only dispatches this inside "if self._fts:".
+            if self._fts.has_session(doc_id):  # type: ignore[union-attr]
                 continue
             try:
                 data = json.loads(path.read_text())
                 doc_text = self._build_document_text(data)
                 if doc_text:
-                    self._fts.index_session(
+                    self._fts.index_session(  # type: ignore[union-attr]
                         doc_id, doc_text,
                         str(data.get("channel_id", "")),
                         float(data.get("last_active", 0)),

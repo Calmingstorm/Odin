@@ -184,7 +184,7 @@ class OllamaClient(LLMProvider):
         session = await self._get_session()
         self._total_requests += 1
         url = f"{self.base_url}/api/chat"
-        last_error = None
+        last_error: Exception | None = None
 
         for attempt in range(self.max_retries + 1):
             try:

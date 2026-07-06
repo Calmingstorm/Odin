@@ -27,7 +27,10 @@ from .grafana_alerts import (
 from .metrics import MetricsCollector
 
 if TYPE_CHECKING:
+    from aiohttp.typedefs import Middleware
+
     from ..discord.client import OdinBot
+    from ..tools.output_streamer import StreamChunk
 
 log = get_logger("health")
 
@@ -190,7 +193,7 @@ class SessionManager:
 def _make_auth_middleware(
     web_config: WebConfig,
     session_manager: SessionManager,
-) -> web.middleware:
+) -> Middleware:
     """Create middleware that enforces Bearer token auth on /api/ routes.
 
     Accepts either the raw api_token or a valid session token.
@@ -277,7 +280,7 @@ def _make_auth_middleware(
     return auth_middleware
 
 
-def _make_admin_middleware(web_config) -> web.middleware:
+def _make_admin_middleware(web_config) -> Middleware:
     """Enforce the admin tier on control-plane prefixes (ADMIN_ONLY_PREFIXES).
 
     Runs after auth_middleware, so request._api_identity is already resolved.
@@ -306,7 +309,7 @@ def _make_admin_middleware(web_config) -> web.middleware:
     return admin_middleware
 
 
-def _make_rate_limit_middleware(trusted_proxies: tuple[str, ...] = ()) -> web.middleware:
+def _make_rate_limit_middleware(trusted_proxies: tuple[str, ...] = ()) -> Middleware:
     """Simple in-memory rate limiter for /api/ routes (per client IP)."""
     # {ip: [timestamp, ...]}
     _buckets: dict[str, list[float]] = defaultdict(list)
@@ -341,7 +344,7 @@ def _make_rate_limit_middleware(trusted_proxies: tuple[str, ...] = ()) -> web.mi
     return rate_limit_middleware
 
 
-def _make_security_headers_middleware() -> web.middleware:
+def _make_security_headers_middleware() -> Middleware:
     """Add security headers (CSP, X-Frame-Options, etc.) to all responses."""
 
     @web.middleware
@@ -363,7 +366,7 @@ def _make_security_headers_middleware() -> web.middleware:
     return security_headers_middleware
 
 
-def _make_csrf_middleware() -> web.middleware:
+def _make_csrf_middleware() -> Middleware:
     """Validate Origin/Referer on state-changing requests (defense-in-depth).
 
     Bearer tokens already prevent CSRF (not auto-sent by browsers), but this
@@ -412,7 +415,7 @@ def _make_csrf_middleware() -> web.middleware:
     return csrf_middleware
 
 
-def _make_web_audit_middleware(trusted_proxies: tuple[str, ...] = ()) -> web.middleware:
+def _make_web_audit_middleware(trusted_proxies: tuple[str, ...] = ()) -> Middleware:
     """Log state-changing API requests to the audit log."""
 
     @web.middleware
@@ -480,7 +483,7 @@ class HealthServer:
         self._components: dict[str, ComponentCheck] = {}
 
         # Grafana alert handler
-        rules = []
+        rules: list[RemediationRule] = []
         for rc in self._grafana_alert_config.rules:
             rules.append(RemediationRule(
                 id=rc.id or f"rule_{len(rules)}",
@@ -623,7 +626,7 @@ class HealthServer:
         executor = getattr(bot, "tool_executor", None)
         streamer = getattr(executor, "output_streamer", None) if executor else None
         if streamer is not None:
-            async def _stream_to_ws(chunk: object) -> None:
+            async def _stream_to_ws(chunk: StreamChunk) -> None:
                 await ws_mgr.broadcast_event({
                     "type": "tool_stream",
                     **chunk.to_dict(),
@@ -637,7 +640,7 @@ class HealthServer:
         """Redirect / to /ui/."""
         raise web.HTTPFound("/ui/")
 
-    async def _serve_ui_file(self, request: web.Request) -> web.Response:
+    async def _serve_ui_file(self, request: web.Request) -> web.StreamResponse:
         """Serve static UI files, defaulting to index.html for SPA routing."""
         path = request.match_info.get("path", "")
         if not path or path == "/":

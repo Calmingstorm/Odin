@@ -108,7 +108,9 @@ def context_aggregates(trajectory_dir: str, window_hours: int = 24) -> dict:
         if (
             delta is not None
             and abs(delta) >= DRIFT_ABS_TOKENS
-            and prev_avg > 0
+            # delta is not None (above) implies prev_avg is not None
+            # by the ternary that produced delta.
+            and prev_avg > 0  # type: ignore[operator]
             and abs(delta) / prev_avg >= DRIFT_REL_FRACTION
         ):
             drift_candidates.append({
