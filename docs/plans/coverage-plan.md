@@ -1,6 +1,6 @@
 # RFC-006: Test-Coverage Campaign (ratchet gate + prioritized waves)
 
-Status: R3 — CONT-1 + CONT-2 COMPLETE (campaign shipped through P4b in §6b; P4-continuation CONT-1 in §6c, CONT-2 in §6d — all six deferred web-route surfaces now covered). Plan of record was Odin-approved R1 (§6a).  Only P5 (discord native tools) remains deferred.
+Status: R3 — CONT-1 + CONT-2 + P5 COMPLETE (campaign shipped through P4b in §6b; P4-continuation CONT-1 §6c, CONT-2 §6d, P5 discord native tools §6e). Plan of record was Odin-approved R1 (§6a). All deferred surfaces now covered.
 Campaign branch: `coverage/rfc006` (created after plan approval).
 Predecessors: RFC-005 (type-safety ratchet) is the template — a fail-closed CI ratchet plus incremental waves, security/high-value first. Unlike RFC-005, coverage waves add TESTS, not annotations: they can and will surface real bugs. Bug **fixes** are out-of-band (§5).
 
@@ -134,6 +134,28 @@ Suite **+90 tests**; mypy 0, ruff clean.
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
 **End state:** the six web-route surfaces the §6b campaign deferred are now 88–100% covered; the coverage-no-drop ratchet holds each as a permanent floor. Only P5 (discord native tools) remains deferred.
+
+## 6e. R3 — P5 discord native tools (2026-07-07)
+
+The last deferred surface: the five Discord-native tool domain handlers (`src/discord/native_tools/`). One PR, Odin-reviewed, coverage-gated.
+
+| File | Start → End |
+|---|---|
+| `native_tools/channel_ops.py` | 15% → **100%** |
+| `native_tools/knowledge.py` | 17% → **100%** |
+| `native_tools/media.py` | 13% → **100%** |
+| `native_tools/scheduling.py` | 46% → **100%** |
+| `native_tools/agents_tasks.py` | 34% → **95%** |
+
+Suite **+103 tests**; mypy 0, ruff clean.
+
+**Method:** each domain `*Tools` class is constructed directly with faked deps and its `_handle_*` methods driven with crafted inputs; the handlers return plain strings (or `analyze_image`'s `__image_block__` marker dict). Every external boundary is faked hard — `discord.Forbidden/NotFound/HTTPException` are real exceptions raised from mocks; no gateway, no network (aiohttp sessions + `getaddrinfo` faked), no SSH subprocess (`create_subprocess_exec` faked), no ComfyUI, no browser. For `agents_tasks`, the runtime is fully neutralized: `run_background_task` is patched, and the loop/agent/bridge managers are mocks — **no real task, loop, or agent ever executes.**
+
+**Uncovered by design (`agents_tasks`, 17 lines = 95%):** exactly the inner `_iteration_cb` / `_tool_exec_cb` / `_codex_followup` / `_run` closures that only execute inside a live loop or spawned agent. Per Odin's standing advisory ("don't start real loops/agents just to worship the green bar"), these are left to the loop/agent integration paths, not driven synthetically.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
+**Campaign end state:** whole-repo line coverage **67.0% → ~78%** across RFC-006 (P0–P5); the four CI ratchets (lint / types / coverage / suite) hold every gain. The web-API, web-admin, and native-tool surfaces are now 88–100% covered.
 
 ## 7. Risks / discipline
 
