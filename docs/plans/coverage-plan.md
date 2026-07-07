@@ -208,6 +208,20 @@ Suite **+62 tests** (kimi new file; attachments extended); mypy 0, ruff clean.
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6i. R3 — P9 skill context (2026-07-07)
+
+The skill API surface — the biggest single-file lift of the campaign. One PR, Odin-reviewed, coverage-gated.
+
+| File | Start → End |
+|---|---|
+| `tools/skill_context.py` | 42% → **100%** |
+
+Suite **+25 tests**; mypy 0, ruff clean.
+
+**Method:** `SkillContext` is the API handed to user skills — thin delegations to the tool executor, channel callbacks, persistent memory, config, HTTP, knowledge base, and scheduler, all wrapped in resource-limit trackers. Built with a MagicMock executor + faked deps; memory is a real tmp file, HTTP uses a fake aiohttp session (no network), and `is_url_blocked` is patched for determinism (no DNS). Every delegation, limit guard, SSRF/path-denial check, and the module helpers (`is_path_denied`, `is_url_blocked`, `ResourceTracker`) are exercised.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.
