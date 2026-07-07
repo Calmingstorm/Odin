@@ -169,4 +169,3 @@ class TestGetPromptSection:
         trace = SimpleNamespace(key=lambda k: k, learned=lambda **kw: None)
         out = r.get_prompt_section(query="database timeout", trace=trace)
         assert "correction" in out  # corrections are pinned
-
