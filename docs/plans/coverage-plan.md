@@ -240,6 +240,24 @@ Suite **+40 tests**; mypy 0, ruff clean.
 
 With P10 the clearly-tractable modules are covered. The remaining low-coverage gated files all wrap infrastructure that can't be faked without either heavy harnesses or real side effects: `health/server.py` (large aiohttp server + middleware), `monitoring/watcher.py` (live metric-poll loops), `search/vectorstore.py` (sqlite-vec extension), `discord/llm_gateway.py` + `discord/wiring.py` (provider lifecycle / composition root), `discord/client.py` (the gateway lifecycle), `discord/intake_pipeline.py` and `tools/background_task.py` (real message/loop execution). These are the "returns get very difficult" tier — meaningful coverage there needs integration-style harnesses, not the boundary-faking pattern that carried P0–P10, and several would risk real side effects to exercise. The coverage-no-drop ratchet holds every gain (whole-repo **67.0% → ~82%**) as a permanent floor; further waves here are a deliberate future decision, not low-hanging fruit.
 
+## 6l. R3 — P11 safe tier-1, round 1 (2026-07-07)
+
+First safe pass into the "harder" tier — the files whose dangerous paths are shallow enough to stub airtight (no real execution, network, or gateway). Aaron's directive for this round: do all the work solo, one final PR, Odin reviews only that PR. (The genuinely dangerous files — `background_task`, `discord/client`, `watcher` — are deferred to a future Incus-sandboxed round, since this desktop *hosts* live Odin and localhost is a destructible target.)
+
+| File | Start → End |
+|---|---|
+| `discord/llm_gateway.py` | 37% → **99%** |
+| `web/api/observability.py` | 64% → **96%** |
+| `web/api/sessions_chat.py` | 69% → **94%** |
+
+Suite **+46 tests**; mypy 0, ruff clean.
+
+**Method / safety:** `llm_gateway` — the provider client classes (`CodexChatClient`/`OllamaClient`/`KimiClient`/`CodexAuthPool`) are patched so reloads build fakes (no real tokens, no network, no health-check hits a server), and the deferred-close `call_later` is stubbed so nothing schedules on a live loop. `observability` — all read-only stat routes with a faked bot; the file-reading aggregates (`context`/`failure`/affordances) are patched so no real trajectory/audit file is touched. `sessions_chat` — chat/execute go through the patched `process_web_chat` seam (never a real LLM call); session + trajectory routes use a faked store/saver. **Residual uncovered = the unreachable `except ValueError` branches around `_safe_int_param` (it swallows, never raises) and a couple of `.resolve()` path-escape / auth-configured-identity branches.**
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
+**Deferred (still safe, next round):** `learning/reflector`, `sessions/manager`, `scheduler` (validation/matching subset), `intake_pipeline` — intricate logic that deserves careful treatment, not a rushed tack-on.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.

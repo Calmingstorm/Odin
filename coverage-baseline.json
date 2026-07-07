@@ -204,9 +204,9 @@
   "statements": 400
  },
  "src/discord/llm_gateway.py": {
-  "covered": 65,
-  "missing": 109,
-  "percent": 37.36,
+  "covered": 173,
+  "missing": 1,
+  "percent": 99.43,
   "statements": 174
  },
  "src/discord/native_tools/__init__.py": {
@@ -1158,9 +1158,9 @@
   "statements": 396
  },
  "src/web/api/observability.py": {
-  "covered": 149,
-  "missing": 83,
-  "percent": 64.22,
+  "covered": 222,
+  "missing": 10,
+  "percent": 95.69,
   "statements": 232
  },
  "src/web/api/schedules_api.py": {
@@ -1182,9 +1182,9 @@
   "statements": 88
  },
  "src/web/api/sessions_chat.py": {
-  "covered": 208,
-  "missing": 95,
-  "percent": 68.65,
+  "covered": 288,
+  "missing": 15,
+  "percent": 95.05,
   "statements": 303
  },
  "src/web/api/skills_api.py": {
