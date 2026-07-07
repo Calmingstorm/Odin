@@ -930,9 +930,9 @@
   "statements": 64
  },
  "src/tools/handlers/coding.py": {
-  "covered": 8,
-  "missing": 130,
-  "percent": 5.8,
+  "covered": 138,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 138
  },
  "src/tools/handlers/comms.py": {
@@ -954,9 +954,9 @@
   "statements": 110
  },
  "src/tools/handlers/files_docs.py": {
-  "covered": 18,
-  "missing": 91,
-  "percent": 16.51,
+  "covered": 109,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 109
  },
  "src/tools/handlers/state.py": {
@@ -1068,9 +1068,9 @@
   "statements": 157
  },
  "src/tools/time_parser.py": {
-  "covered": 12,
-  "missing": 96,
-  "percent": 11.11,
+  "covered": 108,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 108
  },
  "src/tools/tool_text.py": {

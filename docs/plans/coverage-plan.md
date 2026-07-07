@@ -1,6 +1,6 @@
 # RFC-006: Test-Coverage Campaign (ratchet gate + prioritized waves)
 
-Status: R3 — CONT-1 + CONT-2 + P5 COMPLETE (campaign shipped through P4b in §6b; P4-continuation CONT-1 §6c, CONT-2 §6d, P5 discord native tools §6e). Plan of record was Odin-approved R1 (§6a). All deferred surfaces now covered.
+Status: R3 — CONT-1/CONT-2/P5/P6 COMPLETE (campaign shipped through P4b §6b; continuation CONT-1 §6c, CONT-2 §6d, P5 native tools §6e, P6 handlers+parsers §6f). Plan of record was Odin-approved R1 (§6a). Post-campaign coverage sweeps continue opportunistically on the lowest-coverage tractable modules while the ratchet holds every gain.
 Campaign branch: `coverage/rfc006` (created after plan approval).
 Predecessors: RFC-005 (type-safety ratchet) is the template — a fail-closed CI ratchet plus incremental waves, security/high-value first. Unlike RFC-005, coverage waves add TESTS, not annotations: they can and will surface real bugs. Bug **fixes** are out-of-band (§5).
 
@@ -156,6 +156,22 @@ Suite **+103 tests**; mypy 0, ruff clean.
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
 **Campaign end state:** whole-repo line coverage **67.0% → ~78%** across RFC-006 (P0–P5); the four CI ratchets (lint / types / coverage / suite) hold every gain. The web-API, web-admin, and native-tool surfaces are now 88–100% covered.
+
+## 6f. R3 — P6 tool handlers + parsers (2026-07-07)
+
+Post-P5 sweep of the next-lowest-coverage tractable modules. One PR, Odin-reviewed, coverage-gated.
+
+| File | Start → End |
+|---|---|
+| `tools/time_parser.py` | 11% → **100%** |
+| `tools/handlers/coding.py` | 6% → **100%** |
+| `tools/handlers/files_docs.py` | 17% → **100%** |
+
+Suite **+51 tests**; mypy 0, ruff clean.
+
+**Method:** `time_parser` is pure logic driven with an injected fixed `now` (a Wednesday noon UTC) — fully deterministic, no wall clock. The two handler domains are built via `HandlerBase.__new__` with only the deps each method touches (the P3 state-handler pattern); every boundary faked — no SSH (`_exec_command`/`_run_on_host` AsyncMocks), no network (aiohttp faked), no PDF library (`fitz` is not installed here, so it's injected as a fake `sys.modules` entry), and the command governor is a mock.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
 ## 7. Risks / discipline
 
