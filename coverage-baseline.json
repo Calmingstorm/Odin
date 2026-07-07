@@ -1158,9 +1158,9 @@
   "statements": 396
  },
  "src/web/api/observability.py": {
-  "covered": 134,
-  "missing": 98,
-  "percent": 57.76,
+  "covered": 149,
+  "missing": 83,
+  "percent": 64.22,
   "statements": 232
  },
  "src/web/api/schedules_api.py": {
@@ -1188,15 +1188,15 @@
   "statements": 303
  },
  "src/web/api/skills_api.py": {
-  "covered": 28,
-  "missing": 107,
-  "percent": 20.74,
+  "covered": 79,
+  "missing": 56,
+  "percent": 58.52,
   "statements": 135
  },
  "src/web/api_common.py": {
-  "covered": 64,
-  "missing": 23,
-  "percent": 73.56,
+  "covered": 66,
+  "missing": 21,
+  "percent": 75.86,
   "statements": 87
  },
  "src/web/chat.py": {
