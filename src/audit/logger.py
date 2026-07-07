@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import deque
 from collections.abc import Callable
@@ -54,6 +55,16 @@ class AuditLogger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._event_callback: Callable | None = None
         self._signer: AuditSigner | None = AuditSigner(hmac_key) if hmac_key else None
+        # Serializes every operation that reads/mutates the signer's chain
+        # state or rotates the active file. The HMAC chain records ORDER: each
+        # entry's _prev_hmac is the previous entry's _hmac. sign() advances that
+        # running hash, so sign→write must be atomic w.r.t. other persists —
+        # otherwise two concurrent audited actions sign in one order and write
+        # in another, and verify sees the file out of chain-order (they invented
+        # await so we could race ourselves in one thread). Invariant: _persist,
+        # _maybe_rotate (as called from persist), and initialize_chain all hold
+        # this lock.
+        self._persist_lock = asyncio.Lock()
         self._classify_failures = classify_failures
         self._result_cap = result_cap
         self._tool_input_cap = tool_input_cap
@@ -63,7 +74,9 @@ class AuditLogger:
     def _maybe_rotate(self) -> None:
         """Rotate audit.jsonl → .1 → .2 … once it exceeds max_bytes.
 
-        Called before each append. Bounds total growth to roughly
+        Must be called with _persist_lock held (it resets the signer's chain
+        state; rotation + first-entry-signing must be atomic). Called before
+        each append. Bounds total growth to roughly
         max_bytes * (max_files + 1). The HMAC chain (if enabled) starts fresh in
         the new current file — the signer's prev-hash is reset to GENESIS after
         rotation, so verify_integrity() (which reads the current file from
@@ -141,16 +154,23 @@ class AuditLogger:
         being written becomes the first line of the fresh file and its
         _prev_hmac is GENESIS (the signer is reset in _maybe_rotate). Signing
         after rotation was the bug: the first post-rotation entry chained to the
-        old file and verify_integrity() failed."""
-        self._maybe_rotate()
-        if self._signer:
-            self._signer.sign(entry)
-        line = json.dumps(entry, default=str) + "\n"
-        try:
-            async with aiofiles.open(self.path, "a") as f:
-                await f.write(line)
-        except Exception as e:
-            log.error("Failed to write audit log: %s", e)
+        old file and verify_integrity() failed.
+
+        Rotate → sign → append run under _persist_lock so the chain's write
+        order matches its sign order (see __init__). The event fan-out is a
+        best-effort side effect and runs AFTER the lock — the signed append has
+        already durably happened, so a slow or failing callback can neither
+        stall other persists nor affect the persisted result."""
+        async with self._persist_lock:
+            self._maybe_rotate()
+            if self._signer:
+                self._signer.sign(entry)
+            line = json.dumps(entry, default=str) + "\n"
+            try:
+                async with aiofiles.open(self.path, "a") as f:
+                    await f.write(line)
+            except Exception as e:
+                log.error("Failed to write audit log: %s", e)
         if self._event_callback:
             try:
                 await self._event_callback(entry)
@@ -485,27 +505,31 @@ class AuditLogger:
         return await self._collect_matches(_match, limit)
 
     async def initialize_chain(self) -> None:
-        """Read the last signed entry to resume the HMAC chain state."""
+        """Read the last signed entry to resume the HMAC chain state.
+
+        Holds _persist_lock: it mutates the signer's chain state, and must not
+        race a persist if startup overlaps with the first served requests."""
         if not self._signer or not self.path.exists():
             return
-        try:
-            async with aiofiles.open(self.path) as f:
-                lines = await f.readlines()
-        except Exception as exc:
-            log.error("Failed to read audit log for chain init: %s", exc)
-            return
-        for line in reversed(lines):
-            line = line.strip()
-            if not line:
-                continue
+        async with self._persist_lock:
             try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            prev = entry.get("_hmac")
-            if prev:
-                self._signer.prev_hmac = prev
-            return
+                async with aiofiles.open(self.path) as f:
+                    lines = await f.readlines()
+            except Exception as exc:
+                log.error("Failed to read audit log for chain init: %s", exc)
+                return
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                prev = entry.get("_hmac")
+                if prev:
+                    self._signer.prev_hmac = prev
+                return
 
     async def verify_integrity(self) -> dict:
         """Verify the HMAC chain of the audit log.
