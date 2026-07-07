@@ -414,9 +414,9 @@
   "statements": 42
  },
  "src/llm/codex_auth.py": {
-  "covered": 217,
-  "missing": 185,
-  "percent": 53.98,
+  "covered": 375,
+  "missing": 27,
+  "percent": 93.28,
   "statements": 402
  },
  "src/llm/context_compressor.py": {
@@ -450,9 +450,9 @@
   "statements": 177
  },
  "src/llm/openai_codex.py": {
-  "covered": 272,
-  "missing": 172,
-  "percent": 61.26,
+  "covered": 379,
+  "missing": 65,
+  "percent": 85.36,
   "statements": 444
  },
  "src/llm/provider.py": {
