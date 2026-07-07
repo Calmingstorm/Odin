@@ -126,9 +126,9 @@
   "statements": 81
  },
  "src/discord/channel_logger.py": {
-  "covered": 31,
-  "missing": 82,
-  "percent": 27.43,
+  "covered": 104,
+  "missing": 9,
+  "percent": 92.04,
   "statements": 113
  },
  "src/discord/channel_state.py": {
@@ -1164,9 +1164,9 @@
   "statements": 232
  },
  "src/web/api/schedules_api.py": {
-  "covered": 28,
-  "missing": 82,
-  "percent": 25.45,
+  "covered": 110,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 110
  },
  "src/web/api/security.py": {
@@ -1176,9 +1176,9 @@
   "statements": 349
  },
  "src/web/api/self_update.py": {
-  "covered": 12,
-  "missing": 76,
-  "percent": 13.64,
+  "covered": 79,
+  "missing": 9,
+  "percent": 89.77,
   "statements": 88
  },
  "src/web/api/sessions_chat.py": {

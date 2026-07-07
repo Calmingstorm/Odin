@@ -173,6 +173,24 @@ Suite **+51 tests**; mypy 0, ruff clean.
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6g. R3 — P7 web routes + channel logger (2026-07-07)
+
+Next sweep of low-coverage tractable modules. One PR, Odin-reviewed, coverage-gated.
+
+| File | Start → End |
+|---|---|
+| `web/api/schedules_api.py` | 26% → **100%** |
+| `discord/channel_logger.py` | 27% → **92%** |
+| `web/api/self_update.py` | 14% → **90%** |
+
+Suite **+34 tests**; mypy 0, ruff clean.
+
+**Method:** `schedules_api` is safe schedule CRUD through the real route layer with a faked `bot.scheduler` (croniter real). `channel_logger` is pure JSONL file I/O driven against a real tmp dir with faked Discord message objects and a small fake FTS index.
+
+**SAFETY — self_update:** `apply_update` runs real `git reset --hard` / `checkout master` and `os.kill(getpid(), SIGTERM)`. Every test stubs **all** exec primitives — `subprocess.run`, `os.kill`, `os.path.exists`, `os.walk` — so the destructive actions are impossible by construction (per the never-run-a-destructive-command rule). It stops at **90%**: the residual lines are the config-backup/restore/pip/pycache steps inside that destructive flow, which would require fragile global `builtins.open` patching that risks the async test harness — deliberately left uncovered rather than covered unsafely. `channel_logger`'s residual 8% is defensive I/O `except` handlers requiring equally fragile failure injection.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.
