@@ -60,9 +60,9 @@
   "statements": 73
  },
  "src/config/__init__.py": {
-  "covered": 29,
-  "missing": 1,
-  "percent": 96.67,
+  "covered": 30,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 30
  },
  "src/config/schema.py": {
@@ -366,9 +366,9 @@
   "statements": 182
  },
  "src/knowledge/store.py": {
-  "covered": 318,
-  "missing": 99,
-  "percent": 76.26,
+  "covered": 320,
+  "missing": 97,
+  "percent": 76.74,
   "statements": 417
  },
  "src/learning/__init__.py": {
