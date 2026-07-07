@@ -1,15 +1,24 @@
 """Tests for the Discord attachment processor."""
 from __future__ import annotations
 
+import io
+import sys
+import tarfile
 import zipfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.discord.attachments import (
     AttachmentIntent,
     AttachmentProcessor,
+    AttachmentResult,
+    _detect_image_type,
+    _get_ext,
+    _is_archive,
+    _is_text_file,
     _preview_text,
     _safe_filename,
     infer_attachment_intent,
@@ -194,3 +203,253 @@ class TestWorkspaceCleanup:
         removed = proc.cleanup_old_workspaces()
         assert removed >= 1
         assert not ws.exists()
+
+    def test_cleanup_missing_dir(self, tmp_path):
+        proc = AttachmentProcessor(temp_dir=str(tmp_path / "absent"))
+        assert proc.cleanup_old_workspaces() == 0
+
+
+# --------------------------------------------------------------------------- #
+# RFC-006 P8 additions: pure helpers + uncovered handler branches
+# --------------------------------------------------------------------------- #
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+class TestPureHelpers:
+    def test_detect_image_type(self):
+        assert _detect_image_type(PNG) == "image/png"
+        assert _detect_image_type(b"\xff\xd8\xffabc") == "image/jpeg"
+        assert _detect_image_type(b"GIF89a") == "image/gif"
+        assert _detect_image_type(b"RIFF" + b"\x00" * 4 + b"WEBP") == "image/webp"
+        assert _detect_image_type(b"nope") is None
+
+    def test_get_ext_and_archive(self):
+        assert _get_ext("a.tar.gz") == ".tar.gz"
+        assert _get_ext("b.PY") == ".py"
+        assert _get_ext("noext") == ""
+        assert _is_archive("x.zip") is True and _is_archive("x.txt") is False
+
+    def test_is_text_file(self):
+        assert _is_text_file("readme.md", None)
+        assert _is_text_file("data.bin", "text/plain")
+        assert not _is_text_file("data.bin", None)
+
+    def test_infer_intent_default(self):
+        # neither ingest nor task patterns, no assistant hint → CURRENT_TASK
+        assert infer_attachment_intent("just a plain message") == AttachmentIntent.CURRENT_TASK
+
+
+class TestImageHandler:
+    @pytest.mark.asyncio
+    async def test_size_limit(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path), image_max_bytes=10)
+        parts: list = []
+        await p._handle_image(_mock_attachment("big.png", 999, "image/png"),
+                              ".png", parts, AttachmentResult())
+        assert "exceeds limit" in parts[0]
+
+    @pytest.mark.asyncio
+    async def test_jpg_alias(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path))
+        r = AttachmentResult()
+        await p._handle_image(_mock_attachment("x.jpg", 5, "image/jpg", b"rawjpg"),
+                              ".jpg", [], r)
+        assert r.image_blocks[0]["source"]["media_type"] == "image/jpeg"
+
+    @pytest.mark.asyncio
+    async def test_read_failure(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path))
+        att = _mock_attachment("x.png", 5, "image/png")
+        att.read = AsyncMock(side_effect=RuntimeError("net"))
+        parts: list = []
+        await p._handle_image(att, ".png", parts, AttachmentResult())
+        assert "failed" in parts[0]
+
+
+class TestPdfHandler:
+    @pytest.mark.asyncio
+    async def test_size_limit(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path), pdf_max_bytes=10)
+        parts: list = []
+        await p._handle_pdf(_mock_attachment("big.pdf", 999), parts, AttachmentResult())
+        assert "exceeds limit" in parts[0]
+
+    @pytest.mark.asyncio
+    async def test_success_with_fake_fitz(self, tmp_path):
+        class _Doc:
+            page_count = 1
+            def __iter__(self):
+                return iter([SimpleNamespace(get_text=lambda: "pdf body")])
+            def close(self):
+                pass
+        p = AttachmentProcessor(temp_dir=str(tmp_path))
+        parts: list = []
+        with patch.dict(sys.modules, {"fitz": SimpleNamespace(open=lambda **k: _Doc())}):
+            await p._handle_pdf(_mock_attachment("doc.pdf", 4, data=b"%PDF"),
+                                parts, AttachmentResult())
+        assert "pdf body" in parts[0] and "1 pages" in parts[0]
+
+    @pytest.mark.asyncio
+    async def test_failure(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path))
+        boom = SimpleNamespace(open=lambda **k: (_ for _ in ()).throw(RuntimeError("bad")))
+        parts: list = []
+        with patch.dict(sys.modules, {"fitz": boom}):
+            await p._handle_pdf(_mock_attachment("doc.pdf", 4), parts, AttachmentResult())
+        assert "failed" in parts[0]
+
+
+class TestTextAndBinaryFailures:
+    @pytest.mark.asyncio
+    async def test_text_read_failure(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path))
+        att = _mock_attachment("a.txt", 5, "text/plain")
+        att.read = AsyncMock(side_effect=RuntimeError("x"))
+        parts: list = []
+        await p._handle_text(att, ".txt", AttachmentIntent.CURRENT_TASK, "c", "m",
+                             parts, AttachmentResult())
+        assert "failed" in parts[0]
+
+    @pytest.mark.asyncio
+    async def test_binary_read_failure(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path))
+        att = _mock_attachment("x.bin", 5)
+        att.read = AsyncMock(side_effect=RuntimeError("x"))
+        parts: list = []
+        await p._handle_binary(att, "c", "m", parts, AttachmentResult())
+        assert "failed" in parts[0]
+
+
+def _tar_bytes(files):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for name, content in files.items():
+            data = content.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+class TestArchiveExtended:
+    @pytest.mark.asyncio
+    async def test_archive_size_limit(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path), archive_max_bytes=5)
+        parts: list = []
+        await p._handle_archive(_mock_attachment("a.zip", 999), "c", "m",
+                                parts, AttachmentResult())
+        assert "exceeds limit" in parts[0]
+
+    @pytest.mark.asyncio
+    async def test_tar_extract(self, tmp_path):
+        data = _tar_bytes({"top/file.txt": "tar content here"})
+        p = AttachmentProcessor(temp_dir=str(tmp_path / "ws"))
+        parts: list = []
+        r = AttachmentResult()
+        await p._handle_archive(_mock_attachment("a.tar", len(data), None, data),
+                                "c", "m", parts, r)
+        assert "Extracted to" in parts[0] and "tar content here" in parts[0]
+
+    @pytest.mark.asyncio
+    async def test_corrupt_archive_fails(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path / "ws"))
+        parts: list = []
+        await p._handle_archive(_mock_attachment("a.zip", 8, None, b"not a zip"),
+                                "c", "m", parts, AttachmentResult())
+        assert "failed" in parts[0]
+
+    def test_extract_zip_too_many_files(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path), archive_max_files=1)
+        zp = tmp_path / "a.zip"
+        with zipfile.ZipFile(zp, "w") as zf:
+            zf.writestr("a.txt", "1")
+            zf.writestr("b.txt", "2")
+        manifest, ok = p._extract_zip(zp, tmp_path / "out")
+        assert ok is False and any("Too many files" in m for m in manifest)
+
+    def test_extract_zip_too_large(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path), archive_extract_max_bytes=1)
+        zp = tmp_path / "a.zip"
+        with zipfile.ZipFile(zp, "w") as zf:
+            zf.writestr("big.txt", "x" * 100)
+        manifest, ok = p._extract_zip(zp, tmp_path / "out")
+        assert ok is False and any("Too large" in m for m in manifest)
+
+    def test_preview_archive_files(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path))
+        d = tmp_path / "extracted"
+        d.mkdir()
+        (d / "note.txt").write_text("preview me")
+        (d / "blob.bin").write_bytes(b"\x00")  # non-text → skipped
+        out = p._preview_archive_files(d)
+        assert "note.txt" in out and "preview me" in out
+
+    def test_preview_skips_large_and_empty(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path), archive_preview_file_max_bytes=5)
+        d = tmp_path / "ex"
+        d.mkdir()
+        (d / "big.txt").write_text("x" * 100)  # over per-file cap → skipped
+        assert p._preview_archive_files(d) == ""  # nothing previewable → empty string
+
+    def test_extract_tar_too_many_files(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path), archive_max_files=1)
+        tp = tmp_path / "a.tar"
+        tp.write_bytes(_tar_bytes({"a.txt": "1", "b.txt": "2"}))
+        manifest, ok = p._extract_tar(tp, tmp_path / "out")
+        assert ok is False and any("Too many files" in m for m in manifest)
+
+    def test_extract_tar_unsafe_entry_blocked(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path))
+        tp = tmp_path / "evil.tar"
+        tp.write_bytes(_tar_bytes({"../escape.txt": "pwned"}))
+        manifest, ok = p._extract_tar(tp, tmp_path / "out")
+        assert ok is False and any("BLOCKED" in m for m in manifest)
+
+    def test_extract_tar_too_large(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path), archive_extract_max_bytes=1)
+        tp = tmp_path / "a.tar"
+        tp.write_bytes(_tar_bytes({"big.txt": "x" * 100}))
+        manifest, ok = p._extract_tar(tp, tmp_path / "out")
+        assert ok is False and any("Too large" in m for m in manifest)
+
+    def test_preview_stops_at_total_cap(self, tmp_path):
+        # cap sized so the first "--- a.txt ---\nAAAA" (18 chars) fits but adding
+        # the second would exceed it → break after the first.
+        p = AttachmentProcessor(temp_dir=str(tmp_path), archive_preview_total_chars=25)
+        d = tmp_path / "ex"
+        d.mkdir()
+        (d / "a.txt").write_text("AAAA")
+        (d / "b.txt").write_text("BBBB")
+        out = p._preview_archive_files(d)
+        assert "a.txt" in out and "b.txt" not in out
+
+
+class TestProcessPdfDispatch:
+    @pytest.mark.asyncio
+    async def test_pdf_routed_through_process(self, tmp_path):
+        class _Doc:
+            page_count = 1
+            def __iter__(self):
+                return iter([SimpleNamespace(get_text=lambda: "routed pdf")])
+            def close(self):
+                pass
+        p = AttachmentProcessor(temp_dir=str(tmp_path))
+        att = _mock_attachment("doc.pdf", 4, "application/pdf", b"%PDF")
+        with patch.dict(sys.modules, {"fitz": SimpleNamespace(open=lambda **k: _Doc())}):
+            result = await p.process([att], "c", "m")
+        assert "routed pdf" in result.inline_text
+
+
+class TestCleanupEdges:
+    def test_skips_non_directories(self, tmp_path):
+        p = AttachmentProcessor(temp_dir=str(tmp_path), retention_hours=0)
+        (tmp_path / "loose_file").write_text("x")  # non-dir in temp_dir → skipped
+        chan = tmp_path / "ch1"
+        chan.mkdir()
+        (chan / "stray").write_text("y")  # non-dir in channel_dir → skipped
+        old_ws = chan / "msg1"
+        old_ws.mkdir()
+        import os
+        os.utime(old_ws, (0, 0))
+        removed = p.cleanup_old_workspaces()
+        assert removed == 1 and not old_ws.exists()
