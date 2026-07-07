@@ -1038,9 +1038,9 @@
   "statements": 165
  },
  "src/tools/skill_context.py": {
-  "covered": 88,
-  "missing": 120,
-  "percent": 42.31,
+  "covered": 208,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 208
  },
  "src/tools/skill_manager.py": {
