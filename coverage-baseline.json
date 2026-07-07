@@ -198,9 +198,9 @@
   "statements": 50
  },
  "src/discord/intake_pipeline.py": {
-  "covered": 279,
-  "missing": 121,
-  "percent": 69.75,
+  "covered": 305,
+  "missing": 95,
+  "percent": 76.25,
   "statements": 400
  },
  "src/discord/llm_gateway.py": {

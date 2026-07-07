@@ -273,6 +273,22 @@ Careful pass at the intricate-but-safe files, targeting the tractable methods wi
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6n. R3 — P13 intake gating (2026-07-07)
+
+The real-behaviour parts of the message-intake gating chain. One PR, Odin-reviewed.
+
+| File | Start → End (approx) |
+|---|---|
+| `discord/intake_pipeline.py` | 70% → **~80%** |
+
+**Method / safety:** covers `is_allowed_user`/`is_allowed_channel` (pure allowlist logic), `_process_attachments` (with a faked `AttachmentProcessor` — no download), and the early `handle` gates: own-message short-circuit and the full secret-scrub path (detect → scrub → delete → notify, including the NotFound / Forbidden / HTTPException / send-failure sub-branches). The downstream `pipeline`/`tool_loop` are faked — **no LLM, no tool dispatch, no gateway.**
+
+**Deliberately NOT covered:** the deep `handle` body (cog dispatch, bot-buffer flush, voice) and `MessagePipeline.run`/`_run_inner` — they route into the tool loop, so honest coverage needs the sandboxed round, not more mocking.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
+**Safe-tier status:** P11–P13 covered the tractable "harder" files (llm_gateway, observability, sessions_chat, reflector, scheduler-validation, intake-gating). What's left below the gate is either intricate mock-drift territory (`sessions/manager` compaction/archival, the deep intake/pipeline routing, reflector `_consolidate`/repair) or the genuinely-dangerous Incus-only tier. Whole-repo ≈ 83%, gated core ≈ 86%.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.
