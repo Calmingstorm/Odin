@@ -1,6 +1,6 @@
 # RFC-006: Test-Coverage Campaign (ratchet gate + prioritized waves)
 
-Status: R1 — APPROVED, plan of record (Odin re-review 2026-07-07: final blocker = P2 target mismatch, fixed to openai_codex 61→85; §7 wording modernized to the missed-count model).
+Status: R2 — COMPLETE (campaign shipped through P4b; results in §6b). Plan of record was Odin-approved R1 (§6a).  Remaining P4-continuation + P5 deferred by design.
 Campaign branch: `coverage/rfc006` (created after plan approval).
 Predecessors: RFC-005 (type-safety ratchet) is the template — a fail-closed CI ratchet plus incremental waves, security/high-value first. Unlike RFC-005, coverage waves add TESTS, not annotations: they can and will surface real bugs. Bug **fixes** are out-of-band (§5).
 
@@ -66,6 +66,34 @@ No wall-clock pressure; the gate protects from P0 on.
 ## 6a. R1 amendment log (Odin plan review, 2026-07-07)
 
 Required amendments, all adopted: **B1** ratchet redesigned to per-file missed-count ceiling (ε=0) + per-file percent non-regression (ε=0.25) + total report-only; deleted/renamed surfaced; baseline ceremony (§4). **B2** `web/api/security.py` target raised to ≥90, consistently in the crown-jewel bucket (§2/§6). **B3** P0 gate self-tests specified (§4). Advisories adopted: strict xfail w/ COV-id reasons; xfail coverage ledgered; baseline-update before/after table; per-exclusion reasons enforced in config; web handlers driven through the real route layer via aiohttp test client; mock boundaries only, never the unit under test.
+
+## 6b. R2 — results (2026-07-07)
+
+**Total line coverage 67.0% → 72.9%** (whole repo, reported); the gated core (§3 exclusions removed) sits at ~76%. Suite 6,133 → 6,516 (+383 tests). mypy stayed 0 and ruff clean through every wave. **The fourth CI ratchet (`coverage-no-drop`) is live and merged** — the durable deliverable: coverage can no longer silently regress on any future PR.
+
+**Per-file lifts (start → end):**
+
+| File | Wave | Start → End |
+|---|---|---|
+| `permissions/token_manager.py` | P1 | 23% → **100%** |
+| `permissions/host_access.py` | P1 | 39% → **100%** |
+| `permissions/manager.py` | P1 | 81% → **100%** |
+| `web/api/security.py` | P1 | 17% → **95%** |
+| `llm/codex_auth.py` | P2 | 54% → **93%** |
+| `llm/openai_codex.py` | P2 | 61% → **85%** |
+| `tools/handlers/state.py` | P3 | 21% → **93%** |
+| `tools/skill_manager.py` | P3 | 28% → **78%** |
+| `web/api/codex_admin.py` | P4a | 10% → **84%** |
+| `web/api/config_admin.py` | P4a | 23% → 41% (partial) |
+| `web/api/llm_admin.py` | P4a | 20% → 26% (partial) |
+| `web/api/skills_api.py` | P4b | 21% → **59%** |
+| `web/api/observability.py` | P4b | 58% → **64%** |
+
+**Waves shipped:** P0 gate+self-tests+baseline (PR #188), P1 security (#189), P2 credential paths (#190), P3 core singles (#191), P4a web-admin (#192), P4b web-REST partial (#193) — every one Odin-reviewed and CI-gated. Odin's plan review caught the gate's identity hole (missed-count ceiling, not covered-count floor) and hardened P0 with 8 self-tests.
+
+**COV ledger: EMPTY.** Tests were written against never-walked authorization, credential-rotation, memory, skill, and admin-route code — every path behaved exactly as the tests pinned correct behavior. The gate's first act was catching its *own* nondeterminism (config `.env` branch + `store.py` exception-branch flake), both fixed deterministically, not by loosening the ratchet. Two genuine hygiene finds (relative-`Path("config.yml")` test hazard; a duplicate-named shadowed test) were fixed as they surfaced.
+
+**Deliberately deferred (a P4-continuation campaign, whenever there's appetite):** `web/api/config_admin.py` and `llm_admin.py` to ≥85, plus `knowledge_mem`/`agents_loops`/`integrations`/`websocket`, and P5 (discord native tools). These are large multi-registrar route surfaces; Odin endorsed partial-per-file, and the ratchet holds every gain as the permanent floor while they wait.
 
 ## 7. Risks / discipline
 
