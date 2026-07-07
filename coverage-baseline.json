@@ -1122,9 +1122,9 @@
   "statements": 75
  },
  "src/web/api/agents_loops.py": {
-  "covered": 31,
-  "missing": 119,
-  "percent": 20.67,
+  "covered": 148,
+  "missing": 2,
+  "percent": 98.67,
   "statements": 150
  },
  "src/web/api/codex_admin.py": {
@@ -1140,15 +1140,15 @@
   "statements": 297
  },
  "src/web/api/integrations.py": {
-  "covered": 120,
-  "missing": 146,
-  "percent": 45.11,
+  "covered": 266,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 266
  },
  "src/web/api/knowledge_mem.py": {
-  "covered": 118,
-  "missing": 131,
-  "percent": 47.39,
+  "covered": 247,
+  "missing": 2,
+  "percent": 99.2,
   "statements": 249
  },
  "src/web/api/llm_admin.py": {
@@ -1206,9 +1206,9 @@
   "statements": 131
  },
  "src/web/websocket.py": {
-  "covered": 105,
-  "missing": 122,
-  "percent": 46.26,
+  "covered": 200,
+  "missing": 27,
+  "percent": 88.11,
   "statements": 227
  }
 }

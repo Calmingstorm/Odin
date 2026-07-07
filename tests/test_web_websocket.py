@@ -1,0 +1,283 @@
+"""Coverage for web/websocket.py (RFC-006 P4-continuation, CONT-1 optional).
+
+Odin green-lit websocket "only if tractable with real websocket client tests" —
+aiohttp's ws test client makes the ``handle`` message loop and ``_handle_chat``
+paths fully drivable end-to-end. The broadcast / close / tail helpers are
+exercised directly on the manager with fake sockets. ``process_web_chat`` (the
+one real external boundary) is patched; a chdir(tmp_path) autouse fixture keeps
+``_tail_logs``' relative ./data/audit.jsonl read isolated.
+"""
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
+
+from src.web.websocket import WebSocketManager, setup_websocket
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cwd(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+
+def _bot():
+    return SimpleNamespace(name="odin")
+
+
+def _client(*, api_token="", web_config=None, session_manager=None):
+    app = web.Application()
+    if session_manager is not None:
+        app["session_manager"] = session_manager
+    manager = setup_websocket(app, _bot(), api_token=api_token, web_config=web_config)
+    return TestClient(TestServer(app)), manager
+
+
+CHAT_RESULT = {"response": "hi there", "tools_used": ["grep"], "is_error": False}
+
+
+# --------------------------------------------------------------------------- #
+# handle() — the real message loop
+# --------------------------------------------------------------------------- #
+class TestHandleLoop:
+    async def test_subscribe_unsubscribe_ping_unknown(self):
+        client, _ = _client()
+        async with client:
+            async with client.ws_connect("/api/ws") as ws:
+                await ws.send_json({"subscribe": "events"})
+                assert (await ws.receive_json())["channel"] == "events"
+                await ws.send_json({"unsubscribe": "events"})
+                assert (await ws.receive_json())["type"] == "unsubscribed"
+                await ws.send_json({"type": "ping", "ts": 42})
+                pong = await ws.receive_json()
+                assert pong["type"] == "pong" and pong["ts"] == 42
+                await ws.send_json({"whatever": 1})
+                assert "unknown command" in (await ws.receive_json())["error"]
+
+    async def test_invalid_json(self):
+        client, _ = _client()
+        async with client:
+            async with client.ws_connect("/api/ws") as ws:
+                await ws.send_str("{not json")
+                assert "invalid JSON" in (await ws.receive_json())["error"]
+
+    async def test_subscribe_logs_streams_tail(self):
+        # _tail_logs reads ./data/audit.jsonl (relative → isolated by chdir)
+        from pathlib import Path
+        data = Path("data")
+        data.mkdir()
+        (data / "audit.jsonl").write_text('{"a":1}\n{"a":2}\n')
+        client, _ = _client()
+        async with client:
+            async with client.ws_connect("/api/ws") as ws:
+                await ws.send_json({"subscribe": "logs"})
+                # tail lines + the subscribed confirmation arrive (order not fixed)
+                seen = {(await ws.receive_json())["type"] for _ in range(3)}
+                assert "log" in seen and "subscribed" in seen
+                await ws.send_json({"unsubscribe": "logs"})
+
+
+class TestAuth:
+    async def test_rejects_without_token(self):
+        client, _ = _client(api_token="s3cret")
+        async with client:
+            async with client.ws_connect("/api/ws") as ws:
+                await ws.receive()  # server closes with code 4001
+                assert ws.closed
+
+    async def test_accepts_matching_token(self):
+        client, _ = _client(api_token="s3cret")
+        async with client:
+            async with client.ws_connect("/api/ws?token=s3cret") as ws:
+                await ws.send_json({"type": "ping", "ts": 1})
+                assert (await ws.receive_json())["type"] == "pong"
+
+    async def test_accepts_session_manager_token(self):
+        # web_config present (auth on), api_token empty → session_manager validates
+        sm = SimpleNamespace(validate=lambda t: t == "good", get_identity=lambda t: None)
+        client, _ = _client(web_config=SimpleNamespace(), session_manager=sm)
+        async with client:
+            async with client.ws_connect("/api/ws?token=good") as ws:
+                await ws.send_json({"type": "ping", "ts": 1})
+                assert (await ws.receive_json())["type"] == "pong"
+
+
+# --------------------------------------------------------------------------- #
+# _handle_chat — validation, rate limit, delegation, error shaping
+# --------------------------------------------------------------------------- #
+class TestChat:
+    async def test_chat_success(self):
+        client, _ = _client()
+        with patch("src.web.websocket.process_web_chat",
+                   new=AsyncMock(return_value=CHAT_RESULT)):
+            async with client:
+                async with client.ws_connect("/api/ws") as ws:
+                    await ws.send_json({"type": "chat", "content": "hello"})
+                    resp = await ws.receive_json()
+                    assert resp["type"] == "chat_response"
+                    assert resp["content"] == "hi there" and resp["tools_used"] == ["grep"]
+
+    async def test_chat_with_files(self):
+        result = {**CHAT_RESULT, "files": [{"name": "out.txt"}]}
+        client, _ = _client()
+        with patch("src.web.websocket.process_web_chat",
+                   new=AsyncMock(return_value=result)):
+            async with client:
+                async with client.ws_connect("/api/ws") as ws:
+                    await ws.send_json({"type": "chat", "content": "make a file"})
+                    resp = await ws.receive_json()
+                    assert resp["files"] == [{"name": "out.txt"}]
+
+    async def test_chat_empty_and_too_long(self):
+        client, _ = _client()
+        async with client:
+            async with client.ws_connect("/api/ws") as ws:
+                await ws.send_json({"type": "chat", "content": "   "})
+                assert (await ws.receive_json())["type"] == "chat_error"
+                await ws.send_json({"type": "chat", "content": "x" * 40000})
+                assert (await ws.receive_json())["type"] == "chat_error"
+
+    async def test_chat_rate_limit(self):
+        client, _ = _client()
+        with patch("src.web.websocket.process_web_chat",
+                   new=AsyncMock(return_value=CHAT_RESULT)):
+            async with client:
+                async with client.ws_connect("/api/ws") as ws:
+                    last: dict = {}
+                    for _ in range(11):
+                        await ws.send_json({"type": "chat", "content": "ping"})
+                        last = await ws.receive_json()
+                    assert last["type"] == "chat_error" and "rate limit" in last["error"]
+
+    async def test_chat_timeout(self):
+        client, _ = _client()
+        with patch("src.web.websocket.process_web_chat",
+                   new=AsyncMock(side_effect=TimeoutError())):
+            async with client:
+                async with client.ws_connect("/api/ws") as ws:
+                    await ws.send_json({"type": "chat", "content": "slow"})
+                    resp = await ws.receive_json()
+                    assert resp["type"] == "chat_error" and "timed out" in resp["error"]
+
+    async def test_chat_generic_error_scrubbed(self):
+        client, _ = _client()
+        with patch("src.web.websocket.process_web_chat",
+                   new=AsyncMock(side_effect=RuntimeError("kaboom"))):
+            async with client:
+                async with client.ws_connect("/api/ws") as ws:
+                    await ws.send_json({"type": "chat", "content": "boom"})
+                    resp = await ws.receive_json()
+                    assert resp["type"] == "chat_error" and "kaboom" in resp["error"]
+
+
+# --------------------------------------------------------------------------- #
+# broadcast / close / identity helpers — direct with fake sockets
+# --------------------------------------------------------------------------- #
+class _FakeWS:
+    """A hashable (identity) stand-in socket for the broadcast/close/tail helpers.
+
+    (SimpleNamespace can't be used — it defines __eq__ so it's unhashable and
+    the manager keeps sockets in sets.)
+    """
+
+    def __init__(self, **kw):
+        self.closed = False
+        self.send_json = AsyncMock()
+        self.close = AsyncMock()
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def _fake_ws(**kw):
+    return _FakeWS(**kw)
+
+
+class TestBroadcastAndClose:
+    async def test_broadcast_event_to_subscribers(self):
+        mgr = WebSocketManager(_bot())
+        good = _fake_ws()
+        dead = _fake_ws()
+        dead.send_json = AsyncMock(side_effect=ConnectionError())
+        mgr._event_subscribers.update({good, dead})
+        mgr._clients.update({good, dead})
+        await mgr.broadcast_event({"kind": "test"})
+        good.send_json.assert_awaited_once()
+        # a socket that errors on send is pruned from the subscriber set
+        assert dead not in mgr._event_subscribers
+
+    async def test_broadcast_no_subscribers_is_noop(self):
+        mgr = WebSocketManager(_bot())
+        await mgr.broadcast_event({"kind": "test"})  # no raise, early return
+
+    async def test_close_by_user_id(self):
+        mgr = WebSocketManager(_bot())
+        match = _fake_ws(_odin_identity=SimpleNamespace(user_id="u1"))
+        other = _fake_ws(_odin_identity=SimpleNamespace(user_id="u2"))
+        mgr._clients.update({match, other})
+        closed = await mgr.close_by_user_id("u1")
+        assert closed == 1
+        match.close.assert_awaited_once()
+        assert match not in mgr._clients and other in mgr._clients
+
+    async def test_close_by_user_id_none_match(self):
+        mgr = WebSocketManager(_bot())
+        mgr._clients.add(_fake_ws(_odin_identity=SimpleNamespace(user_id="uX")))
+        assert await mgr.close_by_user_id("nobody") == 0
+
+    async def test_close_by_user_id_swallows_close_error(self):
+        mgr = WebSocketManager(_bot())
+        ws = _fake_ws(_odin_identity=SimpleNamespace(user_id="u1"))
+        ws.close = AsyncMock(side_effect=RuntimeError("already closed"))
+        mgr._clients.add(ws)
+        assert await mgr.close_by_user_id("u1") == 1  # error swallowed, still pruned
+        assert ws not in mgr._clients
+
+    def test_client_count(self):
+        mgr = WebSocketManager(_bot())
+        mgr._clients.update({_fake_ws(), _fake_ws()})
+        assert mgr.client_count == 2
+
+
+class TestTailLogs:
+    async def test_tail_sends_existing_lines(self):
+        from pathlib import Path
+        data = Path("data")
+        data.mkdir()
+        (data / "audit.jsonl").write_text('{"a":1}\n{"a":2}\n{"a":3}\n')
+        mgr = WebSocketManager(_bot())
+        ws = _fake_ws()
+        # ws is not in _log_subscribers → the poll loop exits after the tail send
+        await mgr._tail_logs(ws)
+        assert ws.send_json.await_count == 3
+
+    async def test_tail_no_file_is_safe(self):
+        mgr = WebSocketManager(_bot())
+        ws = _fake_ws()
+        await mgr._tail_logs(ws)  # ./data/audit.jsonl absent → no send, no raise
+        ws.send_json.assert_not_awaited()
+
+    def test_resolve_identity_via_session_manager(self):
+        ident = SimpleNamespace(user_id="u1")
+        sm = SimpleNamespace(validate=lambda t: True, get_identity=lambda t: ident)
+        mgr = WebSocketManager(_bot(), session_manager=sm)
+        assert mgr._resolve_identity("tok") is ident
+
+    def test_resolve_identity_via_token_manager(self):
+        ident = SimpleNamespace(user_id="u1")
+        tm = SimpleNamespace(resolve=lambda t: ident)
+        request = SimpleNamespace(app={"token_manager": tm})
+        mgr = WebSocketManager(_bot())
+        assert mgr._resolve_identity("tok", request) is ident
+
+    def test_resolve_identity_via_web_config(self):
+        ident = SimpleNamespace(user_id="u2")
+        wc = SimpleNamespace(resolve_api_identity=lambda t: ident)
+        mgr = WebSocketManager(_bot(), web_config=wc)
+        assert mgr._resolve_identity("tok") is ident
+
+    def test_resolve_identity_returns_none(self):
+        mgr = WebSocketManager(_bot())
+        assert mgr._resolve_identity("tok") is None
