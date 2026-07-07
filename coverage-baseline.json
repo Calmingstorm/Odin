@@ -696,21 +696,21 @@
   "statements": 3
  },
  "src/permissions/host_access.py": {
-  "covered": 60,
-  "missing": 94,
-  "percent": 38.96,
+  "covered": 154,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 154
  },
  "src/permissions/manager.py": {
-  "covered": 63,
-  "missing": 15,
-  "percent": 80.77,
+  "covered": 78,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 78
  },
  "src/permissions/token_manager.py": {
-  "covered": 31,
-  "missing": 101,
-  "percent": 23.48,
+  "covered": 132,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 132
  },
  "src/planning/__init__.py": {
@@ -1170,9 +1170,9 @@
   "statements": 110
  },
  "src/web/api/security.py": {
-  "covered": 58,
-  "missing": 291,
-  "percent": 16.62,
+  "covered": 332,
+  "missing": 17,
+  "percent": 95.13,
   "statements": 349
  },
  "src/web/api/self_update.py": {
@@ -1194,9 +1194,9 @@
   "statements": 135
  },
  "src/web/api_common.py": {
-  "covered": 53,
-  "missing": 34,
-  "percent": 60.92,
+  "covered": 62,
+  "missing": 25,
+  "percent": 71.26,
   "statements": 87
  },
  "src/web/chat.py": {
