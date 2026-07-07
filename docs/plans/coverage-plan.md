@@ -222,6 +222,24 @@ Suite **+25 tests**; mypy 0, ruff clean.
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6j. R3 — P10 scheduled-event handlers (2026-07-07)
+
+The scheduler's Discord callback handlers — likely the last of the clearly-tractable modules. One PR, Odin-reviewed, coverage-gated.
+
+| File | Start → End |
+|---|---|
+| `discord/scheduled_events.py` | 61% → **100%** |
+
+Suite **+40 tests**; mypy 0, ruff clean.
+
+**Method:** `ScheduledEventHandlers` fire on scheduler events — daily digest, monitor alert, reminder, check, and multi-step workflow. Built with faked deps (executor, tool_loop, audit, llm_gateway, agent_task_tools, channels) so nothing is really dispatched; tests assert on channel sends, audit calls, ToolResult shaping, condition-skip logic, spawn-agent auto-collect, and the abort/continue-on-failure branches — including the check/workflow paths that re-raise to signal the scheduler.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
+## 6k. Diminishing-returns boundary (2026-07-07)
+
+With P10 the clearly-tractable modules are covered. The remaining low-coverage gated files all wrap infrastructure that can't be faked without either heavy harnesses or real side effects: `health/server.py` (large aiohttp server + middleware), `monitoring/watcher.py` (live metric-poll loops), `search/vectorstore.py` (sqlite-vec extension), `discord/llm_gateway.py` + `discord/wiring.py` (provider lifecycle / composition root), `discord/client.py` (the gateway lifecycle), `discord/intake_pipeline.py` and `tools/background_task.py` (real message/loop execution). These are the "returns get very difficult" tier — meaningful coverage there needs integration-style harnesses, not the boundary-faking pattern that carried P0–P10, and several would risk real side effects to exercise. The coverage-no-drop ratchet holds every gain (whole-repo **67.0% → ~82%**) as a permanent floor; further waves here are a deliberate future decision, not low-hanging fruit.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.

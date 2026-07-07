@@ -270,9 +270,9 @@
   "statements": 154
  },
  "src/discord/scheduled_events.py": {
-  "covered": 148,
-  "missing": 94,
-  "percent": 61.16,
+  "covered": 242,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 242
  },
  "src/discord/slash_commands.py": {
