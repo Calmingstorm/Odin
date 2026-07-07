@@ -384,9 +384,9 @@
   "statements": 54
  },
  "src/learning/reflector.py": {
-  "covered": 440,
-  "missing": 127,
-  "percent": 77.6,
+  "covered": 501,
+  "missing": 66,
+  "percent": 88.36,
   "statements": 567
  },
  "src/llm/__init__.py": {
@@ -744,9 +744,9 @@
   "statements": 111
  },
  "src/scheduler/scheduler.py": {
-  "covered": 548,
-  "missing": 85,
-  "percent": 86.57,
+  "covered": 566,
+  "missing": 67,
+  "percent": 89.42,
   "statements": 633
  },
  "src/search/__init__.py": {

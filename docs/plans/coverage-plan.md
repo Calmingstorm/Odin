@@ -258,6 +258,21 @@ Suite **+46 tests**; mypy 0, ruff clean.
 
 **Deferred (still safe, next round):** `learning/reflector`, `sessions/manager`, `scheduler` (validation/matching subset), `intake_pipeline` — intricate logic that deserves careful treatment, not a rushed tack-on.
 
+## 6m. R3 — P12 safe tier-1, round 2 (2026-07-07)
+
+Careful pass at the intricate-but-safe files, targeting the tractable methods without over-reaching into the mock-drift zone. One PR, Odin-reviewed.
+
+| File | Start → End (approx) |
+|---|---|
+| `learning/reflector.py` | 78% → **~87%** |
+| `scheduler/scheduler.py` | 86% → **~89%** |
+
+**Method / safety:** `reflector` — `reflect_on_operation`/`session`/`compacted` and `_reflect` are driven through a FAKE `text_fn` (the LLM callback is injected via `set_text_fn` — no real model call); `_parse_entries` and the `get_prompt_section` injection selection (include-all vs gated pinning) are tested as pure logic against a real tmp `learned.json`. `scheduler` — only the pure validation/normalization/trigger-matching helpers (`_validate_timezone`/`_validate_trigger`/`_validate_webhook_config`/`_normalize_webhook_config`/`_trigger_matches`); **`_execute_webhook` (real outbound HTTP) and the fire loop are deliberately left to the future sandboxed round.**
+
+**Deliberately NOT pushed further:** reflector's `_consolidate`/`_repair_damaged` and the scheduler fire loop / `_execute_and_record` — intricate enough that a heavily-mocked test would validate shape, not behavior. Left for careful future work.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.
