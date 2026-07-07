@@ -366,9 +366,9 @@
   "statements": 182
  },
  "src/knowledge/store.py": {
-  "covered": 320,
-  "missing": 97,
-  "percent": 76.74,
+  "covered": 322,
+  "missing": 95,
+  "percent": 77.22,
   "statements": 417
  },
  "src/learning/__init__.py": {
