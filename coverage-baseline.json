@@ -468,9 +468,9 @@
   "statements": 7
  },
  "src/llm/system_prompt.py": {
-  "covered": 32,
-  "missing": 5,
-  "percent": 86.49,
+  "covered": 34,
+  "missing": 3,
+  "percent": 91.89,
   "statements": 37
  },
  "src/llm/types.py": {
@@ -1128,15 +1128,15 @@
   "statements": 150
  },
  "src/web/api/codex_admin.py": {
-  "covered": 22,
-  "missing": 197,
-  "percent": 10.05,
+  "covered": 185,
+  "missing": 34,
+  "percent": 84.47,
   "statements": 219
  },
  "src/web/api/config_admin.py": {
-  "covered": 69,
-  "missing": 228,
-  "percent": 23.23,
+  "covered": 122,
+  "missing": 175,
+  "percent": 41.08,
   "statements": 297
  },
  "src/web/api/integrations.py": {
@@ -1152,9 +1152,9 @@
   "statements": 249
  },
  "src/web/api/llm_admin.py": {
-  "covered": 80,
-  "missing": 316,
-  "percent": 20.2,
+  "covered": 103,
+  "missing": 293,
+  "percent": 26.01,
   "statements": 396
  },
  "src/web/api/observability.py": {
@@ -1194,9 +1194,9 @@
   "statements": 135
  },
  "src/web/api_common.py": {
-  "covered": 62,
-  "missing": 25,
-  "percent": 71.26,
+  "covered": 64,
+  "missing": 23,
+  "percent": 73.56,
   "statements": 87
  },
  "src/web/chat.py": {
