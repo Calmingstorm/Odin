@@ -960,9 +960,9 @@
   "statements": 109
  },
  "src/tools/handlers/state.py": {
-  "covered": 62,
-  "missing": 239,
-  "percent": 20.6,
+  "covered": 281,
+  "missing": 20,
+  "percent": 93.36,
   "statements": 301
  },
  "src/tools/handlers/system.py": {
@@ -1038,15 +1038,15 @@
   "statements": 165
  },
  "src/tools/skill_context.py": {
-  "covered": 76,
-  "missing": 132,
-  "percent": 36.54,
+  "covered": 88,
+  "missing": 120,
+  "percent": 42.31,
   "statements": 208
  },
  "src/tools/skill_manager.py": {
-  "covered": 199,
-  "missing": 511,
-  "percent": 28.03,
+  "covered": 553,
+  "missing": 157,
+  "percent": 77.89,
   "statements": 710
  },
  "src/tools/ssh.py": {
