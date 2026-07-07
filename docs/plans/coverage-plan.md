@@ -191,6 +191,23 @@ Suite **+34 tests**; mypy 0, ruff clean.
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6h. R3 — P8 kimi provider + attachments (2026-07-07)
+
+Continued sweep. One PR, Odin-reviewed, coverage-gated.
+
+| File | Start → End |
+|---|---|
+| `llm/kimi.py` | 59% → **99%** |
+| `discord/attachments.py` | 71% → **96%** |
+
+Suite **+62 tests** (kimi new file; attachments extended); mypy 0, ruff clean.
+
+**Method:** `kimi`'s message/schema/tool/response conversion is pure logic tested directly; the request/retry/chat/health paths use a fake aiohttp session with `asyncio.sleep` patched so retry backoff is instant (no network, no real delay). `attachments` extends the existing suite with the uncovered handler branches — image size/jpg-alias/read-failure, the PDF handler (`fitz` injected as a fake `sys.modules` entry — no PDF library), tar extraction + limits + path-escape blocks, `_preview_archive_files` caps, and cleanup edge cases — all against real tmp workspaces with faked attachment objects.
+
+**Uncovered by design:** kimi's one line is an unreachable `raise` after a retry loop that always returns/raises inside it. attachments' residual 4% is an unreachable "unknown archive format" branch (the extension set only contains zip/tar variants) plus two deep `.resolve()`-based path-escape checks and a read-exception handler that need fragile filesystem-failure injection.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.

@@ -108,9 +108,9 @@
   "statements": 7
  },
  "src/discord/attachments.py": {
-  "covered": 235,
-  "missing": 94,
-  "percent": 71.43,
+  "covered": 315,
+  "missing": 14,
+  "percent": 95.74,
   "statements": 329
  },
  "src/discord/background_task.py": {
@@ -432,9 +432,9 @@
   "statements": 86
  },
  "src/llm/kimi.py": {
-  "covered": 131,
-  "missing": 91,
-  "percent": 59.01,
+  "covered": 221,
+  "missing": 1,
+  "percent": 99.55,
   "statements": 222
  },
  "src/llm/model_router.py": {
