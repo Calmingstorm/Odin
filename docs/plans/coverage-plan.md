@@ -1,6 +1,6 @@
 # RFC-006: Test-Coverage Campaign (ratchet gate + prioritized waves)
 
-Status: R2 — COMPLETE (campaign shipped through P4b; results in §6b). Plan of record was Odin-approved R1 (§6a).  Remaining P4-continuation + P5 deferred by design.
+Status: R3 — CONT-1 COMPLETE (campaign shipped through P4b in §6b; P4-continuation CONT-1 in §6c). Plan of record was Odin-approved R1 (§6a).  CONT-2 + P5 deferred by design.
 Campaign branch: `coverage/rfc006` (created after plan approval).
 Predecessors: RFC-005 (type-safety ratchet) is the template — a fail-closed CI ratchet plus incremental waves, security/high-value first. Unlike RFC-005, coverage waves add TESTS, not annotations: they can and will surface real bugs. Bug **fixes** are out-of-band (§5).
 
@@ -93,7 +93,28 @@ Required amendments, all adopted: **B1** ratchet redesigned to per-file missed-c
 
 **COV ledger: EMPTY.** Tests were written against never-walked authorization, credential-rotation, memory, skill, and admin-route code — every path behaved exactly as the tests pinned correct behavior. The gate's first act was catching its *own* nondeterminism (config `.env` branch + `store.py` exception-branch flake), both fixed deterministically, not by loosening the ratchet. Two genuine hygiene finds (relative-`Path("config.yml")` test hazard; a duplicate-named shadowed test) were fixed as they surfaced.
 
-**Deliberately deferred (a P4-continuation campaign, whenever there's appetite):** `web/api/config_admin.py` and `llm_admin.py` to ≥85, plus `knowledge_mem`/`agents_loops`/`integrations`/`websocket`, and P5 (discord native tools). These are large multi-registrar route surfaces; Odin endorsed partial-per-file, and the ratchet holds every gain as the permanent floor while they wait.
+**Deliberately deferred (a P4-continuation campaign, whenever there's appetite):** `web/api/config_admin.py` and `llm_admin.py` to ≥85 (CONT-2), plus `knowledge_mem`/`agents_loops`/`integrations`/`websocket` (CONT-1, done — §6c), and P5 (discord native tools). These are large multi-registrar route surfaces; Odin endorsed partial-per-file, and the ratchet holds every gain as the permanent floor while they wait.
+
+## 6c. R3 — P4-continuation CONT-1 (2026-07-07)
+
+Picks up the §6b deferred web-route surfaces. Four files, one PR, Odin-reviewed, coverage-gated.
+
+**Total line coverage 72.9% → 74.7%** (whole repo, reported). Suite 6,516 → 6,606 (+90 tests). mypy stayed 0, ruff clean.
+
+| File | Start → End |
+|---|---|
+| `web/api/integrations.py` | 45% → **100%** |
+| `web/api/knowledge_mem.py` | 47% → **99%** |
+| `web/api/agents_loops.py` | 21% → **99%** |
+| `web/websocket.py` | 46% → **88%** |
+
+**Method (per Odin's wave advisory — real interfaces, faked boundaries):** `knowledge_mem` drives a real `KnowledgeStore` (temp sqlite, FTS-only via `embedder=None`) and a real `ConversationReflector` (temp learned.json) with real round-tripping memory persistence — only embeddings faked. `integrations` fakes every remote service (MCP / Slack / issue-tracker / Grafana / webhooks): request parsing, validation, delegation — never the network. `agents_loops` uses real route dispatch with faked loop/agent/process runtime boundaries (no real loops started). `websocket` uses aiohttp's real ws test client for the `handle` message loop and `_handle_chat`; broadcast/close/tail helpers driven directly with hashable fake sockets; autouse `chdir(tmp_path)` isolates the relative `./data/audit.jsonl` tail read.
+
+**Uncovered by design:** the two `_iteration_cb` runtime closures in `agents_loops` (would require starting real loops — Odin: "don't worship the green bar"); `websocket`'s 1 s-poll log-tail loop (timing-heavy) plus a few deep auth/CLOSE branches; two dead-defensive `except` / `_safe_int_param` fallback lines in `knowledge_mem`.
+
+**COV ledger: EMPTY.** Every failing test during authoring was a *test-setup* error the production code corrected me on — dedup-skipped identical ingest, non-numeric `channel_id` → `int()` raise, `_validate_string` being length-only, `_safe_int_param` gracefully falling back (not 400), `SimpleNamespace` unhashable inside a socket set. No real bugs surfaced; no `xfail`s written.
+
+**Scope discipline:** the ratchet was reverted for three files my tests *incidentally* lifted (`knowledge/store.py`, `learning/reflector.py`, `web/api_common.py`) — kept at their looser ceilings so this PR's baseline diff is exactly its four target files, and to avoid locking a tighter number on `store.py` (past coverage nondeterminism). Those gains are real and claimable by a later targeted ratchet.
 
 ## 7. Risks / discipline
 
