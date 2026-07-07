@@ -100,11 +100,26 @@ class TestApplyUpdate:
             kill.assert_not_called()
 
     async def test_success_schedules_restart(self):
-        # Full stubbing: no git runs, no config I/O (exists→False), no pycache
-        # walk, and os.kill is a no-op so the SIGTERM can never fire.
+        # SAFETY (Odin's #200 blocker): the handler does
+        #   asyncio.get_event_loop().call_later(2, lambda: os.kill(getpid(), 15))
+        # The lambda resolves os.kill at FIRE time, not schedule time — patching
+        # os.kill alone would let a real SIGTERM fire if the loop outlives the
+        # test. Stub the RUNNING loop's call_later so the restart callback is
+        # recorded but never actually scheduled — impossible by construction.
+        # (Patching asyncio.get_event_loop wholesale breaks aiohttp, which uses
+        # the loop during the request; narrow the patch to call_later only.)
+        import asyncio
+        loop = asyncio.get_running_loop()
+        recorded: list = []
+
+        def _stub_call_later(delay, cb, *a):
+            recorded.append((delay, cb))
+            return MagicMock()  # a TimerHandle-shaped no-op; nothing is scheduled
+
         with patch("subprocess.run", side_effect=_run_ok), \
              patch("os.path.exists", return_value=False), \
              patch("os.walk", return_value=[]), \
+             patch.object(loop, "call_later", _stub_call_later), \
              patch("os.kill") as kill:
             async with TestClient(TestServer(_app())) as c:
                 # "latest" → resolved to v3.55.0 by _run_ok
@@ -112,7 +127,10 @@ class TestApplyUpdate:
                 assert r.status == 200
                 body = await r.json()
                 assert body["status"] == "updating" and body["version"] == "v3.55.0"
-            kill.assert_not_called()  # scheduled via call_later, never fired in-test
+        # the restart was scheduled with a 2s delay + a callback, but our stub
+        # never registers the SIGTERM callback on a live loop
+        assert any(delay == 2 and callable(cb) for delay, cb in recorded)
+        kill.assert_not_called()
 
     async def test_unexpected_exception_500(self):
         # subprocess raising mid-flow (inside the try) surfaces as a 500
