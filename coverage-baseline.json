@@ -1134,9 +1134,9 @@
   "statements": 219
  },
  "src/web/api/config_admin.py": {
-  "covered": 122,
-  "missing": 175,
-  "percent": 41.08,
+  "covered": 297,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 297
  },
  "src/web/api/integrations.py": {
@@ -1152,9 +1152,9 @@
   "statements": 249
  },
  "src/web/api/llm_admin.py": {
-  "covered": 103,
-  "missing": 293,
-  "percent": 26.01,
+  "covered": 393,
+  "missing": 3,
+  "percent": 99.24,
   "statements": 396
  },
  "src/web/api/observability.py": {
