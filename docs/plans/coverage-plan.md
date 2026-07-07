@@ -1,6 +1,6 @@
 # RFC-006: Test-Coverage Campaign (ratchet gate + prioritized waves)
 
-Status: R3 — CONT-1 COMPLETE (campaign shipped through P4b in §6b; P4-continuation CONT-1 in §6c). Plan of record was Odin-approved R1 (§6a).  CONT-2 + P5 deferred by design.
+Status: R3 — CONT-1 + CONT-2 COMPLETE (campaign shipped through P4b in §6b; P4-continuation CONT-1 in §6c, CONT-2 in §6d — all six deferred web-route surfaces now covered). Plan of record was Odin-approved R1 (§6a).  Only P5 (discord native tools) remains deferred.
 Campaign branch: `coverage/rfc006` (created after plan approval).
 Predecessors: RFC-005 (type-safety ratchet) is the template — a fail-closed CI ratchet plus incremental waves, security/high-value first. Unlike RFC-005, coverage waves add TESTS, not annotations: they can and will surface real bugs. Bug **fixes** are out-of-band (§5).
 
@@ -93,7 +93,7 @@ Required amendments, all adopted: **B1** ratchet redesigned to per-file missed-c
 
 **COV ledger: EMPTY.** Tests were written against never-walked authorization, credential-rotation, memory, skill, and admin-route code — every path behaved exactly as the tests pinned correct behavior. The gate's first act was catching its *own* nondeterminism (config `.env` branch + `store.py` exception-branch flake), both fixed deterministically, not by loosening the ratchet. Two genuine hygiene finds (relative-`Path("config.yml")` test hazard; a duplicate-named shadowed test) were fixed as they surfaced.
 
-**Deliberately deferred (a P4-continuation campaign, whenever there's appetite):** `web/api/config_admin.py` and `llm_admin.py` to ≥85 (CONT-2), plus `knowledge_mem`/`agents_loops`/`integrations`/`websocket` (CONT-1, done — §6c), and P5 (discord native tools). These are large multi-registrar route surfaces; Odin endorsed partial-per-file, and the ratchet holds every gain as the permanent floor while they wait.
+**Deliberately deferred (a P4-continuation campaign, whenever there's appetite):** `web/api/config_admin.py` and `llm_admin.py` to ≥85 (CONT-2, done — §6d), plus `knowledge_mem`/`agents_loops`/`integrations`/`websocket` (CONT-1, done — §6c), and P5 (discord native tools). These are large multi-registrar route surfaces; Odin endorsed partial-per-file, and the ratchet holds every gain as the permanent floor while they wait.
 
 ## 6c. R3 — P4-continuation CONT-1 (2026-07-07)
 
@@ -115,6 +115,25 @@ Picks up the §6b deferred web-route surfaces. Four files, one PR, Odin-reviewed
 **COV ledger: EMPTY.** Every failing test during authoring was a *test-setup* error the production code corrected me on — dedup-skipped identical ingest, non-numeric `channel_id` → `int()` raise, `_validate_string` being length-only, `_safe_int_param` gracefully falling back (not 400), `SimpleNamespace` unhashable inside a socket set. No real bugs surfaced; no `xfail`s written.
 
 **Scope discipline:** the ratchet was reverted for three files my tests *incidentally* lifted (`knowledge/store.py`, `learning/reflector.py`, `web/api_common.py`) — kept at their looser ceilings so this PR's baseline diff is exactly its four target files, and to avoid locking a tighter number on `store.py` (past coverage nondeterminism). Those gains are real and claimable by a later targeted ratchet.
+
+## 6d. R3 — P4-continuation CONT-2 (2026-07-07)
+
+The two large web-admin registrar surfaces from §6b, finished. One PR, Odin-reviewed, coverage-gated.
+
+| File | Start → End |
+|---|---|
+| `web/api/config_admin.py` | 41% → **100%** |
+| `web/api/llm_admin.py` | 26% → **99%** |
+
+Suite **+90 tests**; mypy 0, ruff clean.
+
+**Method:** real pydantic `Config` + faked components through the real aiohttp route layer. Two dangerous boundaries were stubbed by construction, not avoided: the setup wizard's success path schedules a SIGTERM to its own PID — `os.kill` is patched to a no-op so it can never reach the test runner; personality's global preset-registry mutation (`register_user_presets`) is patched so tests don't leak into each other. LLM-admin fakes aiohttp sessions and provider reloads (no network); `_persist_config`'s sync inner is stubbed so no test writes `config.yml`, while the SSRF `_validate_ollama_url`, `_parse_int`, `_safe_secret`, and the ruamel round-trip `_persist_llm_sections_sync` are unit-tested directly (getaddrinfo patched — private / public / link-local / unresolvable all covered without DNS).
+
+**Uncovered by design:** an unreachable `except Exception` after `ip_address()` in `_validate_ollama_url` (that call only raises `ValueError`) and a dead defensive non-http check in `probe-models` (guarded upstream by `_validate_ollama_url`) — 3 lines, both genuinely unreachable.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
+**End state:** the six web-route surfaces the §6b campaign deferred are now 88–100% covered; the coverage-no-drop ratchet holds each as a permanent floor. Only P5 (discord native tools) remains deferred.
 
 ## 7. Risks / discipline
 

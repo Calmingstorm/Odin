@@ -1,12 +1,17 @@
-"""Route-level coverage for src/web/api/config_admin.py (RFC-006 P4a).
+"""Route-level coverage for src/web/api/config_admin.py (RFC-006 P4a + CONT-2).
 
-Drives status/personality/discord/quick-action routes through the real route
-layer with a real pydantic Config and MagicMock components. These handler
-bodies (~23% covered) ran only in production.
+Drives status / setup / discord / config / personality / quick-action / startup
+routes through the real aiohttp route layer with a real pydantic Config and
+faked components. These handler bodies ran only in production before P4a; CONT-2
+finishes the surface. Dangerous boundaries are stubbed: the setup wizard's
+process-SIGTERM is patched to a no-op. Personality handlers run the real
+register_user_presets (2 trivial lines) with a snapshot/restore fixture around
+its system_prompt._USER_PRESETS global so registrations don't leak between tests.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from aiohttp import web
@@ -17,6 +22,8 @@ from src.web.api.config_admin import (
     register_discord_config,
     register_personality,
     register_quick_actions,
+    register_setup_wizard,
+    register_startup_diagnostics,
     register_status_info,
 )
 
@@ -27,6 +34,19 @@ def _isolate_cwd(tmp_path, monkeypatch):
     # (correct at /opt/odin in prod). Chdir to a temp dir so no test can
     # write the repo's tracked config.yml template.
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _restore_user_presets():
+    # Personality handlers call the real register_user_presets, which mutates
+    # the system_prompt._USER_PRESETS module global. Snapshot + restore around
+    # each test so registrations don't leak — the real 2-line function still
+    # runs (we exercise it rather than patch it out).
+    from src.llm import system_prompt
+    saved = dict(system_prompt._USER_PRESETS)
+    yield
+    system_prompt._USER_PRESETS.clear()
+    system_prompt._USER_PRESETS.update(saved)
 
 
 def _bot():
@@ -49,8 +69,8 @@ def _bot():
     return bot
 
 
-def _app(*registrars):
-    bot = _bot()
+def _app(*registrars, bot=None):
+    bot = bot or _bot()
     routes = web.RouteTableDef()
     for reg in registrars:
         reg(routes, bot)
@@ -59,6 +79,100 @@ def _app(*registrars):
     return app, bot
 
 
+# --------------------------------------------------------------------------- #
+# Fake discord objects
+# --------------------------------------------------------------------------- #
+def _channel(cid, name, position=0, category=None):
+    ch = SimpleNamespace(id=cid, name=name, position=position)
+    ch.category = SimpleNamespace(name=category) if category else None
+    return ch
+
+
+def _guild(gid=1, name="Guild", members=None, channels=None):
+    g = SimpleNamespace(id=gid, name=name, member_count=10)
+    g.icon = SimpleNamespace(url="http://icon")
+    g.text_channels = channels or []
+    g.members = members or []
+    return g
+
+
+def _member(mid, name, bot=False):
+    return SimpleNamespace(
+        id=mid, name=name, display_name=name.title(),
+        display_avatar=SimpleNamespace(url=f"http://a/{mid}"), bot=bot,
+    )
+
+
+def _channel_config():
+    cc = MagicMock()
+    cc.get_guild_config.return_value = {"enabled": True}
+    cc.get_channel_config.return_value = {}
+    cc.should_require_mention.return_value = True
+    cc.is_enabled.return_value = True
+    cc.should_respond_to_bots.return_value = False
+    cc.set_guild_config.return_value = {"enabled": False}
+    cc.set_channel_config.return_value = {"enabled": True}
+    return cc
+
+
+# --------------------------------------------------------------------------- #
+# Setup wizard
+# --------------------------------------------------------------------------- #
+class TestSetupWizard:
+    @pytest.mark.asyncio
+    async def test_status(self):
+        app, _ = _app(register_setup_wizard)
+        async with TestClient(TestServer(app)) as c:
+            # empty tmp dir → no config.yml → setup is needed
+            assert (await (await c.get("/api/setup/status")).json())["needed"] is True
+
+    @pytest.mark.asyncio
+    async def test_complete_already_done_409(self):
+        app, _ = _app(register_setup_wizard)
+        with patch("src.web.api.config_admin.is_setup_needed", return_value=False):
+            async with TestClient(TestServer(app)) as c:
+                assert (await c.post("/api/setup/complete", json={})).status == 409
+
+    @pytest.mark.asyncio
+    async def test_complete_validation(self):
+        app, _ = _app(register_setup_wizard)
+        async with TestClient(TestServer(app)) as c:  # setup needed (empty dir)
+            assert (await c.post("/api/setup/complete", data="bad")).status == 400
+            assert (await c.post("/api/setup/complete", json={})).status == 400  # no token
+            with patch("src.web.api.config_admin.validate_token_format", return_value=False):
+                r = await c.post("/api/setup/complete", json={"discord_token": "x"})
+                assert r.status == 400
+
+    @pytest.mark.asyncio
+    async def test_complete_success_writes_and_schedules_restart(self):
+        app, _ = _app(register_setup_wizard)
+        # Patch the process-kill primitive to a no-op — the handler schedules a
+        # SIGTERM to itself on success; it must never reach the test runner.
+        with patch("src.web.api.config_admin.validate_token_format", return_value=True), \
+             patch("os.kill") as kill:
+            async with TestClient(TestServer(app)) as c:
+                r = await c.post("/api/setup/complete", json={
+                    "discord_token": "fake-token",
+                    "hosts": {"srv": {"address": "10.0.0.1", "ssh_user": "root"}},
+                    "features": {"browser": True, "voice": False},
+                    "web_api_token": "tok", "timezone": "UTC",
+                })
+                assert r.status == 200 and (await r.json())["restart_scheduled"] is True
+            kill.assert_not_called()  # scheduled via call_later(2s), not fired in-test
+
+    @pytest.mark.asyncio
+    async def test_complete_write_failure_500(self):
+        app, _ = _app(register_setup_wizard)
+        with patch("src.web.api.config_admin.validate_token_format", return_value=True), \
+             patch("src.web.api.config_admin._write_config", side_effect=OSError("disk full")):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.post("/api/setup/complete", json={"discord_token": "fake-token"})
+                assert r.status == 500
+
+
+# --------------------------------------------------------------------------- #
+# Status
+# --------------------------------------------------------------------------- #
 class TestStatus:
     @pytest.mark.asyncio
     async def test_get_status_aggregates(self):
@@ -81,7 +195,181 @@ class TestStatus:
             body = await (await c.get("/api/status")).json()
             assert body["guild_count"] == 1 and body["user_count"] == 10
 
+    @pytest.mark.asyncio
+    async def test_status_agents_processes_monitoring_populated(self):
+        app, bot = _app(register_status_info)
+        bot.agent_manager._agents = {
+            "a": SimpleNamespace(status="running"),
+            "b": SimpleNamespace(status="done"),
+        }
+        bot.tool_executor._process_registry._processes = {
+            1: SimpleNamespace(status="running"),
+        }
+        bot.infra_watcher = SimpleNamespace(
+            get_status=lambda: {"enabled": True, "checks": 4, "running": 1, "active_alerts": 0}
+        )
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/status")).json()
+            assert body["agent_count"] == 2 and body["agent_running"] == 1
+            assert body["process_count"] == 1 and body["process_running"] == 1
+            assert body["monitoring"]["enabled"] is True
 
+    @pytest.mark.asyncio
+    async def test_status_non_dict_registries_fall_back(self):
+        app, bot = _app(register_status_info)
+        bot.agent_manager._agents = "not-a-dict"
+        bot.tool_executor._process_registry._processes = "not-a-dict"
+        bot.infra_watcher = SimpleNamespace(get_status=lambda: "not-a-dict")
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/status")).json()
+            assert body["agent_count"] == 0 and body["process_count"] == 0
+            assert body["monitoring"] == {
+                "enabled": False, "checks": 0, "running": 0, "active_alerts": 0}
+
+
+# --------------------------------------------------------------------------- #
+# Discord config
+# --------------------------------------------------------------------------- #
+class TestDiscordConfig:
+    @pytest.mark.asyncio
+    async def test_guilds_with_channels(self):
+        app, bot = _app(register_discord_config)
+        bot.channel_config = _channel_config()
+        bot.guilds = [_guild(channels=[_channel(20, "general", 0, "Cat"),
+                                        _channel(21, "random", 1)])]
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/discord/guilds")).json()
+            assert body[0]["name"] == "Guild" and len(body[0]["channels"]) == 2
+            assert body[0]["channels"][0]["effective"]["require_mention"] is True
+
+    @pytest.mark.asyncio
+    async def test_members_deduped_sorted(self):
+        app, bot = _app(register_discord_config)
+        g1 = _guild(members=[_member(1, "zed"), _member(2, "amy")])
+        g2 = _guild(gid=2, members=[_member(2, "amy"), _member(3, "bob", bot=True)])
+        bot.guilds = [g1, g2]
+        async with TestClient(TestServer(app)) as c:
+            members = await (await c.get("/api/discord/members")).json()
+            assert [m["id"] for m in members] == ["2", "3", "1"]  # by display_name
+
+    @pytest.mark.asyncio
+    async def test_guild_and_channel_config_put(self):
+        app, bot = _app(register_discord_config)
+        bot.channel_config = _channel_config()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/discord/guild/5/config", json={"enabled": False})
+            assert r.status == 200 and (await r.json())["guild_id"] == "5"
+            assert (await c.put("/api/discord/guild/5/config", data="bad")).status == 400
+            r = await c.put("/api/discord/channel/9/config", json={"clear": True})
+            assert r.status == 200 and (await r.json())["channel_id"] == "9"
+            assert (await c.put("/api/discord/channel/9/config", data="bad")).status == 400
+
+    @pytest.mark.asyncio
+    async def test_health_and_resource_and_streams(self):
+        app, bot = _app(register_discord_config)
+        bot.tool_executor.output_streamer = SimpleNamespace(
+            enabled_tools={"run_command"}, get_active_streams=lambda: [])
+        with patch("src.health.checker.check_all", return_value={"ok": True}), \
+             patch("src.monitoring.resource_usage.collect_all", return_value={"cpu": 1}):
+            async with TestClient(TestServer(app)) as c:
+                assert (await (await c.get("/api/health/components")).json())["ok"] is True
+                assert (await (await c.get("/api/resource-usage")).json())["cpu"] == 1
+                s = await (await c.get("/api/tool-streams")).json()
+                assert s["enabled"] is True and s["enabled_tools"] == ["run_command"]
+
+    @pytest.mark.asyncio
+    async def test_tool_streams_disabled(self):
+        app, bot = _app(register_discord_config)
+        bot.tool_executor.output_streamer = None
+        async with TestClient(TestServer(app)) as c:
+            assert (await (await c.get("/api/tool-streams")).json())["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_config_get_redacts(self):
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config")).json()
+            # the discord token is redacted, never returned in the clear
+            assert body["discord"]["token"] != "fake"
+
+    @pytest.mark.asyncio
+    async def test_config_put_paths(self):
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            assert (await c.put("/api/config", data="bad")).status == 400
+            assert (await c.put("/api/config", json=[1, 2])).status == 400  # not an object
+            # sensitive field blocked
+            assert (await c.put("/api/config",
+                                json={"discord": {"token": "new"}})).status == 403
+            # invalid value → Config reconstruction fails
+            assert (await c.put("/api/config",
+                                json={"tools": {"max_tool_iterations_chat": "nope"}})).status == 400
+            # valid update applies
+            r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 7}})
+            assert r.status == 200
+            assert bot.config.tools.max_tool_iterations_chat == 7
+
+    @pytest.mark.asyncio
+    async def test_config_put_persists_when_file_exists(self):
+        from pathlib import Path
+        Path("config.yml").write_text("discord:\n  token: fake\n")
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 9}})
+            assert r.status == 200  # persist branch taken (file exists)
+
+    @pytest.mark.asyncio
+    async def test_config_put_persist_failure_still_200(self):
+        from pathlib import Path
+        Path("config.yml").write_text("discord:\n  token: fake\n")
+        app, bot = _app(register_discord_config)
+        with patch("src.web.api.config_admin._write_config", side_effect=OSError("ro")):
+            async with TestClient(TestServer(app)) as c:
+                # persist fails but the in-memory apply still succeeds
+                r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 6}})
+                assert r.status == 200
+
+    @pytest.mark.asyncio
+    async def test_config_put_diff_failure_still_200(self):
+        app, bot = _app(register_discord_config)
+        with patch("src.audit.diff_tracker.compute_dict_diff", side_effect=RuntimeError("x")):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 6}})
+                assert r.status == 200  # diff failure swallowed, config_diff=None
+
+
+# --------------------------------------------------------------------------- #
+# Quick actions
+# --------------------------------------------------------------------------- #
+class TestQuickActions:
+    @pytest.mark.asyncio
+    async def test_clear_all_dev_mode(self):
+        app, bot = _app(register_quick_actions)
+        bot.api_token_manager = None  # no auth configured → dev mode allows
+        bot.sessions.clear_all.return_value = 4
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post("/api/sessions/clear-all")
+            assert r.status == 200 and (await r.json())["count"] == 4
+
+    @pytest.mark.asyncio
+    async def test_clear_all_denied_when_auth_configured(self):
+        app, bot = _app(register_quick_actions)
+        bot.api_token_manager = None
+        bot.config.web.api_token = "secret"  # auth configured, no identity → 403
+        async with TestClient(TestServer(app)) as c:
+            assert (await c.post("/api/sessions/clear-all")).status == 403
+
+    @pytest.mark.asyncio
+    async def test_reload(self):
+        app, bot = _app(register_quick_actions)
+        async with TestClient(TestServer(app)) as c:
+            assert (await (await c.post("/api/reload")).json())["status"] == "reloaded"
+            bot.prompt_builder.rebuild_default.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# Personality
+# --------------------------------------------------------------------------- #
 class TestPersonality:
     @pytest.mark.asyncio
     async def test_get_personality(self):
@@ -94,27 +382,69 @@ class TestPersonality:
     @pytest.mark.asyncio
     async def test_update_personality_and_bad_json(self):
         app, bot = _app(register_personality)
-        bot.prompt_builder = MagicMock()
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/personality", json={"preset": "odin"})
-            assert r.status in (200, 400)  # accepts or validates
+            assert r.status == 200 and (await r.json())["preset"] == "odin"
             assert (await c.put("/api/personality", data="bad")).status == 400
 
-
-class TestDiscordConfig:
     @pytest.mark.asyncio
-    async def test_discord_guilds_empty(self):
-        app, bot = _app(register_discord_config)
-        bot.channel_config = MagicMock()
+    async def test_save_preset(self):
+        app, bot = _app(register_personality)
         async with TestClient(TestServer(app)) as c:
-            r = await c.get("/api/discord/guilds")
-            assert r.status == 200
-            assert isinstance(await r.json(), (list, dict))
+            assert (await c.post("/api/personality/presets", data="bad")).status == 400
+            assert (await c.post("/api/personality/presets", json={})).status == 400  # no name
+            assert (await c.post("/api/personality/presets",
+                                 json={"name": "bad name!"})).status == 400  # bad chars
+            # cannot overwrite a built-in preset name
+            assert (await c.post("/api/personality/presets",
+                                 json={"name": "odin", "identity": "x"})).status == 400
+            assert (await c.post("/api/personality/presets",
+                                 json={"name": "custom1"})).status == 400  # no identity/voice
+            r = await c.post("/api/personality/presets",
+                             json={"name": "custom1", "identity": "witty"})
+            assert r.status == 200 and (await r.json())["name"] == "custom1"
+            assert "custom1" in bot.config.personality.user_presets
 
-
-class TestQuickActions:
     @pytest.mark.asyncio
-    async def test_quick_actions_registered(self):
-        # Smoke: the registrar wires without error and its routes respond.
-        app, bot = _app(register_quick_actions)
-        assert app is not None
+    async def test_delete_preset(self):
+        app, bot = _app(register_personality)
+        from src.config.schema import PersonalityPreset
+        bot.config.personality.user_presets["mine"] = PersonalityPreset(
+            name="Mine", identity="i", voice="v")
+        async with TestClient(TestServer(app)) as c:
+            assert (await c.delete("/api/personality/presets/odin")).status == 400  # builtin
+            assert (await c.delete("/api/personality/presets/ghost")).status == 404
+            r = await c.delete("/api/personality/presets/mine")
+            assert r.status == 200 and (await r.json())["name"] == "mine"
+            assert "mine" not in bot.config.personality.user_presets
+
+    @pytest.mark.asyncio
+    async def test_delete_preset_resets_active(self):
+        app, bot = _app(register_personality)
+        from src.config.schema import PersonalityPreset
+        bot.config.personality.user_presets["active"] = PersonalityPreset(
+            name="A", identity="i", voice="v")
+        bot.config.personality.preset = "active"
+        async with TestClient(TestServer(app)) as c:
+            assert (await c.delete("/api/personality/presets/active")).status == 200
+            assert bot.config.personality.preset == "odin"  # reset to default
+
+
+# --------------------------------------------------------------------------- #
+# Startup diagnostics
+# --------------------------------------------------------------------------- #
+class TestStartupDiagnostics:
+    @pytest.mark.asyncio
+    async def test_unavailable_503(self):
+        app, bot = _app(register_startup_diagnostics)
+        bot.startup_report = None
+        async with TestClient(TestServer(app)) as c:
+            assert (await c.get("/api/startup/diagnostics")).status == 503
+
+    @pytest.mark.asyncio
+    async def test_available(self):
+        app, bot = _app(register_startup_diagnostics)
+        bot.startup_report = SimpleNamespace(to_dict=lambda: {"checks": 8, "passed": 8})
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/startup/diagnostics")).json()
+            assert body["checks"] == 8
