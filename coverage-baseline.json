@@ -216,27 +216,27 @@
   "statements": 2
  },
  "src/discord/native_tools/agents_tasks.py": {
-  "covered": 111,
-  "missing": 210,
-  "percent": 34.58,
+  "covered": 304,
+  "missing": 17,
+  "percent": 94.7,
   "statements": 321
  },
  "src/discord/native_tools/channel_ops.py": {
-  "covered": 17,
-  "missing": 96,
-  "percent": 15.04,
+  "covered": 113,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 113
  },
  "src/discord/native_tools/knowledge.py": {
-  "covered": 20,
-  "missing": 97,
-  "percent": 17.09,
+  "covered": 117,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 117
  },
  "src/discord/native_tools/media.py": {
-  "covered": 21,
-  "missing": 145,
-  "percent": 12.65,
+  "covered": 166,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 166
  },
  "src/discord/native_tools/registry.py": {
@@ -246,9 +246,9 @@
   "statements": 89
  },
  "src/discord/native_tools/scheduling.py": {
-  "covered": 57,
-  "missing": 67,
-  "percent": 45.97,
+  "covered": 124,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 124
  },
  "src/discord/native_tools/skills_tools.py": {
