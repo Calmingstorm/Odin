@@ -247,3 +247,102 @@ class TestAccountOps:
         path.unlink()
         async with TestClient(TestServer(_app(bot))) as c:
             assert (await c.delete("/api/codex/account/0")).status == 404
+
+
+def _bot_raw(tmp_path, content):
+    """Bot with an arbitrary creds-file content and no pool (codex_client=None),
+    isolating the file-manipulation branches of set_label / delete_account."""
+    creds_path = tmp_path / "codex.json"
+    creds_path.write_text(content)
+    bot = MagicMock()
+    bot.config.openai_codex.credentials_path = str(creds_path)
+    bot.llm_gateway.codex_client = None
+    return bot, creds_path
+
+
+class TestAccountOpsEdges:
+    @pytest.mark.asyncio
+    async def test_set_label_dict_file(self, tmp_path):
+        bot, path = _bot_raw(tmp_path, json.dumps(_creds(email="d@x.co")))   # single dict
+        async with TestClient(TestServer(_app(bot))) as c:
+            r = await c.put("/api/codex/account/0/label", json={"label": "solo"})
+            assert r.status == 200 and json.loads(path.read_text())["label"] == "solo"
+            assert (await c.put("/api/codex/account/1/label",
+                                json={"label": "x"})).status == 400          # invalid dict index
+
+    @pytest.mark.asyncio
+    async def test_set_label_unreadable_file(self, tmp_path):
+        bot, _ = _bot_raw(tmp_path, "{ not valid json")
+        async with TestClient(TestServer(_app(bot))) as c:
+            assert (await c.put("/api/codex/account/0/label",
+                                json={"label": "x"})).status == 500          # read fails
+
+    @pytest.mark.asyncio
+    async def test_delete_dict_file(self, tmp_path):
+        bot, path = _bot_raw(tmp_path, json.dumps(_creds(email="d@x.co")))
+        async with TestClient(TestServer(_app(bot))) as c:
+            assert (await c.delete("/api/codex/account/0")).status == 200     # dict-index-0
+            assert json.loads(path.read_text()) == []                        # cleared to []
+            path.write_text(json.dumps(_creds()))                            # reset to a dict
+            assert (await c.delete("/api/codex/account/1")).status == 400     # invalid dict index
+
+    @pytest.mark.asyncio
+    async def test_delete_unreadable_file(self, tmp_path):
+        bot, _ = _bot_raw(tmp_path, "{ broken")
+        async with TestClient(TestServer(_app(bot))) as c:
+            assert (await c.delete("/api/codex/account/0")).status == 500     # read fails
+
+    @pytest.mark.asyncio
+    async def test_refresh_raises_500(self, tmp_path, monkeypatch):
+        bot, _ = _make_bot(tmp_path, accounts=1)
+        monkeypatch.setattr(ca.CodexAuth, "_refresh",
+                            AsyncMock(side_effect=RuntimeError("boom")))
+        async with TestClient(TestServer(_app(bot))) as c:
+            assert (await c.post("/api/codex/account/0/refresh")).status == 500
+
+    @pytest.mark.asyncio
+    async def test_activate_unconfigured_503(self, tmp_path):
+        bot, _ = _make_bot(tmp_path, configured=False)
+        async with TestClient(TestServer(_app(bot))) as c:
+            assert (await c.post("/api/codex/account/0/activate")).status == 503
+
+
+class TestDevicePollMerge:
+    @pytest.mark.asyncio
+    async def test_out_of_range_save_index_appends(self, tmp_path, monkeypatch):
+        bot, path = _make_bot(tmp_path, accounts=1)
+        bot.llm_gateway.reload_codex = AsyncMock(return_value={"configured": True})
+        monkeypatch.setattr(ca.CodexAuth, "poll_device_auth",
+                            AsyncMock(return_value=_creds(access="oor", account_id="9")))
+        async with TestClient(TestServer(_app(bot))) as c:
+            r = await c.post("/api/codex/device-poll",
+                             json={"device_auth_id": "d", "user_code": "AB", "save_index": 5})
+            assert r.status == 200
+        data = json.loads(path.read_text())
+        assert len(data) == 2 and data[1]["access_token"] == "oor"       # appended, not replaced
+
+    @pytest.mark.asyncio
+    async def test_dict_file_with_save_index_promotes(self, tmp_path, monkeypatch):
+        bot, path = _bot_raw(tmp_path, json.dumps(_creds(email="orig@x.co")))  # dict file
+        bot.llm_gateway.reload_codex = AsyncMock(return_value={"configured": True})
+        monkeypatch.setattr(ca.CodexAuth, "poll_device_auth",
+                            AsyncMock(return_value=_creds(access="promoted")))
+        async with TestClient(TestServer(_app(bot))) as c:
+            r = await c.post("/api/codex/device-poll",
+                             json={"device_auth_id": "d", "user_code": "AB", "save_index": 0})
+            assert r.status == 200
+        data = json.loads(path.read_text())
+        assert isinstance(data, list) and len(data) == 2                 # [orig, new]
+
+    @pytest.mark.asyncio
+    async def test_no_file_writes_fresh(self, tmp_path, monkeypatch):
+        bot, path = _bot_raw(tmp_path, "")
+        path.unlink()                                                    # no creds file
+        bot.llm_gateway.reload_codex = AsyncMock(return_value={"configured": True})
+        monkeypatch.setattr(ca.CodexAuth, "poll_device_auth",
+                            AsyncMock(return_value=_creds(access="fresh")))
+        async with TestClient(TestServer(_app(bot))) as c:
+            r = await c.post("/api/codex/device-poll",
+                             json={"device_auth_id": "d", "user_code": "AB"})
+            assert r.status == 200
+        assert json.loads(path.read_text())[0]["access_token"] == "fresh"
