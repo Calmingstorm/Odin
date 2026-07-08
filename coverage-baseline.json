@@ -558,9 +558,9 @@
   "statements": 3
  },
  "src/observability/aggregates.py": {
-  "covered": 108,
-  "missing": 19,
-  "percent": 85.04,
+  "covered": 122,
+  "missing": 5,
+  "percent": 96.06,
   "statements": 127
  },
  "src/observability/context_trace.py": {
@@ -1098,9 +1098,9 @@
   "statements": 2
  },
  "src/trajectories/saver.py": {
-  "covered": 173,
-  "missing": 19,
-  "percent": 90.1,
+  "covered": 181,
+  "missing": 11,
+  "percent": 94.27,
   "statements": 192
  },
  "src/version.py": {
