@@ -711,7 +711,6 @@ class TestResourceUsageAPI:
         bot.tool_executor.config.hosts = {}
         bot.tool_executor.ssh_pool = None
         bot.tool_executor._browser_manager = None
-        bot.infra_watcher = None
         bot.config.web.api_token = ""
         bot.config.web.session_timeout_minutes = 30
         bot.config.model_dump.return_value = {}

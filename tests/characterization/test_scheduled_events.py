@@ -1,5 +1,5 @@
 """Characterization: scheduler/digest/monitor callbacks (_on_scheduled_task,
-_run_scheduled_workflow, _execute_scheduled_tool, _on_monitor_alert,
+_run_scheduled_workflow, _execute_scheduled_tool,
 _on_schedule_failure).
 
 Pins the action routing, workflow step semantics (conditions, on_failure
@@ -229,23 +229,6 @@ class TestExecuteScheduledTool:
 
 
 class TestAlerts:
-    async def test_monitor_alert_falls_back_to_first_configured_channel(
-        self, tmp_path, monkeypatch
-    ):
-        bot = make_bot(
-            fake_llm=FakeLLM([]),
-            config_overrides={"discord": {"channels": ["777"]}},
-        )
-        channel = FakeChannel(id=777)
-        bot.get_channel = lambda cid: channel if int(cid) == 777 else None
-        await bot.scheduled_events._on_monitor_alert("CPU at 99% on desktop")
-        assert channel.sent_texts == ["CPU at 99% on desktop"]
-
-    async def test_monitor_alert_with_no_channel_is_dropped(self, bot_and_channel):
-        bot, channel = bot_and_channel
-        await bot.scheduled_events._on_monitor_alert("nowhere to go")
-        assert channel.sent == []
-
     async def test_schedule_failure_alert_posts_threshold_message(self, bot_and_channel):
         bot, channel = bot_and_channel
         await bot.scheduled_events._on_schedule_failure(

@@ -40,7 +40,6 @@ SERVICE_HANDLES = [
     "channel_config",
     "channel_logger",
     "context_loader",
-    "infra_watcher",
     "browser_manager",
     "permissions",
     "host_access_manager",
@@ -134,7 +133,7 @@ RETIRED_BOT_ATTRS = [
     "_recent_actions", "_last_op_details", "_background_tasks",
     # scheduled-events delegates
     "_on_scheduled_task", "_on_schedule_failure", "_on_scheduled_digest",
-    "_on_monitor_alert", "_execute_scheduled_tool", "_run_scheduled_workflow",
+    "_execute_scheduled_tool", "_run_scheduled_workflow",
     "_format_digest_raw", "_resolve_mentions",
     # web-owned state formerly parked on the bot
     "_web_channel_locks",

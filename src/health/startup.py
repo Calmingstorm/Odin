@@ -403,16 +403,6 @@ def check_config_sections(config: Any) -> DiagnosticResult:
         if not api_token:
             issues.append("web.api_token is empty — API has no authentication (dev mode)")
 
-    # Monitoring: if enabled, check it has at least one check
-    mon_cfg = getattr(config, "monitoring", None)
-    if mon_cfg and getattr(mon_cfg, "enabled", False):
-        checks = getattr(mon_cfg, "checks", [])
-        if not checks:
-            issues.append("monitoring.enabled=true but no checks defined")
-        alert_channel = getattr(mon_cfg, "alert_channel_id", "")
-        if not alert_channel:
-            issues.append("monitoring.enabled=true but alert_channel_id is empty")
-
     # Webhook: if enabled, verify secret is set
     webhook_cfg = getattr(config, "webhook", None)
     if webhook_cfg and getattr(webhook_cfg, "enabled", False):

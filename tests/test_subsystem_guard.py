@@ -700,7 +700,7 @@ class TestGuardLifecycle:
 
 class TestDefaultMessages:
     def test_all_known_subsystems_have_messages(self):
-        expected = {"knowledge", "browser", "mcp", "monitoring", "sessions", "scheduler"}
+        expected = {"knowledge", "browser", "mcp", "sessions", "scheduler"}
         assert set(_DEFAULT_MESSAGES.keys()) == expected
 
     def test_all_messages_mention_unavailable(self):

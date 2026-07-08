@@ -75,26 +75,6 @@ class TestTwoStageComposition:
     def test_gateway_owns_the_llm_surface(self, bot):
         assert bot.llm_gateway is bot.components.llm_gateway
 
-    def test_infra_watcher_alert_callback_binds_scheduled_events(self, tmp_path):
-        bot = make_bot(
-            fake_llm=FakeLLM([]),
-            config_overrides={
-                "monitoring": {
-                    "enabled": True,
-                    "checks": [{"name": "disk", "type": "disk", "threshold": 95}],
-                }
-            },
-        )
-        assert bot.infra_watcher is not None
-        cb = bot.infra_watcher._alert_callback
-        assert getattr(cb, "__self__", None) is bot.scheduled_events, (
-            "R1: the alert callback must bind the scheduled-events component "
-            "directly, not a bot delegate"
-        )
-
-    def test_infra_watcher_absent_but_attribute_none_by_default(self, bot):
-        assert bot.infra_watcher is None  # attribute exists, None when disabled
-
     def test_scheduler_start_wires_scheduled_events_methods(self):
         # on_ready is too heavy to drive here (guild sync); pin the spelling.
         from src.discord.client import OdinBot

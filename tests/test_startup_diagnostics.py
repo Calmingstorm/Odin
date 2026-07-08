@@ -488,8 +488,6 @@ class TestCheckConfigSections:
         cfg.web = MagicMock()
         cfg.web.enabled = True
         cfg.web.api_token = "secret123"
-        cfg.monitoring = MagicMock()
-        cfg.monitoring.enabled = False
         cfg.webhook = MagicMock()
         cfg.webhook.enabled = False
         result = check_config_sections(cfg)
@@ -507,8 +505,6 @@ class TestCheckConfigSections:
         cfg.discord.token = ""
         cfg.web = MagicMock()
         cfg.web.enabled = False
-        cfg.monitoring = MagicMock()
-        cfg.monitoring.enabled = False
         cfg.webhook = MagicMock()
         cfg.webhook.enabled = False
         result = check_config_sections(cfg)
@@ -522,45 +518,12 @@ class TestCheckConfigSections:
         cfg.web = MagicMock()
         cfg.web.enabled = True
         cfg.web.api_token = ""
-        cfg.monitoring = MagicMock()
-        cfg.monitoring.enabled = False
         cfg.webhook = MagicMock()
         cfg.webhook.enabled = False
         result = check_config_sections(cfg)
         assert result.passed is False
         assert "api_token" in result.detail
 
-    def test_monitoring_no_checks(self):
-        cfg = MagicMock()
-        cfg.discord = MagicMock()
-        cfg.discord.token = "tok"
-        cfg.web = MagicMock()
-        cfg.web.enabled = False
-        cfg.monitoring = MagicMock()
-        cfg.monitoring.enabled = True
-        cfg.monitoring.checks = []
-        cfg.monitoring.alert_channel_id = "123"
-        cfg.webhook = MagicMock()
-        cfg.webhook.enabled = False
-        result = check_config_sections(cfg)
-        assert result.passed is False
-        assert "no checks" in result.detail
-
-    def test_monitoring_no_alert_channel(self):
-        cfg = MagicMock()
-        cfg.discord = MagicMock()
-        cfg.discord.token = "tok"
-        cfg.web = MagicMock()
-        cfg.web.enabled = False
-        cfg.monitoring = MagicMock()
-        cfg.monitoring.enabled = True
-        cfg.monitoring.checks = [MagicMock()]
-        cfg.monitoring.alert_channel_id = ""
-        cfg.webhook = MagicMock()
-        cfg.webhook.enabled = False
-        result = check_config_sections(cfg)
-        assert result.passed is False
-        assert "alert_channel_id" in result.detail
 
     def test_webhook_no_secret(self):
         cfg = MagicMock()
@@ -568,8 +531,6 @@ class TestCheckConfigSections:
         cfg.discord.token = "tok"
         cfg.web = MagicMock()
         cfg.web.enabled = False
-        cfg.monitoring = MagicMock()
-        cfg.monitoring.enabled = False
         cfg.webhook = MagicMock()
         cfg.webhook.enabled = True
         cfg.webhook.secret = ""
@@ -584,8 +545,6 @@ class TestCheckConfigSections:
         cfg.web = MagicMock()
         cfg.web.enabled = True
         cfg.web.api_token = ""
-        cfg.monitoring = MagicMock()
-        cfg.monitoring.enabled = False
         cfg.webhook = MagicMock()
         cfg.webhook.enabled = False
         result = check_config_sections(cfg)
@@ -694,8 +653,6 @@ class TestRunStartupDiagnostics:
         yaml_cfg.discord.token = "tok"
         yaml_cfg.web = MagicMock()
         yaml_cfg.web.enabled = False
-        yaml_cfg.monitoring = MagicMock()
-        yaml_cfg.monitoring.enabled = False
         yaml_cfg.webhook = MagicMock()
         yaml_cfg.webhook.enabled = False
 
@@ -721,8 +678,6 @@ class TestRunStartupDiagnostics:
         yaml_cfg.discord.token = "tok"
         yaml_cfg.web = MagicMock()
         yaml_cfg.web.enabled = False
-        yaml_cfg.monitoring = MagicMock()
-        yaml_cfg.monitoring.enabled = False
         yaml_cfg.webhook = MagicMock()
         yaml_cfg.webhook.enabled = False
 
@@ -759,8 +714,6 @@ class TestRunStartupDiagnostics:
         yaml_cfg.discord.token = "tok"
         yaml_cfg.web = MagicMock()
         yaml_cfg.web.enabled = False
-        yaml_cfg.monitoring = MagicMock()
-        yaml_cfg.monitoring.enabled = False
         yaml_cfg.webhook = MagicMock()
         yaml_cfg.webhook.enabled = False
 
@@ -901,10 +854,6 @@ class TestRealWorldScenarios:
         yaml_cfg.web = MagicMock()
         yaml_cfg.web.enabled = True
         yaml_cfg.web.api_token = "supersecret"
-        yaml_cfg.monitoring = MagicMock()
-        yaml_cfg.monitoring.enabled = True
-        yaml_cfg.monitoring.checks = [MagicMock()]
-        yaml_cfg.monitoring.alert_channel_id = "123456"
         yaml_cfg.webhook = MagicMock()
         yaml_cfg.webhook.enabled = False
 
@@ -931,8 +880,6 @@ class TestRealWorldScenarios:
         yaml_cfg.discord.token = "dev_token"
         yaml_cfg.web = MagicMock()
         yaml_cfg.web.enabled = False
-        yaml_cfg.monitoring = MagicMock()
-        yaml_cfg.monitoring.enabled = False
         yaml_cfg.webhook = MagicMock()
         yaml_cfg.webhook.enabled = False
 
@@ -964,10 +911,6 @@ class TestRealWorldScenarios:
         yaml_cfg.web = MagicMock()
         yaml_cfg.web.enabled = True
         yaml_cfg.web.api_token = ""
-        yaml_cfg.monitoring = MagicMock()
-        yaml_cfg.monitoring.enabled = True
-        yaml_cfg.monitoring.checks = []
-        yaml_cfg.monitoring.alert_channel_id = ""
         yaml_cfg.webhook = MagicMock()
         yaml_cfg.webhook.enabled = False
 

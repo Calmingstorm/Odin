@@ -540,23 +540,6 @@ class MessageTriggerConfig(BaseModel):
     allowed_user_ids: list[str] = Field(default_factory=list)  # Empty = all users
 
 
-class MonitorCheck(BaseModel):
-    name: str
-    type: str  # "disk", "memory", "service", "promql"
-    hosts: list[str] = Field(default_factory=list)
-    services: list[str] = Field(default_factory=list)  # for type "service"
-    threshold: int = 90  # percent, for disk/memory
-    query: str = ""  # for type "promql"
-    interval_minutes: int = 30
-
-
-class MonitoringConfig(BaseModel):
-    enabled: bool = False
-    checks: list[MonitorCheck] = Field(default_factory=list)
-    alert_channel_id: str = ""
-    cooldown_minutes: int = 60
-
-
 class SlackConfig(BaseModel):
     enabled: bool = False
     webhook_urls: dict[str, str] = Field(default_factory=dict)
@@ -704,7 +687,6 @@ class Config(BaseModel):
     observability: ObservabilityConfig = ObservabilityConfig()
     email: EmailConfig = EmailConfig()
     search: SearchConfig = SearchConfig()
-    monitoring: MonitoringConfig = MonitoringConfig()
     browser: BrowserConfig = BrowserConfig()
     permissions: PermissionsConfig = PermissionsConfig()
     comfyui: ComfyUIConfig = ComfyUIConfig()

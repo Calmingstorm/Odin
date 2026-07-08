@@ -123,11 +123,6 @@ _DEFAULT_MESSAGES: dict[str, str] = {
         "External MCP tools are offline. "
         "Other tools remain functional."
     ),
-    "monitoring": (
-        "Infrastructure monitoring is currently unavailable. "
-        "Proactive alerts are paused. "
-        "Other tools remain functional."
-    ),
     "sessions": (
         "Session manager is currently unavailable. "
         "Conversation history may not persist. "

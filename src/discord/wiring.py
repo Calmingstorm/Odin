@@ -788,13 +788,6 @@ async def shutdown_services(bot) -> None:
         except Exception:
             log.exception("Error stopping scheduler")
 
-    watcher = getattr(bot, "infra_watcher", None)
-    if watcher is not None:
-        try:
-            await watcher.stop()
-        except Exception:
-            log.exception("Error stopping watcher")
-
     health_server = getattr(bot, "health_server", None)
     if health_server is not None:
         try:

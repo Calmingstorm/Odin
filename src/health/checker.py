@@ -237,37 +237,6 @@ def check_ssh_hosts(bot: OdinBot) -> ComponentStatus:
         )
 
 
-def check_monitoring(bot: OdinBot) -> ComponentStatus:
-    watcher = getattr(bot, "infra_watcher", None)
-    if watcher is None:
-        return ComponentStatus(
-            name="monitoring", healthy=True, status="unconfigured",
-            detail="Infrastructure watcher not enabled",
-        )
-    try:
-        status = watcher.get_status()
-        active_alerts = status.get("active_alerts", 0)
-        checks = status.get("checks", 0)
-        running = status.get("running", 0)
-
-        if active_alerts > 0:
-            return ComponentStatus(
-                name="monitoring", healthy=True, status="degraded",
-                detail=f"{active_alerts} active alert(s), {checks} checks configured",
-                metadata=status,
-            )
-        return ComponentStatus(
-            name="monitoring", healthy=True, status="ok",
-            detail=f"{checks} checks configured, {running} running",
-            metadata=status,
-        )
-    except Exception as exc:
-        return ComponentStatus(
-            name="monitoring", healthy=False, status="down",
-            detail=f"Error: {exc}",
-        )
-
-
 def check_browser(bot: OdinBot) -> ComponentStatus:
     executor = getattr(bot, "tool_executor", None)
     browser_mgr = getattr(executor, "_browser_manager", None) if executor else None
@@ -452,7 +421,6 @@ _ALL_CHECKERS = [
     check_sessions,
     check_knowledge,
     check_ssh_hosts,
-    check_monitoring,
     check_browser,
     check_scheduler,
     check_loops,

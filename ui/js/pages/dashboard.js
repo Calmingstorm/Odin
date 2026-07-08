@@ -288,12 +288,6 @@ export default {
           icon: '\u2261', iconColor: 'text-teal-400',
           sub: 'chunks', subColor: 'text-gray-500',
         }] : []),
-        {
-          label: 'Alerts', value: (s.monitoring && s.monitoring.active_alerts) || 0,
-          icon: '\u2691', iconColor: 'text-red-400',
-          color: (s.monitoring && s.monitoring.active_alerts > 0) ? 'text-red-400' : '',
-          highlight: (s.monitoring && s.monitoring.active_alerts > 0),
-        },
       ];
     });
 
@@ -306,16 +300,6 @@ export default {
         status: s.status === 'online' ? 'ok' : 'warn',
         detail: s.status === 'online' ? 'Online' : 'Starting',
       });
-      // Monitoring
-      const mon = s.monitoring || {};
-      if (mon.enabled) {
-        const hasAlerts = mon.active_alerts > 0;
-        items.push({
-          label: 'Monitoring',
-          status: hasAlerts ? 'error' : 'ok',
-          detail: hasAlerts ? `${mon.active_alerts} alert${mon.active_alerts > 1 ? 's' : ''}` : `${mon.checks} checks`,
-        });
-      }
       // Schedules health
       if ((s.schedule_failing || 0) > 0) {
         items.push({

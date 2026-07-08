@@ -1,4 +1,4 @@
-"""Scheduler, digest, and monitoring callbacks (RFC-001 P10, RFC-002 P3).
+"""Scheduler and digest callbacks (RFC-001 P10, RFC-002 P3).
 
 The scheduled-task action router (reminder/check/workflow/digest),
 workflow step execution with condition and on_failure semantics, the
@@ -169,28 +169,6 @@ class ScheduledEventHandlers:
             return match.group(0)  # leave unchanged if not found
 
         return re.sub(r"@(\w+)", _replace, text)
-
-    async def _on_monitor_alert(self, message: str) -> None:
-        """Callback fired by the infrastructure watcher when a threshold is crossed."""
-        channel_id = self._get_config().monitoring.alert_channel_id
-        if not channel_id:
-            # Fall back to first configured channel
-            if self._get_config().discord.channels:
-                channel_id = self._get_config().discord.channels[0]
-            else:
-                log.warning("Monitor alert has no channel to send to: %s", message[:100])
-                return
-
-        channel = self._get_channel(int(channel_id))
-        if not channel:
-            log.warning("Monitor alert channel %s not found", channel_id)
-            return
-
-        try:
-            await channel.send(scrub_response_secrets(message))
-            log.info("Sent monitor alert to channel %s", channel_id)
-        except Exception as e:
-            log.error("Failed to send monitor alert: %s", e)
 
     async def _execute_scheduled_tool(
         self,
