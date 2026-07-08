@@ -1,6 +1,9 @@
 """Tests for the Ollama LLM client."""
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
+import aiohttp
 import pytest
 
 from src.llm.ollama import OllamaClient
@@ -268,3 +271,177 @@ class TestConfigParsing:
         assert cfg.ollama.enabled is True
         assert cfg.ollama.model == "qwen2.5:14b"
         assert cfg.llm_provider.active_provider == "ollama"
+
+
+# --- HTTP transport (faked aiohttp session — no real network) ---
+
+
+class _FakeResp:
+    """Stands in for an aiohttp response context manager."""
+
+    def __init__(self, status=200, payload=None, text="", raise_on_enter=None):
+        self.status = status
+        self._payload = payload if payload is not None else {}
+        self._text = text
+        self._raise = raise_on_enter
+
+    async def __aenter__(self):
+        if self._raise is not None:
+            raise self._raise
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def json(self):
+        return self._payload
+
+    async def text(self):
+        return self._text
+
+
+class _FakeSession:
+    """Pops a queued _FakeResp per request; records calls; never touches network."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.closed = False
+        self.calls: list = []
+
+    def post(self, url, json=None, headers=None):
+        self.calls.append(("post", url, json, headers))
+        return self._responses.pop(0)
+
+    def get(self, url, headers=None, timeout=None):
+        self.calls.append(("get", url, headers))
+        return self._responses.pop(0)
+
+    async def close(self):
+        self.closed = True
+
+
+def _client(**kw):
+    params = dict(base_url="http://localhost:11434", model="llama3.1:8b",
+                  max_tokens=256, max_retries=1, retry_base_delay=0.0,
+                  retry_max_delay=0.0)
+    params.update(kw)
+    return OllamaClient(**params)  # type: ignore[arg-type]  # test-helper kwargs merge
+
+
+class TestHeaders:
+    def test_without_and_with_api_key(self):
+        assert "Authorization" not in _client()._headers()
+        h = _client(api_key="sk-abc")._headers()
+        assert h["Authorization"] == "Bearer sk-abc"
+        assert h["Content-Type"] == "application/json"
+
+
+class TestSessionLifecycle:
+    async def test_get_session_creates_and_close(self):
+        c = _client()
+        session = await c._get_session()            # real ClientSession object, no network
+        assert session is await c._get_session()    # reused while open
+        assert c._session is not None
+        await c.close()
+        assert c._session is None                    # closed + cleared
+
+
+class TestRequestWithRetry:
+    async def test_success_first_try(self):
+        c = _client()
+        c._session = _FakeSession([_FakeResp(200, {"ok": 1})])  # type: ignore[assignment]
+        assert await c._request_with_retry({"model": "x"}) == {"ok": 1}
+        assert c._total_requests == 1
+
+    async def test_retryable_then_success(self):
+        c = _client(max_retries=2)
+        c._session = _FakeSession([  # type: ignore[assignment]
+            _FakeResp(503, text="busy"), _FakeResp(200, {"ok": 2})])
+        with patch("src.llm.ollama.asyncio.sleep", new=AsyncMock()) as slept:
+            assert await c._request_with_retry({}) == {"ok": 2}
+        slept.assert_awaited()  # backed off before the retry
+
+    async def test_retryable_exhausted_raises(self):
+        c = _client(max_retries=1)
+        c._session = _FakeSession([  # type: ignore[assignment]
+            _FakeResp(500, text="boom"), _FakeResp(500, text="boom")])
+        with patch("src.llm.ollama.asyncio.sleep", new=AsyncMock()):
+            with pytest.raises(RuntimeError, match="500"):
+                await c._request_with_retry({})
+
+    async def test_non_retryable_status_raises(self):
+        c = _client()
+        c._session = _FakeSession([_FakeResp(400, text="bad request")])  # type: ignore[assignment]
+        with pytest.raises(RuntimeError, match="400"):
+            await c._request_with_retry({})
+
+    async def test_client_error_then_success(self):
+        c = _client(max_retries=2)
+        c._session = _FakeSession([  # type: ignore[assignment]
+            _FakeResp(raise_on_enter=aiohttp.ClientError("neterr")),
+            _FakeResp(200, {"ok": 3})])
+        with patch("src.llm.ollama.asyncio.sleep", new=AsyncMock()):
+            assert await c._request_with_retry({}) == {"ok": 3}
+
+    async def test_client_error_exhausted_raises(self):
+        c = _client(max_retries=1)
+        c._session = _FakeSession([  # type: ignore[assignment]
+            _FakeResp(raise_on_enter=aiohttp.ClientError("neterr")),
+            _FakeResp(raise_on_enter=aiohttp.ClientError("neterr"))])
+        with patch("src.llm.ollama.asyncio.sleep", new=AsyncMock()):
+            with pytest.raises(RuntimeError, match="connection error after"):
+                await c._request_with_retry({})
+
+
+class TestChatEndpoints:
+    async def test_chat_returns_content(self):
+        c = _client()
+        c._session = _FakeSession([  # type: ignore[assignment]
+            _FakeResp(200, {"message": {"content": "hello there"}})])
+        assert await c.chat([{"role": "user", "content": "hi"}], "sys") == "hello there"
+        # body carried the converted messages + num_predict override honoured
+        _, url, body, _ = c._session.calls[0]  # type: ignore[union-attr]
+        assert url.endswith("/api/chat") and body["stream"] is False
+
+    async def test_chat_with_tools_parses_response(self):
+        c = _client()
+        c._session = _FakeSession([  # type: ignore[assignment]
+            _FakeResp(200, {"message": {
+                "content": "",
+                "tool_calls": [{"function": {"name": "get_time", "arguments": {"tz": "utc"}}}],
+            }})])
+        resp = await c.chat_with_tools([{"role": "user", "content": "time?"}], "sys",
+                                       [{"name": "get_time", "description": "d",
+                                         "input_schema": {}}])
+        assert isinstance(resp, LLMResponse)
+        assert resp.stop_reason == "tool_use"
+        assert resp.tool_calls[0].name == "get_time"
+
+
+class TestHealthCheck:
+    async def test_healthy_with_exact_model(self):
+        c = _client(model="llama3.1:8b")
+        c._session = _FakeSession([  # type: ignore[assignment]
+            _FakeResp(200, {"models": [{"name": "llama3.1:8b"}]})])
+        r = await c.health_check()
+        assert r["healthy"] is True and r["model_available"] is True
+
+    async def test_healthy_with_base_name_match(self):
+        c = _client(model="llama3.1:8b")
+        c._session = _FakeSession([  # type: ignore[assignment]
+            _FakeResp(200, {"models": [{"name": "llama3.1:70b"}]})])
+        r = await c.health_check()
+        assert r["healthy"] is True and r["model_available"] is True  # base-name prefix match
+
+    async def test_non_200_unhealthy(self):
+        c = _client()
+        c._session = _FakeSession([_FakeResp(500, text="down")])  # type: ignore[assignment]
+        r = await c.health_check()
+        assert r["healthy"] is False and "500" in r["error"]
+
+    async def test_exception_unhealthy(self):
+        c = _client()
+        c._session = _FakeSession([  # type: ignore[assignment]
+            _FakeResp(raise_on_enter=aiohttp.ClientError("refused"))])
+        r = await c.health_check()
+        assert r["healthy"] is False and "refused" in r["error"]

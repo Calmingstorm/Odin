@@ -306,6 +306,25 @@ The session manager, driven against a **real** `SessionManager` (not a mocked on
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6p. R3 — P15 ollama transport + config validators + audit read paths (2026-07-07)
+
+Three unrelated safe files in one PR, Odin-reviewed. Whole-repo 83.6% → **84.1%**.
+
+| File | Start → End |
+|---|---|
+| `llm/ollama.py` | 63.3% → **97.2%** (missing 65 → 5) |
+| `config/schema.py` | 89.6% → **99.8%** (missing 59 → 1) |
+| `audit/logger.py` | 82.5% → **91.0%** (missing 52 → 27) |
+
+**Method / safety.**
+- *ollama* — the HTTP transport (`_request_with_retry` success / retryable-5xx-then-success / retry-exhausted / non-retryable-status / `ClientError`-then-success / `ClientError`-exhausted, with `asyncio.sleep` patched so retries don't wall-clock), `chat`/`chat_with_tools`, `health_check` (exact-model / base-name-prefix / non-200 / exception), `_headers`, and the real `_get_session`/`close` lifecycle. The only faked boundary is a queue-backed fake `aiohttp` session — **no real network.**
+- *config/schema* — every out-of-range field validator's raise arm (parametrized), `_substitute_env_vars` (required / default / missing-raises), `load_config`'s success path plus all four `SystemExit` arms (env-missing, bad-YAML, non-mapping, validation-failure) against tmp files, and `WebConfig.resolve_api_identity` (listed-token + single-token fallback). Pure + tmp-file reads.
+- *audit/logger* — real `AuditLogger` on a tmp jsonl: entries written via the logger's own `log_execution`/`log_web_action` (real `_persist`), then read back through `search`/`_match` (every filter: tool/user/host/keyword/date/status/has_error/min_duration/limit), `count_by_tool`, `get_log_stats`, `initialize_chain` (HMAC chain resumed by a second logger + `verify_integrity` green), and log rotation (tiny `max_bytes` → `.1` backup created). `_cap_tool_input` both arms. Real file I/O only.
+
+**Deliberately deferred:** ollama's few remaining defensive lines; the audit search-by-risk / diff-search / verify-integrity-failure edges (partly covered by the existing `test_audit_signing`/`test_audit_persist_concurrency` suites) — remaining 27 are lower-yield branch tails.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.
