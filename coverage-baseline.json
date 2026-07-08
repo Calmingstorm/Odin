@@ -792,9 +792,9 @@
   "statements": 2
  },
  "src/sessions/manager.py": {
-  "covered": 720,
-  "missing": 125,
-  "percent": 85.21,
+  "covered": 775,
+  "missing": 70,
+  "percent": 91.72,
   "statements": 845
  },
  "src/setup_wizard.py": {

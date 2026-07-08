@@ -289,6 +289,23 @@ The real-behaviour parts of the message-intake gating chain. One PR, Odin-review
 
 **Safe-tier status:** P11–P13 covered the tractable "harder" files (llm_gateway, observability, sessions_chat, reflector, scheduler-validation, intake-gating). What's left below the gate is either intricate mock-drift territory (`sessions/manager` compaction/archival, the deep intake/pipeline routing, reflector `_consolidate`/repair) or the genuinely-dangerous Incus-only tier. Whole-repo ≈ 83%, gated core ≈ 86%.
 
+## 6o. R3 — P14 sessions manager (real-behaviour + pure helpers) (2026-07-07)
+
+The session manager, driven against a **real** `SessionManager` (not a mocked one) with a tmp persist dir, plus the module-level pure helpers. One PR, Odin-reviewed.
+
+| File | Start → End |
+|---|---|
+| `sessions/manager.py` | 85.21% → **91.72%** (missing 125 → 70) |
+
+**Method / safety.** Two safe surfaces:
+
+1. *Real SessionManager* — sessions populated via the real `add_message`; state ops (count/ids/exists/get/items_snapshot/reset/reset_many/clear_all), token/activity metrics, `remove_last_message`, the **compaction trigger** (`get_history_with_compaction`/`get_task_history` → `_compact`, LLM callback faked via the clean `set_compaction_fn` seam), in-memory `search_history` step 1 (summary / segment / message hits + `user_id`/`after`/`before`/`channel_id` filters + limit), and `scrub_secrets`. Real file storage in tmp; no network, no LLM.
+2. *Pure module helpers* — `summarize_tool_response` (all branches: below-threshold, short-body, multi-paragraph with short-last-paragraph inclusion, >15-unique-tool cap, single-block, degenerate-whitespace fallback, budget-trim + mid-word cleanup — 28 dark lines), `compute_activity_rate` (window-drop and zero-span paths), `apply_token_budget` (summary-pair-dropped-last), and the pure `_render_context_summary` static method (recency render, query-based semantic segment selection with a trace object, empty-segment skip, bad-timestamp header fallback).
+
+**Deliberately deferred (mock-drift / harness tier):** `search_history` steps 3–4 (hybrid vector store + channel-log backend orchestration — faking two search backends risks validating a wrong contract), the archival `_archive_session`/`_restore_from_archive`/`_search_archives` reflection+indexing edge branches (already covered in the bulk by the existing session suite; the remainders need real reflector/vector-store harnesses), and `_fallback_compact` edges. These are the honest boundary between safe real-behaviour tests and the sandboxed round.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.
