@@ -237,46 +237,6 @@ def check_ssh_hosts(bot: OdinBot) -> ComponentStatus:
         )
 
 
-def check_voice(bot: OdinBot) -> ComponentStatus:
-    voice_mgr = getattr(bot, "voice_manager", None)
-    if voice_mgr is None:
-        return ComponentStatus(
-            name="voice", healthy=True, status="unconfigured",
-            detail="Voice not enabled",
-        )
-    try:
-        connected = voice_mgr.is_connected
-        channel = voice_mgr.current_channel
-        ws_connected = getattr(voice_mgr, "_connected", False)
-
-        if connected and channel:
-            return ComponentStatus(
-                name="voice", healthy=True, status="ok",
-                detail=f"Connected to #{channel.name}",
-                metadata={
-                    "channel": channel.name,
-                    "channel_id": str(channel.id),
-                    "ws_connected": ws_connected,
-                },
-            )
-        elif ws_connected:
-            return ComponentStatus(
-                name="voice", healthy=True, status="ok",
-                detail="Voice service connected, idle",
-                metadata={"ws_connected": True},
-            )
-        return ComponentStatus(
-            name="voice", healthy=True, status="degraded",
-            detail="Voice enabled but not connected",
-            metadata={"ws_connected": False},
-        )
-    except Exception as exc:
-        return ComponentStatus(
-            name="voice", healthy=False, status="down",
-            detail=f"Error: {exc}",
-        )
-
-
 def check_monitoring(bot: OdinBot) -> ComponentStatus:
     watcher = getattr(bot, "infra_watcher", None)
     if watcher is None:
@@ -492,7 +452,6 @@ _ALL_CHECKERS = [
     check_sessions,
     check_knowledge,
     check_ssh_hosts,
-    check_voice,
     check_monitoring,
     check_browser,
     check_scheduler,

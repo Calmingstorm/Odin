@@ -5,7 +5,7 @@ the exact order ``OdinBot.__init__`` historically did — order matters
 (trajectory savers before the loop bridge, permissions/host-access before
 the executor, search stores before sessions, scheduler before
 ``skill_manager.set_services``). Construction that needs the live bot
-instance (voice manager, infra-watcher callback, LLM callback wiring,
+instance (infra-watcher callback, LLM callback wiring,
 slash commands, the first system-prompt build) stays in ``OdinBot.__init__``.
 
 ``shutdown_services(bot)`` is the teardown mirror, moved verbatim from
@@ -375,7 +375,6 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
         "codex",
         "ssh",
         "knowledge",
-        "voice",
         "browser",
         "comfyui",
     ):
@@ -543,9 +542,8 @@ def build_components(bot, services: BotServices) -> BotComponents:
     "Bot-coupled" means exactly: live hot-reloadable roots read via provider
     callables (``bot.config`` is replaced by config hot-reload, the provider
     clients by live auth reloads), Discord-client operations
-    (``change_presence``, ``get_channel``), the voice manager (constructed on
-    the bot before this runs), and — until P3/P4 narrow them — the classes
-    that still take the bot as ``host``.
+    (``change_presence``, ``get_channel``), and — until P3/P4 narrow them —
+    the classes that still take the bot as ``host``.
     """
     # LLM provider management (RFC-001 P4) — the gateway owns the provider
     # clients and switch state; codex_client/ollama_client/kimi_client on
@@ -578,7 +576,6 @@ def build_components(bot, services: BotServices) -> BotComponents:
         skill_manager=services.skill_manager,
         tool_executor=services.tool_executor,
         channel_state=services.channel_state,
-        voice_manager=bot.voice_manager,
         get_codex_client=lambda: llm_gateway.codex_client,
     )
     tool_catalog = ToolCatalog(
@@ -736,7 +733,6 @@ def build_components(bot, services: BotServices) -> BotComponents:
         MessageIntakeDeps(
             get_config=lambda: bot.config,
             get_user=lambda: bot.user,
-            get_voice_manager=lambda: bot.voice_manager,
             process_commands=lambda message: bot.process_commands(message),
             channel_logger=services.channel_logger,
             channel_config=services.channel_config,

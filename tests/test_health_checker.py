@@ -19,7 +19,6 @@ from src.health.checker import (
     check_scheduler,
     check_sessions,
     check_ssh_hosts,
-    check_voice,
 )
 
 # ---------------------------------------------------------------------------
@@ -377,54 +376,6 @@ class TestCheckSSHHosts:
 
 
 # ---------------------------------------------------------------------------
-# check_voice
-# ---------------------------------------------------------------------------
-
-class TestCheckVoice:
-    def test_connected_to_channel(self):
-        bot = MagicMock()
-        bot.voice_manager.is_connected = True
-        channel = MagicMock()
-        channel.name = "general"
-        channel.id = 12345
-        bot.voice_manager.current_channel = channel
-        bot.voice_manager._connected = True
-        result = check_voice(bot)
-        assert result.healthy is True
-        assert result.status == "ok"
-        assert "#general" in result.detail
-
-    def test_ws_connected_idle(self):
-        bot = MagicMock()
-        bot.voice_manager.is_connected = False
-        bot.voice_manager.current_channel = None
-        bot.voice_manager._connected = True
-        result = check_voice(bot)
-        assert result.status == "ok"
-        assert "idle" in result.detail
-
-    def test_not_connected(self):
-        bot = MagicMock()
-        bot.voice_manager.is_connected = False
-        bot.voice_manager.current_channel = None
-        bot.voice_manager._connected = False
-        result = check_voice(bot)
-        assert result.status == "degraded"
-
-    def test_unconfigured(self):
-        bot = MagicMock(spec=["llm_gateway"])
-        result = check_voice(bot)
-        assert result.status == "unconfigured"
-
-    def test_exception(self):
-        bot = MagicMock()
-        type(bot.voice_manager).is_connected = PropertyMock(side_effect=RuntimeError("voice err"))
-        result = check_voice(bot)
-        assert result.healthy is False
-        assert result.status == "down"
-
-
-# ---------------------------------------------------------------------------
 # check_monitoring
 # ---------------------------------------------------------------------------
 
@@ -618,8 +569,6 @@ class TestCheckAll:
         bot.tool_executor.config.hosts = {}
         bot.tool_executor.ssh_pool = None
         bot.tool_executor._browser_manager = None
-        # voice
-        del bot.voice_manager
         # monitoring
         del bot.infra_watcher
         # scheduler
@@ -634,7 +583,7 @@ class TestCheckAll:
         bot = self._make_healthy_bot()
         result = check_all(bot)
         assert result["overall"] == "healthy"
-        assert result["total"] == 13
+        assert result["total"] == 12
         assert "checked_at" in result
         assert isinstance(result["components"], list)
 
@@ -644,7 +593,7 @@ class TestCheckAll:
         names = {c["name"] for c in result["components"]}
         expected = {
             "discord", "codex", "ollama", "kimi", "sessions", "knowledge", "ssh_hosts",
-            "voice", "monitoring", "browser", "scheduler", "loops", "agents",
+            "monitoring", "browser", "scheduler", "loops", "agents",
         }
         assert names == expected
 
@@ -698,7 +647,7 @@ class TestCheckAll:
 
 class TestCheckerList:
     def test_count(self):
-        assert len(_ALL_CHECKERS) == 13
+        assert len(_ALL_CHECKERS) == 12
 
     def test_all_callable(self):
         for checker in _ALL_CHECKERS:
@@ -711,7 +660,6 @@ class TestCheckerList:
         assert "check_sessions" in names
         assert "check_knowledge" in names
         assert "check_ssh_hosts" in names
-        assert "check_voice" in names
         assert "check_monitoring" in names
         assert "check_browser" in names
         assert "check_scheduler" in names
@@ -769,7 +717,6 @@ class TestHealthAPI:
         bot.tool_executor.config.hosts = {}
         bot.tool_executor.ssh_pool = None
         bot.tool_executor._browser_manager = None
-        del bot.voice_manager
         del bot.infra_watcher
         bot.scheduler.list_all.return_value = []
         bot.loop_manager.active_count = 0
@@ -797,7 +744,7 @@ class TestHealthAPI:
             assert "overall" in data
             assert "components" in data
             assert isinstance(data["components"], list)
-            assert data["total"] == 13
+            assert data["total"] == 12
 
     @pytest.mark.asyncio
     async def test_health_components_has_all_names(self, mock_bot):
@@ -873,4 +820,4 @@ class TestEdgeCases:
         bot = MagicMock(spec=["llm_gateway"])
         result = check_all(bot)
         assert "T" in result["checked_at"]
-        assert result["total"] == 13
+        assert result["total"] == 12

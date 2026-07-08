@@ -6,7 +6,7 @@ MagicMock — so a typo'd attribute access fails loudly instead of returning
 a new mock.
 
 The contract they satisfy is the informal ``MessageLike`` shape documented
-in RFC-001 §6.3: what discord.Message, _LoopMessageProxy, VoiceMessageProxy,
+in RFC-001 §6.3: what discord.Message, _LoopMessageProxy,
 and the web-chat proxies all provide.
 """
 

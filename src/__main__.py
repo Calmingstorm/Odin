@@ -178,11 +178,6 @@ def main() -> None:
             # managers; mypy can't relate the getattr probe to the direct
             # attribute access that follows it.
             (
-                "voice",
-                lambda: getattr(bot, "voice_manager", None)
-                and bot.voice_manager.shutdown(),  # type: ignore[union-attr]
-            ),
-            (
                 "browser",
                 lambda: getattr(bot, "browser_manager", None)
                 and bot.browser_manager.shutdown(),  # type: ignore[attr-defined]

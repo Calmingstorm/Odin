@@ -107,7 +107,7 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
         features: dict[str, bool] = {}
         raw_features = data.get("features")
         if isinstance(raw_features, dict):
-            for key in ("browser", "voice", "comfyui"):
+            for key in ("browser", "comfyui"):
                 if key in raw_features:
                     features[key] = bool(raw_features[key])
 

@@ -70,9 +70,6 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "usage": {
         "directory": "./data/usage",
     },
-    "voice": {
-        "enabled": False,
-    },
     "browser": {
         "enabled": False,
     },
@@ -137,7 +134,6 @@ def build_config(
 
     features = features or {}
     cfg["browser"]["enabled"] = features.get("browser", False)
-    cfg["voice"]["enabled"] = features.get("voice", False)
     cfg["comfyui"]["enabled"] = features.get("comfyui", False)
 
     if claude_code_host and claude_code_host in (hosts or {}):

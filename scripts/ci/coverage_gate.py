@@ -45,7 +45,6 @@ BASELINE_PATH = Path("coverage-baseline.json")
 EXCLUDES: dict[str, str] = {
     "src/discord/cogs/*": "prefix-command UI layer; exercised manually in guilds",
     "src/discord/views/*": "discord.py UI widgets; interaction-driven",
-    "src/discord/voice.py": "hardware/gateway voice path ([voice] extra)",
     "src/discord/helpers/error_handler.py": "discord.py error-event glue",
     "src/tools/browser.py": "playwright optional extra; external browser",
     "src/tools/comfyui.py": "external ComfyUI service client",

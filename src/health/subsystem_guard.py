@@ -113,11 +113,6 @@ _DEFAULT_MESSAGES: dict[str, str] = {
         "Text search and document ingestion are offline. "
         "Other tools remain functional."
     ),
-    "voice": (
-        "Voice subsystem is currently unavailable. "
-        "Voice channel commands are offline. "
-        "Other tools remain functional."
-    ),
     "browser": (
         "Browser automation is currently unavailable. "
         "Web scraping and browser tools are offline. "
@@ -163,7 +158,6 @@ class SubsystemGuard:
 
         guard = SubsystemGuard()
         guard.register("knowledge")
-        guard.register("voice")
 
         # Before using a subsystem:
         err = guard.check("knowledge")

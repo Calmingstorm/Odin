@@ -210,9 +210,6 @@ logging:
 usage:
   directory: ./data/usage
 
-voice:
-  enabled: false
-
 browser:
   enabled: true
   # Leave empty for native Playwright (launches local Chromium — no sidecar needed).

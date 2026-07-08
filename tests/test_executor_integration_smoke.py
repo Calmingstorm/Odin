@@ -402,8 +402,8 @@ class TestBuildLoopModuleWirings:
         from src.health.subsystem_guard import SubsystemGuard
         assert isinstance(bot.subsystem_guard, SubsystemGuard)
         registered = set(bot.subsystem_guard.registered)
-        # Bot pre-registers six subsystems
-        for name in ("codex", "ssh", "knowledge", "voice", "browser", "comfyui"):
+        # Bot pre-registers five subsystems
+        for name in ("codex", "ssh", "knowledge", "browser", "comfyui"):
             assert name in registered, f"subsystem {name} not registered"
 
     def test_trajectory_saver_attached(self):

@@ -162,19 +162,6 @@ class TestRouting:
         await bot.pipeline.run(msg, "use the skill")
         assert msg.reply_texts == ["raw skill output"]
 
-    async def test_voice_callback_receives_response(self):
-        bot, fake = build([text_response("spoken words")])
-        spoken = []
-
-        async def voice_cb(text):
-            spoken.append(text)
-
-        msg = FakeMessage("say it")
-        await bot.pipeline.run(msg, "say it", voice_callback=voice_cb)
-        assert spoken == ["spoken words"]
-        assert msg.reply_texts == ["spoken words"]
-
-
 class TestThreadInheritance:
     async def test_thread_seeds_summary_from_parent_channel(self):
         bot, fake = build([text_response("thread answer")])

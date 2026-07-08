@@ -41,7 +41,6 @@ SERVICE_HANDLES = [
     "channel_logger",
     "context_loader",
     "infra_watcher",
-    "voice_manager",
     "browser_manager",
     "permissions",
     "host_access_manager",

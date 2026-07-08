@@ -22,15 +22,6 @@ def register_commands(bot) -> None:
         if not bot.intake.is_allowed_user(interaction.user):
             await interaction.response.send_message("Access denied.", ephemeral=True)
             return
-        voice_status = ""
-        if bot.voice_manager:
-            if bot.voice_manager.is_connected:
-                ch = bot.voice_manager.current_channel
-                voice_status = (
-                    f"\nVoice: Connected to **{ch.name}**" if ch else "\nVoice: Connected"
-                )
-            else:
-                voice_status = "\nVoice: Not connected"
         provider_cfg = getattr(bot.config, "llm_provider", None)
         active = provider_cfg.active_provider if provider_cfg else "codex"
         client = bot.llm_gateway.active_client
@@ -45,8 +36,7 @@ def register_commands(bot) -> None:
         await interaction.response.send_message(
             f"**Odin Status**\n"
             f"{llm_status}\n"
-            f"Codex: {codex_configured} | Ollama: {ollama_configured} | Kimi: {kimi_configured}\n"
-            f"{voice_status}"
+            f"Codex: {codex_configured} | Ollama: {ollama_configured} | Kimi: {kimi_configured}"
         )
 
     @bot.tree.command(name="reset", description="Reset conversation history")
