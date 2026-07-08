@@ -387,6 +387,21 @@ Two safe file-backed stores, one PR, Odin-reviewed. Whole-repo 84.9% → **85.1%
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6u. R3 — P20 observability aggregates + trajectory saver (2026-07-07)
+
+Two safe read/write file surfaces, one PR, Odin-reviewed. Whole-repo 85.1% → **85.2%**.
+
+| File | Start → End |
+|---|---|
+| `observability/aggregates.py` | 85.0% → **96.1%** (missing 19 → 5) |
+| `trajectories/saver.py` | 90.1% → **94.3%** (missing 19 → 11) |
+
+**Method / safety.**
+- *observability/aggregates* — pure aggregation over tmp JSONL: `context_aggregates` (windowed per-section token stats, drift-candidate detection, trace warnings, malformed-line + bad-timestamp + untraced-turn handling), `failure_aggregates` (current/previous-window failure-class counts, trend deltas, no-file guard, non-dict-failure skip, and the `_tail_lines` >max-bytes seek path via a patched `_AUDIT_TAIL_BYTES`), and the `_percentile` empty guard. Reads tmp files only.
+- *trajectories/saver* — real `TrajectorySaver` on a tmp dir: `save` (happy + `aiofiles`-raises re-raise), `list_files` (jsonl listing + missing-dir guard), `read_file` (newest-first entries, path-traversal rejection, non-existent, malformed-line skip, limit), and `find_by_message_id` (found + not-found + malformed skip). Async file I/O in tmp only; remaining 11 lines are the `search()` fan-out (covered by the existing trajectory suite's higher-level paths).
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.
