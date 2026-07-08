@@ -720,9 +720,9 @@
   "statements": 2
  },
  "src/planning/store.py": {
-  "covered": 62,
-  "missing": 39,
-  "percent": 61.39,
+  "covered": 101,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 101
  },
  "src/relevance.py": {

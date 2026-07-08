@@ -357,6 +357,21 @@ Two safe files to 100%, one PR, Odin-reviewed. Whole-repo 84.4% → **84.7%**.
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6s. R3 — P18 planning store + error handler (2026-07-07)
+
+One gated file to 100% plus additive coverage of an excluded surface, one PR, Odin-reviewed. Whole-repo 84.7% → **84.9%**.
+
+| File | Start → End | Gated? |
+|---|---|---|
+| `planning/store.py` | 61.4% → **100.0%** (missing 39 → 0) | yes — ratcheted |
+| `discord/helpers/error_handler.py` | 0% → **100.0%** | **no** — on the §3 EXCLUDES list; tests are additive |
+
+**Method / safety.**
+- *planning/store* — real `PlanStore` on a tmp JSON path: create/get_pending (most-recent-wins, user/channel scoping), `list_pending` filters, the `mark_executing`/`mark_completed`/`mark_cancelled` transitions (+ missing-plan no-ops), expiry pruning (`_prune_expired` flips pending→expired), persistence round-trip via a second store, the corrupt-file load guard, and the `ExecutionPlan` `is_expired`/`to_dict`/`from_dict` (unknown-key-filtering) helpers. Pure dataclass logic + tmp-file I/O.
+- *error_handler* — `handle_command_error` dispatch for every discord.py error type (MissingPermissions / BotMissingPermissions / MissingRequiredArgument / BadArgument / CommandOnCooldown / NoPrivateMessage / CommandNotFound-silent / CheckFailure / generic-unhandled) plus the `CommandInvokeError` unwrap, using real discord error objects + a fake ctx. **This file is on the coverage-gate EXCLUDES list ("discord.py error-event glue")**, so it is *not* ratcheted — the tests are additive regression coverage that improve whole-repo % without changing the gate's exclusion policy. (It proved cleanly unit-testable; if a future pass wants it gated, un-excluding it in `coverage_gate.py` is a one-line change — deferred here to keep the wave a pure test/baseline diff.)
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.
