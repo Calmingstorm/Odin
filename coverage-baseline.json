@@ -738,9 +738,9 @@
   "statements": 3
  },
  "src/scheduler/history.py": {
-  "covered": 90,
-  "missing": 21,
-  "percent": 81.08,
+  "covered": 102,
+  "missing": 9,
+  "percent": 91.89,
   "statements": 111
  },
  "src/scheduler/scheduler.py": {
@@ -762,9 +762,9 @@
   "statements": 29
  },
  "src/search/fts.py": {
-  "covered": 123,
-  "missing": 28,
-  "percent": 81.46,
+  "covered": 151,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 151
  },
  "src/search/hybrid.py": {
