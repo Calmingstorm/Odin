@@ -342,6 +342,21 @@ Two safe files in one PR, Odin-reviewed. Whole-repo 84.1% → **84.4%**.
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6r. R3 — P17 web tools + channel config (2026-07-07)
+
+Two safe files to 100%, one PR, Odin-reviewed. Whole-repo 84.4% → **84.7%**.
+
+| File | Start → End |
+|---|---|
+| `tools/web.py` | 48.0% → **100.0%** (missing 51 → 0) |
+| `discord/channel_config.py` | 53.1% → **100.0%** (missing 38 → 0) |
+
+**Method / safety.**
+- *tools/web* — pure `_HTMLToText` (skip-tag + block-newline) and `_parse_ddg_results` (link/snippet extraction + `uddg=` redirect unwrap + no-results), plus `fetch_url`/`web_search` with `aiohttp.ClientSession` **faked** (queue-backed fake session/response) and the SSRF `is_url_blocked` guard patched: blocked-URL, HTML/JSON/text content types, non-200, truncation, `ClientError`, and generic-exception arms. **No real HTTP, no network.**
+- *discord/channel_config* — real `ChannelConfigManager` on a tmp JSON path: the channel > guild > global resolution ladder for `is_enabled`/`should_require_mention`/`should_respond_to_bots` (including `guild_id=None` skipping the guild layer), the set/get/clear mutators (None-values-skipped, clear removes), persistence round-trip via a second manager, and the corrupt-file load guard. Pure dict logic + tmp-file I/O.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.

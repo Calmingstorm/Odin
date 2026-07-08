@@ -120,9 +120,9 @@
   "statements": 349
  },
  "src/discord/channel_config.py": {
-  "covered": 43,
-  "missing": 38,
-  "percent": 53.09,
+  "covered": 81,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 81
  },
  "src/discord/channel_logger.py": {
@@ -1086,9 +1086,9 @@
   "statements": 95
  },
  "src/tools/web.py": {
-  "covered": 47,
-  "missing": 51,
-  "percent": 47.96,
+  "covered": 98,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 98
  },
  "src/trajectories/__init__.py": {
