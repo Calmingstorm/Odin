@@ -325,6 +325,23 @@ Three unrelated safe files in one PR, Odin-reviewed. Whole-repo 83.6% → **84.1
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6q. R3 — P16 email client + health checker (2026-07-07)
+
+Two safe files in one PR, Odin-reviewed. Whole-repo 84.1% → **84.4%**.
+
+| File | Start → End |
+|---|---|
+| `tools/email_client.py` | 77.5% → **90.9%** (missing 52 → 21) |
+| `health/checker.py` | 84.3% → **100.0%** (missing 42 → 0) |
+
+**Method / safety.**
+- *email_client* — pure MIME parsing (`_extract_body`: multipart-plain / multipart-html-only / no-text-body / single-part / empty / truncation; `_decode_header_value`: empty + encoded-bytes) plus SMTP send and IMAP search/read/list with `smtplib.SMTP` / `imaplib.IMAP4_SSL` **faked** (a queue-backed fake conn / context-manager server): happy paths, the Gmail `X-GM-RAW` branch, non-OK / UID-not-found / connect-failure error arms, password redaction, and attachment-outside-allowed-dir / not-a-file guards. **No real SMTP/IMAP, no network** — only constructed in-memory messages.
+- *health/checker* — the provider-configured paths of `check_ollama`/`check_kimi` (all three circuit-breaker states + the error arm) driven with real *un-connected* `OllamaClient`/`KimiClient` objects (breaker-state inspection + `pool_stats` only, no request), `check_codex`'s lazy-`None`-session branch, the exception arms of `check_browser`/`check_loops`/`check_agents` (probe raises → "down"), and `check_all`'s crashed-checker handling (a patched raising checker → recorded as down, overall unhealthy). Fake `bot` namespaces; no network, no LLM call.
+
+**Deliberately deferred:** email_client's remaining 21 lines are attachment-encoding sub-branches and a few provider-quirk tails — lower-yield, left for a future pass.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.
