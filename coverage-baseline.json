@@ -318,9 +318,9 @@
   "statements": 3
  },
  "src/health/checker.py": {
-  "covered": 226,
-  "missing": 42,
-  "percent": 84.33,
+  "covered": 268,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 268
  },
  "src/health/grafana_alerts.py": {
@@ -900,9 +900,9 @@
   "statements": 268
  },
  "src/tools/email_client.py": {
-  "covered": 179,
-  "missing": 52,
-  "percent": 77.49,
+  "covered": 210,
+  "missing": 21,
+  "percent": 90.91,
   "statements": 231
  },
  "src/tools/executor.py": {
