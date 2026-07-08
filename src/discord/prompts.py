@@ -7,8 +7,7 @@ Bodies are verbatim moves from ``OdinBot`` with dependency access adjusted.
 Two dependencies are provider callables rather than captured references,
 because the underlying objects are REPLACED at runtime: the config by
 the web API's config hot-reload and the codex client by live auth
-reloads (both live on the gateway/bot as live roots). ``voice_manager`` is
-constructed once and never reassigned, so it is captured directly.
+reloads (both live on the gateway/bot as live roots).
 
 Cache-name note: the fields here deliberately carry no leading underscore
 (``cached_hosts``, ``memory_cache``…) — the old bot-attribute spellings are
@@ -38,7 +37,6 @@ class PromptBuilder:
         skill_manager,
         tool_executor,
         channel_state,
-        voice_manager,
         get_codex_client: Callable,
     ) -> None:
         self.get_config = get_config
@@ -47,7 +45,6 @@ class PromptBuilder:
         self.skill_manager = skill_manager
         self.tool_executor = tool_executor
         self.channel_state = channel_state
-        self.voice_manager = voice_manager
         self.get_codex_client = get_codex_client
         # Cached host string dict — invalidated on context reload
         self.cached_hosts: dict[str, str] | None = None
@@ -131,26 +128,6 @@ class PromptBuilder:
 
     # -- prompt assembly --------------------------------------------------------
 
-    def _voice_info_full(self) -> str:
-        voice_info = "Voice support is not enabled."
-        if self.voice_manager:
-            if self.voice_manager.is_connected:
-                ch = self.voice_manager.current_channel
-                ch_name = ch.name if ch else "unknown"
-                voice_info = (
-                    f"You are currently in voice channel **{ch_name}**. "
-                    "You can hear users via speech-to-text and respond via text-to-speech. "
-                    "Transcribed voice input appears as regular messages. Your text responses "
-                    "are spoken aloud in the voice channel AND posted as text. "
-                    "Keep voice responses concise and conversational — they will be spoken."
-                )
-            else:
-                voice_info = (
-                    "Voice support is enabled but you are not in a voice channel. "
-                    "Users can ask you to join with '/voice join' or 'join voice'."
-                )
-        return voice_info
-
     def build_full_prompt(
         self,
         channel=None,
@@ -159,13 +136,11 @@ class PromptBuilder:
         trace=None,
     ) -> str:
         config = self.get_config()
-        voice_info = self._voice_info_full()
 
         p_cfg = config.personality if hasattr(config, "personality") else None
         prompt = build_system_prompt(
             context=self.context_loader.context,
             hosts=self.cached_hosts_map(),
-            voice_info=voice_info,
             tz=config.timezone,
             claude_code_dir=config.tools.claude_code_dir,
             personality_preset=p_cfg.preset if p_cfg else "odin",
@@ -250,20 +225,9 @@ class PromptBuilder:
         save input tokens on casual conversation.
         """
         config = self.get_config()
-        voice_info = "Voice support is not enabled."
-        if self.voice_manager:
-            if self.voice_manager.is_connected:
-                ch = self.voice_manager.current_channel
-                ch_name = ch.name if ch else "unknown"
-                voice_info = (
-                    f"You are currently in voice channel **{ch_name}**. "
-                    "Transcribed voice input appears as regular messages. Your text responses "
-                    "are spoken aloud. Keep voice responses concise and conversational."
-                )
 
         p_cfg = config.personality if hasattr(config, "personality") else None
         prompt = build_chat_system_prompt(
-            voice_info=voice_info,
             tz=config.timezone,
             personality_preset=p_cfg.preset if p_cfg else "odin",
             personality_name=p_cfg.custom_name if p_cfg else "",

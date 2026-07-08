@@ -11,7 +11,7 @@ Measured 2026-07-06 (master @ `16ec441`): **67% line coverage** — 27,283 state
 - **Security code is under-tested**: `permissions/token_manager.py` 23%, `permissions/host_access.py` 39%, `web/api/security.py` 17%. Authorization logic is exactly where an untested branch is most expensive.
 - **`web/` handler bodies run only in production**: the route-parity contract pins that 183 endpoints exist in order, but many handler bodies (llm_admin 20%, codex_admin 10%, config_admin 23%, agents_loops 21%, skills_api 21%) have never been driven by a test. The five TS bugs (v3.52.0) all lived in exactly this kind of never-walked path.
 - **A few large single-file wins**: `tools/skill_manager.py` 28% (511 missed), `tools/handlers/state.py` 21% (239 missed).
-- **Legitimately-hard-to-test surfaces stay low by design**: Discord cogs/views (prefix-command UI), `voice.py` (hardware), `browser.py`/`comfyui.py` (optional-extra external services), `packaging/validate.py` (CI-context). These are explicitly OUT of the target denominator (§3).
+- **Legitimately-hard-to-test surfaces stay low by design**: Discord cogs/views (prefix-command UI), `browser.py`/`comfyui.py` (optional-extra external services), `packaging/validate.py` (CI-context). These are explicitly OUT of the target denominator (§3).
 
 The pattern: code that has been through a campaign or soak-fix carries its tests (notifications 96%, config 90%, audit 88%, agents 87%); pre-discipline code does not. This campaign closes that gap where it matters and installs a ratchet so it can never silently reopen.
 
@@ -29,7 +29,7 @@ Explicitly NOT chasing 95%: the last 10% is cosmetic-UI and hardware paths whose
 ## 3. Coverage denominator (what "core" means)
 
 The ratchet and the core target EXCLUDE these hard-to-unit-test surfaces (measured separately, never gated to zero-drop because their coverage is legitimately low):
-`src/discord/cogs/**`, `src/discord/views/**`, `src/discord/voice.py`, `src/tools/browser.py`, `src/tools/comfyui.py`, `src/packaging/validate.py`, `src/discord/helpers/error_handler.py`, `src/web/middleware.py`, `src/**/__main__.py`. Rationale per file recorded in the gate config. Excluding them is honest scoping, not hiding — they're reported, just not gated.
+`src/discord/cogs/**`, `src/discord/views/**`, `src/tools/browser.py`, `src/tools/comfyui.py`, `src/packaging/validate.py`, `src/discord/helpers/error_handler.py`, `src/web/middleware.py`, `src/**/__main__.py`. Rationale per file recorded in the gate config. Excluding them is honest scoping, not hiding — they're reported, just not gated.
 
 ## 4. The ratchet (P0 deliverable)
 

@@ -33,7 +33,6 @@ def _intake(config=None, sessions=None, pipeline=None, user=None):
     deps = SimpleNamespace(
         get_config=lambda: config or _cfg(),
         get_user=lambda: user,
-        get_voice_manager=lambda: None,
         process_commands=AsyncMock(),
         channel_logger=MagicMock(),
         channel_config=MagicMock(),

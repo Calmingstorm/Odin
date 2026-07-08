@@ -393,15 +393,6 @@ class SearchConfig(BaseModel):
     search_db_path: str = Field(default="./data/search", validation_alias="chromadb_path")
 
 
-class VoiceConfig(BaseModel):
-    enabled: bool = False
-    voice_service_url: str = "ws://odin-voice:3940/ws"
-    auto_join: bool = False
-    transcript_channel_id: str = ""
-    default_voice: str = "en_US-lessac-medium"
-    wake_word: str = "odin"
-
-
 class BrowserConfig(BaseModel):
     enabled: bool = False
     cdp_url: str = ""  # Empty = native Playwright launch; set ws:// URL for remote CDP
@@ -713,7 +704,6 @@ class Config(BaseModel):
     observability: ObservabilityConfig = ObservabilityConfig()
     email: EmailConfig = EmailConfig()
     search: SearchConfig = SearchConfig()
-    voice: VoiceConfig = VoiceConfig()
     monitoring: MonitoringConfig = MonitoringConfig()
     browser: BrowserConfig = BrowserConfig()
     permissions: PermissionsConfig = PermissionsConfig()

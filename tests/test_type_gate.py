@@ -43,9 +43,9 @@ class TestParseFinding:
         assert a == b
 
     def test_whitespace_collapsed_names_untouched(self):
-        line = 'src/foo.py:5: error: Item "None"  of   "VoiceManager | None" bad  [union-attr]'
+        line = 'src/foo.py:5: error: Item "None"  of   "HttpClient | None" bad  [union-attr]'
         assert parse_finding(line) == (
-            "src/foo.py", "union-attr", 'Item "None" of "VoiceManager | None" bad')
+            "src/foo.py", "union-attr", 'Item "None" of "HttpClient | None" bad')
 
     def test_notes_and_summaries_skipped(self):
         assert parse_finding('src/foo.py:5: note: See docs') is None

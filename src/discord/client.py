@@ -26,7 +26,6 @@ from ..odin_log import get_logger
 from ..tools import get_tool_definitions
 from .slash_commands import register_commands
 from .tool_loop_helpers import init_allowed_webhook_ids as _init_allowed_webhook_ids_impl
-from .voice import VoiceManager, VoiceMessageProxy
 from .wiring import build_components, build_services, shutdown_services
 
 log = get_logger("discord")
@@ -51,7 +50,6 @@ class OdinBot(commands.Bot):
         intents.message_content = True
         intents.reactions = True
         intents.members = True
-        intents.voice_states = True
         super().__init__(
             command_prefix=self._resolve_prefix,
             intents=intents,
@@ -116,13 +114,6 @@ class OdinBot(commands.Bot):
         # The actual chain signing is wired into AuditLogger via the hmac_key
         # constructor arg; signing happens automatically inside log_execution.
         self.audit_signer = self.audit._signer
-
-        # Voice support — VoiceManager takes the live bot, so it stays here
-        # (and must exist before build_components: PromptBuilder consumes it).
-        self.voice_manager: VoiceManager | None = None
-        if config.voice.enabled:
-            self.voice_manager = VoiceManager(config.voice, self)
-            self.voice_manager.on_transcription = self._on_voice_transcription
 
         # ------------------------------------------------------------------
         # Stage 2: bot-coupled components (wiring.build_components), exposed
@@ -307,60 +298,6 @@ class OdinBot(commands.Bot):
         except Exception as e:
             log.error("Archive backfill failed: %s", e)
 
-    async def on_voice_state_update(
-        self,
-        member: discord.Member,
-        before: discord.VoiceState,
-        after: discord.VoiceState,
-    ) -> None:
-        """Auto-join voice channel when an allowed user joins."""
-        if not self.voice_manager or not self.config.voice.auto_join:
-            return
-        if member.bot:
-            return
-        if not self.intake.is_allowed_user(member):
-            return
-        # User joined a voice channel (was not in one before)
-        if before.channel is None and after.channel is not None:
-            if not self.voice_manager.is_connected:
-                log.info("Auto-joining voice channel %s (user: %s)", after.channel.name, member)
-                await self.voice_manager.join_channel(after.channel)
-        # User left — if we're in that channel and it's now empty (minus bot), leave
-        elif before.channel is not None and after.channel is None:
-            if (self.voice_manager.is_connected
-                    and self.voice_manager.current_channel == before.channel):
-                humans = [m for m in before.channel.members if not m.bot]
-                if not humans:
-                    log.info("All users left voice channel, disconnecting")
-                    await self.voice_manager.leave_channel()
-
     async def on_message(self, message: discord.Message) -> None:
         """Intake gating chain — owned by intake_pipeline.MessageIntake."""
         await self.intake.handle(message)
-
-    async def _on_voice_transcription(
-        self, text: str, member: discord.Member, transcript_channel: discord.TextChannel,
-    ) -> None:
-        """Handle transcribed voice input — route through message pipeline."""
-        log.info("Voice transcription from %s: %r", member, text[:80])
-
-        # Post the transcription to the transcript channel
-        await transcript_channel.send(f"**{member.display_name}** (voice): {text}")
-
-        # Create a proxy message for the pipeline
-        proxy = VoiceMessageProxy(
-            author=member,
-            channel=transcript_channel,
-            id=int(time.time() * 1000),
-            guild=member.guild,
-        )
-
-        # Define voice callback for dual output (speak + text)
-        async def voice_callback(response: str) -> None:
-            if self.voice_manager:
-                await self.voice_manager.speak(response)
-
-        await self.pipeline.run(
-            proxy, text,  # type: ignore[arg-type]  # documented duck-typed voice proxy
-            voice_callback=voice_callback,
-        )

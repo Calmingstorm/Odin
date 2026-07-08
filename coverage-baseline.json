@@ -66,10 +66,10 @@
   "statements": 30
  },
  "src/config/schema.py": {
-  "covered": 564,
+  "covered": 556,
   "missing": 1,
   "percent": 99.82,
-  "statements": 565
+  "statements": 557
  },
  "src/constants.py": {
   "covered": 17,
@@ -138,10 +138,10 @@
   "statements": 93
  },
  "src/discord/client.py": {
-  "covered": 139,
-  "missing": 70,
-  "percent": 66.51,
-  "statements": 209
+  "covered": 133,
+  "missing": 45,
+  "percent": 74.72,
+  "statements": 178
  },
  "src/discord/completion.py": {
   "covered": 40,
@@ -198,10 +198,10 @@
   "statements": 50
  },
  "src/discord/intake_pipeline.py": {
-  "covered": 305,
-  "missing": 95,
-  "percent": 76.25,
-  "statements": 400
+  "covered": 298,
+  "missing": 76,
+  "percent": 79.68,
+  "statements": 374
  },
  "src/discord/llm_gateway.py": {
   "covered": 173,
@@ -258,10 +258,10 @@
   "statements": 95
  },
  "src/discord/prompts.py": {
-  "covered": 90,
-  "missing": 37,
-  "percent": 70.87,
-  "statements": 127
+  "covered": 82,
+  "missing": 28,
+  "percent": 74.55,
+  "statements": 110
  },
  "src/discord/response_guards.py": {
   "covered": 154,
@@ -277,9 +277,9 @@
  },
  "src/discord/slash_commands.py": {
   "covered": 20,
-  "missing": 55,
-  "percent": 26.67,
-  "statements": 75
+  "missing": 49,
+  "percent": 28.99,
+  "statements": 69
  },
  "src/discord/tool_catalog.py": {
   "covered": 27,
@@ -318,10 +318,10 @@
   "statements": 3
  },
  "src/health/checker.py": {
-  "covered": 268,
+  "covered": 253,
   "missing": 0,
   "percent": 100.0,
-  "statements": 268
+  "statements": 253
  },
  "src/health/grafana_alerts.py": {
   "covered": 235,
@@ -798,10 +798,10 @@
   "statements": 845
  },
  "src/setup_wizard.py": {
-  "covered": 50,
-  "missing": 10,
-  "percent": 83.33,
-  "statements": 60
+  "covered": 51,
+  "missing": 8,
+  "percent": 86.44,
+  "statements": 59
  },
  "src/tools/__init__.py": {
   "covered": 7,

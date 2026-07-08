@@ -2,8 +2,8 @@
 
 ``MessageIntake.handle`` is the ``on_message`` gating chain (secret scrub
 → cog commands → bot/webhook gates → allowlists → channel enablement →
-mention gate → dedup → bot-message buffering → attachments → voice
-shortcuts). ``MessagePipeline.run`` is the old ``_handle_message``
+mention gate → dedup → bot-message buffering → attachments).
+``MessagePipeline.run`` is the old ``_handle_message``
 (per-channel lock + thread-context inheritance) and ``_run_inner`` the old
 ``_handle_message_inner`` (guest/tool routing, skill handoff, history
 persistence + error sanitization, reflection dispatch, delivery hand-off).
@@ -70,7 +70,6 @@ class MessageIntakeDeps:
 
     get_config: Callable  # live root — replaced by config hot-reload
     get_user: Callable  # live — None until the gateway login completes
-    get_voice_manager: Callable  # live — constructed on the bot, may be None
     process_commands: Callable  # cog prefix-command dispatch (bot-bound)
     channel_logger: ChannelLogger
     channel_config: ChannelConfigManager
@@ -83,7 +82,6 @@ class MessageIntake:
     def __init__(self, deps: MessageIntakeDeps) -> None:
         self._get_config = deps.get_config
         self._get_user = deps.get_user
-        self._get_voice_manager = deps.get_voice_manager
         self._process_commands = deps.process_commands
         self._channel_logger = deps.channel_logger
         self._channel_config = deps.channel_config
@@ -391,51 +389,7 @@ class MessageIntake:
                 pass  # best-effort notice; the scrub already happened
             return
 
-        # Voice commands via natural language (short, direct commands only)
-        if self._get_voice_manager():
-            _voice_lower = content.lower().strip()
-            _voice_words = _voice_lower.split()
-            # Only treat short messages (≤8 words) as voice commands to avoid
-            # false positives on pasted changelogs or longer messages
-            if len(_voice_words) <= 8:
-                _join_words = {
-                    "join",
-                    "hop",
-                    "get in",
-                    "come to",
-                    "connect",
-                    "enter",
-                    "hop in",
-                    "come in",
-                }
-                _leave_words = {"leave", "disconnect", "get out", "exit", "go away", "hop out"}
-                _voice_context = {"voice", "vc", "channel", "call", "chat"}
-                _has_voice_context = any(w in _voice_lower for w in _voice_context)
-
-                if _has_voice_context and any(w in _voice_lower for w in _join_words):
-                    if isinstance(message.author, discord.Member) and message.author.voice:
-                        result = await self._get_voice_manager().join_channel(
-                            message.author.voice.channel
-                        )
-                        await message.reply(result)
-                    else:
-                        await message.reply("You need to be in a voice channel first.")
-                    return
-                if _has_voice_context and any(w in _voice_lower for w in _leave_words):
-                    result = await self._get_voice_manager().leave_channel()
-                    await message.reply(result)
-                    return
-
-        # If bot is in a voice channel, auto-attach voice callback for TTS
-        vc_callback = None
-        if self._get_voice_manager() and self._get_voice_manager().is_connected:
-
-            async def vc_callback(response: str) -> None:
-                await self._get_voice_manager().speak(response)
-
-        await self._pipeline.run(
-            message, content, image_blocks=image_blocks, voice_callback=vc_callback
-        )
+        await self._pipeline.run(message, content, image_blocks=image_blocks)
 
 
 @dataclass(frozen=True)
@@ -471,7 +425,6 @@ class MessagePipeline:
         content: str,
         *,
         image_blocks: list[dict] | None = None,
-        voice_callback: Callable | None = None,
     ) -> None:
         channel_id = str(message.channel.id)
 
@@ -523,7 +476,6 @@ class MessagePipeline:
                 content,
                 channel_id,
                 image_blocks=image_blocks or [],
-                voice_callback=voice_callback,
             )
 
     async def _run_inner(
@@ -533,7 +485,6 @@ class MessagePipeline:
         channel_id: str,
         *,
         image_blocks: list[dict] | None = None,
-        voice_callback: Callable | None = None,
     ) -> None:
         from .tool_loop_helpers import _EMPTY_RESPONSE_FALLBACK
 
@@ -809,8 +760,6 @@ class MessagePipeline:
                 name="operational_reflection",
             )
 
-        if voice_callback:
-            await voice_callback(response)
         if not already_sent:
             # _send_chunked picks up pending files and attaches them to the
             # first message — text + file arrive as one Discord message.
