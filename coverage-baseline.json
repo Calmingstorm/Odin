@@ -12,9 +12,9 @@
   "statements": 5
  },
  "src/agents/loop_bridge.py": {
-  "covered": 66,
-  "missing": 22,
-  "percent": 75.0,
+  "covered": 87,
+  "missing": 1,
+  "percent": 98.86,
   "statements": 88
  },
  "src/agents/manager.py": {
@@ -960,9 +960,9 @@
   "statements": 109
  },
  "src/tools/handlers/state.py": {
-  "covered": 281,
-  "missing": 20,
-  "percent": 93.36,
+  "covered": 301,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 301
  },
  "src/tools/handlers/system.py": {
