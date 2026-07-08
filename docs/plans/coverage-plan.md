@@ -402,6 +402,21 @@ Two safe read/write file surfaces, one PR, Odin-reviewed. Whole-repo 85.1% → *
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6v. R3 — P21 loop bridge + state handler (2026-07-07)
+
+Two safe pure/bookkeeping surfaces, one PR, Odin-reviewed. Whole-repo 85.2% → **85.3%**.
+
+| File | Start → End |
+|---|---|
+| `agents/loop_bridge.py` | 75.0% → **98.9%** (missing 22 → 1) |
+| `tools/handlers/state.py` | 93.4% → **100.0%** (missing 20 → 0) |
+
+**Method / safety.**
+- *agents/loop_bridge* — real `LoopAgentBridge` over a **fake `AgentManager`**: `spawn_agents_for_loop` (empty / per-iteration-limit / per-loop-lifetime-limit / happy-tracks-ids / spawn-error-not-tracked), `get_loop_agent_ids`/`count`, `wait_and_collect` (explicit ids / all-uncollected / then-empty), `format_agent_results_for_context` (all fields + 500-char truncation + empty), `cleanup_loop`, `get_active_loop_agents`, `tracked_loop_count`. Pure bookkeeping — no real agents, no LLM, no tool dispatch.
+- *tools/handlers/state* — `StateTools` via `HandlerBase.__new__` with only the touched deps (memory_path / memory_lock / lists_lock accessors + load/save callables): `manage_list` against a **real tmp `lists.json`** (every action + the no-items / blank-name-skip / not-found / list-now-empty / list_all-with-done edge branches + owner-access denial + the grocery-migration and corrupt-file `except` arms), and `memory_manage` against an in-memory dict (save/get/list/delete/personal-scope/missing-key/unknown-action + the at-cap self-eviction break). Dict logic + tmp-file I/O only. **Note:** the initial comprehensive tests were redundant vs the existing suite (union unchanged at 93.4%); a follow-up edge-case class targeting the *actual* 20 dark lines took it to 100% — a reminder to diff the union, not the isolated file.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.
