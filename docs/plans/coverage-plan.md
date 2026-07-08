@@ -372,6 +372,21 @@ One gated file to 100% plus additive coverage of an excluded surface, one PR, Od
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6t. R3 — P19 FTS index + schedule history (2026-07-07)
+
+Two safe file-backed stores, one PR, Odin-reviewed. Whole-repo 84.9% → **85.1%**.
+
+| File | Start → End |
+|---|---|
+| `search/fts.py` | 81.5% → **100.0%** (missing 28 → 0) |
+| `scheduler/history.py` | 81.1% → **91.9%** (missing 21 → 9) |
+
+**Method / safety.**
+- *search/fts* — real `FullTextIndex` on a **tmp sqlite FTS5 db** (complements `test_fts_search.py`): the channel_id-filtered `search_sessions`/`search_channel_logs` branches, the knowledge index/search/`delete_knowledge_source`/`has_knowledge_chunk` cycle, `index_channel_messages` (content-filtering + empty-input guards) / `clear_channel_logs`, session re-index (delete-then-insert), and every `except` error arm — exercised by closing the connection so the sqlite op raises and is caught (returns False/[]/0). No network, no external service.
+- *scheduler/history* — real `ScheduleHistory` on a tmp JSONL: `record` (error truncation to 500 chars + retry field), `query` (schedule/status/limit filters + no-file guard), `stats` (empty + computed avg/last-run), `prune` (no-file, under-threshold no-op, excess-removal compaction, and the auto-prune-during-`record` path), plus the `aiofiles`-raises `except` arms (patched to `OSError`). Async file I/O in tmp only; the remaining 9 lines are the prune-write-failure tail.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.
