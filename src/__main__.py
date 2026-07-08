@@ -69,17 +69,6 @@ def _wire_observability(health, bot, log) -> None:
 
         health.register_component("scheduler", _scheduler_health)
 
-    watcher = getattr(bot, "infra_watcher", None)
-    if watcher is not None:
-        def _watcher_health() -> tuple[bool, str]:
-            tasks = getattr(watcher, "_check_tasks", {})
-            if not tasks:
-                return (True, "no active checks")
-            dead = [n for n, t in tasks.items() if t.done()]
-            return (not dead, f"{len(tasks)} checks ok" if not dead else f"{len(dead)} dead checks")
-
-        health.register_component("watcher", _watcher_health)
-
     log.info("Observability wired: metric sources and component health checks registered")
 
 

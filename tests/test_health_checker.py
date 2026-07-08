@@ -15,7 +15,6 @@ from src.health.checker import (
     check_discord,
     check_knowledge,
     check_loops,
-    check_monitoring,
     check_scheduler,
     check_sessions,
     check_ssh_hosts,
@@ -376,43 +375,6 @@ class TestCheckSSHHosts:
 
 
 # ---------------------------------------------------------------------------
-# check_monitoring
-# ---------------------------------------------------------------------------
-
-class TestCheckMonitoring:
-    def test_healthy_no_alerts(self):
-        bot = MagicMock()
-        bot.infra_watcher.get_status.return_value = {
-            "enabled": True, "checks": 5, "running": 3, "active_alerts": 0,
-        }
-        result = check_monitoring(bot)
-        assert result.healthy is True
-        assert result.status == "ok"
-        assert "5 checks" in result.detail
-
-    def test_with_alerts(self):
-        bot = MagicMock()
-        bot.infra_watcher.get_status.return_value = {
-            "enabled": True, "checks": 5, "running": 3, "active_alerts": 2,
-        }
-        result = check_monitoring(bot)
-        assert result.status == "degraded"
-        assert "2 active alert" in result.detail
-
-    def test_unconfigured(self):
-        bot = MagicMock(spec=["llm_gateway"])
-        result = check_monitoring(bot)
-        assert result.status == "unconfigured"
-
-    def test_exception(self):
-        bot = MagicMock()
-        bot.infra_watcher.get_status.side_effect = RuntimeError("fail")
-        result = check_monitoring(bot)
-        assert result.healthy is False
-        assert result.status == "down"
-
-
-# ---------------------------------------------------------------------------
 # check_browser
 # ---------------------------------------------------------------------------
 
@@ -569,8 +531,6 @@ class TestCheckAll:
         bot.tool_executor.config.hosts = {}
         bot.tool_executor.ssh_pool = None
         bot.tool_executor._browser_manager = None
-        # monitoring
-        del bot.infra_watcher
         # scheduler
         bot.scheduler.list_all.return_value = []
         # loops
@@ -583,7 +543,7 @@ class TestCheckAll:
         bot = self._make_healthy_bot()
         result = check_all(bot)
         assert result["overall"] == "healthy"
-        assert result["total"] == 12
+        assert result["total"] == 11
         assert "checked_at" in result
         assert isinstance(result["components"], list)
 
@@ -593,7 +553,7 @@ class TestCheckAll:
         names = {c["name"] for c in result["components"]}
         expected = {
             "discord", "codex", "ollama", "kimi", "sessions", "knowledge", "ssh_hosts",
-            "monitoring", "browser", "scheduler", "loops", "agents",
+            "browser", "scheduler", "loops", "agents",
         }
         assert names == expected
 
@@ -647,7 +607,7 @@ class TestCheckAll:
 
 class TestCheckerList:
     def test_count(self):
-        assert len(_ALL_CHECKERS) == 12
+        assert len(_ALL_CHECKERS) == 11
 
     def test_all_callable(self):
         for checker in _ALL_CHECKERS:
@@ -660,7 +620,6 @@ class TestCheckerList:
         assert "check_sessions" in names
         assert "check_knowledge" in names
         assert "check_ssh_hosts" in names
-        assert "check_monitoring" in names
         assert "check_browser" in names
         assert "check_scheduler" in names
         assert "check_loops" in names
@@ -717,7 +676,6 @@ class TestHealthAPI:
         bot.tool_executor.config.hosts = {}
         bot.tool_executor.ssh_pool = None
         bot.tool_executor._browser_manager = None
-        del bot.infra_watcher
         bot.scheduler.list_all.return_value = []
         bot.loop_manager.active_count = 0
         bot.agent_manager._agents = {}
@@ -744,7 +702,7 @@ class TestHealthAPI:
             assert "overall" in data
             assert "components" in data
             assert isinstance(data["components"], list)
-            assert data["total"] == 12
+            assert data["total"] == 11
 
     @pytest.mark.asyncio
     async def test_health_components_has_all_names(self, mock_bot):
@@ -820,4 +778,4 @@ class TestEdgeCases:
         bot = MagicMock(spec=["llm_gateway"])
         result = check_all(bot)
         assert "T" in result["checked_at"]
-        assert result["total"] == 12
+        assert result["total"] == 11

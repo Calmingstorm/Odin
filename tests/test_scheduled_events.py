@@ -117,39 +117,6 @@ class TestResolveMentions:
         assert h._resolve_mentions("hey @bob") == "hey @bob"
 
 
-class TestMonitorAlert:
-    async def test_uses_alert_channel(self):
-        ch = _channel()
-        h = _handlers(get_channel=lambda cid: ch)
-        await h._on_monitor_alert("CPU high")
-        assert "CPU high" in ch.send.await_args.args[0]
-
-    async def test_fallback_to_first_channel(self):
-        ch = _channel()
-        cfg = _cfg()
-        cfg.monitoring.alert_channel_id = ""
-        h = _handlers(get_channel=lambda cid: ch, get_config=lambda: cfg)
-        await h._on_monitor_alert("alert")
-        assert ch.send.await_count == 1
-
-    async def test_no_channel_configured(self):
-        cfg = _cfg()
-        cfg.monitoring.alert_channel_id = ""
-        cfg.discord.channels = []
-        h = _handlers(get_config=lambda: cfg)
-        await h._on_monitor_alert("nowhere")  # no channel → warn, no raise
-
-    async def test_channel_not_found(self):
-        h = _handlers(get_channel=lambda cid: None)
-        await h._on_monitor_alert("lost")
-
-    async def test_send_exception(self):
-        ch = _channel()
-        ch.send = AsyncMock(side_effect=RuntimeError("net"))
-        h = _handlers(get_channel=lambda cid: ch)
-        await h._on_monitor_alert("x")  # swallowed
-
-
 class TestExecuteScheduledTool:
     async def test_rbac_denial(self):
         ex = MagicMock()

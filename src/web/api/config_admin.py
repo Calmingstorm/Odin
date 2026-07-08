@@ -197,19 +197,6 @@ def register_status_info(routes: web.RouteTableDef, bot) -> None:
             process_count = 0
             process_running = 0
 
-        # Monitoring status
-        _default_mon = {
-            "enabled": False, "checks": 0, "running": 0, "active_alerts": 0,
-        }
-        try:
-            watcher = bot.infra_watcher
-            if watcher is None:
-                raise AttributeError
-            result = watcher.get_status()
-            monitoring = result if isinstance(result, dict) else _default_mon
-        except (AttributeError, TypeError):
-            monitoring = _default_mon
-
         return web.json_response({
             "version": get_version(),
             "status": "online" if bot.is_ready() else "starting",
@@ -230,7 +217,6 @@ def register_status_info(routes: web.RouteTableDef, bot) -> None:
             "agent_running": agent_running,
             "process_count": process_count,
             "process_running": process_running,
-            "monitoring": monitoring,
         })
 
 

@@ -10,10 +10,8 @@ from .resource_usage import (
     scan_directory,
     scan_file,
 )
-from .watcher import InfraWatcher
 
 __all__ = [
-    "InfraWatcher",
     "DirStats",
     "SessionStats",
     "KnowledgeStats",

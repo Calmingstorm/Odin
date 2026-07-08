@@ -3,7 +3,7 @@
 Covers:
 - 2.3 autonomous-loop error path backs off instead of tight-looping
 - LoopManager.shutdown() cancels+awaits; cleanup_finished handles no last_trigger
-- 2.4 Scheduler.start() and InfraWatcher.start() are idempotent
+- 2.4 Scheduler.start() is idempotent
 - per-schedule overlap/dedup guard
 - retry backoff off-by-one (first retry waits base, not 2*base)
 - _compute_tick_delay honors retry_at

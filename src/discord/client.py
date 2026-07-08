@@ -21,7 +21,6 @@ import discord
 
 from ..async_utils import fire_and_forget
 from ..config.schema import Config
-from ..monitoring import InfraWatcher
 from ..odin_log import get_logger
 from ..tools import get_tool_definitions
 from .slash_commands import register_commands
@@ -138,17 +137,6 @@ class OdinBot(commands.Bot):
         self.intake = components.intake
         self.pipeline = components.pipeline
         self.housekeeping = components.housekeeping
-
-        # Proactive infrastructure monitoring — constructed AFTER the
-        # components so the alert callback wires directly to the
-        # scheduled-events component (RFC-002 R1; no bot delegate).
-        self.infra_watcher: InfraWatcher | None = None
-        if config.monitoring.enabled and config.monitoring.checks:
-            self.infra_watcher = InfraWatcher(
-                config=config.monitoring,
-                executor=self.tool_executor,
-                alert_callback=self.scheduled_events._on_monitor_alert,
-            )
 
         self.prompt_builder.rebuild_default()
         register_commands(self)
@@ -274,9 +262,6 @@ class OdinBot(commands.Bot):
         )
         if self._vector_store:
             fire_and_forget(self._backfill_archives(), name="backfill_archives")
-        # Start proactive monitoring if configured
-        if hasattr(self, "infra_watcher") and self.infra_watcher:
-            self.infra_watcher.start()
         await self.delivery.set_status(None, task_end=True)
 
     async def _backfill_archives(self) -> None:

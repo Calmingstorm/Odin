@@ -65,7 +65,6 @@ def _bot():
         {"consecutive_failures": 2, "paused": True},
     ]
     bot.agent_manager._agents = {}
-    bot.infra_watcher = None
     return bot
 
 
@@ -183,7 +182,6 @@ class TestStatus:
             assert body["tool_count"] == 1 and body["session_count"] == 3
             assert body["schedule_count"] == 2 and body["schedule_failing"] == 1
             assert body["schedule_paused"] == 1
-            assert body["monitoring"]["enabled"] is False
 
     @pytest.mark.asyncio
     async def test_status_with_guilds(self):
@@ -196,7 +194,7 @@ class TestStatus:
             assert body["guild_count"] == 1 and body["user_count"] == 10
 
     @pytest.mark.asyncio
-    async def test_status_agents_processes_monitoring_populated(self):
+    async def test_status_agents_processes_populated(self):
         app, bot = _app(register_status_info)
         bot.agent_manager._agents = {
             "a": SimpleNamespace(status="running"),
@@ -205,26 +203,19 @@ class TestStatus:
         bot.tool_executor._process_registry._processes = {
             1: SimpleNamespace(status="running"),
         }
-        bot.infra_watcher = SimpleNamespace(
-            get_status=lambda: {"enabled": True, "checks": 4, "running": 1, "active_alerts": 0}
-        )
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/status")).json()
             assert body["agent_count"] == 2 and body["agent_running"] == 1
             assert body["process_count"] == 1 and body["process_running"] == 1
-            assert body["monitoring"]["enabled"] is True
 
     @pytest.mark.asyncio
     async def test_status_non_dict_registries_fall_back(self):
         app, bot = _app(register_status_info)
         bot.agent_manager._agents = "not-a-dict"
         bot.tool_executor._process_registry._processes = "not-a-dict"
-        bot.infra_watcher = SimpleNamespace(get_status=lambda: "not-a-dict")
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/status")).json()
             assert body["agent_count"] == 0 and body["process_count"] == 0
-            assert body["monitoring"] == {
-                "enabled": False, "checks": 0, "running": 0, "active_alerts": 0}
 
 
 # --------------------------------------------------------------------------- #

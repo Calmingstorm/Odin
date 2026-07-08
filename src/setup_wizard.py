@@ -73,12 +73,6 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "browser": {
         "enabled": False,
     },
-    "monitoring": {
-        "enabled": False,
-        "checks": [],
-        "alert_channel_id": "",
-        "cooldown_minutes": 60,
-    },
     "permissions": {
         "tiers": {},
         "default_tier": "user",

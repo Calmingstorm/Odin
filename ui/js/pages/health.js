@@ -1,6 +1,6 @@
 /**
  * Odin Management UI — Health Dashboard Page
- * All component health at a glance: Codex, SSH hosts, DB, knowledge, voice, etc.
+ * All component health at a glance: Codex, SSH hosts, DB, knowledge, etc.
  */
 import { api } from '../api.js';
 import { formatTime } from '../utils.js';
@@ -149,35 +149,6 @@ export default {
               </div>
               <div v-if="c.metadata.over_budget > 0" class="health-meta-row">
                 <span class="text-xs text-yellow-400">{{ c.metadata.over_budget }} over budget</span>
-              </div>
-            </div>
-
-            <!-- Voice metadata -->
-            <div v-if="c.name === 'voice' && c.metadata" class="health-card-meta">
-              <div v-if="c.metadata.channel" class="health-meta-row">
-                <span class="text-xs text-gray-500">Channel:</span>
-                <span class="text-xs">#{{ c.metadata.channel }}</span>
-              </div>
-              <div class="health-meta-row">
-                <span class="text-xs text-gray-500">WebSocket:</span>
-                <span class="text-xs" :class="c.metadata.ws_connected ? 'text-green-400' : 'text-gray-500'">
-                  {{ c.metadata.ws_connected ? 'connected' : 'disconnected' }}
-                </span>
-              </div>
-            </div>
-
-            <!-- Monitoring metadata -->
-            <div v-if="c.name === 'monitoring' && c.metadata && c.metadata.enabled" class="health-card-meta">
-              <div class="health-meta-row">
-                <span class="text-xs text-gray-500">Checks:</span>
-                <span class="text-xs">{{ c.metadata.checks || 0 }}</span>
-              </div>
-              <div class="health-meta-row">
-                <span class="text-xs text-gray-500">Running:</span>
-                <span class="text-xs">{{ c.metadata.running || 0 }}</span>
-              </div>
-              <div v-if="c.metadata.active_alerts > 0" class="health-meta-row">
-                <span class="text-xs text-red-400">{{ c.metadata.active_alerts }} active alert(s)</span>
               </div>
             </div>
 

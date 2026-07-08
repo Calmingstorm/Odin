@@ -62,7 +62,6 @@ select = ["E", "F", "W", "I", "N", "UP"]
 # therefore suppressed for the template-bearing files as a whole.
 "src/llm/system_prompt.py" = ["E501"]
 "src/learning/reflector.py" = ["E501"]
-"src/monitoring/watcher.py" = ["E501"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

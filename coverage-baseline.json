@@ -66,10 +66,10 @@
   "statements": 30
  },
  "src/config/schema.py": {
-  "covered": 556,
+  "covered": 542,
   "missing": 1,
   "percent": 99.82,
-  "statements": 557
+  "statements": 543
  },
  "src/constants.py": {
   "covered": 17,
@@ -138,10 +138,10 @@
   "statements": 93
  },
  "src/discord/client.py": {
-  "covered": 133,
-  "missing": 45,
-  "percent": 74.72,
-  "statements": 178
+  "covered": 129,
+  "missing": 43,
+  "percent": 75.0,
+  "statements": 172
  },
  "src/discord/completion.py": {
   "covered": 40,
@@ -270,10 +270,10 @@
   "statements": 154
  },
  "src/discord/scheduled_events.py": {
-  "covered": 242,
+  "covered": 226,
   "missing": 0,
   "percent": 100.0,
-  "statements": 242
+  "statements": 226
  },
  "src/discord/slash_commands.py": {
   "covered": 20,
@@ -306,10 +306,10 @@
   "statements": 108
  },
  "src/discord/wiring.py": {
-  "covered": 288,
-  "missing": 80,
-  "percent": 78.26,
-  "statements": 368
+  "covered": 284,
+  "missing": 78,
+  "percent": 78.45,
+  "statements": 362
  },
  "src/health/__init__.py": {
   "covered": 3,
@@ -318,10 +318,10 @@
   "statements": 3
  },
  "src/health/checker.py": {
-  "covered": 253,
+  "covered": 239,
   "missing": 0,
   "percent": 100.0,
-  "statements": 253
+  "statements": 239
  },
  "src/health/grafana_alerts.py": {
   "covered": 235,
@@ -342,10 +342,10 @@
   "statements": 639
  },
  "src/health/startup.py": {
-  "covered": 239,
+  "covered": 231,
   "missing": 11,
-  "percent": 95.6,
-  "statements": 250
+  "percent": 95.45,
+  "statements": 242
  },
  "src/health/subsystem_guard.py": {
   "covered": 178,
@@ -510,22 +510,16 @@
   "statements": 14
  },
  "src/monitoring/__init__.py": {
-  "covered": 3,
+  "covered": 2,
   "missing": 0,
   "percent": 100.0,
-  "statements": 3
+  "statements": 2
  },
  "src/monitoring/resource_usage.py": {
   "covered": 154,
   "missing": 11,
   "percent": 93.33,
   "statements": 165
- },
- "src/monitoring/watcher.py": {
-  "covered": 44,
-  "missing": 109,
-  "percent": 28.76,
-  "statements": 153
  },
  "src/notifications/__init__.py": {
   "covered": 4,
@@ -1134,10 +1128,10 @@
   "statements": 219
  },
  "src/web/api/config_admin.py": {
-  "covered": 297,
+  "covered": 288,
   "missing": 0,
   "percent": 100.0,
-  "statements": 297
+  "statements": 288
  },
  "src/web/api/integrations.py": {
   "covered": 266,
