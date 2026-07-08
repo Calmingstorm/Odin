@@ -48,10 +48,10 @@
   "statements": 60
  },
  "src/audit/logger.py": {
-  "covered": 245,
-  "missing": 52,
-  "percent": 82.49,
-  "statements": 297
+  "covered": 274,
+  "missing": 27,
+  "percent": 91.03,
+  "statements": 301
  },
  "src/audit/signer.py": {
   "covered": 71,
@@ -66,9 +66,9 @@
   "statements": 30
  },
  "src/config/schema.py": {
-  "covered": 506,
-  "missing": 59,
-  "percent": 89.56,
+  "covered": 564,
+  "missing": 1,
+  "percent": 99.82,
   "statements": 565
  },
  "src/constants.py": {
@@ -444,9 +444,9 @@
   "statements": 151
  },
  "src/llm/ollama.py": {
-  "covered": 112,
-  "missing": 65,
-  "percent": 63.28,
+  "covered": 172,
+  "missing": 5,
+  "percent": 97.18,
   "statements": 177
  },
  "src/llm/openai_codex.py": {
