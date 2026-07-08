@@ -1128,9 +1128,9 @@
   "statements": 150
  },
  "src/web/api/codex_admin.py": {
-  "covered": 185,
-  "missing": 34,
-  "percent": 84.47,
+  "covered": 203,
+  "missing": 16,
+  "percent": 92.69,
   "statements": 219
  },
  "src/web/api/config_admin.py": {

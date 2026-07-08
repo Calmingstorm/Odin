@@ -417,6 +417,20 @@ Two safe pure/bookkeeping surfaces, one PR, Odin-reviewed. Whole-repo 85.2% → 
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
+## 6w. R3 — P22 codex admin routes (2026-07-07)
+
+One web-route file, extending the existing `test_web_api_codex_admin.py` harness. One PR, Odin-reviewed. Whole-repo 85.3% → **85.4%**.
+
+| File | Start → End |
+|---|---|
+| `web/api/codex_admin.py` | 84.5% → **92.7%** (missing 34 → 16) |
+
+**Method / safety.** Drives the Codex OAuth admin routes through the real aiohttp route layer (`TestClient`/`TestServer`) with a real `CodexAuthPool` (or a pool-less bot for the file-only branches) — faking only network transport and the poll/refresh calls. New coverage: `set_label` / `delete_account` dict-index-0 + invalid-index + unreadable-file(500) branches, `refresh` exception→500, `activate` unconfigured→503, and the `device-poll` credential-merge branches (out-of-range save_index → append, dict-file promote-to-list, no-file fresh write). **No real Codex network, no token exchange** — the credentials file is a tmp fixture.
+
+**Deliberately deferred (16 lines):** the intricate defensive tail — the device-poll `except`-backup path (needs injected write-failure), the per-account status `except` (malformed account), the set_label shadow-update `except`, and the `pool.reload()` fallback (needs a pool lacking `reload_async`). Contrived failure-injection with mock-drift risk, low value.
+
+**COV ledger: EMPTY.** No real bugs; no `xfail`s.
+
 ## 7. Risks / discipline
 
 - **Coverage theater**: the §5 real-behavior rule + Odin review of every test are the guard. A test that would pass against a `pass` body is rejected.
