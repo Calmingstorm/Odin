@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -279,6 +279,12 @@ class AuxiliaryLLMConfig(BaseModel):
     )
 
 
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+# Single source of truth for runtime validation (Literal does not validate
+# direct attribute assignment — the web admin layer checks against this set).
+CODEX_REASONING_EFFORTS: frozenset[str] = frozenset(get_args(ReasoningEffort))
+
+
 class OpenAICodexConfig(BaseModel):
     # ``model`` and ``model_routing`` collide with pydantic v2's protected
     # ``model_*`` namespace by default. Disable the guard.
@@ -287,6 +293,7 @@ class OpenAICodexConfig(BaseModel):
     enabled: bool = False
     model: str = "gpt-4o"
     max_tokens: int = 4096
+    reasoning_effort: ReasoningEffort = "medium"
     credentials_path: str = "./data/codex_auth.json"
     retry: RetryConfig = RetryConfig()
     connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()

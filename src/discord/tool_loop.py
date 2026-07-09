@@ -465,6 +465,9 @@ class ToolLoopRunner:
             trace.provider(
                 name=getattr(provider_cfg, "active_provider", "codex") if provider_cfg else "codex",
                 model=getattr(self._llm_gateway.active_client, "model", "") or "",
+                reasoning_effort=getattr(
+                    self._llm_gateway.active_client, "reasoning_effort", None
+                ),
             )
         _turn_ctx = get_turn() or {}
         _trajectory = TrajectoryTurn(

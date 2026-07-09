@@ -16,6 +16,9 @@ openai_codex:
   # (gpt-4o et al return "model not supported" via this auth path).
   model: gpt-5.5
   max_tokens: 4096
+  # Reasoning effort sent with every main-provider request:
+  # none | minimal | low | medium | high | xhigh (backend default: medium)
+  reasoning_effort: medium
   credentials_path: ./data/codex_auth.json
   retry:
     max_retries: 3

@@ -184,10 +184,17 @@ class ContextTraceCollector:
         self._continuity_source = source
 
     @_guarded
-    def provider(self, *, name: str, model: str, message_format: str = "") -> None:
+    def provider(
+        self, *, name: str, model: str, message_format: str = "",
+        reasoning_effort: str | None = None,
+    ) -> None:
         self._provider = {"name": name, "model": model}
         if message_format:
             self._provider["message_format"] = message_format
+        if reasoning_effort:
+            # Active-provider configuration metadata, not per-request ground
+            # truth: routed auxiliary requests may use a different client.
+            self._provider["reasoning_effort"] = reasoning_effort
 
     @_guarded
     def warning(self, code: str, severity: str, detail: str) -> None:

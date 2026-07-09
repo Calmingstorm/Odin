@@ -15,6 +15,7 @@ from pathlib import Path
 
 from aiohttp import web
 
+from ...config.schema import CODEX_REASONING_EFFORTS
 from ...odin_log import get_logger
 
 log = get_logger("web.api")
@@ -107,6 +108,7 @@ def _persist_llm_sections_sync(bot) -> None:
     existing["openai_codex"]["enabled"] = bot.config.openai_codex.enabled
     existing["openai_codex"]["model"] = bot.config.openai_codex.model
     existing["openai_codex"]["max_tokens"] = bot.config.openai_codex.max_tokens
+    existing["openai_codex"]["reasoning_effort"] = bot.config.openai_codex.reasoning_effort
 
     if "ollama" not in existing:
         existing["ollama"] = {}
@@ -213,6 +215,10 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "enabled": bot.config.openai_codex.enabled,
                 "model": bot.config.openai_codex.model,
                 "max_tokens": bot.config.openai_codex.max_tokens,
+                "reasoning_effort": bot.config.openai_codex.reasoning_effort,
+                "active_reasoning_effort": getattr(
+                    bot.llm_gateway.codex_client, "reasoning_effort", None
+                ),
             },
             "ollama": {
                 "configured": ollama_configured,
@@ -279,6 +285,18 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         try:
             async with lock:
                 cfg = bot.config.openai_codex
+                # Validate BEFORE any mutation — Literal does not validate
+                # direct assignment, and a rejected request must leave config,
+                # persisted YAML, and the live client untouched.
+                effort = body.get("reasoning_effort")
+                if effort is not None and str(effort) not in CODEX_REASONING_EFFORTS:
+                    return web.json_response(
+                        {
+                            "error": f"invalid reasoning_effort: {effort!r}",
+                            "allowed": sorted(CODEX_REASONING_EFFORTS),
+                        },
+                        status=400,
+                    )
                 changed = False
                 if "enabled" in body:
                     cfg.enabled = bool(body["enabled"])
@@ -288,6 +306,9 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     changed = True
                 if "max_tokens" in body:
                     cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
+                    changed = True
+                if effort is not None:
+                    cfg.reasoning_effort = str(effort)
                     changed = True
                 if changed:
                     await bot.llm_gateway.reload_codex_inner()
@@ -299,6 +320,7 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             "status": "updated",
             "enabled": cfg.enabled,
             "model": cfg.model,
+            "reasoning_effort": cfg.reasoning_effort,
             "configured": bot.llm_gateway.codex_client is not None,
         })
 

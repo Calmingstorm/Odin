@@ -33,7 +33,7 @@ class TestCollector:
         c.history(budget=64000, used=900, candidates=20, kept_recent=12,
                   kept_relevant=3, dropped_relevance=5, dropped_budget=0)
         c.continuity("live")
-        c.provider(name="codex", model="gpt-5.5")
+        c.provider(name="codex", model="gpt-5.5", reasoning_effort="high")
         trace = c.finalize()
         assert trace["schema_version"] == TRACE_SCHEMA_VERSION
         assert trace["summary"]["system_tokens"] == 1200
@@ -41,6 +41,11 @@ class TestCollector:
         assert trace["history"]["candidates"] == 20
         assert trace["continuity_source"] == "live"
         assert trace["provider"]["name"] == "codex"
+        assert trace["provider"]["reasoning_effort"] == "high"
+        # None omits the key — non-Codex providers stay clean
+        c2 = ContextTraceCollector()
+        c2.provider(name="ollama", model="qwen3:14b", reasoning_effort=None)
+        assert "reasoning_effort" not in c2.finalize()["provider"]
         assert trace["privacy"]["content_recorded"] is False
         assert trace["privacy"]["secret_scan"]["performed"] is True
 

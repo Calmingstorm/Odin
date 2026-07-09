@@ -123,3 +123,25 @@ class TestLoadConfig:
                         "discord:\n  token: abc\ntools:\n  command_timeout_seconds: 0\n")
         with pytest.raises(SystemExit, match="validation failed"):
             load_config(p)
+
+
+class TestCodexReasoningEffort:
+    def test_default_is_medium(self):
+        from src.config.schema import OpenAICodexConfig
+        assert OpenAICodexConfig().reasoning_effort == "medium"
+
+    def test_all_enum_values_accepted(self):
+        from src.config.schema import CODEX_REASONING_EFFORTS, OpenAICodexConfig
+        assert CODEX_REASONING_EFFORTS == {
+            "none", "minimal", "low", "medium", "high", "xhigh"
+        }
+        for value in CODEX_REASONING_EFFORTS:
+            assert OpenAICodexConfig(reasoning_effort=value).reasoning_effort == value
+
+    def test_invalid_value_rejected_at_load(self):
+        import pydantic
+        import pytest as _pytest
+
+        from src.config.schema import OpenAICodexConfig
+        with _pytest.raises(pydantic.ValidationError):
+            OpenAICodexConfig(reasoning_effort="banana")

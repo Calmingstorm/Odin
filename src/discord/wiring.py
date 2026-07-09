@@ -285,6 +285,7 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
                 auth=codex_auth,
                 model=config.openai_codex.model,
                 max_tokens=config.openai_codex.max_tokens,
+                reasoning_effort=config.openai_codex.reasoning_effort,
             )
             log.info("Codex backend enabled (model: %s)", config.openai_codex.model)
         else:
