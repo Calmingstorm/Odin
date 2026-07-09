@@ -4,6 +4,20 @@ import { confirmDialog } from '../confirm.js';
 import { onMounted, onUnmounted, ref } from 'vue';
 
 
+// Trailing debounce: selects fire @change on EVERY arrow keypress, and each
+// save costs a PUT + status refetches — rapid keyboard scrubbing could burn
+// the API rate-limit window (120 req/min) and 429 the status panels.
+function debounce(fn, ms = 500) {
+  let t = null;
+  const wrapper = (...args) => {
+    if (t) clearTimeout(t);
+    t = setTimeout(() => { t = null; fn(...args); }, ms);
+  };
+  wrapper.pending = () => t !== null;
+  wrapper.cancel = () => { if (t) { clearTimeout(t); t = null; } };
+  return wrapper;
+}
+
 export default {
   template: `
     <div class="p-6 page-fade-in">
@@ -90,7 +104,7 @@ export default {
                 <span class="text-green-400">● Connected</span>
               </div>
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" v-model="codexForm.enabled" @change="saveCodexConfig" class="accent-indigo-500" />
+                <input type="checkbox" v-model="codexForm.enabled" @change="saveCodexConfigDebounced" class="accent-indigo-500" />
                 <span class="text-xs text-gray-400">Enabled</span>
               </label>
             </div>
@@ -98,7 +112,7 @@ export default {
           <div class="grid grid-cols-2 gap-3 mb-3">
             <div>
               <label class="text-xs text-gray-400">Model</label>
-              <select v-model="codexForm.model" @change="saveCodexConfig"
+              <select v-model="codexForm.model" @change="saveCodexConfigDebounced"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                 <option value="gpt-5.6-sol">gpt-5.6-sol</option>
                 <option value="gpt-5.6-terra">gpt-5.6-terra</option>
@@ -111,12 +125,12 @@ export default {
             </div>
             <div>
               <label class="text-xs text-gray-400">Max Tokens</label>
-              <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfig"
+              <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfigNow"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
             <div>
               <label class="text-xs text-gray-400">Reasoning</label>
-              <select v-model="codexForm.reasoning_effort" @change="saveCodexConfig"
+              <select v-model="codexForm.reasoning_effort" @change="saveCodexConfigDebounced"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                 <option value="none">None</option>
                 <option value="low">Low</option>
@@ -256,7 +270,7 @@ export default {
                 <span v-else class="text-red-400">● Unreachable</span>
               </div>
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" v-model="kimiForm.enabled" @change="saveKimiConfig" class="accent-indigo-500" />
+                <input type="checkbox" v-model="kimiForm.enabled" @change="saveKimiConfigDebounced" class="accent-indigo-500" />
                 <span class="text-xs text-gray-400">Enabled</span>
               </label>
             </div>
@@ -264,7 +278,7 @@ export default {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-gray-400">Model</label>
-              <select v-model="kimiForm.model" @change="saveKimiConfig"
+              <select v-model="kimiForm.model" @change="saveKimiConfigDebounced"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                 <option v-if="!kimiModels.length" value="" disabled>No models available</option>
                 <option v-for="m in kimiModels" :key="m" :value="m">{{ m }}</option>
@@ -272,14 +286,14 @@ export default {
             </div>
             <div>
               <label class="text-xs text-gray-400">Max Tokens</label>
-              <input v-model.number="kimiForm.max_tokens" type="number" @keydown.enter="saveKimiConfig"
+              <input v-model.number="kimiForm.max_tokens" type="number" @keydown.enter="saveKimiConfigNow"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
             <div>
               <label class="text-xs text-gray-400">API Key</label>
               <div class="flex items-center gap-2">
                 <span v-if="llmStatus && llmStatus.kimi.has_api_key && !kimiForm.api_key" class="text-xs text-green-400">● Configured</span>
-                <input v-model="kimiForm.api_key" type="password" @keydown.enter="saveKimiConfig" @input="kimiKeyDirty = true"
+                <input v-model="kimiForm.api_key" type="password" @keydown.enter="saveKimiConfigNow" @input="kimiKeyDirty = true"
                        :placeholder="llmStatus && llmStatus.kimi.has_api_key ? '••••••••  (press Enter to replace)' : 'sk-...'"
                        class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
               </div>
@@ -301,7 +315,7 @@ export default {
                 <span v-else class="text-red-400">● Unreachable</span>
               </div>
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" v-model="ollamaForm.enabled" @change="saveOllamaConfig" class="accent-indigo-500" />
+                <input type="checkbox" v-model="ollamaForm.enabled" @change="saveOllamaConfigDebounced" class="accent-indigo-500" />
                 <span class="text-xs text-gray-400">Enabled</span>
               </label>
             </div>
@@ -309,7 +323,7 @@ export default {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-gray-400">Model</label>
-              <select v-model="ollamaForm.model" @change="saveOllamaConfig"
+              <select v-model="ollamaForm.model" @change="saveOllamaConfigDebounced"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                 <option v-if="!ollamaModels.length" value="" disabled>No models available</option>
                 <option v-for="m in ollamaModels" :key="m.name" :value="m.name">{{ m.name }} ({{ formatSize(m.size) }})</option>
@@ -317,17 +331,17 @@ export default {
             </div>
             <div>
               <label class="text-xs text-gray-400">Max Tokens</label>
-              <input v-model.number="ollamaForm.max_tokens" type="number" @keydown.enter="saveOllamaConfig"
+              <input v-model.number="ollamaForm.max_tokens" type="number" @keydown.enter="saveOllamaConfigNow"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
             <div>
               <label class="text-xs text-gray-400">API Key <span class="text-gray-600">(optional, for remote)</span></label>
-              <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local" @keydown.enter="saveOllamaConfig" @input="ollamaKeyDirty = true"
+              <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local" @keydown.enter="saveOllamaConfigNow" @input="ollamaKeyDirty = true"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
             <div>
               <label class="text-xs text-gray-400">Base URL</label>
-              <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434" @keydown.enter="saveOllamaConfig"
+              <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434" @keydown.enter="saveOllamaConfigNow"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
           </div>
@@ -411,20 +425,22 @@ export default {
         const data = await api.get('/api/llm/status');
         llmStatus.value = data;
         selectedProvider.value = data.active_provider || 'codex';
-        if (data.codex) {
+        // Never clobber a form that has a NEWER edit waiting in its debounce
+        // timer — the stale refresh would get re-saved (last-write-lost).
+        if (data.codex && !saveCodexConfigDebounced.pending()) {
           codexForm.value.enabled = data.codex.enabled;
           codexForm.value.model = data.codex.model || 'gpt-5.5';
           codexForm.value.reasoning_effort = data.codex.reasoning_effort || 'medium';
           codexForm.value.max_tokens = data.codex.max_tokens || 4096;
         }
-        if (data.ollama) {
+        if (data.ollama && !saveOllamaConfigDebounced.pending()) {
           ollamaForm.value.enabled = data.ollama.enabled;
           ollamaForm.value.base_url = data.ollama.base_url || '';
           ollamaForm.value.model = data.ollama.model || '';
           ollamaForm.value.max_tokens = data.ollama.max_tokens || 4096;
           // Don't overwrite api_key from server (it's masked)
         }
-        if (data.kimi) {
+        if (data.kimi && !saveKimiConfigDebounced.pending()) {
           kimiForm.value.enabled = data.kimi.enabled;
           kimiForm.value.model = data.kimi.model || '';
           kimiForm.value.max_tokens = data.kimi.max_tokens || 4096;
@@ -563,42 +579,72 @@ export default {
 
     // --- Provider config saves ---
     async function saveCodexConfig() {
+      if (savingCodex.value) { saveCodexConfigDebounced(); return; }
       savingCodex.value = true;
       try {
         await api.put('/api/llm/codex/config', codexForm.value);
         showToast('Codex config saved');
-        await fetchAll();
-      } catch (e) { showToast(e.message || 'Failed', 'error'); await fetchAll(); }
+        await Promise.all([fetchLLMStatus(), fetchCodexStatus()]);
+      } catch (e) {
+        showToast(e.message || 'Failed', 'error');
+        // restore the last confirmed server state (form repopulates from llm/status)
+        await Promise.all([fetchLLMStatus(), fetchCodexStatus()]);
+      }
       finally { savingCodex.value = false; }
     }
 
     async function saveOllamaConfig() {
+      if (savingOllama.value) { saveOllamaConfigDebounced(); return; }
       savingOllama.value = true;
       try {
         const payload = { ...ollamaForm.value };
-        if (!ollamaKeyDirty.value) delete payload.api_key;
+        const sentKey = ollamaKeyDirty.value ? ollamaForm.value.api_key : null;
+        if (sentKey === null) delete payload.api_key;
         await api.put('/api/llm/ollama/config', payload);
         showToast('Ollama config saved');
-        ollamaForm.value.api_key = '';
-        ollamaKeyDirty.value = false;
-        await fetchAll();
+        // Revision-aware cleanup: only clear key state the COMPLETED save
+        // actually sent — a key typed mid-flight must survive to be sent
+        // by its queued save, not be silently erased.
+        if (sentKey !== null && ollamaForm.value.api_key === sentKey) {
+          ollamaForm.value.api_key = '';
+          ollamaKeyDirty.value = false;
+        }
+        await Promise.all([fetchLLMStatus(), fetchOllamaStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingOllama.value = false; }
     }
 
     async function saveKimiConfig() {
+      if (savingKimi.value) { saveKimiConfigDebounced(); return; }
       savingKimi.value = true;
       try {
         const payload = { ...kimiForm.value };
-        if (!kimiKeyDirty.value) delete payload.api_key;
+        const sentKey = kimiKeyDirty.value ? kimiForm.value.api_key : null;
+        if (sentKey === null) delete payload.api_key;
         await api.put('/api/llm/kimi/config', payload);
         showToast('Kimi config saved');
-        kimiForm.value.api_key = '';
-        kimiKeyDirty.value = false;
-        await fetchAll();
+        // Revision-aware cleanup: only clear key state the COMPLETED save
+        // actually sent — a key typed mid-flight must survive to be sent
+        // by its queued save, not be silently erased.
+        if (sentKey !== null && kimiForm.value.api_key === sentKey) {
+          kimiForm.value.api_key = '';
+          kimiKeyDirty.value = false;
+        }
+        await Promise.all([fetchLLMStatus(), fetchKimiStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingKimi.value = false; }
     }
+
+    // Rapid-fire bindings (selects/checkboxes) go through these; explicit
+    // actions (Enter on an input) keep the immediate savers.
+    const saveCodexConfigDebounced = debounce(saveCodexConfig);
+    const saveOllamaConfigDebounced = debounce(saveOllamaConfig);
+    const saveKimiConfigDebounced = debounce(saveKimiConfig);
+    // Explicit saves (Enter) cancel the pending timer, then save immediately —
+    // otherwise the timer would fire a duplicate PUT afterward.
+    const saveCodexConfigNow = () => { saveCodexConfigDebounced.cancel(); return saveCodexConfig(); };
+    const saveOllamaConfigNow = () => { saveOllamaConfigDebounced.cancel(); return saveOllamaConfig(); };
+    const saveKimiConfigNow = () => { saveKimiConfigDebounced.cancel(); return saveKimiConfig(); };
 
     // --- Codex account management ---
     async function activateAccount(index) {
@@ -686,7 +732,12 @@ export default {
     }
 
     onMounted(fetchAll);
-    onUnmounted(() => { if (pollController) pollController.cancelled = true; });
+    onUnmounted(() => {
+      if (pollController) pollController.cancelled = true;
+      saveCodexConfigDebounced.cancel();
+      saveOllamaConfigDebounced.cancel();
+      saveKimiConfigDebounced.cancel();
+    });
 
     return {
       loading, llmStatus, selectedProvider, switching,
@@ -698,6 +749,8 @@ export default {
       fetchAll, switchProvider, reloadOllama, setOllamaModel,
       reloadKimi, setKimiModel, probeOllamaModels,
       saveCodexConfig, saveOllamaConfig, saveKimiConfig,
+      saveCodexConfigDebounced, saveOllamaConfigDebounced, saveKimiConfigDebounced,
+      saveCodexConfigNow, saveOllamaConfigNow, saveKimiConfigNow,
       activateAccount, refreshAccount, startEditLabel, saveLabel, deleteAccount,
       startDeviceLogin, cancelDeviceLogin, formatSize,
     };
