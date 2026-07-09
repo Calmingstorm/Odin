@@ -160,3 +160,61 @@ class TestStopAllLoops:
             body = await (await c.post("/api/loops/stop-all")).json()
             assert body["result"] == "stopped 3 loops"
             bot.loop_manager.stop_loop.assert_called_once_with("all")
+
+
+class TestRepoRootAndMetadataHygiene:
+    """Regressions for the field report of self-update misreporting its
+    version: base pointed at <repo>/src after the RFC-003 package split
+    (pip reinstall silently skipped — src/.venv never exists), and stale
+    odin_bot.egg-info metadata kept get_version() on the old release."""
+
+    def test_repo_root_contains_pyproject(self):
+        import os
+
+        from src.web.api.self_update import _repo_root
+        root = _repo_root()
+        assert os.path.isfile(os.path.join(root, "pyproject.toml"))
+        # the old 3-dirname derivation landed here — never again
+        assert not root.rstrip(os.sep).endswith(os.sep + "src")
+
+    async def test_apply_pip_installs_repo_root_and_clears_egg_info(self):
+        import asyncio
+        import os
+
+        from src.web.api.self_update import _repo_root
+        loop = asyncio.get_running_loop()
+        root = _repo_root()
+        commands: list = []
+
+        def _capture(cmd, **kw):
+            commands.append(cmd)
+            return _run_ok(cmd, **kw)
+
+        def _exists(path):
+            # only the venv pip probe answers True so the install step runs
+            return path.endswith(os.path.join(".venv", "bin", "pip"))
+
+        def _isdir(path):
+            return path.endswith("odin_bot.egg-info")
+
+        with patch("subprocess.run", side_effect=_capture), \
+             patch("os.path.exists", side_effect=_exists), \
+             patch("os.path.isdir", side_effect=_isdir), \
+             patch("shutil.rmtree") as rmtree, \
+             patch("os.walk", return_value=[]), \
+             patch.object(loop, "call_later", lambda d, cb, *a: MagicMock()), \
+             patch("os.kill") as kill:
+            async with TestClient(TestServer(_app())) as c:
+                r = await c.post("/api/update/apply", json={"version": "v3.55.0"})
+                assert r.status == 200
+
+        # stale build metadata is removed from the REPO ROOT before install
+        rmtree.assert_called_once()
+        assert rmtree.call_args.args[0] == os.path.join(root, "odin_bot.egg-info")
+        # pip reinstall actually runs, against the repo root (not <repo>/src)
+        pip_suffix = os.path.join(".venv", "bin", "pip")
+        pip_cmds = [c for c in commands if c and str(c[0]).endswith(pip_suffix)]
+        assert pip_cmds, "pip reinstall step never ran"
+        assert pip_cmds[0][0] == os.path.join(root, ".venv", "bin", "pip")
+        assert pip_cmds[0][-1] == root
+        kill.assert_not_called()

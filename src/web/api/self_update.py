@@ -15,6 +15,33 @@ from ...odin_log import get_logger
 log = get_logger("web.api")
 
 
+def _repo_root() -> str:
+    """Repo root = nearest ancestor of this module containing pyproject.toml.
+
+    Derived by marker rather than a fixed number of dirname hops: the
+    RFC-003 package split moved this module one level deeper
+    (src/web/api.py -> src/web/api/self_update.py) and the old 3-hop
+    derivation silently pointed base at <repo>/src — so the updater's
+    pip reinstall step never ran (src/.venv does not exist), config.yml
+    preservation joined the wrong directory, and the bot kept reporting
+    the pre-update version from stale package metadata.
+    """
+    import os
+
+    path = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(8):
+        if os.path.isfile(os.path.join(path, "pyproject.toml")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    # Fallback: historical layout, src/web/api/ is three levels below root
+    return os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    )
+
+
 def register_self_update(routes: web.RouteTableDef, bot) -> None:
     """Self-Update (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -60,7 +87,7 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             data = {}
         target = data.get("version", "latest")
-        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        base = _repo_root()
 
         # Resolve "latest" to actual release tag
         if target == "latest":
@@ -146,6 +173,14 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
             # Restore user config files after update
             for fname, data in _backups.items():
                 open(os.path.join(base, fname), "wb").write(data)
+
+            # Stale build metadata (a leftover odin_bot.egg-info, e.g.
+            # root-owned from a manual install) can poison the reinstall and
+            # keep importlib.metadata reporting the previous version — the
+            # updater then re-offers the release it just applied.
+            egg_info = os.path.join(base, "odin_bot.egg-info")
+            if os.path.isdir(egg_info):
+                shutil.rmtree(egg_info, ignore_errors=True)
 
             # Install/update dependencies
             venv_pip = os.path.join(base, ".venv", "bin", "pip")
