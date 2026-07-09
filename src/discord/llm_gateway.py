@@ -110,6 +110,17 @@ class LLMGateway:
             auth = getattr(self.codex_client, "auth", None)
             if isinstance(auth, CodexAuthPool):
                 count = await auth.reload_async()
+                # Config changes (model/max_tokens) must land on the live
+                # client too — it reads self.model per request, and without
+                # this a WebUI model switch only took effect after a restart.
+                if self.codex_client.model != config.openai_codex.model:
+                    log.info(
+                        "Codex model updated via live reload: %s -> %s",
+                        self.codex_client.model,
+                        config.openai_codex.model,
+                    )
+                self.codex_client.model = config.openai_codex.model
+                self.codex_client.max_tokens = config.openai_codex.max_tokens
                 return {"configured": True, "reloaded": True, "accounts": count}
 
         auth = CodexAuthPool(config.openai_codex.credentials_path)
