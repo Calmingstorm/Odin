@@ -4817,6 +4817,8 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
               <label class="text-xs text-gray-400">Model</label>
               <select v-model="codexForm.model" @change="saveCodexConfig"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
+                <option value="gpt-5.6-sol">gpt-5.6-sol</option>
+                <option value="gpt-5.6-terra">gpt-5.6-terra</option>
                 <option value="gpt-5.5">gpt-5.5</option>
                 <option value="gpt-5">gpt-5</option>
                 <option value="gpt-5-mini">gpt-5-mini</option>
