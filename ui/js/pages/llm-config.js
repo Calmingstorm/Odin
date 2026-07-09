@@ -4,6 +4,17 @@ import { confirmDialog } from '../confirm.js';
 import { onMounted, onUnmounted, ref } from 'vue';
 
 
+// Trailing debounce: selects fire @change on EVERY arrow keypress, and each
+// save costs a PUT + status refetches — rapid keyboard scrubbing could burn
+// the API rate-limit window (120 req/min) and 429 the status panels.
+function debounce(fn, ms = 500) {
+  let t = null;
+  return (...args) => {
+    if (t) clearTimeout(t);
+    t = setTimeout(() => { t = null; fn(...args); }, ms);
+  };
+}
+
 export default {
   template: `
     <div class="p-6 page-fade-in">
@@ -90,7 +101,7 @@ export default {
                 <span class="text-green-400">● Connected</span>
               </div>
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" v-model="codexForm.enabled" @change="saveCodexConfig" class="accent-indigo-500" />
+                <input type="checkbox" v-model="codexForm.enabled" @change="saveCodexConfigDebounced" class="accent-indigo-500" />
                 <span class="text-xs text-gray-400">Enabled</span>
               </label>
             </div>
@@ -98,7 +109,7 @@ export default {
           <div class="grid grid-cols-2 gap-3 mb-3">
             <div>
               <label class="text-xs text-gray-400">Model</label>
-              <select v-model="codexForm.model" @change="saveCodexConfig"
+              <select v-model="codexForm.model" @change="saveCodexConfigDebounced"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                 <option value="gpt-5.6-sol">gpt-5.6-sol</option>
                 <option value="gpt-5.6-terra">gpt-5.6-terra</option>
@@ -116,7 +127,7 @@ export default {
             </div>
             <div>
               <label class="text-xs text-gray-400">Reasoning</label>
-              <select v-model="codexForm.reasoning_effort" @change="saveCodexConfig"
+              <select v-model="codexForm.reasoning_effort" @change="saveCodexConfigDebounced"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                 <option value="none">None</option>
                 <option value="minimal">Minimal</option>
@@ -257,7 +268,7 @@ export default {
                 <span v-else class="text-red-400">● Unreachable</span>
               </div>
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" v-model="kimiForm.enabled" @change="saveKimiConfig" class="accent-indigo-500" />
+                <input type="checkbox" v-model="kimiForm.enabled" @change="saveKimiConfigDebounced" class="accent-indigo-500" />
                 <span class="text-xs text-gray-400">Enabled</span>
               </label>
             </div>
@@ -265,7 +276,7 @@ export default {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-gray-400">Model</label>
-              <select v-model="kimiForm.model" @change="saveKimiConfig"
+              <select v-model="kimiForm.model" @change="saveKimiConfigDebounced"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                 <option v-if="!kimiModels.length" value="" disabled>No models available</option>
                 <option v-for="m in kimiModels" :key="m" :value="m">{{ m }}</option>
@@ -302,7 +313,7 @@ export default {
                 <span v-else class="text-red-400">● Unreachable</span>
               </div>
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" v-model="ollamaForm.enabled" @change="saveOllamaConfig" class="accent-indigo-500" />
+                <input type="checkbox" v-model="ollamaForm.enabled" @change="saveOllamaConfigDebounced" class="accent-indigo-500" />
                 <span class="text-xs text-gray-400">Enabled</span>
               </label>
             </div>
@@ -310,7 +321,7 @@ export default {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-gray-400">Model</label>
-              <select v-model="ollamaForm.model" @change="saveOllamaConfig"
+              <select v-model="ollamaForm.model" @change="saveOllamaConfigDebounced"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                 <option v-if="!ollamaModels.length" value="" disabled>No models available</option>
                 <option v-for="m in ollamaModels" :key="m.name" :value="m.name">{{ m.name }} ({{ formatSize(m.size) }})</option>
@@ -568,8 +579,12 @@ export default {
       try {
         await api.put('/api/llm/codex/config', codexForm.value);
         showToast('Codex config saved');
-        await fetchAll();
-      } catch (e) { showToast(e.message || 'Failed', 'error'); await fetchAll(); }
+        await Promise.all([fetchLLMStatus(), fetchCodexStatus()]);
+      } catch (e) {
+        showToast(e.message || 'Failed', 'error');
+        // restore the last confirmed server state (form repopulates from llm/status)
+        await Promise.all([fetchLLMStatus(), fetchCodexStatus()]);
+      }
       finally { savingCodex.value = false; }
     }
 
@@ -582,7 +597,7 @@ export default {
         showToast('Ollama config saved');
         ollamaForm.value.api_key = '';
         ollamaKeyDirty.value = false;
-        await fetchAll();
+        await Promise.all([fetchLLMStatus(), fetchOllamaStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingOllama.value = false; }
     }
@@ -596,10 +611,16 @@ export default {
         showToast('Kimi config saved');
         kimiForm.value.api_key = '';
         kimiKeyDirty.value = false;
-        await fetchAll();
+        await Promise.all([fetchLLMStatus(), fetchKimiStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingKimi.value = false; }
     }
+
+    // Rapid-fire bindings (selects/checkboxes) go through these; explicit
+    // actions (Enter on an input) keep the immediate savers.
+    const saveCodexConfigDebounced = debounce(saveCodexConfig);
+    const saveOllamaConfigDebounced = debounce(saveOllamaConfig);
+    const saveKimiConfigDebounced = debounce(saveKimiConfig);
 
     // --- Codex account management ---
     async function activateAccount(index) {
@@ -699,6 +720,7 @@ export default {
       fetchAll, switchProvider, reloadOllama, setOllamaModel,
       reloadKimi, setKimiModel, probeOllamaModels,
       saveCodexConfig, saveOllamaConfig, saveKimiConfig,
+      saveCodexConfigDebounced, saveOllamaConfigDebounced, saveKimiConfigDebounced,
       activateAccount, refreshAccount, startEditLabel, saveLabel, deleteAccount,
       startDeviceLogin, cancelDeviceLogin, formatSize,
     };
