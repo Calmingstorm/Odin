@@ -598,11 +598,17 @@ export default {
       savingOllama.value = true;
       try {
         const payload = { ...ollamaForm.value };
-        if (!ollamaKeyDirty.value) delete payload.api_key;
+        const sentKey = ollamaKeyDirty.value ? ollamaForm.value.api_key : null;
+        if (sentKey === null) delete payload.api_key;
         await api.put('/api/llm/ollama/config', payload);
         showToast('Ollama config saved');
-        ollamaForm.value.api_key = '';
-        ollamaKeyDirty.value = false;
+        // Revision-aware cleanup: only clear key state the COMPLETED save
+        // actually sent — a key typed mid-flight must survive to be sent
+        // by its queued save, not be silently erased.
+        if (sentKey !== null && ollamaForm.value.api_key === sentKey) {
+          ollamaForm.value.api_key = '';
+          ollamaKeyDirty.value = false;
+        }
         await Promise.all([fetchLLMStatus(), fetchOllamaStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingOllama.value = false; }
@@ -613,11 +619,17 @@ export default {
       savingKimi.value = true;
       try {
         const payload = { ...kimiForm.value };
-        if (!kimiKeyDirty.value) delete payload.api_key;
+        const sentKey = kimiKeyDirty.value ? kimiForm.value.api_key : null;
+        if (sentKey === null) delete payload.api_key;
         await api.put('/api/llm/kimi/config', payload);
         showToast('Kimi config saved');
-        kimiForm.value.api_key = '';
-        kimiKeyDirty.value = false;
+        // Revision-aware cleanup: only clear key state the COMPLETED save
+        // actually sent — a key typed mid-flight must survive to be sent
+        // by its queued save, not be silently erased.
+        if (sentKey !== null && kimiForm.value.api_key === sentKey) {
+          kimiForm.value.api_key = '';
+          kimiKeyDirty.value = false;
+        }
         await Promise.all([fetchLLMStatus(), fetchKimiStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingKimi.value = false; }
