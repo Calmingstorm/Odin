@@ -279,7 +279,12 @@ class AuxiliaryLLMConfig(BaseModel):
     )
 
 
-ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+# "minimal" is deliberately absent: it sits in the Codex API's generic
+# parameter enum but every model on the ChatGPT-auth path rejects it at the
+# per-model capability layer ("Unsupported value ... Supported values are:
+# 'none', 'low', 'medium', 'high', and 'xhigh'"), which turns a saved value
+# into a deterministic per-request 400.
+ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh"]
 # Single source of truth for runtime validation (Literal does not validate
 # direct attribute assignment — the web admin layer checks against this set).
 CODEX_REASONING_EFFORTS: frozenset[str] = frozenset(get_args(ReasoningEffort))
@@ -295,6 +300,21 @@ class OpenAICodexConfig(BaseModel):
     max_tokens: int = 4096
     reasoning_effort: ReasoningEffort = "medium"
     credentials_path: str = "./data/codex_auth.json"
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _coerce_legacy_reasoning_effort(cls, v):
+        # v3.58.0 briefly offered "minimal"; a config persisted with it must
+        # not brick startup after upgrading — degrade to the nearest value.
+        if v == "minimal":
+            import logging
+
+            logging.getLogger("odin.config").warning(
+                "reasoning_effort 'minimal' is not supported by any Codex "
+                "model on this auth path; using 'low' instead"
+            )
+            return "low"
+        return v
     retry: RetryConfig = RetryConfig()
     connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()
     auxiliary: AuxiliaryLLMConfig = AuxiliaryLLMConfig()
