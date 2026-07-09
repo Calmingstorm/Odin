@@ -69,8 +69,9 @@ tools:
 ```yaml
 openai_codex:
   enabled: true
-  model: gpt-5.4                 # ChatGPT subscription path
+  model: gpt-5.5                 # ChatGPT subscription path
   max_tokens: 4096
+  reasoning_effort: medium       # none | minimal | low | medium | high | xhigh
   credentials_path: ./data/codex_auth.json
   retry:
     max_retries: 3
