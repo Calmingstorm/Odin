@@ -275,6 +275,10 @@ class TestProviderConfig:
                                   "reasoning_effort": "banana"})
             assert r.status == 400
             assert "reasoning_effort" in (await r.json())["error"]
+            # "minimal" is grammar-valid upstream but unsupported by every
+            # model on this auth path — the PUT layer rejects it too
+            assert (await c.put("/api/llm/codex/config",
+                                json={"reasoning_effort": "minimal"})).status == 400
         # nothing mutated, nothing reloaded
         assert bot.config.openai_codex.reasoning_effort == "medium"
         assert bot.config.openai_codex.model != "changed-model"

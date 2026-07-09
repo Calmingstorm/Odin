@@ -130,7 +130,6 @@ export default {
               <select v-model="codexForm.reasoning_effort" @change="saveCodexConfigDebounced"
                       class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
                 <option value="none">None</option>
-                <option value="minimal">Minimal</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
                 <option value="high">High</option>

@@ -132,11 +132,18 @@ class TestCodexReasoningEffort:
 
     def test_all_enum_values_accepted(self):
         from src.config.schema import CODEX_REASONING_EFFORTS, OpenAICodexConfig
-        assert CODEX_REASONING_EFFORTS == {
-            "none", "minimal", "low", "medium", "high", "xhigh"
-        }
+        # "minimal" is deliberately excluded — every Codex model on this auth
+        # path rejects it per-request despite it appearing in the API's
+        # generic parameter enum.
+        assert CODEX_REASONING_EFFORTS == {"none", "low", "medium", "high", "xhigh"}
         for value in CODEX_REASONING_EFFORTS:
             assert OpenAICodexConfig(reasoning_effort=value).reasoning_effort == value
+
+    def test_legacy_minimal_coerces_to_low(self):
+        """A config persisted while v3.58.0 offered "minimal" must not brick
+        startup after upgrading — it degrades to "low" with a warning."""
+        from src.config.schema import OpenAICodexConfig
+        assert OpenAICodexConfig(reasoning_effort="minimal").reasoning_effort == "low"
 
     def test_invalid_value_rejected_at_load(self):
         import pydantic
