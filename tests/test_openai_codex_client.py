@@ -352,3 +352,61 @@ class TestAuthAdapters:
         assert tok1 == "a1"
         await c._mark_limited(0)  # marks account 0
         assert await c._mark_auth_failed(1) is True  # rotate off, other available
+
+
+class TestReasoningEffortBody:
+    """The reasoning field is sent iff reasoning_effort is set — None (the
+    auxiliary-client default) must omit it so untested models never see it."""
+
+    @staticmethod
+    def _capture_chat(client):
+        captured = {}
+
+        async def fake_stream(body):
+            captured.update(body)
+            return "ok"
+
+        client._stream_request = fake_stream
+        return captured
+
+    @staticmethod
+    def _capture_tools(client):
+        from types import SimpleNamespace
+        captured = {}
+
+        async def fake_stream(body):
+            captured.update(body)
+            return SimpleNamespace(text="ok", tool_calls=[], stop_reason="end")
+
+        client._stream_tool_request = fake_stream
+        return captured
+
+    async def test_chat_includes_reasoning_when_set(self):
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5",
+                                 max_tokens=1000, reasoning_effort="high")
+        captured = self._capture_chat(client)
+        await client.chat([{"role": "user", "content": "hi"}], "sys")
+        assert captured["reasoning"] == {"effort": "high"}
+
+    async def test_chat_omits_reasoning_when_unset(self):
+        client = _client()
+        captured = self._capture_chat(client)
+        await client.chat([{"role": "user", "content": "hi"}], "sys")
+        assert "reasoning" not in captured
+
+    async def test_chat_with_tools_includes_reasoning_when_set(self):
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5",
+                                 max_tokens=1000, reasoning_effort="xhigh")
+        captured = self._capture_tools(client)
+        tools = [{"name": "t", "description": "d",
+                  "input_schema": {"type": "object", "properties": {}}}]
+        await client.chat_with_tools([{"role": "user", "content": "hi"}], "sys", tools)
+        assert captured["reasoning"] == {"effort": "xhigh"}
+
+    async def test_chat_with_tools_omits_reasoning_when_unset(self):
+        client = _client()
+        captured = self._capture_tools(client)
+        tools = [{"name": "t", "description": "d",
+                  "input_schema": {"type": "object", "properties": {}}}]
+        await client.chat_with_tools([{"role": "user", "content": "hi"}], "sys", tools)
+        assert "reasoning" not in captured

@@ -114,6 +114,18 @@ export default {
               <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfig"
                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200" />
             </div>
+            <div>
+              <label class="text-xs text-gray-400">Reasoning</label>
+              <select v-model="codexForm.reasoning_effort" @change="saveCodexConfig"
+                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
+                <option value="none">None</option>
+                <option value="minimal">Minimal</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="xhigh">Extra High</option>
+              </select>
+            </div>
           </div>
           <div class="border-t border-gray-700 pt-4">
           <h3 class="text-xs font-semibold text-gray-400 mb-2">Authentication</h3>
@@ -338,7 +350,7 @@ export default {
     const selectedProvider = ref('codex');
 
     // --- Config forms ---
-    const codexForm = ref({ enabled: false, model: 'gpt-5.5', max_tokens: 4096 });
+    const codexForm = ref({ enabled: false, model: 'gpt-5.5', max_tokens: 4096, reasoning_effort: 'medium' });
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096 });
     const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 });
     const ollamaKeyDirty = ref(false);
@@ -403,6 +415,7 @@ export default {
         if (data.codex) {
           codexForm.value.enabled = data.codex.enabled;
           codexForm.value.model = data.codex.model || 'gpt-5.5';
+          codexForm.value.reasoning_effort = data.codex.reasoning_effort || 'medium';
           codexForm.value.max_tokens = data.codex.max_tokens || 4096;
         }
         if (data.ollama) {
@@ -556,7 +569,7 @@ export default {
         await api.put('/api/llm/codex/config', codexForm.value);
         showToast('Codex config saved');
         await fetchAll();
-      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+      } catch (e) { showToast(e.message || 'Failed', 'error'); await fetchAll(); }
       finally { savingCodex.value = false; }
     }
 

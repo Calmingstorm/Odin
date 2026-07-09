@@ -119,8 +119,18 @@ class LLMGateway:
                         self.codex_client.model,
                         config.openai_codex.model,
                     )
+                if (
+                    getattr(self.codex_client, "reasoning_effort", None)
+                    != config.openai_codex.reasoning_effort
+                ):
+                    log.info(
+                        "Codex reasoning effort updated via live reload: %s -> %s",
+                        getattr(self.codex_client, "reasoning_effort", None),
+                        config.openai_codex.reasoning_effort,
+                    )
                 self.codex_client.model = config.openai_codex.model
                 self.codex_client.max_tokens = config.openai_codex.max_tokens
+                self.codex_client.reasoning_effort = config.openai_codex.reasoning_effort
                 return {"configured": True, "reloaded": True, "accounts": count}
 
         auth = CodexAuthPool(config.openai_codex.credentials_path)
@@ -131,6 +141,7 @@ class LLMGateway:
             auth=auth,
             model=config.openai_codex.model,
             max_tokens=config.openai_codex.max_tokens,
+            reasoning_effort=config.openai_codex.reasoning_effort,
         )
         self.wire_callbacks()
         log.info("Codex client created via live reload (model: %s)", config.openai_codex.model)

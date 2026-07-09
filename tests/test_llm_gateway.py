@@ -22,7 +22,8 @@ def _cfg(active="codex", codex_enabled=True, ollama_enabled=False,
     return SimpleNamespace(
         llm_provider=SimpleNamespace(active_provider=active),
         openai_codex=SimpleNamespace(enabled=codex_enabled, credentials_path="/creds",
-                                     model="gpt-5.5", max_tokens=8000),
+                                     model="gpt-5.5", max_tokens=8000,
+                                     reasoning_effort="medium"),
         ollama=SimpleNamespace(enabled=ollama_enabled, base_url="http://localhost:11434",
                                model="qwen", max_tokens=4096, timeout=300, api_key=""),
         kimi=SimpleNamespace(enabled=kimi_enabled, api_key=kimi_key,
@@ -85,7 +86,8 @@ class TestReloadCodex:
         from src.discord.llm_gateway import CodexAuthPool
         pool = MagicMock(spec=CodexAuthPool)
         pool.reload_async = AsyncMock(return_value=3)
-        client = SimpleNamespace(auth=pool, model="gpt-5.5", max_tokens=8000)
+        client = SimpleNamespace(auth=pool, model="gpt-5.5", max_tokens=8000,
+                                 reasoning_effort="medium")
         gw = _gw(codex=client)
         r = await gw.reload_codex_inner()
         assert r["reloaded"] is True and r["accounts"] == 3
@@ -98,10 +100,12 @@ class TestReloadCodex:
         from src.discord.llm_gateway import CodexAuthPool
         pool = MagicMock(spec=CodexAuthPool)
         pool.reload_async = AsyncMock(return_value=3)
-        client = SimpleNamespace(auth=pool, model="gpt-5.5", max_tokens=8000)
+        client = SimpleNamespace(auth=pool, model="gpt-5.5", max_tokens=8000,
+                                 reasoning_effort="medium")
         cfg = _cfg()
         cfg.openai_codex.model = "gpt-5.6-terra"
         cfg.openai_codex.max_tokens = 4096
+        cfg.openai_codex.reasoning_effort = "xhigh"
         gw = _gw(cfg, codex=client)
         r = await gw.reload_codex_inner()
         assert r["reloaded"] is True
@@ -109,6 +113,7 @@ class TestReloadCodex:
         assert gw.codex_client is client
         assert client.model == "gpt-5.6-terra"
         assert client.max_tokens == 4096
+        assert client.reasoning_effort == "xhigh"
 
     async def test_creates_new_client(self):
         pool = MagicMock()

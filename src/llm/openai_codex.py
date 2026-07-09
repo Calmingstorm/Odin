@@ -29,6 +29,7 @@ class CodexChatClient:
         auth: CodexAuth | CodexAuthPool,
         model: str,
         max_tokens: int,
+        reasoning_effort: str | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_base_delay: float = DEFAULT_BASE_DELAY,
         retry_max_delay: float = DEFAULT_MAX_DELAY,
@@ -38,6 +39,9 @@ class CodexChatClient:
         self.auth = auth
         self.model = model
         self.max_tokens = max_tokens
+        # None omits the reasoning field entirely (backend default applies) —
+        # the auxiliary client stays None until its model is compatibility-probed.
+        self.reasoning_effort = reasoning_effort
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.retry_max_delay = retry_max_delay
@@ -166,6 +170,8 @@ class CodexChatClient:
             "store": False,
             "stream": True,
         }
+        if self.reasoning_effort:
+            body["reasoning"] = {"effort": self.reasoning_effort}
         # Note: Codex Responses API does not support max_output_tokens.
         # Callers needing short responses should use prompt instructions instead.
 
@@ -429,6 +435,8 @@ class CodexChatClient:
             "store": False,
             "stream": True,
         }
+        if self.reasoning_effort:
+            body["reasoning"] = {"effort": self.reasoning_effort}
 
         input_tokens = self._estimate_body_input_tokens(body)
         result = await self._stream_tool_request(body)

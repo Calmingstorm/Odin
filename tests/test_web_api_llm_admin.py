@@ -128,6 +128,8 @@ class TestLlmStatus:
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/llm/status")).json()
             assert body["codex"]["configured"] is True
+            assert body["codex"]["reasoning_effort"] == "medium"
+            assert body["codex"]["active_reasoning_effort"] is None  # object() has no attr
             assert body["ollama"]["configured"] is False
             assert body["active_model"] == "gpt-5.5"
 
@@ -242,8 +244,12 @@ class TestProviderConfig:
         async with TestClient(TestServer(app)) as c:
             assert (await c.put("/api/llm/codex/config", data="bad")).status == 400
             r = await c.put("/api/llm/codex/config",
-                            json={"enabled": True, "model": "gpt-5.5", "max_tokens": 8000})
-            assert r.status == 200 and (await r.json())["status"] == "updated"
+                            json={"enabled": True, "model": "gpt-5.5", "max_tokens": 8000,
+                                  "reasoning_effort": "high"})
+            rbody = await r.json()
+            assert r.status == 200 and rbody["status"] == "updated"
+            assert rbody["reasoning_effort"] == "high"
+            assert bot.config.openai_codex.reasoning_effort == "high"
             bot.llm_gateway.reload_codex_inner.assert_awaited()
             # invalid max_tokens → ValueError → 400
             assert (await c.put("/api/llm/codex/config",
@@ -255,6 +261,24 @@ class TestProviderConfig:
         bot.llm_gateway.provider_lock = None
         async with TestClient(TestServer(app)) as c:
             assert (await c.put("/api/llm/codex/config", json={"enabled": True})).status == 503
+
+    @pytest.mark.asyncio
+    async def test_codex_config_invalid_reasoning_rejected_before_mutation(self):
+        """Literal does not validate assignment — the handler must 400 an
+        invalid reasoning_effort BEFORE touching config or the live client."""
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"enabled": False, "model": "changed-model",
+                                  "reasoning_effort": "banana"})
+            assert r.status == 400
+            assert "reasoning_effort" in (await r.json())["error"]
+        # nothing mutated, nothing reloaded
+        assert bot.config.openai_codex.reasoning_effort == "medium"
+        assert bot.config.openai_codex.model != "changed-model"
+        bot.llm_gateway.reload_codex_inner.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_ollama_config(self):
@@ -554,10 +578,12 @@ class TestPersistHelpers:
         Path("config.yml").write_text("discord:\n  token: fake\n")
         bot = _bot()
         bot.config.openai_codex.model = "gpt-5.5"
+        bot.config.openai_codex.reasoning_effort = "xhigh"
         bot.config.ollama.model = "qwen3"
         _persist_llm_sections_sync(bot)
         written = Path("config.yml").read_text()
         assert "openai_codex" in written and "gpt-5.5" in written
+        assert "reasoning_effort" in written and "xhigh" in written
         assert "ollama" in written and "kimi" in written and "llm_provider" in written
 
     def test_persist_empty_file_returns(self):
