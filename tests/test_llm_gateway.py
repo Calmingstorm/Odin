@@ -85,10 +85,30 @@ class TestReloadCodex:
         from src.discord.llm_gateway import CodexAuthPool
         pool = MagicMock(spec=CodexAuthPool)
         pool.reload_async = AsyncMock(return_value=3)
-        client = SimpleNamespace(auth=pool)
+        client = SimpleNamespace(auth=pool, model="gpt-5.5", max_tokens=8000)
         gw = _gw(codex=client)
         r = await gw.reload_codex_inner()
         assert r["reloaded"] is True and r["accounts"] == 3
+
+    async def test_existing_client_gets_model_and_max_tokens_from_config(self):
+        """Regression: a reload after a config PUT must land model/max_tokens
+        on the LIVE client. The auth-pool branch used to return early without
+        applying them, so WebUI model switches silently no-opped until the
+        next restart while /api/llm/status kept reporting the old model."""
+        from src.discord.llm_gateway import CodexAuthPool
+        pool = MagicMock(spec=CodexAuthPool)
+        pool.reload_async = AsyncMock(return_value=3)
+        client = SimpleNamespace(auth=pool, model="gpt-5.5", max_tokens=8000)
+        cfg = _cfg()
+        cfg.openai_codex.model = "gpt-5.6-terra"
+        cfg.openai_codex.max_tokens = 4096
+        gw = _gw(cfg, codex=client)
+        r = await gw.reload_codex_inner()
+        assert r["reloaded"] is True
+        # same client object — auth pool, breaker, and session are preserved
+        assert gw.codex_client is client
+        assert client.model == "gpt-5.6-terra"
+        assert client.max_tokens == 4096
 
     async def test_creates_new_client(self):
         pool = MagicMock()
