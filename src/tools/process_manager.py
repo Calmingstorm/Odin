@@ -19,6 +19,10 @@ log = get_logger("process_manager")
 MAX_CONCURRENT = 20
 MAX_LIFETIME_SECONDS = 3600  # 1 hour
 OUTPUT_BUFFER_LINES = 500
+# Upper bound on awaiting an in-flight group reap at shutdown before giving up
+# and cancelling it — comfortably exceeds a reader's TERM-grace + KILL-grace so
+# a compliant descendant always finishes, while a wedged one can't hang re-exec.
+SHUTDOWN_REAP_TIMEOUT = 12.0
 
 
 @dataclass
@@ -182,11 +186,21 @@ class ProcessRegistry:
         return "\n".join(lines)
 
     async def shutdown(self) -> int:
-        """Terminate all running processes and cancel reader tasks.
+        """Terminate all managed processes and their groups before returning.
 
         Returns the number of processes that were still running.
+
+        Callers re-exec in place once this returns, so NOTHING the registry
+        owns may still be alive or mid-cleanup afterwards. A leader that already
+        exited on its own may have its reader task mid-reap of a TERM-immune
+        descendant, with the record already marked terminal — so we must AWAIT
+        every reader/reaper to completion, never cancel it out from under an
+        in-flight group kill (cancellation propagates through
+        terminate_process_tree and would strand the descendant across the exec).
         """
         killed = 0
+        # 1) TERM/KILL every still-running leader. This also unblocks its reader
+        #    (readline hits EOF), which then reaps any surviving group members.
         for pid, info in list(self._processes.items()):
             if info.status == "running":
                 try:
@@ -194,9 +208,18 @@ class ProcessRegistry:
                     killed += 1
                 except Exception:
                     log.warning("Failed to kill PID %d during shutdown", pid)
-            # Cancel lingering reader tasks
-            if info._reader_task and not info._reader_task.done():
-                info._reader_task.cancel()
+        # 2) Let every reader/reaper finish so no group cleanup is left pending.
+        for pid, info in list(self._processes.items()):
+            task = info._reader_task
+            if task is None or task.done():
+                continue
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=SHUTDOWN_REAP_TIMEOUT)
+            except TimeoutError:
+                log.warning("Reaper for PID %d did not finish; cancelling", pid)
+                task.cancel()
+            except Exception:
+                log.debug("Reaper for PID %d errored during shutdown", pid, exc_info=True)
         if killed:
             log.info("Shutdown: terminated %d running process(es)", killed)
         return killed

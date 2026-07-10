@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from src.tools.process_manager import ProcessRegistry
+from src.tools.process_manager import ProcessInfo, ProcessRegistry
 from src.tools.ssh import run_local_command, run_ssh_command, terminate_process_tree
 
 
@@ -185,6 +185,36 @@ class TestProcessRegistryGroupKill:
             await _assert_pid_gone(pid)
         finally:
             _best_effort_kill(grandchild)
+
+    async def test_shutdown_awaits_inflight_reaper_not_cancels(self):
+        # A leader that exited on its own can leave its reader task mid group-reap
+        # (TERM grace + SIGKILL escalation) with the record already terminal.
+        # shutdown() must AWAIT that reaper — the old code skipped the terminal
+        # record and cancelled the reader, and cancellation propagates through
+        # terminate_process_tree, stranding a TERM-immune descendant across the
+        # in-place exec. Model the reaper as a task that finishes its cleanup
+        # ONLY if awaited, not cancelled. (PR #227 round-5 blocker.)
+        registry = ProcessRegistry()
+        reaped = asyncio.Event()
+
+        async def fake_reaper():
+            await asyncio.sleep(0.2)  # the TERM grace + SIGKILL escalation
+            reaped.set()  # the descendant is actually killed here
+
+        info = ProcessInfo(
+            pid=4242,
+            command="x",
+            host="localhost",
+            start_time=time.time(),
+            status="completed",  # leader already terminal; reaper still running
+        )
+        info._reader_task = asyncio.create_task(fake_reaper())
+        registry._processes[4242] = info
+
+        await registry.shutdown()
+
+        assert reaped.is_set(), "shutdown cancelled the in-flight reaper instead of awaiting it"
+        assert info._reader_task.done() and not info._reader_task.cancelled()
 
     async def test_leaderless_group_descendant_reaped_on_leader_exit(self, tmp_path):
         # The shell exits naturally while a REDIRECTED background descendant

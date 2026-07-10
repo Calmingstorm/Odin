@@ -8,14 +8,16 @@ ProcessRegistry.shutdown() terminates running processes.
 from __future__ import annotations
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import src.tools.process_manager as pm
 from src.config.schema import Config
 from src.discord.client import OdinBot
 from src.knowledge.store import KnowledgeStore
-from src.tools.process_manager import ProcessRegistry
+from src.tools.process_manager import ProcessInfo, ProcessRegistry
 
 # ── OdinBot.close() ──────────────────────────────────────────────────
 
@@ -247,3 +249,66 @@ class TestProcessRegistryShutdown:
         killed = await registry.shutdown()
         # Process already finished, so kill count should be 0
         assert killed == 0
+
+    @pytest.mark.asyncio
+    async def test_shutdown_skips_done_or_absent_reader_task(self):
+        # A record whose reaper already finished (or was never started) is
+        # simply skipped in the await-reapers pass — no error.
+        registry = ProcessRegistry()
+
+        done = asyncio.create_task(asyncio.sleep(0))
+        await done
+        info_done = ProcessInfo(
+            pid=1, command="x", host="localhost", start_time=time.time(),
+            status="completed",
+        )
+        info_done._reader_task = done
+        info_none = ProcessInfo(
+            pid=2, command="x", host="localhost", start_time=time.time(),
+            status="completed",
+        )
+        info_none._reader_task = None
+        registry._processes[1] = info_done
+        registry._processes[2] = info_none
+
+        assert await registry.shutdown() == 0  # nothing to do, no raise
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_wedged_reaper_after_timeout(self, monkeypatch):
+        # A reaper that never finishes must not hang the in-place exec: after
+        # SHUTDOWN_REAP_TIMEOUT it is cancelled so shutdown can return.
+        monkeypatch.setattr(pm, "SHUTDOWN_REAP_TIMEOUT", 0.05)
+        registry = ProcessRegistry()
+
+        async def wedged():
+            await asyncio.sleep(30)
+
+        info = ProcessInfo(
+            pid=3, command="x", host="localhost", start_time=time.time(),
+            status="completed",
+        )
+        info._reader_task = asyncio.create_task(wedged())
+        registry._processes[3] = info
+
+        await registry.shutdown()
+
+        with pytest.raises(asyncio.CancelledError):
+            await info._reader_task
+
+    @pytest.mark.asyncio
+    async def test_shutdown_tolerates_reaper_that_raises(self):
+        # A reaper that errors during shutdown is logged and swallowed — one
+        # bad record must not abort cleanup of the rest or block re-exec.
+        registry = ProcessRegistry()
+
+        async def boom():
+            raise RuntimeError("reaper blew up")
+
+        info = ProcessInfo(
+            pid=4, command="x", host="localhost", start_time=time.time(),
+            status="completed",
+        )
+        info._reader_task = asyncio.create_task(boom())
+        registry._processes[4] = info
+
+        await registry.shutdown()  # must not propagate
