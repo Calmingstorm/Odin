@@ -182,3 +182,28 @@ class TestCodexTransportTimeouts:
             OpenAICodexConfig(stream_stall_timeout_seconds=10).stream_stall_timeout_seconds
             == 10
         )
+
+
+class TestAgentsTimeoutConfig:
+    def test_defaults(self):
+        from src.config.schema import AgentsConfig
+        cfg = AgentsConfig()
+        assert cfg.iteration_timeout_seconds == 900
+        assert cfg.max_lifetime_seconds == 14400
+
+    def test_iteration_timeout_bounds(self):
+        from src.config.schema import AgentsConfig
+        with pytest.raises(ValidationError):
+            AgentsConfig(iteration_timeout_seconds=59)
+        with pytest.raises(ValidationError):
+            AgentsConfig(iteration_timeout_seconds=86401)
+        assert AgentsConfig(iteration_timeout_seconds=60).iteration_timeout_seconds == 60
+        assert AgentsConfig(iteration_timeout_seconds=86400).iteration_timeout_seconds == 86400
+
+    def test_max_lifetime_bounds(self):
+        from src.config.schema import AgentsConfig
+        with pytest.raises(ValidationError):
+            AgentsConfig(max_lifetime_seconds=59)
+        with pytest.raises(ValidationError):
+            AgentsConfig(max_lifetime_seconds=86401)
+        assert AgentsConfig(max_lifetime_seconds=3600).max_lifetime_seconds == 3600

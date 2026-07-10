@@ -24,7 +24,9 @@ def _cfg(tools_enabled=True):
         tools=SimpleNamespace(enabled=tools_enabled, tool_timeouts={}),
         agents=SimpleNamespace(max_nesting_depth=2, hard_max_iterations=300,
                                max_iterations=120, scheduled_max_iterations=180,
-                               final_warning_iterations=[20, 10, 5, 1]),
+                               final_warning_iterations=[20, 10, 5, 1],
+                               iteration_timeout_seconds=900,
+                               max_lifetime_seconds=14400),
     )
 
 
@@ -217,6 +219,28 @@ class TestSpawnAgent:
         out = await t._handle_spawn_agent(
             _message(), {"label": "s", "goal": "g", "_scheduled": True})
         assert "spawned" in out
+
+    async def test_spawn_passes_configured_timeouts(self):
+        """agents.iteration_timeout_seconds / max_lifetime_seconds are
+        snapshotted into the spawn call."""
+        t = _tools()
+        t._agent_manager.spawn.return_value = "agent-t"
+        t._agent_manager._agents = {}
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        kwargs = t._agent_manager.spawn.call_args.kwargs
+        assert kwargs["iteration_timeout"] == 900
+        assert kwargs["max_lifetime"] == 14400
+
+    async def test_spawn_defaults_without_agents_config(self):
+        """A config missing the agents section falls back to 900/14400."""
+        t = _tools(get_config=lambda: SimpleNamespace(
+            tools=SimpleNamespace(enabled=True, tool_timeouts={})))
+        t._agent_manager.spawn.return_value = "agent-d"
+        t._agent_manager._agents = {}
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        kwargs = t._agent_manager.spawn.call_args.kwargs
+        assert kwargs["iteration_timeout"] == 900
+        assert kwargs["max_lifetime"] == 14400
 
 
 # --------------------------------------------------------------------------- #

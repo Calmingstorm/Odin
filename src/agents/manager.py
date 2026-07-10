@@ -257,6 +257,10 @@ class AgentInfo:
     iteration_count: int = 0
     last_activity: float = field(default_factory=time.time)
     recovery_attempts: int = 0
+    # Snapshotted at spawn — a live config change never shortens (or extends)
+    # an already-running agent's deadline or per-call budget.
+    iteration_timeout: float = ITERATION_CB_TIMEOUT
+    max_lifetime: float = MAX_AGENT_LIFETIME
     depth: int = 0
     parent_id: str | None = None
     children_ids: list[str] = field(default_factory=list)
@@ -323,6 +327,8 @@ class AgentManager:
         max_depth: int = MAX_NESTING_DEPTH,
         max_iterations: int | None = None,
         budget_warnings: builtins.list[int] | None = None,
+        iteration_timeout: float | None = None,
+        max_lifetime: float | None = None,
         context_compression_enabled: bool = False,
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
@@ -368,6 +374,8 @@ class AgentManager:
             requester_name=requester_name,
             depth=depth,
             parent_id=parent_id,
+            iteration_timeout=iteration_timeout or ITERATION_CB_TIMEOUT,
+            max_lifetime=max_lifetime or MAX_AGENT_LIFETIME,
         )
 
         # Register as child of parent
@@ -656,6 +664,8 @@ class AgentManager:
         max_depth: int = MAX_NESTING_DEPTH,
         max_iterations: int | None = None,
         budget_warnings: builtins.list[int] | None = None,
+        iteration_timeout: float | None = None,
+        max_lifetime: float | None = None,
         context_compression_enabled: bool = False,
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
@@ -684,6 +694,8 @@ class AgentManager:
                 max_depth=max_depth,
                 max_iterations=max_iterations,
                 budget_warnings=budget_warnings,
+                iteration_timeout=iteration_timeout,
+                max_lifetime=max_lifetime,
                 context_compression_enabled=context_compression_enabled,
                 max_context_chars=max_context_chars,
                 keep_recent_iterations=keep_recent_iterations,
@@ -741,7 +753,7 @@ class AgentManager:
                 continue
             elapsed = now - agent.created_at
             idle = now - agent.last_activity
-            if elapsed > MAX_AGENT_LIFETIME:
+            if elapsed > agent.max_lifetime:
                 # Actually force-cancel the task — setting the cancel event
                 # alone left an agent stuck in a long tool call running for up
                 # to TOOL_EXEC_TIMEOUT while the log claimed "Force-killed".
@@ -825,18 +837,8 @@ async def _run_agent(
         return False
 
     def _check_lifetime() -> bool:
-        elapsed = time.time() - agent.created_at
-        if elapsed > MAX_AGENT_LIFETIME:
-            agent.transition(AgentState.TIMEOUT, f"lifetime exceeded ({int(elapsed)}s)")
-            agent.result = _get_last_progress(agent)
-            agent.ended_at = time.time()
-            log.warning(
-                "Agent %s (%s) timed out after %ds, %d iterations",
-                agent.id,
-                agent.label,
-                int(elapsed),
-                agent.iteration_count,
-            )
+        if _remaining_lifetime(agent) <= 0:
+            _lifetime_timeout(agent)
             return True
         return False
 
@@ -957,6 +959,9 @@ async def _run_agent(
                 iter_tool_calls.append({"name": tool_name, "input": tool_input})
 
                 tool_timeout = (tool_timeouts or {}).get(tool_name, TOOL_EXEC_TIMEOUT)
+                # Cap at the remaining lifetime so the hard deadline holds
+                # inside a long tool call, not only between iterations.
+                tool_timeout = min(tool_timeout, max(1, int(_remaining_lifetime(agent))))
                 try:
                     result = await asyncio.wait_for(
                         tool_executor_callback(tool_name, tool_input),
@@ -1043,6 +1048,26 @@ async def _run_agent(
                 log.error("Failed to save agent trajectory for %s: %s", agent.id, save_err)
 
 
+def _remaining_lifetime(agent: AgentInfo) -> float:
+    """Seconds until this agent's hard deadline (negative once exceeded)."""
+    return agent.max_lifetime - (time.time() - agent.created_at)
+
+
+def _lifetime_timeout(agent: AgentInfo) -> None:
+    """Transition an agent to TIMEOUT for lifetime exhaustion."""
+    elapsed = time.time() - agent.created_at
+    agent.transition(AgentState.TIMEOUT, f"lifetime exceeded ({int(elapsed)}s)")
+    agent.result = _get_last_progress(agent)
+    agent.ended_at = time.time()
+    log.warning(
+        "Agent %s (%s) timed out after %ds, %d iterations",
+        agent.id,
+        agent.label,
+        int(elapsed),
+        agent.iteration_count,
+    )
+
+
 async def _call_llm_with_recovery(
     agent: AgentInfo,
     iteration_callback: IterationCallback,
@@ -1051,19 +1076,34 @@ async def _call_llm_with_recovery(
 ) -> dict | None:
     """Call LLM with single-retry recovery on transient errors.
 
+    Each wait is bounded by the agent's snapshotted iteration_timeout, capped
+    at the remaining lifetime — the hard deadline must hold even during a
+    long LLM await (the between-iteration lifetime check alone would let a
+    quiet agent overrun it).
+
     On first failure: EXECUTING → RECOVERING → EXECUTING (retry).
     On second failure: EXECUTING → FAILED.
     Returns the LLM response dict, or None if agent reached terminal state.
     """
+    remaining = _remaining_lifetime(agent)
+    if remaining <= 0:
+        _lifetime_timeout(agent)
+        return None
+    call_timeout = min(agent.iteration_timeout, remaining)
     try:
         return await asyncio.wait_for(
             iteration_callback(agent.messages, system_prompt, tools),
-            timeout=ITERATION_CB_TIMEOUT,
+            timeout=call_timeout,
         )
     except (TimeoutError, Exception) as first_err:
         is_timeout = isinstance(first_err, asyncio.TimeoutError)
-        err_desc = (f"LLM {'timeout' if is_timeout else 'error'}: {first_err}"
-            if not is_timeout else f"LLM timeout after {ITERATION_CB_TIMEOUT}s")
+        if is_timeout and _remaining_lifetime(agent) <= 0:
+            # The wait was lifetime-capped and the deadline has passed:
+            # this is lifetime exhaustion, not a stuck LLM call.
+            _lifetime_timeout(agent)
+            return None
+        err_desc = (f"LLM timeout after {int(call_timeout)}s" if is_timeout
+                    else f"LLM error: {first_err}")
 
         if agent.recovery_attempts < MAX_RECOVERY_ATTEMPTS:
             agent.recovery_attempts += 1
@@ -1083,22 +1123,34 @@ async def _call_llm_with_recovery(
 
             agent.transition(AgentState.EXECUTING, "retry after recovery")
 
+            remaining = _remaining_lifetime(agent)
+            if remaining <= 0:
+                _lifetime_timeout(agent)
+                return None
+            retry_timeout = min(agent.iteration_timeout, remaining)
             try:
                 return await asyncio.wait_for(
                     iteration_callback(agent.messages, system_prompt, tools),
-                    timeout=ITERATION_CB_TIMEOUT,
+                    timeout=retry_timeout,
                 )
             except (TimeoutError, Exception) as retry_err:
-                retry_desc = f"retry failed: {retry_err}"
+                retry_is_timeout = isinstance(retry_err, asyncio.TimeoutError)
+                if retry_is_timeout and _remaining_lifetime(agent) <= 0:
+                    _lifetime_timeout(agent)
+                    return None
+                # str(asyncio.TimeoutError()) is EMPTY — always store the
+                # formatted description, never the bare exception string.
+                retry_desc = (f"retry timed out after {int(retry_timeout)}s"
+                              if retry_is_timeout else f"retry failed: {retry_err}")
                 log.error("Agent %s recovery failed: %s", agent.id, retry_desc)
                 agent.transition(AgentState.FAILED, retry_desc)
-                agent.error = str(retry_err)
+                agent.error = retry_desc
                 agent.ended_at = time.time()
                 return None
         else:
             log.error("Agent %s LLM call failed (no retries left): %s", agent.id, err_desc)
             agent.transition(AgentState.FAILED, err_desc)
-            agent.error = str(first_err)
+            agent.error = err_desc
             agent.ended_at = time.time()
             return None
 

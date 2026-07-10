@@ -112,6 +112,13 @@ class AgentsConfig(BaseModel):
     scheduled_max_iterations: int = 180
     hard_max_iterations: int = 300
     final_warning_iterations: list[int] = Field(default_factory=lambda: [20, 10, 5, 1])
+    # Per-LLM-call backstop. The transport already fails dead streams fast
+    # (stream_stall_timeout_seconds); this only bounds a genuinely hung call,
+    # so it must exceed a legitimate high-effort generation (5-10+ min).
+    iteration_timeout_seconds: int = 900
+    # Hard per-agent deadline, snapshotted at spawn (a live config change
+    # never shortens an already-running agent's deadline).
+    max_lifetime_seconds: int = 14400
 
     @field_validator(
         "max_nesting_depth",
@@ -124,6 +131,13 @@ class AgentsConfig(BaseModel):
     def _agents_non_negative(cls, v):
         if v < 1:
             raise ValueError("agent limits must be >= 1")
+        return v
+
+    @field_validator("iteration_timeout_seconds", "max_lifetime_seconds")
+    @classmethod
+    def _agents_timeout_bounds(cls, v, info):
+        if not 60 <= v <= 86400:
+            raise ValueError(f"{info.field_name} must be between 60 and 86400")
         return v
 
     @field_validator("final_warning_iterations")

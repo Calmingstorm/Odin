@@ -94,3 +94,14 @@ class TestSpawnLoopAgentsConfigPath:
         assert "not found" in await bot.agent_task_tools._handle_spawn_loop_agents(
             msg, {"loop_id": "nope", "tasks": [{}]}
         )
+
+    async def test_timeout_snapshot_forwarded_from_config(self):
+        """agents.iteration_timeout_seconds / max_lifetime_seconds reach the
+        bridge so loop-spawned agents get the same snapshot as direct spawns."""
+        bot, captured = _bot_with_running_loop()
+        await bot.agent_task_tools._handle_spawn_loop_agents(
+            FakeMessage("go", channel=FakeChannel(id=777)),
+            {"loop_id": "loop-1", "tasks": [{"goal": "trivial"}]},
+        )
+        assert captured["iteration_timeout"] == bot.config.agents.iteration_timeout_seconds
+        assert captured["max_lifetime"] == bot.config.agents.max_lifetime_seconds

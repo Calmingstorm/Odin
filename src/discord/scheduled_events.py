@@ -276,10 +276,14 @@ class ScheduledEventHandlers:
                     id_match = re.search(r"\(ID:\s*`([^`]+)`\)", result_str)
                     if id_match:
                         agent_id = id_match.group(1)
-                        timeout = float(step.get("timeout", 3660))
+                        # No explicit step timeout → the collector resolves the
+                        # agent's snapshotted lifetime + 60s; an explicit value
+                        # is honored as-is (the lifetime deadline guarantees
+                        # the underlying wait terminates either way).
+                        step_timeout = step.get("timeout")
                         agent_text, agent_data = await self._agent_task_tools._collect_agent_result(
                             agent_id,
-                            timeout=min(timeout, 3660),
+                            timeout=float(step_timeout) if step_timeout is not None else None,
                         )
                         agent_ok = agent_data["status"] == "completed"
                         result = ToolResult(output=agent_text, ok=agent_ok, tool_name="spawn_agent")

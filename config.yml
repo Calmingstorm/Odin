@@ -129,6 +129,13 @@ agents:
   hard_max_iterations: 300         # absolute ceiling for per-spawn overrides
   # Inject budget warnings at these remaining-iteration counts
   final_warning_iterations: [20, 10, 5, 1]
+  # Per-LLM-call backstop (seconds). Must exceed a legitimate high-effort
+  # generation (5-10+ min at high reasoning effort) — the streaming transport
+  # already fails dead connections fast, so this only bounds a hung call.
+  iteration_timeout_seconds: 900
+  # Hard per-agent deadline (seconds). Snapshotted at spawn: config changes
+  # never move the deadline of an agent already mid-run.
+  max_lifetime_seconds: 14400
 
 # Bot personality — preset or custom identity/voice
 personality:

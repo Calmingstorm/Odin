@@ -89,6 +89,31 @@ Generate credentials: `python3 scripts/codex_login.py`
 
 Tokens expire weekly — re-run the script and copy `data/codex_auth.json` to the deployment.
 
+## Agents
+
+```yaml
+agents:
+  max_nesting_depth: 2             # Sub-agent nesting levels (root = 0)
+  max_children_per_agent: 3
+  max_iterations: 120              # LLM turns per interactive spawn
+  scheduled_max_iterations: 180    # Scheduled workflow spawns
+  hard_max_iterations: 300         # Ceiling for per-spawn overrides
+  final_warning_iterations: [20, 10, 5, 1]
+  iteration_timeout_seconds: 900   # Per-LLM-call backstop (60-86400)
+  max_lifetime_seconds: 14400      # Hard per-agent deadline (60-86400)
+```
+
+`iteration_timeout_seconds` bounds each agent LLM call. It is a backstop
+against a hung call, not a working limit — set it well above a legitimate
+high-effort generation (5–10+ minutes at high reasoning effort); the
+streaming transport already fails dead connections fast via
+`stream_stall_timeout_seconds`.
+
+`max_lifetime_seconds` is a hard deadline enforced during LLM and tool
+waits, not just between iterations. Both values are **snapshotted at
+spawn** — changing them live affects newly spawned agents only, never the
+deadline of an agent already running.
+
 ## Sessions
 
 ```yaml
