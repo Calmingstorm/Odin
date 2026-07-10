@@ -67,31 +67,50 @@ async def terminate_process_tree(
     Group signalling happens ONLY when ``os.getpgid(pid) == pid`` (the child
     was spawned with ``start_new_session=True``): a child still in the
     service's own group must never be group-signalled, or the signal would
-    hit the whole service. Process-lookup races and reap timeouts are
-    swallowed; cancellation of the cleanup itself still propagates.
+    hit the whole service. Group ownership is snapshotted BEFORE signalling,
+    and after the TERM pass the group is probed independently of the leader:
+    a compliant leader exiting must not end cleanup while a TERM-immune
+    descendant survives in the now-leaderless group. Process-lookup races
+    and reap timeouts are swallowed; cancellation of the cleanup itself
+    still propagates.
     """
     if proc.returncode is not None:
         return
 
+    try:
+        pgid: int | None = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError):
+        pgid = None
+    owns_group = pgid is not None and pgid == proc.pid
+
     def _signal_tree(sig: int) -> None:
         try:
-            pgid = os.getpgid(proc.pid)
-        except (ProcessLookupError, PermissionError):
-            return
-        try:
-            if pgid == proc.pid:
+            if owns_group and pgid is not None:
                 os.killpg(pgid, sig)
-            else:
+            elif proc.returncode is None:
                 proc.send_signal(sig)
         except (ProcessLookupError, PermissionError):
             pass
 
+    def _group_alive() -> bool:
+        if not owns_group or pgid is None:
+            return False
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+
     _signal_tree(signal.SIGTERM)
+    leader_exited = True
     try:
         await asyncio.wait_for(proc.wait(), timeout=grace)
-        return
     except TimeoutError:
-        pass
+        leader_exited = False
+    if leader_exited and not _group_alive():
+        return
+    # Either the leader ignored TERM, or a descendant in its group did —
+    # SIGKILL the remainder even though the leader may already be gone.
     _signal_tree(signal.SIGKILL)
     try:
         await asyncio.wait_for(proc.wait(), timeout=grace)

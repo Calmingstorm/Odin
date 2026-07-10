@@ -223,6 +223,26 @@ class TestTerminateProcessTreeGuard:
         assert proc.returncode is not None
         await _assert_pid_gone(proc.pid)
 
+    async def test_compliant_leader_with_term_immune_descendant(self, tmp_path):
+        # Re-review repro: the leader exits on TERM (returncode -15) while a
+        # trap-ignoring descendant survives in the now-leaderless group. The
+        # helper used to return as soon as the leader was reaped — the group
+        # must be probed independently and SIGKILLed even without its leader.
+        pidfile = tmp_path / "pid"
+        proc = await asyncio.create_subprocess_shell(
+            f"sh -c 'trap \"\" TERM; sleep 30' & echo $! > {pidfile}; wait $!",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        stubborn = await _read_pidfile(pidfile)
+        try:
+            await terminate_process_tree(proc, grace=0.3)
+            assert proc.returncode is not None
+            await _assert_pid_gone(stubborn)
+        finally:
+            _best_effort_kill(stubborn)
+
     async def test_child_vanishing_before_getpgid_is_tolerated(self, monkeypatch):
         from unittest.mock import AsyncMock
 
