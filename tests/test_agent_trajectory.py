@@ -170,7 +170,8 @@ class TestAgentTrajectoryTurn:
         expected_keys = {
             "agent_id", "label", "goal", "channel_id", "requester_id",
             "requester_name", "timestamp", "source", "depth", "parent_id",
-            "system_prompt_length", "iterations", "final_state", "result",
+            "system_prompt_length", "iteration_timeout", "max_lifetime",
+            "iterations", "final_state", "result",
             "error", "tools_used", "iteration_count", "total_duration_ms",
             "recovery_attempts", "state_history",
         }
@@ -1168,3 +1169,32 @@ class TestEdgeCases:
         assert len(entries) == 2
         assert entries[0]["agent_id"] == "a2"
         assert entries[1]["agent_id"] == "a1"
+
+
+class TestSpawnPolicySerialization:
+    def test_to_dict_includes_spawn_policy(self):
+        """PR #226 review blocker: the in-memory turn carried the snapshot
+        but to_dict() dropped it — serialized JSONL must include it."""
+        turn = AgentTrajectoryTurn(
+            agent_id="a1", label="t", goal="g",
+            iteration_timeout=900.0, max_lifetime=14400.0,
+        )
+        d = turn.to_dict()
+        assert d["iteration_timeout"] == 900.0
+        assert d["max_lifetime"] == 14400.0
+
+    def test_to_dict_iteration_stamps_serialized(self):
+        turn = AgentTrajectoryTurn(agent_id="a1", label="t", goal="g")
+        turn.add_iteration(
+            iteration=1, llm_text="x",
+            provider="codex", model="gpt-5.5", reasoning_effort="low",
+        )
+        it = turn.to_dict()["iterations"][0]
+        assert it["provider"] == "codex"
+        assert it["model"] == "gpt-5.5"
+        assert it["reasoning_effort"] == "low"
+
+    def test_to_dict_default_policy_is_null(self):
+        d = AgentTrajectoryTurn(agent_id="a1").to_dict()
+        assert d["iteration_timeout"] is None
+        assert d["max_lifetime"] is None

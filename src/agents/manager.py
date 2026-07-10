@@ -957,16 +957,34 @@ async def _run_agent(
                 tool_name = tc.get("name", "")
                 tool_input = tc.get("input", {})
 
+                # Hard deadline BETWEEN tools too: without this an expired
+                # agent still got a fresh (floored) budget per remaining
+                # tool call and ran seconds past its lifetime.
+                lifetime_left = _remaining_lifetime(agent)
+                if lifetime_left <= 0:
+                    trajectory.add_iteration(
+                        iteration=iteration + 1,
+                        tool_calls=iter_tool_calls,
+                        tool_results=iter_tool_results,
+                        llm_text=text,
+                        duration_ms=int((time.time() - iter_start) * 1000),
+                        provider=response.get("provider", ""),
+                        model=response.get("model", ""),
+                        reasoning_effort=response.get("reasoning_effort"),
+                    )
+                    _lifetime_timeout(agent)
+                    return
+
                 if tool_name not in agent.tools_used:
                     agent.tools_used.append(tool_name)
 
                 agent.last_activity = time.time()
                 iter_tool_calls.append({"name": tool_name, "input": tool_input})
 
-                tool_timeout = (tool_timeouts or {}).get(tool_name, TOOL_EXEC_TIMEOUT)
-                # Cap at the remaining lifetime so the hard deadline holds
-                # inside a long tool call, not only between iterations.
-                tool_timeout = min(tool_timeout, max(1, int(_remaining_lifetime(agent))))
+                tool_timeout: float = (tool_timeouts or {}).get(tool_name, TOOL_EXEC_TIMEOUT)
+                # Cap at the POSITIVE remainder so the deadline holds inside
+                # a long tool call — never floored to a bonus second.
+                tool_timeout = min(tool_timeout, lifetime_left)
                 try:
                     result = await asyncio.wait_for(
                         tool_executor_callback(tool_name, tool_input),
@@ -1127,7 +1145,14 @@ async def _call_llm_with_recovery(
             if hasattr(first_err, "retry_after"):
                 retry_delay = min(first_err.retry_after, 90.0)
                 log.info("Agent %s: circuit breaker wait %.0fs", agent.id, retry_delay)
-            await asyncio.sleep(retry_delay)
+            # The recovery sleep must not outlive the deadline either — a
+            # 90s breaker wait with 5s of lifetime left sleeps 5s, and the
+            # retry-entry check below then settles it.
+            remaining = _remaining_lifetime(agent)
+            if remaining <= 0:
+                _lifetime_timeout(agent)
+                return None
+            await asyncio.sleep(min(retry_delay, remaining))
 
             agent.transition(AgentState.EXECUTING, "retry after recovery")
 

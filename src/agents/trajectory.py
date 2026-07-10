@@ -111,6 +111,8 @@ class AgentTrajectoryTurn:
             "depth": self.depth,
             "parent_id": self.parent_id,
             "system_prompt_length": self.system_prompt_length,
+            "iteration_timeout": self.iteration_timeout,
+            "max_lifetime": self.max_lifetime,
             "iterations": [asdict(it) for it in self.iterations],
             "final_state": self.final_state,
             "result": self.result,

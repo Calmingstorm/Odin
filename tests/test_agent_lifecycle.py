@@ -1740,3 +1740,110 @@ class TestRetryPathDeadline:
         assert calls == 2
         assert agent.state == AgentState.TIMEOUT
         assert "lifetime exceeded" in agent.state_history[-1].reason
+
+
+class TestHardDeadlineDuringToolsAndSleep:
+    """PR #226 review blockers: the deadline must hold BETWEEN tool calls
+    (no floored bonus budget per tool) and across the recovery sleep."""
+
+    async def test_expired_agent_stops_at_next_tool(self):
+        """Odin's repro shape: tiny lifetime + three slow tools ran ~3s on
+        the 1s-per-tool floor. Now: the first tool is capped at the true
+        remainder and the second never starts."""
+        agent = AgentInfo(
+            id="hd1", label="test", goal="g",
+            channel_id="c1", requester_id="u1", requester_name="user",
+            iteration_timeout=900.0, max_lifetime=0.05,
+        )
+        saved = {}
+
+        class FakeSaver:
+            async def save(self, turn):
+                saved["turn"] = turn
+
+        three_tools = [{"name": f"t{i}", "input": {}} for i in range(3)]
+        iter_cb = AsyncMock(return_value={
+            "text": "using tools", "tool_calls": three_tools,
+        })
+        started = 0
+
+        async def slow_tool(name, tool_input):
+            nonlocal started
+            started += 1
+            await asyncio.sleep(5)
+            return "done"
+
+        t0 = time.monotonic()
+        await _run_agent(agent, "sys", [], iter_cb, slow_tool,
+                         trajectory_saver=FakeSaver())
+        elapsed = time.monotonic() - t0
+
+        assert agent.state == AgentState.TIMEOUT
+        assert "lifetime exceeded" in agent.state_history[-1].reason
+        assert started == 1                    # tools 2 and 3 never began
+        assert elapsed < 2                     # not ~3s of floored budgets
+        # the partial iteration was still recorded
+        turn = saved["turn"]
+        assert len(turn.iterations) == 1
+        assert len(turn.iterations[0].tool_calls) == 1
+        assert "timed out" in turn.iterations[0].tool_results[0]["result"]
+
+    async def test_recovery_sleep_capped_at_remaining(self):
+        """A 90s circuit-breaker wait with ~1s of lifetime left must sleep
+        the remainder, not the full 90s."""
+        agent = _exec_agent(iteration_timeout=900.0, max_lifetime=100.0)
+        agent.created_at = time.time() - 99  # ~1s remaining
+
+        class _BreakerError(Exception):
+            retry_after = 90.0
+
+        calls = 0
+
+        async def fail_then_ok(coro, *, timeout=None):
+            nonlocal calls
+            calls += 1
+            try:
+                coro.close()
+            except Exception:
+                pass
+            if calls == 1:
+                raise _BreakerError("breaker open")
+            return {"text": "recovered", "tool_calls": []}
+
+        slept: list[float] = []
+
+        async def capture_sleep(delay):
+            slept.append(delay)
+
+        iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
+        with patch("src.agents.manager.asyncio.wait_for", side_effect=fail_then_ok):
+            with patch("src.agents.manager.asyncio.sleep", side_effect=capture_sleep):
+                result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
+
+        assert result is not None and result["text"] == "recovered"
+        assert len(slept) == 1
+        assert slept[0] <= 1.01                # capped at the remainder, not 90
+
+    async def test_deadline_passed_before_recovery_sleep(self):
+        """If the first call consumed the lifetime, the agent times out
+        BEFORE the recovery sleep — no sleep at all."""
+        agent = _exec_agent(iteration_timeout=900.0, max_lifetime=100.0)
+        agent.created_at = time.time() - 50
+
+        async def fail_and_expire(coro, *, timeout=None):
+            try:
+                coro.close()
+            except Exception:
+                pass
+            agent.created_at -= 100  # the failed call ate the lifetime
+            raise ConnectionError("transient")
+
+        sleep_mock = AsyncMock()
+        iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
+        with patch("src.agents.manager.asyncio.wait_for", side_effect=fail_and_expire):
+            with patch("src.agents.manager.asyncio.sleep", sleep_mock):
+                result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
+
+        assert result is None
+        assert agent.state == AgentState.TIMEOUT
+        sleep_mock.assert_not_awaited()
