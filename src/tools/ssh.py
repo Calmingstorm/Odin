@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
@@ -56,6 +58,47 @@ def _is_ssh_transient_failure(exit_code: int, output: str) -> bool:
     return False
 
 
+async def terminate_process_tree(
+    proc: asyncio.subprocess.Process, grace: float = 3.0
+) -> None:
+    """Terminate a spawned child — and its whole process group when it leads
+    one — escalating to SIGKILL after *grace* seconds, then reap it.
+
+    Group signalling happens ONLY when ``os.getpgid(pid) == pid`` (the child
+    was spawned with ``start_new_session=True``): a child still in the
+    service's own group must never be group-signalled, or the signal would
+    hit the whole service. Process-lookup races and reap timeouts are
+    swallowed; cancellation of the cleanup itself still propagates.
+    """
+    if proc.returncode is not None:
+        return
+
+    def _signal_tree(sig: int) -> None:
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, PermissionError):
+            return
+        try:
+            if pgid == proc.pid:
+                os.killpg(pgid, sig)
+            else:
+                proc.send_signal(sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    _signal_tree(signal.SIGTERM)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace)
+        return
+    except TimeoutError:
+        pass
+    _signal_tree(signal.SIGKILL)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace)
+    except TimeoutError:
+        log.warning("PID %d did not exit after SIGKILL", proc.pid)
+
+
 async def _read_lines_with_callback(
     proc: asyncio.subprocess.Process,
     timeout: int,
@@ -80,10 +123,15 @@ async def _read_lines_with_callback(
         try:
             await asyncio.wait_for(proc.wait(), timeout=min(timeout, 10))
         except TimeoutError:
-            proc.kill()
+            await terminate_process_tree(proc)
     except TimeoutError:
-        proc.kill()
+        await terminate_process_tree(proc)
         return 1, f"Command timed out after {timeout} seconds"
+    except asyncio.CancelledError:
+        # Task cancellation (loop drain at shutdown/restart) must not leak
+        # the child or its descendants past this process's lifetime.
+        await terminate_process_tree(proc)
+        raise
     output = "".join(lines)
     return proc.returncode or 0, _truncate_output(output)
 
@@ -101,11 +149,16 @@ async def run_local_command(
     """
     log.info("Local exec: %s", command)
 
+    proc: asyncio.subprocess.Process | None = None
     try:
+        # start_new_session puts the shell at the head of its own process
+        # group, so timeout/cancellation cleanup can take out descendants
+        # (`sh -c 'x & ...'`) instead of just the shell leader.
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
         if on_output is not None:
             return await _read_lines_with_callback(proc, timeout, on_output)
@@ -114,8 +167,15 @@ async def run_local_command(
         return proc.returncode or 0, _truncate_output(output)
 
     except TimeoutError:
-        proc.kill()
+        if proc is not None:
+            await terminate_process_tree(proc)
         return 1, f"Command timed out after {timeout} seconds"
+    except asyncio.CancelledError:
+        # Loop drain at shutdown/restart cancels in-flight commands; the
+        # child tree must die with this process, not outlive the exec.
+        if proc is not None:
+            await terminate_process_tree(proc)
+        raise
     except Exception as e:
         log.error("Local command failed: %s", e)
         return 1, f"Local exec error: {e}"
@@ -173,7 +233,11 @@ async def run_ssh_command(
     last_output = ""
 
     for attempt in range(max_retries):
+        proc: asyncio.subprocess.Process | None = None
         try:
+            # The ssh client is a direct child (no new session: killing the
+            # client is sufficient — the remote side is ssh's own domain, and
+            # ControlMaster mux masters must stay untouched).
             proc = await asyncio.create_subprocess_exec(
                 *ssh_args,
                 stdout=asyncio.subprocess.PIPE,
@@ -219,6 +283,11 @@ async def run_ssh_command(
         except TimeoutError:
             last_exit_code = 1
             last_output = f"Command timed out after {timeout} seconds"
+            # Reap the timed-out client on EVERY arm — the retry path used
+            # to leave the previous ssh process running while spawning the
+            # next attempt.
+            if proc is not None:
+                await terminate_process_tree(proc)
             if attempt < max_retries - 1:
                 wait = compute_backoff(attempt, retry_base_delay, retry_max_delay)
                 log.warning(
@@ -230,8 +299,14 @@ async def run_ssh_command(
                 )
                 await asyncio.sleep(wait)
             else:
-                proc.kill()
                 return 1, last_output
+
+        except asyncio.CancelledError:
+            # Loop drain at shutdown/restart: the ssh client must not
+            # outlive this process.
+            if proc is not None:
+                await terminate_process_tree(proc)
+            raise
 
         except Exception as e:
             log.error("SSH command failed: %s", e)

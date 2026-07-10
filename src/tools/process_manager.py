@@ -62,11 +62,15 @@ class ProcessRegistry:
             return f"Cannot start: {running} processes already running (max {MAX_CONCURRENT})."
 
         try:
+            # start_new_session puts the shell at the head of its own process
+            # group, so kill()/shutdown() can take out descendants
+            # (`sh -c 'x & ...'`) instead of just the shell leader.
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 stdin=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
         except Exception as e:
             return f"Failed to start process: {e}"
@@ -131,7 +135,7 @@ class ProcessRegistry:
             return f"Failed to write to PID {pid}: {e}"
 
     async def kill(self, pid: int) -> str:
-        """Kill a running process."""
+        """Kill a running process — and its process group when it leads one."""
         info = self._processes.get(pid)
         if not info:
             return f"No process with PID {pid}."
@@ -140,12 +144,12 @@ class ProcessRegistry:
 
         try:
             if info.process:
-                info.process.terminate()
-                # Give it a moment to exit gracefully
-                try:
-                    await asyncio.wait_for(info.process.wait(), timeout=5)
-                except TimeoutError:
-                    info.process.kill()
+                from ..tools.ssh import terminate_process_tree
+
+                # Group-aware TERM → bounded grace → KILL → reap. Descendants
+                # of the managed shell die with it instead of leaking (they
+                # would otherwise outlive an in-place restart's exec).
+                await terminate_process_tree(info.process, grace=5.0)
             info.status = "failed"
             info.exit_code = -9
             log.info("Killed process PID %d", pid)
