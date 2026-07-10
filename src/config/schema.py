@@ -596,6 +596,46 @@ class ComfyUIConfig(BaseModel):
     default_checkpoint: str = ""
 
 
+class ImageOpenAIConfig(BaseModel):
+    """Native OpenAI image generation over the Codex ChatGPT OAuth backend.
+
+    Rides the SAME CodexAuthPool / current account Odin uses for chat — no
+    separate auth, no per-token API billing (subscription-quota-backed). The
+    outer model is pinned here rather than inherited from the chat model so a
+    Sol/Terra/UI change can't silently alter image generation. Both models are
+    config-only allowlisted, never arbitrary strings from the tool call.
+    """
+
+    enabled: bool = True  # kill switch for the native wire implementation
+    outer_model: str = "gpt-5.5"  # Responses model that hosts the image tool
+    image_model: str = "gpt-image-2"  # the image_generation tool's model
+    # Only sizes actually probed against THIS private endpoint are allowed;
+    # widen after verifying each value (the Codex endpoint != public Images API).
+    allowed_sizes: list[str] = Field(default_factory=lambda: ["1024x1024"])
+    default_size: str = "1024x1024"
+    # Image-specific deadline (separate from chat). Progress events keep the
+    # read timer alive but must not defeat the total.
+    request_timeout_seconds: int = 180
+    connect_timeout_seconds: int = 30
+    stream_stall_timeout_seconds: int = 120
+    max_image_bytes: int = 16 * 1024 * 1024  # decoded-size safety cap
+
+
+class ImageConfig(BaseModel):
+    """Image-generation backend selection.
+
+    ``auto`` follows the active chat provider: on ``codex`` native OpenAI is the
+    default (ComfyUI is the toggle/pre-generation fallback), on any other
+    provider ComfyUI is the only option. ``openai`` / ``comfyui`` force one
+    backend. Availability is structural (selected backend configured), so a
+    cooling-down account or an offline ComfyUI does not make the tool appear or
+    disappear — only the provider/config selection does.
+    """
+
+    backend: Literal["auto", "openai", "comfyui"] = "auto"
+    openai: ImageOpenAIConfig = ImageOpenAIConfig()
+
+
 class ReactionTriggerConfig(BaseModel):
     enabled: bool = False
     channel_ids: list[str] = Field(default_factory=list)  # Empty = all channels
@@ -758,6 +798,7 @@ class Config(BaseModel):
     browser: BrowserConfig = BrowserConfig()
     permissions: PermissionsConfig = PermissionsConfig()
     comfyui: ComfyUIConfig = ComfyUIConfig()
+    image: ImageConfig = ImageConfig()
     web: WebConfig = WebConfig()
     attachments: AttachmentsConfig = AttachmentsConfig()
     personality: PersonalityConfig = PersonalityConfig()
