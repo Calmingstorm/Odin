@@ -20,6 +20,13 @@ openai_codex:
   # none | low | medium | high | xhigh (backend default: medium)
   reasoning_effort: medium
   credentials_path: ./data/codex_auth.json
+  # Streaming transport timeouts. request_timeout_seconds is a generous
+  # whole-request backstop (long high-effort reasoning turns stream past
+  # 10 minutes); stream_stall_timeout_seconds fails the stream fast when
+  # no bytes arrive for that long (dead connection) instead of waiting
+  # out the backstop.
+  request_timeout_seconds: 3600
+  stream_stall_timeout_seconds: 180
   retry:
     max_retries: 3
     base_delay: 1.0

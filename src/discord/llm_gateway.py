@@ -131,6 +131,15 @@ class LLMGateway:
                 self.codex_client.model = config.openai_codex.model
                 self.codex_client.max_tokens = config.openai_codex.max_tokens
                 self.codex_client.reasoning_effort = config.openai_codex.reasoning_effort
+                # Per-request transport values apply live; pool sizing is
+                # session-construction state and needs a client rebuild.
+                self.codex_client.request_timeout = config.openai_codex.request_timeout_seconds
+                self.codex_client.stream_stall_timeout = (
+                    config.openai_codex.stream_stall_timeout_seconds
+                )
+                self.codex_client.max_retries = config.openai_codex.retry.max_retries
+                self.codex_client.retry_base_delay = config.openai_codex.retry.base_delay
+                self.codex_client.retry_max_delay = config.openai_codex.retry.max_delay
                 return {"configured": True, "reloaded": True, "accounts": count}
 
         auth = CodexAuthPool(config.openai_codex.credentials_path)
@@ -142,6 +151,13 @@ class LLMGateway:
             model=config.openai_codex.model,
             max_tokens=config.openai_codex.max_tokens,
             reasoning_effort=config.openai_codex.reasoning_effort,
+            max_retries=config.openai_codex.retry.max_retries,
+            retry_base_delay=config.openai_codex.retry.base_delay,
+            retry_max_delay=config.openai_codex.retry.max_delay,
+            pool_max_connections=config.openai_codex.connection_pool.max_connections,
+            pool_keepalive_timeout=config.openai_codex.connection_pool.keepalive_timeout,
+            request_timeout=config.openai_codex.request_timeout_seconds,
+            stream_stall_timeout=config.openai_codex.stream_stall_timeout_seconds,
         )
         self.wire_callbacks()
         log.info("Codex client created via live reload (model: %s)", config.openai_codex.model)

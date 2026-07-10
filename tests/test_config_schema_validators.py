@@ -152,3 +152,33 @@ class TestCodexReasoningEffort:
         from src.config.schema import OpenAICodexConfig
         with _pytest.raises(pydantic.ValidationError):
             OpenAICodexConfig(reasoning_effort="banana")
+
+
+class TestCodexTransportTimeouts:
+    def test_defaults(self):
+        from src.config.schema import OpenAICodexConfig
+        cfg = OpenAICodexConfig()
+        assert cfg.request_timeout_seconds == 3600
+        assert cfg.stream_stall_timeout_seconds == 180
+
+    def test_request_timeout_bounds(self):
+        from src.config.schema import OpenAICodexConfig
+        with pytest.raises(ValidationError):
+            OpenAICodexConfig(request_timeout_seconds=59)
+        with pytest.raises(ValidationError):
+            OpenAICodexConfig(request_timeout_seconds=86401)
+        assert OpenAICodexConfig(request_timeout_seconds=60).request_timeout_seconds == 60
+        assert (
+            OpenAICodexConfig(request_timeout_seconds=86400).request_timeout_seconds == 86400
+        )
+
+    def test_stream_stall_timeout_bounds(self):
+        from src.config.schema import OpenAICodexConfig
+        with pytest.raises(ValidationError):
+            OpenAICodexConfig(stream_stall_timeout_seconds=9)
+        with pytest.raises(ValidationError):
+            OpenAICodexConfig(stream_stall_timeout_seconds=3601)
+        assert (
+            OpenAICodexConfig(stream_stall_timeout_seconds=10).stream_stall_timeout_seconds
+            == 10
+        )

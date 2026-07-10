@@ -73,6 +73,8 @@ openai_codex:
   max_tokens: 4096
   reasoning_effort: medium       # none | low | medium | high | xhigh
   credentials_path: ./data/codex_auth.json
+  request_timeout_seconds: 3600  # whole-request backstop; long reasoning turns stream past 10 min
+  stream_stall_timeout_seconds: 180  # fail fast when no stream bytes arrive for this long
   retry:
     max_retries: 3
     base_delay: 1.0

@@ -286,6 +286,13 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
                 model=config.openai_codex.model,
                 max_tokens=config.openai_codex.max_tokens,
                 reasoning_effort=config.openai_codex.reasoning_effort,
+                max_retries=config.openai_codex.retry.max_retries,
+                retry_base_delay=config.openai_codex.retry.base_delay,
+                retry_max_delay=config.openai_codex.retry.max_delay,
+                pool_max_connections=config.openai_codex.connection_pool.max_connections,
+                pool_keepalive_timeout=config.openai_codex.connection_pool.keepalive_timeout,
+                request_timeout=config.openai_codex.request_timeout_seconds,
+                stream_stall_timeout=config.openai_codex.stream_stall_timeout_seconds,
             )
             log.info("Codex backend enabled (model: %s)", config.openai_codex.model)
         else:
@@ -424,6 +431,13 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
                     auth=aux_auth,
                     model=_aux.model,
                     max_tokens=_aux.max_tokens,
+                    max_retries=config.openai_codex.retry.max_retries,
+                    retry_base_delay=config.openai_codex.retry.base_delay,
+                    retry_max_delay=config.openai_codex.retry.max_delay,
+                    pool_max_connections=config.openai_codex.connection_pool.max_connections,
+                    pool_keepalive_timeout=config.openai_codex.connection_pool.keepalive_timeout,
+                    request_timeout=config.openai_codex.request_timeout_seconds,
+                    stream_stall_timeout=config.openai_codex.stream_stall_timeout_seconds,
                 )
                 auxiliary_llm_client = AuxiliaryLLMClient(
                     aux_client=aux_client,

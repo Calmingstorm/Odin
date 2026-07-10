@@ -16,6 +16,18 @@ log = get_logger("codex")
 
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
 
+# Streaming transport timeouts (config-overridable via the ctor).
+# request_timeout is a generous whole-request backstop — high-effort
+# reasoning turns legitimately stream past the old 600s total cap, which
+# killed healthy generations at exactly 10 minutes and burned a retry
+# re-generating them from scratch. stream_stall_timeout instead bounds
+# silence between socket reads: a healthy SSE stream delivers events
+# continuously, so a long gap means a dead connection that should fail
+# fast into the retry engine rather than waiting out the backstop.
+DEFAULT_REQUEST_TIMEOUT = 3600
+DEFAULT_STREAM_STALL_TIMEOUT = 180
+CONNECT_TIMEOUT = 30
+
 
 class CodexStreamError(RuntimeError):
     """The SSE stream reported a terminal failure event (response.failed / error)."""
@@ -35,6 +47,8 @@ class CodexChatClient:
         retry_max_delay: float = DEFAULT_MAX_DELAY,
         pool_max_connections: int = 10,
         pool_keepalive_timeout: int = 30,
+        request_timeout: int = DEFAULT_REQUEST_TIMEOUT,
+        stream_stall_timeout: int = DEFAULT_STREAM_STALL_TIMEOUT,
     ) -> None:
         self.auth = auth
         self.model = model
@@ -47,6 +61,8 @@ class CodexChatClient:
         self.retry_max_delay = retry_max_delay
         self.pool_max_connections = pool_max_connections
         self.pool_keepalive_timeout = pool_keepalive_timeout
+        self.request_timeout = request_timeout
+        self.stream_stall_timeout = stream_stall_timeout
         self.breaker = CircuitBreaker("codex_api")
         self._session: aiohttp.ClientSession | None = None
         self._total_requests: int = 0
@@ -489,7 +505,11 @@ class CodexChatClient:
                     CODEX_API_URL,
                     headers=self._auth_headers(token, account_id),
                     json=body,
-                    timeout=aiohttp.ClientTimeout(total=600),
+                    timeout=aiohttp.ClientTimeout(
+                        total=self.request_timeout,
+                        sock_connect=CONNECT_TIMEOUT,
+                        sock_read=self.stream_stall_timeout,
+                    ),
                 ) as resp:
                     if resp.status == 200:
                         try:
@@ -604,9 +624,9 @@ class CodexChatClient:
                     raise RuntimeError(f"Codex API error ({resp.status}): {error_body[:500]}")
 
             except (TimeoutError, aiohttp.ClientError) as e:
-                # asyncio.TimeoutError: the 600s total timeout can fire
-                # mid-stream; it is not an aiohttp.ClientError and previously
-                # escaped both the retry loop and breaker bookkeeping.
+                # asyncio.TimeoutError: the total/sock_read timeouts can fire
+                # mid-stream; TimeoutError is not an aiohttp.ClientError and
+                # previously escaped both the retry loop and breaker bookkeeping.
                 self.breaker.record_failure()
                 last_error = str(e) or type(e).__name__
                 if attempt < self.max_retries - 1:
