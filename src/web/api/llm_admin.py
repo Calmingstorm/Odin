@@ -109,6 +109,9 @@ def _persist_llm_sections_sync(bot) -> None:
     existing["openai_codex"]["model"] = bot.config.openai_codex.model
     existing["openai_codex"]["max_tokens"] = bot.config.openai_codex.max_tokens
     existing["openai_codex"]["reasoning_effort"] = bot.config.openai_codex.reasoning_effort
+    existing["openai_codex"]["agent_reasoning_effort"] = (
+        bot.config.openai_codex.agent_reasoning_effort
+    )
 
     if "ollama" not in existing:
         existing["ollama"] = {}
@@ -219,6 +222,15 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "active_reasoning_effort": getattr(
                     bot.llm_gateway.codex_client, "reasoning_effort", None
                 ),
+                # Configured agent policy (null = inherit) and what the next
+                # agent iteration will actually use (override, else the live
+                # client's own effort — mirrors the callback's resolution).
+                "agent_reasoning_effort": bot.config.openai_codex.agent_reasoning_effort,
+                "effective_agent_reasoning_effort": (
+                    bot.config.openai_codex.agent_reasoning_effort
+                    if bot.config.openai_codex.agent_reasoning_effort is not None
+                    else getattr(bot.llm_gateway.codex_client, "reasoning_effort", None)
+                ),
             },
             "ollama": {
                 "configured": ollama_configured,
@@ -297,21 +309,50 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         },
                         status=400,
                     )
+                # agent_reasoning_effort: JSON null (and "") mean INHERIT, so
+                # presence must be checked by key — .get() cannot distinguish
+                # "missing" from "explicitly null".
+                agent_effort_present = "agent_reasoning_effort" in body
+                agent_effort = body.get("agent_reasoning_effort")
+                if agent_effort in ("", None):
+                    agent_effort = None
+                elif str(agent_effort) not in CODEX_REASONING_EFFORTS:
+                    return web.json_response(
+                        {
+                            "error": f"invalid agent_reasoning_effort: {agent_effort!r}",
+                            "allowed": [*sorted(CODEX_REASONING_EFFORTS), None],
+                        },
+                        status=400,
+                    )
                 changed = False
+                # Agent effort is read from config at call time by the agent
+                # iteration callbacks — persisting it must NOT trigger a codex
+                # client reload (auth-pool refresh) when nothing else changed.
+                needs_reload = False
                 if "enabled" in body:
                     cfg.enabled = bool(body["enabled"])
                     changed = True
+                    needs_reload = True
                 if "model" in body and body["model"]:
                     cfg.model = str(body["model"])
                     changed = True
+                    needs_reload = True
                 if "max_tokens" in body:
                     cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
                     changed = True
+                    needs_reload = True
                 if effort is not None:
                     cfg.reasoning_effort = str(effort)
                     changed = True
+                    needs_reload = True
+                if agent_effort_present:
+                    cfg.agent_reasoning_effort = (
+                        None if agent_effort is None else str(agent_effort)
+                    )
+                    changed = True
                 if changed:
-                    await bot.llm_gateway.reload_codex_inner()
+                    if needs_reload:
+                        await bot.llm_gateway.reload_codex_inner()
                     await _persist_config(bot)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -321,6 +362,7 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             "enabled": cfg.enabled,
             "model": cfg.model,
             "reasoning_effort": cfg.reasoning_effort,
+            "agent_reasoning_effort": cfg.agent_reasoning_effort,
             "configured": bot.llm_gateway.codex_client is not None,
         })
 

@@ -112,6 +112,13 @@ class AgentsConfig(BaseModel):
     scheduled_max_iterations: int = 180
     hard_max_iterations: int = 300
     final_warning_iterations: list[int] = Field(default_factory=lambda: [20, 10, 5, 1])
+    # Per-LLM-call backstop. The transport already fails dead streams fast
+    # (stream_stall_timeout_seconds); this only bounds a genuinely hung call,
+    # so it must exceed a legitimate high-effort generation (5-10+ min).
+    iteration_timeout_seconds: int = 900
+    # Hard per-agent deadline, snapshotted at spawn (a live config change
+    # never shortens an already-running agent's deadline).
+    max_lifetime_seconds: int = 14400
 
     @field_validator(
         "max_nesting_depth",
@@ -124,6 +131,13 @@ class AgentsConfig(BaseModel):
     def _agents_non_negative(cls, v):
         if v < 1:
             raise ValueError("agent limits must be >= 1")
+        return v
+
+    @field_validator("iteration_timeout_seconds", "max_lifetime_seconds")
+    @classmethod
+    def _agents_timeout_bounds(cls, v, info):
+        if not 60 <= v <= 86400:
+            raise ValueError(f"{info.field_name} must be between 60 and 86400")
         return v
 
     @field_validator("final_warning_iterations")
@@ -299,6 +313,11 @@ class OpenAICodexConfig(BaseModel):
     model: str = "gpt-4o"
     max_tokens: int = 4096
     reasoning_effort: ReasoningEffort = "medium"
+    # Effort for SPAWNED-AGENT iterations only. None = inherit
+    # reasoning_effort (the string "none" is a real effort level, not
+    # inherit). Read at call time, so live changes reach in-flight agents
+    # on their next iteration.
+    agent_reasoning_effort: ReasoningEffort | None = None
     credentials_path: str = "./data/codex_auth.json"
     # Streaming transport timeouts: a generous whole-request backstop (long
     # high-effort reasoning turns stream well past 10 minutes) plus a stall
@@ -307,17 +326,18 @@ class OpenAICodexConfig(BaseModel):
     request_timeout_seconds: int = 3600
     stream_stall_timeout_seconds: int = 180
 
-    @field_validator("reasoning_effort", mode="before")
+    @field_validator("reasoning_effort", "agent_reasoning_effort", mode="before")
     @classmethod
-    def _coerce_legacy_reasoning_effort(cls, v):
+    def _coerce_legacy_reasoning_effort(cls, v, info):
         # v3.58.0 briefly offered "minimal"; a config persisted with it must
         # not brick startup after upgrading — degrade to the nearest value.
         if v == "minimal":
             import logging
 
             logging.getLogger("odin.config").warning(
-                "reasoning_effort 'minimal' is not supported by any Codex "
-                "model on this auth path; using 'low' instead"
+                "%s 'minimal' is not supported by any Codex "
+                "model on this auth path; using 'low' instead",
+                info.field_name,
             )
             return "low"
         return v

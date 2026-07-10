@@ -24,7 +24,9 @@ def _cfg(tools_enabled=True):
         tools=SimpleNamespace(enabled=tools_enabled, tool_timeouts={}),
         agents=SimpleNamespace(max_nesting_depth=2, hard_max_iterations=300,
                                max_iterations=120, scheduled_max_iterations=180,
-                               final_warning_iterations=[20, 10, 5, 1]),
+                               final_warning_iterations=[20, 10, 5, 1],
+                               iteration_timeout_seconds=900,
+                               max_lifetime_seconds=14400),
     )
 
 
@@ -217,6 +219,130 @@ class TestSpawnAgent:
         out = await t._handle_spawn_agent(
             _message(), {"label": "s", "goal": "g", "_scheduled": True})
         assert "spawned" in out
+
+    async def test_spawn_passes_configured_timeouts(self):
+        """agents.iteration_timeout_seconds / max_lifetime_seconds are
+        snapshotted into the spawn call."""
+        t = _tools()
+        t._agent_manager.spawn.return_value = "agent-t"
+        t._agent_manager._agents = {}
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        kwargs = t._agent_manager.spawn.call_args.kwargs
+        assert kwargs["iteration_timeout"] == 900
+        assert kwargs["max_lifetime"] == 14400
+
+    async def test_spawn_defaults_without_agents_config(self):
+        """A config missing the agents section falls back to 900/14400."""
+        t = _tools(get_config=lambda: SimpleNamespace(
+            tools=SimpleNamespace(enabled=True, tool_timeouts={})))
+        t._agent_manager.spawn.return_value = "agent-d"
+        t._agent_manager._agents = {}
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        kwargs = t._agent_manager.spawn.call_args.kwargs
+        assert kwargs["iteration_timeout"] == 900
+        assert kwargs["max_lifetime"] == 14400
+
+
+class _FakeEffortClient:
+    """Codex-shaped client: has a reasoning_effort attr (the inherit source)."""
+    reasoning_effort = "high"
+    model = "gpt-5.5"
+    provider_name = "codex"
+
+    def __init__(self):
+        self.captured: dict = {}
+
+    async def chat_with_tools(self, **kw):
+        self.captured.update(kw)
+        return SimpleNamespace(text="hi", tool_calls=[], stop_reason="end_turn")
+
+
+class TestAgentReasoningEffortCallback:
+    def _spawned_callback(self, agent_effort, client):
+        cfg = _cfg()
+        cfg.openai_codex = SimpleNamespace(agent_reasoning_effort=agent_effort)
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=SimpleNamespace(active_client=client))
+        t._agent_manager.spawn.return_value = "agent-e"
+        t._agent_manager._agents = {}
+        return t
+
+    async def test_callback_passes_configured_override_and_stamps(self):
+        client = _FakeEffortClient()
+        t = self._spawned_callback("low", client)
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
+        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["reasoning_effort"] == "low"
+        assert out["reasoning_effort"] == "low"
+        assert out["provider"] == "codex"
+        assert out["model"] == "gpt-5.5"
+
+    async def test_callback_inherits_when_unset(self):
+        client = _FakeEffortClient()
+        t = self._spawned_callback(None, client)
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
+        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["reasoning_effort"] is None  # client applies its own
+        assert out["reasoning_effort"] == "high"            # stamp = inherited value
+
+    async def test_callback_reads_config_at_call_time(self):
+        """A live config change reaches an in-flight agent's NEXT iteration."""
+        client = _FakeEffortClient()
+        cfg = _cfg()
+        cfg.openai_codex = SimpleNamespace(agent_reasoning_effort=None)
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=SimpleNamespace(active_client=client))
+        t._agent_manager.spawn.return_value = "agent-e"
+        t._agent_manager._agents = {}
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
+        await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["reasoning_effort"] is None
+        cfg.openai_codex.agent_reasoning_effort = "xhigh"  # live WebUI change
+        await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["reasoning_effort"] == "xhigh"
+
+    async def test_callback_stamps_none_for_effortless_provider(self):
+        """A provider without a reasoning_effort attr stamps None — never a
+        value it silently ignored."""
+        class NoEffortClient:
+            model = "qwen3"
+            provider_name = "ollama"
+
+            def __init__(self):
+                self.captured: dict = {}
+
+            async def chat_with_tools(self, **kw):
+                self.captured.update(kw)
+                return SimpleNamespace(text="hi", tool_calls=[], stop_reason="end_turn")
+
+        client = NoEffortClient()
+        t = self._spawned_callback("low", client)
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
+        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert out["reasoning_effort"] is None
+        assert out["provider"] == "ollama"
+
+    async def test_loop_spawn_callback_passes_effort(self):
+        """The spawn_loop_agents iteration callback gets the same treatment."""
+        client = _FakeEffortClient()
+        cfg = _cfg()
+        cfg.openai_codex = SimpleNamespace(agent_reasoning_effort="medium")
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=SimpleNamespace(active_client=client))
+        t._loop_manager._loops = {"L1": SimpleNamespace(
+            status="running", requester_id="1", requester_name="u",
+            goal="loop goal", iteration_count=1)}
+        t._loop_agent_bridge.spawn_agents_for_loop = MagicMock(return_value=["a1"])
+        await t._handle_spawn_loop_agents(
+            _message(), {"loop_id": "L1", "tasks": [{"label": "x", "goal": "g"}]})
+        cb = t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs["iteration_callback"]
+        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["reasoning_effort"] == "medium"
+        assert out["reasoning_effort"] == "medium"
 
 
 # --------------------------------------------------------------------------- #

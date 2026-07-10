@@ -413,6 +413,83 @@ class TestReasoningEffortBody:
         assert "reasoning" not in captured
 
 
+class TestPerCallReasoningOverride:
+    """chat_with_tools(reasoning_effort=...) overrides the configured effort
+    for that single request WITHOUT mutating client state — a temporary
+    self-assignment would race concurrent chat and agent calls."""
+
+    _TOOLS = [{"name": "t", "description": "d",
+               "input_schema": {"type": "object", "properties": {}}}]
+
+    @staticmethod
+    def _capture_tools_list(client):
+        from types import SimpleNamespace
+        bodies = []
+
+        async def fake_stream(body):
+            bodies.append(body)
+            return SimpleNamespace(text="ok", tool_calls=[], stop_reason="end")
+
+        client._stream_tool_request = fake_stream
+        return bodies
+
+    async def test_override_wins_and_client_untouched(self):
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5",
+                                 max_tokens=1000, reasoning_effort="medium")
+        bodies = self._capture_tools_list(client)
+        await client.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
+            reasoning_effort="xhigh",
+        )
+        assert bodies[0]["reasoning"] == {"effort": "xhigh"}
+        assert client.reasoning_effort == "medium"
+
+    async def test_none_inherits_configured(self):
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5",
+                                 max_tokens=1000, reasoning_effort="high")
+        bodies = self._capture_tools_list(client)
+        await client.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
+            reasoning_effort=None,
+        )
+        assert bodies[0]["reasoning"] == {"effort": "high"}
+
+    async def test_literal_none_string_is_an_effort(self):
+        """The string "none" is a real effort level, not inherit."""
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5",
+                                 max_tokens=1000, reasoning_effort="high")
+        bodies = self._capture_tools_list(client)
+        await client.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
+            reasoning_effort="none",
+        )
+        assert bodies[0]["reasoning"] == {"effort": "none"}
+
+    async def test_override_on_unset_client(self):
+        client = _client()  # no configured effort
+        bodies = self._capture_tools_list(client)
+        await client.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
+            reasoning_effort="low",
+        )
+        assert bodies[0]["reasoning"] == {"effort": "low"}
+
+    async def test_concurrent_calls_do_not_leak_efforts(self):
+        import asyncio
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5",
+                                 max_tokens=1000, reasoning_effort="medium")
+        bodies = self._capture_tools_list(client)
+        msgs = [{"role": "user", "content": "hi"}]
+        await asyncio.gather(
+            client.chat_with_tools(msgs, "sys", self._TOOLS, reasoning_effort="xhigh"),
+            client.chat_with_tools(msgs, "sys", self._TOOLS),
+            client.chat_with_tools(msgs, "sys", self._TOOLS, reasoning_effort="low"),
+        )
+        efforts = sorted(b["reasoning"]["effort"] for b in bodies)
+        assert efforts == ["low", "medium", "xhigh"]
+        assert client.reasoning_effort == "medium"
+
+
 class TestTransportTimeouts:
     def test_ctor_defaults(self):
         client = _client()

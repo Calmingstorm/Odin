@@ -139,6 +139,18 @@ export default {
                 <option value="xhigh">Extra High</option>
               </select>
             </div>
+            <div>
+              <label class="text-xs text-gray-400">Agent Reasoning</label>
+              <select v-model="codexForm.agent_reasoning_effort" @change="saveCodexConfigDebounced"
+                      class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200">
+                <option value="">Inherit chat setting</option>
+                <option value="none">None</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="xhigh">Extra High</option>
+              </select>
+            </div>
           </div>
           <div class="border-t border-gray-700 pt-4">
           <h3 class="text-xs font-semibold text-gray-400 mb-2">Authentication</h3>
@@ -363,7 +375,9 @@ export default {
     const selectedProvider = ref('codex');
 
     // --- Config forms ---
-    const codexForm = ref({ enabled: false, model: 'gpt-5.5', max_tokens: 4096, reasoning_effort: 'medium' });
+    // agent_reasoning_effort: '' = inherit the chat Reasoning setting (sent
+    // as null; distinct from the literal effort "none")
+    const codexForm = ref({ enabled: false, model: 'gpt-5.5', max_tokens: 4096, reasoning_effort: 'medium', agent_reasoning_effort: '' });
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096 });
     const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 });
     const ollamaKeyDirty = ref(false);
@@ -431,6 +445,8 @@ export default {
           codexForm.value.enabled = data.codex.enabled;
           codexForm.value.model = data.codex.model || 'gpt-5.5';
           codexForm.value.reasoning_effort = data.codex.reasoning_effort || 'medium';
+          // null (inherit) maps to the '' select option
+          codexForm.value.agent_reasoning_effort = data.codex.agent_reasoning_effort || '';
           codexForm.value.max_tokens = data.codex.max_tokens || 4096;
         }
         if (data.ollama && !saveOllamaConfigDebounced.pending()) {

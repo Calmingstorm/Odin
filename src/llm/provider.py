@@ -24,8 +24,14 @@ class LLMProvider(ABC):
     async def chat_with_tools(
         self, messages: list[dict], system: str,
         tools: list[dict],
+        *, reasoning_effort: str | None = None,
     ) -> LLMResponse:
-        """Completion with tool calling — returns structured response."""
+        """Completion with tool calling — returns structured response.
+
+        reasoning_effort overrides the provider's configured effort for this
+        single request (None = use the configured value). Providers without
+        a reasoning-effort concept accept and ignore it.
+        """
 
     @abstractmethod
     async def close(self) -> None:

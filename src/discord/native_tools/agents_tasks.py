@@ -369,15 +369,35 @@ class AgentTaskTools:
             sys_prompt: str,
             tool_defs: list[dict],
         ) -> dict:
-            resp = await self._llm_gateway.active_client.chat_with_tools(
+            # Resolve the client ONCE per call so the provider/model/effort
+            # stamp describes the client this request actually went to, and
+            # read the agent effort from live config at call time (a WebUI
+            # change reaches in-flight agents on their next iteration).
+            client = self._llm_gateway.active_client
+            agent_effort = getattr(
+                getattr(self._get_config(), "openai_codex", None),
+                "agent_reasoning_effort",
+                None,
+            )
+            resp = await client.chat_with_tools(
                 messages=messages,
                 system=sys_prompt,
                 tools=tool_defs,
+                reasoning_effort=agent_effort,
             )
+            if hasattr(client, "reasoning_effort"):
+                effective_effort = (
+                    agent_effort if agent_effort is not None else client.reasoning_effort
+                )
+            else:
+                effective_effort = None  # provider has no effort concept
             return {
                 "text": resp.text,
                 "tool_calls": [{"name": tc.name, "input": tc.input} for tc in resp.tool_calls],
                 "stop_reason": resp.stop_reason,
+                "provider": getattr(client, "provider_name", ""),
+                "model": getattr(client, "model", ""),
+                "reasoning_effort": effective_effort,
             }
 
         msg_proxy = _LoopMessageProxy(channel, user_id, user_name)
@@ -424,6 +444,14 @@ class AgentTaskTools:
             if agents_cfg
             else [20, 10, 5, 1]
         )
+        # Snapshotted at spawn: a live config change must not move the
+        # deadline of an agent already mid-run.
+        iteration_timeout = (
+            getattr(agents_cfg, "iteration_timeout_seconds", 900) if agents_cfg else 900
+        )
+        max_lifetime = (
+            getattr(agents_cfg, "max_lifetime_seconds", 14400) if agents_cfg else 14400
+        )
 
         agent_id = self._agent_manager.spawn(
             label=label,
@@ -441,6 +469,8 @@ class AgentTaskTools:
             trajectory_saver=self._agent_trajectory_saver,
             max_iterations=iter_cap,
             budget_warnings=warnings,
+            iteration_timeout=iteration_timeout,
+            max_lifetime=max_lifetime,
             context_compression_enabled=bool(self._get_context_compressor()),
             max_context_chars=self._get_context_compressor().max_context_chars
             if self._get_context_compressor()
@@ -459,14 +489,28 @@ class AgentTaskTools:
     async def _collect_agent_result(
         self,
         agent_id: str,
-        timeout: float = 3660,
+        timeout: float | None = None,
     ) -> tuple[str, dict]:
         """Wait for an agent to complete and return (formatted_text, raw_data).
+
+        When ``timeout`` is None it resolves to the agent's SNAPSHOTTED
+        max_lifetime + 60s — the lifetime deadline guarantees termination, so
+        this wait always resolves (a fresh config read could disagree with
+        the deadline the agent was actually spawned with).
 
         The raw_data dict contains status, error, result, and empty_result
         so callers can make ok/fail decisions based on structured state
         rather than parsing markdown.
         """
+        if timeout is None:
+            agent = self._agent_manager._agents.get(agent_id)
+            if agent is not None:
+                timeout = agent.max_lifetime + 60
+            else:
+                agents_cfg = getattr(self._get_config(), "agents", None)
+                timeout = (
+                    getattr(agents_cfg, "max_lifetime_seconds", 3600) if agents_cfg else 3600
+                ) + 60
         results = await self._agent_manager.wait_for_agents([agent_id], timeout=timeout)
         r = results.get(agent_id, {})
         status = r.get("status", "unknown")
@@ -620,17 +664,33 @@ class AgentTaskTools:
 
         # Build iteration/tool callbacks (same pattern as _handle_spawn_agent)
         async def _iteration_cb(messages, sys, tool_defs):
-            resp = await self._llm_gateway.active_client.chat_with_tools(
+            client = self._llm_gateway.active_client
+            agent_effort = getattr(
+                getattr(self._get_config(), "openai_codex", None),
+                "agent_reasoning_effort",
+                None,
+            )
+            resp = await client.chat_with_tools(
                 messages=messages,
                 system=sys,
                 tools=tool_defs,
+                reasoning_effort=agent_effort,
             )
+            if hasattr(client, "reasoning_effort"):
+                effective_effort = (
+                    agent_effort if agent_effort is not None else client.reasoning_effort
+                )
+            else:
+                effective_effort = None  # provider has no effort concept
             return {
                 "text": resp.text or "",
                 "tool_calls": [
                     {"name": tc.name, "input": tc.input} for tc in (resp.tool_calls or [])
                 ],
                 "stop_reason": resp.stop_reason or "end_turn",
+                "provider": getattr(client, "provider_name", ""),
+                "model": getattr(client, "model", ""),
+                "reasoning_effort": effective_effort,
             }
 
         async def _tool_cb(tool_name, tool_input):
@@ -664,6 +724,8 @@ class AgentTaskTools:
             # bridge passed None and agents fell back to the module default,
             # ignoring agents.max_iterations.
             max_iterations=self._get_config().agents.max_iterations,
+            iteration_timeout=self._get_config().agents.iteration_timeout_seconds,
+            max_lifetime=self._get_config().agents.max_lifetime_seconds,
             context_compression_enabled=bool(cc),
             max_context_chars=cc.max_context_chars if cc else 750000,
             keep_recent_iterations=cc.keep_recent_iterations if cc else 30,
