@@ -1683,3 +1683,60 @@ class TestTrajectoryStamps:
         assert it.provider == ""
         assert it.model == ""
         assert it.reasoning_effort is None
+
+
+class TestRetryPathDeadline:
+    async def test_lifetime_exhausted_at_retry_entry(self):
+        """First failure is transient, but the deadline passes during the
+        recovery sleep — the retry must not start; lifetime TIMEOUT wins."""
+        agent = _exec_agent(iteration_timeout=900.0, max_lifetime=100.0)
+        agent.created_at = time.time() - 50
+
+        async def fail_first(coro, *, timeout=None):
+            try:
+                coro.close()
+            except Exception:
+                pass
+            raise ConnectionError("transient")
+
+        async def sleep_past_deadline(_delay):
+            agent.created_at -= 100  # recovery sleep consumed the lifetime
+
+        iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
+        with patch("src.agents.manager.asyncio.wait_for", side_effect=fail_first):
+            with patch("src.agents.manager.asyncio.sleep", side_effect=sleep_past_deadline):
+                result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
+
+        assert result is None
+        assert agent.state == AgentState.TIMEOUT
+        assert "lifetime exceeded" in agent.state_history[-1].reason
+
+    async def test_retry_timeout_at_deadline_is_lifetime(self):
+        """A retry that times out exactly at the deadline is lifetime
+        exhaustion (TIMEOUT), not a FAILED recovery."""
+        agent = _exec_agent(iteration_timeout=900.0, max_lifetime=100.0)
+        agent.created_at = time.time() - 50
+        calls = 0
+
+        async def error_then_deadline_timeout(coro, *, timeout=None):
+            nonlocal calls
+            calls += 1
+            try:
+                coro.close()
+            except Exception:
+                pass
+            if calls == 1:
+                raise ConnectionError("transient")
+            agent.created_at -= 100  # retry wait ran past the deadline
+            raise TimeoutError()
+
+        iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
+        with patch("src.agents.manager.asyncio.wait_for",
+                   side_effect=error_then_deadline_timeout):
+            with patch("src.agents.manager.asyncio.sleep", new_callable=AsyncMock):
+                result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
+
+        assert result is None
+        assert calls == 2
+        assert agent.state == AgentState.TIMEOUT
+        assert "lifetime exceeded" in agent.state_history[-1].reason
