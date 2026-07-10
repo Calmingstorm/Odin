@@ -68,11 +68,33 @@ class TestOdinBotClose:
 
     @pytest.mark.asyncio
     async def test_close_shuts_down_process_registry(self):
+        # The registry is created lazily ON the executor
+        # (ToolExecutor._ensure_process_registry) — teardown must read that
+        # seam. The old `bot.process_registry` attribute never existed
+        # anywhere, so manage_process children leaked past shutdown (and an
+        # in-place restart would carry them into the new image).
         bot = _make_bot()
-        bot.process_registry = AsyncMock()
+        bot.tool_executor._process_registry = AsyncMock()
         with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
             await bot.close()
-        bot.process_registry.shutdown.assert_awaited_once()
+        bot.tool_executor._process_registry.shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_close_does_not_create_unused_process_registry(self):
+        # Reading the lazy seam must never instantiate a registry that no
+        # tool ever used.
+        bot = _make_bot()
+        assert not hasattr(bot.tool_executor, "_process_registry")
+        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
+            await bot.close()
+        assert not hasattr(bot.tool_executor, "_process_registry")
+
+    @pytest.mark.asyncio
+    async def test_close_tolerates_missing_tool_executor(self):
+        bot = _make_bot()
+        bot.tool_executor = None
+        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
+            await bot.close()
 
     @pytest.mark.asyncio
     async def test_close_closes_knowledge_store(self):
@@ -122,8 +144,8 @@ class TestOdinBotClose:
         bot.health_server.stop = AsyncMock(
             side_effect=lambda: call_order.append("health_server")
         )
-        bot.process_registry = AsyncMock()
-        bot.process_registry.shutdown = AsyncMock(
+        bot.tool_executor._process_registry = AsyncMock()
+        bot.tool_executor._process_registry.shutdown = AsyncMock(
             side_effect=lambda: call_order.append("process_registry")
         )
         bot.knowledge = MagicMock()

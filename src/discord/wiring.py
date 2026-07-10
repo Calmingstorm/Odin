@@ -10,8 +10,9 @@ slash commands, the first system-prompt build) stays in ``OdinBot.__init__``.
 
 ``shutdown_services(bot)`` is the teardown mirror, moved verbatim from
 ``OdinBot.close()``. It takes the bot rather than a ``BotServices`` because
-several torn-down attributes are late-bound on the bot (``health_server``,
-``process_registry``) or reached via property alias (``knowledge``), and
+several torn-down attributes are late-bound on the bot (``health_server``),
+lazily created on the executor (``_process_registry``), or reached via
+property alias (``knowledge``), and
 because teardown must keep working mid-campaign no matter which phase last
 moved a subsystem.
 """
@@ -810,7 +811,12 @@ async def shutdown_services(bot) -> None:
         except Exception:
             log.exception("Error stopping health_server")
 
-    process_registry = getattr(bot, "process_registry", None)
+    # The ProcessRegistry is created lazily ON the executor
+    # (ToolExecutor._ensure_process_registry); read the private attribute —
+    # the same seam the web API uses — so teardown never instantiates a
+    # registry that was never used.
+    tool_executor = getattr(bot, "tool_executor", None)
+    process_registry = getattr(tool_executor, "_process_registry", None)
     if process_registry is not None:
         try:
             await process_registry.shutdown()
