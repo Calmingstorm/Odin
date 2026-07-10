@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from src import restart
 from src.web.api.self_update import register_self_update
 
 
@@ -27,7 +28,14 @@ def _app(bot=None):
 
 
 def _run_ok(cmd, **kw):
-    """A fake subprocess.run: every git/gh call succeeds, nothing executes."""
+    """A fake subprocess.run: every git/gh call succeeds, nothing executes.
+
+    The worktree probe answers "true" — `git rev-parse --is-inside-work-tree`
+    is what abstracts a directory .git from a linked worktree's FILE .git,
+    which is exactly why the handler asks git instead of the filesystem.
+    """
+    if "--is-inside-work-tree" in cmd:
+        return CompletedProcess(cmd, 0, stdout="true\n", stderr="")
     if any("releases/latest" in str(a) for a in cmd):
         return CompletedProcess(cmd, 0, stdout="v3.55.0\n", stderr="")  # resolve "latest"
     if "rev-parse" in cmd:
@@ -35,6 +43,13 @@ def _run_ok(cmd, **kw):
     if "diff" in cmd:
         return CompletedProcess(cmd, 0, stdout="", stderr="")  # clean worktree
     return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+
+def _git_ok_but_resolve_fails(cmd, **kw):
+    """Worktree probe passes; the gh release resolution fails."""
+    if "--is-inside-work-tree" in cmd:
+        return CompletedProcess(cmd, 0, stdout="true\n", stderr="")
+    return CompletedProcess(cmd, 1, stdout="", stderr="")
 
 
 class TestCheckUpdate:
@@ -60,20 +75,24 @@ class TestCheckUpdate:
 
 class TestApplyUpdate:
     async def test_invalid_version_format(self):
-        # reached before any git op — pass an explicit bad tag (not "latest")
-        async with TestClient(TestServer(_app())) as c:
-            r = await c.post("/api/update/apply", json={"version": "not-a-version"})
-            assert r.status == 400 and "Invalid version format" in (await r.json())["error"]
+        # reached after the worktree probe but before any release resolution
+        with patch("subprocess.run", side_effect=_run_ok):
+            async with TestClient(TestServer(_app())) as c:
+                r = await c.post("/api/update/apply", json={"version": "not-a-version"})
+                assert r.status == 400 and "Invalid version format" in (await r.json())["error"]
+        assert restart.restart_requested() is False
 
     async def test_resolve_latest_failure(self):
-        with patch("subprocess.run",
-                   return_value=CompletedProcess([], 1, stdout="", stderr="")):
+        with patch("subprocess.run", side_effect=_git_ok_but_resolve_fails):
             async with TestClient(TestServer(_app())) as c:
                 r = await c.post("/api/update/apply", json={"version": "latest"})
                 assert r.status == 502
+        assert restart.restart_requested() is False
 
     async def test_dirty_worktree_409(self):
         def _dirty(cmd, **kw):
+            if "--is-inside-work-tree" in cmd:
+                return CompletedProcess(cmd, 0, stdout="true\n", stderr="")
             if "diff" in cmd:
                 return CompletedProcess(cmd, 0, stdout="src/foo.py\nsrc/bar.py", stderr="")
             return CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -82,9 +101,12 @@ class TestApplyUpdate:
             async with TestClient(TestServer(_app())) as c:
                 r = await c.post("/api/update/apply", json={"version": "v3.55.0"})
                 assert r.status == 409 and "unexpected modifications" in (await r.json())["error"]
+        assert restart.restart_requested() is False
 
     async def test_step_failure_rolls_back(self):
         def _fail_merge(cmd, **kw):
+            if "--is-inside-work-tree" in cmd:
+                return CompletedProcess(cmd, 0, stdout="true\n", stderr="")
             if "rev-parse" in cmd:
                 return CompletedProcess(cmd, 0, stdout="prevsha123", stderr="")
             if "merge" in cmd:
@@ -98,6 +120,7 @@ class TestApplyUpdate:
                 assert r.status == 500 and "fast-forward to release tag failed" in (
                     await r.json())["error"]
             kill.assert_not_called()
+        assert restart.restart_requested() is False
 
     async def test_success_schedules_restart(self):
         # SAFETY (Odin's #200 blocker): the handler does
@@ -131,10 +154,14 @@ class TestApplyUpdate:
         # never registers the SIGTERM callback on a live loop
         assert any(delay == 2 and callable(cb) for delay, cb in recorded)
         kill.assert_not_called()
+        # main() re-execs in place after shutdown only because this was set
+        assert restart.restart_requested() is True
 
     async def test_unexpected_exception_500(self):
         # subprocess raising mid-flow (inside the try) surfaces as a 500
         def _boom(cmd, **kw):
+            if "--is-inside-work-tree" in cmd:
+                return CompletedProcess(cmd, 0, stdout="true\n", stderr="")
             if "diff" in cmd:
                 raise RuntimeError("git exploded")
             return CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -143,13 +170,62 @@ class TestApplyUpdate:
             async with TestClient(TestServer(_app())) as c:
                 r = await c.post("/api/update/apply", json={"version": "v3.55.0"})
                 assert r.status == 500 and "git exploded" in (await r.json())["error"]
+        assert restart.restart_requested() is False
 
     async def test_bad_json_defaults_to_latest(self):
         # invalid JSON → data={} → target defaults to "latest" → resolve attempt
-        with patch("subprocess.run",
-                   return_value=CompletedProcess([], 1, stdout="", stderr="")):
+        with patch("subprocess.run", side_effect=_git_ok_but_resolve_fails):
             async with TestClient(TestServer(_app())) as c:
                 assert (await c.post("/api/update/apply", data="notjson")).status == 502
+
+
+class TestNonGitInstall:
+    """.deb installs ship /opt/odin without a repository — the endpoint must
+    answer a friendly 409 BEFORE resolving releases or mutating anything,
+    and must never arm the restart flag on that path."""
+
+    async def test_non_git_checkout_409_before_any_resolution(self):
+        commands: list = []
+
+        def _not_git(cmd, **kw):
+            commands.append(cmd)
+            if "--is-inside-work-tree" in cmd:
+                return CompletedProcess(
+                    cmd, 128, stdout="", stderr="fatal: not a git repository"
+                )
+            return CompletedProcess(cmd, 0, stdout="v9.9.9\n", stderr="")
+
+        with patch("subprocess.run", side_effect=_not_git), \
+             patch("os.kill") as kill:
+            async with TestClient(TestServer(_app())) as c:
+                r = await c.post("/api/update/apply", json={"version": "latest"})
+                assert r.status == 409
+                assert "not a git checkout" in (await r.json())["error"]
+        # detection ran first and nothing else was attempted — no gh resolve,
+        # no git mutation
+        assert all("--is-inside-work-tree" in c for c in commands)
+        assert restart.restart_requested() is False
+        kill.assert_not_called()
+
+    async def test_git_binary_missing_entirely_409(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError("git")):
+            async with TestClient(TestServer(_app())) as c:
+                r = await c.post("/api/update/apply", json={"version": "latest"})
+                assert r.status == 409
+        assert restart.restart_requested() is False
+
+    async def test_rev_parse_false_output_409(self):
+        # rev-parse can exit 0 with "false" (e.g. inside .git itself)
+        def _false(cmd, **kw):
+            if "--is-inside-work-tree" in cmd:
+                return CompletedProcess(cmd, 0, stdout="false\n", stderr="")
+            return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=_false):
+            async with TestClient(TestServer(_app())) as c:
+                assert (
+                    await c.post("/api/update/apply", json={"version": "latest"})
+                ).status == 409
 
 
 class TestStopAllLoops:

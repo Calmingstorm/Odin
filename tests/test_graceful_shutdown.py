@@ -8,14 +8,16 @@ ProcessRegistry.shutdown() terminates running processes.
 from __future__ import annotations
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import src.tools.process_manager as pm
 from src.config.schema import Config
 from src.discord.client import OdinBot
 from src.knowledge.store import KnowledgeStore
-from src.tools.process_manager import ProcessRegistry
+from src.tools.process_manager import ProcessInfo, ProcessRegistry
 
 # ── OdinBot.close() ──────────────────────────────────────────────────
 
@@ -68,11 +70,33 @@ class TestOdinBotClose:
 
     @pytest.mark.asyncio
     async def test_close_shuts_down_process_registry(self):
+        # The registry is created lazily ON the executor
+        # (ToolExecutor._ensure_process_registry) — teardown must read that
+        # seam. The old `bot.process_registry` attribute never existed
+        # anywhere, so manage_process children leaked past shutdown (and an
+        # in-place restart would carry them into the new image).
         bot = _make_bot()
-        bot.process_registry = AsyncMock()
+        bot.tool_executor._process_registry = AsyncMock()
         with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
             await bot.close()
-        bot.process_registry.shutdown.assert_awaited_once()
+        bot.tool_executor._process_registry.shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_close_does_not_create_unused_process_registry(self):
+        # Reading the lazy seam must never instantiate a registry that no
+        # tool ever used.
+        bot = _make_bot()
+        assert not hasattr(bot.tool_executor, "_process_registry")
+        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
+            await bot.close()
+        assert not hasattr(bot.tool_executor, "_process_registry")
+
+    @pytest.mark.asyncio
+    async def test_close_tolerates_missing_tool_executor(self):
+        bot = _make_bot()
+        bot.tool_executor = None
+        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
+            await bot.close()
 
     @pytest.mark.asyncio
     async def test_close_closes_knowledge_store(self):
@@ -122,8 +146,8 @@ class TestOdinBotClose:
         bot.health_server.stop = AsyncMock(
             side_effect=lambda: call_order.append("health_server")
         )
-        bot.process_registry = AsyncMock()
-        bot.process_registry.shutdown = AsyncMock(
+        bot.tool_executor._process_registry = AsyncMock()
+        bot.tool_executor._process_registry.shutdown = AsyncMock(
             side_effect=lambda: call_order.append("process_registry")
         )
         bot.knowledge = MagicMock()
@@ -225,3 +249,66 @@ class TestProcessRegistryShutdown:
         killed = await registry.shutdown()
         # Process already finished, so kill count should be 0
         assert killed == 0
+
+    @pytest.mark.asyncio
+    async def test_shutdown_skips_done_or_absent_reader_task(self):
+        # A record whose reaper already finished (or was never started) is
+        # simply skipped in the await-reapers pass — no error.
+        registry = ProcessRegistry()
+
+        done = asyncio.create_task(asyncio.sleep(0))
+        await done
+        info_done = ProcessInfo(
+            pid=1, command="x", host="localhost", start_time=time.time(),
+            status="completed",
+        )
+        info_done._reader_task = done
+        info_none = ProcessInfo(
+            pid=2, command="x", host="localhost", start_time=time.time(),
+            status="completed",
+        )
+        info_none._reader_task = None
+        registry._processes[1] = info_done
+        registry._processes[2] = info_none
+
+        assert await registry.shutdown() == 0  # nothing to do, no raise
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_wedged_reaper_after_timeout(self, monkeypatch):
+        # A reaper that never finishes must not hang the in-place exec: after
+        # SHUTDOWN_REAP_TIMEOUT it is cancelled so shutdown can return.
+        monkeypatch.setattr(pm, "SHUTDOWN_REAP_TIMEOUT", 0.05)
+        registry = ProcessRegistry()
+
+        async def wedged():
+            await asyncio.sleep(30)
+
+        info = ProcessInfo(
+            pid=3, command="x", host="localhost", start_time=time.time(),
+            status="completed",
+        )
+        info._reader_task = asyncio.create_task(wedged())
+        registry._processes[3] = info
+
+        await registry.shutdown()
+
+        with pytest.raises(asyncio.CancelledError):
+            await info._reader_task
+
+    @pytest.mark.asyncio
+    async def test_shutdown_tolerates_reaper_that_raises(self):
+        # A reaper that errors during shutdown is logged and swallowed — one
+        # bad record must not abort cleanup of the rest or block re-exec.
+        registry = ProcessRegistry()
+
+        async def boom():
+            raise RuntimeError("reaper blew up")
+
+        info = ProcessInfo(
+            pid=4, command="x", host="localhost", start_time=time.time(),
+            status="completed",
+        )
+        info._reader_task = asyncio.create_task(boom())
+        registry._processes[4] = info
+
+        await registry.shutdown()  # must not propagate

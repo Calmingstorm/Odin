@@ -19,6 +19,10 @@ log = get_logger("process_manager")
 MAX_CONCURRENT = 20
 MAX_LIFETIME_SECONDS = 3600  # 1 hour
 OUTPUT_BUFFER_LINES = 500
+# Upper bound on awaiting an in-flight group reap at shutdown before giving up
+# and cancelling it — comfortably exceeds a reader's TERM-grace + KILL-grace so
+# a compliant descendant always finishes, while a wedged one can't hang re-exec.
+SHUTDOWN_REAP_TIMEOUT = 12.0
 
 
 @dataclass
@@ -62,11 +66,15 @@ class ProcessRegistry:
             return f"Cannot start: {running} processes already running (max {MAX_CONCURRENT})."
 
         try:
+            # start_new_session puts the shell at the head of its own process
+            # group, so kill()/shutdown() can take out descendants
+            # (`sh -c 'x & ...'`) instead of just the shell leader.
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 stdin=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
         except Exception as e:
             return f"Failed to start process: {e}"
@@ -131,7 +139,7 @@ class ProcessRegistry:
             return f"Failed to write to PID {pid}: {e}"
 
     async def kill(self, pid: int) -> str:
-        """Kill a running process."""
+        """Kill a running process — and its process group when it leads one."""
         info = self._processes.get(pid)
         if not info:
             return f"No process with PID {pid}."
@@ -140,12 +148,16 @@ class ProcessRegistry:
 
         try:
             if info.process:
-                info.process.terminate()
-                # Give it a moment to exit gracefully
-                try:
-                    await asyncio.wait_for(info.process.wait(), timeout=5)
-                except TimeoutError:
-                    info.process.kill()
+                from ..tools.ssh import terminate_process_tree
+
+                # Group-aware TERM → bounded grace → KILL → reap. Descendants
+                # of the managed shell die with it instead of leaking (they
+                # would otherwise outlive an in-place restart's exec).
+                # owned_pgid: start() spawns with start_new_session=True, so
+                # the group stays signallable after the leader exits.
+                await terminate_process_tree(
+                    info.process, grace=5.0, owned_pgid=info.process.pid
+                )
             info.status = "failed"
             info.exit_code = -9
             log.info("Killed process PID %d", pid)
@@ -174,11 +186,21 @@ class ProcessRegistry:
         return "\n".join(lines)
 
     async def shutdown(self) -> int:
-        """Terminate all running processes and cancel reader tasks.
+        """Terminate all managed processes and their groups before returning.
 
         Returns the number of processes that were still running.
+
+        Callers re-exec in place once this returns, so NOTHING the registry
+        owns may still be alive or mid-cleanup afterwards. A leader that already
+        exited on its own may have its reader task mid-reap of a TERM-immune
+        descendant, with the record already marked terminal — so we must AWAIT
+        every reader/reaper to completion, never cancel it out from under an
+        in-flight group kill (cancellation propagates through
+        terminate_process_tree and would strand the descendant across the exec).
         """
         killed = 0
+        # 1) TERM/KILL every still-running leader. This also unblocks its reader
+        #    (readline hits EOF), which then reaps any surviving group members.
         for pid, info in list(self._processes.items()):
             if info.status == "running":
                 try:
@@ -186,9 +208,18 @@ class ProcessRegistry:
                     killed += 1
                 except Exception:
                     log.warning("Failed to kill PID %d during shutdown", pid)
-            # Cancel lingering reader tasks
-            if info._reader_task and not info._reader_task.done():
-                info._reader_task.cancel()
+        # 2) Let every reader/reaper finish so no group cleanup is left pending.
+        for pid, info in list(self._processes.items()):
+            task = info._reader_task
+            if task is None or task.done():
+                continue
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=SHUTDOWN_REAP_TIMEOUT)
+            except TimeoutError:
+                log.warning("Reaper for PID %d did not finish; cancelling", pid)
+                task.cancel()
+            except Exception:
+                log.debug("Reaper for PID %d errored during shutdown", pid, exc_info=True)
         if killed:
             log.info("Shutdown: terminated %d running process(es)", killed)
         return killed
@@ -230,6 +261,22 @@ class ProcessRegistry:
                 info.status = "completed" if info.exit_code == 0 else "failed"
             except Exception:
                 info.status = "failed"
+
+            # The leader has exited, but `&`-backgrounded descendants can still
+            # be alive in its process group — a redirected one that doesn't hold
+            # stdout lets this task finish while it lingers. Reap the group NOW,
+            # while ownership is fresh: a non-empty group keeps the leader pid
+            # from being recycled, so owned_pgid still uniquely names OUR group.
+            # After this, shutdown() need not (and must not) signal a stale,
+            # possibly-recycled pgid for an already-terminal record.
+            from ..tools.ssh import terminate_process_tree
+
+            try:
+                await terminate_process_tree(
+                    info.process, grace=2.0, owned_pgid=info.process.pid
+                )
+            except Exception:
+                log.debug("group reap after PID %d exit failed", info.pid, exc_info=True)
 
     async def _enforce_lifetime(self, pid: int, max_seconds: int) -> None:
         """Auto-kill process after max lifetime."""

@@ -197,3 +197,14 @@ def diamond_plan() -> PlanSpec:
         ),
     )
 
+
+@pytest.fixture(autouse=True)
+def _reset_restart_intent():
+    """Restart intent (src/restart.py) is process-global state — never let
+    one test's requested restart leak into another (or toward a real exec)."""
+    from src import restart
+
+    restart.reset()
+    yield
+    restart.reset()
+

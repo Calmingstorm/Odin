@@ -88,24 +88,27 @@ class TestReadLinesCallbackTimeout:
     """proc.wait() must not hang indefinitely after readline loop exits."""
 
     @pytest.mark.asyncio
-    async def test_proc_wait_is_bounded(self):
+    async def test_proc_wait_is_bounded(self, monkeypatch):
+        import src.tools.ssh as ssh_mod
         from src.tools.ssh import _read_lines_with_callback
 
         proc = AsyncMock()
         proc.stdout.readline = AsyncMock(side_effect=[b"line\n", b""])
         proc.returncode = 0
 
-        # Make proc.wait() hang — it should be killed after bounded timeout
+        # Make proc.wait() hang — the bounded timeout must fire and hand the
+        # process to group-aware cleanup (PR #227; was a leader-only kill)
         async def hang_forever():
             await asyncio.sleep(999)
 
         proc.wait = hang_forever
-        proc.kill = MagicMock()
+
+        reap = AsyncMock()
+        monkeypatch.setattr(ssh_mod, "terminate_process_tree", reap)
 
         cb = AsyncMock()
         code, output = await _read_lines_with_callback(proc, timeout=30, on_output=cb)
-        # proc.wait hung, so proc.kill should have been called
-        proc.kill.assert_called_once()
+        reap.assert_awaited_once_with(proc, owned_pgid=None)
         assert "line" in output
 
     @pytest.mark.asyncio

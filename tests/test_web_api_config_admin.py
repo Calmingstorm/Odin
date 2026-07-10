@@ -144,6 +144,8 @@ class TestSetupWizard:
 
     @pytest.mark.asyncio
     async def test_complete_success_writes_and_schedules_restart(self):
+        from src import restart
+
         app, _ = _app(register_setup_wizard)
         # Patch the process-kill primitive to a no-op — the handler schedules a
         # SIGTERM to itself on success; it must never reach the test runner.
@@ -158,15 +160,24 @@ class TestSetupWizard:
                 })
                 assert r.status == 200 and (await r.json())["restart_scheduled"] is True
             kill.assert_not_called()  # scheduled via call_later(2s), not fired in-test
+        # In-place restart armed, carrying the fresh token as an exec-time env
+        # override — exec inherits the old environment and
+        # load_dotenv(override=False) would otherwise keep the stale value.
+        assert restart.restart_requested() is True
+        assert restart.pending_env_overrides() == {"DISCORD_TOKEN": "fake-token"}
 
     @pytest.mark.asyncio
     async def test_complete_write_failure_500(self):
+        from src import restart
+
         app, _ = _app(register_setup_wizard)
         with patch("src.web.api.config_admin.validate_token_format", return_value=True), \
              patch("src.web.api.config_admin._write_config", side_effect=OSError("disk full")):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post("/api/setup/complete", json={"discord_token": "fake-token"})
                 assert r.status == 500
+        # a failed save must never arm the restart
+        assert restart.restart_requested() is False
 
 
 # --------------------------------------------------------------------------- #

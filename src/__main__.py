@@ -14,6 +14,8 @@ import signal
 import sys
 from pathlib import Path
 
+from src import restart
+
 
 def _wire_observability(health, bot, log) -> None:
     """Register Prometheus metric sources and component health checks.
@@ -124,41 +126,60 @@ def main() -> None:
     # fatal startup error (bad token, boot-time DNS failure) exited 0 and only
     # Restart=always kept the service recovering.
     exit_code = 0
+    shutdown_task: asyncio.Task[None] | None = None
+
+    def request_shutdown() -> asyncio.Task[None]:
+        """Create the shutdown task exactly once; repeat requests reuse it.
+
+        A second SIGTERM must not start a second teardown pass — every
+        cleanup step would run twice, racing its own first invocation.
+        """
+        nonlocal shutdown_task
+        if shutdown_task is None:
+            shutdown_task = loop.create_task(shutdown())
+        return shutdown_task
 
     async def run() -> None:
         nonlocal exit_code
-        await health.start()
-
-        async def _webhook_send(channel_id: str, text: str) -> None:
-            channel = bot.get_channel(int(channel_id))
-            if channel:
-                # Admin-configured webhook target; kind not enforced, so the
-                # union includes send-less channel types (Category/Forum).
-                await channel.send(scrub_response_secrets(text))  # type: ignore[union-attr]
-            else:
-                log.warning("Webhook: channel %s not found", channel_id)
-
-        health.set_send_message(_webhook_send)
-        if hasattr(bot, "scheduler") and hasattr(health, "set_trigger_callback"):
-            health.set_trigger_callback(bot.scheduler.fire_triggers)
-
-        _wire_observability(health, bot, log)
-
-        def handle_signal() -> None:
-            log.info("Shutdown signal received")
-            loop.create_task(shutdown())
-
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, handle_signal)
-
         try:
+            await health.start()
+
+            async def _webhook_send(channel_id: str, text: str) -> None:
+                channel = bot.get_channel(int(channel_id))
+                if channel:
+                    # Admin-configured webhook target; kind not enforced, so the
+                    # union includes send-less channel types (Category/Forum).
+                    await channel.send(scrub_response_secrets(text))  # type: ignore[union-attr]
+                else:
+                    log.warning("Webhook: channel %s not found", channel_id)
+
+            health.set_send_message(_webhook_send)
+            if hasattr(bot, "scheduler") and hasattr(health, "set_trigger_callback"):
+                health.set_trigger_callback(bot.scheduler.fire_triggers)
+
+            _wire_observability(health, bot, log)
+
+            def handle_signal() -> None:
+                log.info("Shutdown signal received")
+                request_shutdown()
+
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, handle_signal)
+
             health.set_ready(True)
             log.info("Connecting to Discord…")
             await bot.start(config.discord.token)
         except Exception as exc:
             exit_code = 1
             log.error("Fatal error: %s", exc, exc_info=True)
-            await shutdown()
+        finally:
+            # Completion barrier: run() returns only after teardown actually
+            # finished. shutdown()'s bot.close() unblocks bot.start() above,
+            # so without this await run_until_complete() would return — and
+            # main() would close the loop — while the shutdown task was still
+            # mid-cleanup ("Task was destroyed but it is pending"), silently
+            # skipping whatever remained (health stop, session saves).
+            await request_shutdown()
 
     async def shutdown() -> None:
         log.info("Shutting down…")
@@ -192,33 +213,62 @@ def main() -> None:
             await health.stop()
         except Exception:
             log.exception("health stop error")
-        loop.stop()
 
     try:
         loop.run_until_complete(run())
     except (KeyboardInterrupt, SystemExit) as exc:
         # Ctrl-C stays a clean stop; an intentional SystemExit keeps its
-        # original code rather than being normalized.
+        # original code rather than being normalized. run()'s finally has
+        # normally completed shutdown already; a raw KeyboardInterrupt that
+        # broke out of the loop itself still needs it finished here.
         if isinstance(exc, SystemExit) and exc.code:
             exit_code = exc.code if isinstance(exc.code, int) else 1
-        loop.run_until_complete(shutdown())
+        loop.run_until_complete(request_shutdown())
     except asyncio.CancelledError:
         # Cancellation reaching the top level is a shutdown path, not a
         # fatal error — exit clean unless a fatal path already set a code.
-        loop.run_until_complete(shutdown())
+        loop.run_until_complete(request_shutdown())
     except Exception:
-        # Failures outside run()'s own guard (e.g. the health server's port
-        # bind) previously tracebacked out with no clean shutdown. Cleanup
-        # failures are logged separately and never mask the fatal code.
+        # Failures outside run()'s own guard previously tracebacked out with
+        # no clean shutdown. Cleanup failures are logged separately and never
+        # mask the fatal code.
         exit_code = 1
         log.exception("Fatal error during startup")
         try:
-            loop.run_until_complete(shutdown())
+            loop.run_until_complete(request_shutdown())
         except Exception:
             log.exception("Cleanup after fatal startup error failed")
     finally:
+        # Drain before close: cancel stragglers, then run the loop's async
+        # generator and default-executor shutdown hooks. Closing without this
+        # destroys still-pending work mid-await — and an in-place restart
+        # would exec over half-finished writes.
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_default_executor())
+        except Exception:
+            log.exception("Event-loop drain failed")
         loop.close()
         log.info("Odin stopped")
+
+    if restart.restart_requested():
+        # In-place restart (self-update / setup wizard): replace the process
+        # image instead of exiting so recovery does not depend on the unit's
+        # Restart= policy. Exec failure exits nonzero — a clean-exit fallback
+        # would recreate exactly the stranding this path removes.
+        log.info("Restart requested — re-executing in place")
+        try:
+            restart.reexec()
+        except OSError:
+            log.exception("In-place restart failed")
+            sys.exit(exit_code or 1)
     if exit_code:
         sys.exit(exit_code)
 
