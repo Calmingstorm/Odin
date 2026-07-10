@@ -239,6 +239,22 @@ class ProcessRegistry:
             except Exception:
                 info.status = "failed"
 
+            # The leader has exited, but `&`-backgrounded descendants can still
+            # be alive in its process group — a redirected one that doesn't hold
+            # stdout lets this task finish while it lingers. Reap the group NOW,
+            # while ownership is fresh: a non-empty group keeps the leader pid
+            # from being recycled, so owned_pgid still uniquely names OUR group.
+            # After this, shutdown() need not (and must not) signal a stale,
+            # possibly-recycled pgid for an already-terminal record.
+            from ..tools.ssh import terminate_process_tree
+
+            try:
+                await terminate_process_tree(
+                    info.process, grace=2.0, owned_pgid=info.process.pid
+                )
+            except Exception:
+                log.debug("group reap after PID %d exit failed", info.pid, exc_info=True)
+
     async def _enforce_lifetime(self, pid: int, max_seconds: int) -> None:
         """Auto-kill process after max lifetime."""
         await asyncio.sleep(max_seconds)

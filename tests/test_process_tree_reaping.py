@@ -186,6 +186,26 @@ class TestProcessRegistryGroupKill:
         finally:
             _best_effort_kill(grandchild)
 
+    async def test_leaderless_group_descendant_reaped_on_leader_exit(self, tmp_path):
+        # The shell exits naturally while a REDIRECTED background descendant
+        # (its stdout on /dev/null, so it never holds the registry's pipe)
+        # survives. The entry goes 'completed'; shutdown() skips completed
+        # entries, so the descendant would leak across an in-place restart. It
+        # must be reaped when the leader exits, while group ownership is fresh.
+        # (PR #227 round-4 blocker 1.)
+        pidfile = tmp_path / "pid"
+        registry = ProcessRegistry()
+        await registry.start(
+            "localhost", f"sleep 30 >/dev/null 2>&1 & echo $! > {pidfile}"
+        )
+        grandchild = await _read_pidfile(pidfile)
+        try:
+            await _assert_pid_gone(grandchild)  # reaped at leader-exit, not leaked
+            (pid,) = registry._processes.keys()
+            assert registry._processes[pid].status in ("completed", "failed")
+        finally:
+            _best_effort_kill(grandchild)
+
 
 class TestLeaderAlreadyExited:
     """A shell can exit naturally while a descendant lives on holding stdout
@@ -194,13 +214,18 @@ class TestLeaderAlreadyExited:
 
     async def test_helper_kills_group_after_leader_reaped(self, tmp_path):
         pidfile = tmp_path / "pid"
+        # DEVNULL, not PIPE: the backgrounded sleep inherits the leader's
+        # stdout, so a PIPE would keep proc.wait() blocked on pipe-EOF until the
+        # sleep itself dies — making the descendant's liveness a race (it can be
+        # gone by the time we check). With no inherited pipe the leader is reaped
+        # immediately while the descendant is deterministically still alive.
         proc = await asyncio.create_subprocess_shell(
             f"sleep 30 & echo $! > {pidfile}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True,
         )
-        await proc.wait()  # leader exits naturally; returncode set
+        await proc.wait()  # leader exits at once; returncode set, descendant lives
         assert proc.returncode == 0
         stubborn = await _read_pidfile(pidfile)
         try:
