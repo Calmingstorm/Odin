@@ -1847,3 +1847,37 @@ class TestHardDeadlineDuringToolsAndSleep:
         assert result is None
         assert agent.state == AgentState.TIMEOUT
         sleep_mock.assert_not_awaited()
+
+    async def test_expiry_during_final_tool_of_final_iteration_is_timeout(self):
+        """Odin's re-review repro: one 5s tool, max_lifetime=0.05,
+        max_iterations=1 previously fell through to COMPLETED
+        ('max iterations reached'). Expiry inside the last tool call must
+        terminate as TIMEOUT."""
+        agent = AgentInfo(
+            id="hd2", label="one-tool", goal="g",
+            channel_id="c1", requester_id="u1", requester_name="user",
+            iteration_timeout=900.0, max_lifetime=0.05,
+        )
+        saved = {}
+
+        class FakeSaver:
+            async def save(self, turn):
+                saved["turn"] = turn
+
+        iter_cb = AsyncMock(return_value={
+            "text": "using tool", "tool_calls": [{"name": "slow", "input": {}}],
+        })
+
+        async def slow_tool(name, tool_input):
+            await asyncio.sleep(5)
+            return "done"
+
+        await _run_agent(agent, "sys", [], iter_cb, slow_tool,
+                         trajectory_saver=FakeSaver(), max_iterations=1)
+
+        assert agent.state == AgentState.TIMEOUT
+        assert "lifetime exceeded" in agent.state_history[-1].reason
+        # the lifetime-capped tool attempt is still recorded
+        turn = saved["turn"]
+        assert len(turn.iterations) == 1
+        assert "timed out" in turn.iterations[0].tool_results[0]["result"]

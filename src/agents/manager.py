@@ -1017,6 +1017,12 @@ async def _run_agent(
                 reasoning_effort=response.get("reasoning_effort"),
             )
 
+            # Post-tool deadline check: expiry during the FINAL tool call of
+            # the FINAL iteration must terminate as TIMEOUT here — falling
+            # through would mislabel it COMPLETED ("max iterations reached").
+            if _check_lifetime():
+                return
+
             # Back to READY for next iteration
             agent.transition(AgentState.READY, "tools complete")
 
