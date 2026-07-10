@@ -10,6 +10,7 @@ import asyncio
 
 from aiohttp import web
 
+from ... import restart
 from ...odin_log import get_logger
 
 log = get_logger("web.api")
@@ -88,6 +89,26 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
             data = {}
         target = data.get("version", "latest")
         base = _repo_root()
+
+        # Self-update mutates a git checkout; .deb installs ship without one
+        # (their upgrade path is apt). A linked worktree's .git is a FILE,
+        # so ask git itself rather than probing the filesystem. Fail closed
+        # to the friendly 409 before resolving tags or touching anything.
+        try:
+            r = subprocess.run(
+                ["git", "-C", base, "rev-parse", "--is-inside-work-tree"],
+                capture_output=True, text=True, timeout=10,
+            )
+            is_git = r.returncode == 0 and r.stdout.strip() == "true"
+        except Exception:
+            is_git = False
+        if not is_git:
+            return web.json_response({
+                "error": (
+                    "This install is not a git checkout, so self-update "
+                    "cannot run. For .deb installs, upgrade via apt."
+                ),
+            }, status=409)
 
         # Resolve "latest" to actual release tag
         if target == "latest":
@@ -197,13 +218,16 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
                     if d == "__pycache__":
                         shutil.rmtree(os.path.join(root, d), ignore_errors=True)
 
-            # Graceful shutdown — systemd Restart=always will restart with new code
-            asyncio.get_event_loop().call_later(2, lambda: os.kill(os.getpid(), 15))
+            # Record restart intent, then trigger the normal graceful
+            # shutdown; main() re-execs in place once the loop drains, so
+            # coming back does not depend on the unit's Restart= policy.
+            restart.request_restart()
+            asyncio.get_running_loop().call_later(2, lambda: os.kill(os.getpid(), 15))
             return web.json_response({
                 "status": "updating",
                 "version": target,
                 "previous": prev_ref[:12] if prev_ref else None,
-                "message": f"Updated master to {target}. Restarting in 2 seconds...",
+                "message": f"Updated master to {target}. Restarting in place in 2 seconds...",
             })
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)

@@ -13,7 +13,9 @@ source module attributes is enough.
 from __future__ import annotations
 
 import asyncio
+import signal
 import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -133,8 +135,9 @@ class TestFatalStartupExitsNonzero:
         assert _FakeHealthServer.instances[0].stopped is True
 
     def test_health_start_failure_exits_1_with_cleanup(self, entry_point, monkeypatch):
-        # Failures BEFORE run()'s own try block (e.g. port bind) previously
-        # tracebacked out of main() with no clean shutdown at all.
+        # Early startup failures (e.g. port bind) must exit 1 after a clean
+        # shutdown — historically they tracebacked out of main() with no
+        # cleanup at all.
         def _fail_health_init(*args, **kwargs):
             server = _FakeHealthServer()
             server.fail_start = OSError(98, "address already in use")
@@ -183,3 +186,163 @@ class TestMissingConfig:
         with pytest.raises(SystemExit) as excinfo:
             main()
         assert excinfo.value.code == 1
+
+
+class _SlowStopHealthServer(_FakeHealthServer):
+    """stop() actually suspends — the shape that exposed the barrier bug:
+    bot.close() unblocks bot.start(), run() used to return immediately, and
+    loop.close() destroyed this still-pending stop ("Task was destroyed but
+    it is pending")."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.stop_calls = 0
+
+    async def stop(self):
+        self.stop_calls += 1
+        await asyncio.sleep(0.05)
+        self.stopped = True
+
+
+class _SignalingBot(_FakeBot):
+    """Parks in start() until close(), firing the captured SIGTERM handler
+    once running — the live service's shutdown shape."""
+
+    captured: dict = {}
+    signal_count = 1
+    close_calls = 0
+    straggler: asyncio.Task | None = None
+    spawn_straggler = False
+
+    def __init__(self, config):
+        super().__init__(config)
+        self._done: asyncio.Event | None = None
+
+    async def start(self, token):
+        self._done = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        if type(self).spawn_straggler:
+            type(self).straggler = loop.create_task(asyncio.sleep(30))
+        handler = type(self).captured[signal.SIGTERM]
+        for _ in range(type(self).signal_count):
+            loop.call_soon(handler)
+        await self._done.wait()
+
+    async def close(self):
+        type(self).close_calls += 1
+        self.closed = True
+        if self._done is not None:
+            self._done.set()
+
+
+@pytest.fixture
+def signal_entry_point(monkeypatch, tmp_path):
+    """entry_point variant with a signal-drivable bot, a slow-stopping
+    health server, and a loop whose add_signal_handler records callbacks
+    instead of touching process signal state."""
+    import src.config
+    import src.discord.client
+    import src.health
+
+    cfg_path = tmp_path / "config.yml"
+    cfg_path.write_text("# contents irrelevant; load_config is faked\n")
+
+    from src.config.schema import Config
+
+    _FakeBot.instances = []
+    _FakeBot.start_error = None
+    _FakeHealthServer.instances = []
+    _SignalingBot.captured = {}
+    _SignalingBot.signal_count = 1
+    _SignalingBot.close_calls = 0
+    _SignalingBot.straggler = None
+    _SignalingBot.spawn_straggler = False
+
+    loop = asyncio.new_event_loop()
+
+    def _capture_signal_handler(sig, cb, *args):
+        _SignalingBot.captured[sig] = cb
+
+    loop.add_signal_handler = _capture_signal_handler  # type: ignore[method-assign]
+    monkeypatch.setattr(asyncio, "new_event_loop", lambda: loop)
+
+    monkeypatch.setattr(
+        src.config, "load_config", lambda path: Config(discord={"token": "fake-token"})
+    )
+    monkeypatch.setattr(src.discord.client, "OdinBot", _SignalingBot)
+    monkeypatch.setattr(src.health, "HealthServer", _SlowStopHealthServer)
+    monkeypatch.setattr(sys, "argv", ["odin", str(cfg_path)])
+
+    from src.__main__ import main
+
+    yield main
+    if not loop.is_closed():
+        loop.close()
+
+
+class TestShutdownBarrierAndInPlaceRestart:
+    """Design-review blockers for the in-place restart (2026-07-10): the old
+    orchestration let loop.close() cut off the shutdown task mid-cleanup,
+    duplicate signals started duplicate teardowns, and exec must happen only
+    after genuine quiescence — failing to a NONZERO exit, never a clean one.
+
+    SAFETY: os.execve is stubbed everywhere; a real exec would replace the
+    test runner."""
+
+    def test_signal_shutdown_completes_cleanup_before_returning(self, signal_entry_point):
+        # THE barrier: health.stop() suspends mid-teardown; main() must not
+        # return (nor close the loop) until it actually finished.
+        assert signal_entry_point() is None
+        assert _FakeHealthServer.instances[0].stopped is True
+        assert _FakeBot.instances[0].closed is True
+
+    def test_second_signal_does_not_start_second_teardown(self, signal_entry_point):
+        _SignalingBot.signal_count = 3
+        assert signal_entry_point() is None
+        assert _FakeHealthServer.instances[0].stop_calls == 1
+        assert _SignalingBot.close_calls == 1
+
+    def test_straggler_tasks_are_drained_before_close(self, signal_entry_point):
+        _SignalingBot.spawn_straggler = True
+        assert signal_entry_point() is None
+        straggler = _SignalingBot.straggler
+        assert straggler is not None and straggler.cancelled()
+
+    def test_exec_runs_only_after_cleanup_with_reconstructed_env(
+        self, signal_entry_point, monkeypatch
+    ):
+        from src import restart
+
+        monkeypatch.setenv("DISCORD_TOKEN", "stale")
+        restart.request_restart(env_overrides={"DISCORD_TOKEN": "fresh"})
+        seen: dict = {}
+
+        def _fake_execve(path, argv, env):
+            seen["health_stopped"] = _FakeHealthServer.instances[0].stopped
+            seen["path"], seen["argv"], seen["env"] = path, argv, env
+
+        with patch("os.execve", side_effect=_fake_execve) as execve:
+            assert signal_entry_point() is None
+        execve.assert_called_once()
+        assert seen["health_stopped"] is True  # quiescence before exec
+        assert seen["path"] == sys.executable
+        assert seen["argv"][:3] == [sys.executable, "-m", "src"]
+        assert seen["env"]["DISCORD_TOKEN"] == "fresh"  # wizard override wins
+
+    def test_exec_failure_exits_nonzero_even_after_clean_shutdown(
+        self, signal_entry_point
+    ):
+        # A clean-exit fallback would recreate the exact stranding this PR
+        # removes; a nonzero exit gives Restart=on-failure its chance.
+        from src import restart
+
+        restart.request_restart()
+        with patch("os.execve", side_effect=OSError("interpreter gone")):
+            with pytest.raises(SystemExit) as excinfo:
+                signal_entry_point()
+        assert excinfo.value.code == 1
+
+    def test_no_restart_request_means_no_exec(self, signal_entry_point):
+        with patch("os.execve") as execve:
+            assert signal_entry_point() is None
+        execve.assert_not_called()

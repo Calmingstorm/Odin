@@ -207,3 +207,16 @@ logging:
 | Logs | `/var/log/odin/` |
 | Application | `/opt/odin/` |
 | Systemd | `/usr/lib/systemd/system/odin.service` |
+
+## Restarts (self-update and setup wizard)
+
+The WebUI self-updater (Updates page) requires a **git-clone install** —
+`.deb` installs have no repository and should upgrade via `apt` instead
+(the endpoint answers 409 with the same hint).
+
+After a successful update — and after the first-boot setup wizard saves its
+config — Odin restarts **in place** by re-executing itself once graceful
+shutdown completes. Recovery therefore does not depend on the service
+unit's `Restart=` policy, Docker restart policy, or any supervisor at all.
+`Restart=always` (what the packaged unit ships) is still recommended so the
+service also recovers from crashes and reboots.

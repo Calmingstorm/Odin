@@ -16,6 +16,7 @@ from pathlib import Path
 
 from aiohttp import web
 
+from ... import restart
 from ...config.schema import Config
 from ...odin_log import get_logger
 from ...setup_wizard import (
@@ -140,12 +141,16 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
 
         log.info("Setup wizard completed — config files written")
 
-        # Schedule a delayed process exit to allow the HTTP response to be sent.
-        # Under systemd (Restart=on-failure) or Docker (restart: unless-stopped),
-        # the process will be restarted automatically with the new config.
+        # Record restart intent, then schedule a delayed SIGTERM so the HTTP
+        # response can flush; main() re-execs in place once the loop drains,
+        # independent of any supervisor Restart= policy. The fresh token must
+        # ride as an exec-time env override: exec inherits the already-loaded
+        # environment, and load_dotenv(override=False) in the new image would
+        # otherwise keep serving the stale DISCORD_TOKEN.
+        restart.request_restart(env_overrides={"DISCORD_TOKEN": discord_token})
         import os as _os
         import signal as _signal
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         loop.call_later(2.0, _os.kill, _os.getpid(), _signal.SIGTERM)
 
         return web.json_response({
