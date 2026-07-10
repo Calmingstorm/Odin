@@ -499,7 +499,12 @@ class CodexChatClient:
         last_error = None
         token, account_id, acct_idx = await self._acquire_auth()
 
-        for attempt in range(self.max_retries):
+        # max_retries counts total attempts here (historical semantics: 3 ⇒
+        # three tries); clamp so a configured 0 means "one attempt, no
+        # retries" — the sibling providers' meaning — instead of "make no
+        # request at all", which would silently suppress every Codex call
+        # now that the retry config is actually plumbed.
+        for attempt in range(max(1, self.max_retries)):
             try:
                 async with session.post(
                     CODEX_API_URL,
