@@ -7,6 +7,7 @@ adapter branches. Network streaming is exercised separately where cheap.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -410,3 +411,49 @@ class TestReasoningEffortBody:
                   "input_schema": {"type": "object", "properties": {}}}]
         await client.chat_with_tools([{"role": "user", "content": "hi"}], "sys", tools)
         assert "reasoning" not in captured
+
+
+class TestTransportTimeouts:
+    def test_ctor_defaults(self):
+        client = _client()
+        assert client.request_timeout == 3600
+        assert client.stream_stall_timeout == 180
+
+    async def test_post_receives_configured_timeouts(self, monkeypatch):
+        """The per-request ClientTimeout must be built from the configured
+        values with NO fixed total cap: the old hardcoded total=600 killed
+        healthy long reasoning streams at exactly 10 minutes, while a dead
+        stream waited out the full window instead of failing on the first
+        silent stretch (sock_read)."""
+        client = CodexChatClient(auth=_BareAuth(), model="m", max_tokens=10,
+                                 request_timeout=1234, stream_stall_timeout=56)
+        recorded = {}
+
+        class _CM:
+            async def __aenter__(self):
+                return SimpleNamespace(status=200)
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class _Sess:
+            closed = False
+
+            def post(self, url, **kwargs):
+                recorded.update(kwargs)
+                return _CM()
+
+        async def _fake_session():
+            return _Sess()
+
+        monkeypatch.setattr(client, "_get_session", _fake_session)
+
+        async def _reader(resp):
+            return "ok"
+
+        result = await client._send_with_retries({}, _reader, lambda r: not r)
+        assert result == "ok"
+        t = recorded["timeout"]
+        assert t.total == 1234
+        assert t.sock_read == 56
+        assert t.sock_connect == 30

@@ -23,7 +23,13 @@ def _cfg(active="codex", codex_enabled=True, ollama_enabled=False,
         llm_provider=SimpleNamespace(active_provider=active),
         openai_codex=SimpleNamespace(enabled=codex_enabled, credentials_path="/creds",
                                      model="gpt-5.5", max_tokens=8000,
-                                     reasoning_effort="medium"),
+                                     reasoning_effort="medium",
+                                     request_timeout_seconds=3600,
+                                     stream_stall_timeout_seconds=180,
+                                     retry=SimpleNamespace(max_retries=3, base_delay=1.0,
+                                                           max_delay=30.0),
+                                     connection_pool=SimpleNamespace(max_connections=10,
+                                                                     keepalive_timeout=30)),
         ollama=SimpleNamespace(enabled=ollama_enabled, base_url="http://localhost:11434",
                                model="qwen", max_tokens=4096, timeout=300, api_key=""),
         kimi=SimpleNamespace(enabled=kimi_enabled, api_key=kimi_key,
@@ -114,6 +120,59 @@ class TestReloadCodex:
         assert client.model == "gpt-5.6-terra"
         assert client.max_tokens == 4096
         assert client.reasoning_effort == "xhigh"
+
+    async def test_existing_client_gets_transport_values_from_config(self):
+        """Companion to the model/max_tokens reload fix: the per-request
+        transport values (timeouts, retry policy) must land on the LIVE
+        client too, so a config change applies without a restart."""
+        from src.discord.llm_gateway import CodexAuthPool
+        pool = MagicMock(spec=CodexAuthPool)
+        pool.reload_async = AsyncMock(return_value=3)
+        client = SimpleNamespace(auth=pool, model="gpt-5.5", max_tokens=8000,
+                                 reasoning_effort="medium",
+                                 request_timeout=3600, stream_stall_timeout=180,
+                                 max_retries=3, retry_base_delay=1.0,
+                                 retry_max_delay=30.0)
+        cfg = _cfg()
+        cfg.openai_codex.request_timeout_seconds = 7200
+        cfg.openai_codex.stream_stall_timeout_seconds = 90
+        cfg.openai_codex.retry = SimpleNamespace(max_retries=5, base_delay=0.5,
+                                                 max_delay=10.0)
+        gw = _gw(cfg, codex=client)
+        r = await gw.reload_codex_inner()
+        assert r["reloaded"] is True
+        assert client.request_timeout == 7200
+        assert client.stream_stall_timeout == 90
+        assert client.max_retries == 5
+        assert client.retry_base_delay == 0.5
+        assert client.retry_max_delay == 10.0
+
+    async def test_created_client_receives_transport_kwargs(self):
+        """A freshly created client must be constructed from the config's
+        transport values — the retry/connection_pool config sections were
+        previously documented but never plumbed (ctor defaults happened to
+        match, so the gap was invisible)."""
+        pool = MagicMock()
+        pool.is_configured.return_value = True
+        pool._accounts = [1]
+        captured = {}
+
+        def _fake_client(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("src.discord.llm_gateway.CodexAuthPool", return_value=pool), \
+             patch("src.discord.llm_gateway.CodexChatClient", side_effect=_fake_client):
+            gw = _gw(codex=None)
+            r = await gw.reload_codex_inner()
+        assert r["created"] is True
+        assert captured["request_timeout"] == 3600
+        assert captured["stream_stall_timeout"] == 180
+        assert captured["max_retries"] == 3
+        assert captured["retry_base_delay"] == 1.0
+        assert captured["retry_max_delay"] == 30.0
+        assert captured["pool_max_connections"] == 10
+        assert captured["pool_keepalive_timeout"] == 30
 
     async def test_creates_new_client(self):
         pool = MagicMock()

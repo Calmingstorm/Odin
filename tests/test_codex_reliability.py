@@ -584,3 +584,31 @@ async def test_generic_401_forces_refresh_and_retries_same_account(tmp_path, mon
     assert refreshed == ["stale-tok"]
     # Same account retried — no rotation, no rate-limit marking.
     assert pool._accounts[0].is_rate_limited() is False
+
+
+# ---------------------------------------------------------------------------
+# max_retries=0 semantics (PR #225 activation regression)
+# ---------------------------------------------------------------------------
+
+async def test_zero_max_retries_still_makes_one_attempt(monkeypatch):
+    """max_retries=0 must mean "one attempt, no retries" — never "make no
+    request at all". RetryConfig accepts 0 and was inert before it was
+    plumbed from config; an unclamped range(0) would silently suppress
+    every Codex call and fail with "after 0 retries: None"."""
+    client = _client(max_retries=0)
+    session = FakeSession([FakeResp(200, sse_lines=TEXT_OK_SSE)])
+    monkeypatch.setattr(client, "_get_session", lambda: _async_return(session))
+
+    text = await client._stream_request({"model": "m"})
+    assert text == "hello"
+    assert session.calls == 1
+
+
+async def test_zero_max_retries_failure_raises_without_retry(monkeypatch):
+    client = _client(max_retries=0)
+    session = FakeSession([TimeoutError()])
+    monkeypatch.setattr(client, "_get_session", lambda: _async_return(session))
+
+    with pytest.raises(RuntimeError, match="connection failed"):
+        await client._stream_request({"model": "m"})
+    assert session.calls == 1

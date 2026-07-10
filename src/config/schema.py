@@ -300,6 +300,12 @@ class OpenAICodexConfig(BaseModel):
     max_tokens: int = 4096
     reasoning_effort: ReasoningEffort = "medium"
     credentials_path: str = "./data/codex_auth.json"
+    # Streaming transport timeouts: a generous whole-request backstop (long
+    # high-effort reasoning turns stream well past 10 minutes) plus a stall
+    # bound that fails a silent stream fast instead of waiting out the
+    # backstop. Both are read per request, so live reload picks them up.
+    request_timeout_seconds: int = 3600
+    stream_stall_timeout_seconds: int = 180
 
     @field_validator("reasoning_effort", mode="before")
     @classmethod
@@ -315,6 +321,21 @@ class OpenAICodexConfig(BaseModel):
             )
             return "low"
         return v
+
+    @field_validator("request_timeout_seconds")
+    @classmethod
+    def _request_timeout_bounds(cls, v):
+        if not 60 <= v <= 86400:
+            raise ValueError("request_timeout_seconds must be between 60 and 86400")
+        return v
+
+    @field_validator("stream_stall_timeout_seconds")
+    @classmethod
+    def _stream_stall_timeout_bounds(cls, v):
+        if not 10 <= v <= 3600:
+            raise ValueError("stream_stall_timeout_seconds must be between 10 and 3600")
+        return v
+
     retry: RetryConfig = RetryConfig()
     connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()
     auxiliary: AuxiliaryLLMConfig = AuxiliaryLLMConfig()
