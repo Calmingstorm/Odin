@@ -369,15 +369,35 @@ class AgentTaskTools:
             sys_prompt: str,
             tool_defs: list[dict],
         ) -> dict:
-            resp = await self._llm_gateway.active_client.chat_with_tools(
+            # Resolve the client ONCE per call so the provider/model/effort
+            # stamp describes the client this request actually went to, and
+            # read the agent effort from live config at call time (a WebUI
+            # change reaches in-flight agents on their next iteration).
+            client = self._llm_gateway.active_client
+            agent_effort = getattr(
+                getattr(self._get_config(), "openai_codex", None),
+                "agent_reasoning_effort",
+                None,
+            )
+            resp = await client.chat_with_tools(
                 messages=messages,
                 system=sys_prompt,
                 tools=tool_defs,
+                reasoning_effort=agent_effort,
             )
+            if hasattr(client, "reasoning_effort"):
+                effective_effort = (
+                    agent_effort if agent_effort is not None else client.reasoning_effort
+                )
+            else:
+                effective_effort = None  # provider has no effort concept
             return {
                 "text": resp.text,
                 "tool_calls": [{"name": tc.name, "input": tc.input} for tc in resp.tool_calls],
                 "stop_reason": resp.stop_reason,
+                "provider": getattr(client, "provider_name", ""),
+                "model": getattr(client, "model", ""),
+                "reasoning_effort": effective_effort,
             }
 
         msg_proxy = _LoopMessageProxy(channel, user_id, user_name)
@@ -644,17 +664,33 @@ class AgentTaskTools:
 
         # Build iteration/tool callbacks (same pattern as _handle_spawn_agent)
         async def _iteration_cb(messages, sys, tool_defs):
-            resp = await self._llm_gateway.active_client.chat_with_tools(
+            client = self._llm_gateway.active_client
+            agent_effort = getattr(
+                getattr(self._get_config(), "openai_codex", None),
+                "agent_reasoning_effort",
+                None,
+            )
+            resp = await client.chat_with_tools(
                 messages=messages,
                 system=sys,
                 tools=tool_defs,
+                reasoning_effort=agent_effort,
             )
+            if hasattr(client, "reasoning_effort"):
+                effective_effort = (
+                    agent_effort if agent_effort is not None else client.reasoning_effort
+                )
+            else:
+                effective_effort = None  # provider has no effort concept
             return {
                 "text": resp.text or "",
                 "tool_calls": [
                     {"name": tc.name, "input": tc.input} for tc in (resp.tool_calls or [])
                 ],
                 "stop_reason": resp.stop_reason or "end_turn",
+                "provider": getattr(client, "provider_name", ""),
+                "model": getattr(client, "model", ""),
+                "reasoning_effort": effective_effort,
             }
 
         async def _tool_cb(tool_name, tool_input):

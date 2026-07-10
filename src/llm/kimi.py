@@ -302,6 +302,7 @@ class KimiClient(LLMProvider):
     async def chat_with_tools(
         self, messages: list[dict], system: str,
         tools: list[dict],
+        *, reasoning_effort: str | None = None,  # signature parity; no effort concept
         **kwargs,
     ) -> LLMResponse:
         adapted_system = system + KIMI_TOOL_ENFORCEMENT

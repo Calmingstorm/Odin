@@ -39,6 +39,13 @@ class ToolIteration:
     input_tokens: int = 0
     output_tokens: int = 0
     duration_ms: int = 0
+    # Per-iteration provider stamp (agent trajectories). The active provider,
+    # model, and effective reasoning effort are live-reloadable, so a single
+    # turn-level stamp would misattribute iterations that ran after a switch.
+    # Empty/None on records that predate the stamp or don't populate it.
+    provider: str = ""
+    model: str = ""
+    reasoning_effort: str | None = None
 
 
 def stored_tool_results(

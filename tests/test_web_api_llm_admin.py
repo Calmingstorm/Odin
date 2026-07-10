@@ -134,6 +134,24 @@ class TestLlmStatus:
             assert body["active_model"] == "gpt-5.5"
 
     @pytest.mark.asyncio
+    async def test_llm_status_agent_effort_fields(self):
+        app, bot = _app(register_llm_provider)
+        bot.llm_gateway.codex_client = SimpleNamespace(reasoning_effort="high")
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.kimi_client = None
+        bot.llm_gateway.active_client = None
+        async with TestClient(TestServer(app)) as c:
+            # inherit (default): effective mirrors the live client's effort
+            body = await (await c.get("/api/llm/status")).json()
+            assert body["codex"]["agent_reasoning_effort"] is None
+            assert body["codex"]["effective_agent_reasoning_effort"] == "high"
+            # override set: effective is the override
+            bot.config.openai_codex.agent_reasoning_effort = "low"
+            body = await (await c.get("/api/llm/status")).json()
+            assert body["codex"]["agent_reasoning_effort"] == "low"
+            assert body["codex"]["effective_agent_reasoning_effort"] == "low"
+
+    @pytest.mark.asyncio
     async def test_llm_status_no_active_client(self):
         app, bot = _app(register_llm_provider)
         bot.llm_gateway.codex_client = None
@@ -283,6 +301,83 @@ class TestProviderConfig:
         assert bot.config.openai_codex.reasoning_effort == "medium"
         assert bot.config.openai_codex.model != "changed-model"
         bot.llm_gateway.reload_codex_inner.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_codex_agent_effort_set_persists_without_reload(self):
+        """agent_reasoning_effort is read at call time by the agent callbacks
+        — an agent-only change must persist but NOT reload the codex client
+        (a reload needlessly refreshes the auth pool)."""
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"agent_reasoning_effort": "low"})
+            body = await r.json()
+            assert r.status == 200 and body["agent_reasoning_effort"] == "low"
+            assert bot.config.openai_codex.agent_reasoning_effort == "low"
+            bot.llm_gateway.reload_codex_inner.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_codex_agent_effort_null_and_empty_mean_inherit(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        bot.config.openai_codex.agent_reasoning_effort = "high"
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"agent_reasoning_effort": None})
+            assert r.status == 200
+            assert (await r.json())["agent_reasoning_effort"] is None
+            assert bot.config.openai_codex.agent_reasoning_effort is None
+            # "" (the UI's inherit sentinel) behaves like null
+            bot.config.openai_codex.agent_reasoning_effort = "high"
+            r = await c.put("/api/llm/codex/config",
+                            json={"agent_reasoning_effort": ""})
+            assert r.status == 200
+            assert bot.config.openai_codex.agent_reasoning_effort is None
+
+    @pytest.mark.asyncio
+    async def test_codex_agent_effort_missing_key_untouched(self):
+        """Absent key ≠ explicit null — a PUT without the field must not
+        reset an existing override."""
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        bot.config.openai_codex.agent_reasoning_effort = "high"
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json={"max_tokens": 5000})
+            assert r.status == 200
+            assert bot.config.openai_codex.agent_reasoning_effort == "high"
+
+    @pytest.mark.asyncio
+    async def test_codex_agent_effort_invalid_rejected_before_mutation(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"model": "changed-model",
+                                  "agent_reasoning_effort": "banana"})
+            assert r.status == 400
+            assert "agent_reasoning_effort" in (await r.json())["error"]
+        assert bot.config.openai_codex.agent_reasoning_effort is None
+        assert bot.config.openai_codex.model != "changed-model"
+        bot.llm_gateway.reload_codex_inner.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_codex_mixed_change_still_reloads(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"reasoning_effort": "high",
+                                  "agent_reasoning_effort": "low"})
+            assert r.status == 200
+            bot.llm_gateway.reload_codex_inner.assert_awaited()
+            assert bot.config.openai_codex.reasoning_effort == "high"
+            assert bot.config.openai_codex.agent_reasoning_effort == "low"
 
     @pytest.mark.asyncio
     async def test_ollama_config(self):
@@ -589,6 +684,23 @@ class TestPersistHelpers:
         assert "openai_codex" in written and "gpt-5.5" in written
         assert "reasoning_effort" in written and "xhigh" in written
         assert "ollama" in written and "kimi" in written and "llm_provider" in written
+
+    def test_persist_includes_agent_reasoning_effort(self):
+        """The YAML allowlist writes the field explicitly — without it, UI
+        saves of the agent effort would silently never persist."""
+        from pathlib import Path
+        Path("config.yml").write_text("discord:\n  token: fake\n")
+        bot = _bot()
+        bot.config.openai_codex.agent_reasoning_effort = "low"
+        _persist_llm_sections_sync(bot)
+        written = Path("config.yml").read_text()
+        assert "agent_reasoning_effort: low" in written
+        # null (inherit) round-trips as an explicit empty value
+        bot.config.openai_codex.agent_reasoning_effort = None
+        _persist_llm_sections_sync(bot)
+        written = Path("config.yml").read_text()
+        assert "agent_reasoning_effort" in written
+        assert "agent_reasoning_effort: low" not in written
 
     def test_persist_empty_file_returns(self):
         from pathlib import Path

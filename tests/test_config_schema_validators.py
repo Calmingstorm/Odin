@@ -207,3 +207,29 @@ class TestAgentsTimeoutConfig:
         with pytest.raises(ValidationError):
             AgentsConfig(max_lifetime_seconds=86401)
         assert AgentsConfig(max_lifetime_seconds=3600).max_lifetime_seconds == 3600
+
+
+class TestAgentReasoningEffortConfig:
+    def test_default_is_inherit(self):
+        from src.config.schema import OpenAICodexConfig
+        assert OpenAICodexConfig().agent_reasoning_effort is None
+
+    def test_valid_values_accepted(self):
+        from src.config.schema import CODEX_REASONING_EFFORTS, OpenAICodexConfig
+        for effort in sorted(CODEX_REASONING_EFFORTS):
+            assert OpenAICodexConfig(
+                agent_reasoning_effort=effort).agent_reasoning_effort == effort
+
+    def test_invalid_rejected(self):
+        from src.config.schema import OpenAICodexConfig
+        with pytest.raises(ValidationError):
+            OpenAICodexConfig(agent_reasoning_effort="banana")
+
+    def test_legacy_minimal_coerced_to_low(self):
+        """A persisted 'minimal' must not brick startup — same degradation
+        the main reasoning_effort field gets."""
+        from src.config.schema import OpenAICodexConfig
+        cfg = OpenAICodexConfig(agent_reasoning_effort="minimal")
+        assert cfg.agent_reasoning_effort == "low"
+        # and the main field's coercion still works
+        assert OpenAICodexConfig(reasoning_effort="minimal").reasoning_effort == "low"

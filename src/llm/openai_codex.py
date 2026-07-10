@@ -431,6 +431,8 @@ class CodexChatClient:
         messages: list[dict],
         system: str,
         tools: list[dict],
+        *,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """Send a request with tool definitions, return structured LLMResponse.
 
@@ -438,10 +440,15 @@ class CodexChatClient:
             messages: Conversation history in internal format.
             system: System prompt text.
             tools: Tool definitions in internal format (converted internally).
+            reasoning_effort: Per-request override of the configured effort
+                (None = use self.reasoning_effort). Resolved into a LOCAL
+                value — never assigned onto self, which concurrent chat and
+                agent calls would race.
 
         Returns:
             LLMResponse with text, tool_calls, and stop_reason.
         """
+        effort = reasoning_effort if reasoning_effort is not None else self.reasoning_effort
         body = {
             "model": self.model,
             "instructions": system,
@@ -451,8 +458,8 @@ class CodexChatClient:
             "store": False,
             "stream": True,
         }
-        if self.reasoning_effort:
-            body["reasoning"] = {"effort": self.reasoning_effort}
+        if effort:
+            body["reasoning"] = {"effort": effort}
 
         input_tokens = self._estimate_body_input_tokens(body)
         result = await self._stream_tool_request(body)

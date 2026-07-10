@@ -1616,3 +1616,70 @@ class TestLifetimeEnforcement:
         assert captured[0] == 40.0                    # iteration timeout
         assert captured[1] is not None
         assert 190 <= captured[1] <= 200              # tool wait capped by lifetime
+
+
+class TestTrajectoryStamps:
+    async def test_iteration_stamps_and_spawn_policy(self):
+        """Each iteration records the provider/model/effort the callback
+        reported (live-reloadable values — a turn-level stamp would lie),
+        and the turn records the spawn-policy snapshot."""
+        agent = AgentInfo(
+            id="ts1", label="test", goal="g",
+            channel_id="c1", requester_id="u1", requester_name="user",
+            iteration_timeout=222.0, max_lifetime=3333.0,
+        )
+        saved = {}
+
+        class FakeSaver:
+            async def save(self, turn):
+                saved["turn"] = turn
+
+        calls = 0
+
+        async def iter_cb(msgs, sys, tools):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {
+                    "text": "using tool",
+                    "tool_calls": [{"name": "t", "input": {}}],
+                    "provider": "codex", "model": "gpt-5.5",
+                    "reasoning_effort": "low",
+                }
+            return {
+                "text": "done", "tool_calls": [],
+                "provider": "codex", "model": "gpt-5.6-sol",
+                "reasoning_effort": "xhigh",
+            }
+
+        tool_cb = AsyncMock(return_value="ok")
+        await _run_agent(agent, "sys", [], iter_cb, tool_cb, trajectory_saver=FakeSaver())
+
+        turn = saved["turn"]
+        assert turn.iteration_timeout == 222.0
+        assert turn.max_lifetime == 3333.0
+        assert turn.iterations[0].provider == "codex"
+        assert turn.iterations[0].model == "gpt-5.5"
+        assert turn.iterations[0].reasoning_effort == "low"
+        # the second iteration recorded its own (changed) stamp
+        assert turn.iterations[1].model == "gpt-5.6-sol"
+        assert turn.iterations[1].reasoning_effort == "xhigh"
+
+    async def test_callback_without_stamps_defaults_clean(self):
+        """Older/simpler callbacks that omit the stamp keys must not break."""
+        agent = AgentInfo(
+            id="ts2", label="test", goal="g",
+            channel_id="c1", requester_id="u1", requester_name="user",
+        )
+        saved = {}
+
+        class FakeSaver:
+            async def save(self, turn):
+                saved["turn"] = turn
+
+        iter_cb = AsyncMock(return_value={"text": "done", "tool_calls": []})
+        await _run_agent(agent, "sys", [], iter_cb, AsyncMock(), trajectory_saver=FakeSaver())
+        it = saved["turn"].iterations[0]
+        assert it.provider == ""
+        assert it.model == ""
+        assert it.reasoning_effort is None

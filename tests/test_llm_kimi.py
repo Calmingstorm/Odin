@@ -246,6 +246,15 @@ class TestChatAndHealth:
                                     [{"name": "grep"}])
         assert r.text == "answer"
 
+    async def test_chat_with_tools_ignores_reasoning_effort(self):
+        """LLMProvider signature parity: the kwarg is accepted and ignored."""
+        c = _client()
+        _with_session(c, _Resp(200, {"choices": [{"finish_reason": "stop",
+                                                  "message": {"content": "answer"}}]}))
+        r = await c.chat_with_tools([{"role": "user", "content": "q"}], "sys",
+                                    [{"name": "grep"}], reasoning_effort="xhigh")
+        assert r.text == "answer"
+
     async def test_chat_with_tools_tokenization_error(self):
         c = _client()
         c._request_with_retry = AsyncMock(side_effect=RuntimeError("tokenization failed"))

@@ -313,6 +313,11 @@ class OpenAICodexConfig(BaseModel):
     model: str = "gpt-4o"
     max_tokens: int = 4096
     reasoning_effort: ReasoningEffort = "medium"
+    # Effort for SPAWNED-AGENT iterations only. None = inherit
+    # reasoning_effort (the string "none" is a real effort level, not
+    # inherit). Read at call time, so live changes reach in-flight agents
+    # on their next iteration.
+    agent_reasoning_effort: ReasoningEffort | None = None
     credentials_path: str = "./data/codex_auth.json"
     # Streaming transport timeouts: a generous whole-request backstop (long
     # high-effort reasoning turns stream well past 10 minutes) plus a stall
@@ -321,17 +326,18 @@ class OpenAICodexConfig(BaseModel):
     request_timeout_seconds: int = 3600
     stream_stall_timeout_seconds: int = 180
 
-    @field_validator("reasoning_effort", mode="before")
+    @field_validator("reasoning_effort", "agent_reasoning_effort", mode="before")
     @classmethod
-    def _coerce_legacy_reasoning_effort(cls, v):
+    def _coerce_legacy_reasoning_effort(cls, v, info):
         # v3.58.0 briefly offered "minimal"; a config persisted with it must
         # not brick startup after upgrading — degrade to the nearest value.
         if v == "minimal":
             import logging
 
             logging.getLogger("odin.config").warning(
-                "reasoning_effort 'minimal' is not supported by any Codex "
-                "model on this auth path; using 'low' instead"
+                "%s 'minimal' is not supported by any Codex "
+                "model on this auth path; using 'low' instead",
+                info.field_name,
             )
             return "low"
         return v

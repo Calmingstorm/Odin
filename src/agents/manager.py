@@ -811,6 +811,8 @@ async def _run_agent(
         depth=agent.depth,
         parent_id=agent.parent_id,
         system_prompt_length=len(system_prompt),
+        iteration_timeout=agent.iteration_timeout,
+        max_lifetime=agent.max_lifetime,
     )
     agent_start = time.time()
 
@@ -931,6 +933,9 @@ async def _run_agent(
                     iteration=iteration + 1,
                     llm_text=text,
                     duration_ms=int((time.time() - iter_start) * 1000),
+                    provider=response.get("provider", ""),
+                    model=response.get("model", ""),
+                    reasoning_effort=response.get("reasoning_effort"),
                 )
                 agent.transition(AgentState.COMPLETED, "no more tool calls")
                 agent.result = text
@@ -989,6 +994,9 @@ async def _run_agent(
                 tool_results=iter_tool_results,
                 llm_text=text,
                 duration_ms=int((time.time() - iter_start) * 1000),
+                provider=response.get("provider", ""),
+                model=response.get("model", ""),
+                reasoning_effort=response.get("reasoning_effort"),
             )
 
             # Back to READY for next iteration

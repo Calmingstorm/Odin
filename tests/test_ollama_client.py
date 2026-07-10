@@ -417,6 +417,20 @@ class TestChatEndpoints:
         assert resp.stop_reason == "tool_use"
         assert resp.tool_calls[0].name == "get_time"
 
+    async def test_chat_with_tools_ignores_reasoning_effort(self):
+        """LLMProvider signature parity: accepted, never forwarded upstream."""
+        c = _client()
+        c._session = _FakeSession([  # type: ignore[assignment]
+            _FakeResp(200, {"message": {"content": "ok"}})])
+        resp = await c.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys",
+            [{"name": "t", "description": "d", "input_schema": {}}],
+            reasoning_effort="xhigh",
+        )
+        assert isinstance(resp, LLMResponse)
+        _, _, body, _ = c._session.calls[0]  # type: ignore[union-attr]
+        assert "reasoning" not in body and "reasoning_effort" not in body
+
 
 class TestHealthCheck:
     async def test_healthy_with_exact_model(self):

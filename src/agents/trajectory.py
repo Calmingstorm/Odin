@@ -38,6 +38,9 @@ class AgentTrajectoryTurn:
     depth: int = 0
     parent_id: str | None = None
     system_prompt_length: int = 0
+    # Spawn policy snapshot (per-agent timeout values the run was bound by)
+    iteration_timeout: float | None = None
+    max_lifetime: float | None = None
 
     iterations: list[ToolIteration] = field(default_factory=list)
 
@@ -57,6 +60,9 @@ class AgentTrajectoryTurn:
         tool_results: list[dict] | None = None,
         llm_text: str = "",
         duration_ms: int = 0,
+        provider: str = "",
+        model: str = "",
+        reasoning_effort: str | None = None,
     ) -> ToolIteration:
         it = ToolIteration(
             iteration=iteration,
@@ -64,6 +70,9 @@ class AgentTrajectoryTurn:
             tool_results=tool_results or [],
             llm_text=llm_text,
             duration_ms=duration_ms,
+            provider=provider,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
         self.iterations.append(it)
         return it
