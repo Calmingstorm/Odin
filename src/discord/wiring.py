@@ -598,6 +598,9 @@ def build_components(bot, services: BotServices) -> BotComponents:
         get_config=lambda: bot.config,
         skill_manager=services.skill_manager,
     )
+    # A live provider switch must rebuild the tool registry so provider-gated
+    # tools (native image gen is Codex-only) reappear/disappear immediately.
+    llm_gateway.on_provider_switch = tool_catalog.invalidate
 
     # Domain handler bundles (P5b) — built BEFORE the dispatcher so they can
     # be its owners (RFC-002 P5).
@@ -614,10 +617,33 @@ def build_components(bot, services: BotServices) -> BotComponents:
         permissions=services.permissions,
         get_channel=bot.get_channel,
     )
+    # Image-generation backends behind one selector. Native OpenAI rides the
+    # SAME CodexAuthPool the codex client uses (no separate auth); it's only
+    # built when Codex credentials exist. ComfyUI is always available as a
+    # backend object (its own config gates it at call time).
+    from ..tools.image import (
+        ComfyUIImageBackend,
+        ImageBackendSelector,
+        OpenAIImageBackend,
+    )
+
+    _image_auth = getattr(services.codex_client, "auth", None)
+    _openai_image_backend = (
+        OpenAIImageBackend(auth=_image_auth, get_config=lambda: bot.config)
+        if _image_auth is not None
+        else None
+    )
+    image_selector = ImageBackendSelector(
+        get_config=lambda: bot.config,
+        openai_backend=_openai_image_backend,
+        comfyui_backend=ComfyUIImageBackend(get_config=lambda: bot.config),
+    )
+
     media_tools = MediaTools(
         get_config=lambda: bot.config,
         browser_manager=services.browser_manager,
         tool_executor=services.tool_executor,
+        image_selector=image_selector,
     )
 
     # One Discord-native dispatch table for both pipelines (RFC-001 P5a);

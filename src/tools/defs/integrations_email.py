@@ -143,12 +143,13 @@ TOOLS_SECTION: list[dict] = [
             "required": ["action"],
         },
     },
-    # --- Image generation (ComfyUI) ---
+    # --- Image generation (native OpenAI or ComfyUI, per config) ---
     {
         "name": "generate_image",
         "description": (
-            "Generates an image from a text prompt via ComfyUI and posts to Discord. "
-            "Requires ComfyUI enabled in config."
+            "Generates an image from a text prompt and posts it to Discord. "
+            "The backend is chosen by config (native OpenAI on the Codex provider, "
+            "or ComfyUI). Use 'prompt' and optionally 'size'."
         ),
         "input_schema": {
             "type": "object",
@@ -157,24 +158,28 @@ TOOLS_SECTION: list[dict] = [
                     "type": "string",
                     "description": "Text description of the image to generate",
                 },
+                "size": {
+                    "type": "string",
+                    "description": "Image size as WxH (e.g. '1024x1024'). Uses the "
+                    "configured default if omitted.",
+                },
                 "negative": {
                     "type": "string",
-                    "description": "Negative prompt — things to avoid (default: empty)",
+                    "description": "ComfyUI only — negative prompt. Ignored/rejected by the "
+                    "OpenAI backend; in 'auto' its presence selects ComfyUI.",
                 },
                 "width": {
                     "type": "integer",
-                    "description": "Image width in pixels (default 1024)",
+                    "description": "ComfyUI only — width in pixels (use 'size' for OpenAI).",
                 },
                 "height": {
                     "type": "integer",
-                    "description": "Image height in pixels (default 1024)",
+                    "description": "ComfyUI only — height in pixels (use 'size' for OpenAI).",
                 },
                 "model": {
                     "type": "string",
-                    "description": "Checkpoint/model name to use "
-                    "(e.g. 'realisticVisionV60B1_v60B1VAE.safetensors'). "
-                    "If omitted, uses the default. Query available models via run_command: "
-                    "curl -s http://localhost:8188/object_info/CheckpointLoaderSimple",
+                    "description": "ComfyUI only — checkpoint name. In 'auto' its presence "
+                    "selects ComfyUI. The OpenAI image model is set in config, not here.",
                 },
             },
             "required": ["prompt"],

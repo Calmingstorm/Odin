@@ -47,6 +47,13 @@ class ToolCatalog:
         issue_cfg = getattr(config, "issue_tracker", None)
         if not issue_cfg or not issue_cfg.enabled:
             builtin = [t for t in builtin if t["name"] != "issue_tracker"]
+        # generate_image: visible only when a backend is structurally available —
+        # native (Codex provider + creds) OR ComfyUI configured, per image.backend.
+        # So Kimi with no ComfyUI hides it entirely.
+        from ..tools.image.selector import image_tool_available
+
+        if not image_tool_available(config):
+            builtin = [t for t in builtin if t["name"] != "generate_image"]
         builtin_names = {t["name"] for t in builtin}
         skill_defs = [
             t for t in self.skill_manager.get_tool_definitions() if t["name"] not in builtin_names
