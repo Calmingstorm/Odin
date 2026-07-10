@@ -108,7 +108,7 @@ class TestReadLinesCallbackTimeout:
 
         cb = AsyncMock()
         code, output = await _read_lines_with_callback(proc, timeout=30, on_output=cb)
-        reap.assert_awaited_once_with(proc)
+        reap.assert_awaited_once_with(proc, owned_pgid=None)
         assert "line" in output
 
     @pytest.mark.asyncio

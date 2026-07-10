@@ -187,6 +187,108 @@ class TestProcessRegistryGroupKill:
             _best_effort_kill(grandchild)
 
 
+class TestLeaderAlreadyExited:
+    """A shell can exit naturally while a descendant lives on holding stdout
+    — cleanup then runs with returncode already set and must still be able
+    to signal the owned group (round-3 review repro)."""
+
+    async def test_helper_kills_group_after_leader_reaped(self, tmp_path):
+        pidfile = tmp_path / "pid"
+        proc = await asyncio.create_subprocess_shell(
+            f"sleep 30 & echo $! > {pidfile}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        await proc.wait()  # leader exits naturally; returncode set
+        assert proc.returncode == 0
+        stubborn = await _read_pidfile(pidfile)
+        try:
+            os.kill(stubborn, 0)  # descendant is alive right now
+            await terminate_process_tree(proc, grace=0.5, owned_pgid=proc.pid)
+            await _assert_pid_gone(stubborn)
+        finally:
+            _best_effort_kill(stubborn)
+
+    async def test_cancelled_local_command_reaps_after_natural_leader_exit(
+        self, tmp_path
+    ):
+        # Through the real path: the shell exits immediately, the sleep holds
+        # stdout open so communicate() stays blocked, the child watcher reaps
+        # the shell (returncode set), THEN the task is cancelled — the
+        # descendant must still die.
+        pidfile = tmp_path / "pid"
+        task = asyncio.create_task(
+            run_local_command(f"sleep 30 & echo $! > {pidfile}", timeout=30)
+        )
+        stubborn = await _read_pidfile(pidfile)
+        await asyncio.sleep(0.3)  # let the child watcher reap the exited shell
+        try:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await _assert_pid_gone(stubborn)
+        finally:
+            _best_effort_kill(stubborn)
+
+
+class TestNeverBroadcasts:
+    """A poisoned pgid must NEVER reach os.killpg as a broadcast/own-group
+    target. os.killpg(1, sig) == kill(-1, sig) signals every process the user
+    owns — run bare in a desktop session it SIGTERMs the login manager and
+    Cinnamon; run as the service user it reaps the live bot. Whatever produces a
+    pgid of 0/1 or our own group (a bad owned_pgid, a recycled pid), cleanup
+    must fall back to child-only signalling and never call killpg with it.
+    """
+
+    @pytest.mark.parametrize("poison", [0, 1, -1])
+    async def test_poisoned_owned_pgid_never_reaches_killpg(self, poison, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        calls: list[tuple[int, int]] = []
+
+        def _record_killpg(pgid, sig):
+            calls.append((pgid, sig))
+            # Emulate the kernel: signal 0 to a "live" broadcast target succeeds,
+            # so a missing guard would loop/escalate rather than error out.
+            if sig != 0:
+                raise ProcessLookupError
+
+        monkeypatch.setattr(os, "killpg", _record_killpg)
+
+        proc = AsyncMock()
+        proc.returncode = None
+        proc.pid = poison  # owned_pgid == proc.pid → would-be "owns_group"
+        proc.wait = AsyncMock(return_value=0)
+        sent: list[int] = []
+        proc.send_signal = lambda sig: sent.append(sig)
+
+        await terminate_process_tree(proc, grace=0.05, owned_pgid=poison)
+
+        assert calls == [], f"killpg called with poisoned pgid: {calls}"
+        # Cleanup still happened — via the single child, not a group broadcast.
+        assert signal.SIGTERM in sent
+
+    async def test_own_process_group_is_never_signalled(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        own = os.getpgrp()
+        calls: list[tuple[int, int]] = []
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+
+        proc = AsyncMock()
+        proc.returncode = None
+        proc.pid = own  # a recycled pid that aliases the runner's own group
+        proc.wait = AsyncMock(return_value=0)
+        sent: list[int] = []
+        proc.send_signal = lambda sig: sent.append(sig)
+
+        await terminate_process_tree(proc, grace=0.05, owned_pgid=own)
+
+        assert calls == [], f"killpg targeted our own group: {calls}"
+        assert signal.SIGTERM in sent
+
+
 class TestTerminateProcessTreeGuard:
     async def test_never_group_signals_a_child_in_our_own_group(self):
         # A child spawned WITHOUT start_new_session shares this process's

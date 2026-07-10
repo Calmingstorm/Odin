@@ -58,30 +58,69 @@ def _is_ssh_transient_failure(exit_code: int, output: str) -> bool:
     return False
 
 
+def _is_signallable_group(pgid: int | None) -> bool:
+    """Whether *pgid* is safe to hand to ``os.killpg``.
+
+    ``os.killpg(pgid, sig)`` is ``kill(-pgid, sig)`` at the syscall level, so a
+    pgid of 1 becomes ``kill(-1)`` — SIGTERM/SIGKILL to *every process the user
+    can signal*. Run bare in a desktop session that reaps the login manager and
+    Cinnamon; run as the ``odin`` service user it reaps the live bot. ``pgid``
+    of 0 means ``kill(0)`` — the caller's OWN group (the test runner / service).
+    Our own process group is likewise off limits. A managed child is always a
+    session leader with a large, foreign pgid, so this rejects ONLY the
+    catastrophic targets and never a legitimate group kill.
+    """
+    if not isinstance(pgid, int) or pgid <= 1:
+        return False
+    try:
+        if pgid == os.getpgrp():
+            return False
+    except OSError:
+        return False
+    return True
+
+
 async def terminate_process_tree(
-    proc: asyncio.subprocess.Process, grace: float = 3.0
+    proc: asyncio.subprocess.Process,
+    grace: float = 3.0,
+    owned_pgid: int | None = None,
 ) -> None:
     """Terminate a spawned child — and its whole process group when it leads
-    one — escalating to SIGKILL after *grace* seconds, then reap it.
+    one — escalating to SIGKILL after *grace* seconds per pass, then reap it.
 
-    Group signalling happens ONLY when ``os.getpgid(pid) == pid`` (the child
-    was spawned with ``start_new_session=True``): a child still in the
-    service's own group must never be group-signalled, or the signal would
-    hit the whole service. Group ownership is snapshotted BEFORE signalling,
-    and after the TERM pass the group is probed independently of the leader:
-    a compliant leader exiting must not end cleanup while a TERM-immune
-    descendant survives in the now-leaderless group. Process-lookup races
-    and reap timeouts are swallowed; cancellation of the cleanup itself
-    still propagates.
+    ``owned_pgid`` is the by-construction group id (``proc.pid``) and must be
+    passed ONLY by callers that spawned the child with
+    ``start_new_session=True``. It keeps the group signallable after the
+    leader has already exited and been reaped — a shell can finish naturally
+    (``returncode`` set) while a descendant lives on holding stdout, and at
+    that point ``getpgid`` can no longer discover the group. Without it,
+    group ownership is discovered — and verified — via
+    ``os.getpgid(pid) == pid`` while the leader is alive; a child still in
+    the service's own group is never group-signalled, or the signal would
+    hit the whole service. Each pass probes the group independently of the
+    leader (``killpg(pgid, 0)``), so a compliant leader exiting never ends
+    cleanup while TERM-immune descendants survive. Process-lookup races and
+    reap timeouts are swallowed; cancellation of the cleanup itself still
+    propagates.
     """
-    if proc.returncode is not None:
-        return
+    pgid = owned_pgid
+    if pgid is None and proc.returncode is None:
+        try:
+            discovered = os.getpgid(proc.pid)
+        except (ProcessLookupError, PermissionError):
+            discovered = None
+        if discovered is not None and discovered == proc.pid:
+            pgid = discovered
+    # Group-signalling requires a pgid that is (a) led by the child we spawned
+    # (``pgid == proc.pid``) and (b) a safe, foreign target. A pgid that is
+    # broadcast/own-group — however it arose (a bad owned_pgid, a recycled pid) —
+    # is dropped here and cleanup falls back to signalling the child alone.
+    owns_group = (
+        pgid is not None and pgid == proc.pid and _is_signallable_group(pgid)
+    )
 
-    try:
-        pgid: int | None = os.getpgid(proc.pid)
-    except (ProcessLookupError, PermissionError):
-        pgid = None
-    owns_group = pgid is not None and pgid == proc.pid
+    if proc.returncode is not None and not owns_group:
+        return  # child-only cleanup and the child is already reaped
 
     def _signal_tree(sig: int) -> None:
         try:
@@ -101,27 +140,36 @@ async def terminate_process_tree(
         except (ProcessLookupError, PermissionError):
             return False
 
+    async def _phase_wait(timeout: float) -> bool:
+        """True once the leader is reaped AND its owned group is empty."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        if proc.returncode is None:
+            remaining = deadline - asyncio.get_running_loop().time()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=max(remaining, 0.05))
+            except TimeoutError:
+                return False
+        while _group_alive():
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+        return True
+
     _signal_tree(signal.SIGTERM)
-    leader_exited = True
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=grace)
-    except TimeoutError:
-        leader_exited = False
-    if leader_exited and not _group_alive():
+    if await _phase_wait(grace):
         return
-    # Either the leader ignored TERM, or a descendant in its group did —
-    # SIGKILL the remainder even though the leader may already be gone.
+    # Leader, descendants, or both ignored TERM — SIGKILL the remainder even
+    # though the leader may already be gone.
     _signal_tree(signal.SIGKILL)
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=grace)
-    except TimeoutError:
-        log.warning("PID %d did not exit after SIGKILL", proc.pid)
+    if not await _phase_wait(grace):
+        log.warning("PID %d process tree did not exit after SIGKILL", proc.pid)
 
 
 async def _read_lines_with_callback(
     proc: asyncio.subprocess.Process,
     timeout: int,
     on_output: OutputCallback,
+    owned_pgid: int | None = None,
 ) -> tuple[int, str]:
     """Read stdout line by line, calling *on_output* for each line."""
     lines: list[str] = []
@@ -142,14 +190,14 @@ async def _read_lines_with_callback(
         try:
             await asyncio.wait_for(proc.wait(), timeout=min(timeout, 10))
         except TimeoutError:
-            await terminate_process_tree(proc)
+            await terminate_process_tree(proc, owned_pgid=owned_pgid)
     except TimeoutError:
-        await terminate_process_tree(proc)
+        await terminate_process_tree(proc, owned_pgid=owned_pgid)
         return 1, f"Command timed out after {timeout} seconds"
     except asyncio.CancelledError:
         # Task cancellation (loop drain at shutdown/restart) must not leak
         # the child or its descendants past this process's lifetime.
-        await terminate_process_tree(proc)
+        await terminate_process_tree(proc, owned_pgid=owned_pgid)
         raise
     output = "".join(lines)
     return proc.returncode or 0, _truncate_output(output)
@@ -180,20 +228,24 @@ async def run_local_command(
             start_new_session=True,
         )
         if on_output is not None:
-            return await _read_lines_with_callback(proc, timeout, on_output)
+            return await _read_lines_with_callback(
+                proc, timeout, on_output, owned_pgid=proc.pid
+            )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = stdout.decode("utf-8", errors="replace")
         return proc.returncode or 0, _truncate_output(output)
 
     except TimeoutError:
         if proc is not None:
-            await terminate_process_tree(proc)
+            await terminate_process_tree(proc, owned_pgid=proc.pid)
         return 1, f"Command timed out after {timeout} seconds"
     except asyncio.CancelledError:
         # Loop drain at shutdown/restart cancels in-flight commands; the
-        # child tree must die with this process, not outlive the exec.
+        # child tree must die with this process, not outlive the exec —
+        # owned_pgid keeps the group signallable even when the shell already
+        # exited naturally, leaving a descendant holding stdout.
         if proc is not None:
-            await terminate_process_tree(proc)
+            await terminate_process_tree(proc, owned_pgid=proc.pid)
         raise
     except Exception as e:
         log.error("Local command failed: %s", e)

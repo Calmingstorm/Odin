@@ -60,6 +60,12 @@ class ProcessKillTool(BaseTool):
         pid: int = params["pid"]
         sig: int = params.get("signal", signal.SIGTERM)
 
+        # A pid <= 0 is not a single process: os.kill(0, sig) hits the caller's
+        # whole process group and os.kill(-1, sig) every process the user owns.
+        # This tool kills ONE process by pid; reject broadcast targets.
+        if pid <= 0:
+            return {"pid": pid, "killed": False}
+
         try:
             os.kill(pid, sig)
             return {"pid": pid, "killed": True}

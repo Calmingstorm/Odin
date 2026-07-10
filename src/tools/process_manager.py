@@ -149,7 +149,11 @@ class ProcessRegistry:
                 # Group-aware TERM → bounded grace → KILL → reap. Descendants
                 # of the managed shell die with it instead of leaking (they
                 # would otherwise outlive an in-place restart's exec).
-                await terminate_process_tree(info.process, grace=5.0)
+                # owned_pgid: start() spawns with start_new_session=True, so
+                # the group stays signallable after the leader exits.
+                await terminate_process_tree(
+                    info.process, grace=5.0, owned_pgid=info.process.pid
+                )
             info.status = "failed"
             info.exit_code = -9
             log.info("Killed process PID %d", pid)

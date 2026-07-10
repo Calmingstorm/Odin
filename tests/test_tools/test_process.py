@@ -36,3 +36,14 @@ async def test_kill_nonexistent():
     tool = ProcessKillTool()
     result = await tool.execute({"pid": 999999999}, ExecutionContext())
     assert result["killed"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pid", [0, -1, -1000])
+async def test_kill_rejects_broadcast_pids(pid):
+    # os.kill(0, sig) hits the caller's whole process group; os.kill(-1, sig)
+    # every process the user owns. This tool kills ONE process — a pid <= 0 is
+    # never a single target and must be refused, not signalled.
+    tool = ProcessKillTool()
+    result = await tool.execute({"pid": pid}, ExecutionContext())
+    assert result["killed"] is False
