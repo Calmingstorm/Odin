@@ -71,6 +71,16 @@ class TestActiveClientAndCallbacks:
         reflection_fn = gw.reflector.set_text_fn.call_args.args[0]
         assert await reflection_fn([], "sys") == "summary"
 
+    async def test_switch_provider_fires_on_provider_switch(self):
+        # The hook wiring points at the tool catalog's invalidate() so a live
+        # switch rebuilds the registry (native image gen is Codex-only).
+        gw = _gw(_cfg("kimi"), codex=object())
+        fired: list[bool] = []
+        gw.on_provider_switch = lambda: fired.append(True)
+        result = await gw.switch_provider("codex")
+        assert result["active_provider"] == "codex"
+        assert fired == [True]
+
     async def test_callbacks_raise_without_client(self):
         gw = _gw(codex=None)  # no active client
         gw.wire_callbacks()

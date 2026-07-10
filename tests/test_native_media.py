@@ -37,11 +37,12 @@ def _executor(resolve=("1.2.3.4", "root", "linux"), exec_ret=(0, "")):
     return ex
 
 
-def _tools(config=None, browser_manager=None, tool_executor=None):
+def _tools(config=None, browser_manager=None, tool_executor=None, image_selector=None):
     return MediaTools(
         get_config=lambda: config or _config(),
         browser_manager=browser_manager,
         tool_executor=tool_executor or _executor(),
+        image_selector=image_selector,
     )
 
 
@@ -268,30 +269,53 @@ class TestAnalyzeImage:
 
 
 class TestGenerateImage:
-    async def test_disabled_and_no_prompt(self):
-        disabled = _tools(config=_config(comfy_enabled=False))
-        assert "disabled" in await disabled._handle_generate_image(_message(), {"prompt": "x"})
-        assert "required" in await _tools()._handle_generate_image(_message(), {})
+    """The handler dispatches to the image selector and owns Discord posting;
+    backend selection/wire behavior is covered in test_image_backends.py."""
 
-    async def test_success(self):
-        client = MagicMock()
-        client.generate = AsyncMock(return_value=PNG)
+    @staticmethod
+    def _selector(result=None, error=None):
+        sel = MagicMock()
+        sel.generate = AsyncMock(return_value=result, side_effect=error)
+        return sel
+
+    @staticmethod
+    def _result(backend="openai"):
+        from src.tools.image import ImageResult
+
+        return ImageResult(PNG, "image/png", 1024, 1024, backend, "gpt-image-2")
+
+    async def test_no_selector_and_no_prompt(self):
+        # No backend wired at all -> not available.
+        no_sel = _tools()
+        assert "not available" in await no_sel._handle_generate_image(_message(), {"prompt": "x"})
+        # Selector present but missing prompt -> required.
+        t = _tools(image_selector=self._selector(result=self._result()))
+        assert "required" in await t._handle_generate_image(_message(), {})
+
+    async def test_success_posts_attachment(self):
+        sel = self._selector(result=self._result(backend="openai"))
         msg = _message()
-        with patch("src.tools.comfyui.ComfyUIClient", return_value=client):
-            out = await _tools()._handle_generate_image(
-                msg, {"prompt": "a cat", "width": 99999, "height": 10})
-            assert "Image generated and posted" in out
-            msg.channel.send.assert_awaited_once()
+        out = await _tools(image_selector=sel)._handle_generate_image(msg, {"prompt": "a cat"})
+        assert "Image generated via openai" in out
+        msg.channel.send.assert_awaited_once()
 
-    async def test_generation_failed_and_http_error(self):
-        client = MagicMock()
-        client.generate = AsyncMock(return_value=None)
-        with patch("src.tools.comfyui.ComfyUIClient", return_value=client):
-            assert "generation failed" in await _tools()._handle_generate_image(
-                _message(), {"prompt": "x"})
-        client.generate = AsyncMock(return_value=PNG)
+    async def test_backend_failure_and_http_error(self):
+        from src.tools.image import ImageGenError
+
+        sel = self._selector(error=ImageGenError("no backend"))
+        assert "failed" in await _tools(image_selector=sel)._handle_generate_image(
+            _message(), {"prompt": "x"}
+        )
+        sel = self._selector(result=self._result(backend="comfyui"))
         msg = _message()
         msg.channel.send = AsyncMock(side_effect=_http_exc())
-        with patch("src.tools.comfyui.ComfyUIClient", return_value=client):
-            assert "Failed to upload generated" in await _tools()._handle_generate_image(
-                msg, {"prompt": "x"})
+        out = await _tools(image_selector=sel)._handle_generate_image(msg, {"prompt": "x"})
+        assert "Failed to upload generated" in out
+
+    async def test_unexpected_error_is_contained(self):
+        # A non-ImageGenError must not leak a payload — generic catch-all.
+        sel = self._selector(error=RuntimeError("raw provider blob"))
+        out = await _tools(image_selector=sel)._handle_generate_image(
+            _message(), {"prompt": "x"}
+        )
+        assert "unexpectedly" in out and "raw provider blob" not in out
