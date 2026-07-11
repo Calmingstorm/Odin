@@ -140,7 +140,7 @@ const App = {
     </div>
     <login-screen v-else-if="authState === 'login'" :on-login="onLogin" :session-expired="sessionExpired" />
     <div v-else class="app-shell">
-      <aside class="hm-sidebar" :class="{ collapsed: sidebarCollapsed, 'mobile-open': mobileOpen }" aria-label="Primary navigation">
+      <aside ref="sidebarEl" class="hm-sidebar" :class="{ collapsed: sidebarCollapsed, 'mobile-open': mobileOpen }" aria-label="Primary navigation">
         <div class="sidebar-brand">
           <div class="brand-mark" aria-hidden="true"><odin-icon name="brand" :size="24" /></div>
           <div class="sidebar-brand-copy">
@@ -195,7 +195,7 @@ const App = {
 
       <main id="main-content" class="hm-main" role="main">
         <header class="hm-topbar" role="banner">
-          <button class="icon-btn mobile-menu-btn" @click="mobileOpen = !mobileOpen"
+          <button ref="mobileMenuButton" class="icon-btn mobile-menu-btn" @click="toggleMobileNavigation"
                   :aria-expanded="mobileOpen" aria-controls="sidebar-nav" aria-label="Open navigation menu">
             <odin-icon name="menu" :size="20" />
           </button>
@@ -232,6 +232,9 @@ const App = {
     const sessionExpired = ref(false);
     const sidebarCollapsed = ref(false);
     const mobileOpen = ref(false);
+    const sidebarEl = ref(null);
+    const mobileMenuButton = ref(null);
+    let mobileReturnFocus = null;
     const wsConnected = ref(false);
     const wsState = ref('disconnected'); // disconnected | connecting | connected | reconnecting
     const wsLatency = ref(-1);
@@ -267,7 +270,20 @@ const App = {
         }
         return;
       }
-      // Esc: close mobile sidebar, or modals (modals handle their own Esc via @click.self)
+      // Keep keyboard navigation inside the open mobile drawer.
+      if (mobileOpen.value && e.key === 'Tab') {
+        const items = [...(sidebarEl.value?.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
+        if (items.length) {
+          const first = items[0];
+          const last = items[items.length - 1];
+          if (e.shiftKey && (document.activeElement === first || !sidebarEl.value.contains(document.activeElement))) {
+            e.preventDefault(); last.focus(); return;
+          }
+          if (!e.shiftKey && (document.activeElement === last || !sidebarEl.value.contains(document.activeElement))) {
+            e.preventDefault(); first.focus(); return;
+          }
+        }
+      }
       if (e.key === 'Escape') {
         if (mobileOpen.value) { mobileOpen.value = false; e.preventDefault(); return; }
       }
@@ -310,6 +326,22 @@ const App = {
     function toggleSidebar() {
       sidebarCollapsed.value = !sidebarCollapsed.value;
     }
+
+    function toggleMobileNavigation() {
+      mobileOpen.value = !mobileOpen.value;
+    }
+
+    watch(mobileOpen, async open => {
+      if (open) {
+        mobileReturnFocus = document.activeElement;
+        await nextTick();
+        sidebarEl.value?.querySelector('.nav-item')?.focus();
+      } else if (mobileReturnFocus?.isConnected) {
+        const target = mobileReturnFocus;
+        mobileReturnFocus = null;
+        requestAnimationFrame(() => target.focus());
+      }
+    });
 
     const wsLabel = computed(() => {
       switch (wsState.value) {
@@ -374,8 +406,8 @@ const App = {
       authState, sessionExpired, sidebarCollapsed, mobileOpen, wsConnected,
       wsState, wsLatency, wsLabel, wsToast,
       botStatus, botUptime, navRoutes, navGroups,
-      currentPage, currentSection, currentDescription,
-      onLogin, logout, toggleSidebar, openPalette,
+      currentPage, currentSection, currentDescription, sidebarEl, mobileMenuButton,
+      onLogin, logout, toggleSidebar, toggleMobileNavigation, openPalette,
     };
   },
 };
