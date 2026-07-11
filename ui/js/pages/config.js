@@ -192,7 +192,7 @@ export default {
             <span class="cfg-group-label">{{ group.label }}</span>
             <span class="badge badge-info text-xs">{{ group.sections.length }}</span>
             <span v-if="editing && groupChanged(group)" class="badge badge-warning text-xs">modified</span>
-            <span class="cfg-group-arrow" aria-hidden="true"><odin-icon name="chevronRight" :size="14" :class="{ 'rotate-90': expandedGroups[group.key] }" /></span>
+            <span class="cfg-group-arrow" aria-hidden="true"><odin-icon :name="expandedGroups[group.key] ? 'chevronUp' : 'chevronDown'" :size="14" /></span>
           </div>
 
           <!-- Group content -->
@@ -200,7 +200,7 @@ export default {
             <div v-for="section in group.sections" :key="section" class="cfg-section">
               <!-- Section header -->
               <div class="cfg-section-header cursor-pointer select-none" @click="toggleSection(section)">
-                <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon name="chevronRight" :size="13" :class="{ 'rotate-90': expanded[section] }" /></span>
+                <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon :name="expanded[section] ? 'chevronUp' : 'chevronDown'" :size="13" /></span>
                 <span class="cfg-section-name">{{ section }}</span>
                 <span class="badge badge-info text-xs"
                       v-if="typeof getDisplay(section) === 'object' && getDisplay(section) !== null && !Array.isArray(getDisplay(section))">
@@ -362,7 +362,7 @@ export default {
         <!-- Ungrouped sections (fallback) -->
         <div v-for="section in ungroupedSections" :key="section" class="hm-card">
           <div class="cfg-section-header cursor-pointer select-none" @click="toggleSection(section)">
-            <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon name="chevronRight" :size="13" :class="{ 'rotate-90': expanded[section] }" /></span>
+            <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon :name="expanded[section] ? 'chevronUp' : 'chevronDown'" :size="13" /></span>
             <span class="cfg-section-name">{{ section }}</span>
           </div>
           <div v-if="expanded[section]" class="pl-4 mt-2">

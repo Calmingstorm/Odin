@@ -238,7 +238,7 @@ export default {
       return [
         {
           label: 'Guilds', value: s.guild_count ?? 0,
-          icon: 'history', iconColor: 'text-blue-400',
+          icon: 'home', iconColor: 'text-blue-400',
         },
         {
           label: 'Sessions', value: s.session_count ?? 0,
@@ -281,7 +281,7 @@ export default {
         },
         {
           label: 'Users', value: s.user_count ?? 0,
-          icon: 'database', iconColor: 'text-indigo-400',
+          icon: 'users', iconColor: 'text-indigo-400',
         },
         ...(knowledgeChunks.value !== null ? [{
           label: 'Knowledge', value: knowledgeChunks.value,

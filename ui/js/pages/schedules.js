@@ -178,7 +178,7 @@ export default {
             <tr :class="{ 'opacity-50': s.paused }">
               <td class="text-center" style="width:40px;">
                 <button class="row-expander" @click="toggleExpand(s.id)" :aria-expanded="expandedId === s.id" :aria-label="(expandedId === s.id ? 'Collapse ' : 'Expand ') + s.description">
-                  <odin-icon name="chevronRight" :size="15" :class="{ 'rotate-90': expandedId === s.id }" />
+                  <odin-icon :name="expandedId === s.id ? 'chevronUp' : 'chevronDown'" :size="15" />
                 </button>
               </td>
               <td class="text-sm">

@@ -118,7 +118,7 @@ export default {
                 <div v-if="msg.tools_used && msg.tools_used.length > 0" class="chat-tool-cards">
                   <button class="chat-tools-toggle" @click="msg._showTools = !msg._showTools"
                           :aria-expanded="msg._showTools" aria-label="Toggle tool details">
-                    <span class="chat-tools-toggle-icon" aria-hidden="true"><odin-icon name="chevronRight" :size="13" :class="{ 'rotate-90': msg._showTools }" /></span>
+                    <span class="chat-tools-toggle-icon" aria-hidden="true"><odin-icon :name="msg._showTools ? 'chevronUp' : 'chevronDown'" :size="13" /></span>
                     <span class="chat-tools-toggle-count">{{ msg.tools_used.length }}</span>
                     <span>tool{{ msg.tools_used.length > 1 ? 's' : '' }} executed</span>
                   </button>

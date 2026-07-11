@@ -206,8 +206,8 @@ export default {
                 </div>
               </div>
               <div class="flex items-center gap-1" @click.stop>
-                <span class="sess-expand-icon" :class="{ 'sess-expanded': expandedId === s.channel_id }" aria-hidden="true">
-                  <odin-icon name="chevronRight" :size="14" />
+                <span class="sess-expand-icon" aria-hidden="true">
+                  <odin-icon :name="expandedId === s.channel_id ? 'chevronUp' : 'chevronDown'" :size="14" />
                 </span>
                 <button @click="exportSession(s.channel_id, 'json')" class="btn btn-ghost text-xs" title="Export JSON">
                   JSON
@@ -271,7 +271,7 @@ export default {
                       <span class="text-xs text-gray-300">{{ threadSummary(thread) }}</span>
                       <span class="text-xs bg-gray-700 px-1.5 py-0.5 rounded text-gray-300">{{ thread.length }} msg</span>
                       <span class="text-xs text-gray-500 ml-auto" v-if="thread[0]">{{ formatTimestamp(thread[0].timestamp) }}</span>
-                      <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon name="chevronRight" :size="13" :class="{ 'rotate-90': !collapsedThreads.has(ti) }" /></span>
+                      <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon :name="collapsedThreads.has(ti) ? 'chevronDown' : 'chevronUp'" :size="13" /></span>
                     </div>
                     <div v-if="!collapsedThreads.has(ti)" class="space-y-2 pl-2">
                       <div v-for="(m, mi) in thread" :key="mi"

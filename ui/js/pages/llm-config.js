@@ -100,7 +100,7 @@ export default {
             <h2 class="text-sm font-semibold text-gray-300">Codex (OpenAI)</h2>
             <div class="flex items-center gap-3">
               <div v-if="codexData.configured" class="text-sm">
-                <span class="provider-status text-green-400"><span class="status-dot online"></span>Connected</span>
+                <span class="provider-status text-green-400"><span class="status-dot online" aria-hidden="true"></span>Connected</span>
               </div>
               <label class="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" v-model="codexForm.enabled" @change="saveCodexConfigDebounced" class="provider-control" />
@@ -254,7 +254,7 @@ export default {
                   <p>2. Enter code: <code class="bg-gray-900 px-2 py-1 rounded text-lg font-bold text-white">{{ deviceInfo.user_code }}</code></p>
                 </div>
                 <div class="flex items-center gap-3">
-                  <div class="provider-status text-xs text-gray-500"><span class="status-dot starting animate-pulse"></span>Waiting...</div>
+                  <div class="provider-status text-xs text-gray-500"><span class="status-dot starting animate-pulse" aria-hidden="true"></span>Waiting...</div>
                   <button @click="cancelDeviceLogin" class="btn btn-ghost text-xs">Cancel</button>
                 </div>
               </div>
@@ -277,8 +277,8 @@ export default {
             <h2 class="text-sm font-semibold text-gray-300">Kimi (Moonshot AI)</h2>
             <div class="flex items-center gap-3">
               <div v-if="kimiStatus.configured" class="text-sm">
-                <span v-if="kimiStatus.health && kimiStatus.health.healthy" class="provider-status text-green-400"><span class="status-dot online"></span>Connected</span>
-                <span v-else class="provider-status text-red-400"><span class="status-dot offline"></span>Unreachable</span>
+                <span v-if="kimiStatus.health && kimiStatus.health.healthy" class="provider-status text-green-400"><span class="status-dot online" aria-hidden="true"></span>Connected</span>
+                <span v-else class="provider-status text-red-400"><span class="status-dot offline" aria-hidden="true"></span>Unreachable</span>
               </div>
               <label class="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" v-model="kimiForm.enabled" @change="saveKimiConfigDebounced" class="provider-control" />
@@ -303,7 +303,7 @@ export default {
             <div>
               <label class="text-xs text-gray-400">API Key</label>
               <div class="flex items-center gap-2">
-                <span v-if="llmStatus && llmStatus.kimi.has_api_key && !kimiForm.api_key" class="provider-status text-xs text-green-400"><span class="status-dot online"></span>Configured</span>
+                <span v-if="llmStatus && llmStatus.kimi.has_api_key && !kimiForm.api_key" class="provider-status text-xs text-green-400"><span class="status-dot online" aria-hidden="true"></span>Configured</span>
                 <input v-model="kimiForm.api_key" type="password" @keydown.enter="saveKimiConfigNow" @input="kimiKeyDirty = true"
                        :placeholder="llmStatus && llmStatus.kimi.has_api_key ? '••••••••  (press Enter to replace)' : 'sk-...'"
                        class="hm-input flex-1" />
@@ -322,8 +322,8 @@ export default {
             <h2 class="text-sm font-semibold text-gray-300">Ollama (Local/Remote)</h2>
             <div class="flex items-center gap-3">
               <div v-if="ollamaStatus.configured" class="text-sm">
-                <span v-if="ollamaStatus.health && ollamaStatus.health.healthy" class="provider-status text-green-400"><span class="status-dot online"></span>Connected</span>
-                <span v-else class="provider-status text-red-400"><span class="status-dot offline"></span>Unreachable</span>
+                <span v-if="ollamaStatus.health && ollamaStatus.health.healthy" class="provider-status text-green-400"><span class="status-dot online" aria-hidden="true"></span>Connected</span>
+                <span v-else class="provider-status text-red-400"><span class="status-dot offline" aria-hidden="true"></span>Unreachable</span>
               </div>
               <label class="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" v-model="ollamaForm.enabled" @change="saveOllamaConfigDebounced" class="provider-control" />

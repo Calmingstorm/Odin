@@ -839,7 +839,6 @@ textarea.hm-input {
   display: inline-block;
   margin-right: var(--hm-space-2);
 }
-.sess-expanded { transform: rotate(90deg); }
 
 /* --- Summary banner --- */
 .sess-summary-banner {
@@ -2227,7 +2226,6 @@ textarea.hm-input {
 .kb-tree-arrow {
   font-size: 10px; color: var(--hm-text-dim); transition: transform 0.2s; flex-shrink: 0;
 }
-.kb-tree-arrow-open { transform: rotate(90deg); }
 .kb-tree-icon { font-size: 1rem; flex-shrink: 0; }
 .kb-tree-name { font-family: var(--hm-font-mono); font-size: var(--hm-text-sm); font-weight: 600; }
 .kb-tree-actions { margin-left: auto; display: flex; gap: var(--hm-space-1); flex-shrink: 0; }
@@ -2334,7 +2332,6 @@ textarea.hm-input {
 .mem-tree-arrow {
   font-size: 10px; color: var(--hm-text-dim); transition: transform 0.2s; flex-shrink: 0;
 }
-.mem-tree-arrow-open { transform: rotate(90deg); }
 .mem-tree-entries { padding: 0 var(--hm-space-4) var(--hm-space-3); }
 .mem-tree-loading {
   display: flex; align-items: center; gap: var(--hm-space-2); color: var(--hm-text-dim);
