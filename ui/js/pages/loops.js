@@ -132,7 +132,7 @@ export default {
 
             <div class="text-sm text-gray-200 mb-2">{{ loop.goal }}</div>
 
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-gray-400">
+            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2 text-xs text-gray-400">
               <div>
                 <span class="text-gray-500">Interval:</span>
                 {{ formatDuration(loop.interval_seconds) }}

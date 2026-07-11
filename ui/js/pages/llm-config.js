@@ -108,7 +108,7 @@ export default {
               </label>
             </div>
           </div>
-          <div class="grid grid-cols-2 gap-3 mb-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
             <div>
               <label class="text-xs text-gray-400">Model</label>
               <select v-model="codexForm.model" @change="saveCodexConfigDebounced"
@@ -288,7 +288,7 @@ export default {
               </label>
             </div>
           </div>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-gray-400">Model</label>
               <select v-model="kimiForm.model" @change="saveKimiConfigDebounced"
@@ -333,7 +333,7 @@ export default {
               </label>
             </div>
           </div>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-gray-400">Model</label>
               <select v-model="ollamaForm.model" @change="saveOllamaConfigDebounced"

@@ -49,7 +49,7 @@ export default {
             </button>
           </div>
           <div v-if="showCreate" class="space-y-3">
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="text-xs text-gray-500 block mb-1">User ID (unique identifier)</label>
                 <input v-model="createForm.user_id" class="hm-input w-full text-sm"
@@ -174,7 +174,7 @@ export default {
           <div class="modal-content" style="max-width:640px">
             <h3 id="token-edit-title" class="text-sm font-semibold text-gray-300 mb-4">Edit Token: {{ editing.user_id }}</h3>
             <div class="space-y-3">
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="text-xs text-gray-500 block mb-1">Display Name</label>
                   <input v-model="editForm.username" class="hm-input w-full text-sm" />

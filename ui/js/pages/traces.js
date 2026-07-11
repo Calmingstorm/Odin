@@ -13,7 +13,7 @@ const ContextAssemblyPanel = {
               <!-- Context trace (observability): what the prompt assembler did -->
               <div v-if="trace" class="mt-3">
                 <div class="text-gray-400 text-xs mb-1">Context Assembly</div>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-2">
+                <div class="grid grid-cols-1 min-[360px]:grid-cols-2 md:grid-cols-4 gap-2 mb-2">
                   <div class="p-2 rounded bg-gray-900 text-xs">
                     <span class="text-gray-500 block">System tokens</span>
                     <span class="font-semibold">{{ formatTokens(trace.summary?.system_tokens) }}</span>

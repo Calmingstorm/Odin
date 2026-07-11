@@ -343,7 +343,7 @@ export default {
                 <!-- Expanded detail -->
                 <div v-if="expandedSearch === i" class="mt-2 ml-4 p-2 bg-gray-900 border border-gray-700 rounded text-xs"
                      @click.stop>
-                  <div class="grid grid-cols-2 gap-x-4 gap-y-1 mb-2" style="max-width:500px;">
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 mb-2" style="max-width:500px;">
                     <span class="text-gray-500">Timestamp:</span>
                     <span>{{ entry.timestamp || 'N/A' }}</span>
                     <template v-if="entry.user_id">

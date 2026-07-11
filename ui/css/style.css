@@ -630,7 +630,6 @@ textarea.hm-input {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.chat-markdown pre:hover .chat-code-copy { opacity: 1; }
 .chat-code-copy:hover { color: var(--hm-accent-hover); }
 
 /* --- Tool cards --- */
@@ -1732,7 +1731,7 @@ textarea.hm-input {
 /* Skill card grid */
 .sk-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
   gap: var(--hm-space-4);
 }
 .sk-card {
@@ -2401,7 +2400,7 @@ textarea.hm-input {
 
 /* Card grid */
 .ag-card-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
   gap: var(--hm-space-4);
 }
 .ag-card {
@@ -3080,6 +3079,14 @@ a:focus-visible {
   .hm-main .p-6 { padding: var(--hm-space-4); }
 
 }
+
+/* Session full-text result types are emitted by JavaScript at runtime. */
+.fts-result-user { background: rgba(17, 24, 39, .5); border-color: #1f2937; }
+.fts-result-assistant { background: rgba(49, 46, 129, .3); border-color: rgba(49, 46, 129, .3); }
+.fts-result-summary { background: rgba(69, 26, 3, .2); border-color: rgba(120, 53, 15, .3); }
+.fts-result-fts { background: rgba(2, 44, 34, .2); border-color: rgba(6, 78, 59, .3); }
+.fts-result-channel { background: rgba(59, 7, 100, .2); border-color: rgba(88, 28, 135, .3); }
+.fts-result-default { background: rgba(17, 24, 39, .3); border-color: rgba(31, 41, 55, .5); }
 
 /* FTS search highlight */
 .fts-highlight {

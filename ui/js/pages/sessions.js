@@ -631,12 +631,12 @@ export default {
     }
 
     function ftsResultClass(type) {
-      if (type === 'user') return 'bg-gray-900/50 border-gray-800';
-      if (type === 'assistant') return 'bg-indigo-950/30 border-indigo-900/30';
-      if (type === 'summary') return 'bg-amber-950/20 border-amber-900/30';
-      if (type === 'fts') return 'bg-emerald-950/20 border-emerald-900/30';
-      if (type === 'channel') return 'bg-purple-950/20 border-purple-900/30';
-      return 'bg-gray-900/30 border-gray-800/50';
+      if (type === 'user') return 'fts-result-user';
+      if (type === 'assistant') return 'fts-result-assistant';
+      if (type === 'summary') return 'fts-result-summary';
+      if (type === 'fts') return 'fts-result-fts';
+      if (type === 'channel') return 'fts-result-channel';
+      return 'fts-result-default';
     }
 
     function ftsTypeBadge(type) {
