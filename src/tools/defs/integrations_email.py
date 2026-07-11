@@ -147,9 +147,9 @@ TOOLS_SECTION: list[dict] = [
     {
         "name": "generate_image",
         "description": (
-            "Generates an image from a text prompt and posts it to Discord. "
-            "The backend is chosen by config (native OpenAI on the Codex provider, "
-            "or ComfyUI). Use 'prompt' and optionally 'size'."
+            "Generates an image from a text prompt and posts it to Discord. The "
+            "backend is chosen by config. Provide 'prompt'; add 'size' only when a "
+            "specific size/aspect ratio is wanted."
         ),
         "input_schema": {
             "type": "object",
@@ -160,26 +160,20 @@ TOOLS_SECTION: list[dict] = [
                 },
                 "size": {
                     "type": "string",
-                    "description": "Image size as WxH (e.g. '1024x1024'). Uses the "
-                    "configured default if omitted.",
+                    "description": "Optional size as WxH (e.g. '1024x1024' or '1536x1024'). "
+                    "A non-square size is served by ComfyUI (native OpenAI only produces "
+                    "square images). Omit for the default; do not pass unless the user "
+                    "asked for a specific size.",
                 },
                 "negative": {
                     "type": "string",
-                    "description": "ComfyUI only — negative prompt. Ignored/rejected by the "
-                    "OpenAI backend; in 'auto' its presence selects ComfyUI.",
-                },
-                "width": {
-                    "type": "integer",
-                    "description": "ComfyUI only — width in pixels (use 'size' for OpenAI).",
-                },
-                "height": {
-                    "type": "integer",
-                    "description": "ComfyUI only — height in pixels (use 'size' for OpenAI).",
+                    "description": "ComfyUI only — negative prompt. Selects ComfyUI; rejected "
+                    "by the OpenAI backend. Omit unless the user specifically wants one.",
                 },
                 "model": {
                     "type": "string",
-                    "description": "ComfyUI only — checkpoint name. In 'auto' its presence "
-                    "selects ComfyUI. The OpenAI image model is set in config, not here.",
+                    "description": "ComfyUI only — checkpoint name. Selects ComfyUI. The OpenAI "
+                    "image model is set in config, not here. Omit unless a checkpoint is named.",
                 },
             },
             "required": ["prompt"],

@@ -609,10 +609,9 @@ class ImageOpenAIConfig(BaseModel):
     enabled: bool = True  # kill switch for the native wire implementation
     outer_model: str = "gpt-5.5"  # Responses model that hosts the image tool
     image_model: str = "gpt-image-2"  # the image_generation tool's model
-    # Only sizes actually probed against THIS private endpoint are allowed;
-    # widen after verifying each value (the Codex endpoint != public Images API).
-    allowed_sizes: list[str] = Field(default_factory=lambda: ["1024x1024"])
-    default_size: str = "1024x1024"
+    # NOTE: this route IGNORES the requested size and always returns a
+    # backend-selected SQUARE image, so there is no size allowlist — the
+    # selector sends non-square requests to ComfyUI instead.
     # Image-specific deadline (separate from chat). Progress events keep the
     # read timer alive but must not defeat the total.
     request_timeout_seconds: int = 180

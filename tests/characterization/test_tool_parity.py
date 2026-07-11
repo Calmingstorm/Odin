@@ -121,7 +121,7 @@ EXPECTED_TOOL_HASHES = {
     "terraform_ops": "054cd8877208bc7d",
     "http_probe": "dfc3b04b36c5e7f9",
     "issue_tracker": "4f0a793414052b40",
-    "generate_image": "ee28d2ae514c51e0",
+    "generate_image": "ef74ebec4eafcaf1",
     "validate_action": "199baeb4723517d7",
     "email_send": "1282279440e34e6f",
     "email_search": "3a7584b725d1c134",

@@ -23,6 +23,46 @@ def png_dimensions(data: bytes) -> tuple[int, int] | None:
     return width, height
 
 
+# One canonical dimension contract for BOTH backends — the range ComfyUI can
+# actually honor. Requests outside it are rejected (never silently clamped,
+# which would change the caller's aspect ratio).
+MIN_DIM = 64
+MAX_DIM = 2048
+
+
+def parse_size(size: str | None) -> tuple[int, int] | None:
+    """Parse a ``WxH`` size string to ``(width, height)``.
+
+    Returns None for an omitted/empty size. Raises ValueError for a malformed,
+    one-sided, non-integer, or out-of-range value so callers reject before
+    routing rather than guess or clamp.
+    """
+    if not size:
+        return None
+    parts = str(size).strip().lower().split("x")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"malformed size {size!r} (expected WxH)")
+    try:
+        width, height = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise ValueError(f"malformed size {size!r} (expected integer WxH)") from None
+    if not (MIN_DIM <= width <= MAX_DIM) or not (MIN_DIM <= height <= MAX_DIM):
+        raise ValueError(
+            f"size {size!r} out of range — each dimension must be {MIN_DIM}..{MAX_DIM}"
+        )
+    return (width, height)
+
+
+def is_square_size(size: str | None) -> bool:
+    """True when no size is given (unconstrained) or the requested size is square.
+
+    Native OpenAI produces a backend-selected SQUARE image and ignores the
+    requested size, so only square/unspecified requests can be honored there.
+    """
+    dims = parse_size(size)
+    return dims is None or dims[0] == dims[1]
+
+
 @dataclass
 class ImageResult:
     """A generated image, ready for the tool layer to attach.

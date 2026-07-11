@@ -294,9 +294,18 @@ class MediaTools:
         try:
             file = discord.File(io.BytesIO(result.data), filename="generated.png")
             await message.channel.send(file=file)
+            # The selected backend is recorded internally (here + selector logs)
+            # but never surfaced in the user-facing result.
+            log.info(
+                "image generated: backend=%s model=%s decoded=%dx%d",
+                result.backend,
+                result.image_model,
+                result.width,
+                result.height,
+            )
             return (
-                f"Image generated via {result.backend} ({result.image_model}, "
-                f"{result.width}x{result.height}, {len(result.data) / 1024:.1f} KB) and posted."
+                f"Image generated ({result.width}x{result.height}, "
+                f"{len(result.data) / 1024:.1f} KB) and posted."
             )
         except discord.HTTPException as e:
             return f"Failed to upload generated image to Discord: {e}"

@@ -16,6 +16,8 @@ from .base import (
     ImageGenError,
     ImageRequestError,
     ImageResult,
+    is_square_size,
+    parse_size,
 )
 
 log = get_logger("image.selector")
@@ -64,6 +66,32 @@ class ImageBackendSelector:
     def tool_available(self, config=None) -> bool:
         return image_tool_available(config or self.get_config())
 
+    @staticmethod
+    def _resolve_size(size: str | None, width: int | None, height: int | None) -> str | None:
+        """Canonical requested size (``WxH``) or None.
+
+        Explicit ``size`` wins; otherwise legacy ``width``/``height`` (both
+        required) are normalized. Malformed/one-sided/out-of-bounds inputs are
+        rejected here so routing never guesses.
+        """
+        if size:
+            try:
+                dims = parse_size(size)
+            except ValueError as e:
+                raise ImageRequestError(str(e)) from e
+            return f"{dims[0]}x{dims[1]}"  # type: ignore[index]
+        if width is not None and height is not None:
+            # Let parse_size do all validation — never int() raw input (a
+            # non-integer would leak a ValueError; a float would truncate).
+            try:
+                dims = parse_size(f"{width}x{height}")
+            except ValueError as e:
+                raise ImageRequestError(str(e)) from e
+            return f"{dims[0]}x{dims[1]}"  # type: ignore[index]
+        if width is not None or height is not None:
+            raise ImageRequestError("both width and height are required (or use size WxH)")
+        return None
+
     async def generate(
         self,
         *,
@@ -78,56 +106,64 @@ class ImageBackendSelector:
         backend = config.image.backend
         native = self.openai is not None and _native_possible(config)
         comfy = _comfy_possible(config)
-        # ComfyUI-only concepts. Their presence routes to ComfyUI in auto and is
-        # rejected (never silently ignored) under the OpenAI backend.
-        wants_comfy_features = (
-            bool(negative) or bool(model) or width is not None or height is not None
-        )
+
+        req_size = self._resolve_size(size, width, height)
+        # Only `negative` and a checkpoint `model` are genuinely ComfyUI-only;
+        # width/height are just geometry and fold into `req_size`.
+        comfy_only = bool(negative) or bool(model)
+        # Native produces a backend-selected SQUARE image and cannot honor an
+        # aspect ratio, so a non-square request is a ComfyUI-capability request.
+        non_square = not is_square_size(req_size)
+
+        async def _comfy(reason: str = "") -> ImageResult:
+            if reason:
+                log.info("image gen -> ComfyUI (%s)", reason)
+            return await self.comfyui.generate(
+                prompt=prompt, size=req_size, negative=negative, model=model
+            )
 
         if backend == "comfyui":
             if not comfy:
                 raise ImageBackendUnavailableError("ComfyUI is not configured")
-            return await self.comfyui.generate(
-                prompt=prompt, size=size, negative=negative, model=model, width=width, height=height
-            )
+            return await _comfy()
 
         if backend == "openai":
-            if wants_comfy_features:
+            if comfy_only:
                 raise ImageRequestError(
-                    "negative/model/width/height are ComfyUI-only and not supported "
-                    "by the OpenAI backend"
+                    "negative/model are ComfyUI-only and not supported by the OpenAI backend"
+                )
+            if non_square:
+                raise ImageRequestError(
+                    "OpenAI image generation only supports square output on this "
+                    f"authentication route; requested {req_size}"
                 )
             if not native:
                 raise ImageBackendUnavailableError(
                     "Native OpenAI image generation requires the Codex provider and credentials"
                 )
-            return await self.openai.generate(prompt=prompt, size=size)
+            return await self.openai.generate(prompt=prompt, size=req_size)
 
-        # auto — follow the active provider, with ComfyUI as the pre-generation fallback
-        if wants_comfy_features:
+        # auto — capability routing
+        if comfy_only:
             if comfy:
-                return await self.comfyui.generate(
-                    prompt=prompt,
-                    size=size,
-                    negative=negative,
-                    model=model,
-                    width=width,
-                    height=height,
-                )
-            raise ImageRequestError(
-                "negative/model/width/height require ComfyUI, which is not configured"
+                return await _comfy("negative/checkpoint requested")
+            raise ImageRequestError("negative/model require ComfyUI, which is not configured")
+        if non_square:
+            # ComfyUI is the ONLY backend that can produce this shape — never
+            # fall back to native, which would knowingly return a square.
+            if comfy:
+                return await _comfy(f"non-square {req_size}")
+            raise ImageBackendUnavailableError(
+                f"the requested aspect ratio {req_size} needs ComfyUI, which is unavailable; "
+                "the OpenAI backend only produces square images"
             )
         if native:
             try:
-                return await self.openai.generate(prompt=prompt, size=size)
+                return await self.openai.generate(prompt=prompt, size=req_size)
             except ImageGenError as e:
                 if e.pre_generation and comfy:
-                    log.info(
-                        "Native image gen unavailable (%s); falling back to ComfyUI",
-                        type(e).__name__,
-                    )
-                    return await self.comfyui.generate(prompt=prompt, size=size)
+                    return await _comfy(f"native unavailable: {type(e).__name__}")
                 raise
         if comfy:
-            return await self.comfyui.generate(prompt=prompt, size=size)
+            return await _comfy()
         raise ImageBackendUnavailableError("No image backend is available")

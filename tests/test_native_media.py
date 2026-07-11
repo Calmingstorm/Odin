@@ -296,7 +296,8 @@ class TestGenerateImage:
         sel = self._selector(result=self._result(backend="openai"))
         msg = _message()
         out = await _tools(image_selector=sel)._handle_generate_image(msg, {"prompt": "a cat"})
-        assert "Image generated via openai" in out
+        assert "Image generated (1024x1024" in out
+        assert "openai" not in out.lower()  # backend name is NOT surfaced
         msg.channel.send.assert_awaited_once()
 
     async def test_backend_failure_and_http_error(self):
