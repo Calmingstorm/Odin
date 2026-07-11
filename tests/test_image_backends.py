@@ -259,6 +259,28 @@ async def test_no_failover_after_200_then_transport_break():
     assert b._session.posts == 1
 
 
+async def test_no_failover_when_response_cleanup_fails_after_success():
+    # A successful 200 stream whose response __aexit__ then raises must NOT retry
+    # another account — that double-generates after the account is pinned.
+    pool = _FakePool(count=3)
+
+    class _AexitFailResp(_FakeResp):
+        async def __aexit__(self, *a):
+            raise aiohttp.ClientError("cleanup boom")
+
+    b, _ = _backend(
+        pool,
+        [
+            _AexitFailResp(200, (_sse(_final_image_event()),)),
+            _FakeResp(200, (_sse(_final_image_event()),)),  # must NOT be reached
+        ],
+    )
+    with pytest.raises(ImageTransportError) as ei:
+        await b.generate(prompt="p")
+    assert ei.value.pre_generation is False
+    assert b._session.posts == 1  # exactly one POST — no double generation
+
+
 async def test_oversized_decoded_image_rejected():
     big = base64.b64encode(PNG_1x1 + b"\x00" * 5000).decode()
     pool = _FakePool()

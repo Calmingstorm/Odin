@@ -130,6 +130,7 @@ class OpenAIImageBackend(ImageBackend):
                 # can fall back to ComfyUI. Never surface the raw pool error.
                 last_err = ImageQuotaError("no healthy Codex account for image generation")
                 break
+            committed = False
             try:
                 async with session.post(
                     CODEX_IMAGE_URL,
@@ -138,8 +139,10 @@ class OpenAIImageBackend(ImageBackend):
                     timeout=timeout,
                 ) as resp:
                     if resp.status == 200:
-                        # Accepted — pinned. Stream errors from here on are
-                        # post-generation and propagate WITHOUT failover.
+                        # Accepted — PINNED. Everything from here (stream AND the
+                        # response context manager's own cleanup) is
+                        # post-generation: no failover, no fallback.
+                        committed = True
                         result = await self._read_stream(resp, icfg)
                         self.breaker.record_success()
                         return result
@@ -162,6 +165,15 @@ class OpenAIImageBackend(ImageBackend):
                     # bad prompt must not disable image generation for everyone.
                     raise ImageRequestError(f"image request rejected (HTTP {resp.status})")
             except (TimeoutError, aiohttp.ClientError) as e:
+                if committed:
+                    # A 200 was accepted; this is the response context manager's
+                    # own cleanup failing AFTER the image was produced. Pinned —
+                    # never fail over (that would generate twice). The endpoint
+                    # was healthy, so don't count it against the breaker either.
+                    raise ImageTransportError(
+                        f"image response cleanup error: {type(e).__name__}",
+                        pre_generation=False,
+                    ) from e
                 # Pre-response transport failure (connection/handshake) — a
                 # mid-stream break after 200 is caught inside _read_stream and
                 # re-raised as a non-failover ImageTransportError instead.
