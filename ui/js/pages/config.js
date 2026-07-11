@@ -199,7 +199,9 @@ export default {
           <div v-if="expandedGroups[group.key]" class="cfg-group-body">
             <div v-for="section in group.sections" :key="section" class="cfg-section">
               <!-- Section header -->
-              <div class="cfg-section-header cursor-pointer select-none" @click="toggleSection(section)">
+              <div class="cfg-section-header cursor-pointer select-none" role="button" tabindex="0"
+                     :aria-expanded="expanded[section]" @click="toggleSection(section)"
+                     @keydown.enter="toggleSection(section)" @keydown.space.prevent="toggleSection(section)">
                 <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon :name="expanded[section] ? 'chevronUp' : 'chevronDown'" :size="13" /></span>
                 <span class="cfg-section-name">{{ section }}</span>
                 <span class="badge badge-info text-xs"
@@ -361,7 +363,9 @@ export default {
 
         <!-- Ungrouped sections (fallback) -->
         <div v-for="section in ungroupedSections" :key="section" class="hm-card">
-          <div class="cfg-section-header cursor-pointer select-none" @click="toggleSection(section)">
+          <div class="cfg-section-header cursor-pointer select-none" role="button" tabindex="0"
+                     :aria-expanded="expanded[section]" @click="toggleSection(section)"
+                     @keydown.enter="toggleSection(section)" @keydown.space.prevent="toggleSection(section)">
             <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon :name="expanded[section] ? 'chevronUp' : 'chevronDown'" :size="13" /></span>
             <span class="cfg-section-name">{{ section }}</span>
           </div>

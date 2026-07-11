@@ -104,7 +104,8 @@ export default {
       <div v-else class="mem-tree">
         <div v-for="scope in scopes" :key="scope.name" class="mem-tree-node">
           <!-- Scope header -->
-          <div class="mem-tree-header" @click="toggleScope(scope.name)">
+          <div class="mem-tree-header" role="button" tabindex="0" :aria-expanded="expanded[scope.name]"
+               @click="toggleScope(scope.name)" @keydown.enter="toggleScope(scope.name)" @keydown.space.prevent="toggleScope(scope.name)">
             <span class="mem-tree-arrow" aria-hidden="true">
               <odin-icon :name="expanded[scope.name] ? 'chevronUp' : 'chevronDown'" :size="14" />
             </span>

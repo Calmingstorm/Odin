@@ -173,8 +173,11 @@ export default {
                   <span class="text-gray-600 text-xs">Ingested: {{ formatTs(s.ingested_at) }}</span>
                 </div>
                 <div v-for="chunk in sourceChunks[s.source || s.name || s]" :key="chunk.chunk_id"
-                     class="kb-chunk-item" :class="{ 'kb-chunk-selected': selectedChunk === chunk.chunk_id }"
-                     @click="selectedChunk = selectedChunk === chunk.chunk_id ? null : chunk.chunk_id">
+                     class="kb-chunk-item" role="button" tabindex="0" :aria-expanded="selectedChunk === chunk.chunk_id"
+                     :class="{ 'kb-chunk-selected': selectedChunk === chunk.chunk_id }"
+                     @click="selectedChunk = selectedChunk === chunk.chunk_id ? null : chunk.chunk_id"
+                     @keydown.enter="selectedChunk = selectedChunk === chunk.chunk_id ? null : chunk.chunk_id"
+                     @keydown.space.prevent="selectedChunk = selectedChunk === chunk.chunk_id ? null : chunk.chunk_id">
                   <div class="kb-chunk-item-header">
                     <span class="kb-chunk-index">#{{ chunk.chunk_index }}</span>
                     <span class="kb-chunk-chars">{{ chunk.char_count }} chars</span>

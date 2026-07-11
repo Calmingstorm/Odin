@@ -87,15 +87,15 @@ export default {
         </div>
         <!-- Custom presets -->
         <div v-if="customPresets.length > 0" class="flex gap-1.5 flex-wrap mt-2">
-          <button v-for="cp in customPresets" :key="cp.id"
-                  @click="applyCustomPreset(cp)"
-                  class="sess-preset-chip sess-preset-custom"
-                  :class="{ 'sess-preset-active': activePreset === cp.id }">
-            <odin-icon name="sparkles" :size="14" />
-            <span>{{ cp.name }}</span>
-            <span class="sess-preset-remove" @click.stop="removeCustomPreset(cp.id)"
-                  title="Remove preset">&times;</span>
-          </button>
+          <div v-for="cp in customPresets" :key="cp.id" class="sess-preset-chip sess-preset-custom"
+               :class="{ 'sess-preset-active': activePreset === cp.id }">
+            <button type="button" class="inline-flex items-center gap-1" @click="applyCustomPreset(cp)">
+              <odin-icon name="sparkles" :size="14" />
+              <span>{{ cp.name }}</span>
+            </button>
+            <button type="button" class="sess-preset-remove" @click="removeCustomPreset(cp.id)"
+                  :aria-label="'Remove preset ' + cp.name" title="Remove preset">&times;</button>
+          </div>
         </div>
       </div>
 
@@ -187,7 +187,9 @@ export default {
                class="session-card hm-card"
                :class="{ 'flash-new': s._updated, 'session-selected': selected.has(s.channel_id) }">
             <!-- Header row -->
-            <div class="flex items-center gap-3 cursor-pointer" @click="toggleSession(s.channel_id)">
+            <div class="flex items-center gap-3 cursor-pointer" role="button" tabindex="0"
+                 :aria-expanded="expandedId === s.channel_id" @click="toggleSession(s.channel_id)"
+                 @keydown.enter="toggleSession(s.channel_id)" @keydown.space.prevent="toggleSession(s.channel_id)">
               <input type="checkbox" :checked="selected.has(s.channel_id)"
                      @click.stop @change="toggleSelect(s.channel_id)"
                      class="session-checkbox" />

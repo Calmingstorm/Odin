@@ -194,11 +194,11 @@ export default {
                   <tr v-for="a in codexData.accounts" :key="a.index">
                     <td class="text-gray-400">{{ a.index + 1 }}</td>
                     <td>
-                      <span v-if="editingLabel !== a.index" class="text-gray-200 cursor-pointer hover:text-indigo-300"
-                            @click="startEditLabel(a.index, a.label)">
+                      <button v-if="editingLabel !== a.index" type="button" class="text-gray-200 cursor-pointer hover:text-indigo-300 inline-flex items-center"
+                            @click="startEditLabel(a.index, a.label)" :aria-label="'Edit label for account ' + (a.index + 1)">
                         {{ a.label || '—' }}
-                        <span class="text-gray-600 ml-1"><odin-icon name="edit" :size="12" /></span>
-                      </span>
+                        <span class="text-gray-600 ml-1" aria-hidden="true"><odin-icon name="edit" :size="12" /></span>
+                      </button>
                       <span v-else class="flex items-center gap-1">
                         <input v-model="labelValue" @keydown.enter="saveLabel(a.index)" @keydown.escape="editingLabel = null"
                                class="bg-gray-900 border border-gray-600 rounded px-2 py-0.5 text-sm text-gray-300 w-32" />

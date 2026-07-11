@@ -107,7 +107,8 @@ export default {
             <div class="tl-tool-grid">
               <div v-for="t in group.tools" :key="t.name"
                    class="tl-tool-card" :class="{ 'tl-tool-card-active': stats[t.name] > 0 }"
-                   @click="toggleExpand(t.name)">
+                   role="button" tabindex="0" :aria-expanded="!!expanded[t.name]"
+                   @click="toggleExpand(t.name)" @keydown.enter="toggleExpand(t.name)" @keydown.space.prevent="toggleExpand(t.name)">
                 <div class="tl-tool-header">
                   <span class="tl-tool-name">{{ t.name }}</span>
                 </div>
@@ -155,7 +156,8 @@ export default {
               </thead>
               <tbody>
                 <template v-for="t in group.tools" :key="t.name">
-                  <tr class="cursor-pointer" @click="toggleExpand(t.name)">
+                  <tr class="cursor-pointer" role="button" tabindex="0" :aria-expanded="!!expanded[t.name]"
+                      @click="toggleExpand(t.name)" @keydown.enter="toggleExpand(t.name)" @keydown.space.prevent="toggleExpand(t.name)">
                     <td class="font-mono text-sm whitespace-nowrap">
                       <span class="tool-expand-icon text-gray-600 mr-1" aria-hidden="true"><odin-icon :name="expanded[t.name] ? 'chevronUp' : 'chevronDown'" :size="13" /></span>
                       {{ t.name }}

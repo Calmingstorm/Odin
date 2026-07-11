@@ -190,8 +190,9 @@ export default {
               <div v-for="(it, idx) in singleTrace.iterations" :key="idx"
                    class="border border-gray-700 rounded p-3 hover:border-gray-600 transition-colors">
                 <!-- Iteration header -->
-                <div class="flex items-center justify-between cursor-pointer"
-                     @click="toggleIteration('single', idx)">
+                <div class="flex items-center justify-between cursor-pointer" role="button" tabindex="0"
+                     @click="toggleIteration('single', idx)" @keydown.enter="toggleIteration('single', idx)"
+                     @keydown.space.prevent="toggleIteration('single', idx)">
                   <div class="flex items-center gap-2">
                     <span class="text-xs font-mono font-semibold text-gray-400">#{{ it.iteration + 1 }}</span>
                     <div class="flex gap-1 flex-wrap">
@@ -304,7 +305,8 @@ export default {
               </thead>
               <tbody>
                 <template v-for="(e, i) in entries" :key="i">
-                <tr @click="toggleExpand(i)" style="cursor:pointer;"
+                <tr @click="toggleExpand(i)" @keydown.enter="toggleExpand(i)" @keydown.space.prevent="toggleExpand(i)"
+                    role="button" tabindex="0" :aria-expanded="expandedIdx === i" style="cursor:pointer;"
                     :class="expandedIdx === i ? 'bg-gray-800/50' : ''">
                   <td class="text-xs text-gray-400 font-mono whitespace-nowrap">{{ formatTs(e.timestamp) }}</td>
                   <td class="text-xs font-mono">{{ e.user_name || e.user_id || '\u2014' }}</td>
@@ -375,8 +377,9 @@ export default {
                 <div class="space-y-2">
                   <div v-for="(it, idx) in entries[expandedIdx].iterations" :key="idx"
                        class="border border-gray-700 rounded p-3 hover:border-gray-600 transition-colors">
-                    <div class="flex items-center justify-between cursor-pointer"
-                         @click.stop="toggleIteration('list', idx)">
+                    <div class="flex items-center justify-between cursor-pointer" role="button" tabindex="0"
+                         @click.stop="toggleIteration('list', idx)" @keydown.enter.stop="toggleIteration('list', idx)"
+                         @keydown.space.prevent.stop="toggleIteration('list', idx)">
                       <div class="flex items-center gap-2">
                         <span class="text-xs font-mono font-semibold text-gray-400">#{{ it.iteration + 1 }}</span>
                         <div class="flex gap-1 flex-wrap">

@@ -86,7 +86,8 @@ export default {
           </thead>
           <tbody>
             <template v-for="(e, i) in entries" :key="i">
-            <tr @click="toggleExpand(i)" style="cursor:pointer;"
+            <tr @click="toggleExpand(i)" @keydown.enter="toggleExpand(i)" @keydown.space.prevent="toggleExpand(i)"
+                role="button" tabindex="0" :aria-expanded="expandedIdx === i" style="cursor:pointer;"
                 :class="expandedIdx === i ? 'bg-gray-800/50' : ''">
               <td class="text-xs text-gray-400 font-mono whitespace-nowrap">{{ formatTs(e.timestamp) }}</td>
               <td class="font-mono text-xs">{{ e.tool || e.tool_name || '—' }}</td>
