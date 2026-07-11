@@ -686,7 +686,10 @@ export default {
     // Keyboard shortcuts for undo/redo
     function handleKeydown(e) {
       if (!editing.value) return;
-      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
+      const target = e.target;
+      if (target instanceof HTMLElement &&
+          (target.matches('input, textarea, select') || target.isContentEditable)) return;
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         undo();
       } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z') || (e.shiftKey && e.key === 'Z'))) {

@@ -4,7 +4,7 @@
  * + server-side search/history mode (Round 5)
  */
 import { api, ws } from '../api.js';
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
 
 
 const LOG_LEVELS = ['INFO', 'WARNING', 'ERROR'];
@@ -890,29 +890,41 @@ export default {
       }
     }
 
-    // Track WS connection status via state callback
+    // The tab host uses <keep-alive>, so subscription ownership follows
+    // activation rather than mount/unmount. Hidden Logs tabs must not retain
+    // the global WebSocket state callback.
     let prevStateHandler = null;
+    let logsStateHandler = null;
+    let logStreamActive = false;
 
-    onMounted(() => {
-      loadCustomLogPresets();
+    function activateLogStream() {
+      if (logStreamActive) return;
+      logStreamActive = true;
       ws.subscribe('logs', onLog);
       subscribed.value = ws.connected;
       wsState.value = ws.state || 'disconnected';
       prevStateHandler = ws.onStateChange;
-      const origHandler = ws.onStateChange;
-      ws.onStateChange = (state, detail) => {
+      logsStateHandler = (state, detail) => {
         wsState.value = state;
         subscribed.value = state === 'connected';
-        if (origHandler) origHandler(state, detail);
+        if (prevStateHandler) prevStateHandler(state, detail);
       };
-    });
+      ws.onStateChange = logsStateHandler;
+    }
 
-    onUnmounted(() => {
+    function deactivateLogStream() {
+      if (!logStreamActive) return;
+      logStreamActive = false;
       ws.unsubscribe('logs', onLog);
-      if (prevStateHandler !== undefined) {
-        ws.onStateChange = prevStateHandler;
-      }
-    });
+      if (ws.onStateChange === logsStateHandler) ws.onStateChange = prevStateHandler;
+      logsStateHandler = null;
+      prevStateHandler = null;
+    }
+
+    onMounted(loadCustomLogPresets);
+    onActivated(activateLogStream);
+    onDeactivated(deactivateLogStream);
+    onUnmounted(deactivateLogStream);
 
     return {
       mode,

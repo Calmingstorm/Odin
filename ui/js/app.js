@@ -25,8 +25,13 @@ import { createRouter, createWebHashHistory } from 'vue-router';
 
 
 // ---------------------------------------------------------------------------
-// Router — 6 top-level items, sub-pages rendered as tabs within each
+// Router — grouped top-level items, sub-pages rendered as tabs within each
 // ---------------------------------------------------------------------------
+const legacyTabRedirect = (path, tab) => to => ({
+  path,
+  query: { ...to.query, tab },
+});
+
 const routes = [
   { path: '/',              redirect: '/dashboard' },
   { path: '/dashboard',     component: DashboardPage,    meta: { label: 'Dashboard',    icon: 'dashboard',    section: 'Workspace', description: 'System posture and recent activity' } },
@@ -37,26 +42,26 @@ const routes = [
   { path: '/personality',   component: PersonalityPage,   meta: { label: 'Personality',  icon: 'personality',  section: 'Manage',    description: 'Behavior and response profile' } },
   { path: '/system',        component: SystemPage,        meta: { label: 'System',       icon: 'system',       section: 'Manage',    description: 'Health, configuration, access, and updates' } },
   // Redirects from old routes to new grouped locations. Preserve deep links.
-  { path: '/execution',  redirect: { path: '/operations', query: { tab: 'live' } } },
-  { path: '/agents',     redirect: { path: '/operations', query: { tab: 'agents' } } },
-  { path: '/loops',      redirect: { path: '/operations', query: { tab: 'loops' } } },
-  { path: '/processes',  redirect: { path: '/operations', query: { tab: 'processes' } } },
-  { path: '/schedules',  redirect: { path: '/operations', query: { tab: 'schedules' } } },
-  { path: '/audit',      redirect: { path: '/history', query: { tab: 'audit' } } },
-  { path: '/sessions',   redirect: { path: '/history', query: { tab: 'sessions' } } },
-  { path: '/traces',     redirect: { path: '/history', query: { tab: 'traces' } } },
-  { path: '/usage',      redirect: { path: '/history', query: { tab: 'usage' } } },
-  { path: '/tools',      redirect: { path: '/capabilities', query: { tab: 'tools' } } },
-  { path: '/skills',     redirect: { path: '/capabilities', query: { tab: 'skills' } } },
-  { path: '/knowledge',  redirect: { path: '/capabilities', query: { tab: 'knowledge' } } },
-  { path: '/memory',     redirect: { path: '/capabilities', query: { tab: 'memory' } } },
-  { path: '/learned',    redirect: { path: '/capabilities', query: { tab: 'learned' } } },
-  { path: '/health',     redirect: { path: '/system', query: { tab: 'health' } } },
-  { path: '/resources',  redirect: { path: '/system', query: { tab: 'resources' } } },
-  { path: '/logs',       redirect: { path: '/system', query: { tab: 'logs' } } },
-  { path: '/config',     redirect: { path: '/system', query: { tab: 'config' } } },
-  { path: '/host-access', redirect: { path: '/system', query: { tab: 'host-access' } } },
-  { path: '/internals',  redirect: { path: '/system', query: { tab: 'internals' } } },
+  { path: '/execution',  redirect: legacyTabRedirect('/operations', 'live') },
+  { path: '/agents',     redirect: legacyTabRedirect('/operations', 'agents') },
+  { path: '/loops',      redirect: legacyTabRedirect('/operations', 'loops') },
+  { path: '/processes',  redirect: legacyTabRedirect('/operations', 'processes') },
+  { path: '/schedules',  redirect: legacyTabRedirect('/operations', 'schedules') },
+  { path: '/audit',      redirect: legacyTabRedirect('/history', 'audit') },
+  { path: '/sessions',   redirect: legacyTabRedirect('/history', 'sessions') },
+  { path: '/traces',     redirect: legacyTabRedirect('/history', 'traces') },
+  { path: '/usage',      redirect: legacyTabRedirect('/history', 'usage') },
+  { path: '/tools',      redirect: legacyTabRedirect('/capabilities', 'tools') },
+  { path: '/skills',     redirect: legacyTabRedirect('/capabilities', 'skills') },
+  { path: '/knowledge',  redirect: legacyTabRedirect('/capabilities', 'knowledge') },
+  { path: '/memory',     redirect: legacyTabRedirect('/capabilities', 'memory') },
+  { path: '/learned',    redirect: legacyTabRedirect('/capabilities', 'learned') },
+  { path: '/health',     redirect: legacyTabRedirect('/system', 'health') },
+  { path: '/resources',  redirect: legacyTabRedirect('/system', 'resources') },
+  { path: '/logs',       redirect: legacyTabRedirect('/system', 'logs') },
+  { path: '/config',     redirect: legacyTabRedirect('/system', 'config') },
+  { path: '/host-access', redirect: legacyTabRedirect('/system', 'host-access') },
+  { path: '/internals',  redirect: legacyTabRedirect('/system', 'internals') },
 ];
 
 const router = createRouter({
@@ -140,7 +145,11 @@ const App = {
     </div>
     <login-screen v-else-if="authState === 'login'" :on-login="onLogin" :session-expired="sessionExpired" />
     <div v-else class="app-shell">
-      <aside ref="sidebarEl" class="hm-sidebar" :class="{ collapsed: sidebarCollapsed, 'mobile-open': mobileOpen }" aria-label="Primary navigation">
+      <aside ref="sidebarEl" class="hm-sidebar" :class="{ collapsed: sidebarCollapsed, 'mobile-open': mobileOpen }"
+             :role="isMobileViewport && mobileOpen ? 'dialog' : undefined"
+             :aria-modal="isMobileViewport && mobileOpen ? 'true' : undefined"
+             :aria-hidden="isMobileViewport && !mobileOpen ? 'true' : undefined"
+             :inert="isMobileViewport && !mobileOpen" aria-label="Primary navigation">
         <div class="sidebar-brand">
           <div class="brand-mark" aria-hidden="true"><odin-icon name="brand" :size="24" /></div>
           <div class="sidebar-brand-copy">
@@ -193,10 +202,11 @@ const App = {
 
       <div v-if="mobileOpen" class="mobile-scrim" @click="mobileOpen = false" aria-hidden="true"></div>
 
-      <main id="main-content" class="hm-main" role="main">
+      <main id="main-content" class="hm-main" role="main" :inert="isMobileViewport && mobileOpen">
         <header class="hm-topbar" role="banner">
           <button ref="mobileMenuButton" class="icon-btn mobile-menu-btn" @click="toggleMobileNavigation"
-                  :aria-expanded="mobileOpen" aria-controls="sidebar-nav" aria-label="Open navigation menu">
+                  :aria-expanded="mobileOpen" aria-controls="sidebar-nav"
+                  :aria-label="mobileOpen ? 'Close navigation menu' : 'Open navigation menu'">
             <odin-icon name="menu" :size="20" />
           </button>
           <div class="topbar-context">
@@ -234,6 +244,8 @@ const App = {
     const mobileOpen = ref(false);
     const sidebarEl = ref(null);
     const mobileMenuButton = ref(null);
+    const isMobileViewport = ref(false);
+    let mobileMedia = null;
     let mobileReturnFocus = null;
     const wsConnected = ref(false);
     const wsState = ref('disconnected'); // disconnected | connecting | connected | reconnecting
@@ -295,9 +307,17 @@ const App = {
       }
     }
 
+    function syncMobileViewport() {
+      isMobileViewport.value = Boolean(mobileMedia?.matches);
+      if (!isMobileViewport.value) mobileOpen.value = false;
+    }
+
     // Check auth on mount
     onMounted(async () => {
       document.addEventListener('keydown', onKeydown);
+      mobileMedia = window.matchMedia('(max-width: 900px)');
+      syncMobileViewport();
+      mobileMedia.addEventListener('change', syncMobileViewport);
       const check = await api.check();
       if (check.ok) {
         authState.value = 'ready';
@@ -400,13 +420,14 @@ const App = {
       if (statusInterval) clearInterval(statusInterval);
       ws.disconnect();
       document.removeEventListener('keydown', onKeydown);
+      mobileMedia?.removeEventListener('change', syncMobileViewport);
     });
 
     return {
       authState, sessionExpired, sidebarCollapsed, mobileOpen, wsConnected,
       wsState, wsLatency, wsLabel, wsToast,
       botStatus, botUptime, navRoutes, navGroups,
-      currentPage, currentSection, currentDescription, sidebarEl, mobileMenuButton,
+      currentPage, currentSection, currentDescription, sidebarEl, mobileMenuButton, isMobileViewport,
       onLogin, logout, toggleSidebar, toggleMobileNavigation, openPalette,
     };
   },
