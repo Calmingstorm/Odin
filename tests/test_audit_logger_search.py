@@ -123,3 +123,27 @@ class TestChainAndRotation:
         await _exec(logger, result_summary="x" * 200)  # one entry already > cap
         await _exec(logger, result_summary="y" * 200)  # triggers rotation
         assert (tmp_path / "rot.jsonl.1").exists()
+
+
+class TestAuditMetadata:
+    """Structured audit_metadata (e.g. image backend/route) is persisted and
+    searchable, so a later lookup can answer 'which backend?' truthfully."""
+
+    async def test_metadata_persisted_and_searchable(self, logger):
+        meta = {
+            "backend": "openai",
+            "route": "auto_native",
+            "fallback_reason": None,
+            "decoded_width": 1536,
+            "decoded_height": 1024,
+            "delivery_status": "posted",
+        }
+        await _exec(logger, tool_name="generate_image", audit_metadata=meta)
+        results = await logger.search(tool_name="generate_image")
+        assert len(results) == 1
+        assert results[0]["audit_metadata"] == meta
+
+    async def test_no_metadata_key_when_absent(self, logger):
+        await _exec(logger, tool_name="run_command")
+        results = await logger.search(tool_name="run_command")
+        assert "audit_metadata" not in results[0]

@@ -262,10 +262,16 @@ class MediaTools:
             "__prompt__": prompt,
         }
 
-    async def _handle_generate_image(self, message, inp: dict) -> str:
+    async def _handle_generate_image(self, message, inp: dict):
         """Generate an image via the selected backend and post as a Discord
-        attachment. The backend returns bytes; this tool layer owns Discord."""
+        attachment. The backend returns bytes; this tool layer owns Discord.
+
+        Returns a ToolResult whose ``output`` is a generic user-facing string
+        (never names the backend) plus ``audit_metadata`` — a bounded structured
+        record so ``search_audit`` can answer "which backend?" when asked.
+        """
         from ...tools.image import ImageGenError
+        from ...tools.result_validator import ToolResult
 
         if self.image_selector is None:
             return "Image generation is not available."
@@ -291,21 +297,37 @@ class MediaTools:
             log.warning("image generation raised unexpectedly", exc_info=True)
             return "Image generation failed unexpectedly."
 
+        # Non-sensitive structured record — enums + decoded dims only.
+        meta: dict = {
+            "backend": result.backend,
+            "route": result.route,
+            "fallback_reason": result.fallback_reason,
+            "decoded_width": result.width,
+            "decoded_height": result.height,
+        }
         try:
             file = discord.File(io.BytesIO(result.data), filename="generated.png")
             await message.channel.send(file=file)
-            # The selected backend is recorded internally (here + selector logs)
-            # but never surfaced in the user-facing result.
-            log.info(
-                "image generated: backend=%s model=%s decoded=%dx%d",
-                result.backend,
-                result.image_model,
-                result.width,
-                result.height,
+        except discord.HTTPException as e:
+            # Generation succeeded even though delivery failed — record both.
+            meta["delivery_status"] = "upload_failed"
+            log.info("image generated (backend=%s) but upload failed: %s", result.backend, e)
+            return ToolResult(
+                output=f"Failed to upload generated image to Discord: {e}",
+                tool_name="generate_image",
+                audit_metadata=meta,
             )
-            return (
+
+        meta["delivery_status"] = "posted"
+        log.info(
+            "image generated: backend=%s model=%s decoded=%dx%d route=%s",
+            result.backend, result.image_model, result.width, result.height, result.route,
+        )
+        return ToolResult(
+            output=(
                 f"Image generated ({result.width}x{result.height}, "
                 f"{len(result.data) / 1024:.1f} KB) and posted."
-            )
-        except discord.HTTPException as e:
-            return f"Failed to upload generated image to Discord: {e}"
+            ),
+            tool_name="generate_image",
+            audit_metadata=meta,
+        )

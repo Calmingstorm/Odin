@@ -17,7 +17,6 @@ from .base import (
     ImageRequestError,
     ImageResult,
     ImageTransportError,
-    is_square_size,
     parse_size,
     png_dimensions,
 )
@@ -36,7 +35,6 @@ __all__ = [
     "ImageTransportError",
     "ComfyUIImageBackend",
     "OpenAIImageBackend",
-    "is_square_size",
     "parse_size",
     "png_dimensions",
 ]

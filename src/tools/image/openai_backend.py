@@ -32,7 +32,6 @@ from .base import (
     ImageRequestError,
     ImageResult,
     ImageTransportError,
-    is_square_size,
     png_dimensions,
 )
 
@@ -100,20 +99,24 @@ class OpenAIImageBackend(ImageBackend):
         if pool is None or not pool.is_configured():
             raise ImageBackendUnavailableError("No Codex credentials for native image generation")
 
-        # Defense in depth: the selector routes non-square requests to ComfyUI,
-        # but native only ever produces a square image, so refuse a non-square
-        # size here too rather than silently returning the wrong shape.
-        if not is_square_size(size):
+        # Defense in depth: native ignores the requested size and picks its own
+        # dimensions, so it can't honor ANY specific size. The selector routes
+        # every sized request to ComfyUI; refuse one here too rather than
+        # pretending we honored it.
+        if size is not None:
             raise ImageRequestError(
-                "the OpenAI backend only produces square images "
-                f"(requested {size})"
+                "the OpenAI backend chooses its own dimensions and cannot honor a "
+                f"requested size ({size})"
             )
 
         # An open image breaker is pre-generation — let auto fall back to ComfyUI.
         try:
             self.breaker.check()
         except CircuitOpenError as e:
-            raise ImageTransportError("image endpoint breaker open", pre_generation=True) from e
+            raise ImageTransportError(
+                "image endpoint breaker open", pre_generation=True,
+                reason="pre_response_transport",
+            ) from e
 
         body = self._body(icfg, prompt)
         session = await self._get_session()
@@ -133,7 +136,9 @@ class OpenAIImageBackend(ImageBackend):
             except RuntimeError:
                 # Pool exhausted / no healthy account — pre-generation, so auto
                 # can fall back to ComfyUI. Never surface the raw pool error.
-                last_err = ImageQuotaError("no healthy Codex account for image generation")
+                last_err = ImageQuotaError(
+                    "no healthy Codex account for image generation", reason="pool_exhausted"
+                )
                 break
             committed = False
             try:
@@ -154,16 +159,23 @@ class OpenAIImageBackend(ImageBackend):
 
                     if resp.status == 429:
                         await pool.mark_limited(idx)
-                        last_err = ImageQuotaError("usage limit reached (HTTP 429)")
+                        last_err = ImageQuotaError(
+                            "usage limit reached (HTTP 429)", reason="quota"
+                        )
                         continue
                     if resp.status == 401:
                         await pool.mark_auth_failed(idx)
-                        last_err = ImageQuotaError("account authentication failed (HTTP 401)")
+                        last_err = ImageQuotaError(
+                            "account authentication failed (HTTP 401)",
+                            reason="account_unavailable",
+                        )
                         continue
                     if resp.status in (500, 502, 503, 504):
                         # Endpoint health — this one counts against the breaker.
                         self.breaker.record_failure()
-                        last_err = ImageTransportError(f"image endpoint HTTP {resp.status}")
+                        last_err = ImageTransportError(
+                            f"image endpoint HTTP {resp.status}", reason="pre_response_transport"
+                        )
                         continue
                     # Other 4xx: request-level (bad params / content policy). Do
                     # NOT fail over, fall back, OR poison the shared breaker — a
@@ -183,12 +195,17 @@ class OpenAIImageBackend(ImageBackend):
                 # mid-stream break after 200 is caught inside _read_stream and
                 # re-raised as a non-failover ImageTransportError instead.
                 self.breaker.record_failure()
-                last_err = ImageTransportError(f"image request transport error: {type(e).__name__}")
+                last_err = ImageTransportError(
+                    f"image request transport error: {type(e).__name__}",
+                    reason="pre_response_transport",
+                )
                 continue
 
         if last_err is not None:
             raise last_err
-        raise ImageQuotaError("no healthy Codex account for image generation")
+        raise ImageQuotaError(
+            "no healthy Codex account for image generation", reason="pool_exhausted"
+        )
 
     async def _read_stream(self, resp: aiohttp.ClientResponse, icfg) -> ImageResult:
         """Parse the SSE stream and return the single terminal image.

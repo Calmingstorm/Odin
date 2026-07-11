@@ -184,5 +184,11 @@ class KnowledgeTools:
             summary = entry.get("result_summary", "")[:200]
             err = entry.get("error")
             status = f"ERROR: {err}" if err else summary
-            lines.append(f"[{ts}] **{tool}** by {user} ({approved}, {elapsed}ms)\n  {status}")
+            line = f"[{ts}] **{tool}** by {user} ({approved}, {elapsed}ms)\n  {status}"
+            meta = entry.get("audit_metadata")
+            if isinstance(meta, dict) and meta:
+                # Structured record (e.g. which image backend actually ran).
+                rendered = " ".join(f"{k}={v}" for k, v in meta.items())
+                line += f"\n  [{rendered}]"
+            lines.append(line)
         return f"**Audit log ({len(results)} entries):**\n" + "\n".join(lines)

@@ -160,10 +160,10 @@ TOOLS_SECTION: list[dict] = [
                 },
                 "size": {
                     "type": "string",
-                    "description": "Optional size as WxH (e.g. '1024x1024' or '1536x1024'). "
-                    "A non-square size is served by ComfyUI (native OpenAI only produces "
-                    "square images). Omit for the default; do not pass unless the user "
-                    "asked for a specific size.",
+                    "description": "Optional size as WxH (e.g. '1024x1024', '1536x1024'). Any "
+                    "specified size selects ComfyUI; OMIT it to let the native backend choose "
+                    "its own dimensions and aspect ratio. Only pass it if the user asked for a "
+                    "specific size.",
                 },
                 "negative": {
                     "type": "string",

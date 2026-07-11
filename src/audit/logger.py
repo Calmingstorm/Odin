@@ -192,6 +192,7 @@ class AuditLogger:
         diff: str | None = None,
         risk_level: str | None = None,
         risk_reason: str | None = None,
+        audit_metadata: dict | None = None,
     ) -> None:
         entry = {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -220,6 +221,10 @@ class AuditLogger:
             entry["risk_level"] = risk_level
         if risk_reason:
             entry["risk_reason"] = risk_reason
+        if audit_metadata:
+            # Bounded structured metadata (e.g. image backend/route/dims) — the
+            # caller guarantees no prompts, IDs, or payloads.
+            entry["audit_metadata"] = audit_metadata
         await self._persist(entry)
 
     async def log_event(
