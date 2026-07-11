@@ -9,34 +9,27 @@ from ..comfyui import ComfyUIClient
 from .base import (
     ImageBackend,
     ImageBackendUnavailableError,
+    ImageRequestError,
     ImageResult,
     ImageTransportError,
+    parse_size,
     png_dimensions,
 )
 
 log = get_logger("image.comfyui")
 
 
-def _parse_size(size: str | None, width: int | None, height: int | None) -> tuple[int, int]:
-    """Resolve a WxH pair from an explicit size string or width/height args.
+def _resolve_size(size: str | None, width: int | None, height: int | None) -> tuple[int, int]:
+    """Resolve a WxH pair, defaulting to 1024x1024.
 
-    Explicit width/height (a ComfyUI-only concept) win; otherwise parse the
-    backend-neutral ``size`` string; default 1024x1024. Clamped to a sane range.
+    Uses the ONE canonical contract (``parse_size``) shared with the selector —
+    out-of-range values are rejected, never clamped, so an accepted request's
+    aspect ratio is never silently altered. Raises ValueError on invalid input.
     """
-    w, h = 1024, 1024
-    if size and "x" in size:
-        try:
-            sw, sh = size.lower().split("x", 1)
-            w, h = int(sw), int(sh)
-        except ValueError:
-            pass
-    if width:
-        w = int(width)
-    if height:
-        h = int(height)
-    w = max(64, min(2048, w))
-    h = max(64, min(2048, h))
-    return w, h
+    dims = parse_size(size)
+    if dims is None and width is not None and height is not None:
+        dims = parse_size(f"{width}x{height}")
+    return dims if dims is not None else (1024, 1024)
 
 
 class ComfyUIImageBackend(ImageBackend):
@@ -60,7 +53,10 @@ class ComfyUIImageBackend(ImageBackend):
         if not config.comfyui.enabled:
             raise ImageBackendUnavailableError("ComfyUI is not enabled")
 
-        w, h = _parse_size(size, width, height)
+        try:
+            w, h = _resolve_size(size, width, height)
+        except ValueError as e:
+            raise ImageRequestError(str(e)) from e
         client = ComfyUIClient(
             config.comfyui.url, default_checkpoint=config.comfyui.default_checkpoint
         )
@@ -70,13 +66,18 @@ class ComfyUIImageBackend(ImageBackend):
         if not image_bytes:
             raise ImageTransportError("ComfyUI generation failed (unavailable or timed out)")
 
+        # Report DECODED dimensions — never substitute the request. Invalid /
+        # non-PNG output is rejected, not posted with a fabricated size.
         dims = png_dimensions(image_bytes)
-        aw, ah = dims if dims else (w, h)
+        if dims is None:
+            raise ImageTransportError(
+                "ComfyUI returned invalid (non-PNG) image data", pre_generation=False
+            )
         return ImageResult(
             data=image_bytes,
             mime="image/png",
-            width=aw,
-            height=ah,
+            width=dims[0],
+            height=dims[1],
             backend="comfyui",
             image_model=model or config.comfyui.default_checkpoint or "default",
         )

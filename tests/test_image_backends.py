@@ -480,14 +480,35 @@ async def test_comfyui_backend_failure_is_transport_error(monkeypatch):
         await b.generate(prompt="p")
 
 
-def test_parse_size_variants():
-    from src.tools.image.comfyui_backend import _parse_size
+async def test_comfyui_backend_rejects_non_png_output(monkeypatch):
+    # A non-PNG payload must be rejected, not posted with a fabricated size.
+    from src.tools.image import comfyui_backend as mod
 
-    assert _parse_size("512x768", None, None) == (512, 768)
-    assert _parse_size(None, None, None) == (1024, 1024)
-    assert _parse_size("garbage", None, None) == (1024, 1024)
-    assert _parse_size("100x100", 200, 300) == (200, 300)  # explicit w/h win
-    assert _parse_size(None, 99999, 10) == (2048, 64)  # clamped both ends
+    junk = b"\xff\xd8\xff\xe0 not a png " + b"\x00" * 40
+    monkeypatch.setattr(
+        mod, "ComfyUIClient", lambda url, default_checkpoint="": _FakeComfyClient(junk)
+    )
+    b = mod.ComfyUIImageBackend(get_config=lambda: _comfy_cfg())
+    with pytest.raises(ImageTransportError):
+        await b.generate(prompt="p", size="512x512")
+
+
+def test_comfy_resolve_size():
+    from src.tools.image.comfyui_backend import _resolve_size
+
+    assert _resolve_size("512x768", None, None) == (512, 768)
+    assert _resolve_size(None, None, None) == (1024, 1024)  # default
+    assert _resolve_size(None, 200, 300) == (200, 300)  # width/height when no size
+    # Out-of-range is REJECTED, never clamped (would change the aspect ratio).
+    bad_inputs = [
+        ("garbage", None, None),
+        (None, 99999, 10),
+        ("4096x1024", None, None),
+        (None, 1, 2),
+    ]
+    for bad in bad_inputs:
+        with pytest.raises(ValueError):
+            _resolve_size(*bad)
 
 
 # ── visibility matrix (Aaron's rules) ─────────────────────────────────
@@ -613,10 +634,14 @@ def test_parse_size_and_is_square():
     assert parse_size("") is None
     assert parse_size("1024x1024") == (1024, 1024)
     assert parse_size("1536X1024") == (1536, 1024)  # case-insensitive
+    assert parse_size("64x64") == (64, 64)  # lower bound ok
+    assert parse_size("2048x2048") == (2048, 2048)  # upper bound ok
     assert is_square_size(None) is True
     assert is_square_size("1024x1024") is True
     assert is_square_size("1536x1024") is False
-    for bad in ["1024", "1024x", "x1024", "0x0", "-1x-1", "axb", "5000x5000"]:
+    # malformed, non-integer, or out of the canonical 64..2048 range
+    for bad in ["1024", "1024x", "x1024", "0x0", "-1x-1", "axb", "1024.5x1024",
+                "32x32", "2049x2048", "5000x5000", "64x4096"]:
         with pytest.raises(ValueError):
             parse_size(bad)
 
@@ -684,3 +709,21 @@ async def test_selector_explicit_size_wins_over_width_height():
         prompt="p", size="1024x1024", width=1536, height=1024
     )
     assert native.calls and native.calls[0]["size"] == "1024x1024" and not comfy.calls
+
+
+async def test_selector_rejects_out_of_range_size():
+    # 4096x1024 exceeds the 2048 cap ComfyUI honors — reject, never clamp
+    # (clamping would change the caller's requested aspect ratio).
+    cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
+    native = _RecordingBackend("openai")
+    comfy = _RecordingBackend("comfyui")
+    with pytest.raises(ImageRequestError):
+        await _selector(cfg, native=native, comfy=comfy).generate(prompt="p", size="4096x1024")
+    assert not native.calls and not comfy.calls
+
+
+async def test_selector_bad_dimension_does_not_leak_valueerror():
+    cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
+    sel = _selector(cfg, native=_RecordingBackend("openai"), comfy=_RecordingBackend("comfyui"))
+    with pytest.raises(ImageRequestError):  # a clean ImageRequestError, NOT a raw ValueError
+        await sel.generate(prompt="p", width="bad", height=1024)

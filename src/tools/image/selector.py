@@ -76,17 +76,18 @@ class ImageBackendSelector:
         """
         if size:
             try:
-                parse_size(size)
+                dims = parse_size(size)
             except ValueError as e:
                 raise ImageRequestError(str(e)) from e
-            return str(size).strip().lower()
+            return f"{dims[0]}x{dims[1]}"  # type: ignore[index]
         if width is not None and height is not None:
-            combined = f"{int(width)}x{int(height)}"
+            # Let parse_size do all validation — never int() raw input (a
+            # non-integer would leak a ValueError; a float would truncate).
             try:
-                parse_size(combined)
+                dims = parse_size(f"{width}x{height}")
             except ValueError as e:
                 raise ImageRequestError(str(e)) from e
-            return combined
+            return f"{dims[0]}x{dims[1]}"  # type: ignore[index]
         if width is not None or height is not None:
             raise ImageRequestError("both width and height are required (or use size WxH)")
         return None

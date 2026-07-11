@@ -23,12 +23,19 @@ def png_dimensions(data: bytes) -> tuple[int, int] | None:
     return width, height
 
 
+# One canonical dimension contract for BOTH backends — the range ComfyUI can
+# actually honor. Requests outside it are rejected (never silently clamped,
+# which would change the caller's aspect ratio).
+MIN_DIM = 64
+MAX_DIM = 2048
+
+
 def parse_size(size: str | None) -> tuple[int, int] | None:
     """Parse a ``WxH`` size string to ``(width, height)``.
 
     Returns None for an omitted/empty size. Raises ValueError for a malformed,
-    one-sided, zero/negative, or out-of-bounds value so callers reject before
-    routing rather than guess.
+    one-sided, non-integer, or out-of-range value so callers reject before
+    routing rather than guess or clamp.
     """
     if not size:
         return None
@@ -39,10 +46,10 @@ def parse_size(size: str | None) -> tuple[int, int] | None:
         width, height = int(parts[0]), int(parts[1])
     except ValueError:
         raise ValueError(f"malformed size {size!r} (expected integer WxH)") from None
-    if width <= 0 or height <= 0:
-        raise ValueError(f"size {size!r} must be positive")
-    if width > 4096 or height > 4096:
-        raise ValueError(f"size {size!r} exceeds the 4096px limit")
+    if not (MIN_DIM <= width <= MAX_DIM) or not (MIN_DIM <= height <= MAX_DIM):
+        raise ValueError(
+            f"size {size!r} out of range — each dimension must be {MIN_DIM}..{MAX_DIM}"
+        )
     return (width, height)
 
 
