@@ -253,14 +253,14 @@ comfyui:
 
 # Image generation backend selection.
 #   auto    (default): follow the active chat provider — on 'codex' use native
-#            OpenAI for square/unspecified requests (ComfyUI is the pre-generation
-#            fallback); a non-square size, a negative prompt, or a checkpoint
-#            routes to ComfyUI; on any other provider use ComfyUI only. If
-#            neither is available the tool hides.
+#            OpenAI when NO size is requested (ComfyUI is the pre-generation
+#            fallback); ANY explicit size, a negative prompt, or a checkpoint
+#            routes to ComfyUI (only it honors those); on any other provider use
+#            ComfyUI only. If neither is available the tool hides.
 #   openai : native OpenAI only (rides the current Codex auth; Codex-provider
-#            only; square output only — non-square requests are rejected).
+#            only; an explicit size or ComfyUI-only field is rejected).
 #   comfyui: ComfyUI only.
-# Native OpenAI ignores the requested size and returns a backend-selected square.
+# Native OpenAI ignores the requested size and returns backend-selected dimensions.
 image:
   backend: auto
   openai:

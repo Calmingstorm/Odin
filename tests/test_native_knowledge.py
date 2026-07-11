@@ -151,3 +151,16 @@ class TestSearchAudit:
         out = await _tools(audit=a)._handle_search_audit(
             {"has_error": 1, "min_duration_ms": "5", "limit": 5})
         assert "2 entries" in out and "run_command" in out and "ERROR: boom" in out
+
+    async def test_renders_audit_metadata(self):
+        # A later "which backend?" lookup surfaces the structured record.
+        a = MagicMock()
+        a.search = AsyncMock(return_value=[
+            {"timestamp": "2026-07-07T12:00:00Z", "tool_name": "generate_image",
+             "user_name": "aaron", "approved": True, "execution_time_ms": 63000,
+             "result_summary": "Image generated (1536x1024, 800 KB) and posted.",
+             "audit_metadata": {"backend": "openai", "route": "auto_native",
+                                "decoded_width": 1536, "decoded_height": 1024}},
+        ])
+        out = await _tools(audit=a)._handle_search_audit({"tool_name": "generate_image"})
+        assert "backend=openai" in out and "route=auto_native" in out

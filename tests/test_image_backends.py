@@ -311,20 +311,21 @@ async def test_no_image_in_stream_rejected():
         await b.generate(prompt="p")
 
 
-async def test_native_rejects_non_square_without_request():
-    # Native only produces squares; a non-square size is refused before any HTTP
-    # call (defense in depth — the selector also routes non-square to ComfyUI).
+@pytest.mark.parametrize("size", ["1024x1024", "1536x1024"])
+async def test_native_rejects_any_explicit_size(size):
+    # Native ignores/refuses ANY size (square or not) — it can't honor a specific
+    # size (defense in depth; the selector routes every sized request to ComfyUI).
     pool = _FakePool()
     b, _ = _backend(pool, [_FakeResp(200, (_sse(_final_image_event()),))])
     with pytest.raises(ImageRequestError):
-        await b.generate(prompt="p", size="1536x1024")
+        await b.generate(prompt="p", size=size)
     assert b._session.posts == 0
 
 
-async def test_native_accepts_square_and_omits_size_in_payload():
+async def test_native_no_size_omits_it_from_payload():
     pool = _FakePool()
     b, _ = _backend(pool, [_FakeResp(200, (_sse(_final_image_event()),))])
-    res = await b.generate(prompt="p", size="1024x1024")
+    res = await b.generate(prompt="p")  # no size
     assert res.backend == "openai"
     # `size` must NOT be sent — the endpoint ignores it.
     sent = b._body(b.get_config().image, "p")
@@ -557,7 +558,11 @@ class _RecordingBackend:
         self.calls.append(kw)
         if self._error:
             raise self._error
-        return self._result
+        import dataclasses
+
+        # Fresh instance per call — the selector stamps route/fallback_reason on
+        # the returned result, so concurrent calls must not share one object.
+        return dataclasses.replace(self._result)
 
 
 def _selector(cfg, *, native=None, comfy=None):
@@ -627,8 +632,8 @@ async def test_selector_no_backend_available_raises():
 # ── size handling + square-only routing (Odin round-2) ────────────────
 
 
-def test_parse_size_and_is_square():
-    from src.tools.image.base import is_square_size, parse_size
+def test_parse_size():
+    from src.tools.image.base import parse_size
 
     assert parse_size(None) is None
     assert parse_size("") is None
@@ -636,9 +641,6 @@ def test_parse_size_and_is_square():
     assert parse_size("1536X1024") == (1536, 1024)  # case-insensitive
     assert parse_size("64x64") == (64, 64)  # lower bound ok
     assert parse_size("2048x2048") == (2048, 2048)  # upper bound ok
-    assert is_square_size(None) is True
-    assert is_square_size("1024x1024") is True
-    assert is_square_size("1536x1024") is False
     # malformed, non-integer, or out of the canonical 64..2048 range
     for bad in ["1024", "1024x", "x1024", "0x0", "-1x-1", "axb", "1024.5x1024",
                 "32x32", "2049x2048", "5000x5000", "64x4096"]:
@@ -646,51 +648,67 @@ def test_parse_size_and_is_square():
             parse_size(bad)
 
 
-async def test_selector_width_height_fold_to_size_and_use_native():
-    # The original bug: width/height (auto-filled from the schema) forced
-    # ComfyUI. They now fold into a square size and go native.
+async def test_selector_no_size_uses_native():
+    # A plain request (no size, no ComfyUI-only fields) goes native — the cat
+    # case. width/height are out of the schema, so the LLM sends no size.
     cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
     native = _RecordingBackend("openai")
     comfy = _RecordingBackend("comfyui")
-    await _selector(cfg, native=native, comfy=comfy).generate(prompt="p", width=1024, height=1024)
-    assert native.calls and not comfy.calls
-    assert native.calls[0]["size"] == "1024x1024"
+    res = await _selector(cfg, native=native, comfy=comfy).generate(prompt="p")
+    assert res.backend == "openai" and native.calls and not comfy.calls
+    assert res.route == "auto_native"
 
 
-async def test_selector_auto_non_square_routes_to_comfy():
+async def test_selector_legacy_width_height_fold_to_size_route_comfy():
+    # Legacy width/height fold into an explicit size -> ComfyUI (native can't
+    # honor exact dims); native is never tried.
     cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
     native = _RecordingBackend("openai")
     comfy = _RecordingBackend("comfyui")
-    res = await _selector(cfg, native=native, comfy=comfy).generate(prompt="p", size="1536x1024")
-    assert res.backend == "comfyui" and not native.calls  # native never tried
+    res = await _selector(cfg, native=native, comfy=comfy).generate(
+        prompt="p", width=1024, height=1024
+    )
+    assert res.backend == "comfyui" and not native.calls
+    assert comfy.calls[0]["size"] == "1024x1024" and res.route == "auto_comfy_size"
 
 
-async def test_selector_auto_non_square_no_comfy_does_not_fall_back_to_native():
+@pytest.mark.parametrize("size", ["1024x1024", "1536x1024"])
+async def test_selector_auto_any_size_routes_to_comfy(size):
+    # ANY explicit size (square OR not) -> ComfyUI; native never tried.
+    cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
+    native = _RecordingBackend("openai")
+    comfy = _RecordingBackend("comfyui")
+    res = await _selector(cfg, native=native, comfy=comfy).generate(prompt="p", size=size)
+    assert res.backend == "comfyui" and not native.calls and res.route == "auto_comfy_size"
+
+
+async def test_selector_auto_sized_no_comfy_does_not_fall_back_to_native():
     cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=False)
     native = _RecordingBackend("openai")
     with pytest.raises(ImageBackendUnavailableError):
         await _selector(cfg, native=native, comfy=_RecordingBackend("comfyui")).generate(
-            prompt="p", size="1536x1024"
+            prompt="p", size="1024x1024"
         )
-    assert not native.calls  # a non-square request must never fall back to native
+    assert not native.calls  # a sized request must never fall back to native
 
 
-async def test_selector_openai_mode_rejects_non_square():
+@pytest.mark.parametrize("size", ["1024x1024", "1536x1024"])
+async def test_selector_openai_mode_rejects_any_size(size):
     cfg = _cfg(backend="openai", provider="codex", codex=True)
     native = _RecordingBackend("openai")
     with pytest.raises(ImageRequestError):
         await _selector(cfg, native=native, comfy=_RecordingBackend("comfyui")).generate(
-            prompt="p", size="1536x1024"
+            prompt="p", size=size
         )
     assert not native.calls  # rejected before any native call
 
 
-async def test_selector_auto_square_size_uses_native():
-    cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
+async def test_selector_openai_mode_no_size_uses_native():
+    cfg = _cfg(backend="openai", provider="codex", codex=True)
     native = _RecordingBackend("openai")
-    comfy = _RecordingBackend("comfyui")
-    res = await _selector(cfg, native=native, comfy=comfy).generate(prompt="p", size="512x512")
-    assert res.backend == "openai" and native.calls and not comfy.calls
+    sel = _selector(cfg, native=native, comfy=_RecordingBackend("comfyui"))
+    res = await sel.generate(prompt="p")
+    assert res.backend == "openai" and res.route == "forced_openai"
 
 
 async def test_selector_rejects_one_sided_dimension():
@@ -704,11 +722,22 @@ async def test_selector_explicit_size_wins_over_width_height():
     cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
     native = _RecordingBackend("openai")
     comfy = _RecordingBackend("comfyui")
-    # explicit square size beats a non-square width/height -> native
-    await _selector(cfg, native=native, comfy=comfy).generate(
+    # explicit size beats width/height; any size -> ComfyUI
+    res = await _selector(cfg, native=native, comfy=comfy).generate(
         prompt="p", size="1024x1024", width=1536, height=1024
     )
-    assert native.calls and native.calls[0]["size"] == "1024x1024" and not comfy.calls
+    assert res.backend == "comfyui" and comfy.calls[0]["size"] == "1024x1024" and not native.calls
+
+
+async def test_selector_stamps_fallback_route_and_reason():
+    from src.tools.image.base import ImageQuotaError
+
+    cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
+    native = _RecordingBackend("openai", error=ImageQuotaError("limit", reason="quota"))
+    comfy = _RecordingBackend("comfyui")
+    res = await _selector(cfg, native=native, comfy=comfy).generate(prompt="p")
+    assert res.backend == "comfyui" and res.route == "auto_comfy_fallback"
+    assert res.fallback_reason == "quota"
 
 
 async def test_selector_rejects_out_of_range_size():
@@ -727,3 +756,18 @@ async def test_selector_bad_dimension_does_not_leak_valueerror():
     sel = _selector(cfg, native=_RecordingBackend("openai"), comfy=_RecordingBackend("comfyui"))
     with pytest.raises(ImageRequestError):  # a clean ImageRequestError, NOT a raw ValueError
         await sel.generate(prompt="p", width="bad", height=1024)
+
+
+async def test_concurrent_generations_keep_separate_metadata():
+    # Metadata rides on each call's returned result (task-local) — two concurrent
+    # generations down different routes must not swap backend/route.
+    import asyncio
+
+    cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
+    sel = _selector(cfg, native=_RecordingBackend("openai"), comfy=_RecordingBackend("comfyui"))
+    r_native, r_comfy = await asyncio.gather(
+        sel.generate(prompt="a"),  # no size -> native
+        sel.generate(prompt="b", size="1024x1024"),  # sized -> comfy
+    )
+    assert (r_native.backend, r_native.route) == ("openai", "auto_native")
+    assert (r_comfy.backend, r_comfy.route) == ("comfyui", "auto_comfy_size")

@@ -112,6 +112,15 @@ class _LoopAuthorProxy:
         return self._name
 
 
+def _unwrap_native_result(result):
+    """A native handler may return a ToolResult (carrying non-model-facing
+    audit_metadata) or a plain string/dict. Return ``(tool_result_or_None,
+    output)`` so the caller audits the metadata and sends the string."""
+    if isinstance(result, ToolResult):
+        return result, str(result)
+    return None, result
+
+
 @dataclass(frozen=True)
 class LoopPolicy:
     """The chat-vs-autonomous behavioral dimensions (RFC-001 §4.3) as data.
@@ -905,6 +914,10 @@ class ToolLoopRunner:
                         channel=st.message.channel,
                         user_id=st.user_id,
                     )
+                # A native handler may return a ToolResult (e.g. generate_image
+                # carries non-model-facing audit_metadata) — unwrap it so the
+                # audit record picks up the metadata like the executor path.
+                tool_result, result = _unwrap_native_result(result)
             else:
                 tool_result = await self._tool_executor.execute(
                     tool_name,
@@ -1003,6 +1016,7 @@ class ToolLoopRunner:
                 error=error,
                 risk_level=tool_result.risk_level if tool_result else None,
                 risk_reason=tool_result.risk_reason if tool_result else None,
+                audit_metadata=tool_result.audit_metadata if tool_result else None,
             )
             await self._audit.log_event(
                 event_type="tool_end",
@@ -1469,7 +1483,9 @@ class ToolLoopRunner:
 
         # Make structured failure visible (see ensure_failure_visible)
         # and propagate it into the audit error field.
+        _audit_meta = None
         if isinstance(raw, ToolResult):
+            _audit_meta = raw.audit_metadata
             if not raw.ok and not error:
                 error = raw.error or "tool reported failure"
             raw = ensure_failure_visible(str(raw), raw.ok)
@@ -1488,6 +1504,7 @@ class ToolLoopRunner:
                 result_summary=result,
                 execution_time_ms=elapsed_ms,
                 error=error,
+                audit_metadata=_audit_meta,
             )
         except OSError as audit_err:
             log.warning("Audit write failed (I/O): %s", audit_err)

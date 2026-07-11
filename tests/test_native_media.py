@@ -296,9 +296,13 @@ class TestGenerateImage:
         sel = self._selector(result=self._result(backend="openai"))
         msg = _message()
         out = await _tools(image_selector=sel)._handle_generate_image(msg, {"prompt": "a cat"})
-        assert "Image generated (1024x1024" in out
-        assert "openai" not in out.lower()  # backend name is NOT surfaced
+        # Generic user-facing string — the backend name is NOT surfaced there...
+        assert "Image generated (1024x1024" in str(out)
+        assert "openai" not in str(out).lower()
         msg.channel.send.assert_awaited_once()
+        # ...but IS recorded in the (non-model-facing) audit metadata.
+        assert out.audit_metadata["backend"] == "openai"
+        assert out.audit_metadata["delivery_status"] == "posted"
 
     async def test_backend_failure_and_http_error(self):
         from src.tools.image import ImageGenError
@@ -307,11 +311,15 @@ class TestGenerateImage:
         assert "failed" in await _tools(image_selector=sel)._handle_generate_image(
             _message(), {"prompt": "x"}
         )
+        # Upload failure: generation ran, so the metadata still records the
+        # backend with delivery_status=upload_failed.
         sel = self._selector(result=self._result(backend="comfyui"))
         msg = _message()
         msg.channel.send = AsyncMock(side_effect=_http_exc())
         out = await _tools(image_selector=sel)._handle_generate_image(msg, {"prompt": "x"})
-        assert "Failed to upload generated" in out
+        assert "Failed to upload generated" in str(out)
+        assert out.audit_metadata["backend"] == "comfyui"
+        assert out.audit_metadata["delivery_status"] == "upload_failed"
 
     async def test_unexpected_error_is_contained(self):
         # A non-ImageGenError must not leak a payload — generic catch-all.
@@ -320,3 +328,17 @@ class TestGenerateImage:
             _message(), {"prompt": "x"}
         )
         assert "unexpectedly" in out and "raw provider blob" not in out
+
+
+def test_unwrap_native_result():
+    # generate_image returns a ToolResult (audit_metadata); other native tools
+    # return a plain string/dict. The tool_loop unwrapper handles both.
+    from src.discord.tool_loop import _unwrap_native_result
+    from src.tools.result_validator import ToolResult
+
+    tr = ToolResult(output="hi", audit_metadata={"backend": "openai"})
+    tool_result, out = _unwrap_native_result(tr)
+    assert tool_result is tr and out == "hi"
+    assert _unwrap_native_result("plain") == (None, "plain")
+    block = {"__image_block__": 1}
+    assert _unwrap_native_result(block) == (None, block)

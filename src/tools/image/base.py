@@ -53,22 +53,13 @@ def parse_size(size: str | None) -> tuple[int, int] | None:
     return (width, height)
 
 
-def is_square_size(size: str | None) -> bool:
-    """True when no size is given (unconstrained) or the requested size is square.
-
-    Native OpenAI produces a backend-selected SQUARE image and ignores the
-    requested size, so only square/unspecified requests can be honored there.
-    """
-    dims = parse_size(size)
-    return dims is None or dims[0] == dims[1]
-
-
 @dataclass
 class ImageResult:
     """A generated image, ready for the tool layer to attach.
 
     Carries only non-sensitive metadata — never account identifiers, tokens,
-    or raw provider payloads.
+    or raw provider payloads. ``route``/``fallback_reason`` are stamped by the
+    selector for the audit record.
     """
 
     data: bytes
@@ -77,6 +68,8 @@ class ImageResult:
     height: int
     backend: str  # "openai" | "comfyui"
     image_model: str
+    route: str = ""  # stable enum, e.g. auto_native / auto_comfy_size (selector-set)
+    fallback_reason: str | None = None  # stable enum when native fell back
 
 
 class ImageGenError(Exception):
@@ -87,9 +80,19 @@ class ImageGenError(Exception):
     account or falling back to ComfyUI cannot duplicate work or quota. Anything
     that happens after a 2xx or the first generation event is post-generation
     and must NOT be retried or fallen back.
+
+    ``reason`` is a stable enum (quota / account_unavailable / pool_exhausted /
+    pre_response_transport) recorded as the audit fallback_reason — never raw
+    exception text.
     """
 
     pre_generation: bool = False
+    reason: str | None = None
+
+    def __init__(self, message: str = "", *, reason: str | None = None) -> None:
+        super().__init__(message)
+        if reason is not None:
+            self.reason = reason
 
 
 class ImageBackendUnavailableError(ImageGenError):
@@ -110,8 +113,10 @@ class ImageTransportError(ImageGenError):
     before an accepted response; a mid-stream break after 2xx is post-generation
     (constructed with ``pre_generation=False``)."""
 
-    def __init__(self, message: str, *, pre_generation: bool = True) -> None:
-        super().__init__(message)
+    def __init__(
+        self, message: str, *, pre_generation: bool = True, reason: str | None = None
+    ) -> None:
+        super().__init__(message, reason=reason)
         self.pre_generation = pre_generation
 
 

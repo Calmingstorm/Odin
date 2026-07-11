@@ -97,6 +97,9 @@ class ToolResult:
     risk_reason: str = ""
     requires_validation: bool = False
     validation_reason: str = ""
+    # Non-model-facing structured record for the audit log (never in output).
+    # Bounded, non-sensitive enums/metadata only — no prompts, IDs, or payloads.
+    audit_metadata: dict | None = None
 
     def __str__(self) -> str:
         return self.output
