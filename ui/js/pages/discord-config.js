@@ -78,7 +78,8 @@ export default {
 
           <!-- Channel list -->
           <div v-if="expanded[guild.id]">
-            <table class="hm-table">
+            <div class="table-responsive">
+              <table class="hm-table">
               <thead>
                 <tr>
                   <th>Channel</th>
@@ -119,15 +120,16 @@ export default {
                     </label>
                   </td>
                   <td class="text-center">
-                    <span v-if="hasOverride(ch)" class="badge badge-warning text-xs cursor-pointer"
-                          @click="clearOverride(ch.id, guild.id)" title="Click to clear override">
+                    <button v-if="hasOverride(ch)" type="button" class="badge badge-warning text-xs cursor-pointer"
+                          @click="clearOverride(ch.id, guild.id)" :aria-label="'Clear override for channel ' + ch.name" title="Click to clear override">
                       custom
-                    </span>
+                    </button>
                     <span v-else class="text-gray-600 text-xs">inherit</span>
                   </td>
                 </tr>
               </tbody>
             </table>
+            </div>
           </div>
         </div>
       </div>

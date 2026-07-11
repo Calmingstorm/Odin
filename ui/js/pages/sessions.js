@@ -7,18 +7,18 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 
 
 const FILTER_PRESETS = [
-  { id: 'all', name: 'All Sessions', icon: '\u2630', filters: {} },
-  { id: 'active', name: 'Recently Active', icon: '\u26A1', filters: { minAge: 0, maxAge: 3600 } },
-  { id: 'discord', name: 'Discord Only', icon: '\u{1F4AC}', filters: { source: 'discord' } },
-  { id: 'web', name: 'Web Only', icon: '\u{1F310}', filters: { source: 'web' } },
-  { id: 'long', name: 'Long Conversations', icon: '\u{1F4D6}', filters: { minMessages: 10 } },
-  { id: 'compacted', name: 'Compacted', icon: '\u{1F5DC}', filters: { hasCompaction: true } },
+  { id: 'all', name: 'All Sessions', icon: 'list', filters: {} },
+  { id: 'active', name: 'Recently Active', icon: 'activity', filters: { minAge: 0, maxAge: 3600 } },
+  { id: 'discord', name: 'Discord Only', icon: 'message', filters: { source: 'discord' } },
+  { id: 'web', name: 'Web Only', icon: 'globe', filters: { source: 'web' } },
+  { id: 'long', name: 'Long Conversations', icon: 'book', filters: { minMessages: 10 } },
+  { id: 'compacted', name: 'Compacted', icon: 'archive', filters: { hasCompaction: true } },
 ];
 
 const SORT_OPTIONS = [
-  { value: 'last_active', label: 'Last Active', icon: '\u{1F551}' },
-  { value: 'created_at', label: 'Created', icon: '\u{1F4C5}' },
-  { value: 'message_count', label: 'Message Count', icon: '\u{1F4CA}' },
+  { value: 'last_active', label: 'Last Active' },
+  { value: 'created_at', label: 'Created' },
+  { value: 'message_count', label: 'Message Count' },
 ];
 
 export default {
@@ -53,7 +53,7 @@ export default {
                   @click="applyPreset(preset.id)"
                   class="sess-preset-chip"
                   :class="{ 'sess-preset-active': activePreset === preset.id }">
-            <span class="sess-preset-icon">{{ preset.icon }}</span>
+            <span class="sess-preset-icon"><odin-icon :name="preset.icon" :size="15" /></span>
             <span>{{ preset.name }}</span>
           </button>
         </div>
@@ -64,12 +64,12 @@ export default {
           <!-- Sort -->
           <select v-model="sortBy" class="hm-select">
             <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">
-              {{ opt.icon }} {{ opt.label }}
+              {{ opt.label }}
             </option>
           </select>
-          <button @click="sortAsc = !sortAsc" class="btn btn-ghost text-xs"
-                  :title="sortAsc ? 'Ascending' : 'Descending'">
-            {{ sortAsc ? '\u2191' : '\u2193' }}
+          <button @click="sortAsc = !sortAsc" class="icon-btn"
+                  :title="sortAsc ? 'Ascending' : 'Descending'" :aria-label="sortAsc ? 'Sort ascending' : 'Sort descending'">
+            <odin-icon name="sort" :size="15" :class="{ 'rotate-180': sortAsc }" />
           </button>
         </div>
         <!-- Custom preset save -->
@@ -87,15 +87,15 @@ export default {
         </div>
         <!-- Custom presets -->
         <div v-if="customPresets.length > 0" class="flex gap-1.5 flex-wrap mt-2">
-          <button v-for="cp in customPresets" :key="cp.id"
-                  @click="applyCustomPreset(cp)"
-                  class="sess-preset-chip sess-preset-custom"
-                  :class="{ 'sess-preset-active': activePreset === cp.id }">
-            <span>\u2605</span>
-            <span>{{ cp.name }}</span>
-            <span class="sess-preset-remove" @click.stop="removeCustomPreset(cp.id)"
-                  title="Remove preset">&times;</span>
-          </button>
+          <div v-for="cp in customPresets" :key="cp.id" class="sess-preset-chip sess-preset-custom"
+               :class="{ 'sess-preset-active': activePreset === cp.id }">
+            <button type="button" class="inline-flex items-center gap-1" @click="applyCustomPreset(cp)">
+              <odin-icon name="sparkles" :size="14" />
+              <span>{{ cp.name }}</span>
+            </button>
+            <button type="button" class="sess-preset-remove" @click="removeCustomPreset(cp.id)"
+                  :aria-label="'Remove preset ' + cp.name" title="Remove preset">&times;</button>
+          </div>
         </div>
       </div>
 
@@ -158,17 +158,17 @@ export default {
         <div v-for="n in 4" :key="n" class="skeleton skeleton-row"></div>
       </div>
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="retry" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="sessions.length === 0" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{1F4AC}</span>
+        <span class="empty-state-icon"><odin-icon name="message" :size="23" /></span>
         <span class="empty-state-text">No active sessions</span>
         <span class="empty-state-hint">Sessions appear when users interact with Odin via Discord or the chat interface</span>
       </div>
       <div v-else-if="filteredSessions.length === 0" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{1F50D}</span>
+        <span class="empty-state-icon"><odin-icon name="search" :size="23" /></span>
         <span class="empty-state-text">No sessions match the current filter</span>
         <button @click="resetFilters" class="btn btn-ghost text-xs mt-2">Clear Filters</button>
       </div>
@@ -187,12 +187,15 @@ export default {
                class="session-card hm-card"
                :class="{ 'flash-new': s._updated, 'session-selected': selected.has(s.channel_id) }">
             <!-- Header row -->
-            <div class="flex items-center gap-3 cursor-pointer" @click="toggleSession(s.channel_id)">
+            <div class="flex items-center gap-3 cursor-pointer" role="button" tabindex="0"
+                 :aria-expanded="expandedId === s.channel_id" @click="toggleSession(s.channel_id)"
+                 @keydown.enter="toggleSession(s.channel_id)" @keydown.space.prevent="toggleSession(s.channel_id)">
               <input type="checkbox" :checked="selected.has(s.channel_id)"
+                     :aria-label="'Select session ' + (s.channel_name || s.channel_id)"
                      @click.stop @change="toggleSelect(s.channel_id)"
                      class="session-checkbox" />
               <div class="sess-source-icon" :class="s.source === 'web' ? 'sess-source-web' : 'sess-source-discord'">
-                {{ s.source === 'web' ? '\u{1F310}' : '\u{1F4AC}' }}
+                <odin-icon :name="s.source === 'web' ? 'globe' : 'message'" :size="14" />
               </div>
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
@@ -206,8 +209,8 @@ export default {
                 </div>
               </div>
               <div class="flex items-center gap-1" @click.stop>
-                <span class="sess-expand-icon" :class="{ 'sess-expanded': expandedId === s.channel_id }">
-                  \u25B6
+                <span class="sess-expand-icon" aria-hidden="true">
+                  <odin-icon :name="expandedId === s.channel_id ? 'chevronUp' : 'chevronDown'" :size="14" />
                 </span>
                 <button @click="exportSession(s.channel_id, 'json')" class="btn btn-ghost text-xs" title="Export JSON">
                   JSON
@@ -271,7 +274,7 @@ export default {
                       <span class="text-xs text-gray-300">{{ threadSummary(thread) }}</span>
                       <span class="text-xs bg-gray-700 px-1.5 py-0.5 rounded text-gray-300">{{ thread.length }} msg</span>
                       <span class="text-xs text-gray-500 ml-auto" v-if="thread[0]">{{ formatTimestamp(thread[0].timestamp) }}</span>
-                      <span class="text-xs text-gray-500">{{ collapsedThreads.has(ti) ? '\u25B6' : '\u25BC' }}</span>
+                      <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon :name="collapsedThreads.has(ti) ? 'chevronDown' : 'chevronUp'" :size="13" /></span>
                     </div>
                     <div v-if="!collapsedThreads.has(ti)" class="space-y-2 pl-2">
                       <div v-for="(m, mi) in thread" :key="mi"
@@ -316,7 +319,7 @@ export default {
       </div>
 
       <!-- Confirm clear modal (single) -->
-      <div v-if="clearTarget" class="modal-overlay" @click.self="clearTarget = null" @keyup.escape="clearTarget = null" role="dialog" aria-modal="true" aria-labelledby="sess-clear-title">
+      <div v-if="clearTarget" class="modal-overlay" v-modal-focus @click.self="clearTarget = null" @keyup.escape="clearTarget = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="sess-clear-title">
         <div class="modal-content">
           <h3 id="sess-clear-title" class="text-lg font-semibold mb-2">Clear Session</h3>
           <p class="text-gray-400 text-sm mb-4">
@@ -332,7 +335,7 @@ export default {
       </div>
 
       <!-- Confirm bulk clear modal -->
-      <div v-if="bulkClearing" class="modal-overlay" @click.self="bulkClearing = false" @keyup.escape="bulkClearing = false" role="dialog" aria-modal="true" aria-labelledby="sess-bulk-clear-title">
+      <div v-if="bulkClearing" class="modal-overlay" v-modal-focus @click.self="bulkClearing = false" @keyup.escape="bulkClearing = false" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="sess-bulk-clear-title">
         <div class="modal-content">
           <h3 id="sess-bulk-clear-title" class="text-lg font-semibold mb-2">Clear Selected Sessions</h3>
           <p class="text-gray-400 text-sm mb-4">
@@ -448,7 +451,7 @@ export default {
       return result;
     });
 
-    // Thread grouping: group messages into user→assistant turns
+    // Thread grouping: group messages into user to assistant turns
     const threads = computed(() => {
       if (!detail.value || !detail.value.messages) return [];
       const msgs = detail.value.messages;
@@ -629,12 +632,12 @@ export default {
     }
 
     function ftsResultClass(type) {
-      if (type === 'user') return 'bg-gray-900/50 border-gray-800';
-      if (type === 'assistant') return 'bg-indigo-950/30 border-indigo-900/30';
-      if (type === 'summary') return 'bg-amber-950/20 border-amber-900/30';
-      if (type === 'fts') return 'bg-emerald-950/20 border-emerald-900/30';
-      if (type === 'channel') return 'bg-purple-950/20 border-purple-900/30';
-      return 'bg-gray-900/30 border-gray-800/50';
+      if (type === 'user') return 'fts-result-user';
+      if (type === 'assistant') return 'fts-result-assistant';
+      if (type === 'summary') return 'fts-result-summary';
+      if (type === 'fts') return 'fts-result-fts';
+      if (type === 'channel') return 'fts-result-channel';
+      return 'fts-result-default';
     }
 
     function ftsTypeBadge(type) {

@@ -21,23 +21,27 @@ export default {
       <div class="hm-card mb-4">
         <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Tool</label>
+            <label class="text-gray-400 text-xs block mb-1">Tool
             <input v-model="filters.tool" type="text" class="hm-input"
                    placeholder="e.g. run_command" @keyup.enter="fetchAudit" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">User</label>
+            <label class="text-gray-400 text-xs block mb-1">User
             <input v-model="filters.user" type="text" class="hm-input"
                    placeholder="User ID or name" @keyup.enter="fetchAudit" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Keyword</label>
+            <label class="text-gray-400 text-xs block mb-1">Keyword
             <input v-model="filters.keyword" type="text" class="hm-input"
                    placeholder="Search in output..." @keyup.enter="fetchAudit" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Date</label>
+            <label class="text-gray-400 text-xs block mb-1">Date
             <input v-model="filters.date" type="date" class="hm-input" @change="fetchAudit" />
+            </label>
           </div>
         </div>
         <div class="flex gap-2 mt-3">
@@ -45,13 +49,14 @@ export default {
           <button @click="clearFilters" class="btn btn-ghost text-xs">Clear Filters</button>
           <div class="flex-1"></div>
           <div class="flex items-center gap-2">
-            <label class="text-gray-400 text-xs">Limit:</label>
+            <label class="text-gray-400 text-xs">Limit:
             <select v-model="filters.limit" class="hm-input" style="width:auto;min-width:70px;" @change="fetchAudit">
               <option :value="25">25</option>
               <option :value="50">50</option>
               <option :value="100">100</option>
               <option :value="200">200</option>
             </select>
+            </label>
           </div>
         </div>
       </div>
@@ -61,12 +66,12 @@ export default {
         <div v-for="n in 5" :key="n" class="skeleton skeleton-row"></div>
       </div>
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="fetchAudit" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="entries.length === 0" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{1F4DD}</span>
+        <span class="empty-state-icon"><odin-icon name="file" :size="23" /></span>
         <span class="empty-state-text">No audit entries found</span>
         <span class="empty-state-hint">Try adjusting your filters or wait for tool executions to appear</span>
       </div>
@@ -86,7 +91,8 @@ export default {
           </thead>
           <tbody>
             <template v-for="(e, i) in entries" :key="i">
-            <tr @click="toggleExpand(i)" style="cursor:pointer;"
+            <tr @click="toggleExpand(i)" @keydown.enter="toggleExpand(i)" @keydown.space.prevent="toggleExpand(i)"
+                role="button" tabindex="0" :aria-expanded="expandedIdx === i" style="cursor:pointer;"
                 :class="expandedIdx === i ? 'bg-gray-800/50' : ''">
               <td class="text-xs text-gray-400 font-mono whitespace-nowrap">{{ formatTs(e.timestamp) }}</td>
               <td class="font-mono text-xs">{{ e.tool || e.tool_name || '—' }}</td>

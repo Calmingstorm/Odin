@@ -72,7 +72,7 @@ export default {
           <p class="text-red-400 text-sm">Search error: {{ searchError }}</p>
         </div>
         <div v-else-if="searchResults.length === 0" class="hm-card empty-state">
-          <span class="empty-state-icon">\u{1F50D}</span>
+          <span class="empty-state-icon"><odin-icon name="search" :size="23" /></span>
           <span class="empty-state-text">No results for "{{ lastQuery }}"</span>
           <span class="empty-state-hint">Try different search terms or ingest more documents</span>
         </div>
@@ -93,13 +93,15 @@ export default {
       <div v-if="showIngest" class="hm-card mb-4 kb-ingest-form">
         <h2 class="text-sm font-medium mb-3">Ingest Document</h2>
         <div class="mb-3">
-          <label class="text-gray-400 text-xs block mb-1">Source Name</label>
+          <label class="text-gray-400 text-xs block mb-1">Source Name
           <input v-model="ingestSource" type="text" class="hm-input" placeholder="e.g. project-docs, api-reference" />
+          </label>
         </div>
         <div class="mb-3">
-          <label class="text-gray-400 text-xs block mb-1">Content</label>
+          <label class="text-gray-400 text-xs block mb-1">Content
           <textarea v-model="ingestContent" class="hm-input" rows="8"
                     placeholder="Paste document content here..."></textarea>
+          </label>
         </div>
         <div v-if="ingestError" class="mb-3 text-red-400 text-sm">{{ ingestError }}</div>
         <div v-if="ingestSuccess" class="mb-3 text-green-400 text-sm">{{ ingestSuccess }}</div>
@@ -113,12 +115,12 @@ export default {
         <div v-for="n in 3" :key="n" class="skeleton skeleton-row"></div>
       </div>
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="fetchSources" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="sources.length === 0 && !showIngest" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{1F4DA}</span>
+        <span class="empty-state-icon"><odin-icon name="book" :size="23" /></span>
         <span class="empty-state-text">No documents ingested</span>
         <span class="empty-state-hint">Click "Ingest Document" to add knowledge for Odin to reference</span>
       </div>
@@ -132,10 +134,10 @@ export default {
             <div class="kb-tree-header" @click="toggleSource(s.source || s.name || s)"
                  role="button" tabindex="0" @keydown.enter="toggleSource(s.source || s.name || s)" @keydown.space.prevent="toggleSource(s.source || s.name || s)"
                  :aria-expanded="!!expanded[s.source || s.name || s]">
-              <span class="kb-tree-arrow" :class="{ 'kb-tree-arrow-open': expanded[s.source || s.name || s] }" aria-hidden="true">
-                \u25B6
+              <span class="kb-tree-arrow" aria-hidden="true">
+                <odin-icon :name="expanded[s.source || s.name || s] ? 'chevronUp' : 'chevronDown'" :size="14" />
               </span>
-              <span class="kb-tree-icon">\u{1F4C4}</span>
+              <span class="kb-tree-icon"><odin-icon name="file" :size="17" /></span>
               <span class="kb-tree-name">{{ s.source || s.name || s }}</span>
               <span class="badge badge-info text-xs">{{ s.chunks || 0 }} chunks</span>
               <span v-if="s.uploader" class="badge badge-warning text-xs">{{ s.uploader }}</span>
@@ -173,8 +175,11 @@ export default {
                   <span class="text-gray-600 text-xs">Ingested: {{ formatTs(s.ingested_at) }}</span>
                 </div>
                 <div v-for="chunk in sourceChunks[s.source || s.name || s]" :key="chunk.chunk_id"
-                     class="kb-chunk-item" :class="{ 'kb-chunk-selected': selectedChunk === chunk.chunk_id }"
-                     @click="selectedChunk = selectedChunk === chunk.chunk_id ? null : chunk.chunk_id">
+                     class="kb-chunk-item" role="button" tabindex="0" :aria-expanded="selectedChunk === chunk.chunk_id"
+                     :class="{ 'kb-chunk-selected': selectedChunk === chunk.chunk_id }"
+                     @click="selectedChunk = selectedChunk === chunk.chunk_id ? null : chunk.chunk_id"
+                     @keydown.enter="selectedChunk = selectedChunk === chunk.chunk_id ? null : chunk.chunk_id"
+                     @keydown.space.prevent="selectedChunk = selectedChunk === chunk.chunk_id ? null : chunk.chunk_id">
                   <div class="kb-chunk-item-header">
                     <span class="kb-chunk-index">#{{ chunk.chunk_index }}</span>
                     <span class="kb-chunk-chars">{{ chunk.char_count }} chars</span>
@@ -193,7 +198,7 @@ export default {
       </div>
 
       <!-- Delete confirmation -->
-      <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null" role="dialog" aria-modal="true" aria-labelledby="kb-delete-title">
+      <div v-if="deleteTarget" class="modal-overlay" v-modal-focus @click.self="deleteTarget = null" @keyup.escape="deleteTarget = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="kb-delete-title">
         <div class="modal-content">
           <h3 id="kb-delete-title" class="text-lg font-semibold mb-2">Delete Source</h3>
           <p class="text-gray-400 text-sm mb-4">

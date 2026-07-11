@@ -13,7 +13,7 @@ const ContextAssemblyPanel = {
               <!-- Context trace (observability): what the prompt assembler did -->
               <div v-if="trace" class="mt-3">
                 <div class="text-gray-400 text-xs mb-1">Context Assembly</div>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-2">
+                <div class="grid grid-cols-1 min-[360px]:grid-cols-2 md:grid-cols-4 gap-2 mb-2">
                   <div class="p-2 rounded bg-gray-900 text-xs">
                     <span class="text-gray-500 block">System tokens</span>
                     <span class="font-semibold">{{ formatTokens(trace.summary?.system_tokens) }}</span>
@@ -77,24 +77,27 @@ export default {
       <div class="hm-card mb-4">
         <div class="grid grid-cols-1 md:grid-cols-5 gap-3">
           <div class="md:col-span-2">
-            <label class="text-gray-400 text-xs block mb-1">Message ID</label>
+            <label class="text-gray-400 text-xs block mb-1">Message ID
             <input v-model="messageIdQuery" type="text" class="hm-input"
                    placeholder="Look up by message ID..." @keyup.enter="lookupMessage" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">File</label>
+            <label class="text-gray-400 text-xs block mb-1">File
             <select v-model="selectedFile" class="hm-input" @change="fetchTraces">
               <option value="">All files</option>
               <option v-for="f in files" :key="f" :value="f">{{ f.replace('.jsonl', '') }}</option>
             </select>
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Tool</label>
+            <label class="text-gray-400 text-xs block mb-1">Tool
             <input v-model="filters.tool_name" type="text" class="hm-input"
                    placeholder="e.g. run_command" @keyup.enter="fetchTraces" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Filters</label>
+            <span class="text-gray-400 text-xs block mb-1">Filters</span>
             <div class="flex gap-2">
               <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer">
                 <input type="checkbox" v-model="filters.errors_only" @change="fetchTraces" class="rounded" />
@@ -106,22 +109,25 @@ export default {
         </div>
         <div class="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Channel</label>
+            <label class="text-gray-400 text-xs block mb-1">Channel
             <input v-model="filters.channel_id" type="text" class="hm-input"
                    placeholder="Channel ID" @keyup.enter="fetchTraces" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">User</label>
+            <label class="text-gray-400 text-xs block mb-1">User
             <input v-model="filters.user_id" type="text" class="hm-input"
                    placeholder="User ID" @keyup.enter="fetchTraces" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Limit</label>
+            <label class="text-gray-400 text-xs block mb-1">Limit
             <select v-model="filters.limit" class="hm-input" @change="fetchTraces">
               <option :value="25">25</option>
               <option :value="50">50</option>
               <option :value="100">100</option>
             </select>
+            </label>
           </div>
           <div class="flex items-end">
             <button @click="fetchTraces" class="btn btn-primary text-xs">Search</button>
@@ -190,8 +196,9 @@ export default {
               <div v-for="(it, idx) in singleTrace.iterations" :key="idx"
                    class="border border-gray-700 rounded p-3 hover:border-gray-600 transition-colors">
                 <!-- Iteration header -->
-                <div class="flex items-center justify-between cursor-pointer"
-                     @click="toggleIteration('single', idx)">
+                <div class="flex items-center justify-between cursor-pointer" role="button" tabindex="0"
+                     @click="toggleIteration('single', idx)" @keydown.enter="toggleIteration('single', idx)"
+                     @keydown.space.prevent="toggleIteration('single', idx)">
                   <div class="flex items-center gap-2">
                     <span class="text-xs font-mono font-semibold text-gray-400">#{{ it.iteration + 1 }}</span>
                     <div class="flex gap-1 flex-wrap">
@@ -206,7 +213,7 @@ export default {
                   <div class="flex items-center gap-3 text-xs text-gray-500">
                     <span v-if="it.duration_ms">{{ formatDuration(it.duration_ms) }}</span>
                     <span v-if="it.input_tokens || it.output_tokens">{{ it.input_tokens + it.output_tokens }} tok</span>
-                    <span class="text-gray-600">{{ isIterationExpanded('single', idx) ? '\u25B2' : '\u25BC' }}</span>
+                    <span class="text-gray-600" aria-hidden="true"><odin-icon :name="isIterationExpanded('single', idx) ? 'chevronUp' : 'chevronDown'" :size="14" /></span>
                   </div>
                 </div>
 
@@ -273,12 +280,12 @@ export default {
           <div v-for="n in 5" :key="n" class="skeleton skeleton-row"></div>
         </div>
         <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-          <span class="error-icon" aria-hidden="true">\u26A0</span>
+          <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
           <p class="text-red-400">{{ error }}</p>
           <button @click="fetchTraces" class="btn btn-ghost text-xs">Retry</button>
         </div>
         <div v-else-if="entries.length === 0" class="hm-card empty-state">
-          <span class="empty-state-icon">\u{1F50D}</span>
+          <span class="empty-state-icon"><odin-icon name="search" :size="23" /></span>
           <span class="empty-state-text">No traces found</span>
           <span class="empty-state-hint">Traces appear when the bot processes messages with tool calls</span>
         </div>
@@ -304,7 +311,8 @@ export default {
               </thead>
               <tbody>
                 <template v-for="(e, i) in entries" :key="i">
-                <tr @click="toggleExpand(i)" style="cursor:pointer;"
+                <tr @click="toggleExpand(i)" @keydown.enter="toggleExpand(i)" @keydown.space.prevent="toggleExpand(i)"
+                    role="button" tabindex="0" :aria-expanded="expandedIdx === i" style="cursor:pointer;"
                     :class="expandedIdx === i ? 'bg-gray-800/50' : ''">
                   <td class="text-xs text-gray-400 font-mono whitespace-nowrap">{{ formatTs(e.timestamp) }}</td>
                   <td class="text-xs font-mono">{{ e.user_name || e.user_id || '\u2014' }}</td>
@@ -375,8 +383,9 @@ export default {
                 <div class="space-y-2">
                   <div v-for="(it, idx) in entries[expandedIdx].iterations" :key="idx"
                        class="border border-gray-700 rounded p-3 hover:border-gray-600 transition-colors">
-                    <div class="flex items-center justify-between cursor-pointer"
-                         @click.stop="toggleIteration('list', idx)">
+                    <div class="flex items-center justify-between cursor-pointer" role="button" tabindex="0"
+                         @click.stop="toggleIteration('list', idx)" @keydown.enter.stop="toggleIteration('list', idx)"
+                         @keydown.space.prevent.stop="toggleIteration('list', idx)">
                       <div class="flex items-center gap-2">
                         <span class="text-xs font-mono font-semibold text-gray-400">#{{ it.iteration + 1 }}</span>
                         <div class="flex gap-1 flex-wrap">
@@ -391,7 +400,7 @@ export default {
                       <div class="flex items-center gap-3 text-xs text-gray-500">
                         <span v-if="it.duration_ms">{{ formatDuration(it.duration_ms) }}</span>
                         <span v-if="it.input_tokens || it.output_tokens">{{ it.input_tokens + it.output_tokens }} tok</span>
-                        <span class="text-gray-600">{{ isIterationExpanded('list', idx) ? '\u25B2' : '\u25BC' }}</span>
+                        <span class="text-gray-600" aria-hidden="true"><odin-icon :name="isIterationExpanded('list', idx) ? 'chevronUp' : 'chevronDown'" :size="14" /></span>
                       </div>
                     </div>
 

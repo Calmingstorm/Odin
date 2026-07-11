@@ -49,38 +49,43 @@ export default {
             </button>
           </div>
           <div v-if="showCreate" class="space-y-3">
-            <div class="grid grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label class="text-xs text-gray-500 block mb-1">User ID (unique identifier)</label>
+                <label class="text-xs text-gray-500 block mb-1">User ID (unique identifier)
                 <input v-model="createForm.user_id" class="hm-input w-full text-sm"
                        placeholder="e.g. orchestrator-1" />
+                </label>
               </div>
               <div>
-                <label class="text-xs text-gray-500 block mb-1">Display Name</label>
+                <label class="text-xs text-gray-500 block mb-1">Display Name
                 <input v-model="createForm.username" class="hm-input w-full text-sm"
                        placeholder="e.g. Task Orchestrator" />
+                </label>
               </div>
               <div>
-                <label class="text-xs text-gray-500 block mb-1">Permission Tier</label>
+                <label class="text-xs text-gray-500 block mb-1">Permission Tier
                 <select v-model="createForm.tier" class="hm-input w-full text-sm">
                   <option value="admin">admin — full tool access</option>
                   <option value="user">user — read-only tools</option>
                   <option value="guest">guest — chat only, no tools</option>
                 </select>
+                </label>
               </div>
               <div>
-                <label class="text-xs text-gray-500 block mb-1">Label (description)</label>
+                <label class="text-xs text-gray-500 block mb-1">Label (description)
                 <input v-model="createForm.label" class="hm-input w-full text-sm"
                        placeholder="e.g. CI/CD pipeline" />
+                </label>
               </div>
             </div>
             <div>
-              <label class="text-xs text-gray-500 block mb-1">Host Access</label>
+              <label class="text-xs text-gray-500 block mb-1">Host Access
               <select v-model="createForm.host_mode" class="hm-input w-full text-sm mb-2">
                 <option value="default">Use default host policy</option>
                 <option value="select">Restrict to selected hosts</option>
                 <option value="none">No host access (chat only)</option>
               </select>
+              </label>
               <div v-if="createForm.host_mode === 'select'" class="flex flex-wrap gap-3">
                 <label v-for="host in availableHosts" :key="'ch-'+host"
                        class="flex items-center gap-2 text-sm">
@@ -92,7 +97,7 @@ export default {
               </div>
             </div>
             <div>
-              <label class="text-xs text-gray-500 block mb-1">Default Host</label>
+              <label class="text-xs text-gray-500 block mb-1">Default Host
               <select v-model="createForm.default_host" class="hm-input w-full text-sm"
                       :disabled="createForm.host_mode === 'none'">
                 <option value="">Use host policy default</option>
@@ -100,12 +105,14 @@ export default {
                   {{ host }}
                 </option>
               </select>
+              </label>
               <p class="text-xs text-gray-500 mt-1">Used when API requests don't specify a host.</p>
             </div>
             <div>
-              <label class="text-xs text-gray-500 block mb-1">Allowed Tools (comma-separated, leave empty for tier default)</label>
+              <label class="text-xs text-gray-500 block mb-1">Allowed Tools (comma-separated, leave empty for tier default)
               <input v-model="createForm.allowed_tools_str" class="hm-input w-full text-sm"
                      placeholder="e.g. run_command, web_search, fetch_url" />
+              </label>
             </div>
             <div class="flex justify-end">
               <button @click="createToken" class="btn btn-primary text-sm" :disabled="!createForm.user_id.trim() || creating">
@@ -170,35 +177,39 @@ export default {
         </div>
 
         <!-- Edit modal -->
-        <div v-if="editing" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50" @click.self="editing = null">
-          <div class="hm-card w-full max-w-lg mx-4">
-            <h3 class="text-sm font-semibold text-gray-300 mb-4">Edit Token: {{ editing.user_id }}</h3>
+        <div v-if="editing" class="modal-overlay" v-modal-focus @click.self="editing = null" @keyup.escape="editing = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="token-edit-title">
+          <div class="modal-content" style="max-width:640px">
+            <h3 id="token-edit-title" class="text-sm font-semibold text-gray-300 mb-4">Edit Token: {{ editing.user_id }}</h3>
             <div class="space-y-3">
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label class="text-xs text-gray-500 block mb-1">Display Name</label>
+                  <label class="text-xs text-gray-500 block mb-1">Display Name
                   <input v-model="editForm.username" class="hm-input w-full text-sm" />
+                  </label>
                 </div>
                 <div>
-                  <label class="text-xs text-gray-500 block mb-1">Tier</label>
+                  <label class="text-xs text-gray-500 block mb-1">Tier
                   <select v-model="editForm.tier" class="hm-input w-full text-sm">
                     <option value="admin">admin</option>
                     <option value="user">user</option>
                     <option value="guest">guest</option>
                   </select>
+                  </label>
                 </div>
               </div>
               <div>
-                <label class="text-xs text-gray-500 block mb-1">Label</label>
+                <label class="text-xs text-gray-500 block mb-1">Label
                 <input v-model="editForm.label" class="hm-input w-full text-sm" />
+                </label>
               </div>
               <div>
-                <label class="text-xs text-gray-500 block mb-1">Host Access</label>
+                <label class="text-xs text-gray-500 block mb-1">Host Access
                 <select v-model="editForm.host_mode" class="hm-input w-full text-sm mb-2">
                   <option value="default">Use default host policy</option>
                   <option value="select">Restrict to selected hosts</option>
                   <option value="none">No host access (chat only)</option>
                 </select>
+                </label>
                 <div v-if="editForm.host_mode === 'select'" class="flex flex-wrap gap-3">
                   <label v-for="host in availableHosts" :key="'eh-'+host"
                          class="flex items-center gap-2 text-sm">
@@ -210,7 +221,7 @@ export default {
                 </div>
               </div>
               <div>
-                <label class="text-xs text-gray-500 block mb-1">Default Host</label>
+                <label class="text-xs text-gray-500 block mb-1">Default Host
                 <select v-model="editForm.default_host" class="hm-input w-full text-sm"
                         :disabled="editForm.host_mode === 'none'">
                   <option value="">Use host policy default</option>
@@ -218,10 +229,12 @@ export default {
                     {{ host }}
                   </option>
                 </select>
+                </label>
               </div>
               <div>
-                <label class="text-xs text-gray-500 block mb-1">Allowed Tools (comma-separated, empty for tier default)</label>
+                <label class="text-xs text-gray-500 block mb-1">Allowed Tools (comma-separated, empty for tier default)
                 <input v-model="editForm.allowed_tools_str" class="hm-input w-full text-sm" />
+                </label>
               </div>
               <div class="flex justify-end gap-2 pt-2">
                 <button @click="editing = null" class="btn btn-ghost text-sm">Cancel</button>

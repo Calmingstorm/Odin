@@ -4,17 +4,17 @@
  * + server-side search/history mode (Round 5)
  */
 import { api, ws } from '../api.js';
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
 
 
 const LOG_LEVELS = ['INFO', 'WARNING', 'ERROR'];
 
 const LOG_PRESETS = [
-  { id: 'all', name: 'All Logs', icon: '\u2630', filters: {} },
-  { id: 'errors', name: 'Errors Only', icon: '\u274C', filters: { level: 'ERROR' } },
-  { id: 'warnings', name: 'Warnings+', icon: '\u26A0', filters: { levels: ['WARNING', 'ERROR'] } },
-  { id: 'tools', name: 'Tool Activity', icon: '\uD83D\uDD27', filters: { hasToolName: true } },
-  { id: 'recent-errors', name: 'Recent Errors', icon: '\uD83D\uDD25', filters: { level: 'ERROR', timeRange: 'last_1h' } },
+  { id: 'all', name: 'All Logs', icon: 'list', filters: {} },
+  { id: 'errors', name: 'Errors Only', icon: 'error', filters: { level: 'ERROR' } },
+  { id: 'warnings', name: 'Warnings+', icon: 'warning', filters: { levels: ['WARNING', 'ERROR'] } },
+  { id: 'tools', name: 'Tool Activity', icon: 'wrench', filters: { hasToolName: true } },
+  { id: 'recent-errors', name: 'Recent Errors', icon: 'flame', filters: { level: 'ERROR', timeRange: 'last_1h' } },
 ];
 
 const TIME_RANGES = [
@@ -72,7 +72,7 @@ export default {
                     @click="applyLogPreset(preset)"
                     class="sess-preset-chip"
                     :class="{ 'sess-preset-active': activeLogPreset === preset.id }">
-              <span class="sess-preset-icon">{{ preset.icon }}</span>
+              <span class="sess-preset-icon"><odin-icon :name="preset.icon" :size="15" /></span>
               <span>{{ preset.name }}</span>
             </button>
           </div>
@@ -130,7 +130,7 @@ export default {
                   @click="applyCustomLogPreset(cp)"
                   class="sess-preset-chip sess-preset-custom"
                   :class="{ 'sess-preset-active': activeLogPreset === cp.id }">
-            <span>\u2605</span>
+            <odin-icon name="sparkles" :size="14" />
             <span>{{ cp.name }}</span>
             <span class="sess-preset-remove" @click.stop="removeLogCustomPreset(cp.id)">&times;</span>
           </button>
@@ -177,7 +177,7 @@ export default {
           <div ref="logContainer" @scroll="onScroll"
                class="absolute inset-0 overflow-y-auto bg-gray-950 border border-gray-800 rounded p-3 font-mono text-xs">
             <div v-if="filteredLogs.length === 0" class="empty-state" style="padding:2rem 0;">
-              <span class="empty-state-icon">{{ logs.length === 0 ? '\uD83D\uDCC4' : '\uD83D\uDD0D' }}</span>
+              <span class="empty-state-icon"><odin-icon :name="logs.length === 0 ? 'file' : 'search'" :size="23" /></span>
               <span class="empty-state-text">{{ logs.length === 0 ? 'Waiting for log entries...' : 'No entries match the current filter' }}</span>
             </div>
             <div v-for="(entry, i) in filteredLogs" :key="i"
@@ -195,7 +195,7 @@ export default {
           <!-- Jump to bottom -->
           <button v-if="showJumpBottom" @click="jumpToBottom"
                   class="log-jump-btn">
-            &#x2193; Jump to bottom
+            <odin-icon name="download" :size="14" /> Jump to bottom
           </button>
         </div>
       </template>
@@ -227,26 +227,28 @@ export default {
           <div class="flex gap-3 flex-wrap items-end">
             <!-- Level -->
             <div class="flex flex-col gap-1">
-              <label class="text-xs text-gray-500">Level</label>
+              <label class="text-xs text-gray-500">Level
               <select v-model="searchLevel" class="hm-select text-xs" style="min-width:100px;">
                 <option value="all">All</option>
                 <option value="error">Errors only</option>
                 <option value="info">Info only</option>
               </select>
+              </label>
             </div>
 
             <!-- Tool name -->
             <div class="flex flex-col gap-1">
-              <label class="text-xs text-gray-500">Tool</label>
+              <label class="text-xs text-gray-500">Tool
               <select v-model="searchTool" class="hm-select text-xs" style="min-width:140px;">
                 <option value="">Any tool</option>
                 <option v-for="t in (searchStats ? searchStats.tools || [] : [])" :key="t" :value="t">{{ t }}</option>
               </select>
+              </label>
             </div>
 
             <!-- Time range quick select -->
             <div class="flex flex-col gap-1">
-              <label class="text-xs text-gray-500">Time range</label>
+              <label class="text-xs text-gray-500">Time range
               <select v-model="searchTimePreset" @change="applySearchTimePreset" class="hm-select text-xs" style="min-width:130px;">
                 <option value="">Custom / All</option>
                 <option value="last_5m">Last 5 min</option>
@@ -256,34 +258,39 @@ export default {
                 <option value="last_24h">Last 24 hours</option>
                 <option value="last_7d">Last 7 days</option>
               </select>
+              </label>
             </div>
 
             <!-- Start time -->
             <div class="flex flex-col gap-1">
-              <label class="text-xs text-gray-500">From</label>
+              <label class="text-xs text-gray-500">From
               <input v-model="searchStart" type="datetime-local" class="hm-input text-xs" style="min-width:170px;" />
+              </label>
             </div>
 
             <!-- End time -->
             <div class="flex flex-col gap-1">
-              <label class="text-xs text-gray-500">To</label>
+              <label class="text-xs text-gray-500">To
               <input v-model="searchEnd" type="datetime-local" class="hm-input text-xs" style="min-width:170px;" />
+              </label>
             </div>
 
             <!-- Keyword -->
             <div class="flex flex-col gap-1 flex-1" style="min-width:150px;">
-              <label class="text-xs text-gray-500">Keyword</label>
+              <label class="text-xs text-gray-500">Keyword
               <input v-model="searchKeyword" type="text" class="hm-input text-xs"
                      placeholder="Search text..."
                      @keyup.enter="runSearch" />
+              </label>
             </div>
 
             <!-- Limit -->
             <div class="flex flex-col gap-1">
-              <label class="text-xs text-gray-500">Limit</label>
+              <label class="text-xs text-gray-500">Limit
               <select v-model.number="searchLimit" class="hm-select text-xs" style="min-width:80px;">
                 <option v-for="l in searchLimits" :key="l" :value="l">{{ l }}</option>
               </select>
+              </label>
             </div>
 
             <!-- Search button -->
@@ -307,19 +314,19 @@ export default {
           <div class="absolute inset-0 overflow-y-auto bg-gray-950 border border-gray-800 rounded p-3 font-mono text-xs">
             <!-- Loading -->
             <div v-if="searching" class="empty-state" style="padding:2rem 0;">
-              <span class="empty-state-icon">\u23F3</span>
+              <span class="empty-state-icon"><odin-icon name="clock" :size="23" /></span>
               <span class="empty-state-text">Searching...</span>
             </div>
 
             <!-- No results -->
             <div v-else-if="searchResults.length === 0 && searchRan" class="empty-state" style="padding:2rem 0;">
-              <span class="empty-state-icon">\uD83D\uDD0D</span>
+              <span class="empty-state-icon"><odin-icon name="search" :size="23" /></span>
               <span class="empty-state-text">No entries match the search criteria</span>
             </div>
 
             <!-- Prompt to search -->
             <div v-else-if="searchResults.length === 0 && !searchRan" class="empty-state" style="padding:2rem 0;">
-              <span class="empty-state-icon">\uD83D\uDCCA</span>
+              <span class="empty-state-icon"><odin-icon name="chart" :size="23" /></span>
               <span class="empty-state-text">Set filters and click Search to query log history</span>
             </div>
 
@@ -343,7 +350,7 @@ export default {
                 <!-- Expanded detail -->
                 <div v-if="expandedSearch === i" class="mt-2 ml-4 p-2 bg-gray-900 border border-gray-700 rounded text-xs"
                      @click.stop>
-                  <div class="grid grid-cols-2 gap-x-4 gap-y-1 mb-2" style="max-width:500px;">
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 mb-2" style="max-width:500px;">
                     <span class="text-gray-500">Timestamp:</span>
                     <span>{{ entry.timestamp || 'N/A' }}</span>
                     <template v-if="entry.user_id">
@@ -890,29 +897,41 @@ export default {
       }
     }
 
-    // Track WS connection status via state callback
+    // The tab host uses <keep-alive>, so subscription ownership follows
+    // activation rather than mount/unmount. Hidden Logs tabs must not retain
+    // the global WebSocket state callback.
     let prevStateHandler = null;
+    let logsStateHandler = null;
+    let logStreamActive = false;
 
-    onMounted(() => {
-      loadCustomLogPresets();
+    function activateLogStream() {
+      if (logStreamActive) return;
+      logStreamActive = true;
       ws.subscribe('logs', onLog);
       subscribed.value = ws.connected;
       wsState.value = ws.state || 'disconnected';
       prevStateHandler = ws.onStateChange;
-      const origHandler = ws.onStateChange;
-      ws.onStateChange = (state, detail) => {
+      logsStateHandler = (state, detail) => {
         wsState.value = state;
         subscribed.value = state === 'connected';
-        if (origHandler) origHandler(state, detail);
+        if (prevStateHandler) prevStateHandler(state, detail);
       };
-    });
+      ws.onStateChange = logsStateHandler;
+    }
 
-    onUnmounted(() => {
+    function deactivateLogStream() {
+      if (!logStreamActive) return;
+      logStreamActive = false;
       ws.unsubscribe('logs', onLog);
-      if (prevStateHandler !== undefined) {
-        ws.onStateChange = prevStateHandler;
-      }
-    });
+      if (ws.onStateChange === logsStateHandler) ws.onStateChange = prevStateHandler;
+      logsStateHandler = null;
+      prevStateHandler = null;
+    }
+
+    onMounted(loadCustomLogPresets);
+    onActivated(activateLogStream);
+    onDeactivated(deactivateLogStream);
+    onUnmounted(deactivateLogStream);
 
     return {
       mode,

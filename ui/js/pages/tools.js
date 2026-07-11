@@ -9,18 +9,18 @@ import { computed, onMounted, ref } from 'vue';
 
 /** Category mapping for tools — groups tools by functional area */
 const TOOL_CATEGORIES = [
-  { id: 'system', label: 'System & Commands', icon: '\u{1F5A5}', match: n => /^(run_command|run_script|read_file|write_file|list_directory|search_files|manage_process|file_|post_file)/.test(n) },
-  { id: 'devops', label: 'DevOps & Infrastructure', icon: '\u{1F6E0}', match: n => /^(git_ops|docker_ops|kubectl|terraform_ops|http_probe)/.test(n) },
-  { id: 'agents', label: 'Agents & Orchestration', icon: '\u{1F916}', match: n => /^(spawn_agent|send_to_agent|wait_for_agents|get_agent_results|kill_agent|list_agents|spawn_loop_agents|collect_loop_agents)/.test(n) },
-  { id: 'workflow', label: 'Workflows & Tasks', icon: '\u{1F4CB}', match: n => /^(delegate_task|cancel_task|list_tasks|schedule_|start_loop|stop_loop|list_loops|delete_schedule|list_schedules|update_schedule|parse_time)/.test(n) },
-  { id: 'network', label: 'Network & Web', icon: '\u{1F310}', match: n => /^(web_|browser_|search_web|fetch_url|http_)/.test(n) },
-  { id: 'knowledge', label: 'Knowledge & Search', icon: '\u{1F4DA}', match: n => /^(search_knowledge|ingest_|knowledge_|search_history|search_audit|bulk_ingest|delete_knowledge|list_knowledge)/.test(n) },
-  { id: 'discord', label: 'Discord & Admin', icon: '\u{1F4AC}', match: n => /^(send_|add_reaction|create_poll|purge_|discord_|embed_|read_channel|set_permission)/.test(n) },
-  { id: 'skills', label: 'Skills', icon: '\u{1F9E9}', match: n => /^(create_skill|edit_skill|delete_skill|enable_skill|disable_skill|install_skill|export_skill|skill_status|invoke_skill|list_skills)/.test(n) },
-  { id: 'memory', label: 'Memory & State', icon: '\u{1F9E0}', match: n => /^(memory_manage|list_manage)/.test(n) },
-  { id: 'ai', label: 'AI & Generation', icon: '\u2728', match: n => /^(generate_|analyze_|claude_|vision_|comfyui_)/.test(n) },
-  { id: 'integrations', label: 'Integrations', icon: '\u{1F517}', match: n => /^(issue_tracker|slack_|grafana_|mcp_)/.test(n) },
-  { id: 'other', label: 'Other Tools', icon: '\u{1F527}', match: () => true },
+  { id: 'system', label: 'System & Commands', icon: 'terminal', match: n => /^(run_command|run_script|read_file|write_file|list_directory|search_files|manage_process|file_|post_file)/.test(n) },
+  { id: 'devops', label: 'DevOps & Infrastructure', icon: 'server', match: n => /^(git_ops|docker_ops|kubectl|terraform_ops|http_probe)/.test(n) },
+  { id: 'agents', label: 'Agents & Orchestration', icon: 'bot', match: n => /^(spawn_agent|send_to_agent|wait_for_agents|get_agent_results|kill_agent|list_agents|spawn_loop_agents|collect_loop_agents)/.test(n) },
+  { id: 'workflow', label: 'Workflows & Tasks', icon: 'workflow', match: n => /^(delegate_task|cancel_task|list_tasks|schedule_|start_loop|stop_loop|list_loops|delete_schedule|list_schedules|update_schedule|parse_time)/.test(n) },
+  { id: 'network', label: 'Network & Web', icon: 'globe', match: n => /^(web_|browser_|search_web|fetch_url|http_)/.test(n) },
+  { id: 'knowledge', label: 'Knowledge & Search', icon: 'book', match: n => /^(search_knowledge|ingest_|knowledge_|search_history|search_audit|bulk_ingest|delete_knowledge|list_knowledge)/.test(n) },
+  { id: 'discord', label: 'Discord & Admin', icon: 'message', match: n => /^(send_|add_reaction|create_poll|purge_|discord_|embed_|read_channel|set_permission)/.test(n) },
+  { id: 'skills', label: 'Skills', icon: 'puzzle', match: n => /^(create_skill|edit_skill|delete_skill|enable_skill|disable_skill|install_skill|export_skill|skill_status|invoke_skill|list_skills)/.test(n) },
+  { id: 'memory', label: 'Memory & State', icon: 'brain', match: n => /^(memory_manage|list_manage)/.test(n) },
+  { id: 'ai', label: 'AI & Generation', icon: 'sparkles', match: n => /^(generate_|analyze_|claude_|vision_|comfyui_)/.test(n) },
+  { id: 'integrations', label: 'Integrations', icon: 'link', match: n => /^(issue_tracker|slack_|grafana_|mcp_)/.test(n) },
+  { id: 'other', label: 'Other Tools', icon: 'wrench', match: () => true },
 ];
 
 export default {
@@ -30,8 +30,8 @@ export default {
         <h1 class="text-xl font-semibold">Tools</h1>
         <div class="flex gap-2 items-center">
           <div class="tl-view-toggle" role="toolbar" aria-label="View mode">
-            <button @click="viewMode = 'cards'" class="tl-view-btn" :class="{ 'tl-view-active': viewMode === 'cards' }" :aria-pressed="viewMode === 'cards'" aria-label="Card view"><span aria-hidden="true">\u25A6</span></button>
-            <button @click="viewMode = 'table'" class="tl-view-btn" :class="{ 'tl-view-active': viewMode === 'table' }" :aria-pressed="viewMode === 'table'" aria-label="Table view"><span aria-hidden="true">\u2630</span></button>
+            <button @click="viewMode = 'cards'" class="tl-view-btn" :class="{ 'tl-view-active': viewMode === 'cards' }" :aria-pressed="viewMode === 'cards'" aria-label="Card view"><odin-icon name="grid" :size="16" /></button>
+            <button @click="viewMode = 'table'" class="tl-view-btn" :class="{ 'tl-view-active': viewMode === 'table' }" :aria-pressed="viewMode === 'table'" aria-label="Table view"><odin-icon name="list" :size="16" /></button>
           </div>
           <button @click="refresh" class="btn btn-ghost text-xs" :disabled="loading">
             {{ loading ? 'Loading...' : 'Refresh' }}
@@ -54,7 +54,7 @@ export default {
 
       <!-- Error state -->
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="refresh" class="btn btn-ghost text-xs">Retry</button>
       </div>
@@ -91,7 +91,7 @@ export default {
                     @click="activeCategory = activeCategory === cat.id ? null : cat.id"
                     class="tl-category-chip" :class="{ 'tl-category-active': activeCategory === cat.id }"
                     :aria-pressed="activeCategory === cat.id">
-              <span aria-hidden="true">{{ cat.icon }}</span> {{ cat.label }}
+              <odin-icon :name="cat.icon" :size="15" /> {{ cat.label }}
             </button>
           </div>
         </div>
@@ -100,14 +100,15 @@ export default {
         <div v-if="viewMode === 'cards'">
           <div v-for="group in groupedTools" :key="group.label" class="mb-5">
             <div class="tl-group-header">
-              <span class="tl-group-icon">{{ group.icon }}</span>
+              <span class="tl-group-icon"><odin-icon :name="group.icon" :size="17" /></span>
               <span class="tl-group-label">{{ group.label }}</span>
               <span class="badge badge-info">{{ group.tools.length }}</span>
             </div>
             <div class="tl-tool-grid">
               <div v-for="t in group.tools" :key="t.name"
                    class="tl-tool-card" :class="{ 'tl-tool-card-active': stats[t.name] > 0 }"
-                   @click="toggleExpand(t.name)">
+                   role="button" tabindex="0" :aria-expanded="!!expanded[t.name]"
+                   @click="toggleExpand(t.name)" @keydown.enter="toggleExpand(t.name)" @keydown.space.prevent="toggleExpand(t.name)">
                 <div class="tl-tool-header">
                   <span class="tl-tool-name">{{ t.name }}</span>
                 </div>
@@ -140,7 +141,7 @@ export default {
         <div v-if="viewMode === 'table'">
           <div v-for="group in groupedTools" :key="group.label" class="mb-4">
             <div class="tl-group-header">
-              <span class="tl-group-icon">{{ group.icon }}</span>
+              <span class="tl-group-icon"><odin-icon :name="group.icon" :size="17" /></span>
               <span class="tl-group-label">{{ group.label }}</span>
               <span class="badge badge-info">{{ group.tools.length }}</span>
             </div>
@@ -155,9 +156,10 @@ export default {
               </thead>
               <tbody>
                 <template v-for="t in group.tools" :key="t.name">
-                  <tr class="cursor-pointer" @click="toggleExpand(t.name)">
+                  <tr class="cursor-pointer" role="button" tabindex="0" :aria-expanded="!!expanded[t.name]"
+                      @click="toggleExpand(t.name)" @keydown.enter="toggleExpand(t.name)" @keydown.space.prevent="toggleExpand(t.name)">
                     <td class="font-mono text-sm whitespace-nowrap">
-                      <span class="tool-expand-icon text-gray-600 mr-1">{{ expanded[t.name] ? '\u25BC' : '\u25B6' }}</span>
+                      <span class="tool-expand-icon text-gray-600 mr-1" aria-hidden="true"><odin-icon :name="expanded[t.name] ? 'chevronUp' : 'chevronDown'" :size="13" /></span>
                       {{ t.name }}
                     </td>
                     <td class="text-gray-400 text-sm mobile-hide">{{ truncate(t.description, 100) }}</td>
@@ -182,7 +184,7 @@ export default {
 
         <!-- Empty search state -->
         <div v-if="filteredTools.length === 0 && search" class="hm-card empty-state">
-          <span class="empty-state-icon">\u{1F50D}</span>
+          <span class="empty-state-icon"><odin-icon name="search" :size="23" /></span>
           <span class="empty-state-text">No tools match "{{ search }}"</span>
           <span class="empty-state-hint">Try a different search term</span>
         </div>

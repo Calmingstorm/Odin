@@ -12,8 +12,11 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 export default {
   template: `
     <div class="p-6 page-fade-in">
-      <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
-        <h1 class="text-xl font-semibold">Processes</h1>
+      <div class="flex items-start justify-between mb-4 flex-wrap gap-3">
+        <div>
+          <h1 class="text-xl font-semibold">Processes</h1>
+          <p class="page-lede">Inspect managed command lifecycles, output, and exit state.</p>
+        </div>
         <div class="flex items-center gap-3">
           <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
             <span class="toggle-switch" style="width:28px; height:16px;">
@@ -35,12 +38,12 @@ export default {
         <div v-for="n in 3" :key="n" class="skeleton skeleton-row"></div>
       </div>
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="fetchProcesses()" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="processes.length === 0" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{2699}\u{FE0F}</span>
+        <span class="empty-state-icon"><odin-icon name="terminal" :size="23" /></span>
         <span class="empty-state-text">No background processes</span>
         <span class="empty-state-hint">Processes appear when Odin runs long-running commands</span>
       </div>

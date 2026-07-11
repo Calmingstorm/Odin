@@ -14,12 +14,7 @@ const STATUS_COLORS = {
   unconfigured: 'text-gray-500',
 };
 
-const STATUS_ICONS = {
-  ok: '\u2714',
-  degraded: '\u26A0',
-  down: '\u2716',
-  unconfigured: '\u2014',
-};
+const STATUS_ICONS = { ok: 'success', degraded: 'warning', down: 'error', unconfigured: 'minus' };
 
 const OVERALL_COLORS = {
   healthy: 'text-green-400',
@@ -46,7 +41,7 @@ export default {
 
       <!-- Error state -->
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="retry" class="btn btn-ghost text-xs">Retry</button>
       </div>
@@ -56,7 +51,7 @@ export default {
         <div class="hm-card mb-4" style="padding:1.25rem 1.5rem;">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;">
             <div style="display:flex;align-items:center;gap:0.75rem;">
-              <span style="font-size:1.5rem;" :class="overallColor" aria-hidden="true">{{ overallIcon }}</span>
+              <span :class="overallColor" aria-hidden="true"><odin-icon :name="overallIcon" :size="26" /></span>
               <div>
                 <div class="text-lg font-semibold" :class="overallColor">{{ overallLabel }}</div>
                 <div class="text-xs text-gray-400">
@@ -67,7 +62,8 @@ export default {
             <div style="display:flex;align-items:center;gap:0.75rem;">
               <span class="text-xs text-gray-500">Updated {{ formatTime(data.checked_at) }}</span>
               <button @click="fetchHealth" class="btn btn-ghost text-xs" :disabled="refreshing">
-                {{ refreshing ? '...' : '\u21BB Refresh' }}
+                <odin-icon name="refresh" :size="14" :class="{ 'animate-spin': refreshing }" />
+                {{ refreshing ? 'Refreshing...' : 'Refresh' }}
               </button>
             </div>
           </div>
@@ -79,7 +75,7 @@ export default {
                class="hm-card health-card"
                :class="'health-card-' + c.status">
             <div class="health-card-header">
-              <span class="health-card-icon" :class="statusColor(c.status)">{{ statusIcon(c.status) }}</span>
+              <span class="health-card-icon" :class="statusColor(c.status)"><odin-icon :name="statusIcon(c.status)" :size="18" /></span>
               <span class="health-card-name">{{ formatName(c.name) }}</span>
               <span class="badge" :class="badgeClass(c.status)">{{ c.status }}</span>
             </div>
@@ -174,10 +170,10 @@ export default {
 
     const overallColor = computed(() => OVERALL_COLORS[data.value.overall] || 'text-gray-400');
     const overallIcon = computed(() => {
-      if (data.value.overall === 'healthy') return '\u2714';
-      if (data.value.overall === 'degraded') return '\u26A0';
-      if (data.value.overall === 'unhealthy') return '\u2716';
-      return '\u2014';
+      if (data.value.overall === 'healthy') return 'success';
+      if (data.value.overall === 'degraded') return 'warning';
+      if (data.value.overall === 'unhealthy') return 'error';
+      return 'minus';
     });
     const overallLabel = computed(() => {
       const o = data.value.overall;
@@ -188,7 +184,7 @@ export default {
     });
 
     function statusColor(status) { return STATUS_COLORS[status] || 'text-gray-400'; }
-    function statusIcon(status) { return STATUS_ICONS[status] || '?'; }
+    function statusIcon(status) { return STATUS_ICONS[status] || 'info'; }
     function badgeClass(status) {
       if (status === 'ok') return 'badge-success';
       if (status === 'degraded') return 'badge-warning';

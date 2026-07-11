@@ -21,7 +21,7 @@ const ENUM_FIELDS = {
 const VALIDATION_RULES = {
   'discord.allowed_users': { type: 'array', itemType: 'string', message: 'Must be a list of user IDs' },
   'discord.channels': { type: 'array', itemType: 'string', message: 'Must be a list of channel IDs' },
-  'openai_codex.max_tokens': { type: 'number', min: 1, max: 128000, message: 'Must be 1\u201c128000' },
+  'openai_codex.max_tokens': { type: 'number', min: 1, max: 128000, message: 'Must be 1\u2013128000' },
   'sessions.max_history': { type: 'number', min: 1, max: 10000, message: 'Must be 1\u201310000' },
   'sessions.max_age_hours': { type: 'number', min: 1, message: 'Must be at least 1' },
   'learning.max_entries': { type: 'number', min: 1, message: 'Must be at least 1' },
@@ -34,14 +34,14 @@ const VALIDATION_RULES = {
 
 // Section grouping: category -> { label, icon, sections[] }
 const SECTION_GROUPS = [
-  { key: 'core', label: 'Core', icon: '\u2699', sections: ['timezone', 'discord', 'logging', 'permissions', 'personality', 'graceful_degradation'] },
-  { key: 'llm', label: 'LLM & AI', icon: '\uD83E\uDDE0', sections: ['llm_provider', 'openai_codex', 'ollama', 'kimi', 'context', 'agents'] },
-  { key: 'data', label: 'Data & Storage', icon: '\uD83D\uDCBE', sections: ['sessions', 'learning', 'search', 'usage', 'audit', 'attachments'] },
-  { key: 'services', label: 'Services', icon: '\uD83D\uDD17', sections: ['webhook', 'observability', 'email', 'browser', 'comfyui', 'mcp', 'slack'] },
-  { key: 'infra', label: 'Infrastructure', icon: '\uD83D\uDEE0', sections: ['tools'] },
-  { key: 'ui', label: 'Web UI', icon: '\uD83C\uDF10', sections: ['web'] },
-  { key: 'automation', label: 'Automation', icon: '\uD83D\uDD04', sections: ['message_triggers', 'reaction_triggers', 'grafana_alerts', 'outbound_webhooks'] },
-  { key: 'integrations', label: 'Integrations', icon: '\uD83D\uDD0C', sections: ['issue_tracker'] },
+  { key: 'core', label: 'Core', icon: 'sliders', sections: ['timezone', 'discord', 'logging', 'permissions', 'personality', 'graceful_degradation'] },
+  { key: 'llm', label: 'LLM & AI', icon: 'brain', sections: ['llm_provider', 'openai_codex', 'ollama', 'kimi', 'context', 'agents'] },
+  { key: 'data', label: 'Data & Storage', icon: 'database', sections: ['sessions', 'learning', 'search', 'usage', 'audit', 'attachments'] },
+  { key: 'services', label: 'Services', icon: 'link', sections: ['webhook', 'observability', 'email', 'browser', 'comfyui', 'mcp', 'slack'] },
+  { key: 'infra', label: 'Infrastructure', icon: 'server', sections: ['tools'] },
+  { key: 'ui', label: 'Web UI', icon: 'globe', sections: ['web'] },
+  { key: 'automation', label: 'Automation', icon: 'workflow', sections: ['message_triggers', 'reaction_triggers', 'grafana_alerts', 'outbound_webhooks'] },
+  { key: 'integrations', label: 'Integrations', icon: 'puzzle', sections: ['issue_tracker'] },
 ];
 
 const REDACTED = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
@@ -136,10 +136,10 @@ export default {
         <div class="flex gap-2 items-center">
           <template v-if="editing">
             <button @click="undo" class="btn btn-ghost text-xs cfg-undo-btn" :disabled="!canUndo" title="Undo (Ctrl+Z)">
-              \u21A9 Undo
+              <odin-icon name="undo" :size="14" /> Undo
             </button>
             <button @click="redo" class="btn btn-ghost text-xs cfg-redo-btn" :disabled="!canRedo" title="Redo (Ctrl+Y)">
-              Redo \u21AA
+              <odin-icon name="redo" :size="14" /> Redo
             </button>
             <span class="cfg-change-count" v-if="changeCount > 0">
               {{ changeCount }} change{{ changeCount !== 1 ? 's' : '' }}
@@ -176,7 +176,7 @@ export default {
 
       <!-- Error state -->
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="fetchConfig" class="btn btn-ghost text-xs">Retry</button>
       </div>
@@ -188,19 +188,21 @@ export default {
           <div class="cfg-group-header cursor-pointer select-none" @click="toggleGroup(group.key)"
                role="button" tabindex="0" @keydown.enter="toggleGroup(group.key)" @keydown.space.prevent="toggleGroup(group.key)"
                :aria-expanded="!!expandedGroups[group.key]">
-            <span class="cfg-group-icon" aria-hidden="true">{{ group.icon }}</span>
+            <span class="cfg-group-icon" aria-hidden="true"><odin-icon :name="group.icon" :size="17" /></span>
             <span class="cfg-group-label">{{ group.label }}</span>
             <span class="badge badge-info text-xs">{{ group.sections.length }}</span>
             <span v-if="editing && groupChanged(group)" class="badge badge-warning text-xs">modified</span>
-            <span class="cfg-group-arrow" aria-hidden="true">{{ expandedGroups[group.key] ? '\u25BC' : '\u25B6' }}</span>
+            <span class="cfg-group-arrow" aria-hidden="true"><odin-icon :name="expandedGroups[group.key] ? 'chevronUp' : 'chevronDown'" :size="14" /></span>
           </div>
 
           <!-- Group content -->
           <div v-if="expandedGroups[group.key]" class="cfg-group-body">
             <div v-for="section in group.sections" :key="section" class="cfg-section">
               <!-- Section header -->
-              <div class="cfg-section-header cursor-pointer select-none" @click="toggleSection(section)">
-                <span class="text-xs text-gray-500 font-mono">{{ expanded[section] ? '\u25BC' : '\u25B6' }}</span>
+              <div class="cfg-section-header cursor-pointer select-none" role="button" tabindex="0"
+                     :aria-expanded="expanded[section]" @click="toggleSection(section)"
+                     @keydown.enter="toggleSection(section)" @keydown.space.prevent="toggleSection(section)">
+                <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon :name="expanded[section] ? 'chevronUp' : 'chevronDown'" :size="13" /></span>
                 <span class="cfg-section-name">{{ section }}</span>
                 <span class="badge badge-info text-xs"
                       v-if="typeof getDisplay(section) === 'object' && getDisplay(section) !== null && !Array.isArray(getDisplay(section))">
@@ -361,8 +363,10 @@ export default {
 
         <!-- Ungrouped sections (fallback) -->
         <div v-for="section in ungroupedSections" :key="section" class="hm-card">
-          <div class="cfg-section-header cursor-pointer select-none" @click="toggleSection(section)">
-            <span class="text-xs text-gray-500 font-mono">{{ expanded[section] ? '\u25BC' : '\u25B6' }}</span>
+          <div class="cfg-section-header cursor-pointer select-none" role="button" tabindex="0"
+                     :aria-expanded="expanded[section]" @click="toggleSection(section)"
+                     @keydown.enter="toggleSection(section)" @keydown.space.prevent="toggleSection(section)">
+            <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon :name="expanded[section] ? 'chevronUp' : 'chevronDown'" :size="13" /></span>
             <span class="cfg-section-name">{{ section }}</span>
           </div>
           <div v-if="expanded[section]" class="pl-4 mt-2">
@@ -376,11 +380,11 @@ export default {
       </div>
 
       <!-- Diff modal -->
-      <div v-if="showDiffModal" class="modal-overlay" @click.self="showDiffModal = false" role="dialog" aria-modal="true" aria-labelledby="cfg-diff-title">
+      <div v-if="showDiffModal" class="modal-overlay" v-modal-focus @click.self="showDiffModal = false" @keyup.escape="showDiffModal = false" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="cfg-diff-title">
         <div class="modal-content" style="max-width:700px">
           <div class="flex items-center justify-between mb-4">
             <h2 id="cfg-diff-title" class="text-lg font-semibold">Review Changes</h2>
-            <button @click="showDiffModal = false" class="btn btn-ghost text-xs">\u2715</button>
+            <button @click="showDiffModal = false" class="icon-btn" aria-label="Close review"><odin-icon name="close" :size="17" /></button>
           </div>
           <div v-if="diffEntries.length === 0" class="text-gray-500 text-sm py-4 text-center">No changes to review.</div>
           <div v-else class="cfg-diff-list">
@@ -682,7 +686,10 @@ export default {
     // Keyboard shortcuts for undo/redo
     function handleKeydown(e) {
       if (!editing.value) return;
-      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
+      const target = e.target;
+      if (target instanceof HTMLElement &&
+          (target.matches('input, textarea, select') || target.isContentEditable)) return;
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         undo();
       } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z') || (e.shiftKey && e.key === 'Z'))) {

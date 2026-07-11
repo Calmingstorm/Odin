@@ -55,20 +55,23 @@ export default {
         <h2 class="text-sm font-medium mb-3">Add Memory Entry</h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Scope</label>
+            <label class="text-gray-400 text-xs block mb-1">Scope
             <input v-model="addForm.scope" type="text" class="hm-input"
                    placeholder="e.g. global, user:12345" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Key</label>
+            <label class="text-gray-400 text-xs block mb-1">Key
             <input v-model="addForm.key" type="text" class="hm-input"
                    placeholder="e.g. preferred_language" />
+            </label>
           </div>
         </div>
         <div class="mb-3">
-          <label class="text-gray-400 text-xs block mb-1">Value</label>
+          <label class="text-gray-400 text-xs block mb-1">Value
           <textarea v-model="addForm.value" class="hm-input" rows="3"
                     placeholder="Enter value..."></textarea>
+          </label>
         </div>
         <div v-if="addError" class="mb-3 text-red-400 text-sm">{{ addError }}</div>
         <div v-if="addSuccess" class="mb-3 text-green-400 text-sm">{{ addSuccess }}</div>
@@ -90,12 +93,12 @@ export default {
         <div v-for="n in 3" :key="n" class="skeleton skeleton-row"></div>
       </div>
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="fetchMemory" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="scopes.length === 0 && !showAdd" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{1F9E0}</span>
+        <span class="empty-state-icon"><odin-icon name="brain" :size="23" /></span>
         <span class="empty-state-text">No memory entries</span>
         <span class="empty-state-hint">Click "Add Entry" or let Odin learn preferences through conversations</span>
       </div>
@@ -104,9 +107,10 @@ export default {
       <div v-else class="mem-tree">
         <div v-for="scope in scopes" :key="scope.name" class="mem-tree-node">
           <!-- Scope header -->
-          <div class="mem-tree-header" @click="toggleScope(scope.name)">
-            <span class="mem-tree-arrow" :class="{ 'mem-tree-arrow-open': expanded[scope.name] }">
-              \u25B6
+          <div class="mem-tree-header" role="button" tabindex="0" :aria-expanded="expanded[scope.name]"
+               @click="toggleScope(scope.name)" @keydown.enter="toggleScope(scope.name)" @keydown.space.prevent="toggleScope(scope.name)">
+            <span class="mem-tree-arrow" aria-hidden="true">
+              <odin-icon :name="expanded[scope.name] ? 'chevronUp' : 'chevronDown'" :size="14" />
             </span>
             <span class="memory-scope-badge"
                   :class="scope.name === 'global' ? 'memory-scope-global' : 'memory-scope-user'">
@@ -115,6 +119,7 @@ export default {
             <span class="badge badge-info text-xs">{{ scope.count }} keys</span>
             <input type="checkbox" class="memory-checkbox ml-auto"
                    :checked="isScopeAllSelected(scope.name)"
+                   :aria-label="'Select all keys in ' + scope.name"
                    @click.stop
                    @change="toggleSelectAll(scope.name, $event.target.checked)" />
           </div>
@@ -133,6 +138,7 @@ export default {
                 <div class="mem-tree-entry-header">
                   <input type="checkbox" class="memory-checkbox"
                          :checked="isSelected(scope.name, entry.key)"
+                         :aria-label="'Select ' + entry.key + ' in ' + scope.name"
                          @change="toggleSelect(scope.name, entry.key)" />
                   <span class="mem-tree-key">{{ entry.key }}</span>
                   <div class="mem-tree-entry-actions">
@@ -144,7 +150,7 @@ export default {
                   </div>
                 </div>
                 <div v-if="editingKey === scope.name + '/' + entry.key" class="mem-tree-edit">
-                  <textarea v-model="editValue" class="hm-input text-sm" rows="2"></textarea>
+                  <textarea v-model="editValue" class="hm-input text-sm" rows="2" :aria-label="'Edit value for ' + entry.key"></textarea>
                   <div class="flex gap-1 mt-1">
                     <button @click="doEdit(scope.name, entry.key)" class="btn btn-primary text-xs" :disabled="saving">
                       {{ saving ? 'Saving...' : 'Save' }}
@@ -160,7 +166,7 @@ export default {
       </div>
 
       <!-- Delete confirmation (single) -->
-      <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null" role="dialog" aria-modal="true" aria-labelledby="mem-delete-title">
+      <div v-if="deleteTarget" class="modal-overlay" v-modal-focus @click.self="deleteTarget = null" @keyup.escape="deleteTarget = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="mem-delete-title">
         <div class="modal-content">
           <h3 id="mem-delete-title" class="text-lg font-semibold mb-2">Delete Memory Entry</h3>
           <p class="text-gray-400 text-sm mb-4">
@@ -176,7 +182,7 @@ export default {
       </div>
 
       <!-- Bulk delete confirmation -->
-      <div v-if="showBulkDelete" class="modal-overlay" @click.self="showBulkDelete = false" role="dialog" aria-modal="true" aria-labelledby="mem-bulk-delete-title">
+      <div v-if="showBulkDelete" class="modal-overlay" v-modal-focus @click.self="showBulkDelete = false" @keyup.escape="showBulkDelete = false" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="mem-bulk-delete-title">
         <div class="modal-content">
           <h3 id="mem-bulk-delete-title" class="text-lg font-semibold mb-2">Bulk Delete</h3>
           <p class="text-gray-400 text-sm mb-4">

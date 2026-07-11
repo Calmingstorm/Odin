@@ -29,42 +29,48 @@ export default {
         <h2 class="text-sm font-medium mb-3">Start New Loop</h2>
 
         <div class="mb-3">
-          <label class="text-gray-400 text-xs block mb-1">Goal</label>
+          <label class="text-gray-400 text-xs block mb-1">Goal
           <textarea v-model="form.goal" class="hm-input" rows="3"
                     placeholder="What should this loop accomplish? e.g. Monitor disk usage and warn if above 80%"></textarea>
+          </label>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Interval (seconds)</label>
+            <label class="text-gray-400 text-xs block mb-1">Interval (seconds)
             <input v-model.number="form.interval_seconds" type="number" class="hm-input"
                    min="10" placeholder="60" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Mode</label>
+            <label class="text-gray-400 text-xs block mb-1">Mode
             <select v-model="form.mode" class="hm-input">
               <option value="notify">Notify (check + report)</option>
               <option value="act">Act (check + take actions + report)</option>
               <option value="silent">Silent (only report if notable)</option>
             </select>
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Max Iterations</label>
+            <label class="text-gray-400 text-xs block mb-1">Max Iterations
             <input v-model.number="form.max_iterations" type="number" class="hm-input"
                    min="1" placeholder="50" />
+            </label>
           </div>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Stop Condition (optional)</label>
+            <label class="text-gray-400 text-xs block mb-1">Stop Condition (optional)
             <input v-model="form.stop_condition" type="text" class="hm-input"
                    placeholder="e.g. when disk is below 50%" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Channel ID</label>
+            <label class="text-gray-400 text-xs block mb-1">Channel ID
             <input v-model="form.channel_id" type="text" class="hm-input"
                    placeholder="Discord channel ID" />
+            </label>
           </div>
         </div>
 
@@ -80,12 +86,12 @@ export default {
         <div v-for="n in 3" :key="n" class="skeleton skeleton-row"></div>
       </div>
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="fetchLoops()" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="loops.length === 0 && !showCreate" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{1F504}</span>
+        <span class="empty-state-icon"><odin-icon name="rotate" :size="23" /></span>
         <span class="empty-state-text">No active loops</span>
         <span class="empty-state-hint">Click "Start Loop" to create an autonomous recurring task</span>
       </div>
@@ -132,7 +138,7 @@ export default {
 
             <div class="text-sm text-gray-200 mb-2">{{ loop.goal }}</div>
 
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-gray-400">
+            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2 text-xs text-gray-400">
               <div>
                 <span class="text-gray-500">Interval:</span>
                 {{ formatDuration(loop.interval_seconds) }}
@@ -166,7 +172,7 @@ export default {
             <!-- Iteration history -->
             <div v-if="loop.iteration_history && loop.iteration_history.length > 0" class="mt-3">
               <button @click="toggleHistory(loop.id)" class="text-xs text-gray-500 hover:text-gray-300 flex items-center gap-1 mb-1">
-                <span class="tool-expand-icon" :style="{ transform: expandedHistory[loop.id] ? 'rotate(90deg)' : '' }">&#9654;</span>
+                <span class="tool-expand-icon" aria-hidden="true"><odin-icon :name="expandedHistory[loop.id] ? 'chevronUp' : 'chevronDown'" :size="13" /></span>
                 Recent iterations ({{ loop.iteration_history.length }})
               </button>
               <div v-if="expandedHistory[loop.id]" class="loop-history">

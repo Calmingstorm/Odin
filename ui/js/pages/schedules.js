@@ -12,8 +12,11 @@ import { computed, onMounted, ref } from 'vue';
 export default {
   template: `
     <div class="p-6 page-fade-in">
-      <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
-        <h1 class="text-xl font-semibold">Schedules</h1>
+      <div class="flex items-start justify-between mb-4 flex-wrap gap-3">
+        <div>
+          <h1 class="text-xl font-semibold">Schedules</h1>
+          <p class="page-lede">Create, inspect, and run recurring or one-time automation.</p>
+        </div>
         <div class="flex gap-2">
           <button @click="showCreate = !showCreate" class="btn btn-primary text-xs">
             {{ showCreate ? 'Cancel' : 'New Schedule' }}
@@ -25,35 +28,38 @@ export default {
       </div>
 
       <!-- Create form -->
-      <div v-if="showCreate" class="hm-card mb-4">
+      <div v-if="showCreate" class="hm-card form-panel mb-4">
         <h2 class="text-sm font-medium mb-3">Create Schedule</h2>
 
         <div class="mb-3">
-          <label class="text-gray-400 text-xs block mb-1">Description</label>
+          <label class="text-gray-400 text-xs block mb-1">Description
           <input v-model="form.description" type="text" class="hm-input"
                  placeholder="e.g. Daily disk check" />
+          </label>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Action Type</label>
+            <label class="text-gray-400 text-xs block mb-1">Action Type
             <select v-model="form.action" class="hm-input">
               <option value="reminder">Reminder</option>
               <option value="check">Check (tool call)</option>
               <option value="workflow">Workflow (multi-step)</option>
               <option value="digest">Digest</option>
             </select>
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Channel ID</label>
+            <label class="text-gray-400 text-xs block mb-1">Channel ID
             <input v-model="form.channel_id" type="text" class="hm-input"
                    placeholder="Discord channel ID" />
+            </label>
           </div>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Cron Expression</label>
+            <span class="text-gray-400 text-xs block mb-1">Cron Expression</span>
             <div class="flex gap-2">
               <input v-model="form.cron" type="text" class="hm-input"
                      placeholder="e.g. 0 */6 * * *" @input="onCronInput" />
@@ -82,28 +88,32 @@ export default {
             </div>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">One-Time (ISO datetime)</label>
+            <label class="text-gray-400 text-xs block mb-1">One-Time (ISO datetime)
             <input v-model="form.run_at" type="text" class="hm-input"
                    placeholder="e.g. 2026-04-01T09:00:00" />
+            </label>
           </div>
         </div>
 
         <div v-if="form.action === 'reminder'" class="mb-3">
-          <label class="text-gray-400 text-xs block mb-1">Message</label>
+          <label class="text-gray-400 text-xs block mb-1">Message
           <input v-model="form.message" type="text" class="hm-input"
                  placeholder="Reminder message..." />
+          </label>
         </div>
 
         <div v-if="form.action === 'check'" class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Tool Name</label>
+            <label class="text-gray-400 text-xs block mb-1">Tool Name
             <input v-model="form.tool_name" type="text" class="hm-input"
                    placeholder="e.g. run_command" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Tool Input (JSON)</label>
+            <label class="text-gray-400 text-xs block mb-1">Tool Input (JSON)
             <input v-model="form.tool_input_str" type="text" class="hm-input"
                    placeholder='e.g. {"host":"server1"}' />
+            </label>
           </div>
         </div>
 
@@ -119,12 +129,12 @@ export default {
         <div v-for="n in 4" :key="n" class="skeleton skeleton-row"></div>
       </div>
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">⚠</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="22" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="fetchSchedules" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="schedules.length === 0 && !showCreate" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{23F0}</span>
+        <span class="empty-state-icon"><odin-icon name="calendar" :size="23" /></span>
         <span class="empty-state-text">No scheduled tasks</span>
         <span class="empty-state-hint">Click "New Schedule" to set up automated checks or reminders</span>
       </div>
@@ -173,8 +183,10 @@ export default {
           <tbody>
             <template v-for="s in schedules" :key="s.id">
             <tr :class="{ 'opacity-50': s.paused }">
-              <td class="text-center" style="width:30px;cursor:pointer;" @click="toggleExpand(s.id)">
-                <span class="text-gray-500 text-xs">{{ expandedId === s.id ? '▼' : '▶' }}</span>
+              <td class="text-center" style="width:40px;">
+                <button class="row-expander" @click="toggleExpand(s.id)" :aria-expanded="expandedId === s.id" :aria-label="(expandedId === s.id ? 'Collapse ' : 'Expand ') + s.description">
+                  <odin-icon :name="expandedId === s.id ? 'chevronUp' : 'chevronDown'" :size="15" />
+                </button>
               </td>
               <td class="text-sm">
                 {{ s.description }}

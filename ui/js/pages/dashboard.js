@@ -31,7 +31,7 @@ export default {
 
       <!-- Error state with retry -->
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="retry" class="btn btn-ghost text-xs">Retry</button>
       </div>
@@ -47,7 +47,7 @@ export default {
                   stroke-dasharray="125.66" :stroke-dashoffset="uptimeRingOffset"
                   stroke-linecap="round" class="dash-ring-progress"/>
               </svg>
-              <span class="dash-hero-icon" aria-hidden="true">\u2300</span>
+              <span class="dash-hero-icon" aria-hidden="true"><odin-icon name="brand" :size="21" /></span>
             </div>
             <div>
               <div class="dash-hero-name">Odin</div>
@@ -61,13 +61,13 @@ export default {
           </div>
           <div class="dash-hero-actions">
             <button @click="reloadConfig" class="btn btn-ghost text-xs" :disabled="actionLoading.reload">
-              {{ actionLoading.reload ? '...' : '\u21bb Reload' }}
+              {{ actionLoading.reload ? '...' : 'Reload' }}
             </button>
             <button @click="clearSessions" class="btn btn-ghost text-xs" :disabled="actionLoading.clearSessions">
-              {{ actionLoading.clearSessions ? '...' : '\u2715 Clear Sessions' }}
+              {{ actionLoading.clearSessions ? '...' : 'Clear Sessions' }}
             </button>
             <button @click="stopAllLoops" class="btn btn-ghost text-xs" :disabled="actionLoading.stopLoops || (status.loop_count || 0) === 0">
-              {{ actionLoading.stopLoops ? '...' : '\u25a0 Stop Loops' }}
+              {{ actionLoading.stopLoops ? '...' : 'Stop Loops' }}
             </button>
           </div>
         </div>
@@ -78,7 +78,7 @@ export default {
                class="hm-card stat-card dash-stat"
                :class="s.highlight ? 'dash-stat-highlight' : ''">
             <div class="dash-stat-header">
-              <span class="dash-stat-icon" :class="s.iconColor">{{ s.icon }}</span>
+              <span class="dash-stat-icon" :class="s.iconColor"><odin-icon :name="s.icon" :size="17" /></span>
               <span class="dash-stat-label">{{ s.label }}</span>
             </div>
             <div class="dash-stat-value" :class="s.color || ''">{{ s.value }}</div>
@@ -108,7 +108,7 @@ export default {
               <span class="badge badge-info" v-if="agents.length > 0">{{ agents.length }}</span>
             </div>
             <div v-if="agents.length === 0" class="dash-empty">
-              <span class="dash-empty-icon">\u2693</span>
+              <span class="dash-empty-icon"><odin-icon name="bot" :size="21" /></span>
               <span>No active agents</span>
             </div>
             <div v-else class="dash-agent-list">
@@ -134,13 +134,13 @@ export default {
                 Recent Activity
                 <span v-if="newEventCount > 0" class="badge badge-success" style="font-size:0.625rem;margin-left:4px;">+{{ newEventCount }}</span>
               </span>
-              <button @click="fetchActivity" class="btn btn-ghost text-xs" :disabled="activityLoading" style="padding:2px 8px;">
-                {{ activityLoading ? '...' : '\u21bb' }}
+              <button @click="fetchActivity" class="icon-btn" :disabled="activityLoading" aria-label="Refresh recent activity" title="Refresh recent activity">
+                <odin-icon name="refresh" :size="15" :class="{ 'animate-spin': activityLoading }" />
               </button>
             </div>
             <div v-if="activityLoading && activity.length === 0" class="dash-empty"><span>Loading...</span></div>
             <div v-else-if="activity.length === 0" class="dash-empty">
-              <span class="dash-empty-icon">\u2042</span>
+              <span class="dash-empty-icon"><odin-icon name="activity" :size="21" /></span>
               <span>No recent activity</span>
             </div>
             <div v-else class="dash-activity-list">
@@ -162,7 +162,7 @@ export default {
                 <span class="dash-panel-title">Guilds</span>
               </div>
               <div v-if="!status.guilds || status.guilds.length === 0" class="dash-empty">
-                <span class="dash-empty-icon">\u2302</span>
+                <span class="dash-empty-icon"><odin-icon name="history" :size="21" /></span>
                 <span>No guilds</span>
               </div>
               <div v-else class="space-y-1.5">
@@ -181,13 +181,13 @@ export default {
                 <span v-if="errors.length > 0" class="badge badge-danger" style="font-size:0.625rem;">{{ errors.length }}</span>
               </div>
               <div v-if="errors.length === 0" class="dash-empty">
-                <span class="dash-empty-icon">\u2713</span>
+                <span class="dash-empty-icon"><odin-icon name="success" :size="21" /></span>
                 <span>All clear</span>
               </div>
               <div v-else class="dash-error-list">
                 <div v-for="(e, i) in errors" :key="i" class="dash-error-item">
                   <div class="dash-error-top">
-                    <span class="text-red-400">\u26a0</span>
+                    <span class="text-red-400"><odin-icon name="warning" :size="16" /></span>
                     <span class="dash-error-tool">{{ e.tool_name }}</span>
                     <span class="dash-error-time">{{ formatTime(e.timestamp) }}</span>
                   </div>
@@ -238,40 +238,40 @@ export default {
       return [
         {
           label: 'Guilds', value: s.guild_count ?? 0,
-          icon: '\u2302', iconColor: 'text-blue-400',
+          icon: 'home', iconColor: 'text-blue-400',
         },
         {
           label: 'Sessions', value: s.session_count ?? 0,
-          icon: '\u2630', iconColor: 'text-yellow-400',
+          icon: 'message', iconColor: 'text-yellow-400',
         },
         {
           label: 'Tools', value: s.tool_count ?? 0,
-          icon: '\u2692', iconColor: 'text-purple-400',
+          icon: 'wrench', iconColor: 'text-purple-400',
           sub: `${s.skill_count ?? 0} skills`, subColor: 'text-gray-500',
         },
         {
           label: 'Loops', value: s.loop_count ?? 0,
-          icon: '\u27f3', iconColor: 'text-green-400',
+          icon: 'rotate', iconColor: 'text-green-400',
           color: s.loop_count > 0 ? 'text-green-400' : '',
           highlight: s.loop_count > 0,
         },
         {
           label: 'Agents', value: s.agent_running ?? 0,
-          icon: '\u2693', iconColor: 'text-cyan-400',
+          icon: 'bot', iconColor: 'text-cyan-400',
           sub: s.agent_count > 0 ? `${s.agent_count} total` : '',
           subColor: 'text-gray-500',
           highlight: (s.agent_running ?? 0) > 0,
         },
         {
           label: 'Processes', value: s.process_running ?? 0,
-          icon: '\u2699', iconColor: 'text-orange-400',
+          icon: 'sliders', iconColor: 'text-orange-400',
           sub: s.process_count > 0 ? `${s.process_count} total` : '',
           subColor: 'text-gray-500',
           highlight: (s.process_running ?? 0) > 0,
         },
         {
           label: 'Schedules', value: s.schedule_count ?? 0,
-          icon: '\u23f0', iconColor: 'text-amber-400',
+          icon: 'clock', iconColor: 'text-amber-400',
           sub: (s.schedule_failing > 0 ? `${s.schedule_failing} failing` : '') +
                (s.schedule_failing > 0 && s.schedule_paused > 0 ? ', ' : '') +
                (s.schedule_paused > 0 ? `${s.schedule_paused} paused` : '') || undefined,
@@ -281,11 +281,11 @@ export default {
         },
         {
           label: 'Users', value: s.user_count ?? 0,
-          icon: '\u263a', iconColor: 'text-indigo-400',
+          icon: 'users', iconColor: 'text-indigo-400',
         },
         ...(knowledgeChunks.value !== null ? [{
           label: 'Knowledge', value: knowledgeChunks.value,
-          icon: '\u2261', iconColor: 'text-teal-400',
+          icon: 'book', iconColor: 'text-teal-400',
           sub: 'chunks', subColor: 'text-gray-500',
         }] : []),
       ];
