@@ -31,7 +31,7 @@ export default {
         <button @click="fetchEntries" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="entries.length === 0" class="hm-card empty-state">
-        <span class="empty-state-icon">🧠</span>
+        <span class="empty-state-icon"><odin-icon name="brain" :size="28" /></span>
         <span class="empty-state-text">No learned entries yet</span>
         <span class="empty-state-hint">Odin learns from conversations automatically</span>
       </div>
@@ -71,8 +71,8 @@ export default {
               </div>
             </div>
             <div class="flex gap-1 shrink-0">
-              <button @click="startEdit(entry)" class="btn btn-ghost text-xs" title="Edit">✏️</button>
-              <button @click="deleteEntry(entry.key)" class="btn btn-ghost text-xs text-red-400" title="Delete">🗑️</button>
+              <button @click="startEdit(entry)" class="icon-btn" title="Edit" aria-label="Edit entry"><odin-icon name="edit" :size="16" /></button>
+              <button @click="deleteEntry(entry.key)" class="icon-btn icon-btn-danger" title="Delete" aria-label="Delete entry"><odin-icon name="trash" :size="16" /></button>
             </div>
           </div>
         </div>

@@ -63,8 +63,10 @@ export const ConfirmHost = {
     <transition name="modal">
       <div v-if="state.open" class="modal-overlay" @click.self="settle(false)" role="dialog" aria-modal="true" :aria-label="state.title">
         <div class="modal-content confirm-dialog">
-          <h3 class="text-base font-semibold mb-2">{{ state.title }}</h3>
-          <p class="text-sm text-gray-400 mb-4" style="white-space: pre-wrap;">{{ state.message }}</p>
+          <div class="confirm-heading">
+            <span class="confirm-icon" :class="{ danger: state.danger }" aria-hidden="true"><odin-icon :name="state.danger ? 'warning' : 'info'" :size="20" /></span>
+            <div><h3>{{ state.title }}</h3><p style="white-space: pre-wrap;">{{ state.message }}</p></div>
+          </div>
           <div class="flex justify-end gap-2">
             <button class="btn btn-ghost text-sm" @click="settle(false)">{{ state.cancelLabel }}</button>
             <button class="btn text-sm" :class="state.danger ? 'btn-danger' : 'btn-primary'" @click="settle(true)" autofocus>

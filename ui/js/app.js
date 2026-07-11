@@ -5,11 +5,13 @@
 import '../css/fonts.css';
 import '../css/tailwind.css';
 import '../css/style.css';
+import '../css/foundation.css';
 
 import { api, ws } from './api.js';
 import { ToastContainer } from './toast.js';
 import { ConfirmHost } from './confirm.js';
 import { CommandPalette, openPalette } from './palette.js';
+import { OdinIcon } from './icons.js';
 import DashboardPage from './pages/dashboard.js';
 import ChatPage from './pages/chat.js';
 import OperationsPage from './pages/operations.js';
@@ -26,14 +28,14 @@ import { createRouter, createWebHashHistory } from 'vue-router';
 // ---------------------------------------------------------------------------
 const routes = [
   { path: '/',              redirect: '/dashboard' },
-  { path: '/dashboard',     component: DashboardPage,    meta: { label: 'Dashboard',     icon: '\u{1F4CA}' } },
-  { path: '/chat',          component: ChatPage,          meta: { label: 'Chat',          icon: '\u{1F4AD}' } },
-  { path: '/operations',    component: OperationsPage,    meta: { label: 'Operations',    icon: '\u{1F3AF}' } },
-  { path: '/history',       component: HistoryPage,       meta: { label: 'History',       icon: '\u{1F4DD}' } },
-  { path: '/capabilities',  component: CapabilitiesPage,  meta: { label: 'Capabilities',  icon: '\u{1F527}' } },
-  { path: '/personality',   component: PersonalityPage,   meta: { label: 'Personality',   icon: '\u{1F3AD}' } },
-  { path: '/system',        component: SystemPage,        meta: { label: 'System',        icon: '\u{2699}\u{FE0F}' } },
-  // Redirects from old routes to new grouped locations
+  { path: '/dashboard',     component: DashboardPage,    meta: { label: 'Dashboard',    icon: 'dashboard',    section: 'Workspace', description: 'System posture and recent activity' } },
+  { path: '/chat',          component: ChatPage,          meta: { label: 'Chat',         icon: 'chat',         section: 'Workspace', description: 'Direct operator conversation' } },
+  { path: '/operations',    component: OperationsPage,    meta: { label: 'Operations',   icon: 'operations',   section: 'Operate',   description: 'Execution, agents, loops, processes, and schedules' } },
+  { path: '/history',       component: HistoryPage,       meta: { label: 'History',      icon: 'history',      section: 'Observe',   description: 'Audit trail, sessions, traces, and usage' } },
+  { path: '/capabilities',  component: CapabilitiesPage,  meta: { label: 'Capabilities', icon: 'capabilities', section: 'Manage',    description: 'Tools, skills, knowledge, and memory' } },
+  { path: '/personality',   component: PersonalityPage,   meta: { label: 'Personality',  icon: 'personality',  section: 'Manage',    description: 'Behavior and response profile' } },
+  { path: '/system',        component: SystemPage,        meta: { label: 'System',       icon: 'system',       section: 'Manage',    description: 'Health, configuration, access, and updates' } },
+  // Redirects from old routes to new grouped locations. Preserve deep links.
   { path: '/execution',  redirect: { path: '/operations', query: { tab: 'live' } } },
   { path: '/agents',     redirect: { path: '/operations', query: { tab: 'agents' } } },
   { path: '/loops',      redirect: { path: '/operations', query: { tab: 'loops' } } },
@@ -47,6 +49,7 @@ const routes = [
   { path: '/skills',     redirect: { path: '/capabilities', query: { tab: 'skills' } } },
   { path: '/knowledge',  redirect: { path: '/capabilities', query: { tab: 'knowledge' } } },
   { path: '/memory',     redirect: { path: '/capabilities', query: { tab: 'memory' } } },
+  { path: '/learned',    redirect: { path: '/capabilities', query: { tab: 'learned' } } },
   { path: '/health',     redirect: { path: '/system', query: { tab: 'health' } } },
   { path: '/resources',  redirect: { path: '/system', query: { tab: 'resources' } } },
   { path: '/logs',       redirect: { path: '/system', query: { tab: 'logs' } } },
@@ -71,10 +74,12 @@ router.afterEach((to) => {
 // ---------------------------------------------------------------------------
 const LoginScreen = {
   template: `
-    <div class="min-h-screen flex items-center justify-center" role="main">
-      <div class="hm-card w-full max-w-sm">
-        <h1 id="login-title" class="text-xl font-semibold mb-1 text-center">Odin</h1>
-        <p class="text-gray-400 text-sm text-center mb-4">Management Interface</p>
+    <div class="login-shell" role="main">
+      <div class="login-panel">
+        <div class="login-brand" aria-hidden="true"><odin-icon name="brand" :size="30" /></div>
+        <p class="login-eyebrow">Operator console</p>
+        <h1 id="login-title" class="login-title">Odin</h1>
+        <p class="login-subtitle">Authenticate to manage the system.</p>
         <div v-if="error" class="mb-3 text-red-400 text-sm text-center" role="alert">{{ error }}</div>
         <div v-if="sessionExpired" class="mb-3 text-amber-400 text-sm text-center" role="alert">Session expired. Please log in again.</div>
         <form @submit.prevent="login" aria-labelledby="login-title">
@@ -128,49 +133,56 @@ const LoginScreen = {
 // ---------------------------------------------------------------------------
 const App = {
   template: `
-    <div v-if="authState === 'checking'" class="min-h-screen flex items-center justify-center" role="status" aria-label="Loading">
-      <div class="spinner" aria-hidden="true"></div>
+    <div v-if="authState === 'checking'" class="app-loading" role="status" aria-label="Loading">
+      <div class="brand-loader"><odin-icon name="brand" :size="28" /></div>
       <span class="sr-only">Loading application...</span>
     </div>
     <login-screen v-else-if="authState === 'login'" :on-login="onLogin" :session-expired="sessionExpired" />
-    <div v-else class="flex min-h-screen">
-      <!-- Sidebar -->
-      <aside class="hm-sidebar" :class="{ collapsed: sidebarCollapsed, 'mobile-open': mobileOpen }" role="navigation" aria-label="Main navigation">
-        <div class="flex items-center gap-2 px-3 py-3 border-b border-gray-800">
-          <button @click="toggleSidebar" class="btn-ghost p-1 rounded sidebar-toggle-btn"
+    <div v-else class="app-shell">
+      <aside class="hm-sidebar" :class="{ collapsed: sidebarCollapsed, 'mobile-open': mobileOpen }" aria-label="Primary navigation">
+        <div class="sidebar-brand">
+          <div class="brand-mark" aria-hidden="true"><odin-icon name="brand" :size="24" /></div>
+          <div class="sidebar-brand-copy">
+            <span class="brand-wordmark">ODIN</span>
+            <span class="brand-caption">Management</span>
+          </div>
+          <button @click="toggleSidebar" class="icon-btn sidebar-toggle-btn"
                   :aria-expanded="!sidebarCollapsed" aria-controls="sidebar-nav"
                   :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'">
-            <span style="font-size:1.1rem;" aria-hidden="true">{{ sidebarCollapsed ? '\u{25B6}' : '\u{2630}' }}</span>
+            <odin-icon :name="sidebarCollapsed ? 'chevronRight' : 'chevronLeft'" :size="17" />
           </button>
-          <span class="sidebar-header-text font-semibold text-sm tracking-wide">ODIN</span>
         </div>
-        <nav id="sidebar-nav" class="flex-1 py-2 overflow-y-auto" aria-label="Page navigation">
-          <router-link
-            v-for="r in navRoutes"
-            :key="r.path"
-            :to="r.path"
-            class="nav-item"
-            active-class="active"
-            :aria-current="$route.path === r.path ? 'page' : undefined"
-            @click="mobileOpen = false"
-          >
-            <span class="nav-icon" aria-hidden="true">{{ r.meta.icon }}</span>
-            <span class="nav-label">{{ r.meta.label }}</span>
-          </router-link>
+        <nav id="sidebar-nav" class="sidebar-nav" aria-label="Page navigation">
+          <div v-for="group in navGroups" :key="group.name" class="nav-group">
+            <div class="nav-section-label">{{ group.name }}</div>
+            <router-link
+              v-for="r in group.routes"
+              :key="r.path"
+              :to="r.path"
+              class="nav-item"
+              active-class="active"
+              :aria-current="$route.path === r.path ? 'page' : undefined"
+              :title="sidebarCollapsed ? r.meta.label : undefined"
+              @click="mobileOpen = false"
+            >
+              <span class="nav-icon" aria-hidden="true"><odin-icon :name="r.meta.icon" :size="18" /></span>
+              <span class="nav-label">{{ r.meta.label }}</span>
+            </router-link>
+          </div>
         </nav>
-        <div class="px-3 py-2 border-t border-gray-800 text-xs text-gray-500 sidebar-header-text">
-          <div class="flex items-center gap-1.5 mb-1" aria-live="polite">
+        <div class="sidebar-footer">
+          <div class="connection-card" :class="'connection-' + wsState" aria-live="polite">
             <span class="ws-indicator" :class="'ws-' + wsState" aria-hidden="true"></span>
-            <span>{{ wsLabel }}</span>
-            <span v-if="wsLatency >= 0" class="text-gray-600" style="font-size:0.5625rem;">{{ wsLatency }}ms</span>
+            <div class="connection-copy">
+              <span class="connection-label">{{ wsLabel }}</span>
+              <span v-if="wsLatency >= 0" class="connection-latency">{{ wsLatency }}ms</span>
+            </div>
           </div>
-          <div class="text-gray-600 mobile-hide" style="font-size:0.625rem;" aria-label="Keyboard shortcuts">
-            <kbd class="px-1 py-0.5 bg-gray-800 rounded">Ctrl K</kbd> jump
-            <kbd class="px-1 py-0.5 bg-gray-800 rounded ml-1">/</kbd> search
-            <kbd class="px-1 py-0.5 bg-gray-800 rounded ml-1">Esc</kbd> close
-          </div>
+          <button class="shortcut-hint" @click="openPalette" aria-label="Open command palette">
+            <odin-icon name="command" :size="14" />
+            <span>Quick jump</span><kbd>Ctrl K</kbd>
+          </button>
         </div>
-        <!-- Connection toast -->
         <transition name="ws-toast">
           <div v-if="wsToast" class="ws-toast" :class="'ws-toast-' + wsToast.level" role="status" aria-live="assertive">
             {{ wsToast.text }}
@@ -178,25 +190,37 @@ const App = {
         </transition>
       </aside>
 
-      <!-- Mobile overlay -->
-      <div v-if="mobileOpen" class="fixed inset-0 bg-black/50 z-30 md:hidden" @click="mobileOpen = false" aria-hidden="true"></div>
+      <div v-if="mobileOpen" class="mobile-scrim" @click="mobileOpen = false" aria-hidden="true"></div>
 
-      <!-- Main content -->
       <main id="main-content" class="hm-main" role="main">
         <header class="hm-topbar" role="banner">
-          <button class="btn-ghost p-1 rounded md:hidden" @click="mobileOpen = !mobileOpen"
+          <button class="icon-btn mobile-menu-btn" @click="mobileOpen = !mobileOpen"
                   :aria-expanded="mobileOpen" aria-controls="sidebar-nav" aria-label="Open navigation menu">
-            <span style="font-size:1.1rem;" aria-hidden="true">\u{2630}</span>
+            <odin-icon name="menu" :size="20" />
           </button>
-          <div class="flex items-center gap-2">
-            <span class="status-dot" :class="botStatus" role="img" :aria-label="'Bot status: ' + botStatus"></span>
-            <span class="text-sm font-medium">Odin</span>
+          <div class="topbar-context">
+            <span class="topbar-kicker">{{ currentSection }}</span>
+            <div class="topbar-title-row">
+              <h1>{{ currentPage }}</h1>
+              <span class="status-pill" :class="'status-' + botStatus">
+                <span class="status-dot" :class="botStatus" aria-hidden="true"></span>
+                {{ botStatus }}
+              </span>
+            </div>
           </div>
-          <span v-if="botUptime" class="text-xs text-gray-500" aria-label="Uptime">{{ botUptime }}</span>
-          <div class="flex-1"></div>
-          <button @click="logout" class="btn btn-ghost text-xs" aria-label="Log out">Logout</button>
+          <p class="topbar-description">{{ currentDescription }}</p>
+          <div class="topbar-actions">
+            <span v-if="botUptime" class="uptime-label" aria-label="Uptime">{{ botUptime }}</span>
+            <button class="command-trigger" @click="openPalette" aria-label="Open command palette">
+              <odin-icon name="search" :size="15" />
+              <span>Jump to</span><kbd>Ctrl K</kbd>
+            </button>
+            <button @click="logout" class="icon-btn" aria-label="Log out" title="Log out">
+              <odin-icon name="logout" :size="17" />
+            </button>
+          </div>
         </header>
-        <router-view />
+        <div class="page-viewport"><router-view /></div>
       </main>
     </div>
     <toast-container />
@@ -216,6 +240,13 @@ const App = {
     const botUptime = ref('');
 
     const navRoutes = routes.filter(r => r.meta);
+    const navGroups = computed(() => ['Workspace', 'Operate', 'Observe', 'Manage'].map(name => ({
+      name,
+      routes: navRoutes.filter(route => route.meta.section === name),
+    })).filter(group => group.routes.length));
+    const currentPage = computed(() => router.currentRoute.value.meta?.label || 'Odin');
+    const currentSection = computed(() => router.currentRoute.value.meta?.section || 'Management');
+    const currentDescription = computed(() => router.currentRoute.value.meta?.description || 'Management console');
 
     // Handle session expiry from the API client
     api.onSessionExpired = () => {
@@ -341,8 +372,9 @@ const App = {
     return {
       authState, sessionExpired, sidebarCollapsed, mobileOpen, wsConnected,
       wsState, wsLatency, wsLabel, wsToast,
-      botStatus, botUptime, navRoutes,
-      onLogin, logout, toggleSidebar,
+      botStatus, botUptime, navRoutes, navGroups,
+      currentPage, currentSection, currentDescription,
+      onLogin, logout, toggleSidebar, openPalette,
     };
   },
 };
@@ -351,6 +383,7 @@ const App = {
 // Bootstrap
 // ---------------------------------------------------------------------------
 const app = createApp(App);
+app.component('odin-icon', OdinIcon);
 app.component('login-screen', LoginScreen);
 app.component('toast-container', ToastContainer);
 app.component('confirm-host', ConfirmHost);

@@ -54,7 +54,7 @@ export const ToastContainer = {
           role="status"
           @click="dismiss(t.id)"
         >
-          <span class="toast-icon" aria-hidden="true">{{ t.type === 'success' ? '✓' : t.type === 'error' ? '⚠' : 'ℹ' }}</span>
+          <span class="toast-icon" aria-hidden="true"><odin-icon :name="t.type === 'success' ? 'success' : t.type === 'error' ? 'error' : 'info'" :size="18" /></span>
           <span class="toast-text">{{ t.message }}</span>
         </div>
       </transition-group>

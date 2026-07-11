@@ -1,9 +1,7 @@
 /**
- * TabbedPage — Reusable wrapper with URL-driven tabs
- * Tab state persisted in query param (?tab=agents) for deep-linking,
- * back/forward support, and refresh survival.
+ * TabbedPage — URL-driven section navigation with preserved deep links.
  */
-import { computed, onMounted, watch } from 'vue';
+import { computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
 export default {
@@ -15,58 +13,46 @@ export default {
   setup(props) {
     const route = useRoute();
     const router = useRouter();
-
     const activeTab = computed({
       get() {
         const q = route.query.tab;
         if (q && props.tabs.some(t => t.id === q)) return q;
         return props.defaultTab || props.tabs[0]?.id || '';
       },
-      set(val) {
-        router.replace({ query: { ...route.query, tab: val } });
-      },
+      set(val) { router.replace({ query: { ...route.query, tab: val } }); },
     });
-
-    const activeComponent = computed(() => {
-      const tab = props.tabs.find(t => t.id === activeTab.value);
-      return tab?.component || null;
-    });
-
-    const activeLabel = computed(() => {
-      const tab = props.tabs.find(t => t.id === activeTab.value);
-      return tab?.label || '';
-    });
-
-    watch(activeLabel, (label) => {
-      if (props.groupLabel && label) {
-        document.title = `Odin \u2014 ${props.groupLabel} \u203A ${label}`;
-      }
+    const activeComponent = computed(() => props.tabs.find(t => t.id === activeTab.value)?.component || null);
+    const activeLabel = computed(() => props.tabs.find(t => t.id === activeTab.value)?.label || '');
+    watch(activeLabel, label => {
+      if (props.groupLabel && label) document.title = `Odin — ${props.groupLabel} › ${label}`;
     }, { immediate: true });
-
-    return { activeTab, activeComponent, activeLabel };
+    function onTabKeydown(event, index) {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      let next = index;
+      if (event.key === 'ArrowRight') next = (index + 1) % props.tabs.length;
+      if (event.key === 'ArrowLeft') next = (index - 1 + props.tabs.length) % props.tabs.length;
+      if (event.key === 'Home') next = 0;
+      if (event.key === 'End') next = props.tabs.length - 1;
+      activeTab.value = props.tabs[next].id;
+      requestAnimationFrame(() => document.getElementById('tab-' + props.tabs[next].id)?.focus());
+    }
+    return { activeTab, activeComponent, activeLabel, onTabKeydown };
   },
   template: `
-    <div>
-      <div class="flex border-b border-gray-700 mb-4 overflow-x-auto" role="tablist" :aria-label="groupLabel + ' navigation'">
-        <button
-          v-for="tab in tabs"
-          :key="tab.id"
-          @click="activeTab = tab.id"
-          role="tab"
-          :id="'tab-' + tab.id"
-          :aria-selected="activeTab === tab.id"
-          :aria-controls="'panel-' + tab.id"
-          class="px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors"
-          :class="activeTab === tab.id
-            ? 'text-blue-400 border-b-2 border-blue-400'
-            : 'text-gray-400 hover:text-gray-200'"
-        >{{ tab.label }}</button>
+    <section class="section-shell" :aria-label="groupLabel">
+      <div class="section-tabs-wrap">
+        <div class="section-tabs" role="tablist" :aria-label="groupLabel + ' navigation'">
+          <button v-for="(tab, index) in tabs" :key="tab.id" @click="activeTab = tab.id"
+            @keydown="onTabKeydown($event, index)" role="tab" :id="'tab-' + tab.id"
+            :aria-selected="activeTab === tab.id" :aria-controls="'panel-' + tab.id"
+            :tabindex="activeTab === tab.id ? 0 : -1" class="section-tab"
+            :class="{ active: activeTab === tab.id }">{{ tab.label }}</button>
+        </div>
       </div>
-      <div role="tabpanel" :id="'panel-' + activeTab" :aria-labelledby="'tab-' + activeTab">
-        <keep-alive>
-          <component :is="activeComponent" :key="activeTab" />
-        </keep-alive>
+      <div class="section-panel" role="tabpanel" :id="'panel-' + activeTab" :aria-labelledby="'tab-' + activeTab">
+        <keep-alive><component :is="activeComponent" :key="activeTab" /></keep-alive>
       </div>
-    </div>
+    </section>
   `,
 };
