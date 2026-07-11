@@ -239,6 +239,25 @@ class TestProcessRegistryShutdown:
             assert info._reader_task.done() or info._reader_task.cancelled()
 
     @pytest.mark.asyncio
+    async def test_shutdown_services_closes_image_backend(self):
+        # shutdown_services must close the native image backend's own HTTP
+        # session (separate transport from the codex chat client) and tolerate
+        # its errors. Only `components` is set, so every other getattr-guarded
+        # block short-circuits to None.
+        from types import SimpleNamespace
+
+        from src.discord.wiring import shutdown_services
+
+        backend = SimpleNamespace(close=AsyncMock(side_effect=RuntimeError("boom")))
+        bot = SimpleNamespace(
+            components=SimpleNamespace(
+                media_tools=SimpleNamespace(image_selector=SimpleNamespace(openai=backend))
+            )
+        )
+        await shutdown_services(bot)  # must not raise despite close() erroring
+        backend.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_shutdown_skips_already_finished(self):
         registry = ProcessRegistry()
         await registry.start("localhost", "echo done")

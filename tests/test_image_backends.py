@@ -107,21 +107,28 @@ class _FakeSession:
             return _RaiseCtx(r)
         return r
 
+    async def close(self):
+        self.closed = True
+
 
 class _FakePool:
-    def __init__(self, count: int = 3) -> None:
+    def __init__(self, count: int = 3, acquire_error: Exception | None = None) -> None:
         self._count = count
         self._idx = 0
+        self._acquire_error = acquire_error
         self.limited: list[int] = []
         self.auth_failed: list[int] = []
 
     def is_configured(self):
         return self._count > 0
 
-    def account_count(self):
+    @property
+    def account_count(self):  # mirrors the REAL CodexAuthPool: a property, not a method
         return self._count
 
     async def acquire(self):
+        if self._acquire_error is not None:
+            raise self._acquire_error
         i = self._idx % self._count
         self._idx += 1
         return ("tok", "acct", i)
@@ -139,7 +146,7 @@ def _backend(pool, responses, **cfg_over):
     cfg.openai_codex.enabled = True
     for k, v in cfg_over.items():
         setattr(cfg.image.openai, k, v)
-    b = OpenAIImageBackend(auth=pool, get_config=lambda: cfg)
+    b = OpenAIImageBackend(get_auth=lambda: pool, get_config=lambda: cfg)
     b._session = _FakeSession(responses)
     return b, cfg
 
@@ -301,6 +308,90 @@ async def test_unconfigured_pool_unavailable():
     b, _ = _backend(_FakePool(count=0), [])
     with pytest.raises(ImageBackendUnavailableError):
         await b.generate(prompt="p")
+
+
+async def test_no_pool_resolved_is_unavailable():
+    # get_auth resolves live and may return None (Codex not logged in yet).
+    cfg = Config(discord={"token": "x"})
+    cfg.openai_codex.enabled = True
+    b = OpenAIImageBackend(get_auth=lambda: None, get_config=lambda: cfg)
+    with pytest.raises(ImageBackendUnavailableError):
+        await b.generate(prompt="p")
+
+
+async def test_auth_resolved_live_not_snapshotted():
+    # A pool that appears AFTER construction must be used (live login/reload).
+    holder = {"pool": None}
+    cfg = Config(discord={"token": "x"})
+    cfg.openai_codex.enabled = True
+    b = OpenAIImageBackend(get_auth=lambda: holder["pool"], get_config=lambda: cfg)
+    assert b.is_configured() is False
+    holder["pool"] = _FakePool()
+    b._session = _FakeSession([_FakeResp(200, (_sse(_final_image_event()),))])
+    assert b.is_configured() is True
+    res = await b.generate(prompt="p")
+    assert res.backend == "openai"
+
+
+async def test_pool_exhaustion_is_quota_error():
+    # acquire() raising RuntimeError must become a pre-generation ImageQuotaError
+    # (so `auto` can fall back), not a raw RuntimeError that bypasses fallback.
+    pool = _FakePool(acquire_error=RuntimeError("No Codex credentials configured."))
+    b, _ = _backend(pool, [])
+    with pytest.raises(ImageQuotaError) as ei:
+        await b.generate(prompt="p")
+    assert ei.value.pre_generation is True
+    assert b._session.posts == 0
+
+
+async def test_open_breaker_is_pre_generation():
+    from src.llm.circuit_breaker import CircuitOpenError
+
+    pool = _FakePool()
+    b, _ = _backend(pool, [])
+    b.breaker.check = lambda: (_ for _ in ()).throw(CircuitOpenError("codex_image", 5.0))
+    with pytest.raises(ImageTransportError) as ei:
+        await b.generate(prompt="p")
+    assert ei.value.pre_generation is True  # auto can fall back
+    assert b._session.posts == 0
+
+
+async def test_4xx_does_not_poison_the_breaker():
+    from unittest.mock import MagicMock
+
+    pool = _FakePool()
+    b, _ = _backend(pool, [_FakeResp(400, body=b"bad prompt")])
+    b.breaker.record_failure = MagicMock()
+    with pytest.raises(ImageRequestError):
+        await b.generate(prompt="p")
+    b.breaker.record_failure.assert_not_called()  # a bad prompt must not disable everyone
+
+
+async def test_5xx_does_count_against_the_breaker():
+    from unittest.mock import MagicMock
+
+    pool = _FakePool(count=1)
+    b, _ = _backend(pool, [_FakeResp(503)])
+    b.breaker.record_failure = MagicMock()
+    with pytest.raises(ImageTransportError):
+        await b.generate(prompt="p")
+    b.breaker.record_failure.assert_called()
+
+
+async def test_unterminated_oversized_frame_rejected():
+    # A giant frame with no newline must be rejected before it is fully buffered.
+    pool = _FakePool()
+    huge = b"data: " + b"A" * 200_000  # no newline
+    b, _ = _backend(pool, [_FakeResp(200, (huge,))], max_image_bytes=1024)
+    with pytest.raises(ImageRequestError):
+        await b.generate(prompt="p")
+
+
+async def test_close_closes_session():
+    pool = _FakePool()
+    b, _ = _backend(pool, [])
+    await b.close()
+    assert b._session.closed
 
 
 # ── ComfyUIImageBackend ───────────────────────────────────────────────

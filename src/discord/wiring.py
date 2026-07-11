@@ -618,24 +618,23 @@ def build_components(bot, services: BotServices) -> BotComponents:
         get_channel=bot.get_channel,
     )
     # Image-generation backends behind one selector. Native OpenAI rides the
-    # SAME CodexAuthPool the codex client uses (no separate auth); it's only
-    # built when Codex credentials exist. ComfyUI is always available as a
-    # backend object (its own config gates it at call time).
+    # SAME CodexAuthPool the codex client uses (no separate auth). It resolves
+    # that pool via the gateway at CALL time — a live Codex login/reload replaces
+    # the client, so a snapshot would run on stale/absent credentials. Always
+    # built; is_configured() reports false until a pool exists.
     from ..tools.image import (
         ComfyUIImageBackend,
         ImageBackendSelector,
         OpenAIImageBackend,
     )
 
-    _image_auth = getattr(services.codex_client, "auth", None)
-    _openai_image_backend = (
-        OpenAIImageBackend(auth=_image_auth, get_config=lambda: bot.config)
-        if _image_auth is not None
-        else None
+    openai_image_backend = OpenAIImageBackend(
+        get_auth=lambda: getattr(llm_gateway.codex_client, "auth", None),
+        get_config=lambda: bot.config,
     )
     image_selector = ImageBackendSelector(
         get_config=lambda: bot.config,
-        openai_backend=_openai_image_backend,
+        openai_backend=openai_image_backend,
         comfyui_backend=ComfyUIImageBackend(get_config=lambda: bot.config),
     )
 
@@ -939,6 +938,18 @@ async def shutdown_services(bot) -> None:
             await kimi.close()
         except Exception:
             log.exception("Error closing Kimi client")
+
+    # Close the native image backend's own HTTP session (separate transport
+    # from the codex chat client, so it isn't covered by codex.close()).
+    _components = getattr(bot, "components", None)
+    _media = getattr(_components, "media_tools", None)
+    _selector = getattr(_media, "image_selector", None)
+    _image_backend = getattr(_selector, "openai", None)
+    if _image_backend is not None:
+        try:
+            await _image_backend.close()
+        except Exception:
+            log.exception("Error closing image backend")
 
     # Shut down Playwright browser
     browser = getattr(bot, "browser_manager", None)

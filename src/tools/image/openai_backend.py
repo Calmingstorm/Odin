@@ -23,7 +23,7 @@ from collections.abc import Callable
 
 import aiohttp
 
-from ...llm.circuit_breaker import CircuitBreaker
+from ...llm.circuit_breaker import CircuitBreaker, CircuitOpenError
 from ...odin_log import get_logger
 from .base import (
     ImageBackend,
@@ -44,9 +44,11 @@ _INSTRUCTIONS = "You are an image generation assistant. Produce exactly the requ
 class OpenAIImageBackend(ImageBackend):
     name = "openai"
 
-    def __init__(self, *, auth, get_config: Callable) -> None:
-        # `auth` is the shared CodexAuthPool (may be None if Codex isn't set up).
-        self._auth = auth
+    def __init__(self, *, get_auth: Callable, get_config: Callable) -> None:
+        # get_auth resolves the LIVE shared CodexAuthPool at CALL time (may
+        # return None). A live Codex login/reload REPLACES the pool, so we must
+        # never snapshot it here or the backend runs on stale/absent credentials.
+        self._get_auth = get_auth
         self.get_config = get_config
         self.breaker = CircuitBreaker("codex_image")
         self._session: aiohttp.ClientSession | None = None
@@ -82,7 +84,8 @@ class OpenAIImageBackend(ImageBackend):
         }
 
     def is_configured(self) -> bool:
-        return self._auth is not None and self._auth.is_configured()
+        pool = self._get_auth()
+        return pool is not None and pool.is_configured()
 
     async def generate(
         self, *, prompt: str, size: str | None = None, **_ignored
@@ -91,7 +94,8 @@ class OpenAIImageBackend(ImageBackend):
         icfg = cfg.image
         if not icfg.openai.enabled:
             raise ImageBackendUnavailableError("Native OpenAI image backend is disabled")
-        if not self.is_configured():
+        pool = self._get_auth()
+        if pool is None or not pool.is_configured():
             raise ImageBackendUnavailableError("No Codex credentials for native image generation")
 
         size = size or icfg.openai.default_size
@@ -100,7 +104,12 @@ class OpenAIImageBackend(ImageBackend):
                 f"Unsupported size {size!r}. Allowed: {', '.join(icfg.openai.allowed_sizes)}"
             )
 
-        self.breaker.check()
+        # An open image breaker is pre-generation — let auto fall back to ComfyUI.
+        try:
+            self.breaker.check()
+        except CircuitOpenError as e:
+            raise ImageTransportError("image endpoint breaker open", pre_generation=True) from e
+
         body = self._body(icfg, prompt, size)
         session = await self._get_session()
         timeout = aiohttp.ClientTimeout(
@@ -111,10 +120,16 @@ class OpenAIImageBackend(ImageBackend):
 
         # Failover across accounts ONLY on pre-generation failures. The loop is
         # bounded by the account count; once a POST returns 200 we commit.
-        attempts = max(1, self._auth.account_count())
+        attempts = max(1, pool.account_count)
         last_err: ImageQuotaError | ImageTransportError | None = None
         for _attempt in range(attempts):
-            token, account_id, idx = await self._auth.acquire()
+            try:
+                token, account_id, idx = await pool.acquire()
+            except RuntimeError:
+                # Pool exhausted / no healthy account — pre-generation, so auto
+                # can fall back to ComfyUI. Never surface the raw pool error.
+                last_err = ImageQuotaError("no healthy Codex account for image generation")
+                break
             try:
                 async with session.post(
                     CODEX_IMAGE_URL,
@@ -130,20 +145,21 @@ class OpenAIImageBackend(ImageBackend):
                         return result
 
                     if resp.status == 429:
-                        await self._auth.mark_limited(idx)
+                        await pool.mark_limited(idx)
                         last_err = ImageQuotaError("usage limit reached (HTTP 429)")
                         continue
                     if resp.status == 401:
-                        await self._auth.mark_auth_failed(idx)
+                        await pool.mark_auth_failed(idx)
                         last_err = ImageQuotaError("account authentication failed (HTTP 401)")
                         continue
                     if resp.status in (500, 502, 503, 504):
+                        # Endpoint health — this one counts against the breaker.
                         self.breaker.record_failure()
                         last_err = ImageTransportError(f"image endpoint HTTP {resp.status}")
                         continue
-                    # Other 4xx: request-level (bad params / content policy).
-                    # Do NOT fail over or fall back — the request is the problem.
-                    self.breaker.record_failure()
+                    # Other 4xx: request-level (bad params / content policy). Do
+                    # NOT fail over, fall back, OR poison the shared breaker — a
+                    # bad prompt must not disable image generation for everyone.
                     raise ImageRequestError(f"image request rejected (HTTP {resp.status})")
             except (TimeoutError, aiohttp.ClientError) as e:
                 # Pre-response transport failure (connection/handshake) — a
@@ -165,6 +181,10 @@ class OpenAIImageBackend(ImageBackend):
         """
         max_bytes = icfg.openai.max_image_bytes
         max_b64 = max_bytes * 4 // 3 + 8
+        # A single legitimate line is one base64 image plus a little JSON/SSE
+        # framing; anything past that with no newline is an unterminated frame
+        # and must be rejected BEFORE it is fully buffered into memory.
+        max_line = max_b64 + 65536
         final_b64: str | None = None
         buf = b""
         try:
@@ -209,6 +229,10 @@ class OpenAIImageBackend(ImageBackend):
                         raise ImageRequestError("image generation failed upstream")
                     if final_b64 is not None and len(final_b64) > max_b64:
                         raise ImageRequestError("generated image exceeds the configured size cap")
+                # Complete lines are drained above; a leftover past one max line
+                # is an unterminated frame — reject before buffering more.
+                if len(buf) > max_line:
+                    raise ImageRequestError("unterminated oversized SSE frame")
         except (TimeoutError, aiohttp.ClientError) as e:
             # Mid-stream break AFTER a 200 — post-generation, no failover.
             self.breaker.record_failure()
