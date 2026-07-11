@@ -311,12 +311,24 @@ async def test_no_image_in_stream_rejected():
         await b.generate(prompt="p")
 
 
-async def test_disallowed_size_rejected_without_request():
+async def test_native_rejects_non_square_without_request():
+    # Native only produces squares; a non-square size is refused before any HTTP
+    # call (defense in depth — the selector also routes non-square to ComfyUI).
     pool = _FakePool()
     b, _ = _backend(pool, [_FakeResp(200, (_sse(_final_image_event()),))])
     with pytest.raises(ImageRequestError):
-        await b.generate(prompt="p", size="4096x4096")
-    assert b._session.posts == 0  # rejected before any HTTP call
+        await b.generate(prompt="p", size="1536x1024")
+    assert b._session.posts == 0
+
+
+async def test_native_accepts_square_and_omits_size_in_payload():
+    pool = _FakePool()
+    b, _ = _backend(pool, [_FakeResp(200, (_sse(_final_image_event()),))])
+    res = await b.generate(prompt="p", size="1024x1024")
+    assert res.backend == "openai"
+    # `size` must NOT be sent — the endpoint ignores it.
+    sent = b._body(b.get_config().image, "p")
+    assert "size" not in sent["tools"][0]
 
 
 async def test_kill_switch_unavailable():
@@ -589,3 +601,86 @@ async def test_selector_no_backend_available_raises():
     cfg = _cfg(backend="auto", provider="kimi", comfy=False)
     with pytest.raises(ImageBackendUnavailableError):
         await _selector(cfg, native=None, comfy=_RecordingBackend("comfyui")).generate(prompt="p")
+
+
+# ── size handling + square-only routing (Odin round-2) ────────────────
+
+
+def test_parse_size_and_is_square():
+    from src.tools.image.base import is_square_size, parse_size
+
+    assert parse_size(None) is None
+    assert parse_size("") is None
+    assert parse_size("1024x1024") == (1024, 1024)
+    assert parse_size("1536X1024") == (1536, 1024)  # case-insensitive
+    assert is_square_size(None) is True
+    assert is_square_size("1024x1024") is True
+    assert is_square_size("1536x1024") is False
+    for bad in ["1024", "1024x", "x1024", "0x0", "-1x-1", "axb", "5000x5000"]:
+        with pytest.raises(ValueError):
+            parse_size(bad)
+
+
+async def test_selector_width_height_fold_to_size_and_use_native():
+    # The original bug: width/height (auto-filled from the schema) forced
+    # ComfyUI. They now fold into a square size and go native.
+    cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
+    native = _RecordingBackend("openai")
+    comfy = _RecordingBackend("comfyui")
+    await _selector(cfg, native=native, comfy=comfy).generate(prompt="p", width=1024, height=1024)
+    assert native.calls and not comfy.calls
+    assert native.calls[0]["size"] == "1024x1024"
+
+
+async def test_selector_auto_non_square_routes_to_comfy():
+    cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
+    native = _RecordingBackend("openai")
+    comfy = _RecordingBackend("comfyui")
+    res = await _selector(cfg, native=native, comfy=comfy).generate(prompt="p", size="1536x1024")
+    assert res.backend == "comfyui" and not native.calls  # native never tried
+
+
+async def test_selector_auto_non_square_no_comfy_does_not_fall_back_to_native():
+    cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=False)
+    native = _RecordingBackend("openai")
+    with pytest.raises(ImageBackendUnavailableError):
+        await _selector(cfg, native=native, comfy=_RecordingBackend("comfyui")).generate(
+            prompt="p", size="1536x1024"
+        )
+    assert not native.calls  # a non-square request must never fall back to native
+
+
+async def test_selector_openai_mode_rejects_non_square():
+    cfg = _cfg(backend="openai", provider="codex", codex=True)
+    native = _RecordingBackend("openai")
+    with pytest.raises(ImageRequestError):
+        await _selector(cfg, native=native, comfy=_RecordingBackend("comfyui")).generate(
+            prompt="p", size="1536x1024"
+        )
+    assert not native.calls  # rejected before any native call
+
+
+async def test_selector_auto_square_size_uses_native():
+    cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
+    native = _RecordingBackend("openai")
+    comfy = _RecordingBackend("comfyui")
+    res = await _selector(cfg, native=native, comfy=comfy).generate(prompt="p", size="512x512")
+    assert res.backend == "openai" and native.calls and not comfy.calls
+
+
+async def test_selector_rejects_one_sided_dimension():
+    cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
+    sel = _selector(cfg, native=_RecordingBackend("openai"), comfy=_RecordingBackend("comfyui"))
+    with pytest.raises(ImageRequestError):
+        await sel.generate(prompt="p", width=1024)  # height missing
+
+
+async def test_selector_explicit_size_wins_over_width_height():
+    cfg = _cfg(backend="auto", provider="codex", codex=True, comfy=True)
+    native = _RecordingBackend("openai")
+    comfy = _RecordingBackend("comfyui")
+    # explicit square size beats a non-square width/height -> native
+    await _selector(cfg, native=native, comfy=comfy).generate(
+        prompt="p", size="1024x1024", width=1536, height=1024
+    )
+    assert native.calls and native.calls[0]["size"] == "1024x1024" and not comfy.calls

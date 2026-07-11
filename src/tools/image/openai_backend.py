@@ -32,6 +32,7 @@ from .base import (
     ImageRequestError,
     ImageResult,
     ImageTransportError,
+    is_square_size,
     png_dimensions,
 )
 
@@ -70,14 +71,15 @@ class OpenAIImageBackend(ImageBackend):
         return headers
 
     @staticmethod
-    def _body(icfg, prompt: str, size: str) -> dict:
+    def _body(icfg, prompt: str) -> dict:
+        # `size` is deliberately omitted: this route ignores it and always
+        # returns a backend-selected square, so sending it would imply a
+        # contract that does not exist.
         return {
             "model": icfg.openai.outer_model,
             "instructions": _INSTRUCTIONS,
             "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
-            "tools": [
-                {"type": "image_generation", "model": icfg.openai.image_model, "size": size}
-            ],
+            "tools": [{"type": "image_generation", "model": icfg.openai.image_model}],
             "tool_choice": {"type": "image_generation"},
             "stream": True,
             "store": False,
@@ -98,10 +100,13 @@ class OpenAIImageBackend(ImageBackend):
         if pool is None or not pool.is_configured():
             raise ImageBackendUnavailableError("No Codex credentials for native image generation")
 
-        size = size or icfg.openai.default_size
-        if size not in icfg.openai.allowed_sizes:
+        # Defense in depth: the selector routes non-square requests to ComfyUI,
+        # but native only ever produces a square image, so refuse a non-square
+        # size here too rather than silently returning the wrong shape.
+        if not is_square_size(size):
             raise ImageRequestError(
-                f"Unsupported size {size!r}. Allowed: {', '.join(icfg.openai.allowed_sizes)}"
+                "the OpenAI backend only produces square images "
+                f"(requested {size})"
             )
 
         # An open image breaker is pre-generation — let auto fall back to ComfyUI.
@@ -110,7 +115,7 @@ class OpenAIImageBackend(ImageBackend):
         except CircuitOpenError as e:
             raise ImageTransportError("image endpoint breaker open", pre_generation=True) from e
 
-        body = self._body(icfg, prompt, size)
+        body = self._body(icfg, prompt)
         session = await self._get_session()
         timeout = aiohttp.ClientTimeout(
             total=icfg.openai.request_timeout_seconds,

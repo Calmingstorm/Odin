@@ -23,6 +23,39 @@ def png_dimensions(data: bytes) -> tuple[int, int] | None:
     return width, height
 
 
+def parse_size(size: str | None) -> tuple[int, int] | None:
+    """Parse a ``WxH`` size string to ``(width, height)``.
+
+    Returns None for an omitted/empty size. Raises ValueError for a malformed,
+    one-sided, zero/negative, or out-of-bounds value so callers reject before
+    routing rather than guess.
+    """
+    if not size:
+        return None
+    parts = str(size).strip().lower().split("x")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"malformed size {size!r} (expected WxH)")
+    try:
+        width, height = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise ValueError(f"malformed size {size!r} (expected integer WxH)") from None
+    if width <= 0 or height <= 0:
+        raise ValueError(f"size {size!r} must be positive")
+    if width > 4096 or height > 4096:
+        raise ValueError(f"size {size!r} exceeds the 4096px limit")
+    return (width, height)
+
+
+def is_square_size(size: str | None) -> bool:
+    """True when no size is given (unconstrained) or the requested size is square.
+
+    Native OpenAI produces a backend-selected SQUARE image and ignores the
+    requested size, so only square/unspecified requests can be honored there.
+    """
+    dims = parse_size(size)
+    return dims is None or dims[0] == dims[1]
+
+
 @dataclass
 class ImageResult:
     """A generated image, ready for the tool layer to attach.

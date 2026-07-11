@@ -154,8 +154,6 @@ image:
     enabled: true          # kill switch for the native wire implementation
     outer_model: gpt-5.5   # Responses model hosting the image tool (pinned)
     image_model: gpt-image-2
-    allowed_sizes: ["1024x1024"]
-    default_size: "1024x1024"
 ```
 
 The `generate_image` tool can target two backends:
@@ -163,24 +161,28 @@ The `generate_image` tool can target two backends:
 - **Native OpenAI** — generates via the `image_generation` tool on the Codex
   ChatGPT OAuth backend, riding the **same account Odin uses for chat** (no
   separate auth; subscription-quota-backed, so it draws on that account's usage
-  limit). Available only while the active provider is `codex`.
+  limit). Available only while the active provider is `codex`. This route
+  **ignores the requested size and always returns a backend-selected square
+  image** — it cannot produce aspect ratios.
 - **ComfyUI** — the local Stable-Diffusion backend (`comfyui.enabled`), which
-  also supports `negative`, `width`/`height`, and checkpoint `model`.
+  honors exact `size` dimensions and also supports `negative` and a checkpoint
+  `model`.
 
 `backend` selects between them:
 
-- `auto` (default) follows the active chat provider: on `codex`, native OpenAI
-  is used with ComfyUI as a pre-generation fallback; on any other provider,
-  ComfyUI only. A `negative`/`width`/`height`/`model` argument routes the
-  request to ComfyUI. If neither backend is available (e.g. Kimi with no
-  ComfyUI) the tool is hidden from the registry.
-- `openai` forces native OpenAI (ComfyUI-only arguments are rejected).
+- `auto` (default) follows the active chat provider. On `codex`: a square (or
+  omitted) `size` uses native OpenAI, with ComfyUI as a pre-generation fallback;
+  a **non-square** `size`, a `negative` prompt, or a checkpoint `model` routes to
+  ComfyUI (native can't satisfy those). On any other provider: ComfyUI only. If
+  neither backend is available (e.g. Kimi with no ComfyUI) the tool is hidden
+  from the registry.
+- `openai` forces native OpenAI; a non-square size or a ComfyUI-only argument is
+  rejected.
 - `comfyui` forces ComfyUI.
 
-`outer_model` is pinned here rather than following your chat model, so changing
-the chat model (Sol/Terra/…) never alters image generation. Only sizes listed in
-`allowed_sizes` are accepted — widen it only after verifying a size works against
-this private endpoint.
+`size` is `WxH` (e.g. `1024x1024`, `1536x1024`). `outer_model` is pinned here
+rather than following your chat model, so changing the chat model (Sol/Terra/…)
+never alters image generation.
 
 ## Web Management UI
 
