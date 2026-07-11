@@ -448,7 +448,7 @@ export default {
       return result;
     });
 
-    // Thread grouping: group messages into user→assistant turns
+    // Thread grouping: group messages into user to assistant turns
     const threads = computed(() => {
       if (!detail.value || !detail.value.messages) return [];
       const msgs = detail.value.messages;

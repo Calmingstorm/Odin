@@ -166,7 +166,7 @@ export default {
             <!-- Iteration history -->
             <div v-if="loop.iteration_history && loop.iteration_history.length > 0" class="mt-3">
               <button @click="toggleHistory(loop.id)" class="text-xs text-gray-500 hover:text-gray-300 flex items-center gap-1 mb-1">
-                <span class="tool-expand-icon" aria-hidden="true"><odin-icon name="chevronRight" :size="13" :class="{ 'rotate-90': expandedHistory[loop.id] }" /></span>
+                <span class="tool-expand-icon" aria-hidden="true"><odin-icon :name="expandedHistory[loop.id] ? 'chevronUp' : 'chevronDown'" :size="13" /></span>
                 Recent iterations ({{ loop.iteration_history.length }})
               </button>
               <div v-if="expandedHistory[loop.id]" class="loop-history">

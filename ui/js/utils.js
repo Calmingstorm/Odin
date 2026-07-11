@@ -86,13 +86,13 @@ export function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
-/** Locale-grouped number: 1234567 → "1,234,567". */
+/** Locale-grouped number: 1234567  to  "1,234,567". */
 export function fmtNum(n) {
   if (n == null || !isFinite(n)) return '—';
   return Number(n).toLocaleString();
 }
 
-/** Compact token count: 1500 → "1.5k", 950 → "950". */
+/** Compact token count: 1500  to  "1.5k", 950  to  "950". */
 export function formatTokens(n) {
   if (n == null || !isFinite(n)) return '—';
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
