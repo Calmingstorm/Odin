@@ -2247,7 +2247,7 @@ textarea.hm-input {
 }
 .kb-chunk-empty { padding: var(--hm-space-2) 0; }
 .kb-chunk-item {
-  padding: var(--hm-space-2) var(--hm-space-3); border-radius: var(--hm-radius);
+  padding: var(--hm-space-2) var(--hm-space-3); border-radius: var(--hm-radius-md);
   border: 1px solid var(--hm-border-subtle); cursor: pointer; transition: all 0.15s;
 }
 .kb-chunk-item:hover { background: var(--hm-surface-hover); border-color: var(--hm-border); }
@@ -2273,7 +2273,7 @@ textarea.hm-input {
 .kb-chunk-content {
   font-size: var(--hm-text-sm); color: var(--hm-text); white-space: pre-wrap; word-break: break-word;
   max-height: 20rem; overflow-y: auto; margin-top: var(--hm-space-2);
-  padding: var(--hm-space-2); background: var(--hm-bg); border-radius: var(--hm-radius);
+  padding: var(--hm-space-2); background: var(--hm-bg); border-radius: var(--hm-radius-md);
   border: 1px solid var(--hm-border);
 }
 
@@ -2339,7 +2339,7 @@ textarea.hm-input {
 }
 .mem-tree-empty { padding: var(--hm-space-2) 0; }
 .mem-tree-entry {
-  padding: var(--hm-space-2) var(--hm-space-3); border-radius: var(--hm-radius);
+  padding: var(--hm-space-2) var(--hm-space-3); border-radius: var(--hm-radius-md);
   border: 1px solid var(--hm-border-subtle); margin-bottom: var(--hm-space-1);
   transition: all 0.15s;
 }
@@ -2383,7 +2383,7 @@ textarea.hm-input {
   display: flex; gap: var(--hm-space-2); margin-bottom: var(--hm-space-4); flex-wrap: wrap;
 }
 .ag-filter-btn {
-  padding: var(--hm-space-1) var(--hm-space-3); border-radius: var(--hm-radius);
+  padding: var(--hm-space-1) var(--hm-space-3); border-radius: var(--hm-radius-md);
   font-size: var(--hm-text-xs); color: var(--hm-text-muted); background: var(--hm-surface);
   border: 1px solid var(--hm-border); cursor: pointer; transition: all 0.15s;
   display: flex; align-items: center; gap: var(--hm-space-1);
@@ -2480,7 +2480,7 @@ textarea.hm-input {
 
 /* Result/error */
 .ag-card-result, .ag-card-error {
-  padding: var(--hm-space-2); border-radius: var(--hm-radius);
+  padding: var(--hm-space-2); border-radius: var(--hm-radius-md);
   background: var(--hm-bg); border: 1px solid var(--hm-border);
 }
 .ag-result-label { font-size: 0.6rem; color: var(--hm-text-dim); text-transform: uppercase; margin-bottom: 2px; }

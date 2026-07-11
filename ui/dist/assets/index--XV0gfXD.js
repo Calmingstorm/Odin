@@ -435,7 +435,7 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
                       v-if="file.content_type && file.content_type.startsWith('image/')"
                       :src="'data:' + file.content_type + ';base64,' + file.data"
                       :alt="file.filename"
-                      style="max-width: 100%; border-radius: 6px; border: 1px solid var(--border); cursor: pointer;"
+                      style="max-width: 100%; border-radius: 6px; border: 1px solid var(--hm-border); cursor: pointer;"
                       @click="openImage('data:' + file.content_type + ';base64,' + file.data)"
                       loading="lazy"
                     />
@@ -443,7 +443,7 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
                       v-else
                       :href="'data:' + file.content_type + ';base64,' + file.data"
                       :download="file.filename"
-                      style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); color: var(--text-secondary); font-size: 13px; text-decoration: none;"
+                      style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--hm-border); color: var(--hm-text-muted); font-size: 13px; text-decoration: none;"
                     >
                       <odin-icon name="attachment" :size="15" /> {{ file.filename }} ({{ (file.size / 1024).toFixed(1) }} KB)
                     </a>
