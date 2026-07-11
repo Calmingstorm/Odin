@@ -526,7 +526,7 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
   `},tw={setup(){const e=h([]),t=h([]),s=h({}),n=50;function a(c){var f,p,m;const u=c.payload||c,d=u.type||c.type;if(d==="tool_start"){const g={id:`${u.action}-${Date.now()}`,tool:u.action,actor:u.actor||"",channel:u.channel_id||"",iteration:((f=u.metadata)==null?void 0:f.iteration)??0,startTime:Date.now(),elapsed:0,status:"running",output:"",result:""};e.value.unshift(g);return}if(d==="tool_end"){const g=e.value.findIndex(w=>w.tool===u.action&&w.status==="running");if(g>=0){const w=e.value[g];w.status=(p=u.metadata)!=null&&p.error?"error":"success",w.elapsed=((m=u.metadata)==null?void 0:m.elapsed_ms)||Date.now()-w.startTime,w.result=u.detail||"",w.fadingOut=!0,setTimeout(()=>{const R=e.value.indexOf(w);R>=0&&e.value.splice(R,1),t.value.unshift(w),t.value.length>n&&t.value.pop()},5e3)}return}if(d==="tool_stream"){const g=u.tool_name||"unknown";if(u.finished)delete s.value[g];else{const R=((s.value[g]||"")+(u.chunk||"")).split(`
 `);s.value[g]=R.slice(-30).join(`
 `)}return}}let i=null;function l(){const c=Date.now();e.value.forEach(u=>{u.status==="running"&&(u.elapsed=c-u.startTime)})}$e(()=>{Ke.on("events",a),i=setInterval(l,500)}),ft(()=>{Ke.off("events",a),i&&clearInterval(i)});function r(c){return c<1e3?`${c}ms`:`${(c/1e3).toFixed(1)}s`}function o(c){return c==="running"?"clock":c==="success"?"success":c==="error"?"error":"info"}return{activeTasks:e,recentHistory:t,streamOutput:s,formatMs:r,statusIcon:o}},template:`
-    <div class="space-y-6">
+    <div class="p-6 page-fade-in space-y-6">
       <h2 class="text-xl font-bold text-white flex items-center gap-2">
         <odin-icon name="target" :size="22" /> Execution Viewer
       </h2>

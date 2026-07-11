@@ -105,7 +105,7 @@ export default {
   },
 
   template: `
-    <div class="space-y-6">
+    <div class="p-6 page-fade-in space-y-6">
       <h2 class="text-xl font-bold text-white flex items-center gap-2">
         <odin-icon name="target" :size="22" /> Execution Viewer
       </h2>
