@@ -39,7 +39,7 @@ export default {
             <div v-for="d in startup.results" :key="d.name"
                  style="display:flex;align-items:center;gap:0.5rem;padding:0.25rem 0;">
               <span :class="d.passed ? 'text-green-400' : 'text-red-400'" style="font-size:0.9rem;width:1.5rem;text-align:center;">
-                {{ d.passed ? '\u2714' : '\u2716' }}
+                <odin-icon :name="d.passed ? 'success' : 'error'" :size="17" />
               </span>
               <span class="text-sm" style="flex:1;">{{ d.name }}</span>
               <span class="text-xs text-gray-500" style="max-width:50%;text-align:right;">{{ d.detail || '' }}</span>
@@ -55,7 +55,7 @@ export default {
             <div v-for="s in subsystems" :key="s.name" class="hm-card" style="padding:0.75rem;">
               <div style="display:flex;align-items:center;gap:0.5rem;">
                 <span :class="statusColor(s.state === 'available' ? 'ok' : s.state === 'degraded' ? 'degraded' : 'down')" style="font-size:1.1rem;">
-                  {{ s.state === 'available' ? '\u2714' : s.state === 'degraded' ? '\u26A0' : '\u2716' }}
+                  <odin-icon :name="s.state === 'available' ? 'success' : s.state === 'degraded' ? 'warning' : 'error'" :size="18" />
                 </span>
                 <span class="text-sm font-medium">{{ s.name }}</span>
               </div>

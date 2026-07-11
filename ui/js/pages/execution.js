@@ -95,10 +95,10 @@ export default {
     }
 
     function statusIcon(status) {
-      if (status === 'running') return '\u{23F3}';
-      if (status === 'success') return '\u{2705}';
-      if (status === 'error') return '\u{274C}';
-      return '\u{2B55}';
+      if (status === 'running') return 'clock';
+      if (status === 'success') return 'success';
+      if (status === 'error') return 'error';
+      return 'info';
     }
 
     return { activeTasks, recentHistory, streamOutput, formatMs, statusIcon };
@@ -107,7 +107,7 @@ export default {
   template: `
     <div class="space-y-6">
       <h2 class="text-xl font-bold text-white flex items-center gap-2">
-        <span class="text-2xl">\u{1F3AF}</span> Execution Viewer
+        <odin-icon name="target" :size="22" /> Execution Viewer
       </h2>
 
       <!-- Active Tasks -->
@@ -124,8 +124,8 @@ export default {
              :style="task.fadingOut ? 'opacity: 0; transition: opacity 4.5s ease-out;' : ''">
           <div class="flex items-center justify-between mb-2">
             <div class="flex items-center gap-2">
-              <span v-if="task.fadingOut" :class="task.status === 'error' ? 'text-red-400' : 'text-green-400'">{{ statusIcon(task.status) }}</span>
-              <span v-else class="animate-pulse text-blue-400">\u{23F3}</span>
+              <span v-if="task.fadingOut" :class="task.status === 'error' ? 'text-red-400' : 'text-green-400'"><odin-icon :name="statusIcon(task.status)" :size="17" /></span>
+              <span v-else class="animate-pulse text-blue-400"><odin-icon name="clock" :size="17" /></span>
               <span class="text-white font-mono text-sm font-bold">{{ task.tool }}</span>
               <span class="text-gray-500 text-xs">iter {{ task.iteration }}</span>
             </div>
@@ -157,7 +157,7 @@ export default {
         </div>
         <div v-for="task in recentHistory" :key="task.id"
              class="flex items-center gap-3 py-2 border-b border-gray-700/50 last:border-0">
-          <span class="text-lg">{{ statusIcon(task.status) }}</span>
+          <span class="text-lg"><odin-icon :name="statusIcon(task.status)" :size="17" /></span>
           <span class="text-white font-mono text-sm flex-1">{{ task.tool }}</span>
           <span class="text-gray-400 text-xs max-w-md truncate">{{ task.result }}</span>
           <span class="text-gray-500 font-mono text-xs whitespace-nowrap">{{ formatMs(task.elapsed) }}</span>

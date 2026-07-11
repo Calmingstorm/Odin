@@ -91,14 +91,14 @@ export default {
 
       <!-- Error state -->
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="fetchSkills" class="btn btn-ghost text-xs">Retry</button>
       </div>
 
       <!-- Empty state -->
       <div v-else-if="skills.length === 0 && !editing" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{1F9E9}</span>
+        <span class="empty-state-icon"><odin-icon name="puzzle" :size="23" /></span>
         <span class="empty-state-text">No skills loaded</span>
         <span class="empty-state-hint">Click "New Skill" to create a custom tool</span>
       </div>
@@ -110,7 +110,7 @@ export default {
             <!-- Card header -->
             <div class="sk-card-header">
               <div class="sk-card-title-row">
-                <span class="sk-card-icon">\u{1F9E9}</span>
+                <span class="sk-card-icon"><odin-icon name="puzzle" :size="17" /></span>
                 <span class="sk-card-name">{{ s.name }}</span>
                 <span v-if="s.execution_count > 0" class="sk-card-runs">{{ s.execution_count.toLocaleString() }} runs</span>
               </div>
@@ -119,15 +119,15 @@ export default {
                         class="sk-action-btn sk-action-test"
                         :disabled="testing === s.name"
                         :title="testing === s.name ? 'Testing...' : 'Run test'">
-                  {{ testing === s.name ? '\u23F3' : '\u25B6' }}
+                  <odin-icon :name="testing === s.name ? 'clock' : 'play'" :size="15" />
                 </button>
                 <button @click.stop="toggleCode(s.name)"
                         class="sk-action-btn sk-action-code"
                         :title="showCode[s.name] ? 'Hide code' : 'View code'">
-                  {{ showCode[s.name] ? '\u{1F4D6}' : '\u{1F4C4}' }}
+                  <odin-icon :name="showCode[s.name] ? 'book' : 'file'" :size="15" />
                 </button>
-                <button @click.stop="editSkill(s)" class="sk-action-btn sk-action-edit" title="Edit">\u270E</button>
-                <button @click.stop="confirmDelete(s.name)" class="sk-action-btn sk-action-delete" title="Delete">\u2715</button>
+                <button @click.stop="editSkill(s)" class="sk-action-btn sk-action-edit" title="Edit" aria-label="Edit skill"><odin-icon name="edit" :size="14" /></button>
+                <button @click.stop="confirmDelete(s.name)" class="sk-action-btn sk-action-delete" title="Delete" aria-label="Delete skill"><odin-icon name="trash" :size="14" /></button>
               </div>
             </div>
 
@@ -144,7 +144,7 @@ export default {
             <div v-if="testResults[s.name]" class="sk-test-result"
                  :class="testResults[s.name].is_error ? 'sk-test-fail' : 'sk-test-pass'">
               <div class="sk-test-label">
-                {{ testResults[s.name].is_error ? '\u2718 Test Failed' : '\u2714 Test Passed' }}
+                {{ testResults[s.name].is_error ? 'Test failed' : 'Test passed' }}
               </div>
               <div class="sk-test-output">{{ truncate(testResults[s.name].result, 500) }}</div>
             </div>
@@ -154,7 +154,7 @@ export default {
               <div class="sk-code-header">
                 <span class="sk-code-filename">{{ s.name }}.py</span>
                 <button @click.stop="copyCode(s.code)" class="sk-code-copy" title="Copy code">
-                  {{ copied === s.name ? '\u2714' : '\u{1F4CB}' }}
+                  <odin-icon :name="copied === s.name ? 'success' : 'copy'" :size="15" />
                 </button>
               </div>
               <div class="sk-code-wrap">
@@ -167,7 +167,7 @@ export default {
 
         <!-- Empty search -->
         <div v-if="displayedSkills.length === 0 && search" class="hm-card empty-state">
-          <span class="empty-state-icon">\u{1F50D}</span>
+          <span class="empty-state-icon"><odin-icon name="search" :size="23" /></span>
           <span class="empty-state-text">No skills match "{{ search }}"</span>
           <span class="empty-state-hint">Try a different search term</span>
         </div>
@@ -208,7 +208,7 @@ export default {
         <!-- Validation preview -->
         <div v-if="editCode && editValidation" class="sk-validation-box"
              :class="editValidation.valid ? 'sk-validation-ok' : 'sk-validation-err'">
-          <span>{{ editValidation.valid ? '\u2714 Valid Python structure' : '\u26A0 ' + editValidation.message }}</span>
+          <span>{{ editValidation.valid ? 'Valid Python structure' : editValidation.message }}</span>
         </div>
 
         <div v-if="editError" class="mb-3 p-2 rounded bg-red-950/30 border border-red-900/50">
@@ -226,7 +226,7 @@ export default {
       </div>
 
       <!-- Delete confirmation -->
-      <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null" role="dialog" aria-modal="true" aria-labelledby="skill-delete-title">
+      <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null" @keyup.escape="deleteTarget = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="skill-delete-title">
         <div class="modal-content">
           <h3 id="skill-delete-title" class="text-lg font-semibold mb-2">Delete Skill</h3>
           <p class="text-gray-400 text-sm mb-4">

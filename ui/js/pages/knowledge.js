@@ -72,7 +72,7 @@ export default {
           <p class="text-red-400 text-sm">Search error: {{ searchError }}</p>
         </div>
         <div v-else-if="searchResults.length === 0" class="hm-card empty-state">
-          <span class="empty-state-icon">\u{1F50D}</span>
+          <span class="empty-state-icon"><odin-icon name="search" :size="23" /></span>
           <span class="empty-state-text">No results for "{{ lastQuery }}"</span>
           <span class="empty-state-hint">Try different search terms or ingest more documents</span>
         </div>
@@ -113,12 +113,12 @@ export default {
         <div v-for="n in 3" :key="n" class="skeleton skeleton-row"></div>
       </div>
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="fetchSources" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="sources.length === 0 && !showIngest" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{1F4DA}</span>
+        <span class="empty-state-icon"><odin-icon name="book" :size="23" /></span>
         <span class="empty-state-text">No documents ingested</span>
         <span class="empty-state-hint">Click "Ingest Document" to add knowledge for Odin to reference</span>
       </div>
@@ -135,7 +135,7 @@ export default {
               <span class="kb-tree-arrow" :class="{ 'kb-tree-arrow-open': expanded[s.source || s.name || s] }" aria-hidden="true">
                 \u25B6
               </span>
-              <span class="kb-tree-icon">\u{1F4C4}</span>
+              <span class="kb-tree-icon"><odin-icon name="file" :size="17" /></span>
               <span class="kb-tree-name">{{ s.source || s.name || s }}</span>
               <span class="badge badge-info text-xs">{{ s.chunks || 0 }} chunks</span>
               <span v-if="s.uploader" class="badge badge-warning text-xs">{{ s.uploader }}</span>
@@ -193,7 +193,7 @@ export default {
       </div>
 
       <!-- Delete confirmation -->
-      <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null" role="dialog" aria-modal="true" aria-labelledby="kb-delete-title">
+      <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null" @keyup.escape="deleteTarget = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="kb-delete-title">
         <div class="modal-content">
           <h3 id="kb-delete-title" class="text-lg font-semibold mb-2">Delete Source</h3>
           <p class="text-gray-400 text-sm mb-4">

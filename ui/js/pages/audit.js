@@ -61,12 +61,12 @@ export default {
         <div v-for="n in 5" :key="n" class="skeleton skeleton-row"></div>
       </div>
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="fetchAudit" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="entries.length === 0" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{1F4DD}</span>
+        <span class="empty-state-icon"><odin-icon name="file" :size="23" /></span>
         <span class="empty-state-text">No audit entries found</span>
         <span class="empty-state-hint">Try adjusting your filters or wait for tool executions to appear</span>
       </div>

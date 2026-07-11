@@ -34,17 +34,16 @@ function formatTime(ts) {
 
 /** Map tool names to category icons */
 const TOOL_ICONS = {
-  run_command: '\u2318', ssh_command: '\u2318', run_script: '\u2318',
-  read_file: '\uD83D\uDCC4', write_file: '\u270F\uFE0F', list_directory: '\uD83D\uDCC2',
-  search_knowledge: '\uD83D\uDD0D', ingest_document: '\uD83D\uDCDA',
-  generate_image: '\uD83C\uDFA8', analyze_image: '\uD83D\uDDBC\uFE0F',
-  analyze_pdf: '\uD83D\uDCC3', browser_screenshot: '\uD83C\uDF10',
-  manage_process: '\u2699\uFE0F',
+  run_command: 'terminal', ssh_command: 'terminal', run_script: 'terminal',
+  read_file: 'file', write_file: 'edit', list_directory: 'folder',
+  search_knowledge: 'search', ingest_document: 'book',
+  generate_image: 'image', analyze_image: 'eye',
+  analyze_pdf: 'file', browser_screenshot: 'globe',
+  manage_process: 'sliders',
 };
 
 function getToolIcon(name) {
-  if (TOOL_ICONS[name]) return TOOL_ICONS[name];
-  return '\uD83D\uDD27';
+  return TOOL_ICONS[name] || 'wrench';
 }
 
 /** Detect image URLs in text for inline display */
@@ -125,7 +124,7 @@ export default {
                   </button>
                   <div v-if="msg._showTools" class="chat-tool-list">
                     <div v-for="t in msg.tools_used" :key="t" class="chat-tool-card">
-                      <span class="chat-tool-icon">{{ getToolIcon(t) }}</span>
+                      <span class="chat-tool-icon"><odin-icon :name="getToolIcon(t)" :size="15" /></span>
                       <span class="chat-tool-name">{{ t }}</span>
                     </div>
                   </div>
@@ -158,7 +157,7 @@ export default {
                       :download="file.filename"
                       style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); color: var(--text-secondary); font-size: 13px; text-decoration: none;"
                     >
-                      \uD83D\uDCCE {{ file.filename }} ({{ (file.size / 1024).toFixed(1) }} KB)
+                      <odin-icon name="attachment" :size="15" /> {{ file.filename }} ({{ (file.size / 1024).toFixed(1) }} KB)
                     </a>
                   </div>
                 </div>

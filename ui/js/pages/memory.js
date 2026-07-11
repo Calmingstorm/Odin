@@ -90,12 +90,12 @@ export default {
         <div v-for="n in 3" :key="n" class="skeleton skeleton-row"></div>
       </div>
       <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
-        <span class="error-icon" aria-hidden="true">\u26A0</span>
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="fetchMemory" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="scopes.length === 0 && !showAdd" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{1F9E0}</span>
+        <span class="empty-state-icon"><odin-icon name="brain" :size="23" /></span>
         <span class="empty-state-text">No memory entries</span>
         <span class="empty-state-hint">Click "Add Entry" or let Odin learn preferences through conversations</span>
       </div>
@@ -160,7 +160,7 @@ export default {
       </div>
 
       <!-- Delete confirmation (single) -->
-      <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null" role="dialog" aria-modal="true" aria-labelledby="mem-delete-title">
+      <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null" @keyup.escape="deleteTarget = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="mem-delete-title">
         <div class="modal-content">
           <h3 id="mem-delete-title" class="text-lg font-semibold mb-2">Delete Memory Entry</h3>
           <p class="text-gray-400 text-sm mb-4">
@@ -176,7 +176,7 @@ export default {
       </div>
 
       <!-- Bulk delete confirmation -->
-      <div v-if="showBulkDelete" class="modal-overlay" @click.self="showBulkDelete = false" role="dialog" aria-modal="true" aria-labelledby="mem-bulk-delete-title">
+      <div v-if="showBulkDelete" class="modal-overlay" @click.self="showBulkDelete = false" @keyup.escape="showBulkDelete = false" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="mem-bulk-delete-title">
         <div class="modal-content">
           <h3 id="mem-bulk-delete-title" class="text-lg font-semibold mb-2">Bulk Delete</h3>
           <p class="text-gray-400 text-sm mb-4">

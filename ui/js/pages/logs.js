@@ -10,11 +10,11 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 const LOG_LEVELS = ['INFO', 'WARNING', 'ERROR'];
 
 const LOG_PRESETS = [
-  { id: 'all', name: 'All Logs', icon: '\u2630', filters: {} },
-  { id: 'errors', name: 'Errors Only', icon: '\u274C', filters: { level: 'ERROR' } },
-  { id: 'warnings', name: 'Warnings+', icon: '\u26A0', filters: { levels: ['WARNING', 'ERROR'] } },
-  { id: 'tools', name: 'Tool Activity', icon: '\uD83D\uDD27', filters: { hasToolName: true } },
-  { id: 'recent-errors', name: 'Recent Errors', icon: '\uD83D\uDD25', filters: { level: 'ERROR', timeRange: 'last_1h' } },
+  { id: 'all', name: 'All Logs', icon: 'list', filters: {} },
+  { id: 'errors', name: 'Errors Only', icon: 'error', filters: { level: 'ERROR' } },
+  { id: 'warnings', name: 'Warnings+', icon: 'warning', filters: { levels: ['WARNING', 'ERROR'] } },
+  { id: 'tools', name: 'Tool Activity', icon: 'wrench', filters: { hasToolName: true } },
+  { id: 'recent-errors', name: 'Recent Errors', icon: 'flame', filters: { level: 'ERROR', timeRange: 'last_1h' } },
 ];
 
 const TIME_RANGES = [
@@ -72,7 +72,7 @@ export default {
                     @click="applyLogPreset(preset)"
                     class="sess-preset-chip"
                     :class="{ 'sess-preset-active': activeLogPreset === preset.id }">
-              <span class="sess-preset-icon">{{ preset.icon }}</span>
+              <span class="sess-preset-icon"><odin-icon :name="preset.icon" :size="15" /></span>
               <span>{{ preset.name }}</span>
             </button>
           </div>
@@ -130,7 +130,7 @@ export default {
                   @click="applyCustomLogPreset(cp)"
                   class="sess-preset-chip sess-preset-custom"
                   :class="{ 'sess-preset-active': activeLogPreset === cp.id }">
-            <span>\u2605</span>
+            <odin-icon name="sparkles" :size="14" />
             <span>{{ cp.name }}</span>
             <span class="sess-preset-remove" @click.stop="removeLogCustomPreset(cp.id)">&times;</span>
           </button>
@@ -177,7 +177,7 @@ export default {
           <div ref="logContainer" @scroll="onScroll"
                class="absolute inset-0 overflow-y-auto bg-gray-950 border border-gray-800 rounded p-3 font-mono text-xs">
             <div v-if="filteredLogs.length === 0" class="empty-state" style="padding:2rem 0;">
-              <span class="empty-state-icon">{{ logs.length === 0 ? '\uD83D\uDCC4' : '\uD83D\uDD0D' }}</span>
+              <span class="empty-state-icon"><odin-icon :name="logs.length === 0 ? 'file' : 'search'" :size="23" /></span>
               <span class="empty-state-text">{{ logs.length === 0 ? 'Waiting for log entries...' : 'No entries match the current filter' }}</span>
             </div>
             <div v-for="(entry, i) in filteredLogs" :key="i"
@@ -307,19 +307,19 @@ export default {
           <div class="absolute inset-0 overflow-y-auto bg-gray-950 border border-gray-800 rounded p-3 font-mono text-xs">
             <!-- Loading -->
             <div v-if="searching" class="empty-state" style="padding:2rem 0;">
-              <span class="empty-state-icon">\u23F3</span>
+              <span class="empty-state-icon"><odin-icon name="clock" :size="23" /></span>
               <span class="empty-state-text">Searching...</span>
             </div>
 
             <!-- No results -->
             <div v-else-if="searchResults.length === 0 && searchRan" class="empty-state" style="padding:2rem 0;">
-              <span class="empty-state-icon">\uD83D\uDD0D</span>
+              <span class="empty-state-icon"><odin-icon name="search" :size="23" /></span>
               <span class="empty-state-text">No entries match the search criteria</span>
             </div>
 
             <!-- Prompt to search -->
             <div v-else-if="searchResults.length === 0 && !searchRan" class="empty-state" style="padding:2rem 0;">
-              <span class="empty-state-icon">\uD83D\uDCCA</span>
+              <span class="empty-state-icon"><odin-icon name="chart" :size="23" /></span>
               <span class="empty-state-text">Set filters and click Search to query log history</span>
             </div>
 
