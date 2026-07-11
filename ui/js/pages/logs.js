@@ -227,26 +227,28 @@ export default {
           <div class="flex gap-3 flex-wrap items-end">
             <!-- Level -->
             <div class="flex flex-col gap-1">
-              <label class="text-xs text-gray-500">Level</label>
+              <label class="text-xs text-gray-500">Level
               <select v-model="searchLevel" class="hm-select text-xs" style="min-width:100px;">
                 <option value="all">All</option>
                 <option value="error">Errors only</option>
                 <option value="info">Info only</option>
               </select>
+              </label>
             </div>
 
             <!-- Tool name -->
             <div class="flex flex-col gap-1">
-              <label class="text-xs text-gray-500">Tool</label>
+              <label class="text-xs text-gray-500">Tool
               <select v-model="searchTool" class="hm-select text-xs" style="min-width:140px;">
                 <option value="">Any tool</option>
                 <option v-for="t in (searchStats ? searchStats.tools || [] : [])" :key="t" :value="t">{{ t }}</option>
               </select>
+              </label>
             </div>
 
             <!-- Time range quick select -->
             <div class="flex flex-col gap-1">
-              <label class="text-xs text-gray-500">Time range</label>
+              <label class="text-xs text-gray-500">Time range
               <select v-model="searchTimePreset" @change="applySearchTimePreset" class="hm-select text-xs" style="min-width:130px;">
                 <option value="">Custom / All</option>
                 <option value="last_5m">Last 5 min</option>
@@ -256,34 +258,39 @@ export default {
                 <option value="last_24h">Last 24 hours</option>
                 <option value="last_7d">Last 7 days</option>
               </select>
+              </label>
             </div>
 
             <!-- Start time -->
             <div class="flex flex-col gap-1">
-              <label class="text-xs text-gray-500">From</label>
+              <label class="text-xs text-gray-500">From
               <input v-model="searchStart" type="datetime-local" class="hm-input text-xs" style="min-width:170px;" />
+              </label>
             </div>
 
             <!-- End time -->
             <div class="flex flex-col gap-1">
-              <label class="text-xs text-gray-500">To</label>
+              <label class="text-xs text-gray-500">To
               <input v-model="searchEnd" type="datetime-local" class="hm-input text-xs" style="min-width:170px;" />
+              </label>
             </div>
 
             <!-- Keyword -->
             <div class="flex flex-col gap-1 flex-1" style="min-width:150px;">
-              <label class="text-xs text-gray-500">Keyword</label>
+              <label class="text-xs text-gray-500">Keyword
               <input v-model="searchKeyword" type="text" class="hm-input text-xs"
                      placeholder="Search text..."
                      @keyup.enter="runSearch" />
+              </label>
             </div>
 
             <!-- Limit -->
             <div class="flex flex-col gap-1">
-              <label class="text-xs text-gray-500">Limit</label>
+              <label class="text-xs text-gray-500">Limit
               <select v-model.number="searchLimit" class="hm-select text-xs" style="min-width:80px;">
                 <option v-for="l in searchLimits" :key="l" :value="l">{{ l }}</option>
               </select>
+              </label>
             </div>
 
             <!-- Search button -->

@@ -110,7 +110,7 @@ export default {
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
             <div>
-              <label class="text-xs text-gray-400">Model</label>
+              <label class="text-xs text-gray-400 block">Model
               <select v-model="codexForm.model" @change="saveCodexConfigDebounced"
                       class="hm-input">
                 <option value="gpt-5.6-sol">gpt-5.6-sol</option>
@@ -121,14 +121,16 @@ export default {
                 <option value="gpt-4.1">gpt-4.1</option>
                 <option value="gpt-4o">gpt-4o</option>
               </select>
+              </label>
             </div>
             <div>
-              <label class="text-xs text-gray-400">Max Tokens</label>
+              <label class="text-xs text-gray-400 block">Max Tokens
               <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfigNow"
                      class="hm-input" />
+              </label>
             </div>
             <div>
-              <label class="text-xs text-gray-400">Reasoning</label>
+              <label class="text-xs text-gray-400 block">Reasoning
               <select v-model="codexForm.reasoning_effort" @change="saveCodexConfigDebounced"
                       class="hm-input">
                 <option value="none">None</option>
@@ -137,9 +139,10 @@ export default {
                 <option value="high">High</option>
                 <option value="xhigh">Extra High</option>
               </select>
+              </label>
             </div>
             <div>
-              <label class="text-xs text-gray-400">Agent Reasoning</label>
+              <label class="text-xs text-gray-400 block">Agent Reasoning
               <select v-model="codexForm.agent_reasoning_effort" @change="saveCodexConfigDebounced"
                       class="hm-input">
                 <option value="">Inherit chat setting</option>
@@ -149,6 +152,7 @@ export default {
                 <option value="high">High</option>
                 <option value="xhigh">Extra High</option>
               </select>
+              </label>
             </div>
           </div>
           <div class="border-t border-gray-700 pt-4">
@@ -290,23 +294,25 @@ export default {
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label class="text-xs text-gray-400">Model</label>
+              <label class="text-xs text-gray-400 block">Model
               <select v-model="kimiForm.model" @change="saveKimiConfigDebounced"
                       class="hm-input">
                 <option v-if="!kimiModels.length" value="" disabled>No models available</option>
                 <option v-for="m in kimiModels" :key="m" :value="m">{{ m }}</option>
               </select>
+              </label>
             </div>
             <div>
-              <label class="text-xs text-gray-400">Max Tokens</label>
+              <label class="text-xs text-gray-400 block">Max Tokens
               <input v-model.number="kimiForm.max_tokens" type="number" @keydown.enter="saveKimiConfigNow"
                      class="hm-input" />
+              </label>
             </div>
             <div>
-              <label class="text-xs text-gray-400">API Key</label>
+              <span class="text-xs text-gray-400">API Key</span>
               <div class="flex items-center gap-2">
                 <span v-if="llmStatus && llmStatus.kimi.has_api_key && !kimiForm.api_key" class="provider-status text-xs text-green-400"><span class="status-dot online" aria-hidden="true"></span>Configured</span>
-                <input v-model="kimiForm.api_key" type="password" @keydown.enter="saveKimiConfigNow" @input="kimiKeyDirty = true"
+                <input v-model="kimiForm.api_key" type="password" aria-label="Kimi API key" @keydown.enter="saveKimiConfigNow" @input="kimiKeyDirty = true"
                        :placeholder="llmStatus && llmStatus.kimi.has_api_key ? '••••••••  (press Enter to replace)' : 'sk-...'"
                        class="hm-input flex-1" />
               </div>
@@ -335,27 +341,31 @@ export default {
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label class="text-xs text-gray-400">Model</label>
+              <label class="text-xs text-gray-400 block">Model
               <select v-model="ollamaForm.model" @change="saveOllamaConfigDebounced"
                       class="hm-input">
                 <option v-if="!ollamaModels.length" value="" disabled>No models available</option>
                 <option v-for="m in ollamaModels" :key="m.name" :value="m.name">{{ m.name }} ({{ formatSize(m.size) }})</option>
               </select>
+              </label>
             </div>
             <div>
-              <label class="text-xs text-gray-400">Max Tokens</label>
+              <label class="text-xs text-gray-400 block">Max Tokens
               <input v-model.number="ollamaForm.max_tokens" type="number" @keydown.enter="saveOllamaConfigNow"
                      class="hm-input" />
+              </label>
             </div>
             <div>
-              <label class="text-xs text-gray-400">API Key <span class="text-gray-600">(optional, for remote)</span></label>
+              <label class="text-xs text-gray-400 block">API Key <span class="text-gray-600">(optional, for remote)</span>
               <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local" @keydown.enter="saveOllamaConfigNow" @input="ollamaKeyDirty = true"
                      class="hm-input" />
+              </label>
             </div>
             <div>
-              <label class="text-xs text-gray-400">Base URL</label>
+              <label class="text-xs text-gray-400 block">Base URL
               <input v-model="ollamaForm.base_url" placeholder="http://127.0.0.1:11434" @keydown.enter="saveOllamaConfigNow"
                      class="hm-input" />
+              </label>
             </div>
           </div>
           <div v-if="ollamaStatus.health && ollamaStatus.health.error"

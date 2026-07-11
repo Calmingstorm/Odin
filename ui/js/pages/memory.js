@@ -55,20 +55,23 @@ export default {
         <h2 class="text-sm font-medium mb-3">Add Memory Entry</h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Scope</label>
+            <label class="text-gray-400 text-xs block mb-1">Scope
             <input v-model="addForm.scope" type="text" class="hm-input"
                    placeholder="e.g. global, user:12345" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Key</label>
+            <label class="text-gray-400 text-xs block mb-1">Key
             <input v-model="addForm.key" type="text" class="hm-input"
                    placeholder="e.g. preferred_language" />
+            </label>
           </div>
         </div>
         <div class="mb-3">
-          <label class="text-gray-400 text-xs block mb-1">Value</label>
+          <label class="text-gray-400 text-xs block mb-1">Value
           <textarea v-model="addForm.value" class="hm-input" rows="3"
                     placeholder="Enter value..."></textarea>
+          </label>
         </div>
         <div v-if="addError" class="mb-3 text-red-400 text-sm">{{ addError }}</div>
         <div v-if="addSuccess" class="mb-3 text-green-400 text-sm">{{ addSuccess }}</div>
@@ -116,6 +119,7 @@ export default {
             <span class="badge badge-info text-xs">{{ scope.count }} keys</span>
             <input type="checkbox" class="memory-checkbox ml-auto"
                    :checked="isScopeAllSelected(scope.name)"
+                   :aria-label="'Select all keys in ' + scope.name"
                    @click.stop
                    @change="toggleSelectAll(scope.name, $event.target.checked)" />
           </div>
@@ -134,6 +138,7 @@ export default {
                 <div class="mem-tree-entry-header">
                   <input type="checkbox" class="memory-checkbox"
                          :checked="isSelected(scope.name, entry.key)"
+                         :aria-label="'Select ' + entry.key + ' in ' + scope.name"
                          @change="toggleSelect(scope.name, entry.key)" />
                   <span class="mem-tree-key">{{ entry.key }}</span>
                   <div class="mem-tree-entry-actions">
@@ -145,7 +150,7 @@ export default {
                   </div>
                 </div>
                 <div v-if="editingKey === scope.name + '/' + entry.key" class="mem-tree-edit">
-                  <textarea v-model="editValue" class="hm-input text-sm" rows="2"></textarea>
+                  <textarea v-model="editValue" class="hm-input text-sm" rows="2" :aria-label="'Edit value for ' + entry.key"></textarea>
                   <div class="flex gap-1 mt-1">
                     <button @click="doEdit(scope.name, entry.key)" class="btn btn-primary text-xs" :disabled="saving">
                       {{ saving ? 'Saving...' : 'Save' }}

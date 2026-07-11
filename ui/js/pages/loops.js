@@ -29,42 +29,48 @@ export default {
         <h2 class="text-sm font-medium mb-3">Start New Loop</h2>
 
         <div class="mb-3">
-          <label class="text-gray-400 text-xs block mb-1">Goal</label>
+          <label class="text-gray-400 text-xs block mb-1">Goal
           <textarea v-model="form.goal" class="hm-input" rows="3"
                     placeholder="What should this loop accomplish? e.g. Monitor disk usage and warn if above 80%"></textarea>
+          </label>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Interval (seconds)</label>
+            <label class="text-gray-400 text-xs block mb-1">Interval (seconds)
             <input v-model.number="form.interval_seconds" type="number" class="hm-input"
                    min="10" placeholder="60" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Mode</label>
+            <label class="text-gray-400 text-xs block mb-1">Mode
             <select v-model="form.mode" class="hm-input">
               <option value="notify">Notify (check + report)</option>
               <option value="act">Act (check + take actions + report)</option>
               <option value="silent">Silent (only report if notable)</option>
             </select>
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Max Iterations</label>
+            <label class="text-gray-400 text-xs block mb-1">Max Iterations
             <input v-model.number="form.max_iterations" type="number" class="hm-input"
                    min="1" placeholder="50" />
+            </label>
           </div>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Stop Condition (optional)</label>
+            <label class="text-gray-400 text-xs block mb-1">Stop Condition (optional)
             <input v-model="form.stop_condition" type="text" class="hm-input"
                    placeholder="e.g. when disk is below 50%" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Channel ID</label>
+            <label class="text-gray-400 text-xs block mb-1">Channel ID
             <input v-model="form.channel_id" type="text" class="hm-input"
                    placeholder="Discord channel ID" />
+            </label>
           </div>
         </div>
 

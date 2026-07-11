@@ -41,8 +41,8 @@ export default {
             </label>
           </div>
           <div class="flex items-center gap-3">
-            <span class="text-xs text-gray-500">Default host:</span>
-            <select v-model="defaultPolicy.default_host" @change="saveDefaultPolicy"
+            <label for="default-policy-host" class="text-xs text-gray-500">Default host:</label>
+            <select id="default-policy-host" v-model="defaultPolicy.default_host" @change="saveDefaultPolicy"
                     class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-gray-300">
               <option value="">— none —</option>
               <option v-for="host in defaultPolicy.allowed_hosts" :key="'dpd-'+host" :value="host">
@@ -66,21 +66,27 @@ export default {
             <div class="flex items-center gap-3 relative">
               <div class="relative w-72">
                 <input ref="searchInput" v-model="searchQuery" placeholder="Search users..."
+                       role="combobox" aria-label="Search users" aria-autocomplete="list"
+                       :aria-expanded="showDropdown" aria-controls="host-user-options"
+                       :aria-activedescendant="activeOptionId"
                        @input="onSearchInput" @keydown.down.prevent="highlightNext"
                        @keydown.up.prevent="highlightPrev" @keydown.enter.prevent="selectHighlighted"
                        @keydown.escape="closeDropdown" @blur="onBlur"
                        class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-300 w-full" />
                 <div v-if="showDropdown && (filteredMembers.length > 0 || isRawId)"
+                     id="host-user-options" role="listbox"
                      class="absolute z-50 mt-1 w-full max-h-60 overflow-y-auto bg-gray-900 border border-gray-600 rounded shadow-lg">
                   <div v-if="isRawId && !filteredMembers.length"
-                       @mousedown.prevent="addRawId"
+                       @mousedown.prevent="addRawId" id="host-user-option-raw" role="option"
+                       :aria-selected="highlightIdx === 0"
                        class="flex items-center gap-2 px-3 py-2 cursor-pointer text-sm hover:bg-gray-800">
                     <div class="w-5 h-5 rounded-full bg-gray-700 flex items-center justify-center text-xs text-gray-400">?</div>
                     <span class="text-gray-200">Add by ID: {{ searchQuery.trim() }}</span>
                     <span class="text-gray-500 text-xs ml-auto">press Enter</span>
                   </div>
                   <div v-for="(m, idx) in filteredMembers" :key="m.id"
-                       @mousedown.prevent="selectMember(m)"
+                       @mousedown.prevent="selectMember(m)" :id="'host-user-option-' + idx" role="option"
+                       :aria-selected="idx === highlightIdx"
                        class="flex items-center gap-2 px-3 py-2 cursor-pointer text-sm"
                        :class="idx === highlightIdx ? 'bg-gray-700' : 'hover:bg-gray-800'">
                     <img v-if="m.avatar_url" :src="m.avatar_url + '?size=24'" class="w-5 h-5 rounded-full" />
@@ -126,11 +132,12 @@ export default {
                 </td>
                 <td v-for="host in availableHosts" :key="uid+'-'+host" class="text-center">
                   <input type="checkbox" :checked="entry.allowed_hosts.includes(host)"
+                         :aria-label="'Allow ' + (getMember(uid)?.display_name || uid) + ' access to ' + host"
                          @change="toggleUserHost(uid, host, $event.target.checked)"
                          class="rounded border-gray-600 bg-gray-800" />
                 </td>
                 <td class="text-center">
-                  <select :value="entry.default_host" @change="setUserDefault(uid, $event.target.value)"
+                  <select :value="entry.default_host" :aria-label="'Default host for ' + (getMember(uid)?.display_name || uid)" @change="setUserDefault(uid, $event.target.value)"
                           class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300">
                     <option value="">— none —</option>
                     <option v-for="host in entry.allowed_hosts" :key="uid+'-def-'+host" :value="host">
@@ -177,6 +184,12 @@ export default {
     }
 
     const isRawId = computed(() => /^\d{15,25}$/.test(searchQuery.value.trim()));
+    const activeOptionId = computed(() => {
+      if (!showDropdown.value) return undefined;
+      if (filteredMembers.value[highlightIdx.value]) return 'host-user-option-' + highlightIdx.value;
+      if (isRawId.value) return 'host-user-option-raw';
+      return undefined;
+    });
 
     const filteredMembers = computed(() => {
       const q = searchQuery.value.toLowerCase().trim();
@@ -362,7 +375,7 @@ export default {
     return {
       loading, error, data, availableHosts, defaultPolicy, users,
       showAddUser, searchQuery, showDropdown, highlightIdx,
-      members, filteredMembers, isRawId, searchInput,
+      members, filteredMembers, isRawId, activeOptionId, searchInput,
       fetchData, saveDefaultPolicy, toggleDefaultHost, getMember,
       toggleUserHost, setUserDefault, openAddUser, deleteUser,
       onSearchInput, highlightNext, highlightPrev, selectHighlighted,

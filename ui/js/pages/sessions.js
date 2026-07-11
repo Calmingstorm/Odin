@@ -191,6 +191,7 @@ export default {
                  :aria-expanded="expandedId === s.channel_id" @click="toggleSession(s.channel_id)"
                  @keydown.enter="toggleSession(s.channel_id)" @keydown.space.prevent="toggleSession(s.channel_id)">
               <input type="checkbox" :checked="selected.has(s.channel_id)"
+                     :aria-label="'Select session ' + (s.channel_name || s.channel_id)"
                      @click.stop @change="toggleSelect(s.channel_id)"
                      class="session-checkbox" />
               <div class="sess-source-icon" :class="s.source === 'web' ? 'sess-source-web' : 'sess-source-discord'">

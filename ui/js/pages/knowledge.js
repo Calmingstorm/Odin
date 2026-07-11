@@ -93,13 +93,15 @@ export default {
       <div v-if="showIngest" class="hm-card mb-4 kb-ingest-form">
         <h2 class="text-sm font-medium mb-3">Ingest Document</h2>
         <div class="mb-3">
-          <label class="text-gray-400 text-xs block mb-1">Source Name</label>
+          <label class="text-gray-400 text-xs block mb-1">Source Name
           <input v-model="ingestSource" type="text" class="hm-input" placeholder="e.g. project-docs, api-reference" />
+          </label>
         </div>
         <div class="mb-3">
-          <label class="text-gray-400 text-xs block mb-1">Content</label>
+          <label class="text-gray-400 text-xs block mb-1">Content
           <textarea v-model="ingestContent" class="hm-input" rows="8"
                     placeholder="Paste document content here..."></textarea>
+          </label>
         </div>
         <div v-if="ingestError" class="mb-3 text-red-400 text-sm">{{ ingestError }}</div>
         <div v-if="ingestSuccess" class="mb-3 text-green-400 text-sm">{{ ingestSuccess }}</div>

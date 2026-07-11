@@ -77,24 +77,27 @@ export default {
       <div class="hm-card mb-4">
         <div class="grid grid-cols-1 md:grid-cols-5 gap-3">
           <div class="md:col-span-2">
-            <label class="text-gray-400 text-xs block mb-1">Message ID</label>
+            <label class="text-gray-400 text-xs block mb-1">Message ID
             <input v-model="messageIdQuery" type="text" class="hm-input"
                    placeholder="Look up by message ID..." @keyup.enter="lookupMessage" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">File</label>
+            <label class="text-gray-400 text-xs block mb-1">File
             <select v-model="selectedFile" class="hm-input" @change="fetchTraces">
               <option value="">All files</option>
               <option v-for="f in files" :key="f" :value="f">{{ f.replace('.jsonl', '') }}</option>
             </select>
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Tool</label>
+            <label class="text-gray-400 text-xs block mb-1">Tool
             <input v-model="filters.tool_name" type="text" class="hm-input"
                    placeholder="e.g. run_command" @keyup.enter="fetchTraces" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Filters</label>
+            <span class="text-gray-400 text-xs block mb-1">Filters</span>
             <div class="flex gap-2">
               <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer">
                 <input type="checkbox" v-model="filters.errors_only" @change="fetchTraces" class="rounded" />
@@ -106,22 +109,25 @@ export default {
         </div>
         <div class="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Channel</label>
+            <label class="text-gray-400 text-xs block mb-1">Channel
             <input v-model="filters.channel_id" type="text" class="hm-input"
                    placeholder="Channel ID" @keyup.enter="fetchTraces" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">User</label>
+            <label class="text-gray-400 text-xs block mb-1">User
             <input v-model="filters.user_id" type="text" class="hm-input"
                    placeholder="User ID" @keyup.enter="fetchTraces" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Limit</label>
+            <label class="text-gray-400 text-xs block mb-1">Limit
             <select v-model="filters.limit" class="hm-input" @change="fetchTraces">
               <option :value="25">25</option>
               <option :value="50">50</option>
               <option :value="100">100</option>
             </select>
+            </label>
           </div>
           <div class="flex items-end">
             <button @click="fetchTraces" class="btn btn-primary text-xs">Search</button>

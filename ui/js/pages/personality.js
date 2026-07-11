@@ -140,9 +140,9 @@ export default {
     <template v-else>
       <!-- Preset selector -->
       <div class="hm-card">
-        <label class="block text-sm font-medium mb-2">Preset</label>
+        <label for="personality-preset" class="block text-sm font-medium mb-2">Preset</label>
         <div class="flex items-center gap-2">
-          <select v-model="preset" class="hm-input max-w-xs">
+          <select id="personality-preset" v-model="preset" class="hm-input max-w-xs">
             <optgroup label="Built-in">
               <option v-for="name in builtinPresets" :key="name" :value="name">{{ name.charAt(0).toUpperCase() + name.slice(1) }}</option>
             </optgroup>
@@ -161,19 +161,22 @@ export default {
       <!-- Custom fields -->
       <div v-if="isCustom" class="hm-card space-y-4">
         <div>
-          <label class="block text-sm font-medium mb-1">Name</label>
+          <label class="block text-sm font-medium mb-1">Name
           <input v-model="customName" class="hm-input w-full max-w-xs" placeholder="e.g. Muninn, Heimdall, Loki..." />
+          </label>
           <p class="text-gray-500 text-xs mt-1">The bot's name as used in prompts and responses.</p>
         </div>
         <div>
-          <label class="block text-sm font-medium mb-1">Identity</label>
+          <label class="block text-sm font-medium mb-1">Identity
           <textarea v-model="customIdentity" class="hm-input w-full" rows="4"
             placeholder="Describe who the bot is — background, role, perspective..."></textarea>
+          </label>
         </div>
         <div>
-          <label class="block text-sm font-medium mb-1">Voice</label>
+          <label class="block text-sm font-medium mb-1">Voice
           <textarea v-model="customVoice" class="hm-input w-full" rows="6"
             placeholder="Define communication style — tone, formatting, constraints. Use one rule per line starting with -"></textarea>
+          </label>
         </div>
       </div>
 
@@ -211,9 +214,9 @@ export default {
 
       <!-- Save as preset form -->
       <div v-if="showSavePreset" class="hm-card">
-        <label class="block text-sm font-medium mb-2">New preset name</label>
+        <label for="personality-new-preset" class="block text-sm font-medium mb-2">New preset name</label>
         <div class="flex items-center gap-2">
-          <input v-model="newPresetName" class="hm-input max-w-xs" placeholder="e.g. incident-commander"
+          <input id="personality-new-preset" v-model="newPresetName" class="hm-input max-w-xs" placeholder="e.g. incident-commander"
             @keyup.enter="saveAsPreset" />
           <button @click="saveAsPreset" :disabled="savingPreset || !newPresetName.trim()" class="btn btn-primary text-sm">
             {{ savingPreset ? 'Saving...' : 'Save preset' }}

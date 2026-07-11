@@ -183,14 +183,15 @@ export default {
         </div>
 
         <div v-if="editMode === 'create'" class="mb-3">
-          <label class="sk-field-label">Name</label>
+          <label class="sk-field-label">Name
           <input v-model="editName" type="text" class="hm-input" placeholder="my_skill"
                  style="max-width:300px" />
+          </label>
           <div class="sk-field-hint">Lowercase, alphanumeric + underscores, starts with letter</div>
         </div>
 
         <div class="mb-3">
-          <label class="sk-field-label">Code</label>
+          <span class="sk-field-label">Code</span>
           <div class="sk-editor-wrap">
             <div class="sk-editor-gutter">{{ editorLineNums }}</div>
             <textarea v-model="editCode" class="sk-editor-textarea" rows="24"

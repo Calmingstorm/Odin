@@ -58,7 +58,7 @@ export default {
                 </span>
               </div>
               <div v-if="editing === entry.key" class="mt-2">
-                <textarea v-model="editContent" class="hm-input font-mono text-xs w-full" rows="3"></textarea>
+                <textarea v-model="editContent" class="hm-input font-mono text-xs w-full" rows="3" :aria-label="'Edit learned entry ' + entry.key"></textarea>
                 <div class="flex gap-2 mt-2">
                   <button @click="saveEdit(entry.key)" class="btn btn-primary text-xs">Save</button>
                   <button @click="editing = null" class="btn btn-ghost text-xs">Cancel</button>

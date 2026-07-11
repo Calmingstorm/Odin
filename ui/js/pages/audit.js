@@ -21,23 +21,27 @@ export default {
       <div class="hm-card mb-4">
         <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Tool</label>
+            <label class="text-gray-400 text-xs block mb-1">Tool
             <input v-model="filters.tool" type="text" class="hm-input"
                    placeholder="e.g. run_command" @keyup.enter="fetchAudit" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">User</label>
+            <label class="text-gray-400 text-xs block mb-1">User
             <input v-model="filters.user" type="text" class="hm-input"
                    placeholder="User ID or name" @keyup.enter="fetchAudit" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Keyword</label>
+            <label class="text-gray-400 text-xs block mb-1">Keyword
             <input v-model="filters.keyword" type="text" class="hm-input"
                    placeholder="Search in output..." @keyup.enter="fetchAudit" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Date</label>
+            <label class="text-gray-400 text-xs block mb-1">Date
             <input v-model="filters.date" type="date" class="hm-input" @change="fetchAudit" />
+            </label>
           </div>
         </div>
         <div class="flex gap-2 mt-3">
@@ -45,13 +49,14 @@ export default {
           <button @click="clearFilters" class="btn btn-ghost text-xs">Clear Filters</button>
           <div class="flex-1"></div>
           <div class="flex items-center gap-2">
-            <label class="text-gray-400 text-xs">Limit:</label>
+            <label class="text-gray-400 text-xs">Limit:
             <select v-model="filters.limit" class="hm-input" style="width:auto;min-width:70px;" @change="fetchAudit">
               <option :value="25">25</option>
               <option :value="50">50</option>
               <option :value="100">100</option>
               <option :value="200">200</option>
             </select>
+            </label>
           </div>
         </div>
       </div>

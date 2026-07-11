@@ -32,31 +32,34 @@ export default {
         <h2 class="text-sm font-medium mb-3">Create Schedule</h2>
 
         <div class="mb-3">
-          <label class="text-gray-400 text-xs block mb-1">Description</label>
+          <label class="text-gray-400 text-xs block mb-1">Description
           <input v-model="form.description" type="text" class="hm-input"
                  placeholder="e.g. Daily disk check" />
+          </label>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Action Type</label>
+            <label class="text-gray-400 text-xs block mb-1">Action Type
             <select v-model="form.action" class="hm-input">
               <option value="reminder">Reminder</option>
               <option value="check">Check (tool call)</option>
               <option value="workflow">Workflow (multi-step)</option>
               <option value="digest">Digest</option>
             </select>
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Channel ID</label>
+            <label class="text-gray-400 text-xs block mb-1">Channel ID
             <input v-model="form.channel_id" type="text" class="hm-input"
                    placeholder="Discord channel ID" />
+            </label>
           </div>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Cron Expression</label>
+            <span class="text-gray-400 text-xs block mb-1">Cron Expression</span>
             <div class="flex gap-2">
               <input v-model="form.cron" type="text" class="hm-input"
                      placeholder="e.g. 0 */6 * * *" @input="onCronInput" />
@@ -85,28 +88,32 @@ export default {
             </div>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">One-Time (ISO datetime)</label>
+            <label class="text-gray-400 text-xs block mb-1">One-Time (ISO datetime)
             <input v-model="form.run_at" type="text" class="hm-input"
                    placeholder="e.g. 2026-04-01T09:00:00" />
+            </label>
           </div>
         </div>
 
         <div v-if="form.action === 'reminder'" class="mb-3">
-          <label class="text-gray-400 text-xs block mb-1">Message</label>
+          <label class="text-gray-400 text-xs block mb-1">Message
           <input v-model="form.message" type="text" class="hm-input"
                  placeholder="Reminder message..." />
+          </label>
         </div>
 
         <div v-if="form.action === 'check'" class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Tool Name</label>
+            <label class="text-gray-400 text-xs block mb-1">Tool Name
             <input v-model="form.tool_name" type="text" class="hm-input"
                    placeholder="e.g. run_command" />
+            </label>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">Tool Input (JSON)</label>
+            <label class="text-gray-400 text-xs block mb-1">Tool Input (JSON)
             <input v-model="form.tool_input_str" type="text" class="hm-input"
                    placeholder='e.g. {"host":"server1"}' />
+            </label>
           </div>
         </div>
 
