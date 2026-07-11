@@ -141,6 +141,47 @@ Leave `cdp_url` empty to launch a local headless Chromium. Set to `ws://host:por
 
 Run `playwright install chromium` after installation.
 
+## Image Generation
+
+```yaml
+comfyui:
+  enabled: true
+  url: http://localhost:8188
+
+image:
+  backend: auto            # auto | openai | comfyui
+  openai:
+    enabled: true          # kill switch for the native wire implementation
+    outer_model: gpt-5.5   # Responses model hosting the image tool (pinned)
+    image_model: gpt-image-2
+    allowed_sizes: ["1024x1024"]
+    default_size: "1024x1024"
+```
+
+The `generate_image` tool can target two backends:
+
+- **Native OpenAI** — generates via the `image_generation` tool on the Codex
+  ChatGPT OAuth backend, riding the **same account Odin uses for chat** (no
+  separate auth; subscription-quota-backed, so it draws on that account's usage
+  limit). Available only while the active provider is `codex`.
+- **ComfyUI** — the local Stable-Diffusion backend (`comfyui.enabled`), which
+  also supports `negative`, `width`/`height`, and checkpoint `model`.
+
+`backend` selects between them:
+
+- `auto` (default) follows the active chat provider: on `codex`, native OpenAI
+  is used with ComfyUI as a pre-generation fallback; on any other provider,
+  ComfyUI only. A `negative`/`width`/`height`/`model` argument routes the
+  request to ComfyUI. If neither backend is available (e.g. Kimi with no
+  ComfyUI) the tool is hidden from the registry.
+- `openai` forces native OpenAI (ComfyUI-only arguments are rejected).
+- `comfyui` forces ComfyUI.
+
+`outer_model` is pinned here rather than following your chat model, so changing
+the chat model (Sol/Terra/…) never alters image generation. Only sizes listed in
+`allowed_sizes` are accepted — widen it only after verifying a size works against
+this private endpoint.
+
 ## Web Management UI
 
 ```yaml

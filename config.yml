@@ -251,6 +251,22 @@ comfyui:
   enabled: true
   url: http://localhost:8188
 
+# Image generation backend selection.
+#   auto    (default): follow the active chat provider — on 'codex' use native
+#            OpenAI (ComfyUI is the pre-generation fallback); on any other
+#            provider use ComfyUI only. If neither is available the tool hides.
+#   openai : native OpenAI only (rides the current Codex auth; Codex-provider only).
+#   comfyui: ComfyUI only.
+image:
+  backend: auto
+  openai:
+    enabled: true          # kill switch for the native wire implementation
+    outer_model: gpt-5.5   # Responses model hosting the image tool (pinned, not the chat model)
+    image_model: gpt-image-2
+    # Only sizes probed against this private endpoint — widen after verifying each.
+    allowed_sizes: ["1024x1024"]
+    default_size: "1024x1024"
+
 # Web UI and API — all web configuration lives here (not in .env)
 web:
   enabled: true

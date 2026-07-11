@@ -22,10 +22,18 @@ log = get_logger("discord")
 
 
 class MediaTools:
-    def __init__(self, *, get_config: Callable, browser_manager, tool_executor) -> None:
+    def __init__(
+        self,
+        *,
+        get_config: Callable,
+        browser_manager,
+        tool_executor,
+        image_selector=None,
+    ) -> None:
         self.get_config = get_config
         self.browser_manager = browser_manager
         self.tool_executor = tool_executor
+        self.image_selector = image_selector
 
     @staticmethod
     def _detect_image_type(data: bytes) -> str | None:
@@ -255,43 +263,40 @@ class MediaTools:
         }
 
     async def _handle_generate_image(self, message, inp: dict) -> str:
-        """Generate an image via ComfyUI and post as Discord attachment."""
-        config = self.get_config()
-        if not config.comfyui.enabled:
-            return "Image generation is disabled. Enable ComfyUI in config to use this tool."
+        """Generate an image via the selected backend and post as a Discord
+        attachment. The backend returns bytes; this tool layer owns Discord."""
+        from ...tools.image import ImageGenError
+
+        if self.image_selector is None:
+            return "Image generation is not available."
 
         prompt_text = inp.get("prompt", "")
         if not prompt_text:
             return "A 'prompt' describing the image is required."
 
-        negative = inp.get("negative", "")
-        width = inp.get("width", 1024)
-        height = inp.get("height", 1024)
-        model = inp.get("model", "")
-
-        # Clamp dimensions to reasonable range
-        width = max(64, min(2048, width))
-        height = max(64, min(2048, height))
-
-        from ...tools.comfyui import ComfyUIClient
-
-        client = ComfyUIClient(
-            config.comfyui.url, default_checkpoint=config.comfyui.default_checkpoint
-        )
-        image_bytes = await client.generate(
-            prompt=prompt_text,
-            negative=negative,
-            width=width,
-            height=height,
-            model=model,
-        )
-
-        if not image_bytes:
-            return "Image generation failed. ComfyUI may be unavailable or the request timed out."
+        try:
+            result = await self.image_selector.generate(
+                prompt=prompt_text,
+                size=inp.get("size"),
+                negative=inp.get("negative", ""),
+                model=inp.get("model", ""),
+                width=inp.get("width"),
+                height=inp.get("height"),
+            )
+        except ImageGenError as e:
+            # These messages are constructed to carry no payload/account data.
+            return f"Image generation failed: {e}"
+        except Exception:
+            # Never surface a raw provider payload; log without the body.
+            log.warning("image generation raised unexpectedly", exc_info=True)
+            return "Image generation failed unexpectedly."
 
         try:
-            file = discord.File(io.BytesIO(image_bytes), filename="generated.png")
+            file = discord.File(io.BytesIO(result.data), filename="generated.png")
             await message.channel.send(file=file)
-            return f"Image generated and posted ({len(image_bytes) / 1024:.1f} KB)."
+            return (
+                f"Image generated via {result.backend} ({result.image_model}, "
+                f"{result.width}x{result.height}, {len(result.data) / 1024:.1f} KB) and posted."
+            )
         except discord.HTTPException as e:
             return f"Failed to upload generated image to Discord: {e}"

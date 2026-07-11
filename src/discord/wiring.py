@@ -598,6 +598,9 @@ def build_components(bot, services: BotServices) -> BotComponents:
         get_config=lambda: bot.config,
         skill_manager=services.skill_manager,
     )
+    # A live provider switch must rebuild the tool registry so provider-gated
+    # tools (native image gen is Codex-only) reappear/disappear immediately.
+    llm_gateway.on_provider_switch = tool_catalog.invalidate
 
     # Domain handler bundles (P5b) — built BEFORE the dispatcher so they can
     # be its owners (RFC-002 P5).
@@ -614,10 +617,32 @@ def build_components(bot, services: BotServices) -> BotComponents:
         permissions=services.permissions,
         get_channel=bot.get_channel,
     )
+    # Image-generation backends behind one selector. Native OpenAI rides the
+    # SAME CodexAuthPool the codex client uses (no separate auth). It resolves
+    # that pool via the gateway at CALL time — a live Codex login/reload replaces
+    # the client, so a snapshot would run on stale/absent credentials. Always
+    # built; is_configured() reports false until a pool exists.
+    from ..tools.image import (
+        ComfyUIImageBackend,
+        ImageBackendSelector,
+        OpenAIImageBackend,
+    )
+
+    openai_image_backend = OpenAIImageBackend(
+        get_auth=lambda: getattr(llm_gateway.codex_client, "auth", None),
+        get_config=lambda: bot.config,
+    )
+    image_selector = ImageBackendSelector(
+        get_config=lambda: bot.config,
+        openai_backend=openai_image_backend,
+        comfyui_backend=ComfyUIImageBackend(get_config=lambda: bot.config),
+    )
+
     media_tools = MediaTools(
         get_config=lambda: bot.config,
         browser_manager=services.browser_manager,
         tool_executor=services.tool_executor,
+        image_selector=image_selector,
     )
 
     # One Discord-native dispatch table for both pipelines (RFC-001 P5a);
@@ -913,6 +938,18 @@ async def shutdown_services(bot) -> None:
             await kimi.close()
         except Exception:
             log.exception("Error closing Kimi client")
+
+    # Close the native image backend's own HTTP session (separate transport
+    # from the codex chat client, so it isn't covered by codex.close()).
+    _components = getattr(bot, "components", None)
+    _media = getattr(_components, "media_tools", None)
+    _selector = getattr(_media, "image_selector", None)
+    _image_backend = getattr(_selector, "openai", None)
+    if _image_backend is not None:
+        try:
+            await _image_backend.close()
+        except Exception:
+            log.exception("Error closing image backend")
 
     # Shut down Playwright browser
     browser = getattr(bot, "browser_manager", None)

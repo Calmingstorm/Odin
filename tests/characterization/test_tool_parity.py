@@ -121,7 +121,7 @@ EXPECTED_TOOL_HASHES = {
     "terraform_ops": "054cd8877208bc7d",
     "http_probe": "dfc3b04b36c5e7f9",
     "issue_tracker": "4f0a793414052b40",
-    "generate_image": "3df436d69f3b9169",
+    "generate_image": "ee28d2ae514c51e0",
     "validate_action": "199baeb4723517d7",
     "email_send": "1282279440e34e6f",
     "email_search": "3a7584b725d1c134",
@@ -175,11 +175,12 @@ class TestBackendGatedVisibility:
 
     Gated groups: claude_code (needs tools.claude_code_host), the four
     email tools (need email.enabled), issue_tracker (needs
-    issue_tracker.enabled).
+    issue_tracker.enabled), generate_image (needs a native-OpenAI or ComfyUI
+    backend — hidden when neither is available).
     """
 
     GATED = {"claude_code", "email_send", "email_search", "email_read",
-             "email_list_recent", "issue_tracker"}
+             "email_list_recent", "issue_tracker", "generate_image"}
 
     def _catalog_names(self, **config_kwargs) -> set[str]:
         from src.config.schema import Config

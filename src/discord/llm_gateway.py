@@ -60,6 +60,10 @@ class LLMGateway:
         self.provider_lock = asyncio.Lock()
         self.inflight_requests = 0
         self.switching = False
+        # Called after a provider switch settles — wiring points it at the tool
+        # catalog's invalidate() so provider-gated tools (e.g. native image gen,
+        # available only on Codex) reappear/disappear on the next request.
+        self.on_provider_switch: Callable[[], None] | None = None
 
     # ---------- provider resolution ----------------------------------------
 
@@ -266,6 +270,8 @@ class LLMGateway:
 
                 self.get_config().llm_provider.active_provider = provider
                 self.wire_callbacks()
+                if self.on_provider_switch is not None:
+                    self.on_provider_switch()
             finally:
                 self.switching = False
 
