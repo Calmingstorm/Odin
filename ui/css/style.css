@@ -3056,10 +3056,12 @@ a:focus-visible {
 /* ================================================================
    RESPONSIVE — small phones
    ================================================================ */
-@media (max-width: 480px) {
+@media (max-width: 640px) {
   /* Let dashboard identity claim a full row before non-shrinking actions. */
   .dash-hero-left { flex-basis: 100%; }
+}
 
+@media (max-width: 480px) {
   /* Chat: wider bubbles, smaller avatars */
   .chat-bubble-wrap { max-width: 90%; }
   .chat-avatar { width: 24px; height: 24px; }
