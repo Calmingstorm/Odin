@@ -78,7 +78,8 @@ export default {
 
           <!-- Channel list -->
           <div v-if="expanded[guild.id]">
-            <table class="hm-table">
+            <div class="table-responsive">
+              <table class="hm-table">
               <thead>
                 <tr>
                   <th>Channel</th>
@@ -128,6 +129,7 @@ export default {
                 </tr>
               </tbody>
             </table>
+            </div>
           </div>
         </div>
       </div>

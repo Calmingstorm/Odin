@@ -2217,7 +2217,8 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
 
         <!-- By User -->
         <div v-if="activeTab === 'user'" class="hm-card">
-          <table class="w-full text-sm">
+          <div class="table-responsive">
+            <table class="w-full text-sm">
             <thead><tr class="text-slate-400 text-left">
               <th class="pb-2">User</th><th class="pb-2 text-right">Requests</th>
               <th class="pb-2 text-right">Input</th><th class="pb-2 text-right">Output</th>
@@ -2236,11 +2237,13 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
 
         <!-- By Channel -->
         <div v-if="activeTab === 'channel'" class="hm-card">
-          <table class="w-full text-sm">
+          <div class="table-responsive">
+            <table class="w-full text-sm">
             <thead><tr class="text-slate-400 text-left">
               <th class="pb-2">Channel</th><th class="pb-2 text-right">Requests</th>
               <th class="pb-2 text-right">Input</th><th class="pb-2 text-right">Output</th>
@@ -2259,11 +2262,13 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
 
         <!-- By Tool -->
         <div v-if="activeTab === 'tool'" class="hm-card">
-          <table class="w-full text-sm">
+          <div class="table-responsive">
+            <table class="w-full text-sm">
             <thead><tr class="text-slate-400 text-left">
               <th class="pb-2">Tool</th><th class="pb-2 text-right">Requests</th>
               <th class="pb-2 text-right">Input</th><th class="pb-2 text-right">Output</th>
@@ -2282,11 +2287,13 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
 
         <!-- Recent calls -->
         <div v-if="activeTab === 'recent'" class="hm-card">
-          <table class="w-full text-sm">
+          <div class="table-responsive">
+            <table class="w-full text-sm">
             <thead><tr class="text-slate-400 text-left">
               <th class="pb-2">Time</th><th class="pb-2">User</th>
               <th class="pb-2 text-right">In</th><th class="pb-2 text-right">Out</th>
@@ -2306,6 +2313,7 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
 
         <div class="mt-4 text-xs text-slate-500">
@@ -3443,7 +3451,8 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
 
           <div v-if="data.sessions.per_session.length" class="hm-card">
             <h3 class="text-sm font-semibold text-slate-300 mb-2">Per-Session Breakdown</h3>
-            <table class="w-full text-sm">
+            <div class="table-responsive">
+              <table class="w-full text-sm">
               <thead><tr class="text-slate-400 text-left">
                 <th class="pb-2">Channel</th>
                 <th class="pb-2 text-right">Tokens</th>
@@ -3463,6 +3472,7 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
                 </tr>
               </tbody>
             </table>
+            </div>
           </div>
           <div v-else class="hm-card text-center text-slate-500 py-6">
             No active sessions
@@ -3494,7 +3504,8 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
 
           <div v-if="data.knowledge.sources.length" class="hm-card">
             <h3 class="text-sm font-semibold text-slate-300 mb-2">Ingested Sources</h3>
-            <table class="w-full text-sm">
+            <div class="table-responsive">
+              <table class="w-full text-sm">
               <thead><tr class="text-slate-400 text-left">
                 <th class="pb-2">Source</th>
                 <th class="pb-2 text-right">Chunks</th>
@@ -3508,6 +3519,7 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
                 </tr>
               </tbody>
             </table>
+            </div>
           </div>
           <div v-else class="hm-card text-center text-slate-500 py-6">
             {{ data.knowledge.available ? 'No documents ingested' : 'Knowledge store unavailable' }}
@@ -4299,7 +4311,8 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
 
           <!-- Channel list -->
           <div v-if="expanded[guild.id]">
-            <table class="hm-table">
+            <div class="table-responsive">
+              <table class="hm-table">
               <thead>
                 <tr>
                   <th>Channel</th>
@@ -4349,6 +4362,7 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
                 </tr>
               </tbody>
             </table>
+            </div>
           </div>
         </div>
       </div>
@@ -4446,7 +4460,8 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
           </div>
 
           <!-- Users table -->
-          <table v-if="Object.keys(users).length > 0" class="hm-table">
+          <div v-if="Object.keys(users).length > 0" class="table-responsive">
+            <table class="hm-table">
             <thead>
               <tr>
                 <th>User</th>
@@ -4491,6 +4506,7 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
               </tr>
             </tbody>
           </table>
+          </div>
           <p v-else class="text-xs text-gray-500">No user overrides configured. All users follow the default policy.</p>
         </div>
       </div>
@@ -4885,7 +4901,8 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
 
             <!-- Accounts table -->
             <div v-if="codexData.configured && codexData.accounts.length">
-              <table class="hm-table">
+              <div class="table-responsive">
+                <table class="hm-table">
                 <thead>
                   <tr>
                     <th>#</th>
@@ -4943,6 +4960,7 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
                   </tr>
                 </tbody>
               </table>
+              </div>
             </div>
 
             <!-- Device login -->

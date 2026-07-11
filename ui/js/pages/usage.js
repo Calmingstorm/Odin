@@ -62,7 +62,8 @@ export default {
 
         <!-- By User -->
         <div v-if="activeTab === 'user'" class="hm-card">
-          <table class="w-full text-sm">
+          <div class="table-responsive">
+            <table class="w-full text-sm">
             <thead><tr class="text-slate-400 text-left">
               <th class="pb-2">User</th><th class="pb-2 text-right">Requests</th>
               <th class="pb-2 text-right">Input</th><th class="pb-2 text-right">Output</th>
@@ -81,11 +82,13 @@ export default {
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
 
         <!-- By Channel -->
         <div v-if="activeTab === 'channel'" class="hm-card">
-          <table class="w-full text-sm">
+          <div class="table-responsive">
+            <table class="w-full text-sm">
             <thead><tr class="text-slate-400 text-left">
               <th class="pb-2">Channel</th><th class="pb-2 text-right">Requests</th>
               <th class="pb-2 text-right">Input</th><th class="pb-2 text-right">Output</th>
@@ -104,11 +107,13 @@ export default {
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
 
         <!-- By Tool -->
         <div v-if="activeTab === 'tool'" class="hm-card">
-          <table class="w-full text-sm">
+          <div class="table-responsive">
+            <table class="w-full text-sm">
             <thead><tr class="text-slate-400 text-left">
               <th class="pb-2">Tool</th><th class="pb-2 text-right">Requests</th>
               <th class="pb-2 text-right">Input</th><th class="pb-2 text-right">Output</th>
@@ -127,11 +132,13 @@ export default {
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
 
         <!-- Recent calls -->
         <div v-if="activeTab === 'recent'" class="hm-card">
-          <table class="w-full text-sm">
+          <div class="table-responsive">
+            <table class="w-full text-sm">
             <thead><tr class="text-slate-400 text-left">
               <th class="pb-2">Time</th><th class="pb-2">User</th>
               <th class="pb-2 text-right">In</th><th class="pb-2 text-right">Out</th>
@@ -151,6 +158,7 @@ export default {
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
 
         <div class="mt-4 text-xs text-slate-500">

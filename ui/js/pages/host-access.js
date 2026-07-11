@@ -98,7 +98,8 @@ export default {
           </div>
 
           <!-- Users table -->
-          <table v-if="Object.keys(users).length > 0" class="hm-table">
+          <div v-if="Object.keys(users).length > 0" class="table-responsive">
+            <table class="hm-table">
             <thead>
               <tr>
                 <th>User</th>
@@ -143,6 +144,7 @@ export default {
               </tr>
             </tbody>
           </table>
+          </div>
           <p v-else class="text-xs text-gray-500">No user overrides configured. All users follow the default policy.</p>
         </div>
       </div>

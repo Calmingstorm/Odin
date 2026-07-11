@@ -3084,7 +3084,7 @@ a:focus-visible {
 /* FTS search highlight */
 .fts-highlight {
   background: rgba(217, 119, 6, 0.3);
-  color: var(--hm-amber);
+  color: var(--hm-gold);
   border-radius: 2px;
   padding: 0 2px;
 }

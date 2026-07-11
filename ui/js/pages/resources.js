@@ -95,7 +95,8 @@ export default {
 
           <div v-if="data.sessions.per_session.length" class="hm-card">
             <h3 class="text-sm font-semibold text-slate-300 mb-2">Per-Session Breakdown</h3>
-            <table class="w-full text-sm">
+            <div class="table-responsive">
+              <table class="w-full text-sm">
               <thead><tr class="text-slate-400 text-left">
                 <th class="pb-2">Channel</th>
                 <th class="pb-2 text-right">Tokens</th>
@@ -115,6 +116,7 @@ export default {
                 </tr>
               </tbody>
             </table>
+            </div>
           </div>
           <div v-else class="hm-card text-center text-slate-500 py-6">
             No active sessions
@@ -146,7 +148,8 @@ export default {
 
           <div v-if="data.knowledge.sources.length" class="hm-card">
             <h3 class="text-sm font-semibold text-slate-300 mb-2">Ingested Sources</h3>
-            <table class="w-full text-sm">
+            <div class="table-responsive">
+              <table class="w-full text-sm">
               <thead><tr class="text-slate-400 text-left">
                 <th class="pb-2">Source</th>
                 <th class="pb-2 text-right">Chunks</th>
@@ -160,6 +163,7 @@ export default {
                 </tr>
               </tbody>
             </table>
+            </div>
           </div>
           <div v-else class="hm-card text-center text-slate-500 py-6">
             {{ data.knowledge.available ? 'No documents ingested' : 'Knowledge store unavailable' }}

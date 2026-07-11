@@ -178,7 +178,8 @@ export default {
 
             <!-- Accounts table -->
             <div v-if="codexData.configured && codexData.accounts.length">
-              <table class="hm-table">
+              <div class="table-responsive">
+                <table class="hm-table">
                 <thead>
                   <tr>
                     <th>#</th>
@@ -236,6 +237,7 @@ export default {
                   </tr>
                 </tbody>
               </table>
+              </div>
             </div>
 
             <!-- Device login -->
