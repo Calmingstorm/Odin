@@ -226,7 +226,7 @@ export default {
       </div>
 
       <!-- Delete confirmation -->
-      <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null" @keyup.escape="deleteTarget = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="skill-delete-title">
+      <div v-if="deleteTarget" class="modal-overlay" v-modal-focus @click.self="deleteTarget = null" @keyup.escape="deleteTarget = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="skill-delete-title">
         <div class="modal-content">
           <h3 id="skill-delete-title" class="text-lg font-semibold mb-2">Delete Skill</h3>
           <p class="text-gray-400 text-sm mb-4">

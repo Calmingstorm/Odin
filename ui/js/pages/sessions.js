@@ -316,7 +316,7 @@ export default {
       </div>
 
       <!-- Confirm clear modal (single) -->
-      <div v-if="clearTarget" class="modal-overlay" @click.self="clearTarget = null" @keyup.escape="clearTarget = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="sess-clear-title">
+      <div v-if="clearTarget" class="modal-overlay" v-modal-focus @click.self="clearTarget = null" @keyup.escape="clearTarget = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="sess-clear-title">
         <div class="modal-content">
           <h3 id="sess-clear-title" class="text-lg font-semibold mb-2">Clear Session</h3>
           <p class="text-gray-400 text-sm mb-4">
@@ -332,7 +332,7 @@ export default {
       </div>
 
       <!-- Confirm bulk clear modal -->
-      <div v-if="bulkClearing" class="modal-overlay" @click.self="bulkClearing = false" @keyup.escape="bulkClearing = false" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="sess-bulk-clear-title">
+      <div v-if="bulkClearing" class="modal-overlay" v-modal-focus @click.self="bulkClearing = false" @keyup.escape="bulkClearing = false" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="sess-bulk-clear-title">
         <div class="modal-content">
           <h3 id="sess-bulk-clear-title" class="text-lg font-semibold mb-2">Clear Selected Sessions</h3>
           <p class="text-gray-400 text-sm mb-4">

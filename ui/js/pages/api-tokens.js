@@ -170,7 +170,7 @@ export default {
         </div>
 
         <!-- Edit modal -->
-        <div v-if="editing" class="modal-overlay" @click.self="editing = null" @keyup.escape="editing = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="token-edit-title">
+        <div v-if="editing" class="modal-overlay" v-modal-focus @click.self="editing = null" @keyup.escape="editing = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="token-edit-title">
           <div class="modal-content" style="max-width:640px">
             <h3 id="token-edit-title" class="text-sm font-semibold text-gray-300 mb-4">Edit Token: {{ editing.user_id }}</h3>
             <div class="space-y-3">

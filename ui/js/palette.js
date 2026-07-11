@@ -56,16 +56,17 @@ export const CommandPalette = {
   template: `
     <transition name="modal">
       <div v-if="state.open" class="modal-overlay palette-overlay" @click.self="closePalette()" role="dialog" aria-modal="true" aria-label="Command palette">
-        <div class="palette">
+        <div class="palette" v-modal-focus tabindex="-1">
           <div class="palette-search"><odin-icon name="search" :size="19" />
             <input ref="inputEl" v-model="state.query" type="text" class="palette-input"
               placeholder="Search pages and sections" aria-label="Search pages" role="combobox"
-              aria-expanded="true" aria-controls="palette-results" @keydown="onKeydown" />
+              :aria-activedescendant="results[state.selected] ? 'palette-option-' + state.selected : undefined"
+              aria-autocomplete="list" aria-expanded="true" aria-controls="palette-results" @keydown="onKeydown" />
           </div>
           <div id="palette-results" class="palette-results" role="listbox">
             <div v-if="!results.length" class="palette-empty">No destinations match your search.</div>
             <button v-for="(r, i) in results" :key="r.group + '-' + r.label"
-              class="palette-item" :class="{ selected: i === state.selected }" role="option"
+              :id="'palette-option-' + i" class="palette-item" :class="{ selected: i === state.selected }" role="option"
               :aria-selected="i === state.selected" @click="go(r)" @mousemove="state.selected = i">
               <span class="palette-icon" aria-hidden="true"><odin-icon :name="r.icon" :size="17" /></span>
               <span class="palette-copy"><span class="palette-label">{{ r.label }}</span><span class="palette-group">{{ r.group }}</span></span>

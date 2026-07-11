@@ -376,7 +376,7 @@ export default {
       </div>
 
       <!-- Diff modal -->
-      <div v-if="showDiffModal" class="modal-overlay" @click.self="showDiffModal = false" @keyup.escape="showDiffModal = false" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="cfg-diff-title">
+      <div v-if="showDiffModal" class="modal-overlay" v-modal-focus @click.self="showDiffModal = false" @keyup.escape="showDiffModal = false" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="cfg-diff-title">
         <div class="modal-content" style="max-width:700px">
           <div class="flex items-center justify-between mb-4">
             <h2 id="cfg-diff-title" class="text-lg font-semibold">Review Changes</h2>

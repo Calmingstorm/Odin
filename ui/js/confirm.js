@@ -53,7 +53,6 @@ export const ConfirmHost = {
     function onKeydown(e) {
       if (!state.open) return;
       if (e.key === 'Escape') { e.stopPropagation(); settle(false); }
-      if (e.key === 'Enter') { e.stopPropagation(); settle(true); }
     }
     onMounted(() => document.addEventListener('keydown', onKeydown, true));
     onUnmounted(() => document.removeEventListener('keydown', onKeydown, true));
@@ -61,8 +60,8 @@ export const ConfirmHost = {
   },
   template: `
     <transition name="modal">
-      <div v-if="state.open" class="modal-overlay" @click.self="settle(false)" role="dialog" aria-modal="true" :aria-label="state.title">
-        <div class="modal-content confirm-dialog">
+      <div v-if="state.open" class="modal-overlay" @click.self="settle(false)" @keydown.escape.prevent.stop="settle(false)" role="dialog" aria-modal="true" :aria-label="state.title">
+        <div class="modal-content confirm-dialog" v-modal-focus tabindex="-1">
           <div class="confirm-heading">
             <span class="confirm-icon" :class="{ danger: state.danger }" aria-hidden="true"><odin-icon :name="state.danger ? 'warning' : 'info'" :size="20" /></span>
             <div><h3>{{ state.title }}</h3><p style="white-space: pre-wrap;">{{ state.message }}</p></div>
