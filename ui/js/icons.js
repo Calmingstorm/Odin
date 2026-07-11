@@ -67,6 +67,7 @@ const paths = {
   minus: 'M5 12h14',
   more: 'M6 12h.01M12 12h.01M18 12h.01',
   pause: 'M9 5v14m6-14v14',
+  sort: 'M8 5v14m0 0-3-3m3 3 3-3M16 19V5m0 0-3 3m3-3 3 3',
 };
 
 export const iconNames = Object.freeze(Object.keys(paths));

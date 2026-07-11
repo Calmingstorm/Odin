@@ -206,7 +206,7 @@ export default {
                   <div class="flex items-center gap-3 text-xs text-gray-500">
                     <span v-if="it.duration_ms">{{ formatDuration(it.duration_ms) }}</span>
                     <span v-if="it.input_tokens || it.output_tokens">{{ it.input_tokens + it.output_tokens }} tok</span>
-                    <span class="text-gray-600">{{ isIterationExpanded('single', idx) ? '\u25B2' : '\u25BC' }}</span>
+                    <span class="text-gray-600" aria-hidden="true"><odin-icon name="chevronRight" :size="14" :class="{ 'rotate-90': isIterationExpanded('single', idx) }" /></span>
                   </div>
                 </div>
 
@@ -391,7 +391,7 @@ export default {
                       <div class="flex items-center gap-3 text-xs text-gray-500">
                         <span v-if="it.duration_ms">{{ formatDuration(it.duration_ms) }}</span>
                         <span v-if="it.input_tokens || it.output_tokens">{{ it.input_tokens + it.output_tokens }} tok</span>
-                        <span class="text-gray-600">{{ isIterationExpanded('list', idx) ? '\u25B2' : '\u25BC' }}</span>
+                        <span class="text-gray-600" aria-hidden="true"><odin-icon name="chevronRight" :size="14" :class="{ 'rotate-90': isIterationExpanded('list', idx) }" /></span>
                       </div>
                     </div>
 

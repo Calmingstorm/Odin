@@ -134,13 +134,13 @@ export default {
                 Recent Activity
                 <span v-if="newEventCount > 0" class="badge badge-success" style="font-size:0.625rem;margin-left:4px;">+{{ newEventCount }}</span>
               </span>
-              <button @click="fetchActivity" class="btn btn-ghost text-xs" :disabled="activityLoading" style="padding:2px 8px;">
-                {{ activityLoading ? '...' : '\u21bb' }}
+              <button @click="fetchActivity" class="icon-btn" :disabled="activityLoading" aria-label="Refresh recent activity" title="Refresh recent activity">
+                <odin-icon name="refresh" :size="15" :class="{ 'animate-spin': activityLoading }" />
               </button>
             </div>
             <div v-if="activityLoading && activity.length === 0" class="dash-empty"><span>Loading...</span></div>
             <div v-else-if="activity.length === 0" class="dash-empty">
-              <span class="dash-empty-icon">\u2042</span>
+              <span class="dash-empty-icon"><odin-icon name="activity" :size="21" /></span>
               <span>No recent activity</span>
             </div>
             <div v-else class="dash-activity-list">
@@ -285,7 +285,7 @@ export default {
         },
         ...(knowledgeChunks.value !== null ? [{
           label: 'Knowledge', value: knowledgeChunks.value,
-          icon: '\u2261', iconColor: 'text-teal-400',
+          icon: 'book', iconColor: 'text-teal-400',
           sub: 'chunks', subColor: 'text-gray-500',
         }] : []),
       ];

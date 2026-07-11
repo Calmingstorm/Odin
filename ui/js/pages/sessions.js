@@ -67,9 +67,9 @@ export default {
               {{ opt.label }}
             </option>
           </select>
-          <button @click="sortAsc = !sortAsc" class="btn btn-ghost text-xs"
-                  :title="sortAsc ? 'Ascending' : 'Descending'">
-            {{ sortAsc ? '\u2191' : '\u2193' }}
+          <button @click="sortAsc = !sortAsc" class="icon-btn"
+                  :title="sortAsc ? 'Ascending' : 'Descending'" :aria-label="sortAsc ? 'Sort ascending' : 'Sort descending'">
+            <odin-icon name="sort" :size="15" :class="{ 'rotate-180': sortAsc }" />
           </button>
         </div>
         <!-- Custom preset save -->
@@ -206,8 +206,8 @@ export default {
                 </div>
               </div>
               <div class="flex items-center gap-1" @click.stop>
-                <span class="sess-expand-icon" :class="{ 'sess-expanded': expandedId === s.channel_id }">
-                  \u25B6
+                <span class="sess-expand-icon" :class="{ 'sess-expanded': expandedId === s.channel_id }" aria-hidden="true">
+                  <odin-icon name="chevronRight" :size="14" />
                 </span>
                 <button @click="exportSession(s.channel_id, 'json')" class="btn btn-ghost text-xs" title="Export JSON">
                   JSON
@@ -271,7 +271,7 @@ export default {
                       <span class="text-xs text-gray-300">{{ threadSummary(thread) }}</span>
                       <span class="text-xs bg-gray-700 px-1.5 py-0.5 rounded text-gray-300">{{ thread.length }} msg</span>
                       <span class="text-xs text-gray-500 ml-auto" v-if="thread[0]">{{ formatTimestamp(thread[0].timestamp) }}</span>
-                      <span class="text-xs text-gray-500">{{ collapsedThreads.has(ti) ? '\u25B6' : '\u25BC' }}</span>
+                      <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon name="chevronRight" :size="13" :class="{ 'rotate-90': !collapsedThreads.has(ti) }" /></span>
                     </div>
                     <div v-if="!collapsedThreads.has(ti)" class="space-y-2 pl-2">
                       <div v-for="(m, mi) in thread" :key="mi"

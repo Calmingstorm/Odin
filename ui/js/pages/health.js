@@ -62,7 +62,8 @@ export default {
             <div style="display:flex;align-items:center;gap:0.75rem;">
               <span class="text-xs text-gray-500">Updated {{ formatTime(data.checked_at) }}</span>
               <button @click="fetchHealth" class="btn btn-ghost text-xs" :disabled="refreshing">
-                {{ refreshing ? '...' : '\u21BB Refresh' }}
+                <odin-icon name="refresh" :size="14" :class="{ 'animate-spin': refreshing }" />
+                {{ refreshing ? 'Refreshing...' : 'Refresh' }}
               </button>
             </div>
           </div>

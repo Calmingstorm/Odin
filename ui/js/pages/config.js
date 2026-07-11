@@ -21,7 +21,7 @@ const ENUM_FIELDS = {
 const VALIDATION_RULES = {
   'discord.allowed_users': { type: 'array', itemType: 'string', message: 'Must be a list of user IDs' },
   'discord.channels': { type: 'array', itemType: 'string', message: 'Must be a list of channel IDs' },
-  'openai_codex.max_tokens': { type: 'number', min: 1, max: 128000, message: 'Must be 1\u201c128000' },
+  'openai_codex.max_tokens': { type: 'number', min: 1, max: 128000, message: 'Must be 1\u2013128000' },
   'sessions.max_history': { type: 'number', min: 1, max: 10000, message: 'Must be 1\u201310000' },
   'sessions.max_age_hours': { type: 'number', min: 1, message: 'Must be at least 1' },
   'learning.max_entries': { type: 'number', min: 1, message: 'Must be at least 1' },
@@ -136,10 +136,10 @@ export default {
         <div class="flex gap-2 items-center">
           <template v-if="editing">
             <button @click="undo" class="btn btn-ghost text-xs cfg-undo-btn" :disabled="!canUndo" title="Undo (Ctrl+Z)">
-              \u21A9 Undo
+              <odin-icon name="undo" :size="14" /> Undo
             </button>
             <button @click="redo" class="btn btn-ghost text-xs cfg-redo-btn" :disabled="!canRedo" title="Redo (Ctrl+Y)">
-              Redo \u21AA
+              <odin-icon name="redo" :size="14" /> Redo
             </button>
             <span class="cfg-change-count" v-if="changeCount > 0">
               {{ changeCount }} change{{ changeCount !== 1 ? 's' : '' }}
@@ -192,7 +192,7 @@ export default {
             <span class="cfg-group-label">{{ group.label }}</span>
             <span class="badge badge-info text-xs">{{ group.sections.length }}</span>
             <span v-if="editing && groupChanged(group)" class="badge badge-warning text-xs">modified</span>
-            <span class="cfg-group-arrow" aria-hidden="true">{{ expandedGroups[group.key] ? '\u25BC' : '\u25B6' }}</span>
+            <span class="cfg-group-arrow" aria-hidden="true"><odin-icon name="chevronRight" :size="14" :class="{ 'rotate-90': expandedGroups[group.key] }" /></span>
           </div>
 
           <!-- Group content -->
@@ -200,7 +200,7 @@ export default {
             <div v-for="section in group.sections" :key="section" class="cfg-section">
               <!-- Section header -->
               <div class="cfg-section-header cursor-pointer select-none" @click="toggleSection(section)">
-                <span class="text-xs text-gray-500 font-mono">{{ expanded[section] ? '\u25BC' : '\u25B6' }}</span>
+                <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon name="chevronRight" :size="13" :class="{ 'rotate-90': expanded[section] }" /></span>
                 <span class="cfg-section-name">{{ section }}</span>
                 <span class="badge badge-info text-xs"
                       v-if="typeof getDisplay(section) === 'object' && getDisplay(section) !== null && !Array.isArray(getDisplay(section))">
@@ -362,7 +362,7 @@ export default {
         <!-- Ungrouped sections (fallback) -->
         <div v-for="section in ungroupedSections" :key="section" class="hm-card">
           <div class="cfg-section-header cursor-pointer select-none" @click="toggleSection(section)">
-            <span class="text-xs text-gray-500 font-mono">{{ expanded[section] ? '\u25BC' : '\u25B6' }}</span>
+            <span class="text-xs text-gray-500" aria-hidden="true"><odin-icon name="chevronRight" :size="13" :class="{ 'rotate-90': expanded[section] }" /></span>
             <span class="cfg-section-name">{{ section }}</span>
           </div>
           <div v-if="expanded[section]" class="pl-4 mt-2">

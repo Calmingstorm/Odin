@@ -133,7 +133,7 @@ export default {
                  role="button" tabindex="0" @keydown.enter="toggleSource(s.source || s.name || s)" @keydown.space.prevent="toggleSource(s.source || s.name || s)"
                  :aria-expanded="!!expanded[s.source || s.name || s]">
               <span class="kb-tree-arrow" :class="{ 'kb-tree-arrow-open': expanded[s.source || s.name || s] }" aria-hidden="true">
-                \u25B6
+                <odin-icon name="chevronRight" :size="14" />
               </span>
               <span class="kb-tree-icon"><odin-icon name="file" :size="17" /></span>
               <span class="kb-tree-name">{{ s.source || s.name || s }}</span>

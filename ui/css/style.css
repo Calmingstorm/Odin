@@ -7,80 +7,35 @@
 html { -webkit-text-size-adjust: 100%; }
 * { -webkit-tap-highlight-color: rgba(217, 119, 6, 0.15); }
 
-/* ================================================================
-   DESIGN TOKENS
-   ================================================================ */
+/* Design tokens are canonical in foundation.css, loaded after this legacy
+   page-style layer. Keep typography, spacing, and motion values here only
+   until the remaining page-specific CSS is progressively absorbed. */
 :root {
-  /* --- Color: Backgrounds --- */
-  --hm-bg:              #030712;
-  --hm-surface:         #111827;
-  --hm-surface-hover:   #1f2937;
-  --hm-surface-elevated:#192033;
-
-  /* --- Color: Borders --- */
-  --hm-border:          #1f2937;
-  --hm-border-subtle:   #151b28;
-
-  /* --- Color: Accent (Gold / Amber) --- */
-  --hm-accent:          #d97706;
-  --hm-accent-hover:    #f59e0b;
-  --hm-accent-dim:      rgba(217, 119, 6, 0.15);
-  --hm-accent-glow:     rgba(245, 158, 11, 0.2);
-  --hm-gold:            #fbbf24;
-  --hm-gold-dim:        rgba(251, 191, 36, 0.08);
-
-  /* --- Color: Text --- */
-  --hm-text:            #f3f4f6;
-  --hm-text-muted:      #9ca3af;
-  --hm-text-dim:        #6b7280;
-
-  /* --- Color: Semantic --- */
-  --hm-success:         #22c55e;
-  --hm-warning:         #eab308;
-  --hm-danger:          #ef4444;
-  --hm-info:            #3b82f6;
-
-  /* --- Typography --- */
   --hm-font-sans:       'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --hm-font-mono:       'Fira Code', 'Cascadia Code', 'JetBrains Mono', ui-monospace, monospace;
-  --hm-text-xs:         0.6875rem;   /* 11px */
-  --hm-text-sm:         0.75rem;     /* 12px */
-  --hm-text-base:       0.8125rem;   /* 13px */
-  --hm-text-md:         0.875rem;    /* 14px */
-  --hm-text-lg:         1rem;        /* 16px */
-  --hm-text-xl:         1.25rem;     /* 20px */
-  --hm-text-2xl:        1.5rem;      /* 24px */
+  --hm-text-xs:         0.6875rem;
+  --hm-text-sm:         0.75rem;
+  --hm-text-base:       0.8125rem;
+  --hm-text-md:         0.875rem;
+  --hm-text-lg:         1rem;
+  --hm-text-xl:         1.25rem;
+  --hm-text-2xl:        1.5rem;
   --hm-leading-tight:   1.25;
   --hm-leading-normal:  1.5;
   --hm-leading-relaxed: 1.65;
-
-  /* --- Spacing --- */
-  --hm-space-1:  0.25rem;     /* 4px  */
-  --hm-space-2:  0.375rem;    /* 6px  */
-  --hm-space-3:  0.5rem;      /* 8px  */
-  --hm-space-4:  0.75rem;     /* 12px */
-  --hm-space-5:  1rem;        /* 16px */
-  --hm-space-6:  1.5rem;      /* 24px */
-  --hm-space-8:  2rem;        /* 32px */
-
-  /* --- Border Radius --- */
-  --hm-radius-sm:   0.25rem;  /* 4px  */
-  --hm-radius-md:   0.375rem; /* 6px  */
-  --hm-radius-lg:   0.5rem;   /* 8px  */
-  --hm-radius-xl:   0.75rem;  /* 12px */
+  --hm-space-1: 0.25rem;
+  --hm-space-2: 0.375rem;
+  --hm-space-3: 0.5rem;
+  --hm-space-4: 0.75rem;
+  --hm-space-5: 1rem;
+  --hm-space-6: 1.5rem;
+  --hm-space-8: 2rem;
   --hm-radius-full: 9999px;
-
-  /* --- Shadows / Elevation --- */
-  --hm-shadow-sm:      0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
-  --hm-shadow-md:      0 4px 12px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.2);
-  --hm-shadow-lg:      0 8px 24px rgba(0, 0, 0, 0.45), 0 4px 8px rgba(0, 0, 0, 0.2);
-  --hm-shadow-glow:    0 0 20px rgba(217, 119, 6, 0.15), 0 0 4px rgba(217, 119, 6, 0.1);
-  --hm-shadow-glow-sm: 0 0 8px rgba(217, 119, 6, 0.1);
-
-  /* --- Transitions --- */
-  --hm-transition-fast:   0.1s ease;
-  --hm-transition-base:   0.15s ease;
-  --hm-transition-slow:   0.25s ease;
+  --hm-shadow-glow: 0 0 20px rgba(197, 139, 50, 0.15), 0 0 4px rgba(197, 139, 50, 0.1);
+  --hm-shadow-glow-sm: 0 0 8px rgba(197, 139, 50, 0.1);
+  --hm-transition-fast: 0.1s ease;
+  --hm-transition-base: 0.15s ease;
+  --hm-transition-slow: 0.25s ease;
   --hm-transition-spring: 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
@@ -107,73 +62,6 @@ body {
 * {
   scrollbar-width: thin;
   scrollbar-color: #374151 var(--hm-bg);
-}
-
-/* ================================================================
-   LAYOUT
-   ================================================================ */
-.hm-sidebar {
-  width: 240px;
-  min-height: 100vh;
-  background: var(--hm-surface);
-  border-right: 1px solid var(--hm-border);
-  transition: width 0.2s ease;
-  display: flex;
-  flex-direction: column;
-}
-.hm-sidebar.collapsed { width: 56px; }
-.hm-sidebar.collapsed .nav-label,
-.hm-sidebar.collapsed .sidebar-header-text { display: none; }
-
-.hm-main {
-  flex: 1;
-  min-width: 0;
-  overflow-y: auto;
-  max-height: 100vh;
-}
-
-.hm-topbar {
-  height: 48px;
-  background: var(--hm-surface);
-  border-bottom: 1px solid var(--hm-border);
-  display: flex;
-  align-items: center;
-  padding: 0 var(--hm-space-5);
-  gap: var(--hm-space-4);
-}
-
-/* ================================================================
-   NAVIGATION
-   ================================================================ */
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: var(--hm-space-4);
-  padding: var(--hm-space-3) var(--hm-space-4);
-  margin: 1px var(--hm-space-3);
-  border-radius: var(--hm-radius-md);
-  color: var(--hm-text-muted);
-  text-decoration: none;
-  font-size: var(--hm-text-md);
-  cursor: pointer;
-  transition: background var(--hm-transition-base), color var(--hm-transition-base);
-  white-space: nowrap;
-  overflow: hidden;
-}
-.nav-item:hover {
-  background: var(--hm-surface-hover);
-  color: var(--hm-text);
-}
-.nav-item.active {
-  background: var(--hm-accent-dim);
-  color: var(--hm-accent-hover);
-  box-shadow: inset 3px 0 0 var(--hm-accent);
-}
-.nav-icon {
-  width: 20px;
-  text-align: center;
-  flex-shrink: 0;
-  font-size: var(--hm-text-lg);
 }
 
 /* ================================================================
@@ -3132,21 +3020,6 @@ a:focus-visible {
    RESPONSIVE — tablets and small screens
    ================================================================ */
 @media (max-width: 768px) {
-  /* Sidebar: slide-in drawer */
-  .hm-sidebar {
-    position: fixed;
-    z-index: 40;
-    width: 280px;
-    transform: translateX(-100%);
-    transition: transform 0.2s ease;
-  }
-  .hm-sidebar.mobile-open {
-    transform: translateX(0);
-  }
-  .hm-sidebar.collapsed { width: 280px; }
-  .hm-sidebar.collapsed .nav-label,
-  .hm-sidebar.collapsed .sidebar-header-text { display: initial; }
-
   /* Page padding: reduce on mobile */
   .hm-main .p-6 { padding: var(--hm-space-5); }
 
@@ -3179,12 +3052,6 @@ a:focus-visible {
   /* Session checkboxes: larger tap target */
   .session-checkbox, .memory-checkbox { width: 18px; height: 18px; }
 
-  /* Hide sidebar's own collapse button on mobile (topbar hamburger handles it) */
-  .hm-sidebar .sidebar-toggle-btn { display: none; }
-
-  /* Topbar: tighter */
-  .hm-topbar { padding: 0 var(--hm-space-3); gap: var(--hm-space-3); }
-
   /* Cron presets: larger tap targets */
   .cron-preset-btn { padding: var(--hm-space-1) 0.625rem; font-size: var(--hm-text-sm); }
 }
@@ -3193,9 +3060,6 @@ a:focus-visible {
    RESPONSIVE — small phones
    ================================================================ */
 @media (max-width: 480px) {
-  /* Full-width sidebar drawer on small phones */
-  .hm-sidebar { width: 100%; }
-
   /* Chat: wider bubbles, smaller avatars */
   .chat-bubble-wrap { max-width: 90%; }
   .chat-avatar { width: 24px; height: 24px; }

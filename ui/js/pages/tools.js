@@ -157,7 +157,7 @@ export default {
                 <template v-for="t in group.tools" :key="t.name">
                   <tr class="cursor-pointer" @click="toggleExpand(t.name)">
                     <td class="font-mono text-sm whitespace-nowrap">
-                      <span class="tool-expand-icon text-gray-600 mr-1">{{ expanded[t.name] ? '\u25BC' : '\u25B6' }}</span>
+                      <span class="tool-expand-icon text-gray-600 mr-1" aria-hidden="true"><odin-icon name="chevronRight" :size="13" :class="{ 'rotate-90': expanded[t.name] }" /></span>
                       {{ t.name }}
                     </td>
                     <td class="text-gray-400 text-sm mobile-hide">{{ truncate(t.description, 100) }}</td>

@@ -12,8 +12,11 @@ import { computed, onMounted, ref } from 'vue';
 export default {
   template: `
     <div class="p-6 page-fade-in">
-      <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
-        <h1 class="text-xl font-semibold">Schedules</h1>
+      <div class="flex items-start justify-between mb-4 flex-wrap gap-3">
+        <div>
+          <h1 class="text-xl font-semibold">Schedules</h1>
+          <p class="page-lede">Create, inspect, and run recurring or one-time automation.</p>
+        </div>
         <div class="flex gap-2">
           <button @click="showCreate = !showCreate" class="btn btn-primary text-xs">
             {{ showCreate ? 'Cancel' : 'New Schedule' }}
@@ -25,7 +28,7 @@ export default {
       </div>
 
       <!-- Create form -->
-      <div v-if="showCreate" class="hm-card mb-4">
+      <div v-if="showCreate" class="hm-card form-panel mb-4">
         <h2 class="text-sm font-medium mb-3">Create Schedule</h2>
 
         <div class="mb-3">
@@ -124,7 +127,7 @@ export default {
         <button @click="fetchSchedules" class="btn btn-ghost text-xs">Retry</button>
       </div>
       <div v-else-if="schedules.length === 0 && !showCreate" class="hm-card empty-state">
-        <span class="empty-state-icon">\u{23F0}</span>
+        <span class="empty-state-icon"><odin-icon name="calendar" :size="23" /></span>
         <span class="empty-state-text">No scheduled tasks</span>
         <span class="empty-state-hint">Click "New Schedule" to set up automated checks or reminders</span>
       </div>
@@ -173,8 +176,10 @@ export default {
           <tbody>
             <template v-for="s in schedules" :key="s.id">
             <tr :class="{ 'opacity-50': s.paused }">
-              <td class="text-center" style="width:30px;cursor:pointer;" @click="toggleExpand(s.id)">
-                <span class="text-gray-500 text-xs">{{ expandedId === s.id ? '▼' : '▶' }}</span>
+              <td class="text-center" style="width:40px;">
+                <button class="row-expander" @click="toggleExpand(s.id)" :aria-expanded="expandedId === s.id" :aria-label="(expandedId === s.id ? 'Collapse ' : 'Expand ') + s.description">
+                  <odin-icon name="chevronRight" :size="15" :class="{ 'rotate-90': expandedId === s.id }" />
+                </button>
               </td>
               <td class="text-sm">
                 {{ s.description }}

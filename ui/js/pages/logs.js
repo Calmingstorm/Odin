@@ -195,7 +195,7 @@ export default {
           <!-- Jump to bottom -->
           <button v-if="showJumpBottom" @click="jumpToBottom"
                   class="log-jump-btn">
-            &#x2193; Jump to bottom
+            <odin-icon name="download" :size="14" /> Jump to bottom
           </button>
         </div>
       </template>
