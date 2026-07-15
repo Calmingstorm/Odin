@@ -1,7 +1,7 @@
 import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
-import { onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 
 
 // Trailing debounce: selects fire @change on EVERY arrow keypress, and each
@@ -113,20 +113,17 @@ export default {
               <label class="text-xs text-gray-400 block">Model
               <select v-model="codexForm.model" @change="saveCodexConfigDebounced"
                       class="hm-input">
-                <option value="gpt-5.6-sol">gpt-5.6-sol</option>
-                <option value="gpt-5.6-terra">gpt-5.6-terra</option>
-                <option value="gpt-5.5">gpt-5.5</option>
-                <option value="gpt-5">gpt-5</option>
-                <option value="gpt-5-mini">gpt-5-mini</option>
-                <option value="gpt-4.1">gpt-4.1</option>
-                <option value="gpt-4o">gpt-4o</option>
+                <option v-for="m in codexModelOptions" :key="m" :value="m">{{ m }}</option>
               </select>
               </label>
             </div>
             <div>
-              <label class="text-xs text-gray-400 block">Max Tokens
-              <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfigNow"
-                     class="hm-input" />
+              <label class="text-xs text-gray-400 block">Agent Model
+              <select v-model="codexForm.agent_model" @change="saveCodexConfigDebounced"
+                      class="hm-input">
+                <option value="">Inherit chat model</option>
+                <option v-for="m in codexAgentModelOptions" :key="m" :value="m">{{ m }}</option>
+              </select>
               </label>
             </div>
             <div>
@@ -152,6 +149,12 @@ export default {
                 <option value="high">High</option>
                 <option value="xhigh">Extra High</option>
               </select>
+              </label>
+            </div>
+            <div class="sm:col-span-2">
+              <label class="text-xs text-gray-400 block">Max Tokens
+              <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfigNow"
+                     class="hm-input" style="max-width: 240px" />
               </label>
             </div>
           </div>
@@ -386,9 +389,25 @@ export default {
     const selectedProvider = ref('codex');
 
     // --- Config forms ---
-    // agent_reasoning_effort: '' = inherit the chat Reasoning setting (sent
-    // as null; distinct from the literal effort "none")
-    const codexForm = ref({ enabled: false, model: 'gpt-5.5', max_tokens: 4096, reasoning_effort: 'medium', agent_reasoning_effort: '' });
+    // agent_reasoning_effort / agent_model: '' = inherit the chat setting
+    // (the server normalizes ''/null to inherit; distinct from the literal
+    // effort "none")
+    const codexForm = ref({ enabled: false, model: 'gpt-5.5', max_tokens: 4096, reasoning_effort: 'medium', agent_reasoning_effort: '', agent_model: '' });
+
+    // Codex model catalog — ONE ordered list renders both the Model and
+    // Agent Model selects so the two dropdowns can never drift apart.
+    const CODEX_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o'];
+    // model/agent_model are free strings server-side: an unknown configured
+    // value (hand-edited or future model) must render as a temporary option —
+    // a blank select would let the next save silently replace it.
+    const codexModelOptions = computed(() => {
+      const v = codexForm.value.model;
+      return v && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
+    });
+    const codexAgentModelOptions = computed(() => {
+      const v = codexForm.value.agent_model;
+      return v && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
+    });
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096 });
     const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 });
     const ollamaKeyDirty = ref(false);
@@ -458,6 +477,7 @@ export default {
           codexForm.value.reasoning_effort = data.codex.reasoning_effort || 'medium';
           // null (inherit) maps to the '' select option
           codexForm.value.agent_reasoning_effort = data.codex.agent_reasoning_effort || '';
+          codexForm.value.agent_model = data.codex.agent_model || '';
           codexForm.value.max_tokens = data.codex.max_tokens || 4096;
         }
         if (data.ollama && !saveOllamaConfigDebounced.pending()) {
@@ -768,7 +788,8 @@ export default {
 
     return {
       loading, llmStatus, selectedProvider, switching,
-      codexForm, ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
+      codexForm, codexModelOptions, codexAgentModelOptions,
+      ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
