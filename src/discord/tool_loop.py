@@ -470,6 +470,10 @@ class ToolLoopRunner:
             or 2000
         )
         if trace is not None:
+            # Turn-ENTRY policy context only — which provider/model the turn
+            # started under. Per-iteration ToolIteration fields carry the
+            # authoritative execution provenance (routing/reloads can change
+            # what actually serves each iteration).
             provider_cfg = getattr(self._get_config(), "llm_provider", None)
             trace.provider(
                 name=getattr(provider_cfg, "active_provider", "codex") if provider_cfg else "codex",
@@ -667,6 +671,12 @@ class ToolLoopRunner:
                 llm_text=llm_resp.text or "",
                 input_tokens=llm_resp.input_tokens,
                 output_tokens=llm_resp.output_tokens,
+                # Execution provenance from the response — the only source
+                # that survives gateway routing, retries, and live reloads.
+                # Missing provenance stays empty (unknown), never guessed.
+                provider=getattr(llm_resp, "provenance_provider", "") or "",
+                model=getattr(llm_resp, "provenance_model", "") or "",
+                reasoning_effort=getattr(llm_resp, "provenance_reasoning_effort", None),
             )
         )
         st.stuck_tracker.record(iter_tool_calls)
@@ -1408,6 +1418,12 @@ class ToolLoopRunner:
                     llm_text=response.text or "",
                     input_tokens=getattr(response, "input_tokens", 0) or 0,
                     output_tokens=getattr(response, "output_tokens", 0) or 0,
+                    # Execution provenance from the response — the only source
+                    # that survives gateway routing, retries, and live reloads.
+                    # Missing provenance stays empty (unknown), never guessed.
+                    provider=getattr(response, "provenance_provider", "") or "",
+                    model=getattr(response, "provenance_model", "") or "",
+                    reasoning_effort=getattr(response, "provenance_reasoning_effort", None),
                 )
             )
 

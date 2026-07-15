@@ -514,27 +514,31 @@ class TestPerCallModelOverride:
         client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-sol",
                                  max_tokens=1000, reasoning_effort="medium")
         bodies = self._capture_tools_list(client)
-        await client.chat_with_tools(
+        resp = await client.chat_with_tools(
             [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
             model="gpt-5.6-luna",
         )
         assert bodies[0]["model"] == "gpt-5.6-luna"
         assert client.model == "gpt-5.6-sol"
+        # provenance echoes the exact body values
+        assert resp.provenance_model == "gpt-5.6-luna" == bodies[0]["model"]
+        assert resp.provenance_provider == "codex"
 
     async def test_none_and_empty_inherit_configured(self):
         client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-sol",
                                  max_tokens=1000, reasoning_effort="medium")
         bodies = self._capture_tools_list(client)
-        await client.chat_with_tools(
+        r1 = await client.chat_with_tools(
             [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
             model=None,
         )
-        await client.chat_with_tools(
+        r2 = await client.chat_with_tools(
             [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
             model="",
         )
         assert bodies[0]["model"] == "gpt-5.6-sol"
         assert bodies[1]["model"] == "gpt-5.6-sol"
+        assert r1.provenance_model == r2.provenance_model == "gpt-5.6-sol"
 
     async def test_concurrent_calls_do_not_leak_models(self):
         import asyncio
@@ -550,6 +554,69 @@ class TestPerCallModelOverride:
         models = sorted(b["model"] for b in bodies)
         assert models == ["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol"]
         assert client.model == "gpt-5.6-sol"
+
+
+class TestResponseProvenance:
+    """chat_with_tools stamps execution provenance from the SAME pre-await
+    locals the request body was built from — the response is the single
+    truthful record of what was actually sent (survives routing/retries/
+    live reloads that make any call-site snapshot a guess)."""
+
+    _TOOLS = [{"name": "t", "description": "d",
+               "input_schema": {"type": "object", "properties": {}}}]
+
+    @staticmethod
+    def _capture_tools_list(client):
+        from types import SimpleNamespace
+        bodies = []
+
+        async def fake_stream(body):
+            bodies.append(body)
+            return SimpleNamespace(text="ok", tool_calls=[], stop_reason="end")
+
+        client._stream_tool_request = fake_stream
+        return bodies
+
+    async def test_inherited_paths_match_body(self):
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-sol",
+                                 max_tokens=1000, reasoning_effort="medium")
+        bodies = self._capture_tools_list(client)
+        resp = await client.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys", self._TOOLS)
+        assert resp.provenance_provider == "codex"
+        assert resp.provenance_model == bodies[0]["model"] == "gpt-5.6-sol"
+        assert resp.provenance_reasoning_effort == "medium"
+        assert bodies[0]["reasoning"] == {"effort": "medium"}
+
+    async def test_overridden_paths_match_body(self):
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-sol",
+                                 max_tokens=1000, reasoning_effort="medium")
+        bodies = self._capture_tools_list(client)
+        resp = await client.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
+            model="gpt-5.6-luna", reasoning_effort="xhigh")
+        assert resp.provenance_model == bodies[0]["model"] == "gpt-5.6-luna"
+        assert resp.provenance_reasoning_effort == "xhigh"
+        assert bodies[0]["reasoning"] == {"effort": "xhigh"}
+
+    async def test_effort_none_string_vs_not_sent(self):
+        """The literal effort "none" is recorded as sent; a client with no
+        configured effort records None (nothing was serialized)."""
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5",
+                                 max_tokens=1000, reasoning_effort="medium")
+        bodies = self._capture_tools_list(client)
+        resp = await client.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
+            reasoning_effort="none")
+        assert resp.provenance_reasoning_effort == "none"
+        assert bodies[0]["reasoning"] == {"effort": "none"}
+
+        bare = _client()  # no configured effort
+        bodies2 = self._capture_tools_list(bare)
+        resp2 = await bare.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys", self._TOOLS)
+        assert resp2.provenance_reasoning_effort is None
+        assert "reasoning" not in bodies2[0]
 
 
 class TestTransportTimeouts:

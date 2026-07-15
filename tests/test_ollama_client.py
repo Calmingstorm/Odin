@@ -433,7 +433,8 @@ class TestChatEndpoints:
 
     async def test_chat_with_tools_ignores_model_override(self):
         """Signature parity for the Codex-scoped model override: accepted and
-        ignored — the pinned model still goes upstream."""
+        ignored — the pinned model goes upstream AND into the response
+        provenance (an ignored override must never be reported as used)."""
         c = _client()
         c._session = _FakeSession([  # type: ignore[assignment]
             _FakeResp(200, {"message": {"content": "ok"}})])
@@ -445,6 +446,9 @@ class TestChatEndpoints:
         assert isinstance(resp, LLMResponse)
         _, _, body, _ = c._session.calls[0]  # type: ignore[union-attr]
         assert body["model"] == c.model
+        assert resp.provenance_model == body["model"] == c.model
+        assert resp.provenance_provider == "ollama"
+        assert resp.provenance_reasoning_effort is None
 
 
 class TestHealthCheck:

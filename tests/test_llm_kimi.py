@@ -257,13 +257,16 @@ class TestChatAndHealth:
 
     async def test_chat_with_tools_ignores_model_override(self):
         """Signature parity: the Codex-scoped model override is accepted and
-        ignored."""
+        ignored — provenance reports the pinned model actually sent."""
         c = _client()
         _with_session(c, _Resp(200, {"choices": [{"finish_reason": "stop",
                                                   "message": {"content": "answer"}}]}))
         r = await c.chat_with_tools([{"role": "user", "content": "q"}], "sys",
                                     [{"name": "grep"}], model="gpt-5.6-luna")
         assert r.text == "answer"
+        assert r.provenance_model == c.model
+        assert r.provenance_provider == "kimi"
+        assert r.provenance_reasoning_effort is None
 
     async def test_chat_with_tools_tokenization_error(self):
         c = _client()

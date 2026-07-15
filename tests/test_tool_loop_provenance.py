@@ -1,0 +1,84 @@
+"""Per-iteration execution provenance at the chat/loop ToolIteration sites.
+
+Both construction sites in tool_loop stamp provider/model/reasoning_effort
+from the RESPONSE's provenance fields — the only source that survives
+gateway routing, retries, and live reloads. A response without provenance
+is recorded as UNKNOWN (empty/None), never replaced by a call-site guess.
+"""
+from types import SimpleNamespace
+
+from src.discord.response_guards import StuckLoopTracker
+from src.discord.tool_loop import ToolLoopRunner
+from src.llm.types import LLMResponse
+from src.trajectories.saver import TrajectoryTurn
+
+
+def _turn():
+    return TrajectoryTurn(
+        message_id="m1", channel_id="c1", user_id="u1",
+        user_name="u", source="discord",
+    )
+
+
+def _chat_st():
+    return SimpleNamespace(
+        iteration=1, _trajectory=_turn(), stuck_tracker=StuckLoopTracker(),
+    )
+
+
+class TestChatIterationProvenance:
+    async def test_stamps_from_response(self):
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        st = _chat_st()
+        resp = LLMResponse(
+            text="hi",
+            provenance_provider="codex",
+            provenance_model="gpt-5.6-sol",
+            provenance_reasoning_effort="xhigh",
+        )
+        assert await runner._check_stuck_and_record(st, resp) is None
+        it = st._trajectory.iterations[0]
+        assert it.provider == "codex"
+        assert it.model == "gpt-5.6-sol"
+        assert it.reasoning_effort == "xhigh"
+
+    async def test_missing_provenance_stays_unknown(self):
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        st = _chat_st()
+        resp = SimpleNamespace(
+            text="hi", tool_calls=[], stop_reason="end_turn",
+            input_tokens=0, output_tokens=0,
+        )
+        assert await runner._check_stuck_and_record(st, resp) is None
+        it = st._trajectory.iterations[0]
+        assert it.provider == ""
+        assert it.model == ""
+        assert it.reasoning_effort is None
+
+
+class TestLoopIterationProvenance:
+    def test_stamps_from_response(self):
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        st = SimpleNamespace(_trajectory=_turn(), final_text="", completed_naturally=False)
+        resp = LLMResponse(
+            text="done",
+            provenance_provider="codex",
+            provenance_model="gpt-5.6-luna",
+            provenance_reasoning_effort="low",
+        )
+        ended = runner._record_loop_iteration(st, resp, 2)
+        assert ended is True  # tool-free response ends the loop naturally
+        it = st._trajectory.iterations[0]
+        assert it.provider == "codex"
+        assert it.model == "gpt-5.6-luna"
+        assert it.reasoning_effort == "low"
+
+    def test_missing_provenance_stays_unknown(self):
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        st = SimpleNamespace(_trajectory=_turn(), final_text="", completed_naturally=False)
+        resp = SimpleNamespace(text="", tool_calls=[], stop_reason="end_turn")
+        runner._record_loop_iteration(st, resp, 1)
+        it = st._trajectory.iterations[0]
+        assert it.provider == ""
+        assert it.model == ""
+        assert it.reasoning_effort is None

@@ -123,6 +123,14 @@ class FakeLLM:
             item = item()
         if isinstance(item, BaseException):
             raise item
+        # Compliant-provider behavior: stamp execution provenance from the
+        # values the request "carried" (model override else configured
+        # model), exactly like the real providers. Scripted responses that
+        # set their own provenance win — never overwrite a non-empty stamp.
+        if isinstance(item, LLMResponse) and not item.provenance_model:
+            item.provenance_provider = "fake"
+            item.provenance_model = kwargs.get("model") or self.model
+            item.provenance_reasoning_effort = kwargs.get("reasoning_effort")
         return item
 
     async def chat(self, messages: list, system: str = "", **kwargs) -> str:

@@ -45,17 +45,17 @@ if TYPE_CHECKING:
 log = get_logger("discord")
 
 
-def _agent_llm_policy(config: object, client: object) -> tuple[str | None, str | None, bool]:
-    """Resolve the spawned-agent LLM policy from ONE config read.
+def _agent_llm_policy(config: object, client: object) -> tuple[str | None, str | None]:
+    """Resolve the spawned-agent REQUEST policy from ONE config read.
 
-    Returns ``(agent_effort, resolved_model, is_codex)``. ``resolved_model``
-    is the exact string passed to ``chat_with_tools(model=...)`` AND stamped
-    into the iteration metadata — resolving once (``agent_model ?? model``,
-    ""/whitespace = inherit) guarantees the request body and the trajectory
-    stamp cannot diverge under a live config change mid-iteration. For
-    providers that pin their model (no ``reasoning_effort`` attr = not the
-    Codex client) it is None: the override would be ignored, and an ignored
-    override must never be stamped as the model that answered.
+    Returns ``(agent_effort, resolved_model)``. ``resolved_model`` is the
+    exact string passed to ``chat_with_tools(model=...)`` — resolved once
+    (``agent_model ?? model``, ""/whitespace = inherit). For providers that
+    pin their model (no ``reasoning_effort`` attr = not the Codex client) it
+    is None: the override would be ignored. This helper decides what the
+    request ASKS FOR; the trajectory stamp is read from the response's
+    provenance fields, which a compliant provider populates from the exact
+    values the outbound body carried (see LLMResponse).
     """
     codex_cfg = getattr(config, "openai_codex", None)
     agent_effort = getattr(codex_cfg, "agent_reasoning_effort", None)
@@ -63,7 +63,29 @@ def _agent_llm_policy(config: object, client: object) -> tuple[str | None, str |
     raw = getattr(codex_cfg, "agent_model", None)
     agent_model = (str(raw).strip() or None) if raw else None
     resolved_model = (agent_model or getattr(codex_cfg, "model", None)) if is_codex else None
-    return agent_effort, resolved_model, is_codex
+    return agent_effort, resolved_model
+
+
+def _provenance_stamp(resp: object, client: object) -> dict:
+    """Execution-provenance fields for an iteration record, from the response.
+
+    The response is the only layer that stays truthful across routing,
+    retries, and live reloads. Missing provenance is recorded as UNKNOWN
+    (empty/None) — never substituted with a call-site guess, which would
+    silently reintroduce false attribution.
+    """
+    model = getattr(resp, "provenance_model", "") or ""
+    if not model:
+        log.warning(
+            "LLM response from %s carried no execution provenance — "
+            "recording iteration model as unknown",
+            getattr(client, "provider_name", "?"),
+        )
+    return {
+        "provider": getattr(resp, "provenance_provider", "") or "",
+        "model": model,
+        "reasoning_effort": getattr(resp, "provenance_reasoning_effort", None),
+    }
 
 
 @dataclass(frozen=True)
@@ -395,9 +417,7 @@ class AgentTaskTools:
             # read the agent policy from live config at call time (a WebUI
             # change reaches in-flight agents on their next iteration).
             client = self._llm_gateway.active_client
-            agent_effort, resolved_model, is_codex = _agent_llm_policy(
-                self._get_config(), client
-            )
+            agent_effort, resolved_model = _agent_llm_policy(self._get_config(), client)
             resp = await client.chat_with_tools(
                 messages=messages,
                 system=sys_prompt,
@@ -405,19 +425,11 @@ class AgentTaskTools:
                 reasoning_effort=agent_effort,
                 model=resolved_model,
             )
-            if is_codex:
-                effective_effort = (
-                    agent_effort if agent_effort is not None else client.reasoning_effort
-                )
-            else:
-                effective_effort = None  # provider has no effort concept
             return {
                 "text": resp.text,
                 "tool_calls": [{"name": tc.name, "input": tc.input} for tc in resp.tool_calls],
                 "stop_reason": resp.stop_reason,
-                "provider": getattr(client, "provider_name", ""),
-                "model": resolved_model if resolved_model else getattr(client, "model", ""),
-                "reasoning_effort": effective_effort,
+                **_provenance_stamp(resp, client),
             }
 
         msg_proxy = _LoopMessageProxy(channel, user_id, user_name)
@@ -685,9 +697,7 @@ class AgentTaskTools:
         # Build iteration/tool callbacks (same pattern as _handle_spawn_agent)
         async def _iteration_cb(messages, sys, tool_defs):
             client = self._llm_gateway.active_client
-            agent_effort, resolved_model, is_codex = _agent_llm_policy(
-                self._get_config(), client
-            )
+            agent_effort, resolved_model = _agent_llm_policy(self._get_config(), client)
             resp = await client.chat_with_tools(
                 messages=messages,
                 system=sys,
@@ -695,21 +705,13 @@ class AgentTaskTools:
                 reasoning_effort=agent_effort,
                 model=resolved_model,
             )
-            if is_codex:
-                effective_effort = (
-                    agent_effort if agent_effort is not None else client.reasoning_effort
-                )
-            else:
-                effective_effort = None  # provider has no effort concept
             return {
                 "text": resp.text or "",
                 "tool_calls": [
                     {"name": tc.name, "input": tc.input} for tc in (resp.tool_calls or [])
                 ],
                 "stop_reason": resp.stop_reason or "end_turn",
-                "provider": getattr(client, "provider_name", ""),
-                "model": resolved_model if resolved_model else getattr(client, "model", ""),
-                "reasoning_effort": effective_effort,
+                **_provenance_stamp(resp, client),
             }
 
         async def _tool_cb(tool_name, tool_input):

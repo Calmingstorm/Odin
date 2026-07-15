@@ -309,8 +309,11 @@ class KimiClient(LLMProvider):
         adapted_system = system + KIMI_TOOL_ENFORCEMENT
         converted_messages = self._convert_messages(messages, adapted_system)
         converted_tools = self._convert_tools(tools)
+        # Pre-await local: body and response provenance share one snapshot
+        # (self.model is live-reloadable; never re-read it after network I/O).
+        resolved_model = self.model
         body = {
-            "model": self.model,
+            "model": resolved_model,
             "messages": converted_messages,
             "tools": converted_tools,
             "tool_choice": "auto",
@@ -318,15 +321,19 @@ class KimiClient(LLMProvider):
             "temperature": self._resolve_temperature(None),
         }
         log.debug("Kimi request: %d messages, %d tools, model=%s",
-                  len(converted_messages), len(converted_tools), self.model)
+                  len(converted_messages), len(converted_tools), resolved_model)
         try:
             data = await self._request_with_retry(body)
         except RuntimeError as e:
             if "tokenization" in str(e).lower():
                 log.error("Kimi tokenization failed: %d messages, %d tools, model=%s",
-                          len(converted_messages), len(converted_tools), self.model)
+                          len(converted_messages), len(converted_tools), resolved_model)
             raise
-        return self._parse_response(data)
+        resp = self._parse_response(data)
+        resp.provenance_provider = "kimi"
+        resp.provenance_model = resolved_model
+        resp.provenance_reasoning_effort = None  # no effort concept
+        return resp
 
     def _parse_response(self, data: dict) -> LLMResponse:
         """Parse OpenAI-format response into LLMResponse."""

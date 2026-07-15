@@ -451,9 +451,13 @@ class CodexChatClient:
         Returns:
             LLMResponse with text, tool_calls, and stop_reason.
         """
+        # Immutable pre-await locals: the body AND the response provenance are
+        # built from these, so a live reload during the request cannot make
+        # the trajectory stamp diverge from what was actually sent.
         effort = reasoning_effort if reasoning_effort is not None else self.reasoning_effort
+        resolved_model = model if model else self.model
         body = {
-            "model": model if model else self.model,
+            "model": resolved_model,
             "instructions": system,
             "input": self._convert_messages_with_tools(messages),
             "tools": self._convert_tools_cached(tools),
@@ -471,6 +475,9 @@ class CodexChatClient:
             output_chars += len(tc.name) + len(json.dumps(tc.input))
         result.input_tokens = input_tokens
         result.output_tokens = estimate_tokens("x" * output_chars) if output_chars else 0
+        result.provenance_provider = "codex"
+        result.provenance_model = resolved_model
+        result.provenance_reasoning_effort = effort or None
         return result
 
     async def _stream_tool_request(self, body: dict) -> LLMResponse:
