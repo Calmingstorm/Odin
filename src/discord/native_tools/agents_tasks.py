@@ -45,6 +45,49 @@ if TYPE_CHECKING:
 log = get_logger("discord")
 
 
+def _agent_llm_policy(config: object, client: object) -> tuple[str | None, str | None]:
+    """Resolve the spawned-agent REQUEST policy from ONE config read.
+
+    Returns ``(agent_effort, resolved_model)``. ``resolved_model`` is the
+    exact string passed to ``chat_with_tools(model=...)`` — resolved once
+    (``agent_model ?? model``, ""/whitespace = inherit). For providers that
+    pin their model (no ``reasoning_effort`` attr = not the Codex client) it
+    is None: the override would be ignored. This helper decides what the
+    request ASKS FOR; the trajectory stamp is read from the response's
+    provenance fields, which a compliant provider populates from the exact
+    values the outbound body carried (see LLMResponse).
+    """
+    codex_cfg = getattr(config, "openai_codex", None)
+    agent_effort = getattr(codex_cfg, "agent_reasoning_effort", None)
+    is_codex = hasattr(client, "reasoning_effort")
+    raw = getattr(codex_cfg, "agent_model", None)
+    agent_model = (str(raw).strip() or None) if raw else None
+    resolved_model = (agent_model or getattr(codex_cfg, "model", None)) if is_codex else None
+    return agent_effort, resolved_model
+
+
+def _provenance_stamp(resp: object, client: object) -> dict:
+    """Execution-provenance fields for an iteration record, from the response.
+
+    The response is the only layer that stays truthful across routing,
+    retries, and live reloads. Missing provenance is recorded as UNKNOWN
+    (empty/None) — never substituted with a call-site guess, which would
+    silently reintroduce false attribution.
+    """
+    model = getattr(resp, "provenance_model", "") or ""
+    if not model:
+        log.warning(
+            "LLM response from %s carried no execution provenance — "
+            "recording iteration model as unknown",
+            getattr(client, "provider_name", "?"),
+        )
+    return {
+        "provider": getattr(resp, "provenance_provider", "") or "",
+        "model": model,
+        "reasoning_effort": getattr(resp, "provenance_reasoning_effort", None),
+    }
+
+
 @dataclass(frozen=True)
 class AgentTaskDeps:
     """The true dependency surface of the agents/tasks/loops handlers."""
@@ -371,33 +414,22 @@ class AgentTaskTools:
         ) -> dict:
             # Resolve the client ONCE per call so the provider/model/effort
             # stamp describes the client this request actually went to, and
-            # read the agent effort from live config at call time (a WebUI
+            # read the agent policy from live config at call time (a WebUI
             # change reaches in-flight agents on their next iteration).
             client = self._llm_gateway.active_client
-            agent_effort = getattr(
-                getattr(self._get_config(), "openai_codex", None),
-                "agent_reasoning_effort",
-                None,
-            )
+            agent_effort, resolved_model = _agent_llm_policy(self._get_config(), client)
             resp = await client.chat_with_tools(
                 messages=messages,
                 system=sys_prompt,
                 tools=tool_defs,
                 reasoning_effort=agent_effort,
+                model=resolved_model,
             )
-            if hasattr(client, "reasoning_effort"):
-                effective_effort = (
-                    agent_effort if agent_effort is not None else client.reasoning_effort
-                )
-            else:
-                effective_effort = None  # provider has no effort concept
             return {
                 "text": resp.text,
                 "tool_calls": [{"name": tc.name, "input": tc.input} for tc in resp.tool_calls],
                 "stop_reason": resp.stop_reason,
-                "provider": getattr(client, "provider_name", ""),
-                "model": getattr(client, "model", ""),
-                "reasoning_effort": effective_effort,
+                **_provenance_stamp(resp, client),
             }
 
         msg_proxy = _LoopMessageProxy(channel, user_id, user_name)
@@ -665,32 +697,21 @@ class AgentTaskTools:
         # Build iteration/tool callbacks (same pattern as _handle_spawn_agent)
         async def _iteration_cb(messages, sys, tool_defs):
             client = self._llm_gateway.active_client
-            agent_effort = getattr(
-                getattr(self._get_config(), "openai_codex", None),
-                "agent_reasoning_effort",
-                None,
-            )
+            agent_effort, resolved_model = _agent_llm_policy(self._get_config(), client)
             resp = await client.chat_with_tools(
                 messages=messages,
                 system=sys,
                 tools=tool_defs,
                 reasoning_effort=agent_effort,
+                model=resolved_model,
             )
-            if hasattr(client, "reasoning_effort"):
-                effective_effort = (
-                    agent_effort if agent_effort is not None else client.reasoning_effort
-                )
-            else:
-                effective_effort = None  # provider has no effort concept
             return {
                 "text": resp.text or "",
                 "tool_calls": [
                     {"name": tc.name, "input": tc.input} for tc in (resp.tool_calls or [])
                 ],
                 "stop_reason": resp.stop_reason or "end_turn",
-                "provider": getattr(client, "provider_name", ""),
-                "model": getattr(client, "model", ""),
-                "reasoning_effort": effective_effort,
+                **_provenance_stamp(resp, client),
             }
 
         async def _tool_cb(tool_name, tool_input):

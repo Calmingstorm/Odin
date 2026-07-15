@@ -39,10 +39,14 @@ class ToolIteration:
     input_tokens: int = 0
     output_tokens: int = 0
     duration_ms: int = 0
-    # Per-iteration provider stamp (agent trajectories). The active provider,
-    # model, and effective reasoning effort are live-reloadable, so a single
-    # turn-level stamp would misattribute iterations that ran after a switch.
-    # Empty/None on records that predate the stamp or don't populate it.
+    # Per-iteration execution provenance (chat, loop, AND agent paths),
+    # sourced from the LLMResponse provenance fields — the values the
+    # provider actually serialized into the successful request. The active
+    # provider/model/effort are live-reloadable and the gateway can divert
+    # to the auxiliary client, so a single turn-level stamp (context_trace's
+    # `provider` block = turn-ENTRY policy context) would misattribute
+    # iterations. Empty/None = unknown (records predating the stamp, or a
+    # response that carried no provenance) — never a call-site guess.
     provider: str = ""
     model: str = ""
     reasoning_effort: str | None = None

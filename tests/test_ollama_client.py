@@ -431,6 +431,25 @@ class TestChatEndpoints:
         _, _, body, _ = c._session.calls[0]  # type: ignore[union-attr]
         assert "reasoning" not in body and "reasoning_effort" not in body
 
+    async def test_chat_with_tools_ignores_model_override(self):
+        """Signature parity for the Codex-scoped model override: accepted and
+        ignored — the pinned model goes upstream AND into the response
+        provenance (an ignored override must never be reported as used)."""
+        c = _client()
+        c._session = _FakeSession([  # type: ignore[assignment]
+            _FakeResp(200, {"message": {"content": "ok"}})])
+        resp = await c.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys",
+            [{"name": "t", "description": "d", "input_schema": {}}],
+            model="gpt-5.6-luna",
+        )
+        assert isinstance(resp, LLMResponse)
+        _, _, body, _ = c._session.calls[0]  # type: ignore[union-attr]
+        assert body["model"] == c.model
+        assert resp.provenance_model == body["model"] == c.model
+        assert resp.provenance_provider == "ollama"
+        assert resp.provenance_reasoning_effort is None
+
 
 class TestHealthCheck:
     async def test_healthy_with_exact_model(self):

@@ -112,6 +112,7 @@ def _persist_llm_sections_sync(bot) -> None:
     existing["openai_codex"]["agent_reasoning_effort"] = (
         bot.config.openai_codex.agent_reasoning_effort
     )
+    existing["openai_codex"]["agent_model"] = bot.config.openai_codex.agent_model
 
     if "ollama" not in existing:
         existing["ollama"] = {}
@@ -231,6 +232,15 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                     if bot.config.openai_codex.agent_reasoning_effort is not None
                     else getattr(bot.llm_gateway.codex_client, "reasoning_effort", None)
                 ),
+                # Codex-scoped configuration status (agent_model ?? model) —
+                # deliberately independent of whichever provider is active;
+                # trajectory stamps carry the runtime truth per iteration.
+                "agent_model": bot.config.openai_codex.agent_model,
+                "effective_agent_model": (
+                    bot.config.openai_codex.agent_model
+                    if bot.config.openai_codex.agent_model is not None
+                    else bot.config.openai_codex.model
+                ),
             },
             "ollama": {
                 "configured": ollama_configured,
@@ -324,6 +334,12 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         },
                         status=400,
                     )
+                # agent_model: same inherit contract (null/""/whitespace);
+                # free string like model — the dropdown is the UI constraint.
+                agent_model_present = "agent_model" in body
+                agent_model = body.get("agent_model")
+                if agent_model is not None:
+                    agent_model = str(agent_model).strip() or None
                 changed = False
                 # Agent effort is read from config at call time by the agent
                 # iteration callbacks — persisting it must NOT trigger a codex
@@ -350,6 +366,11 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         None if agent_effort is None else str(agent_effort)
                     )
                     changed = True
+                if agent_model_present:
+                    # Read at call time by the agent callbacks — no client
+                    # reload needed (mirrors agent_reasoning_effort).
+                    cfg.agent_model = agent_model
+                    changed = True
                 if changed:
                     if needs_reload:
                         await bot.llm_gateway.reload_codex_inner()
@@ -363,6 +384,7 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             "model": cfg.model,
             "reasoning_effort": cfg.reasoning_effort,
             "agent_reasoning_effort": cfg.agent_reasoning_effort,
+            "agent_model": cfg.agent_model,
             "configured": bot.llm_gateway.codex_client is not None,
         })
 

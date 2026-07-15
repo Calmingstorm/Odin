@@ -241,9 +241,13 @@ class OllamaClient(LLMProvider):
         self, messages: list[dict], system: str,
         tools: list[dict],
         *, reasoning_effort: str | None = None,  # signature parity; no effort concept
+        model: str | None = None,  # signature parity; Codex-scoped override, ignored
     ) -> LLMResponse:
+        # Pre-await local: body and response provenance share one snapshot
+        # (self.model is live-reloadable; never re-read it after network I/O).
+        resolved_model = self.model
         body = {
-            "model": self.model,
+            "model": resolved_model,
             "messages": self._convert_messages(messages, system),
             "tools": self._convert_tools(tools),
             "stream": False,
@@ -252,7 +256,11 @@ class OllamaClient(LLMProvider):
             },
         }
         data = await self._request_with_retry(body)
-        return self._parse_response(data)
+        resp = self._parse_response(data)
+        resp.provenance_provider = "ollama"
+        resp.provenance_model = resolved_model
+        resp.provenance_reasoning_effort = None  # no effort concept
+        return resp
 
     def _parse_response(self, data: dict) -> LLMResponse:
         """Parse Ollama response into LLMResponse."""

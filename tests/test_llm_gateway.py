@@ -328,6 +328,39 @@ class TestCallWithTools:
         assert out is aux_resp  # routed to the cheap auxiliary client
         aux.chat_with_tools.assert_awaited_once()
 
+    async def test_call_with_tools_preserves_provenance(self):
+        """The gateway wrapper returns the child response's provenance
+        unchanged — never overwritten with active_client/gateway identity."""
+        from src.llm.types import LLMResponse
+        resp = LLMResponse(text="ok", provenance_provider="codex",
+                           provenance_model="gpt-5.6-sol",
+                           provenance_reasoning_effort="xhigh")
+        client = SimpleNamespace(chat_with_tools=AsyncMock(return_value=resp), model="gpt-5.5")
+        gw = _gw(codex=client)
+        out = await gw.call_with_tools(messages=[], system="s", tools=[])
+        assert out is resp
+        assert out.provenance_provider == "codex"
+        assert out.provenance_model == "gpt-5.6-sol"
+        assert out.provenance_reasoning_effort == "xhigh"
+
+    async def test_router_diversion_carries_aux_provenance(self):
+        """A cheap-routed turn reports the AUXILIARY client's provenance —
+        the exact case a call-site snapshot of active_client would lie
+        about."""
+        from src.llm.types import LLMResponse
+        aux_resp = LLMResponse(text="ok", provenance_provider="codex",
+                               provenance_model="gpt-4o-mini")
+        strong = SimpleNamespace(chat_with_tools=AsyncMock(), model="gpt-5.6-sol")
+        aux = SimpleNamespace(chat_with_tools=AsyncMock(return_value=aux_resp),
+                              model="gpt-4o-mini")
+        router = MagicMock()
+        router.route = AsyncMock(return_value=SimpleNamespace(
+            use_strong=False, intent=SimpleNamespace(value="chat"), confidence=0.9))
+        gw = _gw(codex=strong, router=router, aux=aux)
+        out = await gw.call_with_tools(messages=[], system="s", tools=[], user_message="hi")
+        assert out.provenance_model == "gpt-4o-mini"
+        strong.chat_with_tools.assert_not_awaited()
+
     async def test_cost_record_exception_non_fatal(self):
         resp = SimpleNamespace(input_tokens=1, output_tokens=1)
         client = SimpleNamespace(chat_with_tools=AsyncMock(return_value=resp), model="m")

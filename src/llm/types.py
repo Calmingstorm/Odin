@@ -33,6 +33,17 @@ class LLMResponse:
     stop_reason: str = "end_turn"  # "end_turn" or "tool_use"
     input_tokens: int = 0
     output_tokens: int = 0
+    # Execution provenance: the frozen provider identity and the serialized
+    # model/effort of the successful outbound request. Providers stamp these
+    # from the SAME pre-await locals the request body was built from — the
+    # only layer that stays truthful across gateway routing, retries, and
+    # live config reloads. Empty/None = unknown; consumers must record it as
+    # unknown, never substitute a call-site guess. reasoning_effort None
+    # means "not sent/not applicable" — distinct from the literal Codex
+    # effort string "none".
+    provenance_provider: str = ""
+    provenance_model: str = ""
+    provenance_reasoning_effort: str | None = None
 
     @property
     def is_tool_use(self) -> bool:

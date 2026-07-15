@@ -318,6 +318,11 @@ class OpenAICodexConfig(BaseModel):
     # inherit). Read at call time, so live changes reach in-flight agents
     # on their next iteration.
     agent_reasoning_effort: ReasoningEffort | None = None
+    # Model for SPAWNED-AGENT iterations only. None = inherit ``model``.
+    # Free string like ``model`` (the WebUI dropdown is the constraint;
+    # an unsupported value fails per-request, same as ``model``). Read at
+    # call time, so live changes reach in-flight agents next iteration.
+    agent_model: str | None = None
     credentials_path: str = "./data/codex_auth.json"
     # Streaming transport timeouts: a generous whole-request backstop (long
     # high-effort reasoning turns stream well past 10 minutes) plus a stall
@@ -341,6 +346,17 @@ class OpenAICodexConfig(BaseModel):
             )
             return "low"
         return v
+
+    @field_validator("agent_model", mode="before")
+    @classmethod
+    def _normalize_agent_model(cls, v):
+        # ""/whitespace-only mean INHERIT (same contract as the admin API);
+        # normalizing here keeps hand-edited configs from carrying a value
+        # that is visually empty but truthy.
+        if v is None:
+            return None
+        v = str(v).strip()
+        return v or None
 
     @field_validator("request_timeout_seconds")
     @classmethod
