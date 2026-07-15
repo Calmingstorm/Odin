@@ -45,6 +45,27 @@ if TYPE_CHECKING:
 log = get_logger("discord")
 
 
+def _agent_llm_policy(config: object, client: object) -> tuple[str | None, str | None, bool]:
+    """Resolve the spawned-agent LLM policy from ONE config read.
+
+    Returns ``(agent_effort, resolved_model, is_codex)``. ``resolved_model``
+    is the exact string passed to ``chat_with_tools(model=...)`` AND stamped
+    into the iteration metadata — resolving once (``agent_model ?? model``,
+    ""/whitespace = inherit) guarantees the request body and the trajectory
+    stamp cannot diverge under a live config change mid-iteration. For
+    providers that pin their model (no ``reasoning_effort`` attr = not the
+    Codex client) it is None: the override would be ignored, and an ignored
+    override must never be stamped as the model that answered.
+    """
+    codex_cfg = getattr(config, "openai_codex", None)
+    agent_effort = getattr(codex_cfg, "agent_reasoning_effort", None)
+    is_codex = hasattr(client, "reasoning_effort")
+    raw = getattr(codex_cfg, "agent_model", None)
+    agent_model = (str(raw).strip() or None) if raw else None
+    resolved_model = (agent_model or getattr(codex_cfg, "model", None)) if is_codex else None
+    return agent_effort, resolved_model, is_codex
+
+
 @dataclass(frozen=True)
 class AgentTaskDeps:
     """The true dependency surface of the agents/tasks/loops handlers."""
@@ -371,21 +392,20 @@ class AgentTaskTools:
         ) -> dict:
             # Resolve the client ONCE per call so the provider/model/effort
             # stamp describes the client this request actually went to, and
-            # read the agent effort from live config at call time (a WebUI
+            # read the agent policy from live config at call time (a WebUI
             # change reaches in-flight agents on their next iteration).
             client = self._llm_gateway.active_client
-            agent_effort = getattr(
-                getattr(self._get_config(), "openai_codex", None),
-                "agent_reasoning_effort",
-                None,
+            agent_effort, resolved_model, is_codex = _agent_llm_policy(
+                self._get_config(), client
             )
             resp = await client.chat_with_tools(
                 messages=messages,
                 system=sys_prompt,
                 tools=tool_defs,
                 reasoning_effort=agent_effort,
+                model=resolved_model,
             )
-            if hasattr(client, "reasoning_effort"):
+            if is_codex:
                 effective_effort = (
                     agent_effort if agent_effort is not None else client.reasoning_effort
                 )
@@ -396,7 +416,7 @@ class AgentTaskTools:
                 "tool_calls": [{"name": tc.name, "input": tc.input} for tc in resp.tool_calls],
                 "stop_reason": resp.stop_reason,
                 "provider": getattr(client, "provider_name", ""),
-                "model": getattr(client, "model", ""),
+                "model": resolved_model if resolved_model else getattr(client, "model", ""),
                 "reasoning_effort": effective_effort,
             }
 
@@ -665,18 +685,17 @@ class AgentTaskTools:
         # Build iteration/tool callbacks (same pattern as _handle_spawn_agent)
         async def _iteration_cb(messages, sys, tool_defs):
             client = self._llm_gateway.active_client
-            agent_effort = getattr(
-                getattr(self._get_config(), "openai_codex", None),
-                "agent_reasoning_effort",
-                None,
+            agent_effort, resolved_model, is_codex = _agent_llm_policy(
+                self._get_config(), client
             )
             resp = await client.chat_with_tools(
                 messages=messages,
                 system=sys,
                 tools=tool_defs,
                 reasoning_effort=agent_effort,
+                model=resolved_model,
             )
-            if hasattr(client, "reasoning_effort"):
+            if is_codex:
                 effective_effort = (
                     agent_effort if agent_effort is not None else client.reasoning_effort
                 )
@@ -689,7 +708,7 @@ class AgentTaskTools:
                 ],
                 "stop_reason": resp.stop_reason or "end_turn",
                 "provider": getattr(client, "provider_name", ""),
-                "model": getattr(client, "model", ""),
+                "model": resolved_model if resolved_model else getattr(client, "model", ""),
                 "reasoning_effort": effective_effort,
             }
 

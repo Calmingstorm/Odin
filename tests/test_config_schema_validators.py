@@ -233,3 +233,24 @@ class TestAgentReasoningEffortConfig:
         assert cfg.agent_reasoning_effort == "low"
         # and the main field's coercion still works
         assert OpenAICodexConfig(reasoning_effort="minimal").reasoning_effort == "low"
+
+
+class TestAgentModelConfig:
+    def test_default_is_inherit(self):
+        from src.config.schema import OpenAICodexConfig
+        assert OpenAICodexConfig().agent_model is None
+
+    def test_value_round_trips(self):
+        from src.config.schema import OpenAICodexConfig
+        assert OpenAICodexConfig(agent_model="gpt-5.6-luna").agent_model == "gpt-5.6-luna"
+
+    def test_empty_and_whitespace_mean_inherit(self):
+        """""/whitespace normalize to None — a hand-edited config must not
+        carry a visually-empty but truthy override."""
+        from src.config.schema import OpenAICodexConfig
+        assert OpenAICodexConfig(agent_model="").agent_model is None
+        assert OpenAICodexConfig(agent_model="   ").agent_model is None
+
+    def test_surrounding_whitespace_stripped(self):
+        from src.config.schema import OpenAICodexConfig
+        assert OpenAICodexConfig(agent_model=" gpt-5.5 ").agent_model == "gpt-5.5"

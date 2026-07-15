@@ -345,6 +345,116 @@ class TestAgentReasoningEffortCallback:
         assert out["reasoning_effort"] == "medium"
 
 
+class TestAgentModelCallback:
+    """openai_codex.agent_model — the spawned-agent model override. The
+    callback resolves agent_model ?? model from ONE config read, passes the
+    RESOLVED value to chat_with_tools, and stamps that same value: the
+    request body and the trajectory stamp cannot diverge."""
+
+    def _spawned(self, cfg_codex, client):
+        cfg = _cfg()
+        cfg.openai_codex = cfg_codex
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=SimpleNamespace(active_client=client))
+        t._agent_manager.spawn.return_value = "agent-m"
+        t._agent_manager._agents = {}
+        return t
+
+    async def _callback(self, t):
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        return t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
+
+    async def test_override_passed_and_stamped(self):
+        client = _FakeEffortClient()
+        t = self._spawned(SimpleNamespace(agent_reasoning_effort=None,
+                                          agent_model="gpt-5.6-luna",
+                                          model="gpt-5.6-sol"), client)
+        cb = await self._callback(t)
+        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["model"] == "gpt-5.6-luna"
+        assert out["model"] == "gpt-5.6-luna"
+
+    async def test_inherit_passes_resolved_chat_model(self):
+        """None = inherit still passes the RESOLVED config model — never
+        None-and-let-self.model-decide-later — so the body and the stamp
+        share one source (the values here differ from client.model on
+        purpose to prove the config is that source)."""
+        client = _FakeEffortClient()
+        t = self._spawned(SimpleNamespace(agent_reasoning_effort=None,
+                                          agent_model=None,
+                                          model="gpt-5.6-sol"), client)
+        cb = await self._callback(t)
+        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["model"] == "gpt-5.6-sol"
+        assert out["model"] == "gpt-5.6-sol"
+
+    async def test_whitespace_override_means_inherit(self):
+        client = _FakeEffortClient()
+        t = self._spawned(SimpleNamespace(agent_reasoning_effort=None,
+                                          agent_model="   ",
+                                          model="gpt-5.6-sol"), client)
+        cb = await self._callback(t)
+        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["model"] == "gpt-5.6-sol"
+        assert out["model"] == "gpt-5.6-sol"
+
+    async def test_live_config_change_tracks_per_iteration(self):
+        """Body model == stamped model on EVERY iteration even when config
+        changes between iterations."""
+        client = _FakeEffortClient()
+        cfg_codex = SimpleNamespace(agent_reasoning_effort=None,
+                                    agent_model=None, model="gpt-5.6-sol")
+        t = self._spawned(cfg_codex, client)
+        cb = await self._callback(t)
+        out1 = await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["model"] == "gpt-5.6-sol" == out1["model"]
+        cfg_codex.agent_model = "gpt-5.6-luna"  # live WebUI change
+        out2 = await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["model"] == "gpt-5.6-luna" == out2["model"]
+
+    async def test_non_codex_provider_stamps_actual_model(self):
+        """A provider that pins its model ignores the override — the stamp
+        must report what actually answered, never the Codex agent setting."""
+        class PinnedModelClient:
+            model = "qwen3"
+            provider_name = "ollama"
+
+            def __init__(self):
+                self.captured: dict = {}
+
+            async def chat_with_tools(self, **kw):
+                self.captured.update(kw)
+                return SimpleNamespace(text="hi", tool_calls=[], stop_reason="end_turn")
+
+        client = PinnedModelClient()
+        t = self._spawned(SimpleNamespace(agent_reasoning_effort=None,
+                                          agent_model="gpt-5.6-luna",
+                                          model="gpt-5.6-sol"), client)
+        cb = await self._callback(t)
+        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["model"] is None  # override not forwarded
+        assert out["model"] == "qwen3"
+
+    async def test_loop_spawn_callback_same_treatment(self):
+        client = _FakeEffortClient()
+        cfg = _cfg()
+        cfg.openai_codex = SimpleNamespace(agent_reasoning_effort=None,
+                                           agent_model="gpt-5.6-luna",
+                                           model="gpt-5.6-sol")
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=SimpleNamespace(active_client=client))
+        t._loop_manager._loops = {"L1": SimpleNamespace(
+            status="running", requester_id="1", requester_name="u",
+            goal="loop goal", iteration_count=1)}
+        t._loop_agent_bridge.spawn_agents_for_loop = MagicMock(return_value=["a1"])
+        await t._handle_spawn_loop_agents(
+            _message(), {"loop_id": "L1", "tasks": [{"label": "x", "goal": "g"}]})
+        cb = t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs["iteration_callback"]
+        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["model"] == "gpt-5.6-luna"
+        assert out["model"] == "gpt-5.6-luna"
+
+
 # --------------------------------------------------------------------------- #
 # simple agent handlers
 # --------------------------------------------------------------------------- #

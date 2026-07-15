@@ -152,6 +152,24 @@ class TestLlmStatus:
             assert body["codex"]["effective_agent_reasoning_effort"] == "low"
 
     @pytest.mark.asyncio
+    async def test_llm_status_agent_model_fields(self):
+        """Codex-scoped configuration status: effective = agent_model ??
+        model, deliberately independent of whichever provider is active."""
+        app, bot = _app(register_llm_provider)
+        bot.llm_gateway.codex_client = SimpleNamespace(reasoning_effort="high")
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.kimi_client = None
+        bot.llm_gateway.active_client = None
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/llm/status")).json()
+            assert body["codex"]["agent_model"] is None
+            assert body["codex"]["effective_agent_model"] == bot.config.openai_codex.model
+            bot.config.openai_codex.agent_model = "gpt-5.6-luna"
+            body = await (await c.get("/api/llm/status")).json()
+            assert body["codex"]["agent_model"] == "gpt-5.6-luna"
+            assert body["codex"]["effective_agent_model"] == "gpt-5.6-luna"
+
+    @pytest.mark.asyncio
     async def test_llm_status_no_active_client(self):
         app, bot = _app(register_llm_provider)
         bot.llm_gateway.codex_client = None
@@ -364,6 +382,85 @@ class TestProviderConfig:
         assert bot.config.openai_codex.agent_reasoning_effort is None
         assert bot.config.openai_codex.model != "changed-model"
         bot.llm_gateway.reload_codex_inner.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_codex_agent_model_set_persists_without_reload(self):
+        """agent_model is read at call time by the agent callbacks — an
+        agent-only change must persist but NOT reload the codex client, and
+        it must appear immediately in configured + effective status."""
+        app, bot = _app(register_provider_config, register_llm_provider)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.kimi_client = None
+        bot.llm_gateway.active_client = None
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"agent_model": "gpt-5.6-luna"})
+            body = await r.json()
+            assert r.status == 200 and body["agent_model"] == "gpt-5.6-luna"
+            assert bot.config.openai_codex.agent_model == "gpt-5.6-luna"
+            bot.llm_gateway.reload_codex_inner.assert_not_awaited()
+            status = await (await c.get("/api/llm/status")).json()
+            assert status["codex"]["agent_model"] == "gpt-5.6-luna"
+            assert status["codex"]["effective_agent_model"] == "gpt-5.6-luna"
+
+    @pytest.mark.asyncio
+    async def test_codex_agent_model_null_empty_whitespace_inherit(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        async with TestClient(TestServer(app)) as c:
+            for inherit_value in (None, "", "   "):
+                bot.config.openai_codex.agent_model = "gpt-5.6-luna"
+                r = await c.put("/api/llm/codex/config",
+                                json={"agent_model": inherit_value})
+                assert r.status == 200
+                assert (await r.json())["agent_model"] is None
+                assert bot.config.openai_codex.agent_model is None
+        bot.llm_gateway.reload_codex_inner.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_codex_agent_model_free_string_and_stripping(self):
+        """Free string like model — unknown values round-trip (the dropdown
+        is the UI constraint); surrounding whitespace is normalized."""
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"agent_model": "  gpt-9-future  "})
+            assert r.status == 200
+            assert bot.config.openai_codex.agent_model == "gpt-9-future"
+
+    @pytest.mark.asyncio
+    async def test_codex_agent_model_missing_key_untouched(self):
+        """Absent key ≠ explicit null — a PUT without the field must not
+        reset an existing override."""
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        bot.config.openai_codex.agent_model = "gpt-5.6-luna"
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json={"max_tokens": 5000})
+            assert r.status == 200
+            assert bot.config.openai_codex.agent_model == "gpt-5.6-luna"
+
+    @pytest.mark.asyncio
+    async def test_codex_combined_model_and_agent_model_reloads_once(self):
+        """The agent-only no-reload optimization must not suppress the reload
+        a base-model change requires."""
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"model": "gpt-5.6-sol",
+                                  "agent_model": "gpt-5.6-luna"})
+            assert r.status == 200
+        assert bot.config.openai_codex.model == "gpt-5.6-sol"
+        assert bot.config.openai_codex.agent_model == "gpt-5.6-luna"
+        assert bot.llm_gateway.reload_codex_inner.await_count == 1
 
     @pytest.mark.asyncio
     async def test_codex_mixed_change_still_reloads(self):
@@ -701,6 +798,22 @@ class TestPersistHelpers:
         written = Path("config.yml").read_text()
         assert "agent_reasoning_effort" in written
         assert "agent_reasoning_effort: low" not in written
+
+    def test_persist_includes_agent_model(self):
+        """Same allowlist requirement as agent_reasoning_effort — without the
+        explicit write, UI saves of the agent model would never persist."""
+        from pathlib import Path
+        Path("config.yml").write_text("discord:\n  token: fake\n")
+        bot = _bot()
+        bot.config.openai_codex.agent_model = "gpt-5.6-luna"
+        _persist_llm_sections_sync(bot)
+        written = Path("config.yml").read_text()
+        assert "agent_model: gpt-5.6-luna" in written
+        bot.config.openai_codex.agent_model = None
+        _persist_llm_sections_sync(bot)
+        written = Path("config.yml").read_text()
+        assert "agent_model" in written
+        assert "agent_model: gpt-5.6-luna" not in written
 
     def test_persist_empty_file_returns(self):
         from pathlib import Path

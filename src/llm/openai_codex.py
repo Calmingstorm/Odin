@@ -433,6 +433,7 @@ class CodexChatClient:
         tools: list[dict],
         *,
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> LLMResponse:
         """Send a request with tool definitions, return structured LLMResponse.
 
@@ -444,13 +445,15 @@ class CodexChatClient:
                 (None = use self.reasoning_effort). Resolved into a LOCAL
                 value — never assigned onto self, which concurrent chat and
                 agent calls would race.
+            model: Per-request override of the configured model (None/empty
+                = use self.model). Same locality rule as reasoning_effort.
 
         Returns:
             LLMResponse with text, tool_calls, and stop_reason.
         """
         effort = reasoning_effort if reasoning_effort is not None else self.reasoning_effort
         body = {
-            "model": self.model,
+            "model": model if model else self.model,
             "instructions": system,
             "input": self._convert_messages_with_tools(messages),
             "tools": self._convert_tools_cached(tools),

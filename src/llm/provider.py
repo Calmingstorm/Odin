@@ -25,12 +25,19 @@ class LLMProvider(ABC):
         self, messages: list[dict], system: str,
         tools: list[dict],
         *, reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> LLMResponse:
         """Completion with tool calling — returns structured response.
 
         reasoning_effort overrides the provider's configured effort for this
         single request (None = use the configured value). Providers without
         a reasoning-effort concept accept and ignore it.
+
+        model overrides the provider's configured model for this single
+        request (None = use the configured value). Codex honors it (spawned
+        agents run on ``openai_codex.agent_model``); providers that pin
+        their model accept and ignore it — callers must never present an
+        ignored override as the model that answered.
         """
 
     @abstractmethod

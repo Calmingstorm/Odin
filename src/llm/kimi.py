@@ -303,6 +303,7 @@ class KimiClient(LLMProvider):
         self, messages: list[dict], system: str,
         tools: list[dict],
         *, reasoning_effort: str | None = None,  # signature parity; no effort concept
+        model: str | None = None,  # signature parity; Codex-scoped override, ignored
         **kwargs,
     ) -> LLMResponse:
         adapted_system = system + KIMI_TOOL_ENFORCEMENT

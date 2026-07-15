@@ -490,6 +490,68 @@ class TestPerCallReasoningOverride:
         assert client.reasoning_effort == "medium"
 
 
+class TestPerCallModelOverride:
+    """chat_with_tools(model=...) overrides the configured model for that
+    single request WITHOUT mutating client state — same locality rule as the
+    reasoning override (concurrent chat and agent calls share self)."""
+
+    _TOOLS = [{"name": "t", "description": "d",
+               "input_schema": {"type": "object", "properties": {}}}]
+
+    @staticmethod
+    def _capture_tools_list(client):
+        from types import SimpleNamespace
+        bodies = []
+
+        async def fake_stream(body):
+            bodies.append(body)
+            return SimpleNamespace(text="ok", tool_calls=[], stop_reason="end")
+
+        client._stream_tool_request = fake_stream
+        return bodies
+
+    async def test_override_wins_and_client_untouched(self):
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-sol",
+                                 max_tokens=1000, reasoning_effort="medium")
+        bodies = self._capture_tools_list(client)
+        await client.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
+            model="gpt-5.6-luna",
+        )
+        assert bodies[0]["model"] == "gpt-5.6-luna"
+        assert client.model == "gpt-5.6-sol"
+
+    async def test_none_and_empty_inherit_configured(self):
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-sol",
+                                 max_tokens=1000, reasoning_effort="medium")
+        bodies = self._capture_tools_list(client)
+        await client.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
+            model=None,
+        )
+        await client.chat_with_tools(
+            [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
+            model="",
+        )
+        assert bodies[0]["model"] == "gpt-5.6-sol"
+        assert bodies[1]["model"] == "gpt-5.6-sol"
+
+    async def test_concurrent_calls_do_not_leak_models(self):
+        import asyncio
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-sol",
+                                 max_tokens=1000, reasoning_effort="medium")
+        bodies = self._capture_tools_list(client)
+        msgs = [{"role": "user", "content": "hi"}]
+        await asyncio.gather(
+            client.chat_with_tools(msgs, "sys", self._TOOLS, model="gpt-5.6-luna"),
+            client.chat_with_tools(msgs, "sys", self._TOOLS),
+            client.chat_with_tools(msgs, "sys", self._TOOLS, model="gpt-5.5"),
+        )
+        models = sorted(b["model"] for b in bodies)
+        assert models == ["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol"]
+        assert client.model == "gpt-5.6-sol"
+
+
 class TestTransportTimeouts:
     def test_ctor_defaults(self):
         client = _client()

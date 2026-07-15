@@ -23,6 +23,9 @@ openai_codex:
   # reasoning_effort ("none" is a real effort level, not inherit).
   # Read at call time — live changes reach in-flight agents next iteration.
   agent_reasoning_effort: null
+  # Model for spawned-agent iterations only. Unset/null = inherit model.
+  # Read at call time — live changes reach in-flight agents next iteration.
+  agent_model: null
   credentials_path: ./data/codex_auth.json
   # Streaming transport timeouts. request_timeout_seconds is a generous
   # whole-request backstop (long high-effort reasoning turns stream past
