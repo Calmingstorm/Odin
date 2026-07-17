@@ -220,6 +220,29 @@ def _restore_section(section, snap: dict) -> None:
         setattr(section, f, v)
 
 
+async def _shielded_settle(coro_factory) -> tuple[Exception | None, bool]:
+    """Run ``coro_factory()`` to completion, un-interruptible by REPEATED
+    caller cancellation (records intent, defers propagation). Used to run a
+    restore/reload that must never be abandoned midway (a second cancellation
+    could otherwise release provider_lock before restoration completed).
+    Returns ``(exc_or_None, was_cancelled)``."""
+    task = asyncio.ensure_future(coro_factory())
+    was_cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            was_cancelled = True
+        except Exception:
+            break
+    # A coroutine that itself raised/was cancelled ends the task in a
+    # cancelled state — .exception() would re-raise, so treat it as a
+    # cancellation signal (not a caught exception).
+    if task.cancelled():
+        return None, True
+    return task.exception(), was_cancelled
+
+
 async def _persist_or_restore(bot, restore_and_reload) -> Exception | None:
     """Settle-safe persist under the caller's held provider_lock, with EXACT
     restore of runtime state on failure — the transactional contract every
@@ -229,8 +252,9 @@ async def _persist_or_restore(bot, restore_and_reload) -> Exception | None:
     never released while the filesystem worker is in flight, and a cancelled
     caller is never mistaken for a successful write. On a write FAILURE the
     disk is unchanged, so ``restore_and_reload`` restores config + reloads the
-    live client to the prior generation. A caller cancellation is re-raised
-    AFTER state is coherent (committed on success, restored on failure).
+    live client to the prior generation — SHIELDED so repeated cancellation
+    can't interrupt it. A caller cancellation is re-raised AFTER state is
+    coherent (committed on success, restored on failure).
 
     Returns the persist exception on failure, else None.
     """
@@ -241,13 +265,51 @@ async def _persist_or_restore(bot, restore_and_reload) -> Exception | None:
     exc, was_cancelled = await gw.run_persist_settled(
         lambda: _persist_llm_sections_sync(bot))
     if exc is not None:
-        await restore_and_reload()
-        if was_cancelled:
+        _, restore_cancelled = await _shielded_settle(restore_and_reload)
+        if was_cancelled or restore_cancelled:
             raise asyncio.CancelledError
         return exc
     if was_cancelled:
         raise asyncio.CancelledError
     return None
+
+
+async def _commit_config(bot, section, new_values: dict, reload_inner,
+                         set_markers: tuple[str, ...] = (),
+                         all_markers: tuple[str, ...] = ()) -> Exception | None:
+    """One transaction under the caller's held provider_lock for a provider
+    config route: snapshot → apply ALREADY-VALIDATED ``new_values`` → forward
+    reload → settle-safe persist, with EXACT restore (config fields + UI-set
+    secret markers + client) on a forward-reload failure/cancellation OR a
+    persist failure. All restoration is shielded. ``new_values`` MUST be fully
+    validated before this call (no mutation may happen before it), so a 400
+    never leaves partial state. ``set_markers`` are added as part of this
+    commit; ``all_markers`` are snapshotted/restored. Returns None on commit,
+    else the failure exception.
+    """
+    prior = _snapshot_section(section, tuple(new_values.keys()))
+    prior_markers = {m: (m in _ui_set_secrets) for m in all_markers}
+
+    async def _restore():
+        _restore_section(section, prior)
+        for m, was in prior_markers.items():
+            (_ui_set_secrets.add if was else _ui_set_secrets.discard)(m)
+        if reload_inner is not None:
+            await reload_inner()
+
+    _restore_section(section, new_values)
+    for m in set_markers:
+        _ui_set_secrets.add(m)
+    if reload_inner is not None:
+        # _shielded_settle never raises — it returns the forward reload's
+        # exception (or a cancellation flag) for a deterministic decision.
+        reload_exc, reload_cancelled = await _shielded_settle(lambda: reload_inner())
+        if reload_exc is not None or reload_cancelled:
+            _, rc = await _shielded_settle(_restore)
+            if reload_cancelled or rc:
+                raise asyncio.CancelledError
+            return reload_exc
+    return await _persist_or_restore(bot, _restore)
 
 
 def register_connection_pools(routes: web.RouteTableDef, bot) -> None:
@@ -481,51 +543,36 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 agent_model = body.get("agent_model")
                 if agent_model is not None:
                     agent_model = str(agent_model).strip() or None
-                changed = False
-                # Snapshot BEFORE mutation for exact restore on persist failure.
-                _prior = _snapshot_section(cfg, (
-                    "enabled", "model", "max_tokens", "reasoning_effort",
-                    "agent_reasoning_effort", "agent_model"))
-                # Agent effort is read from config at call time by the agent
-                # iteration callbacks — persisting it must NOT trigger a codex
-                # client reload (auth-pool refresh) when nothing else changed.
+                # Parse+validate the COMPLETE update into locals BEFORE any
+                # mutation — a later invalid field must not leave an earlier
+                # one applied (all validation raises here, config untouched).
+                new_values: dict = {}
                 needs_reload = False
                 if "enabled" in body:
-                    cfg.enabled = bool(body["enabled"])
-                    changed = True
+                    new_values["enabled"] = bool(body["enabled"])
                     needs_reload = True
                 if "model" in body and body["model"]:
-                    cfg.model = str(body["model"])
-                    changed = True
+                    new_values["model"] = str(body["model"])
                     needs_reload = True
                 if "max_tokens" in body:
-                    cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
-                    changed = True
+                    new_values["max_tokens"] = _parse_int(
+                        body["max_tokens"], "max_tokens", 1, 128000)
                     needs_reload = True
                 if effort is not None:
-                    cfg.reasoning_effort = str(effort)
-                    changed = True
+                    new_values["reasoning_effort"] = str(effort)
                     needs_reload = True
+                # Agent effort/model are read from config at call time by the
+                # agent callbacks — persisting them must NOT trigger a codex
+                # client reload (auth-pool refresh) when nothing else changed.
                 if agent_effort_present:
-                    cfg.agent_reasoning_effort = (
-                        None if agent_effort is None else str(agent_effort)
-                    )
-                    changed = True
+                    new_values["agent_reasoning_effort"] = (
+                        None if agent_effort is None else str(agent_effort))
                 if agent_model_present:
-                    # Read at call time by the agent callbacks — no client
-                    # reload needed (mirrors agent_reasoning_effort).
-                    cfg.agent_model = agent_model
-                    changed = True
-                if changed:
-                    if needs_reload:
-                        await bot.llm_gateway.reload_codex_inner()
-
-                    async def _restore():
-                        _restore_section(cfg, _prior)
-                        if needs_reload:
-                            await bot.llm_gateway.reload_codex_inner()
-
-                    if await _persist_or_restore(bot, _restore) is not None:
+                    new_values["agent_model"] = agent_model
+                if new_values:
+                    reload_inner = (
+                        bot.llm_gateway.reload_codex_inner if needs_reload else None)
+                    if await _commit_config(bot, cfg, new_values, reload_inner) is not None:
                         return web.json_response({"error": "persist failed"}, status=500)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -625,36 +672,28 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         try:
             async with lock:
                 cfg = bot.config.ollama
-                _prior = _snapshot_section(cfg, (
-                    "enabled", "base_url", "model", "max_tokens", "api_key", "timeout"))
-                changed = False
+                # Validate the COMPLETE update into locals BEFORE mutation.
+                new_values: dict = {}
+                set_markers: tuple[str, ...] = ()
                 if "enabled" in body:
-                    cfg.enabled = bool(body["enabled"])
-                    changed = True
+                    new_values["enabled"] = bool(body["enabled"])
                 if "base_url" in body and body["base_url"]:
-                    cfg.base_url = _validate_ollama_url(str(body["base_url"]))
-                    changed = True
+                    new_values["base_url"] = _validate_ollama_url(str(body["base_url"]))
                 if "model" in body and body["model"]:
-                    cfg.model = str(body["model"])
-                    changed = True
+                    new_values["model"] = str(body["model"])
                 if "max_tokens" in body:
-                    cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
-                    changed = True
+                    new_values["max_tokens"] = _parse_int(
+                        body["max_tokens"], "max_tokens", 1, 128000)
                 if "api_key" in body:
-                    cfg.api_key = str(body["api_key"])
-                    _ui_set_secrets.add("ollama.api_key")
-                    changed = True
+                    new_values["api_key"] = str(body["api_key"])
+                    set_markers = ("ollama.api_key",)
                 if "timeout" in body:
-                    cfg.timeout = _parse_int(body["timeout"], "timeout", 10, 3600)
-                    changed = True
-                if changed:
-                    await bot.llm_gateway.reload_ollama_inner()
-
-                    async def _restore():
-                        _restore_section(cfg, _prior)
-                        await bot.llm_gateway.reload_ollama_inner()
-
-                    if await _persist_or_restore(bot, _restore) is not None:
+                    new_values["timeout"] = _parse_int(body["timeout"], "timeout", 10, 3600)
+                if new_values:
+                    if await _commit_config(
+                        bot, cfg, new_values, bot.llm_gateway.reload_ollama_inner,
+                        set_markers=set_markers, all_markers=("ollama.api_key",),
+                    ) is not None:
                         return web.json_response({"error": "persist failed"}, status=500)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -681,33 +720,26 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         try:
             async with lock:
                 cfg = bot.config.kimi
-                _prior = _snapshot_section(cfg, (
-                    "enabled", "api_key", "model", "max_tokens", "timeout"))
-                changed = False
+                # Validate the COMPLETE update into locals BEFORE mutation.
+                new_values: dict = {}
+                set_markers: tuple[str, ...] = ()
                 if "enabled" in body:
-                    cfg.enabled = bool(body["enabled"])
-                    changed = True
+                    new_values["enabled"] = bool(body["enabled"])
                 if "api_key" in body:
-                    cfg.api_key = str(body["api_key"])
-                    _ui_set_secrets.add("kimi.api_key")
-                    changed = True
+                    new_values["api_key"] = str(body["api_key"])
+                    set_markers = ("kimi.api_key",)
                 if "model" in body and body["model"]:
-                    cfg.model = str(body["model"])
-                    changed = True
+                    new_values["model"] = str(body["model"])
                 if "max_tokens" in body:
-                    cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 262000)
-                    changed = True
+                    new_values["max_tokens"] = _parse_int(
+                        body["max_tokens"], "max_tokens", 1, 262000)
                 if "timeout" in body:
-                    cfg.timeout = _parse_int(body["timeout"], "timeout", 10, 3600)
-                    changed = True
-                if changed:
-                    await bot.llm_gateway.reload_kimi_inner()
-
-                    async def _restore():
-                        _restore_section(cfg, _prior)
-                        await bot.llm_gateway.reload_kimi_inner()
-
-                    if await _persist_or_restore(bot, _restore) is not None:
+                    new_values["timeout"] = _parse_int(body["timeout"], "timeout", 10, 3600)
+                if new_values:
+                    if await _commit_config(
+                        bot, cfg, new_values, bot.llm_gateway.reload_kimi_inner,
+                        set_markers=set_markers, all_markers=("kimi.api_key",),
+                    ) is not None:
                         return web.json_response({"error": "persist failed"}, status=500)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
