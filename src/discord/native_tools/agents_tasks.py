@@ -23,7 +23,13 @@ import discord
 from ...agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ...async_utils import fire_and_forget
 from ...odin_log import get_logger
-from ..background_task import MAX_STEPS, BackgroundTask, create_task_id, run_background_task
+from ..background_task import (
+    MAX_STEPS,
+    BackgroundTask,
+    _send_progress,
+    create_task_id,
+    run_background_task,
+)
 from ..tool_loop import _LoopMessageProxy
 
 if TYPE_CHECKING:
@@ -257,9 +263,23 @@ class AgentTaskTools:
                     audit_logger=self._audit,
                     codex_callback=codex_cb,
                 )
+            except asyncio.CancelledError:
+                # cancel_task interrupted a step mid-run: request_cancel already
+                # set status='cancelled'. The loop unwound before its own
+                # completion path, so post one final progress line (shielded so
+                # it isn't re-cancelled), skip summary + follow-up, and re-raise
+                # so the task settles as cancelled.
+                task.status = "cancelled"
+                try:
+                    await asyncio.shield(_send_progress(task, None))
+                except Exception:
+                    pass
+                raise
             except Exception as e:
                 log.error("Background task %s crashed: %s", task.task_id, e, exc_info=True)
-                task.status = "failed"
+                # Never overwrite a cancellation that already won with 'failed'.
+                if task.status != "cancelled":
+                    task.status = "failed"
 
         task._asyncio_task = asyncio.create_task(_run())
 
@@ -315,16 +335,21 @@ class AgentTaskTools:
             )
         return "\n".join(lines)
 
-    def _handle_cancel_task(self, inp: dict) -> str:
-        """Cancel a running background task."""
+    async def _handle_cancel_task(self, inp: dict) -> str:
+        """Cancel a running background task and wait for it to actually stop.
+
+        Uses ``request_cancel`` (not the cooperative ``cancel``) so an in-flight
+        step is interrupted rather than run to completion; returns only after
+        the task has settled as cancelled.
+        """
         task_id = inp.get("task_id", "")
         task = self._channel_state.background_tasks.get(task_id)
         if not task:
             return f"No task found with ID `{task_id}`."
-        if task.status != "running":
+        cancelled = await task.request_cancel()
+        if not cancelled:
             return f"Task `{task_id}` is not running (status: {task.status})."
-        task.cancel()
-        return f"Cancellation requested for task `{task_id}`."
+        return f"Task `{task_id}` cancelled."
 
     def _handle_start_loop(self, message: discord.Message, inp: dict) -> str:
         """Start an autonomous loop."""

@@ -92,7 +92,38 @@ class BackgroundTask:
     _asyncio_task: asyncio.Task | None = field(default=None, repr=False)
 
     def cancel(self) -> None:
+        """Signal cooperative cancellation (observed between steps)."""
         self._cancel_event.set()
+
+    async def request_cancel(self) -> bool:
+        """Cancel a running task and wait for it to settle.
+
+        Idempotent: returns ``False`` if the task already reached a terminal
+        state (a completed/failed task that finished first wins). The terminal
+        status and the cooperative event are set BEFORE the asyncio task is
+        cancelled, so the runner's cancellation cleanup sees the decision. The
+        settlement wait is shielded so cancelling the caller (the ``cancel_task``
+        tool turn itself) cannot sever the runner mid-cleanup — its subprocess /
+        SSH teardown runs to completion.
+        """
+        if self.status != "running":
+            return False
+        self.status = "cancelled"
+        self._cancel_event.set()
+        t = self._asyncio_task
+        if t is not None and not t.done() and t is not asyncio.current_task():
+            t.cancel()
+            try:
+                await asyncio.shield(t)
+            except asyncio.CancelledError:
+                # t's own cancellation acknowledgement — unless OUR turn was
+                # cancelled (t not yet done), in which case propagate and let
+                # the shielded runner keep settling.
+                if not t.done():
+                    raise
+            except Exception:
+                pass  # runner raised during its own teardown; already cancelled
+        return True
 
 
 async def run_background_task(
@@ -283,11 +314,14 @@ async def run_background_task(
 
     # Final progress update
     await _send_progress(task, progress_msg)
-    await _send_summary(task)
-
-    # Generate conversational follow-up via LLM
-    if codex_callback:
-        await _send_conversational_followup(task, codex_callback)
+    # A cancelled task posts only its final progress line — no summary and no
+    # LLM follow-up (cancellation won; there is nothing to conclude). This also
+    # covers a cancel requested between steps (the loop set status=cancelled).
+    if task.status != "cancelled":
+        await _send_summary(task)
+        # Generate conversational follow-up via LLM
+        if codex_callback:
+            await _send_conversational_followup(task, codex_callback)
 
     log.info(
         "Background task %s finished: %s (%d/%d steps)",
