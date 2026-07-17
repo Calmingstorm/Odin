@@ -305,3 +305,37 @@ class TestReviewNestedCorruption:
         r = ConversationReflector(learned_path=str(p))
         assert r.get_all_entries() == []  # read degrades (no KeyError in formatting)
         assert r.update_entry("k", content="x") is None  # write refuses
+
+    def test_update_entry_rejects_non_string_content_no_corruption(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        p = tmp_path / "learned.json"
+        p.write_text(
+            '{"version": 2, "entries": '
+            '[{"key": "k", "category": "operational", "content": "c"}]}'
+        )
+        r = ConversationReflector(learned_path=str(p))
+        # A numeric content is rejected (the RESULT would be read-path corrupt).
+        assert r.update_entry("k", content=42) is None
+        # The store was never written corrupt: still valid, unchanged, no backup.
+        assert r.get_all_entries()[0]["content"] == "c"
+        assert not list(tmp_path.glob("learned.json.corrupt-*"))
+
+    def test_learned_malformed_optional_fields_degrade(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        base = (
+            '{{"version": 2, "entries": '
+            '[{{"key": "k", "category": "c", "content": "x", {bad}}}]}}'
+        )
+        malformed = (
+            '"topic": 123', '"tags": [1]', '"updated_at": 123',
+            '"created_at": 123', '"last_used_at": 123',
+        )
+        for i, bad in enumerate(malformed):
+            p = tmp_path / f"learned_{i}.json"
+            p.write_text(base.format(bad=bad))
+            r = ConversationReflector(learned_path=str(p))
+            # Read degrades (never reaches prompt/consolidation, no TypeError).
+            assert r.get_all_entries() == []
+            assert r.delete_entry("k") is False  # write refuses

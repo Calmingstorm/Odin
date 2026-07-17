@@ -204,6 +204,17 @@ class ConversationReflector:
                     raise StoreCorruptError(
                         f"learned.json entry has a missing/invalid {field!r} field"
                     )
+            # Optional fields consumed by prompt assembly / consolidation must
+            # also be well-typed when present, or they crash outside the safe
+            # boundary: topic (str), updated_at (timestamp str), tags (list[str]).
+            for opt in ("topic", "updated_at", "created_at", "last_used_at"):
+                if opt in e and not isinstance(e[opt], str):
+                    raise StoreCorruptError(f"learned.json entry {opt!r} is not a string")
+            tags = e.get("tags")
+            if tags is not None and (
+                not isinstance(tags, list) or not all(isinstance(t, str) for t in tags)
+            ):
+                raise StoreCorruptError("learned.json entry 'tags' is not a list of strings")
 
     def _load(self) -> dict:
         """READ path — corruption (top-level OR nested) degrades to an empty
@@ -325,6 +336,14 @@ class ConversationReflector:
                 if category is not None:
                     e["category"] = category
                 e["updated_at"] = datetime.now(UTC).isoformat()
+                # Enforce the full schema on the RESULT before persisting, so no
+                # caller (e.g. the update API) can write a document the read path
+                # would then reject and degrade the whole corpus over.
+                try:
+                    self._validate_learned_shape(data)
+                except StoreCorruptError:
+                    log.warning("Refusing learned update for %r — result malformed", key)
+                    return None
                 self._save(data)
                 return e
         return None
@@ -866,7 +885,7 @@ class ConversationReflector:
                 continue
             try:
                 ref_dt = datetime.fromisoformat(ref)
-            except ValueError:
+            except (ValueError, TypeError):
                 kept.append(e)
                 continue
             if now - ref_dt <= timedelta(days=days):

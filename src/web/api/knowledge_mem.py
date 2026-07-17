@@ -361,10 +361,17 @@ def register_learned_context(routes: web.RouteTableDef, bot) -> None:
             data = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
+        content = data.get("content")
+        category = data.get("category")
+        # Reject non-string values before touching the store — a numeric
+        # content/category would persist and then be classified as corrupt by
+        # the next read, degrading the whole corpus to [].
+        if content is not None and not isinstance(content, str):
+            return web.json_response({"error": "content must be a string"}, status=400)
+        if category is not None and not isinstance(category, str):
+            return web.json_response({"error": "category must be a string"}, status=400)
         updated = await bot.reflector.update_entry_async(
-            key,
-            content=data.get("content"),
-            category=data.get("category"),
+            key, content=content, category=category
         )
         if updated:
             return web.json_response(updated)

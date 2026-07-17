@@ -320,3 +320,13 @@ class TestLearnedContext:
             assert r.status == 200 and (await r.json())["content"] == "revised"
             assert (await c.put("/api/learned/ghost", json={"content": "x"})).status == 404
             assert (await c.put("/api/learned/e2", data="not json")).status == 400
+
+    async def test_update_rejects_non_string_values(self, learned_bot):
+        async with TestClient(TestServer(_app(register_learned_context, bot=learned_bot))) as c:
+            # Numeric content/category must be rejected (400), never persisted —
+            # a persisted numeric value would corrupt the store on the next read.
+            assert (await c.put("/api/learned/e2", json={"content": 42})).status == 400
+            assert (await c.put("/api/learned/e2", json={"category": 7})).status == 400
+            # The store is untouched and still readable.
+            body = await (await c.get("/api/learned")).json()
+            assert body["count"] == 2
