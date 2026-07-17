@@ -136,6 +136,9 @@ def _persist_llm_sections_sync(bot) -> None:
         bot.config.openai_codex.agent_reasoning_effort
     )
     existing["openai_codex"]["agent_model"] = bot.config.openai_codex.agent_model
+    # Removed feature: model routing is gone — strip any legacy block so it
+    # can't linger on disk (runtime already ignores it).
+    existing["openai_codex"].pop("model_routing", None)
 
     # Auxiliary: only enabled + model are configurable (auth and token limit
     # are shared with the main Codex client, never overwritten by this surface).
@@ -143,8 +146,13 @@ def _persist_llm_sections_sync(bot) -> None:
     if aux_cfg is not None:
         if "auxiliary" not in existing["openai_codex"]:
             existing["openai_codex"]["auxiliary"] = {}
-        existing["openai_codex"]["auxiliary"]["enabled"] = aux_cfg.enabled
-        existing["openai_codex"]["auxiliary"]["model"] = aux_cfg.model
+        aux_block = existing["openai_codex"]["auxiliary"]
+        aux_block["enabled"] = aux_cfg.enabled
+        aux_block["model"] = aux_cfg.model
+        # Delete the removed knobs so a legacy config gets cleaned on the next
+        # save (auth + token limit are shared with the main Codex client).
+        for dead in ("tasks", "max_tokens", "credentials_path"):
+            aux_block.pop(dead, None)
 
     if "ollama" not in existing:
         existing["ollama"] = {}

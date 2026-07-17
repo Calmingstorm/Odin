@@ -5311,17 +5311,6 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
             <p v-else class="text-xs text-gray-500">No compression data</p>
           </section>
 
-          <!-- Model Routing -->
-          <section class="hm-card" style="padding:1rem;">
-            <h3 class="text-sm font-medium mb-2">Model Routing</h3>
-            <div v-if="routingStats" class="text-xs text-gray-400 space-y-1">
-              <div>Total routed: {{ routingStats.total || 0 }}</div>
-              <div>Cheap model: {{ routingStats.cheap || 0 }}</div>
-              <div>Strong model: {{ routingStats.strong || 0 }}</div>
-            </div>
-            <p v-else class="text-xs text-gray-500">Routing disabled or no data</p>
-          </section>
-
         </div>
 
         <!-- Freshness Stats -->
@@ -5337,7 +5326,7 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
 
       </div>
     </div>
-  `,setup(){const e=h(!0),t=h({}),s=h([]),n=h({}),a=h({}),i=h(null),l=h(null),r=h(null),o=h(null),c=h(null),u=h(null);let d=null;async function f(){const p=await Promise.allSettled([K.get("/api/startup/diagnostics"),K.get("/api/subsystems/status"),K.get("/api/pools/ssh"),K.get("/api/pools/http"),K.get("/api/risk/stats"),K.get("/api/recovery/stats"),K.get("/api/compression/stats"),K.get("/api/routing/stats"),K.get("/api/freshness/stats"),K.get("/api/governor/stats")]),g=k=>p[k].status==="fulfilled"?p[k].value:null;t.value=g(0)||{};const m=g(1);s.value=Array.isArray(m)?m:m&&m.subsystems||[],n.value=g(2)||{},a.value=g(3)||{},i.value=g(4),l.value=g(5),r.value=g(6),o.value=g(7),c.value=g(8),u.value=g(9),e.value=!1}return Be(()=>{f(),d=setInterval(f,3e4)}),ht(()=>{d&&clearInterval(d)}),{loading:e,startup:t,subsystems:s,sshPool:n,httpPool:a,riskStats:i,recoveryStats:l,compressionStats:r,routingStats:o,freshnessStats:c,governorStats:u,statusColor:qw,formatTime:Cc}}},Ww={setup(){const e=h(""),t=h(""),s=h(!1),n=h(""),a=h(!1),i=h(!1),l=h(!1),r=h(null),o=h(!1);async function c(){a.value=!0,r.value=null,o.value=!1;try{const d=await K.get("/api/update/check");e.value=d.current||"",t.value=d.latest||"",s.value=d.update_available||!1,n.value=d.changelog||"",d.error&&(r.value=d.error),o.value=!0}catch(d){r.value=d.message}finally{a.value=!1}}async function u(){if(await ls({title:"Update & restart",message:"Update Odin and restart? Active tasks will be interrupted.",confirmLabel:"Update & Restart",danger:!0})){i.value=!0,r.value=null;try{await K.post("/api/update/apply",{version:"latest"}),l.value=!0,setTimeout(()=>location.reload(),8e3)}catch(f){r.value=f.message}finally{i.value=!1}}}return Be(c),{current:e,latest:t,updateAvailable:s,changelog:n,checking:a,applying:i,applied:l,error:r,checkDone:o,checkUpdate:c,applyUpdate:u}},template:`
+  `,setup(){const e=h(!0),t=h({}),s=h([]),n=h({}),a=h({}),i=h(null),l=h(null),r=h(null),o=h(null),c=h(null);let u=null;async function d(){const f=await Promise.allSettled([K.get("/api/startup/diagnostics"),K.get("/api/subsystems/status"),K.get("/api/pools/ssh"),K.get("/api/pools/http"),K.get("/api/risk/stats"),K.get("/api/recovery/stats"),K.get("/api/compression/stats"),K.get("/api/freshness/stats"),K.get("/api/governor/stats")]),p=m=>f[m].status==="fulfilled"?f[m].value:null;t.value=p(0)||{};const g=p(1);s.value=Array.isArray(g)?g:g&&g.subsystems||[],n.value=p(2)||{},a.value=p(3)||{},i.value=p(4),l.value=p(5),r.value=p(6),o.value=p(7),c.value=p(8),e.value=!1}return Be(()=>{d(),u=setInterval(d,3e4)}),ht(()=>{u&&clearInterval(u)}),{loading:e,startup:t,subsystems:s,sshPool:n,httpPool:a,riskStats:i,recoveryStats:l,compressionStats:r,freshnessStats:o,governorStats:c,statusColor:qw,formatTime:Cc}}},Ww={setup(){const e=h(""),t=h(""),s=h(!1),n=h(""),a=h(!1),i=h(!1),l=h(!1),r=h(null),o=h(!1);async function c(){a.value=!0,r.value=null,o.value=!1;try{const d=await K.get("/api/update/check");e.value=d.current||"",t.value=d.latest||"",s.value=d.update_available||!1,n.value=d.changelog||"",d.error&&(r.value=d.error),o.value=!0}catch(d){r.value=d.message}finally{a.value=!1}}async function u(){if(await ls({title:"Update & restart",message:"Update Odin and restart? Active tasks will be interrupted.",confirmLabel:"Update & Restart",danger:!0})){i.value=!0,r.value=null;try{await K.post("/api/update/apply",{version:"latest"}),l.value=!0,setTimeout(()=>location.reload(),8e3)}catch(f){r.value=f.message}finally{i.value=!1}}}return Be(c),{current:e,latest:t,updateAvailable:s,changelog:n,checking:a,applying:i,applied:l,error:r,checkDone:o,checkUpdate:c,applyUpdate:u}},template:`
   <div class="p-6 space-y-6 max-w-2xl">
     <div>
       <h2 class="text-lg font-semibold mb-1">Updates</h2>

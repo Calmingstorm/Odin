@@ -377,11 +377,14 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         # Apply to bot
         bot.config = new_config
 
-        # Write to disk
+        # Write to disk — persist the VALIDATED/normalized config, not the
+        # pre-normalized merge, so fields removed from the schema (a legacy
+        # model_routing block, auxiliary tasks/max_tokens/credentials_path)
+        # can't linger on disk after runtime has dropped them.
         config_path = Path("config.yml")
         if config_path.exists():
             try:
-                await asyncio.to_thread(_write_config, config_path, current)
+                await asyncio.to_thread(_write_config, config_path, new_config.model_dump())
             except Exception:
                 log.warning(
                     "Config applied in memory but failed to persist to %s",

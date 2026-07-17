@@ -1021,6 +1021,29 @@ class TestPersistHelpers:
         assert "reasoning_effort" in written and "xhigh" in written
         assert "ollama" in written and "kimi" in written and "llm_provider" in written
 
+    def test_persist_strips_removed_keys(self):
+        # A legacy config carrying the removed knobs (auxiliary tasks/
+        # max_tokens/credentials_path, openai_codex.model_routing) must be
+        # CLEANED on the next save — not left to linger on disk.
+        from pathlib import Path
+
+        from ruamel.yaml import YAML
+        Path("config.yml").write_text(
+            "discord:\n  token: fake\n"
+            "openai_codex:\n"
+            "  model_routing:\n    enabled: true\n"
+            "  auxiliary:\n    enabled: true\n    model: gpt-5.6-terra\n"
+            "    tasks: [compaction]\n    max_tokens: 2048\n    credentials_path: /x\n"
+        )
+        bot = _bot()
+        bot.config.openai_codex.auxiliary.enabled = True
+        bot.config.openai_codex.auxiliary.model = "gpt-5.6-terra"
+        _persist_llm_sections_sync(bot)
+        oc = YAML().load(Path("config.yml").read_text())["openai_codex"]
+        assert "model_routing" not in oc  # removed-feature block gone
+        assert set(oc["auxiliary"]) == {"enabled", "model"}  # only the 2 real knobs
+        assert oc["auxiliary"]["model"] == "gpt-5.6-terra"
+
     def test_persist_preserves_file_mode(self):
         # os.replace of a mkstemp(0600) temp must NOT silently chmod the live
         # 0664 config — the original mode is restored before replace.

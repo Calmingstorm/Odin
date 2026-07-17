@@ -414,10 +414,12 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
         try:
             from ..llm.auxiliary import AuxiliaryLLMClient
 
-            aux_auth = CodexAuthPool(config.openai_codex.credentials_path)
-            if aux_auth.is_configured():
+            # SHARE the primary client's auth pool (not a second pool over the
+            # same files) so account selection, rate-limit rotation, and the
+            # single-use refresh-token lock stay coordinated across both.
+            if codex_client.auth.is_configured():
                 aux_client = CodexChatClient(
-                    auth=aux_auth,
+                    auth=codex_client.auth,
                     model=_aux.model,
                     max_tokens=config.openai_codex.max_tokens,
                     max_retries=config.openai_codex.retry.max_retries,

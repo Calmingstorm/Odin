@@ -48,6 +48,13 @@ def _gw(config=None, codex=None, ollama=None, kimi=None,
     )
 
 
+def _primary(configured=True):
+    """A primary Codex client whose auth pool the auxiliary SHARES: the aux
+    candidate is built with ``primary.auth`` (not a second pool), so tests that
+    build a candidate need a primary exposing an ``auth`` with is_configured()."""
+    return SimpleNamespace(auth=SimpleNamespace(is_configured=lambda: configured))
+
+
 class TestActiveClientAndCallbacks:
     def test_active_client_resolution(self):
         codex, ollama, kimi = object(), object(), object()
@@ -401,7 +408,7 @@ class TestReloadAuxiliary:
 
     async def test_disabled_retires_current_wrapper(self):
         old = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(self._aux_cfg(enabled=False), codex=object(), aux=old)
+        gw = _gw(self._aux_cfg(enabled=False), codex=_primary(), aux=old)
         r = await gw.reload_auxiliary()
         await self._flush_drains(gw)
         assert r["effective_enabled"] is False
@@ -411,7 +418,7 @@ class TestReloadAuxiliary:
     async def test_enable_builds_swaps_and_drains(self):
         old = SimpleNamespace(drain_and_close=AsyncMock())
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(self._aux_cfg(), codex=object(), aux=old)
+        gw = _gw(self._aux_cfg(), codex=_primary(), aux=old)
         with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
              patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
              patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
@@ -422,12 +429,28 @@ class TestReloadAuxiliary:
         assert gw.auxiliary_llm_client is candidate
         old.drain_and_close.assert_awaited_once()  # retired one drained
 
+    async def test_candidate_shares_primary_auth_pool(self):
+        # The aux candidate is built with the PRIMARY's auth pool (shared
+        # account selection / rotation / single-use-refresh lock) — NOT a second
+        # CodexAuthPool over the same files.
+        primary = _primary()
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(self._aux_cfg(), codex=primary, aux=None)
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
+            client_cls.return_value.chat = AsyncMock(return_value="ok")
+            await gw.reload_auxiliary()
+        await self._flush_drains(gw)
+        assert client_cls.call_args.kwargs["auth"] is primary.auth
+        pool_cls.assert_not_called()  # no second pool built for the aux
+
     async def test_unsupported_model_probe_rolls_back(self):
         # An unsupported free-string model fails the probe BEFORE install —
         # the prior wrapper and config stay put; the candidate is drained.
         old = SimpleNamespace(drain_and_close=AsyncMock())
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(self._aux_cfg(model="gpt-bogus"), codex=object(), aux=old)
+        gw = _gw(self._aux_cfg(model="gpt-bogus"), codex=_primary(), aux=old)
         with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
              patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
              patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
@@ -444,7 +467,7 @@ class TestReloadAuxiliary:
         # A candidate built while another reload committed (generation moved)
         # is rejected under the lock and drained — never installed.
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(self._aux_cfg(), codex=object(), aux=None)
+        gw = _gw(self._aux_cfg(), codex=_primary(), aux=None)
 
         def _build(*a, **k):
             gw._aux_reload_gen += 1  # simulate a concurrent commit
@@ -464,7 +487,7 @@ class TestReloadAuxiliary:
     async def test_enable_with_no_prior_wrapper(self):
         # retired is None → _schedule_drain(None) is a quiet no-op.
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(self._aux_cfg(), codex=object(), aux=None)
+        gw = _gw(self._aux_cfg(), codex=_primary(), aux=None)
         with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
              patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
              patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
@@ -476,7 +499,7 @@ class TestReloadAuxiliary:
 
     async def test_disabled_path_concurrent_reload_rejected(self):
         old = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(self._aux_cfg(enabled=False), codex=object(), aux=old)
+        gw = _gw(self._aux_cfg(enabled=False), codex=_primary(), aux=old)
         real_lock = gw.provider_lock
 
         class _BumpingLock:
@@ -501,8 +524,8 @@ class TestReloadAuxiliary:
 
     async def test_build_exception_leaves_prior_untouched(self):
         old = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(self._aux_cfg(), codex=object(), aux=old)
-        with patch("src.discord.llm_gateway.CodexAuthPool", side_effect=RuntimeError("boom")):
+        gw = _gw(self._aux_cfg(), codex=_primary(), aux=old)
+        with patch("src.discord.llm_gateway.CodexChatClient", side_effect=RuntimeError("boom")):
             r = await gw.reload_auxiliary()
         assert r["effective_enabled"] is False
         assert "build failed" in r["reason"]
@@ -510,7 +533,7 @@ class TestReloadAuxiliary:
 
     async def test_primary_changed_during_reload_aborts(self):
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(self._aux_cfg(), codex=object(), aux=None)
+        gw = _gw(self._aux_cfg(), codex=_primary(), aux=None)
 
         def _build(*a, **k):
             gw.codex_client = object()  # primary recreated during build
@@ -528,11 +551,10 @@ class TestReloadAuxiliary:
         candidate.drain_and_close.assert_awaited_once()
 
     async def test_missing_credentials_leaves_prior_untouched(self):
+        # The shared primary auth pool is unconfigured → candidate can't build.
         old = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(self._aux_cfg(), codex=object(), aux=old)
-        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls:
-            pool_cls.return_value.is_configured.return_value = False
-            r = await gw.reload_auxiliary()
+        gw = _gw(self._aux_cfg(), codex=_primary(configured=False), aux=old)
+        r = await gw.reload_auxiliary()
         assert r["effective_enabled"] is False
         assert gw.auxiliary_llm_client is old  # unchanged
         old.drain_and_close.assert_not_called()
@@ -607,7 +629,7 @@ class TestPersistAndConcurrency:
         # A losing concurrent disable must return committed=False (so the
         # route 409s and never persists), not a success.
         old = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(self._aux_cfg(enabled=False), codex=object(), aux=old)
+        gw = _gw(self._aux_cfg(enabled=False), codex=_primary(), aux=old)
         real_lock = gw.provider_lock
 
         class _BumpingLock:
@@ -624,7 +646,7 @@ class TestPersistAndConcurrency:
 
     async def test_cancellation_during_probe_drains_candidate(self):
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(self._aux_cfg(), codex=object(), aux=None)
+        gw = _gw(self._aux_cfg(), codex=_primary(), aux=None)
 
         async def _hang_probe(_client):
             await asyncio.Event().wait()  # cancelled here
@@ -660,7 +682,7 @@ class TestPersistTransaction:
         cfg = self._aux_cfg(enabled=False, model="gpt-5.6-luna")
         old = SimpleNamespace(drain_and_close=AsyncMock())
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(cfg, codex=object(), aux=old)
+        gw = _gw(cfg, codex=_primary(), aux=old)
 
         def _persist_fail():
             raise OSError("disk full")
@@ -685,7 +707,7 @@ class TestPersistTransaction:
     async def test_disable_persist_failure_restores_enabled_wrapper(self):
         cfg = self._aux_cfg(enabled=True, model="gpt-5.6-terra")
         old = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(cfg, codex=object(), aux=old)
+        gw = _gw(cfg, codex=_primary(), aux=old)
 
         def _persist_fail():
             raise OSError("disk full")
@@ -702,7 +724,7 @@ class TestPersistTransaction:
         cfg = self._aux_cfg(enabled=True)
         old = SimpleNamespace(drain_and_close=AsyncMock())
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(cfg, codex=object(), aux=old)
+        gw = _gw(cfg, codex=_primary(), aux=old)
         persisted = []
 
         def _persist_ok():
@@ -737,7 +759,7 @@ class TestCancellationDuringPersist:
         cfg = self._aux_cfg(enabled=False, model="gpt-5.6-luna")
         old = SimpleNamespace(drain_and_close=AsyncMock())
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(cfg, codex=object(), aux=old)
+        gw = _gw(cfg, codex=_primary(), aux=old)
         gate = threading.Event()
         started = threading.Event()
 
@@ -768,7 +790,7 @@ class TestCancellationDuringPersist:
     async def test_disable_cancel_during_persist_failure_restores(self):
         cfg = self._aux_cfg(enabled=True, model="gpt-5.6-terra")
         old = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(cfg, codex=object(), aux=old)
+        gw = _gw(cfg, codex=_primary(), aux=old)
         gate = threading.Event()
         started = threading.Event()
 
@@ -853,7 +875,7 @@ class TestCancellationBranchesComplete:
     async def test_disable_cancel_during_persist_success_commits(self):
         cfg = self._aux_cfg(enabled=True)
         old = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(cfg, codex=object(), aux=old)
+        gw = _gw(cfg, codex=_primary(), aux=old)
         gate = threading.Event()
         started = threading.Event()
 
@@ -879,7 +901,7 @@ class TestCancellationBranchesComplete:
         cfg = self._aux_cfg(enabled=False, model="gpt-5.6-luna")
         old = SimpleNamespace(drain_and_close=AsyncMock())
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(cfg, codex=object(), aux=old)
+        gw = _gw(cfg, codex=_primary(), aux=old)
         gate = threading.Event()
         started = threading.Event()
 

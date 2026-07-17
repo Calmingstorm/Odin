@@ -245,12 +245,13 @@ class LLMGateway:
 
     def _build_aux_candidate(self, desired: dict, primary):
         """Construct a candidate wrapper from an IMMUTABLE desired spec bound
-        to ``primary``. Only the aux MODEL is spec-driven; auth and token limit
-        are shared with the main Codex client (read from live config once here)."""
+        to ``primary``. Only the aux MODEL is spec-driven; the auth pool is
+        SHARED with the primary client (same account selection / rotation /
+        refresh lock) and the token limit is read from live config once here."""
         from ..llm.auxiliary import AuxiliaryLLMClient
 
         config = self.get_config()
-        aux_auth = CodexAuthPool(config.openai_codex.credentials_path)
+        aux_auth = primary.auth
         if not aux_auth.is_configured():
             return None, None
         candidate_client = CodexChatClient(
