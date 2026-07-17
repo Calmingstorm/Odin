@@ -161,6 +161,9 @@ class OdinWebSocket {
     this._lastPongTime = 0;
     this._pingInterval = null;
     this._latency = -1;
+    // True while a WS chat awaits its response — on connection loss the
+    // page gets a chat_error via socket lifecycle, never a duration timer.
+    this._chatPending = false;
     // state: 'disconnected' | 'connecting' | 'connected' | 'reconnecting'
     this._state = 'disconnected';
     this.onStatusChange = null; // callback(connected: boolean)
@@ -262,6 +265,7 @@ class OdinWebSocket {
       user_id: userId || undefined,
       username: username || undefined,
     }));
+    this._chatPending = true;
     return true;
   }
 
@@ -300,6 +304,7 @@ class OdinWebSocket {
       } else if (type === 'event') {
         for (const h of this._handlers.events || []) h(data);
       } else if (type === 'chat_response' || type === 'chat_error') {
+        this._chatPending = false;
         for (const h of this._handlers.chat || []) h(data);
       }
       // subscribed/unsubscribed confirmations are silently consumed
@@ -309,6 +314,16 @@ class OdinWebSocket {
       this._ws = null;
       this._stopPing();
       this._latency = -1;
+      if (this._chatPending) {
+        // The server does not cancel an in-flight turn on disconnect — it
+        // finishes under its own guards and lands in session history.
+        this._chatPending = false;
+        const lost = {
+          type: 'chat_error',
+          error: 'Connection lost — the response may still complete; check session history.',
+        };
+        for (const h of this._handlers.chat || []) h(lost);
+      }
       if (this.onStatusChange) this.onStatusChange(false);
       if (this._shouldConnect) {
         this._reconnectAttempt++;

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 from aiohttp import WSCloseCode, web
 
-from ..llm.secret_scrubber import scrub_output_secrets
+from ..error_presentation import format_user_facing_error
 from ..odin_log import get_logger
 from .chat import MAX_CHAT_CONTENT_LEN, process_web_chat
 
@@ -34,7 +34,6 @@ _LOG_POLL_INTERVAL = 1.0
 
 _WS_CHAT_RATE_LIMIT = 10
 _WS_CHAT_RATE_WINDOW = 60.0
-_WS_CHAT_TIMEOUT = 300.0
 
 
 class WebSocketManager:
@@ -203,15 +202,19 @@ class WebSocketManager:
 
         log.info("WebSocket chat from %s (tier=%s): %s", username, tier or "default", content[:80])
         try:
-            result = await asyncio.wait_for(
-                process_web_chat(
-                    self._bot, content, channel_id,
-                    user_id=user_id, username=username,
-                    allowed_tools=allowed_tools, tier=tier,
-                    token_allowed_hosts=token_hosts,
-                    token_default_host=token_default_host,
-                ),
-                timeout=_WS_CHAT_TIMEOUT,
+            # No outer wall — parity with REST /api/chat. The real bounds
+            # are the tool loop's own guards (iteration caps, LLM request
+            # timeout, per-tool timeouts). The old 300s wait_for cancelled
+            # healthy long turns mid-flight (the last of the arbitrary-wall
+            # family). Honest caveat: a browser disconnect does NOT cancel
+            # this await — the turn runs to completion under those guards
+            # and its result lands in session history.
+            result = await process_web_chat(
+                self._bot, content, channel_id,
+                user_id=user_id, username=username,
+                allowed_tools=allowed_tools, tier=tier,
+                token_allowed_hosts=token_hosts,
+                token_default_host=token_default_host,
             )
             resp = {
                 "type": "chat_response",
@@ -223,17 +226,15 @@ class WebSocketManager:
             if files:
                 resp["files"] = files
             await ws.send_json(resp)
-        except TimeoutError:
-            await ws.send_json({
-                "type": "chat_error",
-                "error": f"Request timed out after {int(_WS_CHAT_TIMEOUT)}s. "
-                         "The operation may still be running.",
-            })
         except Exception as e:
-            log.error("WebSocket chat error: %s", e, exc_info=True)
+            # A naturally raised TimeoutError lands here and is formatted
+            # like any other failure. Never send raw str(e): exception
+            # text carries HTTP bodies (HTML pages), control bytes, and
+            # secrets — the shared formatter bounds and scrubs it.
+            log.error("WebSocket chat error: %s", format_user_facing_error(e), exc_info=True)
             await ws.send_json({
                 "type": "chat_error",
-                "error": scrub_output_secrets(str(e)),
+                "error": format_user_facing_error(e),
             })
 
     async def broadcast_event(self, event: dict) -> None:

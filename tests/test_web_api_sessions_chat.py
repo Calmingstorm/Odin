@@ -81,6 +81,21 @@ class TestChat:
                 r = await c.post("/api/chat", json={"content": "hi"})
                 assert r.status == 502 and (await r.json())["files"]
 
+    async def test_escaping_exception_never_leaks_its_text(self):
+        # An unexpected exception escaping the route becomes aiohttp's
+        # generic 500 — never a detailed body. Pins that an HTML-bearing
+        # exception (the 2026-07-16 incident class) cannot leak through
+        # the REST surface either.
+        html = "<html><body>Internal Server Error<script>cf()</script></body></html>"
+        with patch("src.web.api.process_web_chat",
+                   new=AsyncMock(side_effect=RuntimeError(html))):
+            async with TestClient(TestServer(_app(register_chat, bot=_bot()))) as c:
+                r = await c.post("/api/chat", json={"content": "hi"})
+                assert r.status == 500
+                body = await r.text()
+                assert "<html" not in body
+                assert "cf()" not in body
+
 
 class TestExecute:
     async def test_validation_and_success(self):
