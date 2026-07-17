@@ -290,6 +290,37 @@ class LLMGateway:
         except Exception as exc:
             return f"model probe failed: {type(exc).__name__}"
 
+    async def _run_persist_settled(self, persist):
+        """Run ``persist`` under the caller's held lock, cancellation-SAFE.
+
+        ``_persist_config`` awaits ``asyncio.to_thread`` — cancelling that
+        await does NOT stop the worker thread, so releasing the lock on
+        cancellation would let a supposedly-serialized YAML write continue in
+        the background. We shield the worker so a cancel can't abandon it
+        mid-write, then wait for it to SETTLE before returning. The caller
+        commits or restores deterministically and re-raises cancellation only
+        after runtime/disk ownership is coherent.
+
+        Returns ``(persist_exc_or_None, was_cancelled)``.
+        """
+        task = asyncio.ensure_future(persist())
+        was_cancelled = False
+        # Shield-loop: keep waiting (shielded) until the worker settles even
+        # under REPEATED cancellation. A cancel here only records intent —
+        # it must not abandon the in-flight write nor propagate before the
+        # caller has made a coherent commit-or-restore decision. A plain
+        # single await/gather would re-raise the pending cancellation on its
+        # next await and leak out mid-transaction.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                was_cancelled = True
+            except Exception:
+                break  # worker raised; task.done() is now True
+        exc = task.exception() if not task.cancelled() else None
+        return exc, was_cancelled
+
     def _snapshot_aux_config(self) -> dict:
         aux_cfg = self.get_config().openai_codex.auxiliary
         return {
@@ -319,6 +350,9 @@ class LLMGateway:
 
         # --- disabled: retire + persist as one locked transaction ---
         if not desired["enabled"]:
+            committed = False
+            was_cancelled = False
+            prior_aux = None
             async with self.provider_lock:
                 if self._aux_reload_gen != gen_at_build:
                     return {"committed": False, "effective_enabled": False,
@@ -332,18 +366,28 @@ class LLMGateway:
                 self._apply_aux_desired(desired)
                 self._aux_reload_gen += 1
                 if persist is not None:
-                    try:
-                        await persist()
-                    except Exception as exc:
-                        # EXACT restore — no probed reload.
+                    persist_exc, was_cancelled = await self._run_persist_settled(persist)
+                    if persist_exc is not None:
+                        # EXACT restore — no probed reload; disk unchanged.
                         self.auxiliary_llm_client = prior_aux
                         if self.model_router is not None:
                             self.model_router.aux_client = prior_router
                         self._apply_aux_desired(prior_cfg)
                         self._aux_reload_gen += 1
-                        return {"committed": False, "effective_enabled": False,
-                                "reason": f"persist failed: {exc}"}
-            self._schedule_drain(prior_aux)
+                        log.warning("Auxiliary disable persist failed (restored prior)")
+                        if not was_cancelled:
+                            return {"committed": False, "effective_enabled": False,
+                                    "reason": "persist failed"}
+                    else:
+                        committed = True
+                else:
+                    committed = True
+            # Post-lock: drain prior on commit, then re-raise a cancellation
+            # that arrived during persistence (state is now coherent).
+            if committed:
+                self._schedule_drain(prior_aux)
+            if was_cancelled:
+                raise asyncio.CancelledError
             return {"committed": True, "effective_enabled": False,
                     "reason": "auxiliary disabled"}
 
@@ -369,6 +413,7 @@ class LLMGateway:
         # can't leak. Cancellation stays authoritative (re-raised after drain).
         installed = False
         retired = None
+        was_cancelled = False
         try:
             probe_reason = await self._probe_aux(candidate_client)
             if probe_reason is not None:
@@ -390,9 +435,8 @@ class LLMGateway:
                 self._apply_aux_desired(desired)
                 self._aux_reload_gen += 1
                 if persist is not None:
-                    try:
-                        await persist()
-                    except Exception as exc:
+                    persist_exc, was_cancelled = await self._run_persist_settled(persist)
+                    if persist_exc is not None:
                         # EXACT restore of the prior generation, then drain the
                         # candidate (installed stays False → finally handles it).
                         self.auxiliary_llm_client = prior_aux
@@ -400,11 +444,24 @@ class LLMGateway:
                             self.model_router.aux_client = prior_router
                         self._apply_aux_desired(prior_cfg)
                         self._aux_reload_gen += 1
-                        return {"committed": False, "effective_enabled": False,
-                                "reason": f"persist failed: {exc}"}
-                retired = prior_aux
-                installed = True
-            self._schedule_drain(retired)
+                        log.warning("Auxiliary enable persist failed (restored prior)")
+                        if not was_cancelled:
+                            return {"committed": False, "effective_enabled": False,
+                                    "reason": "persist failed"}
+                        # cancelled + restored → candidate drains via finally,
+                        # cancellation re-raised after the lock.
+                    else:
+                        retired = prior_aux
+                        installed = True
+                else:
+                    retired = prior_aux
+                    installed = True
+            # Post-lock: drain the retired generation on commit; a cancellation
+            # that arrived during persistence is re-raised now (coherent state).
+            if installed:
+                self._schedule_drain(retired)
+            if was_cancelled:
+                raise asyncio.CancelledError
             log.info(
                 "Auxiliary reloaded (model: %s, tasks: %s)",
                 desired["model"], ", ".join(desired["tasks"]) or "none",
@@ -486,8 +543,13 @@ class LLMGateway:
             result["health"] = await self.kimi_client.health_check()
         return result
 
-    async def switch_provider(self, provider: str) -> dict:
-        """Switch the active LLM provider at runtime."""
+    async def switch_provider(self, provider: str, persist=None) -> dict:
+        """Switch the active LLM provider at runtime.
+
+        Mutation AND persistence happen under ONE uninterrupted provider_lock
+        ownership: on a persist failure the prior provider is restored before
+        the lock releases, so the live switch and its disk state never split.
+        """
         if provider not in ("codex", "ollama", "kimi"):
             return {"error": f"Unknown provider: {provider}"}
 
@@ -500,6 +562,8 @@ class LLMGateway:
                 return {"error": "Kimi not configured — set api_key first"}
 
             self.switching = True
+            prior_provider = self.get_config().llm_provider.active_provider
+            was_cancelled = False
             try:
                 if self.inflight_requests > 0:
                     log.warning(
@@ -515,9 +579,32 @@ class LLMGateway:
                 self.wire_callbacks()
                 if self.on_provider_switch is not None:
                     self.on_provider_switch()
+
+                if persist is not None:
+                    persist_exc, was_cancelled = await self._run_persist_settled(persist)
+                    if persist_exc is not None and not was_cancelled:
+                        # Restore the prior provider under the same lock so the
+                        # live switch never outruns the (unchanged) disk state.
+                        self.get_config().llm_provider.active_provider = prior_provider
+                        self.wire_callbacks()
+                        if self.on_provider_switch is not None:
+                            self.on_provider_switch()
+                        log.warning("Provider-switch persist failed (restored %s)", prior_provider)
+                        return {"error": "persist failed"}
+                    if persist_exc is not None:
+                        # cancelled + persist failed → restore, then re-raise.
+                        self.get_config().llm_provider.active_provider = prior_provider
+                        self.wire_callbacks()
+                        if self.on_provider_switch is not None:
+                            self.on_provider_switch()
             finally:
                 self.switching = False
 
+        # Post-lock: re-raise a cancellation that arrived during persistence
+        # (runtime/disk state is coherent — committed on success, restored on
+        # failure — before the cancellation propagates).
+        if was_cancelled:
+            raise asyncio.CancelledError
         client = self.active_client
         model = getattr(client, "model", "unknown") if client else "none"
         log.info("LLM provider switched to %s (model: %s)", provider, model)

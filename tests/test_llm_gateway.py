@@ -799,3 +799,226 @@ class TestPersistTransaction:
         assert persisted == [True]
         assert gw.auxiliary_llm_client is candidate
         old.drain_and_close.assert_awaited_once()  # prior drained only after persist
+
+
+class TestCancellationDuringPersist:
+    """Cancellation while persistence is blocked must NOT split live/disk/
+    ownership: the worker settles, then state commits or restores coherently
+    and cancellation is re-raised."""
+
+    def _aux_cfg(self, enabled=True, model="gpt-5.6-terra"):
+        cfg = _cfg()
+        cfg.openai_codex.auxiliary = SimpleNamespace(
+            enabled=enabled, model=model, tasks=["compaction"],
+            max_tokens=2048, credentials_path="")
+        return cfg
+
+    async def test_enable_cancel_during_persist_success_commits(self):
+        cfg = self._aux_cfg(enabled=False, model="gpt-5.6-luna")
+        old = SimpleNamespace(drain_and_close=AsyncMock())
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(cfg, codex=object(), aux=old)
+        gate = asyncio.Event()
+
+        async def _slow_persist():
+            await gate.wait()  # cancellation arrives while blocked here
+
+        desired = {"enabled": True, "model": "gpt-5.6-terra", "tasks": ["compaction"],
+                   "credentials_path": "", "max_tokens": 2048}
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
+            pool_cls.return_value.is_configured.return_value = True
+            client_cls.return_value.chat = AsyncMock(return_value="ok")
+            task = asyncio.create_task(gw.reload_auxiliary(desired, persist=_slow_persist))
+            await asyncio.sleep(0.02)
+            task.cancel()
+            gate.set()  # let the shielded persist settle (succeeds)
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.gather(*list(gw._aux_drains))
+        # persist settled successfully → candidate stays live (committed), the
+        # prior is drained, and the candidate is NOT drained.
+        assert gw.auxiliary_llm_client is candidate
+        old.drain_and_close.assert_awaited_once()
+        candidate.drain_and_close.assert_not_called()
+
+    async def test_disable_cancel_during_persist_failure_restores(self):
+        cfg = self._aux_cfg(enabled=True, model="gpt-5.6-terra")
+        old = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(cfg, codex=object(), aux=old)
+        gate = asyncio.Event()
+
+        async def _slow_fail():
+            await gate.wait()
+            raise OSError("disk full")
+
+        desired = {"enabled": False, "model": "gpt-5.6-terra", "tasks": ["compaction"],
+                   "credentials_path": "", "max_tokens": 2048}
+        task = asyncio.create_task(gw.reload_auxiliary(desired, persist=_slow_fail))
+        await asyncio.sleep(0.02)
+        task.cancel()
+        gate.set()  # persist settles with failure
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # exact restore: the enabled wrapper survives, config re-enabled
+        assert gw.auxiliary_llm_client is old
+        assert cfg.openai_codex.auxiliary.enabled is True
+        old.drain_and_close.assert_not_called()
+
+
+class TestSwitchProviderTransaction:
+    def _cfg_ready(self, active="ollama"):
+        cfg = _cfg(active=active)
+        return cfg
+
+    async def test_switch_persist_failure_restores_prior_provider(self):
+        cfg = self._cfg_ready(active="codex")
+        gw = _gw(cfg, codex=object(), ollama=object())
+        gw.wire_callbacks = lambda: None
+        gw.on_provider_switch = lambda: None  # exercise the restore callback
+
+        async def _persist_fail():
+            raise OSError("disk full")
+
+        r = await gw.switch_provider("ollama", persist=_persist_fail)
+        assert r.get("error") == "persist failed"
+        # prior provider restored under the same lock — live never outran disk
+        assert cfg.llm_provider.active_provider == "codex"
+
+    async def test_switch_waits_for_inflight_then_switches(self):
+        cfg = self._cfg_ready(active="codex")
+        gw = _gw(cfg, codex=object(), ollama=object())
+        gw.wire_callbacks = lambda: None
+        gw.inflight_requests = 1  # a request is in flight at switch time
+        import src.discord.llm_gateway as gwmod
+        real_sleep = gwmod.asyncio.sleep
+
+        async def _sleep(_d):
+            gw.inflight_requests = 0  # it drains during the wait
+            await real_sleep(0)
+
+        with patch.object(gwmod.asyncio, "sleep", _sleep):
+            r = await gw.switch_provider("ollama")
+        assert r["active_provider"] == "ollama"
+
+    async def test_switch_persist_success_commits(self):
+        cfg = self._cfg_ready(active="codex")
+        gw = _gw(cfg, codex=object(), ollama=object())
+        gw.wire_callbacks = lambda: None
+        persisted = []
+
+        async def _persist_ok():
+            persisted.append(True)
+
+        r = await gw.switch_provider("ollama", persist=_persist_ok)
+        assert r["active_provider"] == "ollama"
+        assert persisted == [True]
+        assert cfg.llm_provider.active_provider == "ollama"
+
+
+class TestCancellationBranchesComplete:
+    """Cover the symmetric cancel×persist-result branches."""
+
+    def _aux_cfg(self, enabled=True, model="gpt-5.6-terra"):
+        cfg = _cfg()
+        cfg.openai_codex.auxiliary = SimpleNamespace(
+            enabled=enabled, model=model, tasks=["compaction"],
+            max_tokens=2048, credentials_path="")
+        return cfg
+
+    async def test_disable_cancel_during_persist_success_commits(self):
+        cfg = self._aux_cfg(enabled=True)
+        old = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(cfg, codex=object(), aux=old)
+        gate = asyncio.Event()
+
+        async def _slow_ok():
+            await gate.wait()
+
+        desired = {"enabled": False, "model": "gpt-5.6-terra", "tasks": ["compaction"],
+                   "credentials_path": "", "max_tokens": 2048}
+        task = asyncio.create_task(gw.reload_auxiliary(desired, persist=_slow_ok))
+        await asyncio.sleep(0.02)
+        task.cancel()
+        gate.set()  # persist settles OK
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.gather(*list(gw._aux_drains))
+        # disable committed → prior drained, config disabled
+        assert gw.auxiliary_llm_client is None
+        assert cfg.openai_codex.auxiliary.enabled is False
+        old.drain_and_close.assert_awaited_once()
+
+    async def test_enable_cancel_during_persist_failure_restores(self):
+        cfg = self._aux_cfg(enabled=False, model="gpt-5.6-luna")
+        old = SimpleNamespace(drain_and_close=AsyncMock())
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(cfg, codex=object(), aux=old)
+        gate = asyncio.Event()
+
+        async def _slow_fail():
+            await gate.wait()
+            raise OSError("disk full")
+
+        desired = {"enabled": True, "model": "gpt-5.6-terra", "tasks": ["compaction"],
+                   "credentials_path": "", "max_tokens": 2048}
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
+            pool_cls.return_value.is_configured.return_value = True
+            client_cls.return_value.chat = AsyncMock(return_value="ok")
+            task = asyncio.create_task(gw.reload_auxiliary(desired, persist=_slow_fail))
+            await asyncio.sleep(0.02)
+            task.cancel()
+            gate.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.gather(*list(gw._aux_drains))
+        # persist failed → exact restore (prior stays, config disabled), candidate drained
+        assert gw.auxiliary_llm_client is old
+        assert cfg.openai_codex.auxiliary.enabled is False
+        candidate.drain_and_close.assert_awaited_once()
+        old.drain_and_close.assert_not_called()
+
+    async def test_switch_cancel_during_persist_success_commits(self):
+        cfg = _cfg(active="codex")
+        gw = _gw(cfg, codex=object(), ollama=object())
+        gw.wire_callbacks = lambda: None
+        gate = asyncio.Event()
+
+        started = asyncio.Event()
+
+        async def _slow_ok():
+            started.set()
+            await gate.wait()
+
+        task = asyncio.create_task(gw.switch_provider("ollama", persist=_slow_ok))
+        await started.wait()
+        task.cancel()
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cfg.llm_provider.active_provider == "ollama"  # committed
+
+    async def test_switch_cancel_during_persist_failure_restores(self):
+        cfg = _cfg(active="codex")
+        gw = _gw(cfg, codex=object(), ollama=object())
+        gw.wire_callbacks = lambda: None
+        gw.on_provider_switch = lambda: None  # exercise the restore callback
+        gate = asyncio.Event()
+
+        started = asyncio.Event()
+
+        async def _slow_fail():
+            started.set()
+            await gate.wait()
+            raise OSError("disk full")
+
+        task = asyncio.create_task(gw.switch_provider("ollama", persist=_slow_fail))
+        await started.wait()
+        task.cancel()
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cfg.llm_provider.active_provider == "codex"  # restored

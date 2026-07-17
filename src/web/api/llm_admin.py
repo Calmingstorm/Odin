@@ -112,7 +112,11 @@ def _persist_llm_sections_sync(bot) -> None:
         with open(config_path) as f:
             existing = ry.load(f)
     except Exception as exc:
-        raise PersistError(f"config.yml unreadable/malformed: {exc}") from exc
+        # GENERIC client message — ruamel parse errors (esp. duplicate-key)
+        # echo the conflicting VALUES, which in this file are secrets. The raw
+        # detail goes to logs only, never into the raised message / HTTP body.
+        log.warning("config.yml parse failed: %s", type(exc).__name__)
+        raise PersistError("config.yml unreadable or malformed") from None
     if existing is None:
         raise PersistError("config.yml is empty")
     orig_mode = os.stat(config_path).st_mode & 0o777
@@ -181,15 +185,20 @@ def _persist_llm_sections_sync(bot) -> None:
             os.fsync(f.fileno())
         os.chmod(tmp, orig_mode)
         os.replace(tmp, config_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    # os.replace is THE atomic commit point — the new config is now on disk.
+    # The directory fsync is a durability nicety ONLY; its failure must NOT
+    # raise (that would make the caller "roll back" runtime while disk already
+    # holds the new state, splitting disk vs runtime).
+    with contextlib.suppress(OSError):
         dir_fd = os.open(parent, os.O_RDONLY)
         try:
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
 
 async def _persist_config(bot) -> None:
     """Persist LLM config sections without touching env vars or other settings.
@@ -367,23 +376,18 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 {"error": "provider must be 'codex', 'ollama', or 'kimi'"}, status=400
             )
 
-        result = await bot.llm_gateway.switch_provider(provider)
+        # Mutation AND persistence happen under ONE provider_lock ownership:
+        # switch_provider runs the persist callback inside its own lock and
+        # restores the prior provider on persist failure — no interleaving
+        # window between the live switch and its disk write.
+        async def _persist():
+            await _persist_config(bot)
+
+        result = await bot.llm_gateway.switch_provider(provider, persist=_persist)
         if "error" in result:
-            return web.json_response(result, status=400)
-        # Serialize this write under provider_lock like every other LLM
-        # persist — switch_provider releases the lock, so persisting outside it
-        # could race a config PUT and overwrite it with a stale full-document
-        # snapshot (atomic replace prevents a torn file, not a lost update).
-        lock = getattr(bot.llm_gateway, "provider_lock", None)
-        try:
-            if lock is not None:
-                async with lock:
-                    await _persist_config(bot)
-            else:
-                await _persist_config(bot)
-        except Exception as e:
-            log.exception("Provider-switch persist failed")
-            return web.json_response({"error": f"persist failed: {e}"}, status=500)
+            reason = result["error"]
+            status = 500 if "persist failed" in reason else 400
+            return web.json_response(result, status=status)
         return web.json_response(result)
 
 
