@@ -32,9 +32,12 @@ from src.web.api.llm_admin import (
 
 @pytest.fixture(autouse=True)
 def _isolate_cwd(tmp_path, monkeypatch):
-    # llm_admin persist paths write a relative Path("config.yml"); keep them
-    # out of the repo root.
+    # llm_admin persist writes the ACTIVE config path (recorded at load_config
+    # time), not a CWD-relative guess. Point both the CWD and the active path at
+    # the isolated tmp dir so nothing touches the repo root.
     monkeypatch.chdir(tmp_path)
+    from src.config import schema
+    monkeypatch.setattr(schema, "_ACTIVE_CONFIG_PATH", tmp_path / "config.yml")
 
 
 @pytest.fixture(autouse=True)
@@ -1006,9 +1009,28 @@ class TestPersistHelpers:
     def test_persist_no_file_raises(self):
         # A mutation endpoint must not claim success when nothing persisted —
         # missing config.yml is now a loud failure, not a silent no-op.
+        from pathlib import Path
+
         from src.web.api.llm_admin import PersistError
+        Path("config.yml").unlink(missing_ok=True)  # active path set, file absent
         with pytest.raises(PersistError, match="does not exist"):
             _persist_llm_sections_sync(_bot())
+
+    def test_persist_refuses_when_no_active_config_path(self, monkeypatch):
+        # THE guard against the config-wipe class: a fabricated Config (never
+        # loaded from disk, so no active path) must NOT fall back to a
+        # CWD-relative config.yml and clobber whatever lives there. This is the
+        # exact shape of the review repro that overwrote the live config.
+        from pathlib import Path
+
+        from src.config import schema
+        from src.web.api.llm_admin import PersistError
+        monkeypatch.setattr(schema, "_ACTIVE_CONFIG_PATH", None)
+        Path("config.yml").write_text("discord:\n  token: real-do-not-touch\n")
+        with pytest.raises(PersistError, match="not loaded from disk"):
+            _persist_llm_sections_sync(_bot())
+        # The bystander config.yml in the CWD was left untouched.
+        assert Path("config.yml").read_text() == "discord:\n  token: real-do-not-touch\n"
 
     def test_persist_round_trips_config(self):
         from pathlib import Path

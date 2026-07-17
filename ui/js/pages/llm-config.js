@@ -159,6 +159,45 @@ export default {
             </div>
           </div>
           <div class="border-t border-gray-700 pt-4">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-xs font-semibold text-gray-400">Auxiliary Model</h3>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" v-model="auxForm.enabled" @change="saveAuxConfigDebounced" class="provider-control" />
+              <span class="text-xs text-gray-400">Enabled</span>
+            </label>
+          </div>
+          <p class="text-xs text-gray-500 mb-3">
+            A cheaper Codex model for selected background jobs (routes with automatic fallback to the primary). Requires Codex; only jobs with a live consumer can be delegated.
+          </p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+            <div>
+              <label class="text-xs text-gray-400 block">Model
+              <select v-model="auxForm.model" @change="saveAuxConfigDebounced" class="hm-input">
+                <option v-for="m in auxModelOptions" :key="m" :value="m">{{ m }}</option>
+              </select>
+              </label>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs text-gray-400 mb-2">Delegated tasks</div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-1">
+              <label v-for="t in auxKnownTasks" :key="t"
+                     class="flex items-center gap-2"
+                     :class="auxConsumerBacked.includes(t) ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'">
+                <input type="checkbox" :value="t" v-model="auxForm.tasks"
+                       :disabled="!auxConsumerBacked.includes(t)"
+                       @change="saveAuxConfigDebounced" class="provider-control" />
+                <span class="text-xs text-gray-300">{{ t }}</span>
+                <span v-if="!auxConsumerBacked.includes(t)" class="text-xs text-gray-500">— No consumer yet</span>
+              </label>
+            </div>
+          </div>
+          <div v-if="auxData.unavailable_reason"
+               class="text-sm text-yellow-400 bg-yellow-900/20 rounded p-2 border border-yellow-800 mt-3">
+            {{ auxData.unavailable_reason }}
+          </div>
+          </div>
+          <div class="border-t border-gray-700 pt-4">
           <h3 class="text-xs font-semibold text-gray-400 mb-2">Authentication</h3>
           <p class="text-xs text-gray-500 mb-4">
             OAuth credentials for ChatGPT subscription. Supports automatic refresh and pool rotation.
@@ -324,47 +363,6 @@ export default {
           <div v-if="kimiStatus.health && kimiStatus.health.error"
                class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
             {{ kimiStatus.health.error }}
-          </div>
-        </div>
-
-        <!-- ==================== Auxiliary (cheap-model) Config ==================== -->
-        <div class="hm-card">
-          <div class="flex items-center justify-between mb-3">
-            <h2 class="text-sm font-semibold text-gray-300">Auxiliary Model (Codex)</h2>
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" v-model="auxForm.enabled" @change="saveAuxConfigDebounced" class="provider-control" />
-              <span class="text-xs text-gray-400">Enabled</span>
-            </label>
-          </div>
-          <p class="text-xs text-gray-500 mb-3">
-            A cheaper Codex model for selected background jobs (routes with automatic fallback to the primary). Only jobs with a live consumer can be delegated.
-          </p>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-            <div>
-              <label class="text-xs text-gray-400 block">Model
-              <select v-model="auxForm.model" @change="saveAuxConfigDebounced" class="hm-input">
-                <option v-for="m in auxModelOptions" :key="m" :value="m">{{ m }}</option>
-              </select>
-              </label>
-            </div>
-          </div>
-          <div>
-            <div class="text-xs text-gray-400 mb-2">Delegated tasks</div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-1">
-              <label v-for="t in auxKnownTasks" :key="t"
-                     class="flex items-center gap-2"
-                     :class="auxConsumerBacked.includes(t) ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'">
-                <input type="checkbox" :value="t" v-model="auxForm.tasks"
-                       :disabled="!auxConsumerBacked.includes(t)"
-                       @change="saveAuxConfigDebounced" class="provider-control" />
-                <span class="text-xs text-gray-300">{{ t }}</span>
-                <span v-if="!auxConsumerBacked.includes(t)" class="text-xs text-gray-500">— No consumer yet</span>
-              </label>
-            </div>
-          </div>
-          <div v-if="auxData.unavailable_reason"
-               class="text-sm text-yellow-400 bg-yellow-900/20 rounded p-2 border border-yellow-800 mt-3">
-            {{ auxData.unavailable_reason }}
           </div>
         </div>
 

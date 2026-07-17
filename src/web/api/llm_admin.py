@@ -13,11 +13,10 @@ import contextlib
 import ipaddress as _ipaddress
 import tempfile
 import urllib.parse as _urlparse
-from pathlib import Path
 
 from aiohttp import web
 
-from ...config.schema import CODEX_REASONING_EFFORTS
+from ...config.schema import CODEX_REASONING_EFFORTS, active_config_path
 from ...odin_log import get_logger
 
 log = get_logger("web.api")
@@ -101,7 +100,13 @@ def _persist_llm_sections_sync(bot) -> None:
     """
     import os
 
-    config_path = Path("config.yml")
+    # Persist the file the live config was LOADED from — never a CWD-relative
+    # "config.yml". A fabricated Config (a test double or one-off script that
+    # never called load_config) has no active path, so persistence refuses
+    # rather than clobbering whatever config.yml happens to sit in the CWD.
+    config_path = active_config_path()
+    if config_path is None:
+        raise PersistError("refusing to persist a config not loaded from disk")
     if not config_path.exists():
         raise PersistError("config.yml does not exist")
     from ruamel.yaml import YAML

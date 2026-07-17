@@ -870,6 +870,27 @@ def _substitute_env_vars(text: str) -> str:
     return re.sub(r"\$\{(\w+)(?::-([^}]*))?\}", replacer, text)
 
 
+# The absolute path the live config was loaded from. LLM-config persistence
+# writes THIS path — never a CWD-relative "config.yml" — so a fabricated Config
+# (a test or one-off script that never called load_config) cannot silently
+# overwrite a real deployment's config.yml from the wrong working directory.
+_ACTIVE_CONFIG_PATH: Path | None = None
+
+
+def active_config_path() -> Path | None:
+    """Absolute path the live config was loaded from, or None if this process
+    never loaded one (in which case persistence must refuse, not guess a path)."""
+    return _ACTIVE_CONFIG_PATH
+
+
+def set_active_config_path(path: str | Path | None) -> None:
+    """Record (or clear) the active config path. ``load_config`` calls this on a
+    successful load; tests/tools that persist a hand-built Config point it at
+    their own file."""
+    global _ACTIVE_CONFIG_PATH
+    _ACTIVE_CONFIG_PATH = Path(path).resolve() if path is not None else None
+
+
 def load_config(path: str | Path = "config.yml") -> Config:
     path = Path(path)
     raw = path.read_text()
@@ -900,12 +921,16 @@ def load_config(path: str | Path = "config.yml") -> Config:
     # (extra="forbid") so a slightly-ahead config can't hard-fail boot.
     _warn_unknown_config_keys(data)
     try:
-        return Config(**data)
+        cfg = Config(**data)
     except Exception as exc:
         raise SystemExit(
             f"Config validation failed: {exc}\n"
             "Check config.yml values — numeric fields must be within valid ranges."
         ) from exc
+    # Record where this live config came from so persistence targets THIS file,
+    # never a CWD-relative guess.
+    set_active_config_path(path)
+    return cfg
 
 
 def _warn_unknown_config_keys(data: dict) -> None:
