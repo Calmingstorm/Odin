@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -138,6 +139,7 @@ class ToolExecutor:
         self._host_access = host_access_manager
         self._metrics: dict[str, dict[str, int]] = {}
         self._memory_lock = asyncio.Lock()
+        self._memory_corrupt_logged_at = 0.0
         self._lists_lock = asyncio.Lock()
         self.risk_stats = RiskStats()
         self.recovery_stats = RecoveryStats()
@@ -685,22 +687,32 @@ class ToolExecutor:
     def _load_all_memory(self) -> dict[str, dict[str, str]]:
         """Load the full scoped memory structure.
 
-        Returns {"global": {...}, "user_<id>": {...}, ...}.
-        Auto-migrates old flat format to scoped format.
+        Returns {"global": {...}, "user_<id>": {...}, ...}. STRICT — for
+        mutation paths: a missing file is an empty store, but an unreadable /
+        malformed / wrong-shape file raises StoreCorruptError (a corrupt copy
+        is preserved) so the caller REFUSES to overwrite rather than silently
+        wiping the corpus. Read paths that must not crash chat use
+        _load_all_memory_safe. Auto-migrates the old flat format to scoped.
         """
-        if not self._memory_path or not self._memory_path.exists():
-            return {"global": {}}
-        try:
-            data = json.loads(self._memory_path.read_text())
-        except Exception:
-            return {"global": {}}
-        if not isinstance(data, dict):
+        from ..json_store import StoreCorruptError, load_json_store
+
+        data = load_json_store(self._memory_path, container=dict)
+        if not data:
             return {"global": {}}
         # Migrate old flat format: if no "global" key, treat entire dict as global
         if "global" not in data:
             migrated = {"global": data}
             self._save_all_memory(migrated)
             return migrated
+        # Container-shape validation: each section maps note keys to a dict. A
+        # section that is a list/str/etc. is corruption — refuse rather than
+        # drop it silently on the next save.
+        for section, value in data.items():
+            if not isinstance(value, dict):
+                raise StoreCorruptError(
+                    f"memory.json section {section!r} is {type(value).__name__}, "
+                    "expected an object"
+                )
         return data
 
     def _save_all_memory(self, data: dict[str, dict[str, str]]) -> None:
@@ -711,13 +723,31 @@ class ToolExecutor:
         tmp.write_text(json.dumps(data, indent=2))
         tmp.replace(self._memory_path)
 
+    def _load_all_memory_safe(self) -> dict[str, dict[str, str]]:
+        """Read-path variant of _load_all_memory: corruption degrades to an
+        empty store (inject no working memory) with a rate-limited warning,
+        never raising into the prompt build so a damaged file can't take chat
+        down."""
+        from ..json_store import StoreCorruptError
+
+        try:
+            return self._load_all_memory()
+        except StoreCorruptError as exc:
+            now = time.monotonic()
+            if now - self._memory_corrupt_logged_at > 300:
+                log.error("memory.json unavailable — injecting no working memory: %s", exc)
+                self._memory_corrupt_logged_at = now
+            return {"global": {}}
+
     def _load_memory(self) -> dict[str, str]:
-        """Load merged global memory (backward-compatible for system prompt)."""
-        return self._load_all_memory().get("global", {})
+        """Load merged global memory (READ path — degrades on corruption)."""
+        return self._load_all_memory_safe().get("global", {})
 
     def _load_memory_for_user(self, user_id: str | None) -> dict[str, str]:
-        """Load merged global + user-specific memory for system prompt injection."""
-        all_mem = self._load_all_memory()
+        """Load merged global + user memory for system prompt injection (READ
+        path — degrades to empty on corruption so a damaged store never crashes
+        chat)."""
+        all_mem = self._load_all_memory_safe()
         merged = dict(all_mem.get("global", {}))
         if user_id:
             user_key = f"user_{user_id}"

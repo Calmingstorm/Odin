@@ -228,11 +228,24 @@ class SkillContext:
             self._log.warning("post_file called but no channel callback available")
 
     def remember(self, key: str, value: str) -> None:
-        """Save a key/value pair to persistent memory."""
+        """Save a key/value pair to persistent memory.
+
+        Refuses (without saving) when the store is corrupt, so a transient
+        read failure can't wipe the skill's memory — the void contract is kept;
+        the refusal is logged and a corrupt copy is preserved.
+        """
         if not self._memory_path:
             return
+        from ..json_store import StoreCorruptError
+
         with self._skill_memory_lock:
-            memory = self._load_memory()
+            try:
+                memory = self._load_memory_for_write()
+            except StoreCorruptError as exc:
+                self._log.error(
+                    "Skill memory corrupt (backup preserved); not saving %r: %s", key, exc
+                )
+                return
             memory[key] = value
             self._save_memory(memory)
 
@@ -442,12 +455,21 @@ class SkillContext:
         self._log.info("%s", msg)
 
     def _load_memory(self) -> dict[str, str]:
-        if not self._memory_path or not self._memory_path.exists():
-            return {}
-        try:
-            return json.loads(self._memory_path.read_text())
-        except Exception:
-            return {}
+        """READ path — corruption degrades to an empty store (never raises)."""
+        from ..json_store import load_json_store_safe
+
+        data, _ok = load_json_store_safe(
+            self._memory_path, container=dict, what="skill memory"
+        )
+        return data
+
+    def _load_memory_for_write(self) -> dict[str, str]:
+        """MUTATION path — raises StoreCorruptError so remember() refuses to
+        overwrite rather than wiping the skill's memory (a corrupt copy is
+        preserved by load_json_store)."""
+        from ..json_store import load_json_store
+
+        return load_json_store(self._memory_path, container=dict)
 
     def _save_memory(self, data: dict[str, str]) -> None:
         if not self._memory_path:

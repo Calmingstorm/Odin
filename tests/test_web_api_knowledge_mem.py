@@ -7,6 +7,7 @@ knowledge routes exercise real ingest / version / dedup / merge machinery.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -206,6 +207,9 @@ def _memory_bot(initial=None):
     bot.tool_executor = type("E", (), {})()
     bot.tool_executor._load_all_memory = load
     bot.tool_executor._save_all_memory = save
+    # The mutation routes now serialize load+mutate+save under the executor's
+    # memory lock (they previously raced the tool path).
+    bot.tool_executor._memory_lock = asyncio.Lock()
     bot._backing = backing
     return bot
 
@@ -254,6 +258,29 @@ class TestMemoryNotes:
             ]})
             assert r.status == 200 and (await r.json())["count"] == 2
         assert set(bot._backing["global"]) == {"b"}
+
+    async def test_corrupt_store_reads_503_mutations_409(self):
+        from src.json_store import StoreCorruptError
+
+        bot = _memory_bot()
+
+        def _raise():
+            raise StoreCorruptError("corrupt")
+
+        bot.tool_executor._load_all_memory = _raise
+        async with TestClient(TestServer(_app(register_memory_notes, bot=bot))) as c:
+            # Reads report unavailable (503), NOT an empty store.
+            assert (await c.get("/api/memory")).status == 503
+            assert (await c.get("/api/memory/global/a")).status == 503
+            # Mutations refuse (409) rather than overwrite a corrupt store.
+            assert (await c.put("/api/memory/global/k", json={"value": "v"})).status == 409
+            assert (await c.delete("/api/memory/global/k")).status == 409
+            assert (
+                await c.post(
+                    "/api/memory/bulk-delete",
+                    json={"entries": [{"scope": "global", "key": "a"}]},
+                )
+            ).status == 409
 
 
 # --------------------------------------------------------------------------- #

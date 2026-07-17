@@ -167,18 +167,36 @@ class ConversationReflector:
         consolidation fn when set, else the reflection ``_text_fn``."""
         return self._consolidation_fn or self._text_fn
 
-    def _load(self) -> dict:
-        if self._path.exists():
-            try:
-                data = json.loads(self._path.read_text())
-                return self._migrate(data)
-            except (json.JSONDecodeError, OSError) as e:
-                log.error("Failed to load learned.json: %s", e)
+    def _empty_store(self) -> dict:
         return {
             "version": _LEARNED_SCHEMA_VERSION,
             "last_reflection": None,
             "entries": [],
         }
+
+    def _load(self) -> dict:
+        """READ path — corruption degrades to an empty store (never raises) so
+        prompt injection and WebUI reads can't be taken down by a damaged file.
+        A corrupt copy is preserved by ``load_json_store``."""
+        from ..json_store import load_json_store_safe
+
+        data, ok = load_json_store_safe(self._path, container=dict, what="learned.json")
+        if not ok or not data or not isinstance(data.get("entries", []), list):
+            return self._empty_store()
+        return self._migrate(data)
+
+    def _load_for_write(self) -> dict:
+        """MUTATION path — raises ``StoreCorruptError`` on a damaged file so the
+        caller REFUSES to overwrite. A silent empty-and-save here would wipe the
+        entire learned corpus (the failure this guards against)."""
+        from ..json_store import StoreCorruptError, load_json_store
+
+        data = load_json_store(self._path, container=dict)
+        if not data:
+            return self._empty_store()
+        if not isinstance(data.get("entries", []), list):
+            raise StoreCorruptError("learned.json 'entries' is not a list")
+        return self._migrate(data)
 
     def _migrate(self, data: dict) -> dict:
         """One-time v1→v2 migration: flag legacy chop damage, backfill metadata.
@@ -234,7 +252,13 @@ class ConversationReflector:
         """Synchronous delete. Prefer delete_entry_async from async callers —
         without the lock a delete racing an in-flight reflection is undone when
         the reflection writes back its pre-delete snapshot."""
-        data = self._load()
+        from ..json_store import StoreCorruptError
+
+        try:
+            data = self._load_for_write()
+        except StoreCorruptError as exc:
+            log.error("Refusing to delete from learned.json (corrupt; backup preserved): %s", exc)
+            return False
         entries = data.get("entries", [])
         before = len(entries)
         data["entries"] = [e for e in entries if e.get("key") != key]
@@ -253,7 +277,13 @@ class ConversationReflector:
 
     def update_entry(self, key: str, content: str | None = None, category: str | None = None) -> dict | None:
         """Synchronous update. Prefer update_entry_async from async callers."""
-        data = self._load()
+        from ..json_store import StoreCorruptError
+
+        try:
+            data = self._load_for_write()
+        except StoreCorruptError as exc:
+            log.error("Refusing to update learned.json (corrupt; backup preserved): %s", exc)
+            return None
         for e in data.get("entries", []):
             if e.get("key") == key:
                 if content is not None:
@@ -583,7 +613,16 @@ class ConversationReflector:
                         entry["user_id"] = single_user
 
             async with self._lock:
-                data = await asyncio.to_thread(self._load)
+                from ..json_store import StoreCorruptError
+
+                try:
+                    data = await asyncio.to_thread(self._load_for_write)
+                except StoreCorruptError as exc:
+                    log.error(
+                        "Skipping reflection merge — learned.json corrupt "
+                        "(backup preserved): %s", exc,
+                    )
+                    return
                 existing = data.get("entries", [])
                 self._apply_use_stamps(existing)
                 merged = self._merge_entries(existing, new_entries)
@@ -647,7 +686,15 @@ class ConversationReflector:
         user_ids: list[str] | None = None,
     ) -> None:
         async with self._lock:
-            data = await asyncio.to_thread(self._load)
+            from ..json_store import StoreCorruptError
+
+            try:
+                data = await asyncio.to_thread(self._load_for_write)
+            except StoreCorruptError as exc:
+                log.error(
+                    "Skipping reflection — learned.json corrupt (backup preserved): %s", exc
+                )
+                return
             existing = data.get("entries", [])
 
             existing_text = self._relevant_existing_text(existing, conversation)
