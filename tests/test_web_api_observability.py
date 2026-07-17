@@ -50,7 +50,6 @@ def _bot():
     bot.cost_tracker.get_totals.return_value = {"c": 1}
     bot.cost_tracker.get_summary.return_value = {"c": 2}
     bot.compression_stats.as_dict.return_value = {"comp": 1}
-    bot.model_router.get_metrics.return_value = {"m": 1}
     bot.subsystem_guard.get_status.return_value = {"s": 1}
     return bot
 
@@ -175,30 +174,26 @@ class TestExecutorStats:
 
 
 class TestMiscStats:
-    async def test_affordances_compression_routing_usage_degradation(self):
+    async def test_affordances_compression_usage_degradation(self):
         bot = _bot()
         regs = (obs.register_affordances, obs.register_compression_stats,
-                obs.register_routing_stats, obs.register_usage_cost,
-                obs.register_degradation)
+                obs.register_usage_cost, obs.register_degradation)
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr("src.tools.affordances.all_affordances", lambda: [{"tool": "t"}])
             async with TestClient(TestServer(_app(*regs, bot=bot))) as c:
                 assert (await (await c.get("/api/affordances")).json())["affordances"]
                 assert (await (await c.get("/api/compression/stats")).json())["comp"] == 1
-                assert (await (await c.get("/api/routing/stats")).json())["m"] == 1
                 assert (await (await c.get("/api/usage")).json())["c"] == 2
                 assert (await (await c.get("/api/subsystems/status")).json())["s"] == 1
 
     async def test_misc_unavailable_503(self):
         bot = _bot()
         bot.compression_stats = None
-        bot.model_router = None
         bot.cost_tracker = None
         bot.subsystem_guard = None
-        regs = (obs.register_compression_stats, obs.register_routing_stats,
+        regs = (obs.register_compression_stats,
                 obs.register_usage_cost, obs.register_degradation)
         async with TestClient(TestServer(_app(*regs, bot=bot))) as c:
             assert (await c.get("/api/compression/stats")).status == 503
-            assert (await c.get("/api/routing/stats")).status == 503
             assert (await c.get("/api/usage")).status == 503
             assert (await c.get("/api/subsystems/status")).status == 503

@@ -1,7 +1,12 @@
-"""Tests for the auxiliary LLM client (Round 39).
+"""Tests for the auxiliary LLM client.
 
-Tests the AuxiliaryLLMClient, AuxiliaryLLMConfig, task routing,
-fallback behavior, cost tracking, and factory functions.
+Tests the AuxiliaryLLMClient, AuxiliaryLLMConfig, the always-route chat path,
+fallback behavior, cost tracking, factory functions, and lease/drain.
+
+The auxiliary wrapper no longer gates on a per-task set: the gateway only
+routes the fixed background jobs here, so ``chat`` ALWAYS tries the aux client
+and falls back to the primary transparently on error. ``task`` labels the job
+for cost/metrics only.
 """
 from __future__ import annotations
 
@@ -11,10 +16,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.config.schema import AuxiliaryLLMConfig, OpenAICodexConfig
-from src.llm.auxiliary import KNOWN_TASKS, AuxiliaryLLMClient
+from src.llm.auxiliary import AuxiliaryLLMClient
 from src.llm.circuit_breaker import CircuitOpenError
 from src.llm.cost_tracker import CostTracker
-from src.llm.types import LLMResponse, ToolCall
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -25,9 +29,6 @@ def _make_codex_mock(model: str = "gpt-4o-mini", chat_result: str = "aux respons
     client = MagicMock()
     client.model = model
     client.chat = AsyncMock(return_value=chat_result)
-    client.chat_with_tools = AsyncMock(
-        return_value=LLMResponse(text="tool response", tool_calls=[], stop_reason="end_turn")
-    )
     client.breaker = MagicMock()
     client.breaker.state = "closed"
     client.close = AsyncMock()
@@ -41,7 +42,6 @@ def _make_client(
     primary_model: str = "gpt-4o",
     aux_result: str = "aux response",
     primary_result: str = "primary response",
-    enabled_tasks: set[str] | None = None,
     cost_tracker: CostTracker | None = None,
 ) -> tuple[AuxiliaryLLMClient, MagicMock, MagicMock]:
     """Build an AuxiliaryLLMClient with mocked aux and primary clients."""
@@ -50,7 +50,6 @@ def _make_client(
     client = AuxiliaryLLMClient(
         aux_client=aux,
         primary_client=primary,
-        enabled_tasks=enabled_tasks,
         cost_tracker=cost_tracker,
     )
     return client, aux, primary
@@ -67,53 +66,17 @@ class TestAuxiliaryLLMConfig:
         # Default is Luna (v3.62.x): the Codex catalog's cheap extraction/
         # classification tier; gpt-4o-mini is no longer in the catalog.
         assert cfg.model == "gpt-5.6-luna"
-        assert cfg.max_tokens == 2048
-        assert cfg.credentials_path == ""
-        assert "compaction" in cfg.tasks
-        assert "reflection" in cfg.tasks
 
     def test_custom_values(self):
-        cfg = AuxiliaryLLMConfig(
-            enabled=True, model="gpt-3.5-turbo", max_tokens=1024,
-            credentials_path="/custom/path.json", tasks=["compaction"],
-        )
+        cfg = AuxiliaryLLMConfig(enabled=True, model="gpt-3.5-turbo")
         assert cfg.enabled is True
         assert cfg.model == "gpt-3.5-turbo"
-        assert cfg.max_tokens == 1024
-        assert cfg.credentials_path == "/custom/path.json"
-        assert cfg.tasks == ["compaction"]
 
-    def test_tasks_reject_unknown(self):
-        import pytest
-        with pytest.raises(ValueError, match="unknown auxiliary task"):
-            AuxiliaryLLMConfig(tasks=["compaction", "not_a_task"])
-
-    def test_tasks_strip_deprecated_on_load(self):
-        # Old hand-authored configs may carry summarization / vision_description
-        # (master accepted arbitrary strings; they never had a consumer). They
-        # are STRIPPED, not rejected, so an old config still boots.
-        cfg = AuxiliaryLLMConfig(
-            tasks=["compaction", "summarization", "vision_description", "reflection"]
-        )
-        assert cfg.tasks == ["compaction", "reflection"]
-
-    def test_tasks_deprecated_plus_unknown_still_rejects(self):
-        # A genuinely unknown name is still rejected even when a deprecated
-        # (strippable) value is also present.
-        import pytest
-        with pytest.raises(ValueError, match="unknown auxiliary task"):
-            AuxiliaryLLMConfig(tasks=["summarization", "not_a_task"])
-
-    def test_tasks_dedupe_and_canonical_order(self):
-        # Input order/dupes ignored; stored in KNOWN_TASKS_ORDER order.
-        cfg = AuxiliaryLLMConfig(
-            tasks=["reflection", "compaction", "reflection", "classification"]
-        )
-        assert cfg.tasks == ["compaction", "reflection", "classification"]
-
-    def test_tasks_empty_is_valid(self):
-        cfg = AuxiliaryLLMConfig(tasks=[])
-        assert cfg.tasks == []
+    def test_only_enabled_and_model_fields(self):
+        # The config surface is exactly two knobs — per-task configuration,
+        # max_tokens, and credentials_path were removed (auth + token limit are
+        # shared with the main Codex client).
+        assert set(AuxiliaryLLMConfig.model_fields) == {"enabled", "model"}
 
     def test_nested_in_openai_codex_config(self):
         cfg = OpenAICodexConfig()
@@ -127,45 +90,6 @@ class TestAuxiliaryLLMConfig:
         assert cfg.auxiliary.enabled is True
         assert cfg.auxiliary.model == "gpt-3.5-turbo"
 
-    def test_default_tasks_list(self):
-        cfg = AuxiliaryLLMConfig()
-        expected = ["compaction", "reflection", "consolidation", "background_followup"]
-        assert cfg.tasks == expected
-
-
-# ---------------------------------------------------------------------------
-# KNOWN_TASKS
-# ---------------------------------------------------------------------------
-
-class TestKnownTasks:
-    def test_known_tasks_is_frozenset(self):
-        assert isinstance(KNOWN_TASKS, frozenset)
-
-    def test_contains_core_tasks(self):
-        for task in ("compaction", "reflection", "consolidation", "background_followup"):
-            assert task in KNOWN_TASKS
-
-    def test_contains_classification(self):
-        assert "classification" in KNOWN_TASKS
-
-    def test_count(self):
-        assert len(KNOWN_TASKS) == 5
-
-    def test_every_known_task_is_real(self):
-        # Invariant: the operator-visible list is EXACTLY the five consumer-
-        # backed workloads — no forward-compat placeholders that do nothing.
-        assert set(KNOWN_TASKS) == {
-            "compaction", "reflection", "consolidation",
-            "background_followup", "classification",
-        }
-
-    def test_deprecated_tasks_not_known(self):
-        # summarization / vision_description were removed (never had a
-        # consumer); they live only in DEPRECATED_TASKS for load-time stripping.
-        from src.llm.auxiliary import DEPRECATED_TASKS
-        assert DEPRECATED_TASKS == {"summarization", "vision_description"}
-        assert not (DEPRECATED_TASKS & KNOWN_TASKS)
-
 
 # ---------------------------------------------------------------------------
 # AuxiliaryLLMClient.__init__
@@ -177,19 +101,10 @@ class TestInit:
         assert client.aux_client is aux
         assert client.primary_client is primary
 
-    def test_default_enabled_tasks(self):
-        client, _, _ = _make_client()
-        assert client.enabled_tasks == set(KNOWN_TASKS)
-
-    def test_custom_enabled_tasks(self):
-        client, _, _ = _make_client(enabled_tasks={"compaction", "reflection"})
-        assert client.enabled_tasks == {"compaction", "reflection"}
-
     def test_initial_counters(self):
         client, _, _ = _make_client()
         assert client._aux_calls == 0
         assert client._fallback_calls == 0
-        assert client._primary_direct_calls == 0
 
     def test_cost_tracker_stored(self):
         tracker = CostTracker()
@@ -198,35 +113,12 @@ class TestInit:
 
 
 # ---------------------------------------------------------------------------
-# is_enabled
-# ---------------------------------------------------------------------------
-
-class TestIsEnabled:
-    def test_enabled_task(self):
-        client, _, _ = _make_client(enabled_tasks={"compaction", "reflection"})
-        assert client.is_enabled("compaction") is True
-
-    def test_disabled_task(self):
-        client, _, _ = _make_client(enabled_tasks={"compaction"})
-        assert client.is_enabled("reflection") is False
-
-    def test_unknown_task(self):
-        client, _, _ = _make_client()
-        assert client.is_enabled("nonexistent_task") is False
-
-    def test_all_known_enabled_by_default(self):
-        client, _, _ = _make_client()
-        for task in KNOWN_TASKS:
-            assert client.is_enabled(task) is True
-
-
-# ---------------------------------------------------------------------------
-# chat — routing
+# chat — always routes to aux
 # ---------------------------------------------------------------------------
 
 class TestChatRouting:
-    async def test_enabled_task_uses_aux(self):
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
+    async def test_uses_aux(self):
+        client, aux, primary = _make_client()
         result = await client.chat(
             [{"role": "user", "content": "test"}],
             "system",
@@ -236,19 +128,8 @@ class TestChatRouting:
         aux.chat.assert_awaited_once()
         primary.chat.assert_not_awaited()
 
-    async def test_disabled_task_uses_primary(self):
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
-        result = await client.chat(
-            [{"role": "user", "content": "test"}],
-            "system",
-            task="reflection",
-        )
-        assert result == "primary response"
-        primary.chat.assert_awaited_once()
-        aux.chat.assert_not_awaited()
-
     async def test_max_tokens_forwarded_to_aux(self):
-        client, aux, _ = _make_client(enabled_tasks={"compaction"})
+        client, aux, _ = _make_client()
         await client.chat(
             [{"role": "user", "content": "test"}],
             "system",
@@ -259,8 +140,9 @@ class TestChatRouting:
             [{"role": "user", "content": "test"}], "system", max_tokens=100,
         )
 
-    async def test_max_tokens_forwarded_to_primary(self):
-        client, _, primary = _make_client(enabled_tasks=set())
+    async def test_max_tokens_forwarded_to_primary_on_fallback(self):
+        client, aux, primary = _make_client()
+        aux.chat = AsyncMock(return_value="")  # force fallback
         await client.chat(
             [{"role": "user", "content": "test"}],
             "system",
@@ -278,7 +160,7 @@ class TestChatRouting:
 
 class TestChatFallback:
     async def test_fallback_on_empty_response(self):
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
+        client, aux, primary = _make_client()
         aux.chat = AsyncMock(return_value="")
         result = await client.chat(
             [{"role": "user", "content": "test"}],
@@ -289,7 +171,7 @@ class TestChatFallback:
         assert client._fallback_calls == 1
 
     async def test_fallback_on_circuit_open(self):
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
+        client, aux, primary = _make_client()
         aux.chat = AsyncMock(side_effect=CircuitOpenError("test", 30.0))
         result = await client.chat(
             [{"role": "user", "content": "test"}],
@@ -300,7 +182,7 @@ class TestChatFallback:
         assert client._fallback_calls == 1
 
     async def test_fallback_on_runtime_error(self):
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
+        client, aux, primary = _make_client()
         aux.chat = AsyncMock(side_effect=RuntimeError("API error"))
         result = await client.chat(
             [{"role": "user", "content": "test"}],
@@ -311,7 +193,7 @@ class TestChatFallback:
         assert client._fallback_calls == 1
 
     async def test_fallback_on_connection_error(self):
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
+        client, aux, primary = _make_client()
         aux.chat = AsyncMock(side_effect=ConnectionError("lost connection"))
         result = await client.chat(
             [{"role": "user", "content": "test"}],
@@ -322,7 +204,7 @@ class TestChatFallback:
         assert client._fallback_calls == 1
 
     async def test_no_fallback_on_success(self):
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
+        client, aux, primary = _make_client()
         result = await client.chat(
             [{"role": "user", "content": "test"}],
             "system",
@@ -339,84 +221,16 @@ class TestChatFallback:
 
 class TestChatCounters:
     async def test_aux_call_increments(self):
-        client, _, _ = _make_client(enabled_tasks={"compaction"})
+        client, _, _ = _make_client()
         await client.chat([], "s", task="compaction")
         await client.chat([], "s", task="compaction")
         assert client._aux_calls == 2
 
     async def test_fallback_call_increments(self):
-        client, aux, _ = _make_client(enabled_tasks={"compaction"})
+        client, aux, _ = _make_client()
         aux.chat = AsyncMock(return_value="")
         await client.chat([], "s", task="compaction")
         assert client._fallback_calls == 1
-
-    async def test_primary_direct_increments(self):
-        client, _, _ = _make_client(enabled_tasks=set())
-        await client.chat([], "s", task="compaction")
-        assert client._primary_direct_calls == 1
-
-
-# ---------------------------------------------------------------------------
-# chat_with_tools — routing
-# ---------------------------------------------------------------------------
-
-class TestChatWithToolsRouting:
-    async def test_enabled_task_uses_aux(self):
-        client, aux, primary = _make_client(enabled_tasks={"classification"})
-        result = await client.chat_with_tools([], "system", [], task="classification")
-        assert result.text == "tool response"
-        aux.chat_with_tools.assert_awaited_once()
-        primary.chat_with_tools.assert_not_awaited()
-
-    async def test_disabled_task_uses_primary(self):
-        client, aux, primary = _make_client(enabled_tasks=set())
-        await client.chat_with_tools([], "system", [], task="classification")
-        primary.chat_with_tools.assert_awaited_once()
-        aux.chat_with_tools.assert_not_awaited()
-
-
-# ---------------------------------------------------------------------------
-# chat_with_tools — fallback
-# ---------------------------------------------------------------------------
-
-class TestChatWithToolsFallback:
-    async def test_fallback_on_empty_response(self):
-        client, aux, primary = _make_client(enabled_tasks={"classification"})
-        aux.chat_with_tools = AsyncMock(
-            return_value=LLMResponse(text="", tool_calls=[], stop_reason="end_turn")
-        )
-        primary.chat_with_tools = AsyncMock(
-            return_value=LLMResponse(text="fallback", tool_calls=[], stop_reason="end_turn")
-        )
-        result = await client.chat_with_tools([], "system", [], task="classification")
-        assert result.text == "fallback"
-        assert client._fallback_calls == 1
-
-    async def test_fallback_on_circuit_open(self):
-        client, aux, primary = _make_client(enabled_tasks={"classification"})
-        aux.chat_with_tools = AsyncMock(side_effect=CircuitOpenError("test", 30.0))
-        await client.chat_with_tools([], "system", [], task="classification")
-        primary.chat_with_tools.assert_awaited_once()
-        assert client._fallback_calls == 1
-
-    async def test_fallback_on_exception(self):
-        client, aux, primary = _make_client(enabled_tasks={"classification"})
-        aux.chat_with_tools = AsyncMock(side_effect=RuntimeError("fail"))
-        await client.chat_with_tools([], "system", [], task="classification")
-        primary.chat_with_tools.assert_awaited_once()
-
-    async def test_no_fallback_with_tool_calls(self):
-        client, aux, primary = _make_client(enabled_tasks={"classification"})
-        aux.chat_with_tools = AsyncMock(
-            return_value=LLMResponse(
-                text="", tool_calls=[ToolCall(id="tc1", name="test", input={})],
-                stop_reason="tool_use",
-            )
-        )
-        result = await client.chat_with_tools([], "system", [], task="classification")
-        assert len(result.tool_calls) == 1
-        primary.chat_with_tools.assert_not_awaited()
-        assert client._aux_calls == 1
 
 
 # ---------------------------------------------------------------------------
@@ -425,34 +239,23 @@ class TestChatWithToolsFallback:
 
 class TestMakeChatFn:
     async def test_returns_callable(self):
-        client, _, _ = _make_client(enabled_tasks={"compaction"})
+        client, _, _ = _make_client()
         fn = client.make_chat_fn("compaction")
         assert callable(fn)
 
-    async def test_callable_routes_correctly(self):
-        client, aux, _ = _make_client(enabled_tasks={"compaction"})
+    async def test_callable_routes_to_aux(self):
+        client, aux, _ = _make_client()
         fn = client.make_chat_fn("compaction")
         result = await fn([{"role": "user", "content": "text"}], "system prompt")
         assert result == "aux response"
         aux.chat.assert_awaited_once()
 
     async def test_callable_matches_compaction_fn_signature(self):
-        client, _, _ = _make_client(enabled_tasks={"compaction"})
+        client, _, _ = _make_client()
         fn = client.make_chat_fn("compaction")
         # CompactionFn signature: async (messages: list[dict], system: str) -> str
         result = await fn([{"role": "user", "content": "x"}], "system")
         assert isinstance(result, str)
-
-    async def test_different_tasks_route_differently(self):
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
-        compact_fn = client.make_chat_fn("compaction")
-        reflect_fn = client.make_chat_fn("reflection")
-
-        await compact_fn([], "s")
-        await reflect_fn([], "s")
-
-        aux.chat.assert_awaited_once()  # compaction → aux
-        primary.chat.assert_awaited_once()  # reflection → primary (not enabled)
 
 
 # ---------------------------------------------------------------------------
@@ -466,20 +269,20 @@ class TestMakeCodexCallback:
         assert callable(fn)
 
     async def test_callback_signature(self):
-        client, _, _ = _make_client(enabled_tasks={"background_followup"})
+        client, _, _ = _make_client()
         fn = client.make_codex_callback()
         # CodexCallback signature: async (messages, system, max_tokens) -> str
         result = await fn([{"role": "user", "content": "x"}], "system", 200)
         assert isinstance(result, str)
 
     async def test_max_tokens_passed_through(self):
-        client, aux, _ = _make_client(enabled_tasks={"background_followup"})
+        client, aux, _ = _make_client()
         fn = client.make_codex_callback()
         await fn([], "system", 150)
         aux.chat.assert_awaited_once_with([], "system", max_tokens=150)
 
     async def test_custom_task(self):
-        client, aux, primary = _make_client(enabled_tasks={"reflection"})
+        client, aux, primary = _make_client()
         fn = client.make_codex_callback(task="reflection")
         await fn([], "s", 100)
         aux.chat.assert_awaited_once()
@@ -494,13 +297,10 @@ class TestGetMetrics:
     def test_metrics_structure(self):
         client, _, _ = _make_client()
         m = client.get_metrics()
-        assert "aux_model" in m
-        assert "primary_model" in m
-        assert "enabled_tasks" in m
-        assert "aux_calls" in m
-        assert "fallback_calls" in m
-        assert "primary_direct_calls" in m
-        assert "aux_breaker_state" in m
+        assert set(m) == {
+            "aux_model", "primary_model", "aux_calls",
+            "fallback_calls", "aux_breaker_state",
+        }
 
     def test_metrics_values(self):
         client, _, _ = _make_client(aux_model="gpt-4o-mini", primary_model="gpt-4o")
@@ -509,18 +309,14 @@ class TestGetMetrics:
         assert m["primary_model"] == "gpt-4o"
         assert m["aux_calls"] == 0
         assert m["fallback_calls"] == 0
+        assert m["aux_breaker_state"] == "closed"
 
     async def test_metrics_after_calls(self):
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
+        client, aux, primary = _make_client()
         aux.chat = AsyncMock(return_value="")  # force fallback
         await client.chat([], "s", task="compaction")
         m = client.get_metrics()
         assert m["fallback_calls"] == 1
-
-    def test_enabled_tasks_sorted(self):
-        client, _, _ = _make_client(enabled_tasks={"reflection", "compaction", "consolidation"})
-        m = client.get_metrics()
-        assert m["enabled_tasks"] == ["compaction", "consolidation", "reflection"]
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +337,7 @@ class TestClose:
 class TestCostTracking:
     async def test_aux_call_tracks_cost(self):
         tracker = CostTracker()
-        client, aux, _ = _make_client(enabled_tasks={"compaction"}, cost_tracker=tracker)
+        client, aux, _ = _make_client(cost_tracker=tracker)
         aux._last_input_tokens = 200
         aux._last_output_tokens = 80
         await client.chat([], "s", task="compaction")
@@ -552,7 +348,7 @@ class TestCostTracking:
 
     async def test_fallback_tracks_primary_cost(self):
         tracker = CostTracker()
-        client, aux, primary = _make_client(enabled_tasks={"compaction"}, cost_tracker=tracker)
+        client, aux, primary = _make_client(cost_tracker=tracker)
         aux.chat = AsyncMock(return_value="")  # force fallback
         primary._last_input_tokens = 300
         primary._last_output_tokens = 120
@@ -567,14 +363,14 @@ class TestCostTracking:
 
     async def test_cost_user_id_includes_task(self):
         tracker = CostTracker()
-        client, _, _ = _make_client(enabled_tasks={"compaction"}, cost_tracker=tracker)
+        client, _, _ = _make_client(cost_tracker=tracker)
         await client.chat([], "s", task="compaction")
         by_user = tracker.get_by_user()
         assert "auxiliary:compaction" in by_user
 
     async def test_cost_channel_id_is_system(self):
         tracker = CostTracker()
-        client, _, _ = _make_client(enabled_tasks={"compaction"}, cost_tracker=tracker)
+        client, _, _ = _make_client(cost_tracker=tracker)
         await client.chat([], "s", task="compaction")
         by_channel = tracker.get_by_channel()
         assert "system" in by_channel
@@ -585,14 +381,8 @@ class TestCostTracking:
 # ---------------------------------------------------------------------------
 
 class TestEdgeCases:
-    async def test_empty_enabled_tasks(self):
-        client, _, primary = _make_client(enabled_tasks=set())
-        result = await client.chat([], "s", task="compaction")
-        assert result == "primary response"
-        assert client._primary_direct_calls == 1
-
     async def test_concurrent_calls(self):
-        client, aux, _ = _make_client(enabled_tasks={"compaction", "reflection"})
+        client, aux, _ = _make_client()
         results = await asyncio.gather(
             client.chat([], "s", task="compaction"),
             client.chat([], "s", task="reflection"),
@@ -601,28 +391,18 @@ class TestEdgeCases:
         assert client._aux_calls == 2
 
     async def test_primary_fallback_also_fails(self):
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
+        client, aux, primary = _make_client()
         aux.chat = AsyncMock(side_effect=RuntimeError("aux fail"))
         primary.chat = AsyncMock(side_effect=RuntimeError("primary fail"))
         with pytest.raises(RuntimeError, match="primary fail"):
             await client.chat([], "s", task="compaction")
 
     async def test_none_response_treated_as_empty(self):
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
+        client, aux, primary = _make_client()
         aux.chat = AsyncMock(return_value=None)
         result = await client.chat([], "s", task="compaction")
         assert result == "primary response"
         assert client._fallback_calls == 1
-
-    async def test_chat_with_tools_counter_for_direct(self):
-        client, _, _ = _make_client(enabled_tasks=set())
-        await client.chat_with_tools([], "s", [], task="classification")
-        assert client._primary_direct_calls == 1
-
-    async def test_chat_with_tools_counter_for_aux(self):
-        client, _, _ = _make_client(enabled_tasks={"classification"})
-        await client.chat_with_tools([], "s", [], task="classification")
-        assert client._aux_calls == 1
 
 
 # ---------------------------------------------------------------------------
@@ -631,9 +411,8 @@ class TestEdgeCases:
 
 class TestImports:
     def test_auxiliary_module_imports(self):
-        from src.llm.auxiliary import KNOWN_TASKS, AuxiliaryLLMClient
+        from src.llm.auxiliary import AuxiliaryLLMClient
         assert AuxiliaryLLMClient is not None
-        assert KNOWN_TASKS is not None
 
     def test_llm_init_exports(self):
         from src.llm import AuxiliaryLLMClient
@@ -645,37 +424,12 @@ class TestImports:
 
 
 # ---------------------------------------------------------------------------
-# Lease/drain + ungated routed path (v3.62.x auxiliary reload support)
+# Lease / drain — a retiring wrapper drains in-flight leased calls, never cut
 # ---------------------------------------------------------------------------
 
-class TestRoutedAndLease:
-    async def test_chat_with_tools_routed_bypasses_task_gate(self):
-        # Empty enabled_tasks: is_enabled() is False for everything, yet the
-        # routed path must still use the aux client (the router is the gate).
-        client, aux, primary = _make_client(enabled_tasks=set())
-        from src.llm.types import LLMResponse
-        aux.chat_with_tools = AsyncMock(
-            return_value=LLMResponse(text="cheap", tool_calls=[])
-        )
-        out = await client.chat_with_tools_routed([], "s", [])
-        assert out.text == "cheap"
-        aux.chat_with_tools.assert_awaited_once()
-        primary.chat_with_tools.assert_not_called()
-
-    async def test_routed_falls_back_to_primary_on_empty(self):
-        client, aux, primary = _make_client(enabled_tasks=set())
-        from src.llm.types import LLMResponse
-        aux.chat_with_tools = AsyncMock(return_value=LLMResponse(text="", tool_calls=[]))
-        primary.chat_with_tools = AsyncMock(
-            return_value=LLMResponse(text="strong", tool_calls=[])
-        )
-        out = await client.chat_with_tools_routed([], "s", [])
-        assert out.text == "strong"
-        primary.chat_with_tools.assert_awaited_once()
-
+class TestLease:
     async def test_drain_and_close_waits_for_inflight(self):
-        import asyncio
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
+        client, aux, primary = _make_client()
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -697,12 +451,10 @@ class TestRoutedAndLease:
         await drain
         aux.close.assert_awaited_once()
 
-
-class TestDrainNeverCuts:
     async def test_drain_never_cuts_a_long_lease(self):
         # A legitimately long in-flight call is NEVER severed by a wall-clock
         # timeout — the drain waits for the lease to reach zero.
-        client, aux, primary = _make_client(enabled_tasks={"compaction"})
+        client, aux, primary = _make_client()
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -724,28 +476,3 @@ class TestDrainNeverCuts:
         await drain
         aux.close.assert_awaited_once()
         call.cancel()
-
-    async def test_routed_circuit_open_falls_back(self):
-        client, aux, primary = _make_client(enabled_tasks=set())
-        from src.llm.circuit_breaker import CircuitOpenError
-        from src.llm.types import LLMResponse
-        aux.chat_with_tools = AsyncMock(side_effect=CircuitOpenError("open", retry_after=1.0))
-        primary.chat_with_tools = AsyncMock(
-            return_value=LLMResponse(text="strong", tool_calls=[])
-        )
-        out = await client.chat_with_tools_routed([], "s", [])
-        assert out.text == "strong"
-        assert client._fallback_calls == 1
-
-
-class TestRoutedGenericError:
-    async def test_routed_generic_exception_falls_back(self):
-        client, aux, primary = _make_client(enabled_tasks=set())
-        from src.llm.types import LLMResponse
-        aux.chat_with_tools = AsyncMock(side_effect=RuntimeError("kaboom"))
-        primary.chat_with_tools = AsyncMock(
-            return_value=LLMResponse(text="strong", tool_calls=[])
-        )
-        out = await client.chat_with_tools_routed([], "s", [])
-        assert out.text == "strong"
-        assert client._fallback_calls == 1

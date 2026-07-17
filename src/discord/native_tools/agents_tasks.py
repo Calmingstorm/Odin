@@ -45,25 +45,63 @@ if TYPE_CHECKING:
 log = get_logger("discord")
 
 
-def _agent_llm_policy(config: object, client: object) -> tuple[str | None, str | None]:
+def _agent_llm_policy(
+    config: object,
+    client: object,
+    *,
+    model_override: str | None = None,
+    effort_override: str | None = None,
+) -> tuple[str | None, str | None]:
     """Resolve the spawned-agent REQUEST policy from ONE config read.
 
-    Returns ``(agent_effort, resolved_model)``. ``resolved_model`` is the
-    exact string passed to ``chat_with_tools(model=...)`` — resolved once
-    (``agent_model ?? model``, ""/whitespace = inherit). For providers that
-    pin their model (no ``reasoning_effort`` attr = not the Codex client) it
-    is None: the override would be ignored. This helper decides what the
-    request ASKS FOR; the trajectory stamp is read from the response's
-    provenance fields, which a compliant provider populates from the exact
-    values the outbound body carried (see LLMResponse).
+    Returns ``(agent_effort, resolved_model)``. A per-spawn override, when
+    given, is FIXED for that agent's lifetime and wins over live config; when
+    None, the value tracks live config at CALL time (a WebUI change reaches
+    in-flight agents next iteration). ``resolved_model`` is the exact string
+    passed to ``chat_with_tools(model=...)`` (``override ?? agent_model ??
+    model``, ""/whitespace = inherit). For providers that pin their model (no
+    ``reasoning_effort`` attr = not the Codex client) it is None: the override
+    would be ignored. This helper decides what the request ASKS FOR; the
+    trajectory stamp is read from the response's provenance fields.
     """
     codex_cfg = getattr(config, "openai_codex", None)
-    agent_effort = getattr(codex_cfg, "agent_reasoning_effort", None)
     is_codex = hasattr(client, "reasoning_effort")
-    raw = getattr(codex_cfg, "agent_model", None)
-    agent_model = (str(raw).strip() or None) if raw else None
-    resolved_model = (agent_model or getattr(codex_cfg, "model", None)) if is_codex else None
+    agent_effort: str | None
+    if effort_override is not None:
+        agent_effort = effort_override
+    else:
+        agent_effort = getattr(codex_cfg, "agent_reasoning_effort", None)
+    if not is_codex:
+        return agent_effort, None
+    resolved_model: str | None
+    if model_override:
+        resolved_model = model_override
+    else:
+        raw = getattr(codex_cfg, "agent_model", None)
+        agent_model = (str(raw).strip() or None) if raw else None
+        resolved_model = agent_model or getattr(codex_cfg, "model", None)
     return agent_effort, resolved_model
+
+
+def _parse_spawn_overrides(inp: dict) -> tuple[str | None, str | None, str | None]:
+    """Extract per-spawn ``(model_override, effort_override, error)`` from a
+    spawn/task dict. Empty/whitespace = inherit (None). An invalid
+    ``reasoning_effort`` is REJECTED (returns an error string) — never clamped,
+    so a typo fails loudly instead of silently running the wrong effort.
+    """
+    from ...config.schema import CODEX_REASONING_EFFORTS
+
+    raw_model = inp.get("model")
+    model_override = (str(raw_model).strip() or None) if raw_model else None
+
+    raw_effort = inp.get("reasoning_effort")
+    if raw_effort in ("", None):
+        return model_override, None, None
+    effort = str(raw_effort)
+    if effort not in CODEX_REASONING_EFFORTS:
+        allowed = ", ".join(sorted(CODEX_REASONING_EFFORTS))
+        return None, None, f"invalid reasoning_effort {effort!r} (allowed: {allowed})"
+    return model_override, effort, None
 
 
 def _provenance_stamp(resp: object, client: object) -> dict:
@@ -185,9 +223,9 @@ class AgentTaskTools:
         self._channel_state.background_tasks[task.task_id] = task
 
         # Build Codex callback for conversational follow-up. Resolves the
-        # auxiliary pointer at CALL TIME so a live reload swap is honored and
-        # the 'background_followup' task routes cheap when enabled on the
-        # current wrapper (Codex active); else the active client handles it.
+        # auxiliary pointer at CALL TIME so a live reload swap is honored: the
+        # background follow-up routes to the aux model when it's enabled and
+        # Codex is active; otherwise the active client handles it.
         codex_cb = None
         if self._llm_gateway.active_client:
 
@@ -195,7 +233,7 @@ class AgentTaskTools:
                 aux = getattr(self._llm_gateway, "auxiliary_llm_client", None)
                 provider_cfg = getattr(self._get_config(), "llm_provider", None)
                 active = provider_cfg.active_provider if provider_cfg else "codex"
-                if aux is not None and active == "codex" and aux.is_enabled("background_followup"):
+                if aux is not None and active == "codex":
                     return await aux.chat(
                         messages, system, task="background_followup", max_tokens=max_tokens
                     )
@@ -389,6 +427,10 @@ class AgentTaskTools:
         if not label or not goal:
             return "Both 'label' and 'goal' are required."
 
+        model_override, effort_override, ovr_err = _parse_spawn_overrides(inp)
+        if ovr_err:
+            return f"Error: {ovr_err}"
+
         if not self._llm_gateway.active_client:
             return "Error: LLM provider not available."
 
@@ -427,7 +469,10 @@ class AgentTaskTools:
             # read the agent policy from live config at call time (a WebUI
             # change reaches in-flight agents on their next iteration).
             client = self._llm_gateway.active_client
-            agent_effort, resolved_model = _agent_llm_policy(self._get_config(), client)
+            agent_effort, resolved_model = _agent_llm_policy(
+                self._get_config(), client,
+                model_override=model_override, effort_override=effort_override,
+            )
             resp = await client.chat_with_tools(
                 messages=messages,
                 system=sys_prompt,
@@ -513,6 +558,8 @@ class AgentTaskTools:
             budget_warnings=warnings,
             iteration_timeout=iteration_timeout,
             max_lifetime=max_lifetime,
+            model_override=model_override,
+            reasoning_effort_override=effort_override,
             context_compression_enabled=bool(self._get_context_compressor()),
             max_context_chars=self._get_context_compressor().max_context_chars
             if self._get_context_compressor()
@@ -704,25 +751,51 @@ class AgentTaskTools:
         )
         tools = filter_agent_tools(all_tools)
 
-        # Build iteration/tool callbacks (same pattern as _handle_spawn_agent)
-        async def _iteration_cb(messages, sys, tool_defs):
-            client = self._llm_gateway.active_client
-            agent_effort, resolved_model = _agent_llm_policy(self._get_config(), client)
-            resp = await client.chat_with_tools(
-                messages=messages,
-                system=sys,
-                tools=tool_defs,
-                reasoning_effort=agent_effort,
-                model=resolved_model,
-            )
-            return {
-                "text": resp.text or "",
-                "tool_calls": [
-                    {"name": tc.name, "input": tc.input} for tc in (resp.tool_calls or [])
-                ],
-                "stop_reason": resp.stop_reason or "end_turn",
-                **_provenance_stamp(resp, client),
-            }
+        # Validate + normalize each task's optional per-agent model/effort
+        # override — a single bad reasoning_effort rejects the WHOLE batch
+        # (nothing spawns) rather than silently running the wrong effort.
+        validated_tasks = []
+        for t in tasks:
+            if not isinstance(t, dict):
+                return "Error: each task must be an object with 'label' and 'goal'."
+            mo, eo, err = _parse_spawn_overrides(t)
+            if err:
+                return f"Error: task '{t.get('label', '?')}': {err}"
+            validated_tasks.append({
+                "label": t.get("label", ""),
+                "goal": t.get("goal", ""),
+                "model_override": mo,
+                "reasoning_effort_override": eo,
+            })
+        tasks = validated_tasks
+
+        # Per-task iteration callback FACTORY (same pattern as
+        # _handle_spawn_agent): each agent gets a callback closed over ITS OWN
+        # model/effort override, so a fleet can mix models. Overrides are fixed
+        # for the agent's life; None fields track live config at call time.
+        def _make_iteration_cb(model_override, effort_override):
+            async def _iteration_cb(messages, sys, tool_defs):
+                client = self._llm_gateway.active_client
+                agent_effort, resolved_model = _agent_llm_policy(
+                    self._get_config(), client,
+                    model_override=model_override, effort_override=effort_override,
+                )
+                resp = await client.chat_with_tools(
+                    messages=messages,
+                    system=sys,
+                    tools=tool_defs,
+                    reasoning_effort=agent_effort,
+                    model=resolved_model,
+                )
+                return {
+                    "text": resp.text or "",
+                    "tool_calls": [
+                        {"name": tc.name, "input": tc.input} for tc in (resp.tool_calls or [])
+                    ],
+                    "stop_reason": resp.stop_reason or "end_turn",
+                    **_provenance_stamp(resp, client),
+                }
+            return _iteration_cb
 
         async def _tool_cb(tool_name, tool_input):
             return await self._tool_loop.dispatch_loop_tool(
@@ -746,7 +819,8 @@ class AgentTaskTools:
             channel_id=channel_id,
             requester_id=loop_info.requester_id,
             requester_name=loop_info.requester_name,
-            iteration_callback=_iteration_cb,
+            iteration_callback=_make_iteration_cb(None, None),
+            iteration_callback_factory=_make_iteration_cb,
             tool_executor_callback=_tool_cb,
             tools=tools,
             system_prompt=system_prompt,

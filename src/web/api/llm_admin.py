@@ -137,16 +137,14 @@ def _persist_llm_sections_sync(bot) -> None:
     )
     existing["openai_codex"]["agent_model"] = bot.config.openai_codex.agent_model
 
-    # Auxiliary: persist ONLY the card-exposed fields (enabled/model/tasks).
-    # credentials_path and max_tokens are deliberately not exposed or
-    # overwritten by this surface.
+    # Auxiliary: only enabled + model are configurable (auth and token limit
+    # are shared with the main Codex client, never overwritten by this surface).
     aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
     if aux_cfg is not None:
         if "auxiliary" not in existing["openai_codex"]:
             existing["openai_codex"]["auxiliary"] = {}
         existing["openai_codex"]["auxiliary"]["enabled"] = aux_cfg.enabled
         existing["openai_codex"]["auxiliary"]["model"] = aux_cfg.model
-        existing["openai_codex"]["auxiliary"]["tasks"] = list(aux_cfg.tasks)
 
     if "ollama" not in existing:
         existing["ollama"] = {}
@@ -283,15 +281,12 @@ def register_connection_pools(routes: web.RouteTableDef, bot) -> None:
 def _auxiliary_status(bot) -> dict:
     """Configured vs effective auxiliary state for /api/llm/status.
 
-    ``enabled``/``model``/``tasks`` are the persisted config; the
-    ``effective_*`` fields describe the live runtime wrapper (present only
-    when config produced a working client). ``unavailable_reason`` is set
-    when enabled config could NOT produce a live client (e.g. no auth).
-    ``known_tasks`` is the operator-visible list — every entry has a live
-    consumer, so the UI can render them all as real controls.
+    ``enabled``/``model`` are the persisted config; the ``effective_*`` fields
+    describe the live runtime wrapper (present only when config produced a
+    working client). ``unavailable_reason`` is set when enabled config could
+    NOT produce a live client (e.g. no auth). The four background jobs route
+    to this model when enabled — there is no per-task configuration.
     """
-    from ...llm.auxiliary import KNOWN_TASKS_ORDER
-
     aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
     live = getattr(bot.llm_gateway, "auxiliary_llm_client", None)
     configured_enabled = bool(aux_cfg and aux_cfg.enabled)
@@ -301,12 +296,9 @@ def _auxiliary_status(bot) -> dict:
     return {
         "enabled": configured_enabled,
         "model": aux_cfg.model if aux_cfg else "",
-        "tasks": list(aux_cfg.tasks) if aux_cfg else [],
         "effective_enabled": live is not None,
         "effective_model": getattr(getattr(live, "aux_client", None), "model", None),
-        "effective_tasks": sorted(live.enabled_tasks) if live is not None else [],
         "unavailable_reason": unavailable_reason,
-        "known_tasks": list(KNOWN_TASKS_ORDER),
     }
 
 
@@ -518,49 +510,20 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        from ...llm.auxiliary import KNOWN_TASKS, KNOWN_TASKS_ORDER
-
         aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
         if aux_cfg is None:
             return web.json_response({"error": "auxiliary config unavailable"}, status=503)
 
-        # Validate the whole candidate BEFORE mutating (assignment does not
-        # run the pydantic field_validator). Presence-checked: an absent key
-        # leaves the existing value untouched.
-        tasks_present = "tasks" in body
-        new_tasks = None
-        if tasks_present:
-            raw = body.get("tasks")
-            if not isinstance(raw, list):
-                return web.json_response({"error": "tasks must be a list"}, status=400)
-            # Require every item to be a string BEFORE set membership /
-            # sorted() — a non-string ({}/int) would raise TypeError → 500.
-            if not all(isinstance(t, str) for t in raw):
-                return web.json_response(
-                    {"error": "every task must be a string"}, status=400)
-            unknown = [t for t in raw if t not in KNOWN_TASKS]
-            if unknown:
-                return web.json_response(
-                    {"error": f"unknown auxiliary task(s): {sorted(set(unknown))}",
-                     "allowed": list(KNOWN_TASKS_ORDER)},
-                    status=400,
-                )
-            seen = set(raw)
-            new_tasks = [t for t in KNOWN_TASKS_ORDER if t in seen]
-
-        # Build an IMMUTABLE desired spec (presence-merged with current
-        # config) WITHOUT mutating live config — reload_auxiliary commits it
-        # atomically under the lock, so a concurrent PUT can't install a
-        # candidate built from a config this handler already changed.
+        # Build an IMMUTABLE desired spec (presence-merged with current config)
+        # WITHOUT mutating live config — reload_auxiliary commits it atomically
+        # under the lock, so a concurrent PUT can't install a candidate built
+        # from a config this handler already changed. Only enabled + model are
+        # configurable; auth and token limit are shared with the main Codex.
         want_enabled = bool(body["enabled"]) if "enabled" in body else aux_cfg.enabled
         want_model = aux_cfg.model
         if "model" in body and str(body["model"]).strip():
             want_model = str(body["model"]).strip()
-        want_tasks = new_tasks if tasks_present else list(aux_cfg.tasks)
-        desired = {
-            "enabled": want_enabled, "model": want_model, "tasks": want_tasks,
-            "credentials_path": aux_cfg.credentials_path, "max_tokens": aux_cfg.max_tokens,
-        }
+        desired = {"enabled": want_enabled, "model": want_model}
         # Persistence runs INSIDE reload_auxiliary's locked transaction: the
         # SYNC write runs on an executor future (settled before the lock
         # releases), the candidate is applied, persisted, and (on persist

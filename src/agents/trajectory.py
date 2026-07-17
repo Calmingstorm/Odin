@@ -41,6 +41,11 @@ class AgentTrajectoryTurn:
     # Spawn policy snapshot (per-agent timeout values the run was bound by)
     iteration_timeout: float | None = None
     max_lifetime: float | None = None
+    # Per-spawn LLM overrides the parent explicitly chose for this agent
+    # (None = inherited the configured agent defaults). Distinct from the
+    # per-iteration execution provenance, which records what ACTUALLY ran.
+    model_override: str | None = None
+    reasoning_effort_override: str | None = None
 
     iterations: list[ToolIteration] = field(default_factory=list)
 
@@ -113,6 +118,8 @@ class AgentTrajectoryTurn:
             "system_prompt_length": self.system_prompt_length,
             "iteration_timeout": self.iteration_timeout,
             "max_lifetime": self.max_lifetime,
+            "model_override": self.model_override,
+            "reasoning_effort_override": self.reasoning_effort_override,
             "iterations": [asdict(it) for it in self.iterations],
             "final_state": self.final_state,
             "result": self.result,

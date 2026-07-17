@@ -458,16 +458,6 @@ class TestBuildLoopModuleWirings:
         bot = OdinBot(cfg)
         assert isinstance(bot.outbound_webhook_dispatcher, OutboundWebhookDispatcher)
 
-    def test_model_router_wired_when_enabled(self):
-        from src.config.schema import Config
-        from src.llm.model_router import ModelRouter
-        cfg = Config(
-            discord={"token": "x"},
-            openai_codex={"model_routing": {"enabled": True}},
-        )
-        bot = OdinBot(cfg)
-        assert isinstance(bot.model_router, ModelRouter)
-
     def test_context_compressor_wired_when_enabled(self):
         from src.config.schema import Config
         from src.llm.context_compressor import PrefixTracker

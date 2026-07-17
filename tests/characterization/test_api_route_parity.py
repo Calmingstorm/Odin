@@ -198,7 +198,6 @@ EXPECTED_ROUTES = [
     ("PUT", "/api/learned/{key}", "update_learned"),
     ("GET", "/api/affordances", "affordances"),
     ("GET", "/api/compression/stats", "compression_stats"),
-    ("GET", "/api/routing/stats", "routing_stats"),
     ("GET", "/api/startup/diagnostics", "startup_diagnostics"),
     ("GET", "/api/subsystems/status", "subsystem_status"),
     ("GET", "/api/agent-trajectories", "list_agent_trajectory_files"),
@@ -231,7 +230,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 184
+        assert len(actual) == len(expected) == 183
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

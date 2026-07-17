@@ -92,7 +92,6 @@ class OdinBot(commands.Bot):
         self.cost_tracker = services.cost_tracker
         self.subsystem_guard = services.subsystem_guard
         self.diff_tracker = services.diff_tracker
-        self.model_router = services.model_router
         self.context_compressor = services.context_compressor
         self.prefix_tracker = services.prefix_tracker
         # The gateway holds the CANONICAL auxiliary pointer — live reloads

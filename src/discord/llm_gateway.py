@@ -41,7 +41,6 @@ class LLMGateway:
         ollama_client: OllamaClient | None,
         kimi_client: KimiClient | None,
         subsystem_guard,
-        model_router,
         auxiliary_llm_client,
         cost_tracker,
         sessions,
@@ -52,7 +51,6 @@ class LLMGateway:
         self.ollama_client = ollama_client
         self.kimi_client = kimi_client
         self.subsystem_guard = subsystem_guard
-        self.model_router = model_router
         self.auxiliary_llm_client = auxiliary_llm_client
         self.cost_tracker = cost_tracker
         self.sessions = sessions
@@ -103,7 +101,7 @@ class LLMGateway:
             aux = self.auxiliary_llm_client
             provider_cfg = getattr(self.get_config(), "llm_provider", None)
             active = provider_cfg.active_provider if provider_cfg else "codex"
-            if aux is not None and active == "codex" and aux.is_enabled(task):
+            if aux is not None and active == "codex":
                 return await aux.chat(messages, system, task=task, max_tokens=max_tokens)
             client = self.active_client
             if not client:
@@ -140,8 +138,6 @@ class LLMGateway:
         if self.codex_client is None:
             if aux is not None:
                 self.auxiliary_llm_client = None
-                if self.model_router is not None:
-                    self.model_router.aux_client = None
                 self._schedule_drain(aux)
             return
         if aux is not None:
@@ -246,23 +242,21 @@ class LLMGateway:
         aux_cfg = self.get_config().openai_codex.auxiliary
         aux_cfg.enabled = desired["enabled"]
         aux_cfg.model = desired["model"]
-        aux_cfg.tasks = list(desired["tasks"])
 
     def _build_aux_candidate(self, desired: dict, primary):
         """Construct a candidate wrapper from an IMMUTABLE desired spec bound
-        to ``primary`` — no live config read, so a concurrent config change
-        can't leak into this candidate."""
+        to ``primary``. Only the aux MODEL is spec-driven; auth and token limit
+        are shared with the main Codex client (read from live config once here)."""
         from ..llm.auxiliary import AuxiliaryLLMClient
 
         config = self.get_config()
-        aux_creds = desired["credentials_path"] or config.openai_codex.credentials_path
-        aux_auth = CodexAuthPool(aux_creds)
+        aux_auth = CodexAuthPool(config.openai_codex.credentials_path)
         if not aux_auth.is_configured():
             return None, None
         candidate_client = CodexChatClient(
             auth=aux_auth,
             model=desired["model"],
-            max_tokens=desired["max_tokens"],
+            max_tokens=config.openai_codex.max_tokens,
             max_retries=config.openai_codex.retry.max_retries,
             retry_base_delay=config.openai_codex.retry.base_delay,
             retry_max_delay=config.openai_codex.retry.max_delay,
@@ -274,7 +268,6 @@ class LLMGateway:
         candidate = AuxiliaryLLMClient(
             aux_client=candidate_client,
             primary_client=primary,
-            enabled_tasks=set(desired["tasks"]),
             cost_tracker=self.cost_tracker,
         )
         return candidate, candidate_client
@@ -322,12 +315,7 @@ class LLMGateway:
 
     def _snapshot_aux_config(self) -> dict:
         aux_cfg = self.get_config().openai_codex.auxiliary
-        return {
-            "enabled": aux_cfg.enabled, "model": aux_cfg.model,
-            "tasks": list(aux_cfg.tasks),
-            "credentials_path": aux_cfg.credentials_path,
-            "max_tokens": aux_cfg.max_tokens,
-        }
+        return {"enabled": aux_cfg.enabled, "model": aux_cfg.model}
 
     async def reload_auxiliary(self, desired: dict | None = None, persist=None) -> dict:
         """Transactional live reload of the auxiliary wrapper.
@@ -358,10 +346,7 @@ class LLMGateway:
                             "reason": "concurrent reload; retry"}
                 prior_cfg = self._snapshot_aux_config()
                 prior_aux = self.auxiliary_llm_client
-                prior_router = self.model_router.aux_client if self.model_router else None
                 self.auxiliary_llm_client = None
-                if self.model_router is not None:
-                    self.model_router.aux_client = None
                 self._apply_aux_desired(desired)
                 self._aux_reload_gen += 1
                 if persist is not None:
@@ -369,8 +354,6 @@ class LLMGateway:
                     if persist_exc is not None:
                         # EXACT restore — no probed reload; disk unchanged.
                         self.auxiliary_llm_client = prior_aux
-                        if self.model_router is not None:
-                            self.model_router.aux_client = prior_router
                         self._apply_aux_desired(prior_cfg)
                         self._aux_reload_gen += 1
                         log.warning("Auxiliary disable persist failed (restored prior)")
@@ -427,10 +410,7 @@ class LLMGateway:
                             "reason": "concurrent reload; retry"}
                 prior_cfg = self._snapshot_aux_config()
                 prior_aux = self.auxiliary_llm_client
-                prior_router = self.model_router.aux_client if self.model_router else None
                 self.auxiliary_llm_client = candidate
-                if self.model_router is not None:
-                    self.model_router.aux_client = candidate
                 self._apply_aux_desired(desired)
                 self._aux_reload_gen += 1
                 if persist is not None:
@@ -439,8 +419,6 @@ class LLMGateway:
                         # EXACT restore of the prior generation, then drain the
                         # candidate (installed stays False → finally handles it).
                         self.auxiliary_llm_client = prior_aux
-                        if self.model_router is not None:
-                            self.model_router.aux_client = prior_router
                         self._apply_aux_desired(prior_cfg)
                         self._aux_reload_gen += 1
                         log.warning("Auxiliary enable persist failed (restored prior)")
@@ -461,12 +439,9 @@ class LLMGateway:
                 self._schedule_drain(retired)
             if was_cancelled:
                 raise asyncio.CancelledError
-            log.info(
-                "Auxiliary reloaded (model: %s, tasks: %s)",
-                desired["model"], ", ".join(desired["tasks"]) or "none",
-            )
+            log.info("Auxiliary reloaded (model: %s)", desired["model"])
             return {"committed": True, "effective_enabled": True,
-                    "model": desired["model"], "tasks": list(desired["tasks"])}
+                    "model": desired["model"]}
         finally:
             if not installed:
                 self._schedule_drain(candidate)
@@ -617,17 +592,14 @@ class LLMGateway:
         messages: list,
         system: str,
         tools: list,
-        user_message: str = "",
         user_id: str = "",
         channel_id: str = "",
         tools_used: list[str] | None = None,
         **kwargs,
     ):
-        """Wrap chat_with_tools with cost / subsystem / routing wiring.
+        """Wrap chat_with_tools with cost / subsystem wiring.
 
         - subsystem_guard.check() short-circuits if the provider is UNAVAILABLE
-        - model_router (when enabled and user_message given) picks cheap vs
-          strong model; cheap path uses auxiliary_llm_client when available
         - cost_tracker.record() captures token usage on every successful call
         - subsystem_guard.record_success / record_failure tracks provider health
         """
@@ -647,43 +619,12 @@ class LLMGateway:
             if err:
                 self.inflight_requests -= 1
                 raise RuntimeError(f"LLM subsystem unavailable: {err}")
-        # Auxiliary cheap-model routing is Codex-only (the aux client is always a
-        # CodexChatClient). When the operator has switched the active provider to
-        # ollama/kimi, do NOT divert "cheap" turns back to Codex — that defeats the
-        # provider switch and fails if Codex isn't authed. Let the active provider
-        # handle everything.
-        route_cheap = False
-        if (
-            user_message
-            and active == "codex"
-            and self.model_router is not None
-            and self.auxiliary_llm_client is not None
-        ):
-            try:
-                decision = await self.model_router.route(user_message)
-                if not decision.use_strong:
-                    route_cheap = True
-                    log.debug(
-                        "model_router: routing to cheap model (intent=%s, conf=%.2f)",
-                        decision.intent.value,
-                        decision.confidence,
-                    )
-            except Exception:
-                log.exception("model_router.route failed; using strong model (non-fatal)")
 
         try:
             try:
-                if route_cheap and self.auxiliary_llm_client is not None:
-                    # Whole-turn cheap routing goes through the UNGATED routed
-                    # path (the router already decided) — not chat_with_tools,
-                    # which would consult the classification checkbox.
-                    resp = await self.auxiliary_llm_client.chat_with_tools_routed(
-                        messages, system, tools
-                    )
-                else:
-                    resp = await client.chat_with_tools(
-                        messages=messages, system=system, tools=tools, **kwargs
-                    )
+                resp = await client.chat_with_tools(
+                    messages=messages, system=system, tools=tools, **kwargs
+                )
             except Exception as exc:
                 if self.subsystem_guard is not None:
                     self.subsystem_guard.record_failure(guard_key, str(exc))

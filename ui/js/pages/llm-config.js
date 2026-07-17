@@ -151,52 +151,31 @@ export default {
               </select>
               </label>
             </div>
-            <div class="sm:col-span-2">
-              <label class="text-xs text-gray-400 block">Max Tokens
-              <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfigNow"
-                     class="hm-input" style="max-width: 240px" />
-              </label>
-            </div>
-          </div>
-          <div class="border-t border-gray-700 pt-4">
-          <div class="flex items-center justify-between mb-2">
-            <h3 class="text-xs font-semibold text-gray-400">Auxiliary Model</h3>
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" v-model="auxForm.enabled" @change="saveAuxConfigDebounced" class="provider-control" />
-              <span class="text-xs text-gray-400">Enabled</span>
-            </label>
-          </div>
-          <p class="text-xs text-gray-500 mb-3">
-            A cheaper Codex model for selected background jobs (routes with automatic fallback to the primary). Requires Codex; only jobs with a live consumer can be delegated.
-          </p>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
             <div>
-              <label class="text-xs text-gray-400 block">Model
-              <select v-model="auxForm.model" @change="saveAuxConfigDebounced" class="hm-input">
+              <label class="text-xs text-gray-400 block">Auxiliary Model
+              <select :value="auxForm.enabled ? auxForm.model : ''" @change="onAuxModelChange"
+                      class="hm-input">
+                <option value="">Off — use primary model</option>
                 <option v-for="m in auxModelOptions" :key="m" :value="m">{{ m }}</option>
               </select>
               </label>
             </div>
-          </div>
-          <div>
-            <div class="text-xs text-gray-400 mb-2">Delegated tasks</div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-1">
-              <label v-for="t in auxKnownTasks" :key="t"
-                     class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" :value="t" v-model="auxForm.tasks"
-                       @change="saveAuxConfigDebounced" class="provider-control" />
-                <span class="text-xs text-gray-300">{{ t }}</span>
-                <span v-if="t === 'classification'" class="text-xs text-gray-500">— requires Model Routing</span>
+            <div>
+              <label class="text-xs text-gray-400 block">Max Tokens
+              <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfigNow"
+                     class="hm-input" />
               </label>
             </div>
-            <p class="text-xs text-gray-500 mt-2">
-              Intent classification requires Model Routing to be enabled; it gates the router's ambiguous-intent checks only, not whole-turn routing.
-            </p>
           </div>
+          <p class="text-xs text-gray-500 mt-3">
+            The Auxiliary Model runs the background jobs (compaction, reflection, consolidation,
+            background follow-up) on a cheaper Codex model, with automatic fallback to the primary
+            on error. It shares the main Codex login and token limit — only the model differs.
+            "Off" runs those jobs on the primary model.
+          </p>
           <div v-if="auxData.unavailable_reason"
                class="text-sm text-yellow-400 bg-yellow-900/20 rounded p-2 border border-yellow-800 mt-3">
             {{ auxData.unavailable_reason }}
-          </div>
           </div>
           <div class="border-t border-gray-700 pt-4">
           <h3 class="text-xs font-semibold text-gray-400 mb-2">Authentication</h3>
@@ -436,7 +415,9 @@ export default {
 
     // Codex model catalog — ONE ordered list renders both the Model and
     // Agent Model selects so the two dropdowns can never drift apart.
-    const CODEX_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'];
+    // gpt-5.5 is intentionally not offered as a fresh choice (skip 5.5); an
+    // existing 5.5 config still renders via the free-string temporary option.
+    const CODEX_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
     // model/agent_model are free strings server-side: an unknown configured
     // value (hand-edited or future model) must render as a temporary option —
     // a blank select would let the next save silently replace it.
@@ -449,16 +430,24 @@ export default {
       return v && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
     });
     // --- Auxiliary (cheap-model) ---
-    const auxForm = ref({ enabled: false, model: 'gpt-5.6-luna', tasks: [] });
-    const auxData = ref({ known_tasks: [], unavailable_reason: null });
-    const auxKnownTasks = computed(() => auxData.value.known_tasks || []);
+    const auxForm = ref({ enabled: false, model: 'gpt-5.6-luna' });
+    const auxData = ref({ unavailable_reason: null });
     // Same free-string contract as the main model dropdown: an unknown
-    // configured value (e.g. a preserved gpt-4o-mini) renders as a temporary
-    // first option so the debounced save can't silently replace it.
+    // configured value renders as a temporary first option so the debounced
+    // save can't silently replace it.
     const auxModelOptions = computed(() => {
       const v = auxForm.value.model;
       return v && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
     });
+    // The single dropdown carries the enabled state: "Off" (empty value)
+    // disables the aux model (background jobs fall to the primary); picking a
+    // model enables it. We keep the last model so re-enabling restores it.
+    function onAuxModelChange(e) {
+      const v = e.target.value;
+      auxForm.value.enabled = v !== '';
+      if (v !== '') auxForm.value.model = v;
+      saveAuxConfigDebounced();
+    }
     const savingAux = ref(false);
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096 });
     const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 });
@@ -549,7 +538,6 @@ export default {
           if (!saveAuxConfigDebounced.pending()) {
             auxForm.value.enabled = data.auxiliary.enabled;
             auxForm.value.model = data.auxiliary.model || 'gpt-5.6-luna';
-            auxForm.value.tasks = [...(data.auxiliary.tasks || [])];
           }
         }
       } catch (e) {
@@ -865,7 +853,7 @@ export default {
     return {
       loading, llmStatus, selectedProvider, switching,
       codexForm, codexModelOptions, codexAgentModelOptions,
-      auxForm, auxData, auxKnownTasks, auxModelOptions, savingAux, saveAuxConfigDebounced,
+      auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
       ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,

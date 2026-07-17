@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 from ..odin_log import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .manager import (
         AgentManager,
         AnnounceCallback,
@@ -89,14 +91,20 @@ class LoopAgentBridge:
         budget_warnings: list[int] | None = None,
         iteration_timeout: float | None = None,
         max_lifetime: float | None = None,
+        iteration_callback_factory: Callable[[str | None, str | None], IterationCallback]
+        | None = None,
         context_compression_enabled: bool = False,
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
     ) -> list[str]:
         """Spawn agents for a loop iteration.
 
-        Each task dict must have 'label' and 'goal' keys.
-        Returns list of agent_ids (or error strings starting with 'Error:').
+        Each task dict must have 'label' and 'goal'. Optional per-task
+        'model_override'/'reasoning_effort_override' (pre-validated by the
+        caller) run that agent on a specific model/effort — when present with
+        an ``iteration_callback_factory``, each agent gets its own callback
+        built from its overrides; otherwise the shared ``iteration_callback``
+        is used. Returns agent_ids (or error strings starting with 'Error:').
         """
         if not tasks:
             return []
@@ -132,13 +140,21 @@ class LoopAgentBridge:
                 f"Agent task: {goal}"
             )
 
+            model_override = task.get("model_override")
+            effort_override = task.get("reasoning_effort_override")
+            cb = (
+                iteration_callback_factory(model_override, effort_override)
+                if iteration_callback_factory is not None
+                else iteration_callback
+            )
+
             agent_id = self._agent_manager.spawn(
                 label=label,
                 goal=enriched_goal,
                 channel_id=channel_id,
                 requester_id=requester_id,
                 requester_name=requester_name,
-                iteration_callback=iteration_callback,
+                iteration_callback=cb,
                 tool_executor_callback=tool_executor_callback,
                 announce_callback=announce_callback,
                 tools=tools,
@@ -149,6 +165,8 @@ class LoopAgentBridge:
                 budget_warnings=budget_warnings,
                 iteration_timeout=iteration_timeout,
                 max_lifetime=max_lifetime,
+                model_override=model_override,
+                reasoning_effort_override=effort_override,
                 context_compression_enabled=context_compression_enabled,
                 max_context_chars=max_context_chars,
                 keep_recent_iterations=keep_recent_iterations,

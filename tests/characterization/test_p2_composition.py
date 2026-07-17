@@ -85,12 +85,10 @@ class TestTwoStageComposition:
 
 
 class TestAuxiliaryWiring:
-    """The wiring bug fix: build_services must pass the configured task set
-    to the AuxiliaryLLMClient and bind the ModelRouter's aux classifier
-    client (both were missing — the wrapper defaulted to ALL tasks and the
-    router got no cheap classifier)."""
+    """build_services builds the AuxiliaryLLMClient (no per-task gating) and
+    binds it onto the gateway when Codex + auxiliary are both enabled."""
 
-    def test_enabled_tasks_passed_and_router_bound(self, tmp_path, monkeypatch):
+    def test_aux_client_built_and_bound(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         from unittest.mock import MagicMock
 
@@ -99,8 +97,8 @@ class TestAuxiliaryWiring:
         captured = {}
 
         class _FakeAux:
-            def __init__(self, *, aux_client, primary_client, enabled_tasks, cost_tracker):
-                captured["enabled_tasks"] = enabled_tasks
+            def __init__(self, *, aux_client, primary_client, cost_tracker):
+                captured["instance"] = self
 
         # AuxiliaryLLMClient is imported locally in build_services → patch it
         # at its source module; the Codex classes are module-level in wiring.
@@ -116,17 +114,14 @@ class TestAuxiliaryWiring:
             "openai_codex": {
                 "enabled": True,
                 "credentials_path": "/fake/creds.json",
-                "model_routing": {"enabled": True},
                 "auxiliary": {
                     "enabled": True,
                     "model": "gpt-5.6-terra",
-                    "tasks": ["compaction", "reflection"],
                 },
             },
         })
-        assert captured["enabled_tasks"] == {"compaction", "reflection"}
-        assert bot.llm_gateway.model_router is not None
-        assert bot.llm_gateway.model_router.aux_client is bot.llm_gateway.auxiliary_llm_client
+        assert captured.get("instance") is not None
+        assert bot.llm_gateway.auxiliary_llm_client is captured["instance"]
 
 
 class TestAuxiliaryFlatHandle:

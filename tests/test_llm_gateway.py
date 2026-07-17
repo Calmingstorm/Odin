@@ -39,11 +39,11 @@ def _cfg(active="codex", codex_enabled=True, ollama_enabled=False,
 
 
 def _gw(config=None, codex=None, ollama=None, kimi=None,
-        guard=None, router=None, aux=None, cost=None):
+        guard=None, aux=None, cost=None):
     return LLMGateway(
         get_config=lambda: config if config is not None else _cfg(),
         codex_client=codex, ollama_client=ollama, kimi_client=kimi,
-        subsystem_guard=guard, model_router=router, auxiliary_llm_client=aux,
+        subsystem_guard=guard, auxiliary_llm_client=aux,
         cost_tracker=cost, sessions=MagicMock(), reflector=MagicMock(),
     )
 
@@ -317,23 +317,6 @@ class TestCallWithTools:
         guard.record_failure.assert_called_once()
         assert gw.inflight_requests == 0
 
-    async def test_model_router_cheap_path(self):
-        strong = SimpleNamespace(chat_with_tools=AsyncMock(), model="gpt-5.5")
-        aux_resp = SimpleNamespace(input_tokens=1, output_tokens=1)
-        # Cheap whole-turn routing uses the UNGATED chat_with_tools_routed
-        # (the router is the gate) — not chat_with_tools, which would consult
-        # the classification checkbox.
-        aux = SimpleNamespace(
-            chat_with_tools_routed=AsyncMock(return_value=aux_resp), model="cheap"
-        )
-        router = MagicMock()
-        router.route = AsyncMock(return_value=SimpleNamespace(
-            use_strong=False, intent=SimpleNamespace(value="chat"), confidence=0.9))
-        gw = _gw(codex=strong, router=router, aux=aux)
-        out = await gw.call_with_tools(messages=[], system="s", tools=[], user_message="hi")
-        assert out is aux_resp  # routed to the cheap auxiliary client
-        aux.chat_with_tools_routed.assert_awaited_once()
-
     async def test_call_with_tools_preserves_provenance(self):
         """The gateway wrapper returns the child response's provenance
         unchanged — never overwritten with active_client/gateway identity."""
@@ -349,24 +332,6 @@ class TestCallWithTools:
         assert out.provenance_model == "gpt-5.6-sol"
         assert out.provenance_reasoning_effort == "xhigh"
 
-    async def test_router_diversion_carries_aux_provenance(self):
-        """A cheap-routed turn reports the AUXILIARY client's provenance —
-        the exact case a call-site snapshot of active_client would lie
-        about."""
-        from src.llm.types import LLMResponse
-        aux_resp = LLMResponse(text="ok", provenance_provider="codex",
-                               provenance_model="gpt-5.6-luna")
-        strong = SimpleNamespace(chat_with_tools=AsyncMock(), model="gpt-5.6-sol")
-        aux = SimpleNamespace(chat_with_tools_routed=AsyncMock(return_value=aux_resp),
-                              model="gpt-5.6-luna")
-        router = MagicMock()
-        router.route = AsyncMock(return_value=SimpleNamespace(
-            use_strong=False, intent=SimpleNamespace(value="chat"), confidence=0.9))
-        gw = _gw(codex=strong, router=router, aux=aux)
-        out = await gw.call_with_tools(messages=[], system="s", tools=[], user_message="hi")
-        assert out.provenance_model == "gpt-5.6-luna"
-        strong.chat_with_tools.assert_not_awaited()
-
     async def test_cost_record_exception_non_fatal(self):
         resp = SimpleNamespace(input_tokens=1, output_tokens=1)
         client = SimpleNamespace(chat_with_tools=AsyncMock(return_value=resp), model="m")
@@ -378,25 +343,14 @@ class TestCallWithTools:
         # cost tracking failure must not break the call
         assert await gw.call_with_tools(messages=[], system="s", tools=[]) is resp
 
-    async def test_router_exception_uses_strong(self):
-        resp = SimpleNamespace(input_tokens=0, output_tokens=0)
-        strong = SimpleNamespace(chat_with_tools=AsyncMock(return_value=resp), model="gpt-5.5")
-        router = MagicMock()
-        router.route = AsyncMock(side_effect=RuntimeError("route boom"))
-        gw = _gw(codex=strong, router=router, aux=SimpleNamespace())
-        out = await gw.call_with_tools(messages=[], system="s", tools=[], user_message="hi")
-        assert out is resp  # router failure is non-fatal → strong client used
-
 
 class TestAuxiliaryRouting:
     """wire_callbacks resolves the aux pointer at CALL time (a live reload
-    swap must be honored), and named tasks route through the wrapper."""
+    swap must be honored). Named jobs route through the wrapper whenever it is
+    present and Codex is the active provider — there is no per-task gate."""
 
-    async def test_named_task_routes_through_current_aux_when_enabled(self):
-        aux = SimpleNamespace(
-            is_enabled=lambda t: t == "compaction",
-            chat=AsyncMock(return_value="cheap summary"),
-        )
+    async def test_named_task_routes_through_current_aux(self):
+        aux = SimpleNamespace(chat=AsyncMock(return_value="cheap summary"))
         client = SimpleNamespace(chat=AsyncMock(return_value="strong summary"))
         gw = _gw(codex=client, aux=aux)
         gw.wire_callbacks()
@@ -405,23 +359,8 @@ class TestAuxiliaryRouting:
         aux.chat.assert_awaited_once()
         client.chat.assert_not_called()
 
-    async def test_named_task_falls_to_active_when_task_disabled(self):
-        aux = SimpleNamespace(
-            is_enabled=lambda t: False,  # nothing delegated
-            chat=AsyncMock(return_value="cheap"),
-        )
-        client = SimpleNamespace(chat=AsyncMock(return_value="strong"))
-        gw = _gw(codex=client, aux=aux)
-        gw.wire_callbacks()
-        reflection_fn = gw.reflector.set_text_fn.call_args.args[0]
-        assert await reflection_fn([], "s") == "strong"
-        aux.chat.assert_not_called()
-
     async def test_consolidation_wired_to_its_own_fn(self):
-        aux = SimpleNamespace(
-            is_enabled=lambda t: t == "consolidation",
-            chat=AsyncMock(return_value="cheap consolidation"),
-        )
+        aux = SimpleNamespace(chat=AsyncMock(return_value="cheap consolidation"))
         client = SimpleNamespace(chat=AsyncMock(return_value="strong"))
         gw = _gw(codex=client, aux=aux)
         gw.wire_callbacks()
@@ -432,8 +371,8 @@ class TestAuxiliaryRouting:
 
     async def test_named_task_uses_active_when_provider_not_codex(self):
         # Aux routing is Codex-only; on an ollama switch the named job must
-        # stay on the active provider even if the task is "enabled".
-        aux = SimpleNamespace(is_enabled=lambda t: True, chat=AsyncMock(return_value="cheap"))
+        # stay on the active provider.
+        aux = SimpleNamespace(chat=AsyncMock(return_value="cheap"))
         client = SimpleNamespace(chat=AsyncMock(return_value="ollama out"))
         gw = _gw(_cfg("ollama"), codex=object(), ollama=client, aux=aux)
         gw.wire_callbacks()
@@ -443,12 +382,9 @@ class TestAuxiliaryRouting:
 
 
 class TestReloadAuxiliary:
-    def _aux_cfg(self, enabled=True, model="gpt-5.6-terra", tasks=("compaction",)):
+    def _aux_cfg(self, enabled=True, model="gpt-5.6-terra"):
         cfg = _cfg()
-        cfg.openai_codex.auxiliary = SimpleNamespace(
-            enabled=enabled, model=model, tasks=list(tasks),
-            max_tokens=2048, credentials_path="",
-        )
+        cfg.openai_codex.auxiliary = SimpleNamespace(enabled=enabled, model=model)
         return cfg
 
     @staticmethod
@@ -465,20 +401,17 @@ class TestReloadAuxiliary:
 
     async def test_disabled_retires_current_wrapper(self):
         old = SimpleNamespace(drain_and_close=AsyncMock())
-        router = SimpleNamespace(aux_client=old)
-        gw = _gw(self._aux_cfg(enabled=False), codex=object(), router=router, aux=old)
+        gw = _gw(self._aux_cfg(enabled=False), codex=object(), aux=old)
         r = await gw.reload_auxiliary()
         await self._flush_drains(gw)
         assert r["effective_enabled"] is False
         assert gw.auxiliary_llm_client is None
-        assert router.aux_client is None
         old.drain_and_close.assert_awaited_once()
 
     async def test_enable_builds_swaps_and_drains(self):
         old = SimpleNamespace(drain_and_close=AsyncMock())
-        router = SimpleNamespace(aux_client=old)
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(self._aux_cfg(), codex=object(), router=router, aux=old)
+        gw = _gw(self._aux_cfg(), codex=object(), aux=old)
         with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
              patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
              patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
@@ -487,7 +420,6 @@ class TestReloadAuxiliary:
         await self._flush_drains(gw)
         assert r["effective_enabled"] is True
         assert gw.auxiliary_llm_client is candidate
-        assert router.aux_client is candidate
         old.drain_and_close.assert_awaited_once()  # retired one drained
 
     async def test_unsupported_model_probe_rolls_back(self):
@@ -617,12 +549,10 @@ class TestPrimaryLifecycleReconcile:
 
     async def test_primary_disabled_retires_auxiliary(self):
         aux = SimpleNamespace(drain_and_close=AsyncMock(), primary_client=object())
-        router = SimpleNamespace(aux_client=aux)
-        gw = _gw(self._cfg_codex_disabled(), codex=object(), router=router, aux=aux)
+        gw = _gw(self._cfg_codex_disabled(), codex=object(), aux=aux)
         await gw.reload_codex_inner()
         assert gw.codex_client is None
         assert gw.auxiliary_llm_client is None  # retired
-        assert router.aux_client is None
 
     async def test_primary_recreated_rebinds_auxiliary_fallback(self):
         old_primary = object()
@@ -645,8 +575,7 @@ class TestPrimaryCreatesAuxiliary:
     def _cfg_aux_enabled(self):
         cfg = _cfg()
         cfg.openai_codex.auxiliary = SimpleNamespace(
-            enabled=True, model="gpt-5.6-terra", tasks=["compaction"],
-            max_tokens=2048, credentials_path="")
+            enabled=True, model="gpt-5.6-terra")
         return cfg
 
     async def test_primary_created_schedules_aux_build(self):
@@ -671,8 +600,7 @@ class TestPersistAndConcurrency:
     def _aux_cfg(self, enabled=True):
         cfg = _cfg()
         cfg.openai_codex.auxiliary = SimpleNamespace(
-            enabled=enabled, model="gpt-5.6-terra", tasks=["compaction"],
-            max_tokens=2048, credentials_path="")
+            enabled=enabled, model="gpt-5.6-terra")
         return cfg
 
     async def test_disable_generation_reject_is_not_committed(self):
@@ -725,22 +653,19 @@ class TestPersistTransaction:
     def _aux_cfg(self, enabled=True, model="gpt-5.6-terra"):
         cfg = _cfg()
         cfg.openai_codex.auxiliary = SimpleNamespace(
-            enabled=enabled, model=model, tasks=["compaction"],
-            max_tokens=2048, credentials_path="")
+            enabled=enabled, model=model)
         return cfg
 
     async def test_enable_persist_failure_exactly_restores_prior(self):
         cfg = self._aux_cfg(enabled=False, model="gpt-5.6-luna")
         old = SimpleNamespace(drain_and_close=AsyncMock())
-        router = SimpleNamespace(aux_client=old)
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
-        gw = _gw(cfg, codex=object(), router=router, aux=old)
+        gw = _gw(cfg, codex=object(), aux=old)
 
         def _persist_fail():
             raise OSError("disk full")
 
-        desired = {"enabled": True, "model": "gpt-5.6-terra", "tasks": ["compaction"],
-                   "credentials_path": "", "max_tokens": 2048}
+        desired = {"enabled": True, "model": "gpt-5.6-terra"}
         with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
              patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
              patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
@@ -752,7 +677,6 @@ class TestPersistTransaction:
         assert "persist failed" in r["reason"]
         # EXACT prior wrapper/pointers/config restored — the prior was NOT drained
         assert gw.auxiliary_llm_client is old
-        assert router.aux_client is old
         assert cfg.openai_codex.auxiliary.enabled is False
         assert cfg.openai_codex.auxiliary.model == "gpt-5.6-luna"
         old.drain_and_close.assert_not_called()   # prior survives
@@ -761,19 +685,16 @@ class TestPersistTransaction:
     async def test_disable_persist_failure_restores_enabled_wrapper(self):
         cfg = self._aux_cfg(enabled=True, model="gpt-5.6-terra")
         old = SimpleNamespace(drain_and_close=AsyncMock())
-        router = SimpleNamespace(aux_client=old)
-        gw = _gw(cfg, codex=object(), router=router, aux=old)
+        gw = _gw(cfg, codex=object(), aux=old)
 
         def _persist_fail():
             raise OSError("disk full")
 
-        desired = {"enabled": False, "model": "gpt-5.6-terra", "tasks": ["compaction"],
-                   "credentials_path": "", "max_tokens": 2048}
+        desired = {"enabled": False, "model": "gpt-5.6-terra"}
         r = await gw.reload_auxiliary(desired, persist=_persist_fail)
         assert r["committed"] is False
         # the enabled wrapper is restored, not drained
         assert gw.auxiliary_llm_client is old
-        assert router.aux_client is old
         assert cfg.openai_codex.auxiliary.enabled is True
         old.drain_and_close.assert_not_called()
 
@@ -787,8 +708,7 @@ class TestPersistTransaction:
         def _persist_ok():
             persisted.append(True)
 
-        desired = {"enabled": True, "model": "gpt-5.6-terra", "tasks": ["compaction"],
-                   "credentials_path": "", "max_tokens": 2048}
+        desired = {"enabled": True, "model": "gpt-5.6-terra"}
         with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
              patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
              patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
@@ -810,8 +730,7 @@ class TestCancellationDuringPersist:
     def _aux_cfg(self, enabled=True, model="gpt-5.6-terra"):
         cfg = _cfg()
         cfg.openai_codex.auxiliary = SimpleNamespace(
-            enabled=enabled, model=model, tasks=["compaction"],
-            max_tokens=2048, credentials_path="")
+            enabled=enabled, model=model)
         return cfg
 
     async def test_enable_cancel_during_persist_success_commits(self):
@@ -826,8 +745,7 @@ class TestCancellationDuringPersist:
             started.set()
             gate.wait()  # blocks in the executor thread; cancel arrives meanwhile
 
-        desired = {"enabled": True, "model": "gpt-5.6-terra", "tasks": ["compaction"],
-                   "credentials_path": "", "max_tokens": 2048}
+        desired = {"enabled": True, "model": "gpt-5.6-terra"}
         with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
              patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
              patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
@@ -859,8 +777,7 @@ class TestCancellationDuringPersist:
             gate.wait()
             raise OSError("disk full")
 
-        desired = {"enabled": False, "model": "gpt-5.6-terra", "tasks": ["compaction"],
-                   "credentials_path": "", "max_tokens": 2048}
+        desired = {"enabled": False, "model": "gpt-5.6-terra"}
         task = asyncio.create_task(gw.reload_auxiliary(desired, persist=_slow_fail))
         while not started.is_set():
             await asyncio.sleep(0.005)
@@ -930,8 +847,7 @@ class TestCancellationBranchesComplete:
     def _aux_cfg(self, enabled=True, model="gpt-5.6-terra"):
         cfg = _cfg()
         cfg.openai_codex.auxiliary = SimpleNamespace(
-            enabled=enabled, model=model, tasks=["compaction"],
-            max_tokens=2048, credentials_path="")
+            enabled=enabled, model=model)
         return cfg
 
     async def test_disable_cancel_during_persist_success_commits(self):
@@ -945,8 +861,7 @@ class TestCancellationBranchesComplete:
             started.set()
             gate.wait()
 
-        desired = {"enabled": False, "model": "gpt-5.6-terra", "tasks": ["compaction"],
-                   "credentials_path": "", "max_tokens": 2048}
+        desired = {"enabled": False, "model": "gpt-5.6-terra"}
         task = asyncio.create_task(gw.reload_auxiliary(desired, persist=_slow_ok))
         while not started.is_set():
             await asyncio.sleep(0.005)
@@ -973,8 +888,7 @@ class TestCancellationBranchesComplete:
             gate.wait()
             raise OSError("disk full")
 
-        desired = {"enabled": True, "model": "gpt-5.6-terra", "tasks": ["compaction"],
-                   "credentials_path": "", "max_tokens": 2048}
+        desired = {"enabled": True, "model": "gpt-5.6-terra"}
         with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
              patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
              patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):

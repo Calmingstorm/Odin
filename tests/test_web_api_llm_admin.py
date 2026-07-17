@@ -169,33 +169,28 @@ class TestLlmStatus:
         bot.llm_gateway.auxiliary_llm_client = None
         bot.config.openai_codex.auxiliary.enabled = True
         bot.config.openai_codex.auxiliary.model = "gpt-5.6-terra"
-        bot.config.openai_codex.auxiliary.tasks = ["compaction", "reflection"]
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/llm/status")).json()
             aux = body["auxiliary"]
             # configured reflects persisted config
             assert aux["enabled"] is True
             assert aux["model"] == "gpt-5.6-terra"
-            assert aux["tasks"] == ["compaction", "reflection"]
             # enabled config but no live client → unavailable + effective off
             assert aux["effective_enabled"] is False
             assert aux["unavailable_reason"]
-            # known_tasks is the operator-visible list — every entry is real;
-            # the removed no-op names must not appear.
-            assert "classification" in aux["known_tasks"]
-            assert "summarization" not in aux["known_tasks"]
-            assert "vision_description" not in aux["known_tasks"]
+            # per-task configuration is gone — no task keys on the status block
+            assert "tasks" not in aux
+            assert "known_tasks" not in aux
             assert "consumer_backed_tasks" not in aux
-            # a live wrapper flips effective_* on with the runtime task set
+            assert "effective_tasks" not in aux
+            # a live wrapper flips effective_* on
             bot.llm_gateway.auxiliary_llm_client = SimpleNamespace(
                 aux_client=SimpleNamespace(model="gpt-5.6-terra"),
-                enabled_tasks={"compaction", "reflection"},
             )
             body = await (await c.get("/api/llm/status")).json()
             aux = body["auxiliary"]
             assert aux["effective_enabled"] is True
             assert aux["effective_model"] == "gpt-5.6-terra"
-            assert aux["effective_tasks"] == ["compaction", "reflection"]
             assert aux["unavailable_reason"] is None
 
     @pytest.mark.asyncio
@@ -409,17 +404,16 @@ class TestProviderConfig:
         bot.llm_gateway.codex_client = object()
         bot.llm_gateway.reload_auxiliary = AsyncMock(
             return_value={"committed": True, "effective_enabled": True,
-                          "model": "gpt-5.6-terra", "tasks": ["compaction", "reflection"]}
+                          "model": "gpt-5.6-terra"}
         )
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/llm/auxiliary/config",
-                            json={"enabled": True, "model": "gpt-5.6-terra",
-                                  "tasks": ["compaction", "reflection"]})
+                            json={"enabled": True, "model": "gpt-5.6-terra"})
             assert r.status == 200
             desired = bot.llm_gateway.reload_auxiliary.call_args.args[0]
             assert desired["enabled"] is True
             assert desired["model"] == "gpt-5.6-terra"
-            assert desired["tasks"] == ["compaction", "reflection"]
+            assert "tasks" not in desired
 
     @pytest.mark.asyncio
     async def test_auxiliary_config_invokes_persist_callable(self):
@@ -433,45 +427,16 @@ class TestProviderConfig:
         async def _reload(desired=None, persist=None):
             persist()  # SYNC persist callable — exercise the route's closure
             return {"committed": True, "effective_enabled": True,
-                    "model": desired["model"], "tasks": desired["tasks"]}
+                    "model": desired["model"]}
 
         bot.llm_gateway.reload_auxiliary = _reload
         with patch("src.web.api.llm_admin._persist_llm_sections_sync",
                    new=lambda _b: ran.append(True)):
             async with TestClient(TestServer(app)) as c:
                 r = await c.put("/api/llm/auxiliary/config",
-                                json={"enabled": True, "model": "gpt-5.6-terra",
-                                      "tasks": ["compaction"]})
+                                json={"enabled": True, "model": "gpt-5.6-terra"})
                 assert r.status == 200
         assert ran == [True]
-
-    @pytest.mark.asyncio
-    async def test_auxiliary_config_rejects_unknown_task(self):
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        bot.llm_gateway.reload_auxiliary = AsyncMock()
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/auxiliary/config",
-                            json={"tasks": ["compaction", "not_a_task"]})
-            assert r.status == 400
-            assert "unknown" in (await r.json())["error"].lower()
-        bot.llm_gateway.reload_auxiliary.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_auxiliary_config_rejects_deprecated_task_on_write(self):
-        # The load-time strip is a one-way migration: a NEW write that names a
-        # deprecated no-op task is rejected (it's no longer a KNOWN task), not
-        # silently accepted-and-dropped.
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        bot.llm_gateway.reload_auxiliary = AsyncMock()
-        async with TestClient(TestServer(app)) as c:
-            for dead in ("summarization", "vision_description"):
-                r = await c.put("/api/llm/auxiliary/config",
-                                json={"tasks": ["compaction", dead]})
-                assert r.status == 400
-                assert dead in (await r.json())["error"]
-        bot.llm_gateway.reload_auxiliary.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_auxiliary_config_guards(self):
@@ -479,17 +444,8 @@ class TestProviderConfig:
         _gw(bot)
         bot.llm_gateway.reload_auxiliary = AsyncMock()
         async with TestClient(TestServer(app)) as c:
-            # invalid JSON → 400
+            # invalid JSON → 400, reload never consulted
             assert (await c.put("/api/llm/auxiliary/config", data="bad")).status == 400
-            # tasks not a list → 400
-            assert (await c.put("/api/llm/auxiliary/config",
-                                json={"tasks": "compaction"})).status == 400
-            # non-string task item → 400 (must not TypeError → 500)
-            r = await c.put("/api/llm/auxiliary/config", json={"tasks": [{}]})
-            assert r.status == 400
-            assert "string" in (await r.json())["error"].lower()
-            r2 = await c.put("/api/llm/auxiliary/config", json={"tasks": ["compaction", 7]})
-            assert r2.status == 400
             bot.llm_gateway.reload_auxiliary.assert_not_awaited()
             # reload raising → 500
             bot.llm_gateway.reload_auxiliary = AsyncMock(side_effect=RuntimeError("boom"))

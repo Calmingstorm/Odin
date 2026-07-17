@@ -16,7 +16,11 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.discord.background_task import MAX_STEPS
-from src.discord.native_tools.agents_tasks import AgentTaskDeps, AgentTaskTools
+from src.discord.native_tools.agents_tasks import (
+    AgentTaskDeps,
+    AgentTaskTools,
+    _parse_spawn_overrides,
+)
 
 
 def _cfg(tools_enabled=True):
@@ -531,6 +535,128 @@ class TestAgentModelCallback:
         assert out["model"] == "gpt-5.6-luna"
 
 
+class TestParseSpawnOverrides:
+    """Per-spawn model/effort override parsing: empty = inherit, invalid effort
+    is REJECTED (never clamped), model whitespace normalizes to inherit."""
+
+    def test_absent_means_inherit(self):
+        assert _parse_spawn_overrides({}) == (None, None, None)
+
+    def test_valid_model_and_effort(self):
+        assert _parse_spawn_overrides(
+            {"model": "gpt-5.6-luna", "reasoning_effort": "low"}
+        ) == ("gpt-5.6-luna", "low", None)
+
+    def test_model_whitespace_normalizes_to_inherit(self):
+        assert _parse_spawn_overrides({"model": "   "}) == (None, None, None)
+
+    def test_empty_effort_string_is_inherit(self):
+        assert _parse_spawn_overrides({"reasoning_effort": ""}) == (None, None, None)
+
+    def test_none_effort_is_real(self):
+        # "none" is a real Codex effort level (not the inherit sentinel).
+        assert _parse_spawn_overrides({"reasoning_effort": "none"}) == (None, "none", None)
+
+    def test_invalid_effort_rejected_not_clamped(self):
+        mo, eo, err = _parse_spawn_overrides({"reasoning_effort": "banana"})
+        assert mo is None and eo is None
+        assert err and "banana" in err
+
+
+class TestPerSpawnModelEffort:
+    """The parent can choose a model/effort for a SPECIFIC agent; it wins over
+    the configured agent defaults and is stamped on the trajectory."""
+
+    def _codex_cfg(self, agent_model="gpt-5.6-sol", agent_effort="medium"):
+        return SimpleNamespace(
+            model="gpt-5.6-sol", agent_model=agent_model,
+            agent_reasoning_effort=agent_effort,
+        )
+
+    async def test_spawn_override_wins_over_config(self):
+        client = _FakeEffortClient()
+        cfg = _cfg()
+        cfg.openai_codex = self._codex_cfg()
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=SimpleNamespace(active_client=client))
+        t._agent_manager.spawn.return_value = "agent-o"
+        t._agent_manager._agents = {}
+        await t._handle_spawn_agent(
+            _message(), {"label": "w", "goal": "g",
+                         "model": "gpt-5.6-luna", "reasoning_effort": "low"})
+        # the spawn call carries the overrides for trajectory stamping
+        kwargs = t._agent_manager.spawn.call_args.kwargs
+        assert kwargs["model_override"] == "gpt-5.6-luna"
+        assert kwargs["reasoning_effort_override"] == "low"
+        # and the iteration callback ASKS the client for luna@low, not sol@medium
+        cb = kwargs["iteration_callback"]
+        await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["model"] == "gpt-5.6-luna"
+        assert client.captured["reasoning_effort"] == "low"
+
+    async def test_no_override_inherits_config(self):
+        client = _FakeEffortClient()
+        cfg = _cfg()
+        cfg.openai_codex = self._codex_cfg(agent_model="gpt-5.6-terra", agent_effort="high")
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=SimpleNamespace(active_client=client))
+        t._agent_manager.spawn.return_value = "agent-i"
+        t._agent_manager._agents = {}
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        kwargs = t._agent_manager.spawn.call_args.kwargs
+        assert kwargs["model_override"] is None
+        assert kwargs["reasoning_effort_override"] is None
+        cb = kwargs["iteration_callback"]
+        await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["model"] == "gpt-5.6-terra"   # agent_model
+        assert client.captured["reasoning_effort"] == "high"
+
+    async def test_invalid_effort_rejects_without_spawning(self):
+        client = _FakeEffortClient()
+        cfg = _cfg()
+        cfg.openai_codex = self._codex_cfg()
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=SimpleNamespace(active_client=client))
+        t._agent_manager._agents = {}
+        out = await t._handle_spawn_agent(
+            _message(), {"label": "w", "goal": "g", "reasoning_effort": "ultra"})
+        assert "invalid reasoning_effort" in out
+        t._agent_manager.spawn.assert_not_called()
+
+    async def test_loop_per_task_overrides_and_batch_rejection(self):
+        client = _FakeEffortClient()
+        cfg = _cfg()
+        cfg.openai_codex = self._codex_cfg()
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=SimpleNamespace(active_client=client))
+        t._loop_manager._loops = {"L1": SimpleNamespace(
+            status="running", requester_id="1", requester_name="u",
+            goal="loop goal", iteration_count=1)}
+        t._loop_agent_bridge.spawn_agents_for_loop = MagicMock(return_value=["a1", "a2"])
+        await t._handle_spawn_loop_agents(_message(), {"loop_id": "L1", "tasks": [
+            {"label": "a", "goal": "g", "model": "gpt-5.6-luna"},
+            {"label": "b", "goal": "g", "reasoning_effort": "xhigh"},
+        ]})
+        # tasks reach the bridge normalized with per-task overrides
+        passed = t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs["tasks"]
+        assert passed[0]["model_override"] == "gpt-5.6-luna"
+        assert passed[1]["reasoning_effort_override"] == "xhigh"
+        # the factory builds a per-task callback that asks for THAT task's model
+        factory = t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs[
+            "iteration_callback_factory"]
+        cb = factory("gpt-5.6-luna", None)
+        await cb([{"role": "user", "content": "x"}], "sys", [])
+        assert client.captured["model"] == "gpt-5.6-luna"
+        # one bad effort rejects the WHOLE batch — nothing spawns
+        t._loop_agent_bridge.spawn_agents_for_loop.reset_mock()
+        out = await t._handle_spawn_loop_agents(_message(), {"loop_id": "L1", "tasks": [
+            {"label": "ok", "goal": "g"},
+            {"label": "bad", "goal": "g", "reasoning_effort": "nope"},
+        ]})
+        assert "invalid reasoning_effort" in out and "bad" in out
+        t._loop_agent_bridge.spawn_agents_for_loop.assert_not_called()
+
+
 # --------------------------------------------------------------------------- #
 # simple agent handlers
 # --------------------------------------------------------------------------- #
@@ -625,7 +751,8 @@ class TestLoopAgentBridge:
         t._loop_manager._loops = {"L1": self._running_loop()}
         t._loop_agent_bridge.spawn_agents_for_loop.return_value = ["ag1", "Error: bad"]
         out = await t._handle_spawn_loop_agents(
-            _message(), {"loop_id": "L1", "tasks": ["a", "b"]})
+            _message(), {"loop_id": "L1", "tasks": [
+                {"label": "a", "goal": "g"}, {"label": "b", "goal": "g"}]})
         assert "Spawned 1 agent(s): ag1" in out and "Errors: Error: bad" in out
 
     async def test_collect_loop_agents(self):

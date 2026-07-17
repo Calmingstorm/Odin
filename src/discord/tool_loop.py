@@ -714,7 +714,6 @@ class ToolLoopRunner:
                     messages=st.messages,
                     system=st.system_prompt,
                     tools=st.tools or [],
-                    user_message=getattr(st.message, "content", "") or "",
                     user_id=st.user_id,
                     channel_id=_channel_id,
                     tools_used=st.tools_used_in_loop,

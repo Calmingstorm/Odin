@@ -82,7 +82,6 @@ from .observability import (
     register_log_search,
     register_recovery_stats,
     register_risk_classification,
-    register_routing_stats,
     register_tools_meta,
     register_usage_cost,
     register_validation_stats,
@@ -198,8 +197,6 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     register_affordances(routes, bot)
 
     register_compression_stats(routes, bot)
-
-    register_routing_stats(routes, bot)
 
     register_startup_diagnostics(routes, bot)
 

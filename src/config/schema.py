@@ -180,15 +180,6 @@ class ContextCompressionConfig(BaseModel):
     keep_recent_iterations: int = 30
 
 
-class ModelRoutingConfig(BaseModel):
-    enabled: bool = False
-    confidence_threshold: float = 0.6
-    max_cheap_length: int = 200
-    strong_intents: list[str] = Field(
-        default_factory=lambda: ["task", "complex"],
-    )
-
-
 class GovernorConfig(BaseModel):
     block_critical: bool = True
     block_exfil: bool = True
@@ -279,54 +270,18 @@ class UsageConfig(BaseModel):
 
 
 class AuxiliaryLLMConfig(BaseModel):
-    # Default Luna: the Codex catalog positions it for extraction /
-    # classification / transformation / structured summaries — the auxiliary
-    # workload. gpt-4o-mini (the prior default) is absent from the current
-    # catalog. Existing gpt-4o-mini configs are NOT rewritten (preserved as a
-    # temporary dropdown option), only the absent-value default changed.
+    """A cheaper Codex model for fixed background jobs (compaction, reflection,
+    consolidation, background follow-up), with transparent fallback to the
+    primary model. It shares the main Codex OAuth and token limit — only the
+    MODEL differs. When ``enabled`` and a Codex provider is active, those four
+    jobs route here; otherwise they use the primary model.
+
+    Default Luna: the Codex catalog positions it for the cheap extraction /
+    transformation tier that suits this workload.
+    """
+
     enabled: bool = False
     model: str = "gpt-5.6-luna"
-    max_tokens: int = 2048
-    credentials_path: str = ""  # Empty = share main codex credentials
-    tasks: list[str] = Field(
-        default_factory=lambda: [
-            "compaction",
-            "reflection",
-            "consolidation",
-            "background_followup",
-        ],
-    )
-
-    @field_validator("tasks")
-    @classmethod
-    def _validate_tasks(cls, v: list[str]) -> list[str]:
-        """Dedupe and store in one canonical order (KNOWN_TASKS iteration
-        order). An empty list is valid — the wrapper is available but delegates
-        no named jobs.
-
-        DEPRECATED names (``summarization``/``vision_description`` — no-ops that
-        never had a consumer) are STRIPPED with a warning so a hand-authored
-        config from before their removal still boots. Genuinely unknown names
-        are rejected rather than silently stored as no-ops. New WebUI/API writes
-        are validated against KNOWN_TASKS separately, so the deprecated values
-        are rejected there — they only survive as a load-time migration."""
-        from ..llm.auxiliary import DEPRECATED_TASKS, KNOWN_TASKS, KNOWN_TASKS_ORDER
-        from ..odin_log import get_logger
-
-        deprecated = sorted({t for t in v if t in DEPRECATED_TASKS})
-        if deprecated:
-            get_logger("config").warning(
-                "Dropping deprecated auxiliary task(s) with no consumer: %s",
-                ", ".join(deprecated),
-            )
-        unknown = [t for t in v if t not in KNOWN_TASKS and t not in DEPRECATED_TASKS]
-        if unknown:
-            raise ValueError(
-                f"unknown auxiliary task(s): {', '.join(sorted(set(unknown)))}; "
-                f"valid: {', '.join(KNOWN_TASKS_ORDER)}"
-            )
-        seen = set(v)
-        return [t for t in KNOWN_TASKS_ORDER if t in seen]
 
 
 # "minimal" is deliberately absent: it sits in the Codex API's generic
@@ -412,7 +367,6 @@ class OpenAICodexConfig(BaseModel):
     connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()
     auxiliary: AuxiliaryLLMConfig = AuxiliaryLLMConfig()
     context_compression: ContextCompressionConfig = ContextCompressionConfig()
-    model_routing: ModelRoutingConfig = ModelRoutingConfig()
 
 
 class OllamaConfig(BaseModel):
@@ -826,8 +780,8 @@ class MCPConfig(BaseModel):
 
 
 class Config(BaseModel):
-    # ``model_routing`` and ``model_router`` would otherwise collide with
-    # pydantic v2's protected ``model_*`` namespace. Disable the guard.
+    # ``model``/``agent_model`` and other ``model_*`` fields would otherwise
+    # collide with pydantic v2's protected ``model_*`` namespace. Disable it.
     model_config = ConfigDict(protected_namespaces=())
 
     timezone: str = "UTC"
