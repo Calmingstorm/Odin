@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiohttp
-from aiohttp import web
+from aiohttp import WSCloseCode, web
 
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
@@ -251,6 +251,41 @@ class WebSocketManager:
             self._event_subscribers.discard(ws)
             self._clients.discard(ws)
 
+    async def close_all(self) -> int:
+        """Close every connected client — the app.on_shutdown hook.
+
+        ``AppRunner.cleanup()`` runs this after the listener stops accepting
+        (so a browser cannot reconnect behind the snapshot) and before
+        remaining handlers are cancelled. Closes run CONCURRENTLY with a 1s
+        per-client bound: ``ws.close()`` alone waits up to its own 10s
+        peer-handshake timeout, so serial unbounded closes would reinvent
+        the shutdown hang once per client. Subscriber sets are cleared in
+        guaranteed cleanup even when individual closes fail.
+        """
+        snapshot = list(self._clients)
+
+        async def _close_one(ws: web.WebSocketResponse) -> None:
+            try:
+                await asyncio.wait_for(
+                    ws.close(code=WSCloseCode.GOING_AWAY, message=b"server shutdown"),
+                    timeout=1.0,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.debug("WebSocket close failed (non-fatal): %s", type(exc).__name__)
+
+        try:
+            if snapshot:
+                await asyncio.gather(*(_close_one(ws) for ws in snapshot))
+        finally:
+            self._clients.clear()
+            self._log_subscribers.clear()
+            self._event_subscribers.clear()
+        if snapshot:
+            log.info("Closed %d WebSocket client(s) at shutdown", len(snapshot))
+        return len(snapshot)
+
     async def close_by_user_id(self, user_id: str) -> int:
         """Close all WebSocket connections for a given user_id."""
         to_close = []
@@ -329,5 +364,16 @@ def setup_websocket(
         web_config=web_config,
     )
     app.router.add_get("/api/ws", manager.handle)
+
+    # The manager owns its shutdown: aiohttp runs on_shutdown between
+    # stopping the listener and cancelling remaining handlers, which is the
+    # only race-free point to close live sockets (closing before cleanup
+    # lets a browser reconnect behind the snapshot). Without this, an open
+    # WebSocket held AppRunner.cleanup() until systemd's stop timeout
+    # SIGKILLed every shutdown with a WebUI tab open (found 2026-07-16).
+    async def _close_websockets_on_shutdown(_app: web.Application) -> None:
+        await manager.close_all()
+
+    app.on_shutdown.append(_close_websockets_on_shutdown)
     log.info("WebSocket endpoint registered at /api/ws")
     return manager

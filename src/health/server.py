@@ -658,7 +658,13 @@ class HealthServer:
         return web.FileResponse(self._ui_dir / "index.html")
 
     async def start(self) -> None:
-        self._runner = web.AppRunner(self._app)
+        # shutdown_timeout bounds cleanup()'s wait for in-flight handlers
+        # (default 60s — far past systemd's stop window; an open handler
+        # can spend up to ~2x this between graceful wait and cancellation,
+        # still inside Mint's DefaultTimeoutStopSec=10s). WebSockets are
+        # closed separately via the app.on_shutdown hook, which cleanup()
+        # runs after the listener stops accepting.
+        self._runner = web.AppRunner(self._app, shutdown_timeout=3.0)
         await self._runner.setup()
         bind_host = getattr(self._web_config, "host", "0.0.0.0") or "0.0.0.0"
         site = web.TCPSite(self._runner, bind_host, self.port)
@@ -666,10 +672,18 @@ class HealthServer:
         log.info("Health server listening on %s:%d", bind_host, self.port)
 
     async def stop(self) -> None:
-        if self._slack_notifier:
-            await self._slack_notifier.close()
-        if self._runner:
-            await self._runner.cleanup()
+        # Quiesce the HTTP server first and independently — a notifier
+        # close failure must never leave the runner (and its open
+        # handlers) alive past the stop window.
+        try:
+            if self._runner:
+                await self._runner.cleanup()
+        finally:
+            if self._slack_notifier:
+                try:
+                    await self._slack_notifier.close()
+                except Exception:
+                    log.exception("Slack notifier close failed during shutdown")
 
     async def _health(self, request: web.Request) -> web.Response:
         """Combined health endpoint.
