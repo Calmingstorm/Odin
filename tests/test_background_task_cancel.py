@@ -174,6 +174,67 @@ async def test_cancel_task_handler_not_found_and_not_running():
     ).lower()
 
 
+async def test_cleanup_exception_during_cancel_stays_cancelled():
+    """A regular exception surfacing while cancellation is in flight must NOT be
+    masked as 'failed' (which would fire the summary + forbidden follow-up)."""
+
+    class _CancelThenRaise:
+        def __init__(self, task):
+            self.task = task
+
+        def check_permission(self, *a):
+            return None
+
+        async def execute(self, name, inp, user_id=None):
+            self.task._cancel_event.set()  # cancel requested mid-step
+            raise RuntimeError("cleanup boom")  # then a cleanup exception
+
+    channel = FakeChannel(id=555)
+    task = make_task(
+        [{"tool_name": "run_command", "tool_input": {}, "on_failure": "abort"}], channel=channel
+    )
+    await run_background_task(task, _CancelThenRaise(task), _FakeSkillManager())
+    assert task.status == "cancelled"  # not "failed"
+    joined = " ".join(channel.sent_texts)
+    assert "aborted" not in joined and "succeeded" not in joined  # no summary
+
+
+async def test_cancel_during_followup_is_honored():
+    """The task stays cancellable through the (long) LLM follow-up: a cancel
+    arriving mid-follow-up interrupts it instead of being refused as completed."""
+    executor = _InstantExecutor()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    ran_to_completion = {"v": False}
+
+    async def slow_followup(messages, system, max_tokens):
+        started.set()
+        await release.wait()
+        ran_to_completion["v"] = True
+        return "narrative"
+
+    task = make_task([{"tool_name": "run_command", "tool_input": {}}])
+
+    async def _run():
+        try:
+            await run_background_task(
+                task, executor, _FakeSkillManager(), codex_callback=slow_followup
+            )
+        except asyncio.CancelledError:
+            task.status = "cancelled"
+            raise
+
+    t = asyncio.create_task(_run())
+    task._asyncio_task = t
+    await asyncio.wait_for(started.wait(), timeout=2)  # inside the follow-up
+
+    cancelled = await task.request_cancel()
+    assert cancelled is True  # NOT refused as already-completed
+    assert task.status == "cancelled"
+    assert ran_to_completion["v"] is False  # the follow-up was interrupted
+    assert t.done()
+
+
 async def test_cancel_before_any_step_runs():
     executor = _InstantExecutor()
     channel = FakeChannel(id=555)

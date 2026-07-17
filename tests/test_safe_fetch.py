@@ -70,6 +70,13 @@ async def server():
         # 127.0.0.1 -> localhost is a cross-origin hop (different hostname).
         raise web.HTTPFound(f"http://localhost:{req.url.port}/echo")
 
+    async def set_cookie_cross(req):
+        # Set a cookie, then redirect cross-origin — the cookie must NOT be
+        # resent to the new origin (DummyCookieJar isolates it).
+        resp = web.HTTPFound(f"http://localhost:{req.url.port}/echo")
+        resp.set_cookie("secret", "leaked")
+        raise resp
+
     app = web.Application()
     app.router.add_route("*", "/ok", ok)
     app.router.add_route("*", "/redir-safe", redir_safe)
@@ -83,6 +90,7 @@ async def server():
     app.router.add_route("*", "/redir-303", redir_303)
     app.router.add_route("*", "/redir-307", redir_307)
     app.router.add_route("*", "/redir-cross", redir_cross)
+    app.router.add_route("*", "/set-cookie-cross", set_cookie_cross)
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -185,6 +193,18 @@ async def test_credential_headers_stripped_across_origin(server):
     assert resp.status == 200
     assert resp.text() == "ECHO"
     assert "Authorization" not in state["echo_headers"]
+
+
+async def test_set_cookie_not_resent_across_redirect(server):
+    base, port, state = server
+    localhost_base = f"http://localhost:{port}"
+    resp = await safe_fetch(
+        base + "/set-cookie-cross", allowed_urls=[base, localhost_base]
+    )
+    assert resp.status == 200
+    assert resp.text() == "ECHO"
+    # The cookie set on the first hop must not have been resent to /echo.
+    assert "Cookie" not in state["echo_headers"]
 
 
 async def test_too_many_redirects(server):

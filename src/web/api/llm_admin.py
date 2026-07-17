@@ -497,27 +497,29 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     cfg.reasoning_effort = str(effort)
                     changed = True
                     needs_reload = True
+                axis_changed = False
                 if agent_effort_present:
                     cfg.agent_reasoning_effort = (
                         None if agent_effort is None else str(agent_effort)
                     )
                     changed = True
+                    axis_changed = True
                 if agent_model_present:
                     # Read at call time by the agent callbacks — no client
                     # reload needed (mirrors agent_reasoning_effort).
                     cfg.agent_model = agent_model
                     changed = True
+                    axis_changed = True
+                # An axis change mutates live cfg immediately, and the per-spawn
+                # tool schema depends on it — invalidate NOW (before reload /
+                # persist) so a later reload/persist failure can never leave the
+                # catalog cached against the old schema while cfg already moved.
+                if axis_changed and getattr(bot, "tool_catalog", None):
+                    bot.tool_catalog.invalidate()
                 if changed:
                     if needs_reload:
                         await bot.llm_gateway.reload_codex_inner()
                     await _persist_config(bot)
-                    # The per-spawn tool schema depends on the two agent axis
-                    # modes; rebuild the catalog so the next turn / new spawn
-                    # sees the new exposure (existing turns keep their list).
-                    if (agent_model_present or agent_effort_present) and getattr(
-                        bot, "tool_catalog", None
-                    ):
-                        bot.tool_catalog.invalidate()
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
 

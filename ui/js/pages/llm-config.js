@@ -429,7 +429,9 @@ export default {
     });
     const codexAgentModelOptions = computed(() => {
       const v = codexForm.value.agent_model;
-      return v && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
+      // '' (inherit) and 'auto' are already fixed template options — do not
+      // inject them as a temporary/unknown option, which would duplicate them.
+      return v && v !== 'auto' && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
     });
     // --- Auxiliary (cheap-model) ---
     const auxForm = ref({ enabled: false, model: 'gpt-5.6-luna' });

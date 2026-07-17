@@ -142,11 +142,14 @@ class SkillContext:
         scheduler: Scheduler | None = None,
         skill_config: dict[str, Any] | None = None,
         resource_tracker: ResourceTracker | None = None,
+        skill_memory_lock: threading.Lock | None = None,
     ) -> None:
         self._executor = tool_executor
         self._log = get_logger(f"skills.{skill_name}")
         self._memory_path = Path(memory_path) if memory_path else None
-        self._skill_memory_lock = threading.Lock()
+        # Shared across all contexts by the SkillManager (they write one file);
+        # a private lock is only a fallback for direct construction (e.g. tests).
+        self._skill_memory_lock = skill_memory_lock or threading.Lock()
         self._message_callback = message_callback
         self._file_callback = file_callback
         self._knowledge_store = knowledge_store

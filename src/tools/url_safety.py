@@ -8,8 +8,9 @@ and DNS-resolved IPs to prevent rebinding attacks.
 from __future__ import annotations
 
 import ipaddress
+import posixpath
 import socket
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from ..odin_log import get_logger
 
@@ -19,13 +20,21 @@ ALLOWED_SCHEMES = ("http://", "https://")
 
 
 def _is_ip_blocked(addr_str: str) -> bool:
-    """Check if an IP address string is private/loopback/link-local/metadata."""
+    """True for any address SSRF must never reach.
+
+    Blocks every NON-GLOBAL address — private, loopback, link-local, the
+    CGNAT / Tailscale ``100.64.0.0/10`` overlay range, reserved, multicast,
+    unspecified — not just the RFC1918 subset. Allowlisted origins are
+    permitted separately, BEFORE this check, by ``is_url_blocked``.
+    """
     try:
         addr = ipaddress.ip_address(addr_str)
     except ValueError:
         return False
-    if addr.is_private or addr.is_loopback or addr.is_link_local:
+    if not addr.is_global:
         return True
+    # Belt-and-suspenders for metadata endpoints (already non-global, but pin
+    # them explicitly in case a stdlib version classifies one as global).
     if addr_str in ("169.254.169.254", "fd00::"):
         return True
     return False
@@ -82,8 +91,14 @@ def _matches_allowlist(parsed, allowed_urls: list[str]) -> bool:
         allow_port = allowed.port or (443 if allowed.scheme == "https" else 80)
         if req_port != allow_port:
             continue
-        if allowed.path and allowed.path != "/":
-            if not (parsed.path or "/").startswith(allowed.path):
+        allow_path = allowed.path
+        if allow_path and allow_path != "/":
+            # Normalize percent-encoding + collapse traversal, then require a
+            # SEGMENT-BOUNDARY match: "/allowed-evil" must not match "/allowed",
+            # and "/allowed/%2e%2e/admin" must not escape the allowed prefix.
+            req_norm = posixpath.normpath(unquote(parsed.path or "/"))
+            allow_norm = posixpath.normpath(unquote(allow_path)).rstrip("/")
+            if req_norm != allow_norm and not req_norm.startswith(allow_norm + "/"):
                 continue
         return True
     return False

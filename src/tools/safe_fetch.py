@@ -236,7 +236,12 @@ async def safe_fetch(
     resolver = _ValidatingResolver(allowed_hosts)
     connector = aiohttp.TCPConnector(resolver=resolver)
     client_timeout = aiohttp.ClientTimeout(total=timeout)
-    async with aiohttp.ClientSession(connector=connector, timeout=client_timeout) as session:
+    # DummyCookieJar: never store Set-Cookie, so a cookie learned on one hop
+    # can't be resent after a cross-origin redirect (the credential-header
+    # stripping only covers caller-supplied headers, not the jar).
+    async with aiohttp.ClientSession(
+        connector=connector, timeout=client_timeout, cookie_jar=aiohttp.DummyCookieJar()
+    ) as session:
         for _hop in range(max_redirects + 1):
             _validate_hop_url(current_url, allowed_urls)
             async with session.request(

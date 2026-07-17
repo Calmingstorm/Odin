@@ -49,12 +49,18 @@ def _backup_corrupt(path: Path, raw: bytes) -> None:
         log.error("Could not back up corrupt %s: %s", path.name, exc)
 
 
-def load_json_store(path: Path | None, *, container: type = dict):
+def load_json_store(path: Path | None, *, container: type = dict, validate=None):
     """Strict load for MUTATION paths.
 
     Missing file -> empty ``container()``. Unreadable / invalid JSON / wrong
     top-level type -> back up a copy and raise ``StoreCorruptError`` so the
     caller refuses the mutation instead of overwriting the corpus.
+
+    ``validate`` (optional) runs the caller's NESTED-shape check inside the
+    corruption boundary: it receives the parsed data and raises
+    ``StoreCorruptError`` on a malformed nested shape; the raw bytes are then
+    backed up before the error propagates — so nested corruption gets the same
+    sidecar backup as top-level corruption.
     """
     if path is None:
         return container()
@@ -78,18 +84,24 @@ def load_json_store(path: Path | None, *, container: type = dict):
             f"{p.name} has the wrong shape "
             f"(expected {container.__name__}, got {type(data).__name__})"
         )
+    if validate is not None:
+        try:
+            validate(data)
+        except StoreCorruptError:
+            _backup_corrupt(p, raw)
+            raise
     return data
 
 
 def load_json_store_safe(
-    path: Path | None, *, container: type = dict, what: str = "store"
+    path: Path | None, *, container: type = dict, what: str = "store", validate=None
 ) -> tuple:
-    """Read-path load: corruption degrades to the empty container (never
-    raises), so a damaged store cannot crash the caller (e.g. prompt
-    injection). Returns ``(data, ok)``; ``ok`` is False when corruption was
-    hit so the caller can log at its own (rate-limited) cadence."""
+    """Read-path load: corruption (top-level OR nested via ``validate``)
+    degrades to the empty container (never raises), so a damaged store cannot
+    crash the caller (e.g. prompt injection). Returns ``(data, ok)``; ``ok`` is
+    False when corruption was hit so the caller can log at its own cadence."""
     try:
-        return load_json_store(path, container=container), True
+        return load_json_store(path, container=container, validate=validate), True
     except StoreCorruptError as exc:
         log.error("%s unavailable, degrading to empty: %s", what, exc)
         return container(), False

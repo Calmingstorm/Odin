@@ -274,6 +274,13 @@ async def run_background_task(
                 break
 
         except Exception as e:
+            # Cancellation is authoritative: a cancel that arrived while this
+            # step ran (or a cleanup exception surfacing during it) must NOT be
+            # masked as a failure — that would fire the summary + the forbidden
+            # post-cancel LLM follow-up.
+            if task._cancel_event.is_set():
+                task.status = "cancelled"
+                break
             elapsed_ms = int((time.monotonic() - t0) * 1000)
             error_msg = str(e)
             task.results.append(StepResult(
@@ -308,20 +315,27 @@ async def run_background_task(
             progress_msg = await _send_progress(task, progress_msg)
             last_update = now
 
-    # Final status
-    if task.status == "running":
-        task.status = "completed"
+    # A cancel that landed between steps (or right at the end) wins.
+    if task._cancel_event.is_set() and task.status == "running":
+        task.status = "cancelled"
 
-    # Final progress update
-    await _send_progress(task, progress_msg)
-    # A cancelled task posts only its final progress line — no summary and no
-    # LLM follow-up (cancellation won; there is nothing to conclude). This also
-    # covers a cancel requested between steps (the loop set status=cancelled).
-    if task.status != "cancelled":
-        await _send_summary(task)
-        # Generate conversational follow-up via LLM
-        if codex_callback:
+    if task.status == "cancelled":
+        # Post only the final progress line — no summary and no LLM follow-up
+        # (cancellation won; there is nothing to conclude).
+        await _send_progress(task, progress_msg)
+    else:
+        # Render the terminal outcome, but keep task.status == 'running' so a
+        # cancel arriving during the summary / (potentially long) LLM follow-up
+        # is still honored (request_cancel refuses once the status is terminal).
+        # Publish the real terminal status only AFTER post-processing settles.
+        terminal = "failed" if task.status == "failed" else "completed"
+        task.status = "running"
+        await _send_progress(task, progress_msg, status_override=terminal)
+        await _send_summary(task, status_override=terminal)
+        if codex_callback and not task._cancel_event.is_set():
             await _send_conversational_followup(task, codex_callback)
+        if task.status == "running":  # not cancelled mid-follow-up
+            task.status = terminal
 
     log.info(
         "Background task %s finished: %s (%d/%d steps)",
@@ -490,8 +504,14 @@ def _check_condition(condition: str, prev_output: str) -> bool:
 async def _send_progress(
     task: BackgroundTask,
     existing_msg: discord.Message | None,
+    status_override: str | None = None,
 ) -> discord.Message | None:
-    """Post or edit a progress message in the channel."""
+    """Post or edit a progress message in the channel.
+
+    ``status_override`` renders the terminal outcome while ``task.status`` is
+    deliberately kept ``running`` (cancellable) through post-processing.
+    """
+    status = status_override or task.status
     total = len(task.steps)
     done = len(task.results)
     ok = sum(1 for r in task.results if r.status == "ok")
@@ -499,11 +519,11 @@ async def _send_progress(
     skipped = sum(1 for r in task.results if r.status == "skipped")
 
     # Status emoji
-    if task.status == "completed":
+    if status == "completed":
         status_icon = "DONE"
-    elif task.status == "failed":
+    elif status == "failed":
         status_icon = "FAILED"
-    elif task.status == "cancelled":
+    elif status == "cancelled":
         status_icon = "CANCELLED"
     else:
         status_icon = f"Step {task.current_step + 1}/{total}"
@@ -568,21 +588,22 @@ async def _send_progress(
         return existing_msg
 
 
-async def _send_summary(task: BackgroundTask) -> None:
+async def _send_summary(task: BackgroundTask, status_override: str | None = None) -> None:
     """Post a natural language summary of the completed task."""
+    status = status_override or task.status
     ok = [r for r in task.results if r.status == "ok"]
     errors = [r for r in task.results if r.status == "error"]
 
     lines = [f"**Task complete: {task.description}**"]
 
-    if task.status == "completed" and not errors:
+    if status == "completed" and not errors:
         lines.append(f"All {len(ok)} steps succeeded.")
-    elif task.status == "completed" and errors:
+    elif status == "completed" and errors:
         lines.append(f"{len(ok)} succeeded, {len(errors)} failed.")
-    elif task.status == "failed":
+    elif status == "failed":
         lines.append(f"Task aborted after {len(task.results)} of {len(task.steps)} steps "
                      f"({len(errors)} error(s)).")
-    elif task.status == "cancelled":
+    elif status == "cancelled":
         lines.append(f"Task was cancelled after {len(task.results)} of {len(task.steps)} steps.")
 
     # Include all results with their output

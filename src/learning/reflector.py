@@ -174,28 +174,49 @@ class ConversationReflector:
             "entries": [],
         }
 
+    @staticmethod
+    def _validate_learned_shape(data: dict) -> None:
+        """Nested-shape check run inside json_store's backup boundary: entries
+        must be a list of objects. A non-list or a non-object entry is
+        corruption — caught here so _migrate (which does entry.get(...)) never
+        sees a malformed entry, and so nested corruption is backed up + degrades
+        on reads / refuses on writes exactly like top-level corruption."""
+        from ..json_store import StoreCorruptError
+
+        entries = data.get("entries", [])
+        if not isinstance(entries, list):
+            raise StoreCorruptError("learned.json 'entries' is not a list")
+        for e in entries:
+            if not isinstance(e, dict):
+                raise StoreCorruptError(
+                    f"learned.json contains a non-object entry ({type(e).__name__})"
+                )
+
     def _load(self) -> dict:
-        """READ path — corruption degrades to an empty store (never raises) so
-        prompt injection and WebUI reads can't be taken down by a damaged file.
-        A corrupt copy is preserved by ``load_json_store``."""
+        """READ path — corruption (top-level OR nested) degrades to an empty
+        store (never raises) so prompt injection and WebUI reads can't be taken
+        down by a damaged file. A corrupt copy is preserved by load_json_store."""
         from ..json_store import load_json_store_safe
 
-        data, ok = load_json_store_safe(self._path, container=dict, what="learned.json")
-        if not ok or not data or not isinstance(data.get("entries", []), list):
+        data, ok = load_json_store_safe(
+            self._path, container=dict, what="learned.json",
+            validate=self._validate_learned_shape,
+        )
+        if not ok or not data:
             return self._empty_store()
         return self._migrate(data)
 
     def _load_for_write(self) -> dict:
-        """MUTATION path — raises ``StoreCorruptError`` on a damaged file so the
-        caller REFUSES to overwrite. A silent empty-and-save here would wipe the
-        entire learned corpus (the failure this guards against)."""
-        from ..json_store import StoreCorruptError, load_json_store
+        """MUTATION path — raises ``StoreCorruptError`` on a damaged file
+        (top-level OR nested) so the caller REFUSES to overwrite. A silent
+        empty-and-save here would wipe the entire learned corpus."""
+        from ..json_store import load_json_store
 
-        data = load_json_store(self._path, container=dict)
+        data = load_json_store(
+            self._path, container=dict, validate=self._validate_learned_shape
+        )
         if not data:
             return self._empty_store()
-        if not isinstance(data.get("entries", []), list):
-            raise StoreCorruptError("learned.json 'entries' is not a list")
         return self._migrate(data)
 
     def _migrate(self, data: dict) -> dict:

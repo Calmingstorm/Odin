@@ -250,3 +250,39 @@ class TestSkillMemory:
         sc = self._ctx(tmp_path)
         sc.remember("k", "v")
         assert sc.recall("k") == "v"
+
+
+class TestReviewNestedCorruption:
+    """Odin PR#238 review: nested-shape corruption is backed up (inside the
+    json_store boundary) and degrades on reads / refuses on writes."""
+
+    async def test_memory_section_corruption_backs_up(self, tmp_path):
+        p = tmp_path / "memory.json"
+        p.write_text('{"global": ["not a dict"]}')
+        st, _ex = _state_tools(tmp_path)
+        out = await st._handle_memory_manage(
+            {"action": "save", "scope": "global", "key": "k", "value": "v"}
+        )
+        assert "corrupt" in out.lower()
+        assert p.read_text() == '{"global": ["not a dict"]}'  # not wiped
+        assert list(tmp_path.glob("memory.json.corrupt-*"))  # nested backup (#9)
+
+    def test_learned_nonobject_entry_refuses_and_backs_up(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        p = tmp_path / "learned.json"
+        p.write_text('{"version": 2, "entries": ["not an object"]}')
+        r = ConversationReflector(learned_path=str(p))
+        assert r.delete_entry("k") is False
+        assert r.update_entry("k", content="x") is None
+        assert p.read_text() == '{"version": 2, "entries": ["not an object"]}'
+        assert list(tmp_path.glob("learned.json.corrupt-*"))
+
+    def test_learned_nonobject_entry_read_degrades(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        p = tmp_path / "learned.json"
+        p.write_text('{"version": 2, "entries": [42, "x"]}')
+        r = ConversationReflector(learned_path=str(p))
+        # Must NOT crash _migrate (which does entry.get(...)) on non-dict entries.
+        assert r.get_all_entries() == []

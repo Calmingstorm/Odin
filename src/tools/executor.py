@@ -79,6 +79,22 @@ _current_tool_timeout_ctx: contextvars.ContextVar[int | None] = contextvars.Cont
 )
 
 
+def _validate_memory_shape(data: dict) -> None:
+    """Nested-shape check for memory.json, run inside json_store's backup
+    boundary. The legacy flat format (no ``global`` key) is migrated by the
+    caller and not scoped-validated here; each scoped section must be an object
+    (a list/str section is corruption, not an empty section)."""
+    from ..json_store import StoreCorruptError
+
+    if "global" not in data:
+        return
+    for section, value in data.items():
+        if not isinstance(value, dict):
+            raise StoreCorruptError(
+                f"memory.json section {section!r} is {type(value).__name__}, expected an object"
+            )
+
+
 def _build_bulkhead_registry(config: ToolsConfig) -> BulkheadRegistry:
     """Build a BulkheadRegistry from tools config."""
     registry = BulkheadRegistry()
@@ -707,9 +723,13 @@ class ToolExecutor:
         wiping the corpus. Read paths that must not crash chat use
         _load_all_memory_safe. Auto-migrates the old flat format to scoped.
         """
-        from ..json_store import StoreCorruptError, load_json_store
+        from ..json_store import load_json_store
 
-        data = load_json_store(self._memory_path, container=dict)
+        # The section-shape check runs via the validate hook so nested
+        # corruption gets the same sidecar backup as top-level corruption.
+        data = load_json_store(
+            self._memory_path, container=dict, validate=_validate_memory_shape
+        )
         if not data:
             return {"global": {}}
         # Migrate old flat format: if no "global" key, treat entire dict as global
@@ -717,15 +737,6 @@ class ToolExecutor:
             migrated = {"global": data}
             self._save_all_memory(migrated)
             return migrated
-        # Container-shape validation: each section maps note keys to a dict. A
-        # section that is a list/str/etc. is corruption — refuse rather than
-        # drop it silently on the next save.
-        for section, value in data.items():
-            if not isinstance(value, dict):
-                raise StoreCorruptError(
-                    f"memory.json section {section!r} is {type(value).__name__}, "
-                    "expected an object"
-                )
         return data
 
     def _save_all_memory(self, data: dict[str, dict[str, str]]) -> None:

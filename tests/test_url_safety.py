@@ -81,3 +81,35 @@ class TestAllowlist:
             allowed_urls=allow_with_path,
             resolve_dns=False,
         )
+
+
+class TestReviewFixes:
+    """Odin PR#238 review: CGNAT/Tailscale range + allowlist path-boundary."""
+
+    def test_cgnat_tailscale_range_blocked(self):
+        # 100.64.0.0/10 (CGNAT / Tailscale overlay) is non-global -> blocked.
+        assert is_url_blocked("http://100.64.1.2/", resolve_dns=False)
+        assert is_url_blocked("http://100.100.100.100/", resolve_dns=False)
+        # A public address stays allowed.
+        assert not is_url_blocked("https://1.1.1.1/", resolve_dns=False)
+
+    def test_allowlist_sibling_prefix_not_matched(self):
+        allow = ["http://127.0.0.1:8188/api"]
+        # /api-evil must NOT match the /api prefix.
+        assert is_url_blocked(
+            "http://127.0.0.1:8188/api-evil", allowed_urls=allow, resolve_dns=False
+        )
+        # the exact prefix and a real sub-path DO match (not blocked).
+        assert not is_url_blocked(
+            "http://127.0.0.1:8188/api", allowed_urls=allow, resolve_dns=False
+        )
+        assert not is_url_blocked(
+            "http://127.0.0.1:8188/api/status", allowed_urls=allow, resolve_dns=False
+        )
+
+    def test_allowlist_encoded_traversal_blocked(self):
+        allow = ["http://127.0.0.1:8188/api"]
+        # /api/%2e%2e/admin decodes+normalizes to /admin -> escapes the prefix.
+        assert is_url_blocked(
+            "http://127.0.0.1:8188/api/%2e%2e/admin", allowed_urls=allow, resolve_dns=False
+        )

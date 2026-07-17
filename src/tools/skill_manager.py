@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -598,6 +599,10 @@ class SkillManager:
         else:
             self._memory_path = None
         self._skills: dict[str, LoadedSkill] = {}
+        # ONE lock shared across every SkillContext this manager creates — all
+        # contexts write the same <memory>_skills.json, so a per-context lock
+        # would let concurrent remember() calls race and collide on the .tmp.
+        self._skill_memory_lock = threading.Lock()
         self._disabled: set[str] = self._load_disabled_set()
         # Optional service references — set after construction via set_services()
         self._knowledge_store = None
@@ -1138,6 +1143,7 @@ class SkillManager:
             scheduler=self._scheduler,
             skill_config=skill_config,
             resource_tracker=tracker,
+            skill_memory_lock=self._skill_memory_lock,
         )
 
         start = time.monotonic()
