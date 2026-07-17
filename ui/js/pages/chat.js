@@ -7,7 +7,7 @@ import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 
 import { api, ws } from '../api.js';
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 
 
 // Configure marked for safe rendering
@@ -230,7 +230,6 @@ export default {
     const typingElapsed = ref(0);
     const channelId = ref('');
     let typingTimer = null;
-    let sentViaWs = false;
     let msgIdCounter = 0;
 
     const suggestions = [
@@ -368,7 +367,6 @@ export default {
     function onChatMessage(data) {
       if (!sending.value) return;
       sending.value = false;
-      sentViaWs = false;
       stopTypingTimer();
       if (data.type === 'chat_response') {
         addMessage('bot', data.content, {
@@ -405,47 +403,21 @@ export default {
       addMessage('user', content);
       input.value = '';
       sending.value = true;
-      sentViaWs = false;
       startTypingTimer();
 
       if (inputEl.value) inputEl.value.style.height = 'auto';
 
-      if (ws.connected) {
-        const sent = ws.sendChat(content, { channelId: channelId.value });
-        if (sent) {
-          sentViaWs = true;
-          startWsTimeout();
-        } else {
-          await sendViaRest(content);
-          sending.value = false;
-          stopTypingTimer();
-        }
-      } else {
+      // No client-side response timer: long tool-loop turns are healthy
+      // and the server imposes no outer wall either. If the socket drops
+      // mid-turn, OdinWebSocket dispatches a chat_error via onChatMessage.
+      const sentOverWs = ws.connected && ws.sendChat(content, { channelId: channelId.value });
+      if (!sentOverWs) {
         await sendViaRest(content);
         sending.value = false;
         stopTypingTimer();
       }
 
       nextTick(() => inputEl.value?.focus());
-    }
-
-    // Timeout for WS responses
-    let wsTimeout = null;
-    watch(sending, (val) => {
-      if (!val) {
-        if (wsTimeout) { clearTimeout(wsTimeout); wsTimeout = null; }
-      }
-    });
-
-    function startWsTimeout() {
-      wsTimeout = setTimeout(() => {
-        if (sending.value) {
-          sending.value = false;
-          sentViaWs = false;
-          stopTypingTimer();
-          addMessage('bot', 'Response timed out. Try again.', { is_error: true });
-        }
-      }, 120000);
     }
 
     async function loadHistory() {
@@ -497,7 +469,6 @@ export default {
 
     onUnmounted(() => {
       ws.unsubscribe('chat', onChatMessage);
-      if (wsTimeout) clearTimeout(wsTimeout);
       stopTypingTimer();
     });
 
