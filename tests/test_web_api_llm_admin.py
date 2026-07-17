@@ -366,8 +366,8 @@ class TestProviderConfig:
         _gw(bot)
         bot.llm_gateway.codex_client = object()
         bot.llm_gateway.reload_auxiliary = AsyncMock(
-            return_value={"effective_enabled": True, "model": "gpt-5.6-terra",
-                          "tasks": ["compaction", "reflection"]}
+            return_value={"committed": True, "effective_enabled": True,
+                          "model": "gpt-5.6-terra", "tasks": ["compaction", "reflection"]}
         )
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/llm/auxiliary/config",
@@ -413,6 +413,46 @@ class TestProviderConfig:
             bot.llm_gateway.reload_auxiliary = AsyncMock(side_effect=RuntimeError("boom"))
             assert (await c.put("/api/llm/auxiliary/config",
                                 json={"enabled": True})).status == 500
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_config_generation_reject_409(self):
+        # A committed=False result with a "concurrent" reason → 409, no persist.
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.reload_auxiliary = AsyncMock(
+            return_value={"committed": False, "effective_enabled": False,
+                          "reason": "concurrent reload; retry"})
+        with patch("src.web.api.llm_admin._persist_config", new=AsyncMock()) as persist:
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/auxiliary/config", json={"enabled": False})
+                assert r.status == 409
+            persist.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_config_persist_failure_reverts_runtime(self):
+        # committed=True but persistence raises → 500 and the runtime is
+        # reverted to the prior spec (live must not outrun disk).
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.config.openai_codex.auxiliary.enabled = False
+        bot.config.openai_codex.auxiliary.model = "gpt-5.6-luna"
+        reload_calls = []
+
+        async def _reload(desired=None):
+            reload_calls.append(desired)
+            return {"committed": True, "effective_enabled": True}
+
+        bot.llm_gateway.reload_auxiliary = _reload
+        with patch("src.web.api.llm_admin._persist_config",
+                   new=AsyncMock(side_effect=OSError("disk full"))):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/auxiliary/config",
+                                json={"enabled": True, "model": "gpt-5.6-terra"})
+                assert r.status == 500
+        # reload called twice: the desired, then the prior (rollback)
+        assert len(reload_calls) == 2
+        assert reload_calls[1]["enabled"] is False
+        assert reload_calls[1]["model"] == "gpt-5.6-luna"
 
     @pytest.mark.asyncio
     async def test_auxiliary_config_unavailable_503(self):
@@ -903,6 +943,22 @@ class TestPersistHelpers:
         assert "openai_codex" in written and "gpt-5.5" in written
         assert "reasoning_effort" in written and "xhigh" in written
         assert "ollama" in written and "kimi" in written and "llm_provider" in written
+
+    def test_persist_atomic_write_failure_cleans_temp_and_original_intact(self, monkeypatch):
+        # An os.replace failure must clean the temp file and NOT corrupt the
+        # existing config.yml (atomic replace: original stays whole).
+        import glob
+        import os
+        from pathlib import Path
+        Path("config.yml").write_text("discord:\n  token: fake\n")
+        bot = _bot()
+        bot.config.openai_codex.model = "gpt-5.6-sol"
+        monkeypatch.setattr(os, "replace", MagicMock(side_effect=OSError("disk full")))
+        with pytest.raises(OSError, match="disk full"):
+            _persist_llm_sections_sync(bot)
+        # original untouched, no leaked temp files
+        assert Path("config.yml").read_text() == "discord:\n  token: fake\n"
+        assert glob.glob("*.yml.tmp") == []
 
     def test_persist_includes_agent_reasoning_effort(self):
         """The YAML allowlist writes the field explicitly — without it, UI

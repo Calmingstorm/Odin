@@ -9,7 +9,9 @@ parity contract pins.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress as _ipaddress
+import tempfile
 import urllib.parse as _urlparse
 from pathlib import Path
 
@@ -150,11 +152,33 @@ def _persist_llm_sections_sync(bot) -> None:
         existing["llm_provider"] = {}
     existing["llm_provider"]["active_provider"] = bot.config.llm_provider.active_provider
 
-    with open(config_path, "w") as f:
-        ry.dump(existing, f)
+    # Atomic replace: write a temp file in the same dir, fsync, then os.replace
+    # so a concurrent reader/writer never sees a half-truncated config.yml.
+    import io
+    import os
+
+    buf = io.StringIO()
+    ry.dump(existing, buf)
+    fd, tmp = tempfile.mkstemp(dir=str(config_path.parent or "."), suffix=".yml.tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(buf.getvalue())
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, config_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 async def _persist_config(bot) -> None:
-    """Persist LLM config sections without touching env vars or other settings."""
+    """Persist LLM config sections without touching env vars or other settings.
+
+    Callers hold the gateway's provider_lock (the Codex/Ollama/Kimi routes
+    persist under it; the auxiliary route acquires it explicitly) so writes
+    are serialized — combined with the atomic replace above, concurrent PUTs
+    can't lose or corrupt config.yml. Lock-free here to avoid re-entrancy.
+    """
     await asyncio.to_thread(_persist_llm_sections_sync, bot)
 
 
@@ -481,6 +505,11 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             "enabled": want_enabled, "model": want_model, "tasks": want_tasks,
             "credentials_path": aux_cfg.credentials_path, "max_tokens": aux_cfg.max_tokens,
         }
+        # The prior desired for a persistence-failure rollback of the runtime.
+        prior = {
+            "enabled": aux_cfg.enabled, "model": aux_cfg.model, "tasks": list(aux_cfg.tasks),
+            "credentials_path": aux_cfg.credentials_path, "max_tokens": aux_cfg.max_tokens,
+        }
         try:
             # Self-locking (two-phase; probe + drain outside the lock) — do
             # NOT wrap in provider_lock here.
@@ -488,15 +517,24 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         except Exception as e:
             log.exception("Auxiliary reload raised")
             return web.json_response({"error": f"reload failed: {e}"}, status=500)
-        # We asked to enable but the live rebuild failed (bad model, missing
-        # creds, concurrent reload): config was NOT committed — surface it.
-        if want_enabled and not result.get("effective_enabled"):
-            return web.json_response(
-                {"error": result.get("reason", "auxiliary could not be enabled")},
-                status=400,
-            )
-        # reload committed config under the lock on success — persist the YAML.
-        await _persist_config(bot)
+        # ``committed`` is the sole persist gate — a rejected generation
+        # returns committed=False REGARDLESS of the requested enabled value, so
+        # a losing concurrent disable can't 200/persist as success.
+        if not result.get("committed"):
+            reason = result.get("reason", "auxiliary reload not committed")
+            status = 409 if "concurrent" in reason else 400
+            return web.json_response({"error": reason}, status=status)
+        # Committed under the lock — persist the YAML (serialized under the
+        # provider lock, atomic replace). If persistence fails, revert the
+        # runtime to the prior generation so live never outruns disk.
+        try:
+            async with bot.llm_gateway.provider_lock:
+                await _persist_config(bot)
+        except Exception as e:
+            log.exception("Auxiliary persist failed; reverting runtime")
+            with contextlib.suppress(Exception):
+                await bot.llm_gateway.reload_auxiliary(prior)
+            return web.json_response({"error": f"persist failed: {e}"}, status=500)
         return web.json_response({"status": "updated", **_auxiliary_status(bot)})
 
     @routes.put("/api/llm/ollama/config")

@@ -130,20 +130,32 @@ class LLMGateway:
         after a primary lifecycle change (caller holds provider_lock).
 
         Primary gone → retire auxiliary (its fallback would be a dead client).
-        Primary recreated → rebind the wrapper's fallback to the live primary
-        rather than leave it pointing at a stale one. A full aux rebuild is
-        the next WebUI reload's job; this only prevents a stale-primary hole.
+        Primary recreated with a live wrapper → rebind its fallback to the new
+        primary. Primary created while configured auxiliary is ABSENT (startup
+        credential miss, or after a disable→re-enable) → schedule the full
+        generation-safe reload_auxiliary OUTSIDE this lock so it builds and
+        probes the configured wrapper.
         """
         aux = self.auxiliary_llm_client
-        if aux is None:
-            return
         if self.codex_client is None:
-            self.auxiliary_llm_client = None
-            if self.model_router is not None:
-                self.model_router.aux_client = None
-            self._schedule_drain(aux)
-        elif getattr(aux, "primary_client", None) is not self.codex_client:
-            aux.primary_client = self.codex_client
+            if aux is not None:
+                self.auxiliary_llm_client = None
+                if self.model_router is not None:
+                    self.model_router.aux_client = None
+                self._schedule_drain(aux)
+            return
+        if aux is not None:
+            if getattr(aux, "primary_client", None) is not self.codex_client:
+                aux.primary_client = self.codex_client
+            return
+        # Primary present, no live wrapper: build it if configured+enabled.
+        # reload_auxiliary is self-locking — schedule it so it runs AFTER this
+        # reload releases provider_lock (the task blocks on the lock meanwhile).
+        aux_cfg = getattr(self.get_config().openai_codex, "auxiliary", None)
+        if aux_cfg is not None and aux_cfg.enabled:
+            task = asyncio.ensure_future(self.reload_auxiliary())
+            self._aux_drains.add(task)
+            task.add_done_callback(self._aux_drains.discard)
 
     async def reload_codex_inner(self) -> dict:
         """Inner reload — caller must hold provider_lock."""
@@ -302,10 +314,13 @@ class LLMGateway:
         gen_at_build = self._aux_reload_gen
 
         # --- disabled: retire under the lock, drain outside ---
+        # ``committed`` is the route's persist gate: True only when config +
+        # live pointers were actually mutated (never on a rejected generation).
         if not desired["enabled"]:
             async with self.provider_lock:
                 if self._aux_reload_gen != gen_at_build:
-                    return {"effective_enabled": False, "reason": "concurrent reload; retry"}
+                    return {"committed": False, "effective_enabled": False,
+                            "reason": "concurrent reload; retry"}
                 retired = self.auxiliary_llm_client
                 self.auxiliary_llm_client = None
                 if self.model_router is not None:
@@ -313,48 +328,59 @@ class LLMGateway:
                 self._apply_aux_desired(desired)
                 self._aux_reload_gen += 1
             self._schedule_drain(retired)
-            return {"effective_enabled": False, "reason": "auxiliary disabled"}
+            return {"committed": True, "effective_enabled": False,
+                    "reason": "auxiliary disabled"}
 
         primary_at_build = self.codex_client
         if primary_at_build is None:
-            return {"effective_enabled": False, "reason": "no primary Codex client to bind"}
+            return {"committed": False, "effective_enabled": False,
+                    "reason": "no primary Codex client to bind"}
 
         # --- phase 1: build + probe OUTSIDE the lock ---
         try:
             candidate, candidate_client = self._build_aux_candidate(desired, primary_at_build)
         except Exception as exc:
             log.exception("Auxiliary reload: candidate build failed")
-            return {"effective_enabled": False, "reason": f"build failed: {exc}"}
+            return {"committed": False, "effective_enabled": False,
+                    "reason": f"build failed: {exc}"}
         if candidate is None:
-            return {"effective_enabled": False, "reason": "auxiliary credentials missing"}
-        probe_reason = await self._probe_aux(candidate_client)
-        if probe_reason is not None:
-            self._schedule_drain(candidate)
-            return {"effective_enabled": False, "reason": probe_reason}
+            return {"committed": False, "effective_enabled": False,
+                    "reason": "auxiliary credentials missing"}
 
-        # --- phase 2: verify generation + revision, commit atomically ---
-        async with self.provider_lock:
-            if self.codex_client is not primary_at_build:
+        # A single ``finally`` retires the candidate on EVERY non-install exit
+        # — probe failure, generation rejection, and cancellation during the
+        # probe or while awaiting the lock — so an uninstalled session can't
+        # leak. Cancellation stays authoritative (re-raised after the drain).
+        installed = False
+        try:
+            probe_reason = await self._probe_aux(candidate_client)
+            if probe_reason is not None:
+                return {"committed": False, "effective_enabled": False,
+                        "reason": probe_reason}
+            async with self.provider_lock:
+                if self.codex_client is not primary_at_build:
+                    return {"committed": False, "effective_enabled": False,
+                            "reason": "primary changed during reload"}
+                if self._aux_reload_gen != gen_at_build:
+                    return {"committed": False, "effective_enabled": False,
+                            "reason": "concurrent reload; retry"}
+                retired = self.auxiliary_llm_client
+                self.auxiliary_llm_client = candidate
+                if self.model_router is not None:
+                    self.model_router.aux_client = candidate
+                self._apply_aux_desired(desired)
+                self._aux_reload_gen += 1
+                installed = True
+            self._schedule_drain(retired)
+            log.info(
+                "Auxiliary reloaded (model: %s, tasks: %s)",
+                desired["model"], ", ".join(desired["tasks"]) or "none",
+            )
+            return {"committed": True, "effective_enabled": True,
+                    "model": desired["model"], "tasks": list(desired["tasks"])}
+        finally:
+            if not installed:
                 self._schedule_drain(candidate)
-                return {"effective_enabled": False, "reason": "primary changed during reload"}
-            if self._aux_reload_gen != gen_at_build:
-                self._schedule_drain(candidate)
-                return {"effective_enabled": False, "reason": "concurrent reload; retry"}
-            retired = self.auxiliary_llm_client
-            self.auxiliary_llm_client = candidate
-            if self.model_router is not None:
-                self.model_router.aux_client = candidate
-            self._apply_aux_desired(desired)
-            self._aux_reload_gen += 1
-
-        # --- phase 3: drain retired OUTSIDE the lock (tracked) ---
-        self._schedule_drain(retired)
-        log.info(
-            "Auxiliary reloaded (model: %s, tasks: %s)",
-            desired["model"], ", ".join(desired["tasks"]) or "none",
-        )
-        return {"effective_enabled": True, "model": desired["model"],
-                "tasks": list(desired["tasks"])}
 
     async def reload_ollama_inner(self) -> dict:
         """Inner reload — caller must hold provider_lock."""

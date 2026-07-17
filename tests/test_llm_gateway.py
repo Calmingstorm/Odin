@@ -635,3 +635,83 @@ class TestPrimaryLifecycleReconcile:
         # aux fallback rebound to the newly-created primary, not the old one
         assert aux.primary_client is gw.codex_client
         assert aux.primary_client is not old_primary
+
+
+class TestPrimaryCreatesAuxiliary:
+    """Blocker 1: primary absent→created must build the CONFIGURED auxiliary,
+    not just rebind an already-present wrapper."""
+
+    def _cfg_aux_enabled(self):
+        cfg = _cfg()
+        cfg.openai_codex.auxiliary = SimpleNamespace(
+            enabled=True, model="gpt-5.6-terra", tasks=["compaction"],
+            max_tokens=2048, credentials_path="")
+        return cfg
+
+    async def test_primary_created_schedules_aux_build(self):
+        gw = _gw(self._cfg_aux_enabled(), codex=None, aux=None)  # aux absent at boot
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient", return_value=object()):
+            pool_cls.return_value.is_configured.return_value = True
+            pool_cls.return_value._accounts = [object()]
+            # reload_auxiliary is scheduled by the reconcile — stub it to a flag
+            called = {}
+            async def _fake_reload(desired=None):
+                called["yes"] = True
+                return {"committed": True, "effective_enabled": True}
+            gw.reload_auxiliary = _fake_reload
+            await gw.reload_codex_inner()
+            # let the scheduled task run
+            await asyncio.gather(*list(gw._aux_drains))
+        assert called.get("yes") is True
+
+
+class TestPersistAndConcurrency:
+    def _aux_cfg(self, enabled=True):
+        cfg = _cfg()
+        cfg.openai_codex.auxiliary = SimpleNamespace(
+            enabled=enabled, model="gpt-5.6-terra", tasks=["compaction"],
+            max_tokens=2048, credentials_path="")
+        return cfg
+
+    async def test_disable_generation_reject_is_not_committed(self):
+        # A losing concurrent disable must return committed=False (so the
+        # route 409s and never persists), not a success.
+        old = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(self._aux_cfg(enabled=False), codex=object(), aux=old)
+        real_lock = gw.provider_lock
+
+        class _BumpingLock:
+            async def __aenter__(self):
+                gw._aux_reload_gen += 1
+                await real_lock.acquire()
+            async def __aexit__(self, *a):
+                real_lock.release()
+
+        gw.provider_lock = _BumpingLock()
+        r = await gw.reload_auxiliary()
+        assert r["committed"] is False
+        assert gw.auxiliary_llm_client is old
+
+    async def test_cancellation_during_probe_drains_candidate(self):
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(self._aux_cfg(), codex=object(), aux=None)
+
+        async def _hang_probe(_client):
+            await asyncio.Event().wait()  # cancelled here
+
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
+            pool_cls.return_value.is_configured.return_value = True
+            client_cls.return_value.chat = AsyncMock()
+            gw._probe_aux = _hang_probe
+            task = asyncio.create_task(gw.reload_auxiliary())
+            await asyncio.sleep(0.02)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.gather(*list(gw._aux_drains))
+        # the uninstalled candidate was drained, never installed
+        assert gw.auxiliary_llm_client is None
+        candidate.drain_and_close.assert_awaited_once()
