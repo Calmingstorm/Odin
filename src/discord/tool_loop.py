@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -84,6 +85,68 @@ from .tool_loop_helpers import (
 log = get_logger("discord")
 
 _LONG_TIMEOUT_TOOL_SET = frozenset({"claude_code"})
+
+
+def _error_summary(exc: BaseException, limit: int = 200) -> str:
+    """Bounded one-line exception summary for logs and trajectory storage.
+
+    Total and non-throwing. Never includes response bodies: upstream HTTP
+    errors (Discord 500s carry whole Cloudflare HTML pages in ``str(exc)``)
+    are reduced to type + status/reason; the journal traceback remains the
+    source of full diagnostics.
+    """
+    name = type(exc).__name__
+    try:
+        status = getattr(exc, "status", None)
+        if status is not None:
+            reason = str(getattr(getattr(exc, "response", None), "reason", "") or "").strip()
+            detail = f"HTTP {status} {reason}".strip()
+        else:
+            try:
+                text = str(exc)
+            except Exception:
+                text = ""
+            lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+            detail = lines[0] if lines else ""
+            if "<html" in detail.lower() or "<!doctype" in detail.lower():
+                detail = ""
+        out = f"{name}: {detail}" if detail else name
+        return out[:limit]
+    except Exception:
+        return name
+
+
+@asynccontextmanager
+async def _best_effort_typing(channel):
+    """Discord typing indicator that can never fail the wrapped work.
+
+    The indicator is attempted on every call — no failure memory, so a
+    Discord API outage degrades cosmetics, not behavior — and any ordinary
+    ``Exception`` from typing setup or cleanup is logged bounded and
+    swallowed. Cancellation and exceptions raised by the wrapped body
+    always propagate; a cleanup failure never replaces a body exception.
+    """
+    cm = None
+    try:
+        cm = channel.typing()
+        await cm.__aenter__()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning("Typing indicator failed (non-fatal): %s", _error_summary(exc))
+        cm = None
+    try:
+        yield
+    finally:
+        if cm is not None:
+            try:
+                await cm.__aexit__(None, None, None)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning(
+                    "Typing indicator cleanup failed (non-fatal): %s", _error_summary(exc)
+                )
 
 
 class _LoopMessageProxy:
@@ -319,6 +382,34 @@ class ToolLoopRunner:
             message, history, system_prompt_override, trace, policy
         )
 
+        try:
+            return await self._run_chat_iterations(st)
+        except asyncio.CancelledError:
+            # Cancellation is not an error turn: release channel ownership
+            # and let it propagate untouched (no error trajectory).
+            self._clear_active(st)
+            raise
+        except Exception as exc:
+            # An escaping exception used to skip BOTH the trajectory record
+            # and active-request cleanup (found 2026-07-16: Discord's typing
+            # endpoint 500s left six dead turns with no trajectory at all).
+            # Record bounded, clean up, re-raise — the user-facing message
+            # is intake_pipeline's job, not ours.
+            try:
+                await self._turn_recorder._save_turn_trajectory(
+                    st._trajectory, error=_error_summary(exc), trace=st.trace
+                )
+            except Exception:
+                log.exception("Trajectory record failed while handling tool-loop escape")
+            finally:
+                self._clear_active(st)
+            raise
+
+    async def _run_chat_iterations(
+        self, st: _ChatTurn
+    ) -> tuple[str, bool, bool, list[str], bool]:
+        """The chat iteration loop — every phase-method exit returns through
+        here; unexpected escapes are handled by run()'s guard above."""
         for iteration in range(st.chat_cap):
             st.iteration = iteration
             if st._cancel.is_set():
@@ -577,77 +668,63 @@ class ToolLoopRunner:
 
         Returns ("ok", llm_resp) or ("done", <run() return tuple>).
         """
-        # Show typing indicator while waiting for LLM response.
-        # Typing is best-effort — isolate typing setup failures from
-        # LLM call failures so we don't misclassify provider errors.
-        typing_cm = None
-        try:
-            typing_cm = st.message.channel.typing()
-            await typing_cm.__aenter__()
-        except (discord.HTTPException, ConnectionError, OSError) as typing_err:
-            log.warning("Typing indicator failed (non-fatal): %s", typing_err)
-            typing_cm = None
-
         _channel_id = str(st.message.channel.id)
-        try:
-            llm_resp = await self._llm_gateway.call_with_tools(
-                messages=st.messages,
-                system=st.system_prompt,
-                tools=st.tools or [],
-                user_message=getattr(st.message, "content", "") or "",
-                user_id=st.user_id,
-                channel_id=_channel_id,
-                tools_used=st.tools_used_in_loop,
-            )
-        except CircuitOpenError as coe:
-            wait_secs = min(coe.retry_after, 90.0)
-            log.info(
-                "Circuit breaker open for %s, waiting %.0fs for recovery",
-                coe.provider,
-                wait_secs,
-            )
-            await asyncio.sleep(wait_secs)
+        # Typing is best-effort (shared helper): a typing failure — setup or
+        # cleanup — must never fail the call or misclassify provider errors.
+        async with _best_effort_typing(st.message.channel):
             try:
                 llm_resp = await self._llm_gateway.call_with_tools(
                     messages=st.messages,
                     system=st.system_prompt,
                     tools=st.tools or [],
+                    user_message=getattr(st.message, "content", "") or "",
                     user_id=st.user_id,
                     channel_id=_channel_id,
                     tools_used=st.tools_used_in_loop,
                 )
-            except Exception as retry_err:
+            except CircuitOpenError as coe:
+                wait_secs = min(coe.retry_after, 90.0)
+                log.info(
+                    "Circuit breaker open for %s, waiting %.0fs for recovery",
+                    coe.provider,
+                    wait_secs,
+                )
+                await asyncio.sleep(wait_secs)
+                try:
+                    llm_resp = await self._llm_gateway.call_with_tools(
+                        messages=st.messages,
+                        system=st.system_prompt,
+                        tools=st.tools or [],
+                        user_id=st.user_id,
+                        channel_id=_channel_id,
+                        tools_used=st.tools_used_in_loop,
+                    )
+                except Exception as retry_err:
+                    await self._turn_recorder._save_turn_trajectory(
+                        st._trajectory, error=str(retry_err), trace=st.trace
+                    )
+                    self._clear_active(st)
+                    return (
+                        "done",
+                        (
+                            f"LLM API error (circuit breaker recovery failed): {retry_err}",
+                            False,
+                            True,
+                            st.tools_used_in_loop,
+                            False,
+                        ),
+                    )
+            except Exception as api_err:
+                err_msg = str(api_err) or f"{type(api_err).__name__} (no message)"
+                log.error("LLM API call failed: %s", err_msg, exc_info=True)
                 await self._turn_recorder._save_turn_trajectory(
-                    st._trajectory, error=str(retry_err), trace=st.trace
+                    st._trajectory, error=err_msg, trace=st.trace
                 )
                 self._clear_active(st)
                 return (
                     "done",
-                    (
-                        f"LLM API error (circuit breaker recovery failed): {retry_err}",
-                        False,
-                        True,
-                        st.tools_used_in_loop,
-                        False,
-                    ),
+                    (f"LLM API error: {err_msg}", False, True, st.tools_used_in_loop, False),
                 )
-        except Exception as api_err:
-            err_msg = str(api_err) or f"{type(api_err).__name__} (no message)"
-            log.error("LLM API call failed: %s", err_msg, exc_info=True)
-            await self._turn_recorder._save_turn_trajectory(
-                st._trajectory, error=err_msg, trace=st.trace
-            )
-            self._clear_active(st)
-            return (
-                "done",
-                (f"LLM API error: {err_msg}", False, True, st.tools_used_in_loop, False),
-            )
-        finally:
-            if typing_cm is not None:
-                try:
-                    await typing_cm.__aexit__(None, None, None)
-                except Exception:
-                    pass
 
         return ("ok", llm_resp)
 
@@ -1075,7 +1152,10 @@ class ToolLoopRunner:
         result block to the message list (gather preserves call order)."""
         tool_timeout = self._get_config().tools.tool_timeout_seconds
 
-        async with st.message.channel.typing():
+        # Best-effort typing: the 2026-07-16 Discord incident (typing
+        # endpoint returning HTML 500s) aborted whole turns at exactly this
+        # line and dumped raw DiscordServerError HTML into chat.
+        async with _best_effort_typing(st.message.channel):
             tool_results = await asyncio.gather(
                 *[self._run_one_tool_with_timeout(st, b, tool_timeout) for b in tool_calls],
             )
