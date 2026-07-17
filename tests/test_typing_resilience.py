@@ -567,3 +567,59 @@ class TestRunInnerErrorPresentation:
         await pipeline._run_inner(_msg(), "do the thing", "c1")
         assert delivery.retried == ["Something went wrong: RuntimeError"]
         assert all("<html" not in t for t in delivery.retried)
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (PR #233): the status/HTTPException branches must clean the
+# upstream-controlled reason phrase exactly like generic detail.
+# ---------------------------------------------------------------------------
+
+
+def _http_exc_with_reason(reason, status=500):
+    resp = SimpleNamespace(status=status, reason=reason)
+    return discord.HTTPException(resp, "body")
+
+
+class TestStructuredReasonSanitization:
+    def test_user_facing_error_strips_controls_in_reason(self):
+        out = _user_facing_error(_http_exc_with_reason("Bad\x9b\x7fReason\x00"))
+        assert "\x9b" not in out
+        assert "\x7f" not in out
+        assert "\x00" not in out
+        assert "BadReason" in out
+
+    def test_user_facing_error_neutralizes_mentions_in_reason(self):
+        out = _user_facing_error(_http_exc_with_reason("notify @everyone and @here"))
+        assert "@everyone" not in out
+        assert "@here" not in out
+        assert "everyone" in out
+
+    def test_user_facing_error_strips_format_chars_in_reason(self):
+        out = _user_facing_error(_http_exc_with_reason("zero\u200bwidth"))
+        assert "\u200b" not in out
+        assert "zerowidth" in out
+
+    def test_user_facing_error_html_reason_dropped_status_kept(self):
+        out = _user_facing_error(_http_exc_with_reason("<html>oops</html>"))
+        assert out == "Discord API error: HTTP 500"
+
+    def test_user_facing_error_non_int_status_renders_safely(self):
+        out = _user_facing_error(
+            _http_exc_with_reason("Internal Server Error", status="@everyone 500")
+        )
+        assert "@everyone" not in out
+        assert "HTTP ?" in out
+
+    def test_error_summary_strips_controls_in_reason(self):
+        out = _error_summary(_http_exc_with_reason("Bad\x9bReason\x7f"))
+        assert "\x9b" not in out
+        assert "\x7f" not in out
+        assert "BadReason" in out
+
+    def test_error_summary_html_reason_dropped_status_kept(self):
+        out = _error_summary(_http_exc_with_reason("<html>oops"))
+        assert out == "HTTPException: HTTP 500"
+
+    def test_error_summary_non_int_status_renders_safely(self):
+        out = _error_summary(_http_exc_with_reason("ok", status="evil"))
+        assert out == "HTTPException: HTTP ? ok"

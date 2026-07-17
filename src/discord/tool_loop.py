@@ -88,36 +88,43 @@ log = get_logger("discord")
 _LONG_TIMEOUT_TOOL_SET = frozenset({"claude_code"})
 
 
+def _clean_fragment(s: str) -> str:
+    """Normalize an exception-derived fragment for logs/trajectory storage:
+    category-C strip (C0, DEL, C1, format chars; tab retained) and HTML-page
+    fragments dropped. The reason phrase of an HTTP error is upstream-
+    controlled text, so it goes through here exactly like str(exc) does.
+    """
+    s = "".join(ch for ch in s if ch == "\t" or not unicodedata.category(ch).startswith("C"))
+    if "<html" in s.lower() or "<!doctype" in s.lower():
+        return ""
+    return s.strip()
+
+
 def _error_summary(exc: BaseException, limit: int = 200) -> str:
     """Bounded one-line exception summary for logs and trajectory storage.
 
     Total and non-throwing. Never includes response bodies: upstream HTTP
-    errors (Discord 500s carry whole Cloudflare HTML pages in ``str(exc)``)
-    are reduced to type + status/reason; the journal traceback remains the
-    source of full diagnostics.
+    errors (Discord 500s carry whole Cloudflare HTML pages in str(exc))
+    are reduced to type + status/reason -- both cleaned -- and a non-int
+    status renders as "?". The journal traceback remains the source of
+    full diagnostics.
     """
     name = type(exc).__name__
     try:
         status = getattr(exc, "status", None)
         if status is not None:
-            reason = str(getattr(getattr(exc, "response", None), "reason", "") or "").strip()
-            detail = f"HTTP {status} {reason}".strip()
+            status_s = str(status) if isinstance(status, int) else "?"
+            reason = _clean_fragment(
+                str(getattr(getattr(exc, "response", None), "reason", "") or "")
+            )
+            detail = f"HTTP {status_s} {reason}".strip()
         else:
             try:
                 text = str(exc)
             except Exception:
                 text = ""
-            lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
-            detail = lines[0] if lines else ""
-            # Category-aware strip (C0, DEL, C1, format chars) — journal and
-            # trajectory text must not carry control/CSI sequences either.
-            detail = "".join(
-                ch
-                for ch in detail
-                if ch == "\t" or not unicodedata.category(ch).startswith("C")
-            )
-            if "<html" in detail.lower() or "<!doctype" in detail.lower():
-                detail = ""
+            first = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+            detail = _clean_fragment(first[0] if first else "")
         out = f"{name}: {detail}" if detail else name
         return out[:limit]
     except Exception:

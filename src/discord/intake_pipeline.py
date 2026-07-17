@@ -68,37 +68,53 @@ def check_for_secrets(content: str) -> bool:
 _HTML_MARKERS = ("<html", "<!doctype")
 
 
+def _clean_detail(detail: str) -> str:
+    """Shared normalization for ANY exception-derived text fragment.
+
+    Every fragment that can carry upstream-controlled bytes -- str(exc)
+    first lines and HTTP response.reason phrases alike -- must pass through
+    here before reaching chat: category-C strip (C0, DEL, C1, format chars;
+    tab deliberately retained -- a plain ch >= " " check lets U+007F and
+    U+0080..U+009F through), HTML-page fragments dropped, and mass mentions
+    neutralized with a zero-width space so error text can never ping the
+    server.
+    """
+    detail = "".join(
+        ch for ch in detail if ch == "\t" or not unicodedata.category(ch).startswith("C")
+    )
+    if any(m in detail.lower() for m in _HTML_MARKERS):
+        return ""
+    detail = detail.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+    return detail.strip()
+
+
 def _user_facing_error(exc: BaseException, limit: int = 200) -> str:
     """Bounded, HTML-free, mention-safe one-line exception summary for chat.
 
-    Presentation policy for the user-facing error boundary in ``_run_inner``
-    — total and non-throwing (any internal failure falls back to the
-    exception type name). Never renders ``discord.HTTPException`` bodies:
-    ``str(exc)``/``.text`` carry the raw HTTP response, and Discord 500s are
-    whole Cloudflare HTML pages (the 2026-07-16 incident dumped them into
-    chat verbatim). Full diagnostics stay in the journal via ``exc_info``.
+    Presentation policy for the user-facing error boundary in _run_inner --
+    total and non-throwing (any internal failure falls back to the exception
+    type name). Never renders discord.HTTPException bodies: str(exc)/.text
+    carry the raw HTTP response, and Discord 500s are whole Cloudflare HTML
+    pages (the 2026-07-16 incident dumped them into chat verbatim).
+    Structured fields go through the SAME _clean_detail normalization -- the
+    reason phrase is upstream-controlled text too -- and a non-int status
+    renders as "?". Full diagnostics stay in the journal via exc_info.
     """
     name = type(exc).__name__
     try:
         if isinstance(exc, discord.HTTPException):
-            reason = str(getattr(getattr(exc, "response", None), "reason", "") or "").strip()
-            status = getattr(exc, "status", "?")
-            return f"Discord API error: HTTP {status} {reason}".strip()[:limit]
+            status = getattr(exc, "status", None)
+            status_s = str(status) if isinstance(status, int) else "?"
+            reason = _clean_detail(
+                str(getattr(getattr(exc, "response", None), "reason", "") or "")
+            )
+            return f"Discord API error: HTTP {status_s} {reason}".strip()[:limit]
         try:
             text = str(exc)
         except Exception:
             text = ""
         lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
-        detail = lines[0] if lines else ""
-        # Category-aware strip: C* covers C0, DEL, C1, and format chars —
-        # a plain `ch >= " "` check lets U+007F/U+0080–U+009F through.
-        detail = "".join(
-            ch for ch in detail if ch == "\t" or not unicodedata.category(ch).startswith("C")
-        )
-        if any(m in detail.lower() for m in _HTML_MARKERS):
-            detail = ""
-        # Zero-width space after "@" — error text must not ping the server.
-        detail = detail.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+        detail = _clean_detail(lines[0] if lines else "")
         out = f"{name}: {detail}" if detail else name
         return out[:limit]
     except Exception:
