@@ -64,6 +64,42 @@ def check_for_secrets(content: str) -> bool:
     return any(p.search(content) for p in SECRET_SCRUB_PATTERNS)
 
 
+_HTML_MARKERS = ("<html", "<!doctype")
+
+
+def _user_facing_error(exc: BaseException, limit: int = 200) -> str:
+    """Bounded, HTML-free, mention-safe one-line exception summary for chat.
+
+    Presentation policy for the user-facing error boundary in ``_run_inner``
+    — total and non-throwing (any internal failure falls back to the
+    exception type name). Never renders ``discord.HTTPException`` bodies:
+    ``str(exc)``/``.text`` carry the raw HTTP response, and Discord 500s are
+    whole Cloudflare HTML pages (the 2026-07-16 incident dumped them into
+    chat verbatim). Full diagnostics stay in the journal via ``exc_info``.
+    """
+    name = type(exc).__name__
+    try:
+        if isinstance(exc, discord.HTTPException):
+            reason = str(getattr(getattr(exc, "response", None), "reason", "") or "").strip()
+            status = getattr(exc, "status", "?")
+            return f"Discord API error: HTTP {status} {reason}".strip()[:limit]
+        try:
+            text = str(exc)
+        except Exception:
+            text = ""
+        lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+        detail = lines[0] if lines else ""
+        detail = "".join(ch for ch in detail if ch == "\t" or ch >= " ")
+        if any(m in detail.lower() for m in _HTML_MARKERS):
+            detail = ""
+        # Zero-width space after "@" — error text must not ping the server.
+        detail = detail.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+        out = f"{name}: {detail}" if detail else name
+        return out[:limit]
+    except Exception:
+        return name
+
+
 @dataclass(frozen=True)
 class MessageIntakeDeps:
     """The true dependency surface of the intake gating chain."""
@@ -615,12 +651,17 @@ class MessagePipeline:
                         trace=_trace,
                     )
                 except TimeoutError as codex_err:
-                    log.warning("Codex tool loop timed out: %s", codex_err)
-                    response = f"Tool execution timed out: {codex_err}"
+                    _err = _user_facing_error(codex_err)
+                    log.warning("Codex tool loop timed out: %s", _err)
+                    response = f"Tool execution timed out: {_err}"
                     is_error = True
                 except Exception as codex_err:
-                    log.error("Codex tool loop unexpected error: %s", codex_err, exc_info=True)
-                    response = f"Tool execution failed: {codex_err}"
+                    # exc_info carries the full traceback; the message arg is
+                    # bounded so upstream HTML bodies aren't duplicated into
+                    # the journal — and never reach chat.
+                    _err = _user_facing_error(codex_err)
+                    log.error("Codex tool loop unexpected error: %s", _err, exc_info=True)
+                    response = f"Tool execution failed: {_err}"
                     is_error = True
                     handoff = False
                 # Skill requested Codex handoff — route skill result to Codex for response
