@@ -28,7 +28,12 @@ def register_tools_meta(routes: web.RouteTableDef, bot) -> None:
 
     @routes.get("/api/tools")
     async def list_tools(_request: web.Request) -> web.Response:
-        all_tools = get_tool_definitions()
+        # Report the CURRENTLY-EXPOSED catalog (what the model actually sees —
+        # backend-gated visibility and the per-spawn agent axis policy applied),
+        # not the static declared definitions. Fall back to the static list only
+        # if the runtime catalog is unavailable.
+        catalog = getattr(bot, "tool_catalog", None)
+        all_tools = catalog.merged_definitions() if catalog else get_tool_definitions()
         tools_config = bot.config.tools
         result = [
             {

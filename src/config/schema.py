@@ -294,6 +294,29 @@ ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh"]
 # direct attribute assignment — the web admin layer checks against this set).
 CODEX_REASONING_EFFORTS: frozenset[str] = frozenset(get_args(ReasoningEffort))
 
+# Sentinel for the agent model/effort config axes meaning "let the spawner pick
+# per-spawn from the exposed catalogue". Deliberately NOT a member of
+# CODEX_REASONING_EFFORTS — that set is the values legal to SEND to Codex; "auto"
+# is configuration policy and is never sent to a provider. One constant, one
+# classifier — never scatter `== "auto"` comparisons.
+AGENT_SETTING_AUTO = "auto"
+
+
+def agent_axis_mode(value: str | None) -> str:
+    """Classify an agent model/effort config value into its policy mode:
+
+    * ``"inherit"`` — ``None``: use the main Codex setting, no per-spawn override.
+    * ``"auto"`` — the ``AGENT_SETTING_AUTO`` sentinel: expose the per-spawn
+      catalogue so the spawner selects per task.
+    * ``"fixed"`` — any other value: a hard-set agent setting, no per-spawn
+      override offered.
+    """
+    if value is None:
+        return "inherit"
+    if value == AGENT_SETTING_AUTO:
+        return "auto"
+    return "fixed"
+
 
 class OpenAICodexConfig(BaseModel):
     # ``model`` and ``model_routing`` collide with pydantic v2's protected
@@ -306,13 +329,14 @@ class OpenAICodexConfig(BaseModel):
     reasoning_effort: ReasoningEffort = "medium"
     # Effort for SPAWNED-AGENT iterations only. None = inherit
     # reasoning_effort (the string "none" is a real effort level, not
-    # inherit). Read at call time, so live changes reach in-flight agents
-    # on their next iteration.
-    agent_reasoning_effort: ReasoningEffort | None = None
-    # Model for SPAWNED-AGENT iterations only. None = inherit ``model``.
-    # Free string like ``model`` (the WebUI dropdown is the constraint;
-    # an unsupported value fails per-request, same as ``model``). Read at
-    # call time, so live changes reach in-flight agents next iteration.
+    # inherit); "auto" = expose per-spawn effort selection to the spawner
+    # ("auto" is policy, never sent to a provider). Read at call time, so
+    # live changes reach in-flight agents on their next iteration.
+    agent_reasoning_effort: ReasoningEffort | Literal["auto"] | None = None
+    # Model for SPAWNED-AGENT iterations only. None = inherit ``model``;
+    # "auto" = expose per-spawn model selection to the spawner. Free string
+    # like ``model`` otherwise (the WebUI dropdown is the constraint; an
+    # unsupported value fails per-request). Read at call time.
     agent_model: str | None = None
     credentials_path: str = "./data/codex_auth.json"
     # Streaming transport timeouts: a generous whole-request backstop (long

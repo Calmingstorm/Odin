@@ -57,6 +57,10 @@ def _bot():
 class TestToolsMeta:
     async def test_list_and_stats_and_timeouts(self):
         bot = _bot()
+        # /api/tools now reports the runtime catalog (what the model sees).
+        bot.tool_catalog.merged_definitions.return_value = [
+            {"name": "t", "description": "d", "is_core": True}
+        ]
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr(obs, "get_tool_definitions",
                        lambda: [{"name": "t", "description": "d", "is_core": True}])

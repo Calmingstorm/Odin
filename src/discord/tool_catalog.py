@@ -54,6 +54,12 @@ class ToolCatalog:
 
         if not image_tool_available(config):
             builtin = [t for t in builtin if t["name"] != "generate_image"]
+        # Per-spawn agent model/effort catalogue: expose each axis's field +
+        # clause on spawn_agent/spawn_loop_agents only when that agent config
+        # axis is "auto" (operates on clones — never mutates the shared defs).
+        from ..tools.agent_tool_policy import apply_agent_axis_policy
+
+        builtin = apply_agent_axis_policy(builtin, config)
         builtin_names = {t["name"] for t in builtin}
         skill_defs = [
             t for t in self.skill_manager.get_tool_definitions() if t["name"] not in builtin_names

@@ -122,6 +122,7 @@ export default {
               <select v-model="codexForm.agent_model" @change="saveCodexConfigDebounced"
                       class="hm-input">
                 <option value="">Inherit chat model</option>
+                <option value="auto">Auto — choose per spawn</option>
                 <option v-for="m in codexAgentModelOptions" :key="m" :value="m">{{ m }}</option>
               </select>
               </label>
@@ -143,6 +144,7 @@ export default {
               <select v-model="codexForm.agent_reasoning_effort" @change="saveCodexConfigDebounced"
                       class="hm-input">
                 <option value="">Inherit chat setting</option>
+                <option value="auto">Auto — choose per spawn</option>
                 <option value="none">None</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>

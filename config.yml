@@ -20,10 +20,12 @@ openai_codex:
   # none | low | medium | high | xhigh (backend default: medium)
   reasoning_effort: medium
   # Effort for spawned-agent iterations only. Unset/null = inherit
-  # reasoning_effort ("none" is a real effort level, not inherit).
+  # reasoning_effort ("none" is a real effort level, not inherit). Set to
+  # "auto" to let the spawner choose the effort per spawn from the catalogue.
   # Read at call time — live changes reach in-flight agents next iteration.
   agent_reasoning_effort: null
-  # Model for spawned-agent iterations only. Unset/null = inherit model.
+  # Model for spawned-agent iterations only. Unset/null = inherit model; a
+  # specific model = fixed; "auto" = let the spawner choose per spawn.
   # Read at call time — live changes reach in-flight agents next iteration.
   agent_model: null
   credentials_path: ./data/codex_auth.json

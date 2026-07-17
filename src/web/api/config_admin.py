@@ -377,6 +377,12 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         # Apply to bot
         bot.config = new_config
 
+        # The per-spawn agent tool schema depends on the agent model/effort
+        # axis modes, which can change through this general path too — rebuild
+        # the tool catalog so the next turn / new spawn sees the new exposure.
+        if getattr(bot, "tool_catalog", None):
+            bot.tool_catalog.invalidate()
+
         # Write to disk — persist the VALIDATED/normalized config, not the
         # pre-normalized merge, so fields removed from the schema (a legacy
         # model_routing block, auxiliary tasks/max_tokens/credentials_path)

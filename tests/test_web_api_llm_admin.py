@@ -160,6 +160,27 @@ class TestLlmStatus:
             assert body["codex"]["effective_agent_reasoning_effort"] == "low"
 
     @pytest.mark.asyncio
+    async def test_llm_status_agent_axes_auto_resolves_to_main(self):
+        app, bot = _app(register_llm_provider)
+        bot.llm_gateway.codex_client = SimpleNamespace(reasoning_effort="high")
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.kimi_client = None
+        bot.llm_gateway.active_client = None
+        bot.config.openai_codex.model = "gpt-5.6-sol"
+        bot.config.openai_codex.agent_model = "auto"
+        bot.config.openai_codex.agent_reasoning_effort = "auto"
+        async with TestClient(TestServer(app)) as c:
+            codex = (await (await c.get("/api/llm/status")).json())["codex"]
+            # configured shows the sentinel; effective_* resolves to the
+            # inherited MAIN setting and NEVER surfaces "auto".
+            assert codex["agent_model"] == "auto"
+            assert codex["agent_reasoning_effort"] == "auto"
+            assert codex["effective_agent_model"] == "gpt-5.6-sol"
+            assert codex["effective_agent_reasoning_effort"] == "high"
+            assert codex["effective_agent_model"] != "auto"
+            assert codex["effective_agent_reasoning_effort"] != "auto"
+
+    @pytest.mark.asyncio
     async def test_llm_status_auxiliary_configured_vs_effective(self):
         app, bot = _app(register_llm_provider)
         bot.llm_gateway.codex_client = object()
@@ -365,6 +386,25 @@ class TestProviderConfig:
             # invalid max_tokens → ValueError → 400
             assert (await c.put("/api/llm/codex/config",
                                 json={"max_tokens": "nope"})).status == 400
+
+    @pytest.mark.asyncio
+    async def test_codex_config_accepts_agent_axis_auto(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        bot.tool_catalog = MagicMock()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"agent_reasoning_effort": "auto", "agent_model": "auto"})
+            rbody = await r.json()
+            assert r.status == 200 and rbody["status"] == "updated"
+            assert bot.config.openai_codex.agent_reasoning_effort == "auto"
+            assert bot.config.openai_codex.agent_model == "auto"
+            # changing an agent axis rebuilds the tool catalog
+            bot.tool_catalog.invalidate.assert_called()
+            # an invalid (non-auto) agent effort value is still rejected
+            assert (await c.put("/api/llm/codex/config",
+                                json={"agent_reasoning_effort": "ultra"})).status == 400
 
     @pytest.mark.asyncio
     async def test_codex_config_no_lock_503(self):

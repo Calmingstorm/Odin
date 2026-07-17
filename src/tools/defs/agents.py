@@ -4,21 +4,40 @@ RFC-004 P1: verbatim positional slice. ORDER IS BEHAVIOR (the tool
 catalog feeds prompt assembly) — do not reorder, and do not move
 tools between sections; the characterization contract pins the
 concatenated order exactly.
+
+The spawn_agent / spawn_loop_agents descriptions are composed from a base plus
+INDEPENDENT per-axis clauses. The tool catalog re-exposes each axis's field +
+clause only when the matching agent config axis is "auto" (see
+``src/tools/agent_tool_policy.py``); the static definitions here carry both
+(the canonical form). Keep the clauses independent — never combine them into
+"model and/or effort" wording, or a single-axis schema would read wrong.
 """
+
+# Base spawn descriptions (no per-axis clause) + the independent axis clauses.
+SPAWN_AGENT_BASE_DESC = (
+    "Spawns an autonomous agent for a sub-task. Runs silently in background with "
+    "isolated context; it may spawn its own sub-agents up to the nesting limit. "
+    "Results are NOT posted to Discord — use wait_for_agents to collect results, then "
+    "deliver a cohesive summary yourself. Max 5/channel, 4h lifetime. Budget warnings "
+    "injected near iteration limit."
+)
+SPAWN_LOOP_BASE_DESC = "Spawns agents from a loop iteration with context. Max 3/iter, 10/loop."
+SPAWN_MODEL_CLAUSE = (
+    " Set 'model' to run THIS agent on a specific Codex model — gpt-5.6-sol "
+    "(deepest reasoning, for hard/ambiguous work), gpt-5.6-terra (balanced default), "
+    "gpt-5.6-luna (fastest, for simple/mechanical work); match the tier to the task. "
+    "Omit to use the configured agent model."
+)
+SPAWN_EFFORT_CLAUSE = (
+    " Set 'reasoning_effort' (none/low/medium/high/xhigh) for THIS agent — higher is "
+    "more thorough but slower/costlier. Omit to use the configured agent effort."
+)
 
 TOOLS_SECTION: list[dict] = [
     # --- Agent orchestration ---
     {
         "name": "spawn_agent",
-        "description": (
-            "Spawns an autonomous agent for a sub-task. Runs silently in background with "
-            "isolated context; it may spawn its own sub-agents up to the nesting limit. "
-            "Results are NOT posted to Discord — use wait_for_agents to collect results, then "
-            "deliver a cohesive summary yourself. Max 5/channel, 4h lifetime. Budget warnings "
-            "injected near iteration limit. Optionally set 'model' and/or 'reasoning_effort' to "
-            "run THIS agent on a specific Codex model/effort — match the tier to the work; omit "
-            "to inherit your configured agent defaults."
-        ),
+        "description": SPAWN_AGENT_BASE_DESC + SPAWN_MODEL_CLAUSE + SPAWN_EFFORT_CLAUSE,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -128,11 +147,7 @@ TOOLS_SECTION: list[dict] = [
     # --- Loop-Agent integration ---
     {
         "name": "spawn_loop_agents",
-        "description": (
-            "Spawns agents from a loop iteration with context. Max 3/iter, 10/loop. Each task "
-            "may set its own 'model'/'reasoning_effort' to run on a specific Codex tier "
-            "(sol=deepest, terra=balanced, luna=fastest); omit to inherit the agent defaults."
-        ),
+        "description": SPAWN_LOOP_BASE_DESC + SPAWN_MODEL_CLAUSE + SPAWN_EFFORT_CLAUSE,
         "input_schema": {
             "type": "object",
             "properties": {
