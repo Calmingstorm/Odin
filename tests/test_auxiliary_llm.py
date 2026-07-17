@@ -88,6 +88,22 @@ class TestAuxiliaryLLMConfig:
         with pytest.raises(ValueError, match="unknown auxiliary task"):
             AuxiliaryLLMConfig(tasks=["compaction", "not_a_task"])
 
+    def test_tasks_strip_deprecated_on_load(self):
+        # Old hand-authored configs may carry summarization / vision_description
+        # (master accepted arbitrary strings; they never had a consumer). They
+        # are STRIPPED, not rejected, so an old config still boots.
+        cfg = AuxiliaryLLMConfig(
+            tasks=["compaction", "summarization", "vision_description", "reflection"]
+        )
+        assert cfg.tasks == ["compaction", "reflection"]
+
+    def test_tasks_deprecated_plus_unknown_still_rejects(self):
+        # A genuinely unknown name is still rejected even when a deprecated
+        # (strippable) value is also present.
+        import pytest
+        with pytest.raises(ValueError, match="unknown auxiliary task"):
+            AuxiliaryLLMConfig(tasks=["summarization", "not_a_task"])
+
     def test_tasks_dedupe_and_canonical_order(self):
         # Input order/dupes ignored; stored in KNOWN_TASKS_ORDER order.
         cfg = AuxiliaryLLMConfig(
@@ -129,12 +145,26 @@ class TestKnownTasks:
         for task in ("compaction", "reflection", "consolidation", "background_followup"):
             assert task in KNOWN_TASKS
 
-    def test_contains_extended_tasks(self):
-        for task in ("vision_description", "classification", "summarization"):
-            assert task in KNOWN_TASKS
+    def test_contains_classification(self):
+        assert "classification" in KNOWN_TASKS
 
     def test_count(self):
-        assert len(KNOWN_TASKS) == 7
+        assert len(KNOWN_TASKS) == 5
+
+    def test_every_known_task_is_real(self):
+        # Invariant: the operator-visible list is EXACTLY the five consumer-
+        # backed workloads — no forward-compat placeholders that do nothing.
+        assert set(KNOWN_TASKS) == {
+            "compaction", "reflection", "consolidation",
+            "background_followup", "classification",
+        }
+
+    def test_deprecated_tasks_not_known(self):
+        # summarization / vision_description were removed (never had a
+        # consumer); they live only in DEPRECATED_TASKS for load-time stripping.
+        from src.llm.auxiliary import DEPRECATED_TASKS
+        assert DEPRECATED_TASKS == {"summarization", "vision_description"}
+        assert not (DEPRECATED_TASKS & KNOWN_TASKS)
 
 
 # ---------------------------------------------------------------------------
@@ -449,8 +479,8 @@ class TestMakeCodexCallback:
         aux.chat.assert_awaited_once_with([], "system", max_tokens=150)
 
     async def test_custom_task(self):
-        client, aux, primary = _make_client(enabled_tasks={"summarization"})
-        fn = client.make_codex_callback(task="summarization")
+        client, aux, primary = _make_client(enabled_tasks={"reflection"})
+        fn = client.make_codex_callback(task="reflection")
         await fn([], "s", 100)
         aux.chat.assert_awaited_once()
         primary.chat.assert_not_awaited()
@@ -645,7 +675,7 @@ class TestRoutedAndLease:
 
     async def test_drain_and_close_waits_for_inflight(self):
         import asyncio
-        client, aux, primary = _make_client(enabled_tasks={"summarization"})
+        client, aux, primary = _make_client(enabled_tasks={"compaction"})
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -655,7 +685,7 @@ class TestRoutedAndLease:
             return "done"
 
         aux.chat = AsyncMock(side_effect=_slow)
-        call = asyncio.create_task(client.chat([], "s", task="summarization"))
+        call = asyncio.create_task(client.chat([], "s", task="compaction"))
         await started.wait()
         # a drain started now must not close until the call finishes
         drain = asyncio.create_task(client.drain_and_close())
@@ -672,7 +702,7 @@ class TestDrainNeverCuts:
     async def test_drain_never_cuts_a_long_lease(self):
         # A legitimately long in-flight call is NEVER severed by a wall-clock
         # timeout — the drain waits for the lease to reach zero.
-        client, aux, primary = _make_client(enabled_tasks={"summarization"})
+        client, aux, primary = _make_client(enabled_tasks={"compaction"})
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -682,7 +712,7 @@ class TestDrainNeverCuts:
             return "done"
 
         aux.chat = AsyncMock(side_effect=_long)
-        call = asyncio.create_task(client.chat([], "s", task="summarization"))
+        call = asyncio.create_task(client.chat([], "s", task="compaction"))
         await started.wait()
         drain = asyncio.create_task(client.drain_and_close())
         # even well past any old 30s wall-clock cut, the session stays open

@@ -1,9 +1,9 @@
-"""Auxiliary LLM client — cheap-model wrapper for classification, summarization, and vision.
+"""Auxiliary LLM client — cheap-model wrapper for delegated background jobs.
 
-Wraps a separate ``CodexChatClient`` instance configured with a cheaper/faster
-model (e.g. gpt-4o-mini) for auxiliary tasks that don't need the full-power
-model: session compaction, learning reflection/consolidation, background task
-follow-up, and vision description.
+Wraps a separate ``CodexChatClient`` configured with a cheaper/faster model for
+auxiliary tasks that don't need the full-power model: session compaction,
+learning reflection/consolidation, background-task follow-up, and the model
+router's intent classification.
 
 Falls back to the primary client transparently on error.
 """
@@ -23,28 +23,21 @@ if TYPE_CHECKING:
 
 log = get_logger("auxiliary_llm")
 
-# Tasks that can be routed to the auxiliary model. KNOWN_TASKS_ORDER is the
-# canonical persist/display order (KNOWN_TASKS is the membership set).
-# CONSUMER_BACKED names have real production call sites today; the rest are
-# forward-compat API values with no consumer yet (the UI marks them
-# unavailable rather than offering a checkbox that does nothing).
+# Tasks that can be routed to the auxiliary model, in canonical persist/display
+# order. EVERY listed task has a live production consumer, so the operator-
+# visible list contains only names that actually do something. DEPRECATED_TASKS
+# are historical no-op names (they never had a consumer) that hand-authored
+# configs may still carry — stripped with a warning on load, rejected on write.
+# A name returns here only when its real consumer, wiring, and tests ship.
 KNOWN_TASKS_ORDER = (
     "compaction",
     "reflection",
     "consolidation",
     "background_followup",
     "classification",
-    "vision_description",
-    "summarization",
 )
 KNOWN_TASKS = frozenset(KNOWN_TASKS_ORDER)
-CONSUMER_BACKED_TASKS = frozenset({
-    "compaction",
-    "reflection",
-    "consolidation",
-    "background_followup",
-    "classification",
-})
+DEPRECATED_TASKS = frozenset({"summarization", "vision_description"})
 
 
 class AuxiliaryLLMClient:
@@ -117,7 +110,7 @@ class AuxiliaryLLMClient:
         messages: list[dict],
         system: str,
         *,
-        task: str = "summarization",
+        task: str,
         max_tokens: int | None = None,
     ) -> str:
         """Send a chat request, routing to auxiliary or primary based on task.
@@ -157,7 +150,7 @@ class AuxiliaryLLMClient:
         system: str,
         tools: list[dict],
         *,
-        task: str = "classification",
+        task: str,
     ) -> LLMResponse:
         """Send a tool-calling request through auxiliary or primary client."""
         if not self.is_enabled(task):

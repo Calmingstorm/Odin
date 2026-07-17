@@ -287,10 +287,10 @@ def _auxiliary_status(bot) -> dict:
     ``effective_*`` fields describe the live runtime wrapper (present only
     when config produced a working client). ``unavailable_reason`` is set
     when enabled config could NOT produce a live client (e.g. no auth).
-    ``consumer_backed_tasks`` tells the UI which task checkboxes actually
-    control a workload today vs which are forward-compat only.
+    ``known_tasks`` is the operator-visible list — every entry has a live
+    consumer, so the UI can render them all as real controls.
     """
-    from ...llm.auxiliary import CONSUMER_BACKED_TASKS, KNOWN_TASKS_ORDER
+    from ...llm.auxiliary import KNOWN_TASKS_ORDER
 
     aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
     live = getattr(bot.llm_gateway, "auxiliary_llm_client", None)
@@ -307,7 +307,6 @@ def _auxiliary_status(bot) -> dict:
         "effective_tasks": sorted(live.enabled_tasks) if live is not None else [],
         "unavailable_reason": unavailable_reason,
         "known_tasks": list(KNOWN_TASKS_ORDER),
-        "consumer_backed_tasks": sorted(CONSUMER_BACKED_TASKS),
     }
 
 

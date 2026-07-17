@@ -182,15 +182,16 @@ export default {
             <div class="text-xs text-gray-400 mb-2">Delegated tasks</div>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-1">
               <label v-for="t in auxKnownTasks" :key="t"
-                     class="flex items-center gap-2"
-                     :class="auxConsumerBacked.includes(t) ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'">
+                     class="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" :value="t" v-model="auxForm.tasks"
-                       :disabled="!auxConsumerBacked.includes(t)"
                        @change="saveAuxConfigDebounced" class="provider-control" />
                 <span class="text-xs text-gray-300">{{ t }}</span>
-                <span v-if="!auxConsumerBacked.includes(t)" class="text-xs text-gray-500">— No consumer yet</span>
+                <span v-if="t === 'classification'" class="text-xs text-gray-500">— requires Model Routing</span>
               </label>
             </div>
+            <p class="text-xs text-gray-500 mt-2">
+              Intent classification requires Model Routing to be enabled; it gates the router's ambiguous-intent checks only, not whole-turn routing.
+            </p>
           </div>
           <div v-if="auxData.unavailable_reason"
                class="text-sm text-yellow-400 bg-yellow-900/20 rounded p-2 border border-yellow-800 mt-3">
@@ -449,9 +450,8 @@ export default {
     });
     // --- Auxiliary (cheap-model) ---
     const auxForm = ref({ enabled: false, model: 'gpt-5.6-luna', tasks: [] });
-    const auxData = ref({ known_tasks: [], consumer_backed_tasks: [], unavailable_reason: null });
+    const auxData = ref({ known_tasks: [], unavailable_reason: null });
     const auxKnownTasks = computed(() => auxData.value.known_tasks || []);
-    const auxConsumerBacked = computed(() => auxData.value.consumer_backed_tasks || []);
     // Same free-string contract as the main model dropdown: an unknown
     // configured value (e.g. a preserved gpt-4o-mini) renders as a temporary
     // first option so the debounced save can't silently replace it.
@@ -865,7 +865,7 @@ export default {
     return {
       loading, llmStatus, selectedProvider, switching,
       codexForm, codexModelOptions, codexAgentModelOptions,
-      auxForm, auxData, auxKnownTasks, auxConsumerBacked, auxModelOptions, savingAux, saveAuxConfigDebounced,
+      auxForm, auxData, auxKnownTasks, auxModelOptions, savingAux, saveAuxConfigDebounced,
       ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,

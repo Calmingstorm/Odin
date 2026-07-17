@@ -300,13 +300,26 @@ class AuxiliaryLLMConfig(BaseModel):
     @field_validator("tasks")
     @classmethod
     def _validate_tasks(cls, v: list[str]) -> list[str]:
-        """Reject unknown task names, dedupe, and store in one canonical
-        order (KNOWN_TASKS iteration order). An empty list is valid — the
-        wrapper is available but delegates no named jobs. Unknown names are
-        rejected rather than silently stored as no-ops."""
-        from ..llm.auxiliary import KNOWN_TASKS, KNOWN_TASKS_ORDER
+        """Dedupe and store in one canonical order (KNOWN_TASKS iteration
+        order). An empty list is valid — the wrapper is available but delegates
+        no named jobs.
 
-        unknown = [t for t in v if t not in KNOWN_TASKS]
+        DEPRECATED names (``summarization``/``vision_description`` — no-ops that
+        never had a consumer) are STRIPPED with a warning so a hand-authored
+        config from before their removal still boots. Genuinely unknown names
+        are rejected rather than silently stored as no-ops. New WebUI/API writes
+        are validated against KNOWN_TASKS separately, so the deprecated values
+        are rejected there — they only survive as a load-time migration."""
+        from ..llm.auxiliary import DEPRECATED_TASKS, KNOWN_TASKS, KNOWN_TASKS_ORDER
+        from ..odin_log import get_logger
+
+        deprecated = sorted({t for t in v if t in DEPRECATED_TASKS})
+        if deprecated:
+            get_logger("config").warning(
+                "Dropping deprecated auxiliary task(s) with no consumer: %s",
+                ", ".join(deprecated),
+            )
+        unknown = [t for t in v if t not in KNOWN_TASKS and t not in DEPRECATED_TASKS]
         if unknown:
             raise ValueError(
                 f"unknown auxiliary task(s): {', '.join(sorted(set(unknown)))}; "

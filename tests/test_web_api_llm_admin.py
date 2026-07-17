@@ -180,8 +180,12 @@ class TestLlmStatus:
             # enabled config but no live client → unavailable + effective off
             assert aux["effective_enabled"] is False
             assert aux["unavailable_reason"]
-            assert "classification" in aux["consumer_backed_tasks"]
-            assert "summarization" not in aux["consumer_backed_tasks"]
+            # known_tasks is the operator-visible list — every entry is real;
+            # the removed no-op names must not appear.
+            assert "classification" in aux["known_tasks"]
+            assert "summarization" not in aux["known_tasks"]
+            assert "vision_description" not in aux["known_tasks"]
+            assert "consumer_backed_tasks" not in aux
             # a live wrapper flips effective_* on with the runtime task set
             bot.llm_gateway.auxiliary_llm_client = SimpleNamespace(
                 aux_client=SimpleNamespace(model="gpt-5.6-terra"),
@@ -451,6 +455,22 @@ class TestProviderConfig:
                             json={"tasks": ["compaction", "not_a_task"]})
             assert r.status == 400
             assert "unknown" in (await r.json())["error"].lower()
+        bot.llm_gateway.reload_auxiliary.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_config_rejects_deprecated_task_on_write(self):
+        # The load-time strip is a one-way migration: a NEW write that names a
+        # deprecated no-op task is rejected (it's no longer a KNOWN task), not
+        # silently accepted-and-dropped.
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.reload_auxiliary = AsyncMock()
+        async with TestClient(TestServer(app)) as c:
+            for dead in ("summarization", "vision_description"):
+                r = await c.put("/api/llm/auxiliary/config",
+                                json={"tasks": ["compaction", dead]})
+                assert r.status == 400
+                assert dead in (await r.json())["error"]
         bot.llm_gateway.reload_auxiliary.assert_not_awaited()
 
     @pytest.mark.asyncio
