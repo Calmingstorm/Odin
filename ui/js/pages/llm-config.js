@@ -413,11 +413,11 @@ export default {
     // effort "none")
     const codexForm = ref({ enabled: false, model: 'gpt-5.5', max_tokens: 4096, reasoning_effort: 'medium', agent_reasoning_effort: '', agent_model: '' });
 
-    // Codex model catalog — ONE ordered list renders both the Model and
-    // Agent Model selects so the two dropdowns can never drift apart.
-    // gpt-5.5 is intentionally not offered as a fresh choice (skip 5.5); an
-    // existing 5.5 config still renders via the free-string temporary option.
-    const CODEX_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+    // Codex model catalog — ONE ordered list renders the Model, Agent Model,
+    // and Auxiliary Model selects so the dropdowns can never drift apart.
+    // The 5.6 family first, then gpt-5.5 beneath it. The defunct gpt-4.1/
+    // gpt-4o/gpt-4o-mini/gpt-5/gpt-5-mini entries were removed.
+    const CODEX_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'];
     // model/agent_model are free strings server-side: an unknown configured
     // value (hand-edited or future model) must render as a temporary option —
     // a blank select would let the next save silently replace it.
