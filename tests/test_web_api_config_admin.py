@@ -267,6 +267,24 @@ class TestDiscordConfig:
             assert (await c.put("/api/discord/channel/9/config", data="bad")).status == 400
 
     @pytest.mark.asyncio
+    async def test_update_config_persists_normalized_dropping_removed_keys(self):
+        # The general /api/config write must persist the VALIDATED config, not
+        # the raw merge — a removed key named in the update (model_routing)
+        # can't linger on disk.
+        from pathlib import Path
+
+        from ruamel.yaml import YAML
+        Path("config.yml").write_text("discord:\n  token: fake\n")
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/config", json={
+                "openai_codex": {"model_routing": {"enabled": True}},
+            })
+            assert r.status == 200
+        oc = YAML().load(Path("config.yml").read_text()).get("openai_codex", {})
+        assert "model_routing" not in oc
+
+    @pytest.mark.asyncio
     async def test_health_and_resource_and_streams(self):
         app, bot = _app(register_discord_config)
         bot.tool_executor.output_streamer = SimpleNamespace(

@@ -171,6 +171,7 @@ class TestAgentTrajectoryTurn:
             "agent_id", "label", "goal", "channel_id", "requester_id",
             "requester_name", "timestamp", "source", "depth", "parent_id",
             "system_prompt_length", "iteration_timeout", "max_lifetime",
+            "model_override", "reasoning_effort_override",
             "iterations", "final_state", "result",
             "error", "tools_used", "iteration_count", "total_duration_ms",
             "recovery_attempts", "state_history",

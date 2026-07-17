@@ -9,13 +9,14 @@ parity contract pins.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress as _ipaddress
+import tempfile
 import urllib.parse as _urlparse
-from pathlib import Path
 
 from aiohttp import web
 
-from ...config.schema import CODEX_REASONING_EFFORTS
+from ...config.schema import CODEX_REASONING_EFFORTS, active_config_path
 from ...odin_log import get_logger
 
 log = get_logger("web.api")
@@ -83,14 +84,31 @@ def _safe_secret(key, existing_val, memory_val):
         return existing_val
     return memory_val
 
+class PersistError(RuntimeError):
+    """The persistence target could not be read, parsed, or written. Raised
+    (not silently swallowed) so a mutation endpoint fails loudly and triggers
+    rollback instead of reporting a phantom success."""
+
+
 def _persist_llm_sections_sync(bot) -> None:
     """Merge only LLM-related sections into config.yml using round-trip YAML.
 
-    Preserves comments, ordering, style, and env-var placeholders.
+    Preserves comments, ordering, style, env-var placeholders, and the file's
+    permission mode. Raises ``PersistError`` when the target is missing,
+    empty, malformed, or unreadable — for a mutation endpoint that MUST be a
+    failure, not a silent no-op that lets the route claim it persisted.
     """
-    config_path = Path("config.yml")
+    import os
+
+    # Persist the file the live config was LOADED from — never a CWD-relative
+    # "config.yml". A fabricated Config (a test double or one-off script that
+    # never called load_config) has no active path, so persistence refuses
+    # rather than clobbering whatever config.yml happens to sit in the CWD.
+    config_path = active_config_path()
+    if config_path is None:
+        raise PersistError("refusing to persist a config not loaded from disk")
     if not config_path.exists():
-        return
+        raise PersistError("config.yml does not exist")
     from ruamel.yaml import YAML
 
     ry = YAML()
@@ -98,10 +116,15 @@ def _persist_llm_sections_sync(bot) -> None:
     try:
         with open(config_path) as f:
             existing = ry.load(f)
-        if existing is None:
-            return
-    except Exception:
-        return
+    except Exception as exc:
+        # GENERIC client message — ruamel parse errors (esp. duplicate-key)
+        # echo the conflicting VALUES, which in this file are secrets. The raw
+        # detail goes to logs only, never into the raised message / HTTP body.
+        log.warning("config.yml parse failed: %s", type(exc).__name__)
+        raise PersistError("config.yml unreadable or malformed") from None
+    if existing is None:
+        raise PersistError("config.yml is empty")
+    orig_mode = os.stat(config_path).st_mode & 0o777
 
     if "openai_codex" not in existing:
         existing["openai_codex"] = {}
@@ -113,6 +136,23 @@ def _persist_llm_sections_sync(bot) -> None:
         bot.config.openai_codex.agent_reasoning_effort
     )
     existing["openai_codex"]["agent_model"] = bot.config.openai_codex.agent_model
+    # Removed feature: model routing is gone — strip any legacy block so it
+    # can't linger on disk (runtime already ignores it).
+    existing["openai_codex"].pop("model_routing", None)
+
+    # Auxiliary: only enabled + model are configurable (auth and token limit
+    # are shared with the main Codex client, never overwritten by this surface).
+    aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
+    if aux_cfg is not None:
+        if "auxiliary" not in existing["openai_codex"]:
+            existing["openai_codex"]["auxiliary"] = {}
+        aux_block = existing["openai_codex"]["auxiliary"]
+        aux_block["enabled"] = aux_cfg.enabled
+        aux_block["model"] = aux_cfg.model
+        # Delete the removed knobs so a legacy config gets cleaned on the next
+        # save (auth + token limit are shared with the main Codex client).
+        for dead in ("tasks", "max_tokens", "credentials_path"):
+            aux_block.pop(dead, None)
 
     if "ollama" not in existing:
         existing["ollama"] = {}
@@ -139,12 +179,64 @@ def _persist_llm_sections_sync(bot) -> None:
         existing["llm_provider"] = {}
     existing["llm_provider"]["active_provider"] = bot.config.llm_provider.active_provider
 
-    with open(config_path, "w") as f:
-        ry.dump(existing, f)
+    # Atomic replace: write a temp file in the same dir, restore the ORIGINAL
+    # mode (mkstemp creates 0600 — os.replace would otherwise silently chmod
+    # the live 0664 config), fsync the file, os.replace, then fsync the dir so
+    # the rename is durable.
+    import io
+
+    buf = io.StringIO()
+    ry.dump(existing, buf)
+    parent = str(config_path.parent or ".")
+    fd, tmp = tempfile.mkstemp(dir=parent, suffix=".yml.tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(buf.getvalue())
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, orig_mode)
+        os.replace(tmp, config_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    # os.replace is THE atomic commit point — the new config is now on disk.
+    # The directory fsync is a durability nicety ONLY; its failure must NOT
+    # raise (that would make the caller "roll back" runtime while disk already
+    # holds the new state, splitting disk vs runtime).
+    with contextlib.suppress(OSError):
+        dir_fd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 async def _persist_config(bot) -> None:
-    """Persist LLM config sections without touching env vars or other settings."""
-    await asyncio.to_thread(_persist_llm_sections_sync, bot)
+    """LEGACY fail-soft persist for the sibling provider routes (Codex/Ollama/
+    Kimi config + model-set) and provider switch.
+
+    Settle-safe: the filesystem worker runs on an executor future via the
+    gateway and settles BEFORE the caller's provider_lock releases, so a
+    cancelled writer can't continue and clobber a later commit (the master
+    stale-write race is fixed). ``PersistError`` (missing/empty/malformed
+    config.yml) is swallowed + logged generically, matching master's silent
+    no-op; a genuine write failure propagates (master-equivalent 500).
+    ``CancelledError`` is NEVER swallowed — re-raised after the worker settles.
+
+    DEFERRED DEBT: these sibling routes are intentionally NOT transactional
+    here (no config/client-generation rollback, no exact snapshot) — a
+    follow-up PR owns that. Only the AUXILIARY route is strict + transactional
+    (see reload_auxiliary). See the PR body's 'Deferred' section.
+    """
+    exc, was_cancelled = await bot.llm_gateway.run_persist_settled(
+        lambda: _persist_llm_sections_sync(bot))
+    if isinstance(exc, PersistError):
+        log.warning("config.yml persist skipped (legacy fail-soft): %s", exc)
+        exc = None
+    if was_cancelled:
+        raise asyncio.CancelledError
+    if exc is not None:
+        raise exc
 
 
 def register_connection_pools(routes: web.RouteTableDef, bot) -> None:
@@ -192,6 +284,30 @@ def register_connection_pools(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"closed": closed, "host": host})
         count = await executor.ssh_pool.close_all()
         return web.json_response({"closed_count": count})
+
+
+def _auxiliary_status(bot) -> dict:
+    """Configured vs effective auxiliary state for /api/llm/status.
+
+    ``enabled``/``model`` are the persisted config; the ``effective_*`` fields
+    describe the live runtime wrapper (present only when config produced a
+    working client). ``unavailable_reason`` is set when enabled config could
+    NOT produce a live client (e.g. no auth). The four background jobs route
+    to this model when enabled — there is no per-task configuration.
+    """
+    aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
+    live = getattr(bot.llm_gateway, "auxiliary_llm_client", None)
+    configured_enabled = bool(aux_cfg and aux_cfg.enabled)
+    unavailable_reason = None
+    if configured_enabled and live is None:
+        unavailable_reason = "enabled but no live auxiliary client (check credentials)"
+    return {
+        "enabled": configured_enabled,
+        "model": aux_cfg.model if aux_cfg else "",
+        "effective_enabled": live is not None,
+        "effective_model": getattr(getattr(live, "aux_client", None), "model", None),
+        "unavailable_reason": unavailable_reason,
+    }
 
 
 def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
@@ -258,6 +374,7 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "max_tokens": kimi_cfg.max_tokens if kimi_cfg else 4096,
                 "has_api_key": kimi_has_key,
             },
+            "auxiliary": _auxiliary_status(bot),
         }
 
         client = bot.llm_gateway.active_client
@@ -280,10 +397,16 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 {"error": "provider must be 'codex', 'ollama', or 'kimi'"}, status=400
             )
 
-        result = await bot.llm_gateway.switch_provider(provider)
+        # Mutation AND persistence happen under ONE provider_lock ownership:
+        # switch_provider runs the SYNC persist on an executor future inside
+        # its own lock (settled before the lock releases) and restores the
+        # prior provider on persist failure — no interleaving window.
+        result = await bot.llm_gateway.switch_provider(
+            provider, persist=lambda: _persist_llm_sections_sync(bot))
         if "error" in result:
-            return web.json_response(result, status=400)
-        await _persist_config(bot)
+            reason = result["error"]
+            status = 500 if "persist failed" in reason else 400
+            return web.json_response(result, status=status)
         return web.json_response(result)
 
 
@@ -387,6 +510,48 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             "agent_model": cfg.agent_model,
             "configured": bot.llm_gateway.codex_client is not None,
         })
+
+    @routes.put("/api/llm/auxiliary/config")
+    async def llm_auxiliary_config(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
+        if aux_cfg is None:
+            return web.json_response({"error": "auxiliary config unavailable"}, status=503)
+
+        # Build an IMMUTABLE desired spec (presence-merged with current config)
+        # WITHOUT mutating live config — reload_auxiliary commits it atomically
+        # under the lock, so a concurrent PUT can't install a candidate built
+        # from a config this handler already changed. Only enabled + model are
+        # configurable; auth and token limit are shared with the main Codex.
+        want_enabled = bool(body["enabled"]) if "enabled" in body else aux_cfg.enabled
+        want_model = aux_cfg.model
+        if "model" in body and str(body["model"]).strip():
+            want_model = str(body["model"]).strip()
+        desired = {"enabled": want_enabled, "model": want_model}
+        # Persistence runs INSIDE reload_auxiliary's locked transaction: the
+        # SYNC write runs on an executor future (settled before the lock
+        # releases), the candidate is applied, persisted, and (on persist
+        # failure) EXACTLY restored — no phantom success, no probed reload.
+        try:
+            result = await bot.llm_gateway.reload_auxiliary(
+                desired, persist=lambda: _persist_llm_sections_sync(bot))
+        except Exception as e:
+            log.exception("Auxiliary reload raised")
+            return web.json_response({"error": f"reload failed: {e}"}, status=500)
+        if not result.get("committed"):
+            reason = result.get("reason", "auxiliary reload not committed")
+            if "concurrent" in reason:
+                status = 409
+            elif "persist failed" in reason:
+                status = 500
+            else:
+                status = 400
+            return web.json_response({"error": reason}, status=status)
+        return web.json_response({"status": "updated", **_auxiliary_status(bot)})
 
     @routes.put("/api/llm/ollama/config")
     async def llm_ollama_config(request: web.Request) -> web.Response:

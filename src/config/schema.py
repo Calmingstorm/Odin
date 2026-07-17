@@ -180,15 +180,6 @@ class ContextCompressionConfig(BaseModel):
     keep_recent_iterations: int = 30
 
 
-class ModelRoutingConfig(BaseModel):
-    enabled: bool = False
-    confidence_threshold: float = 0.6
-    max_cheap_length: int = 200
-    strong_intents: list[str] = Field(
-        default_factory=lambda: ["task", "complex"],
-    )
-
-
 class GovernorConfig(BaseModel):
     block_critical: bool = True
     block_exfil: bool = True
@@ -279,18 +270,18 @@ class UsageConfig(BaseModel):
 
 
 class AuxiliaryLLMConfig(BaseModel):
+    """A cheaper Codex model for fixed background jobs (compaction, reflection,
+    consolidation, background follow-up), with transparent fallback to the
+    primary model. It shares the main Codex OAuth and token limit — only the
+    MODEL differs. When ``enabled`` and a Codex provider is active, those four
+    jobs route here; otherwise they use the primary model.
+
+    Default Luna: the Codex catalog positions it for the cheap extraction /
+    transformation tier that suits this workload.
+    """
+
     enabled: bool = False
-    model: str = "gpt-4o-mini"
-    max_tokens: int = 2048
-    credentials_path: str = ""  # Empty = share main codex credentials
-    tasks: list[str] = Field(
-        default_factory=lambda: [
-            "compaction",
-            "reflection",
-            "consolidation",
-            "background_followup",
-        ],
-    )
+    model: str = "gpt-5.6-luna"
 
 
 # "minimal" is deliberately absent: it sits in the Codex API's generic
@@ -376,7 +367,6 @@ class OpenAICodexConfig(BaseModel):
     connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()
     auxiliary: AuxiliaryLLMConfig = AuxiliaryLLMConfig()
     context_compression: ContextCompressionConfig = ContextCompressionConfig()
-    model_routing: ModelRoutingConfig = ModelRoutingConfig()
 
 
 class OllamaConfig(BaseModel):
@@ -790,8 +780,8 @@ class MCPConfig(BaseModel):
 
 
 class Config(BaseModel):
-    # ``model_routing`` and ``model_router`` would otherwise collide with
-    # pydantic v2's protected ``model_*`` namespace. Disable the guard.
+    # ``model``/``agent_model`` and other ``model_*`` fields would otherwise
+    # collide with pydantic v2's protected ``model_*`` namespace. Disable it.
     model_config = ConfigDict(protected_namespaces=())
 
     timezone: str = "UTC"
@@ -847,6 +837,27 @@ def _substitute_env_vars(text: str) -> str:
     return re.sub(r"\$\{(\w+)(?::-([^}]*))?\}", replacer, text)
 
 
+# The absolute path the live config was loaded from. LLM-config persistence
+# writes THIS path — never a CWD-relative "config.yml" — so a fabricated Config
+# (a test or one-off script that never called load_config) cannot silently
+# overwrite a real deployment's config.yml from the wrong working directory.
+_ACTIVE_CONFIG_PATH: Path | None = None
+
+
+def active_config_path() -> Path | None:
+    """Absolute path the live config was loaded from, or None if this process
+    never loaded one (in which case persistence must refuse, not guess a path)."""
+    return _ACTIVE_CONFIG_PATH
+
+
+def set_active_config_path(path: str | Path | None) -> None:
+    """Record (or clear) the active config path. ``load_config`` calls this on a
+    successful load; tests/tools that persist a hand-built Config point it at
+    their own file."""
+    global _ACTIVE_CONFIG_PATH
+    _ACTIVE_CONFIG_PATH = Path(path).resolve() if path is not None else None
+
+
 def load_config(path: str | Path = "config.yml") -> Config:
     path = Path(path)
     raw = path.read_text()
@@ -877,12 +888,16 @@ def load_config(path: str | Path = "config.yml") -> Config:
     # (extra="forbid") so a slightly-ahead config can't hard-fail boot.
     _warn_unknown_config_keys(data)
     try:
-        return Config(**data)
+        cfg = Config(**data)
     except Exception as exc:
         raise SystemExit(
             f"Config validation failed: {exc}\n"
             "Check config.yml values — numeric fields must be within valid ranges."
         ) from exc
+    # Record where this live config came from so persistence targets THIS file,
+    # never a CWD-relative guess.
+    set_active_config_path(path)
+    return cfg
 
 
 def _warn_unknown_config_keys(data: dict) -> None:

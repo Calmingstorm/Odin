@@ -1,7 +1,7 @@
 /**
  * Odin Management UI — Internals Page
  * Operational observability: startup diagnostics, subsystem status, connection pools,
- * risk stats, recovery stats, freshness stats, context compression, model routing.
+ * risk stats, recovery stats, freshness stats, context compression, governor stats.
  */
 import { api } from '../api.js';
 import { formatTime } from '../utils.js';
@@ -147,17 +147,6 @@ export default {
             <p v-else class="text-xs text-gray-500">No compression data</p>
           </section>
 
-          <!-- Model Routing -->
-          <section class="hm-card" style="padding:1rem;">
-            <h3 class="text-sm font-medium mb-2">Model Routing</h3>
-            <div v-if="routingStats" class="text-xs text-gray-400 space-y-1">
-              <div>Total routed: {{ routingStats.total || 0 }}</div>
-              <div>Cheap model: {{ routingStats.cheap || 0 }}</div>
-              <div>Strong model: {{ routingStats.strong || 0 }}</div>
-            </div>
-            <p v-else class="text-xs text-gray-500">Routing disabled or no data</p>
-          </section>
-
         </div>
 
         <!-- Freshness Stats -->
@@ -184,7 +173,6 @@ export default {
     const riskStats = ref(null);
     const recoveryStats = ref(null);
     const compressionStats = ref(null);
-    const routingStats = ref(null);
     const freshnessStats = ref(null);
     const governorStats = ref(null);
     let timer = null;
@@ -198,7 +186,6 @@ export default {
         api.get('/api/risk/stats'),
         api.get('/api/recovery/stats'),
         api.get('/api/compression/stats'),
-        api.get('/api/routing/stats'),
         api.get('/api/freshness/stats'),
         api.get('/api/governor/stats'),
       ]);
@@ -211,9 +198,8 @@ export default {
       riskStats.value = val(4);
       recoveryStats.value = val(5);
       compressionStats.value = val(6);
-      routingStats.value = val(7);
-      freshnessStats.value = val(8);
-      governorStats.value = val(9);
+      freshnessStats.value = val(7);
+      governorStats.value = val(8);
       loading.value = false;
     }
 
@@ -225,7 +211,7 @@ export default {
 
     return {
       loading, startup, subsystems, sshPool, httpPool,
-      riskStats, recoveryStats, compressionStats, routingStats, freshnessStats,
+      riskStats, recoveryStats, compressionStats, freshnessStats,
       governorStats, statusColor, formatTime,
     };
   },

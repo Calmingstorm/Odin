@@ -85,7 +85,16 @@ openai_codex:
     enabled: true
     max_context_chars: 48000
     keep_recent_iterations: 3
+  auxiliary:                     # cheaper model for background jobs
+    enabled: false
+    model: gpt-5.6-luna
 ```
+
+The **auxiliary** model is an optional cheaper Codex model that runs the fixed
+background jobs — compaction, reflection, consolidation, and background
+follow-up — with automatic fallback to the primary model on error. It shares
+the main Codex OAuth and token limit; only the model differs. Set it live from
+the Web UI (Auxiliary Model dropdown, "Off" to run those jobs on the primary).
 
 Generate credentials: `python3 scripts/codex_login.py`
 

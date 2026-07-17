@@ -110,7 +110,6 @@ class BotServices:
     cost_tracker: CostTracker
     subsystem_guard: SubsystemGuard
     diff_tracker: DiffTracker
-    model_router: object | None
     context_compressor: object | None
     prefix_tracker: object | None
     auxiliary_llm_client: object | None
@@ -395,19 +394,6 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
     # Risk classifier — observability only, never blocks.
     from ..tools.risk_classifier import classify_command, classify_tool
 
-    # Model router — heuristic-first, LLM fallback. Off by default.
-    model_router = None
-    _routing = getattr(config.openai_codex, "model_routing", None)
-    if _routing and _routing.enabled:
-        from ..llm.model_router import ModelRouter
-
-        model_router = ModelRouter(
-            enabled=True,
-            confidence_threshold=_routing.confidence_threshold,
-            max_cheap_length=_routing.max_cheap_length,
-            strong_intents=frozenset(_routing.strong_intents),
-        )
-
     # Context compressor — summarizes prior tool iterations when context grows.
     context_compressor = None
     prefix_tracker = None
@@ -418,20 +404,24 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
         prefix_tracker = PrefixTracker()
         context_compressor = _compress  # config object itself acts as the on/off + thresholds
 
-    # Auxiliary LLM client — cheap-model wrapper. Off unless enabled.
+    # Auxiliary LLM client — a cheaper Codex model for background jobs
+    # (compaction / reflection / consolidation / background follow-up), with
+    # transparent fallback to the primary. Shares the main Codex OAuth + token
+    # limit; only the MODEL differs. Off unless enabled.
     auxiliary_llm_client = None
     _aux = getattr(config.openai_codex, "auxiliary", None)
     if _aux and _aux.enabled and codex_client:
         try:
             from ..llm.auxiliary import AuxiliaryLLMClient
 
-            aux_creds = _aux.credentials_path or config.openai_codex.credentials_path
-            aux_auth = CodexAuthPool(aux_creds)
-            if aux_auth.is_configured():
+            # SHARE the primary client's auth pool (not a second pool over the
+            # same files) so account selection, rate-limit rotation, and the
+            # single-use refresh-token lock stay coordinated across both.
+            if codex_client.auth.is_configured():
                 aux_client = CodexChatClient(
-                    auth=aux_auth,
+                    auth=codex_client.auth,
                     model=_aux.model,
-                    max_tokens=_aux.max_tokens,
+                    max_tokens=config.openai_codex.max_tokens,
                     max_retries=config.openai_codex.retry.max_retries,
                     retry_base_delay=config.openai_codex.retry.base_delay,
                     retry_max_delay=config.openai_codex.retry.max_delay,
@@ -516,7 +506,6 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
         cost_tracker=cost_tracker,
         subsystem_guard=subsystem_guard,
         diff_tracker=diff_tracker,
-        model_router=model_router,
         context_compressor=context_compressor,
         prefix_tracker=prefix_tracker,
         auxiliary_llm_client=auxiliary_llm_client,
@@ -570,7 +559,6 @@ def build_components(bot, services: BotServices) -> BotComponents:
         ollama_client=services.ollama_client,
         kimi_client=services.kimi_client,
         subsystem_guard=services.subsystem_guard,
-        model_router=services.model_router,
         auxiliary_llm_client=services.auxiliary_llm_client,
         cost_tracker=services.cost_tracker,
         sessions=services.sessions,
@@ -906,11 +894,20 @@ async def shutdown_services(bot) -> None:
             except Exception:
                 log.exception("Error closing SSH pool")
 
-    # Close auxiliary LLM client
-    aux = getattr(bot, "auxiliary_llm_client", None)
+    # Close auxiliary LLM client — the gateway holds the CANONICAL live
+    # instance (reloads replace it there). Await any outstanding background
+    # drains of retired generations first, then drain the live one.
+    _gateway = getattr(bot, "llm_gateway", None)
+    _drains = getattr(_gateway, "_aux_drains", None)
+    if _drains:
+        try:
+            await asyncio.gather(*list(_drains), return_exceptions=True)
+        except Exception:
+            log.exception("Error awaiting auxiliary drains")
+    aux = getattr(_gateway, "auxiliary_llm_client", None)
     if aux is not None:
         try:
-            await aux.close()
+            await aux.drain_and_close()
         except Exception:
             log.exception("Error closing auxiliary LLM client")
 

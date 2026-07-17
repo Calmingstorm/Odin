@@ -1,40 +1,31 @@
-"""Auxiliary LLM client — cheap-model wrapper for classification, summarization, and vision.
+"""Auxiliary LLM client — cheap-model wrapper for fixed background jobs.
 
-Wraps a separate ``CodexChatClient`` instance configured with a cheaper/faster
-model (e.g. gpt-4o-mini) for auxiliary tasks that don't need the full-power
-model: session compaction, learning reflection/consolidation, background task
-follow-up, and vision description.
+Wraps a separate ``CodexChatClient`` configured with a cheaper/faster model for
+the background jobs that don't need the full-power model: session compaction,
+learning reflection/consolidation, and background-task follow-up.
 
-Falls back to the primary client transparently on error.
+The wrapper is only constructed/used when the operator has enabled it, and the
+gateway only routes those specific jobs here — so every call SHOULD use the aux
+model. It falls back to the primary client transparently on error.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
 from .circuit_breaker import CircuitOpenError
 from .cost_tracker import CostTracker
-from .types import LLMResponse
 
 if TYPE_CHECKING:
     from .openai_codex import CodexChatClient
 
 log = get_logger("auxiliary_llm")
 
-# Tasks that can be routed to the auxiliary model
-KNOWN_TASKS = frozenset({
-    "compaction",
-    "reflection",
-    "consolidation",
-    "background_followup",
-    "vision_description",
-    "classification",
-    "summarization",
-})
-
 
 class AuxiliaryLLMClient:
-    """Cheap-model client for auxiliary LLM tasks with automatic fallback.
+    """Cheap-model client for auxiliary background jobs with automatic fallback.
 
     Parameters
     ----------
@@ -42,9 +33,6 @@ class AuxiliaryLLMClient:
         A ``CodexChatClient`` configured with the cheap model.
     primary_client:
         The main ``CodexChatClient`` used as fallback on auxiliary failure.
-    enabled_tasks:
-        Task names that should use the auxiliary model. Tasks not in this
-        set are routed directly to the primary client.
     cost_tracker:
         Optional cost tracker for recording auxiliary model usage.
     """
@@ -53,39 +41,64 @@ class AuxiliaryLLMClient:
         self,
         aux_client: CodexChatClient,
         primary_client: CodexChatClient,
-        enabled_tasks: set[str] | None = None,
         cost_tracker: CostTracker | None = None,
     ) -> None:
         self.aux_client = aux_client
         self.primary_client = primary_client
-        self.enabled_tasks: set[str] = (
-            enabled_tasks if enabled_tasks is not None else set(KNOWN_TASKS))
         self.cost_tracker = cost_tracker
         self._aux_calls: int = 0
         self._fallback_calls: int = 0
-        self._primary_direct_calls: int = 0
+        # Lease refcount so a live-reload swap can drain the RETIRED wrapper
+        # without cutting an in-flight call. Every entry point brackets its
+        # work with _lease(); close_when_idle() waits for the count to reach
+        # zero (bounded) before closing the aiohttp session.
+        self._inflight: int = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
 
-    def is_enabled(self, task: str) -> bool:
-        """Return True if *task* should use the auxiliary model."""
-        return task in self.enabled_tasks
+    @contextlib.asynccontextmanager
+    async def _lease(self):
+        """Bracket one auxiliary call so a retiring wrapper can drain."""
+        self._inflight += 1
+        self._idle.clear()
+        try:
+            yield
+        finally:
+            self._inflight -= 1
+            if self._inflight == 0:
+                self._idle.set()
+
+    async def drain_and_close(self) -> None:
+        """Wait for ALL in-flight leased calls to finish, then close the aux
+        client's session — no wall-clock cut, so a legitimately long request
+        (auxiliary turns can run minutes) is never severed. Called on a
+        RETIRED wrapper AFTER the live pointer has been swapped away and the
+        provider_lock released, typically as a tracked background task (an
+        hour-long call must never block a reload)."""
+        await self._idle.wait()
+        await self.aux_client.close()
 
     async def chat(
         self,
         messages: list[dict],
         system: str,
         *,
-        task: str = "summarization",
+        task: str,
         max_tokens: int | None = None,
     ) -> str:
-        """Send a chat request, routing to auxiliary or primary based on task.
+        """Send a background-job chat request through the auxiliary model.
 
-        If the auxiliary client fails (circuit open, API error, empty response),
-        falls back to the primary client transparently.
+        The caller (the gateway's job router) only invokes this when the aux
+        model should handle the job, so it always tries the aux client; on any
+        failure (circuit open, API error, empty response) it falls back to the
+        primary client transparently. ``task`` labels the job for cost/metrics.
         """
-        if not self.is_enabled(task):
-            self._primary_direct_calls += 1
-            return await self.primary_client.chat(messages, system, max_tokens=max_tokens)
+        async with self._lease():
+            return await self._chat_aux(messages, system, task, max_tokens)
 
+    async def _chat_aux(
+        self, messages: list[dict], system: str, task: str, max_tokens: int | None
+    ) -> str:
         try:
             result = await self.aux_client.chat(messages, system, max_tokens=max_tokens)
             if result:
@@ -101,35 +114,6 @@ class AuxiliaryLLMClient:
         self._fallback_calls += 1
         self._track_cost(task, is_fallback=True)
         return await self.primary_client.chat(messages, system, max_tokens=max_tokens)
-
-    async def chat_with_tools(
-        self,
-        messages: list[dict],
-        system: str,
-        tools: list[dict],
-        *,
-        task: str = "classification",
-    ) -> LLMResponse:
-        """Send a tool-calling request through auxiliary or primary client."""
-        if not self.is_enabled(task):
-            self._primary_direct_calls += 1
-            return await self.primary_client.chat_with_tools(messages, system, tools)
-
-        try:
-            result = await self.aux_client.chat_with_tools(messages, system, tools)
-            if result.text or result.tool_calls:
-                self._aux_calls += 1
-                self._track_cost(task, is_fallback=False)
-                return result
-            log.warning("Auxiliary LLM tool call returned empty for %s, falling back", task)
-        except CircuitOpenError:
-            log.warning("Auxiliary LLM circuit open for tool call %s, falling back", task)
-        except Exception as exc:
-            log.warning("Auxiliary LLM error for tool call %s: %s, falling back", task, exc)
-
-        self._fallback_calls += 1
-        self._track_cost(task, is_fallback=True)
-        return await self.primary_client.chat_with_tools(messages, system, tools)
 
     def make_chat_fn(self, task: str):
         """Return an ``async (messages, system) -> str`` callable for a specific task.
@@ -156,10 +140,8 @@ class AuxiliaryLLMClient:
         return {
             "aux_model": self.aux_client.model,
             "primary_model": self.primary_client.model,
-            "enabled_tasks": sorted(self.enabled_tasks),
             "aux_calls": self._aux_calls,
             "fallback_calls": self._fallback_calls,
-            "primary_direct_calls": self._primary_direct_calls,
             "aux_breaker_state": self.aux_client.breaker.state,
         }
 

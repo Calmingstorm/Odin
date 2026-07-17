@@ -151,12 +151,31 @@ export default {
               </select>
               </label>
             </div>
-            <div class="sm:col-span-2">
-              <label class="text-xs text-gray-400 block">Max Tokens
-              <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfigNow"
-                     class="hm-input" style="max-width: 240px" />
+            <div>
+              <label class="text-xs text-gray-400 block">Auxiliary Model
+              <select :value="auxForm.enabled ? auxForm.model : ''" @change="onAuxModelChange"
+                      class="hm-input">
+                <option value="">Off — use primary model</option>
+                <option v-for="m in auxModelOptions" :key="m" :value="m">{{ m }}</option>
+              </select>
               </label>
             </div>
+            <div>
+              <label class="text-xs text-gray-400 block">Max Tokens
+              <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfigNow"
+                     class="hm-input" />
+              </label>
+            </div>
+          </div>
+          <p class="text-xs text-gray-500 mt-3">
+            The Auxiliary Model runs the background jobs (compaction, reflection, consolidation,
+            background follow-up) on a cheaper Codex model, with automatic fallback to the primary
+            on error. It shares the main Codex login and token limit — only the model differs.
+            "Off" runs those jobs on the primary model.
+          </p>
+          <div v-if="auxData.unavailable_reason"
+               class="text-sm text-yellow-400 bg-yellow-900/20 rounded p-2 border border-yellow-800 mt-3">
+            {{ auxData.unavailable_reason }}
           </div>
           <div class="border-t border-gray-700 pt-4">
           <h3 class="text-xs font-semibold text-gray-400 mb-2">Authentication</h3>
@@ -394,9 +413,11 @@ export default {
     // effort "none")
     const codexForm = ref({ enabled: false, model: 'gpt-5.5', max_tokens: 4096, reasoning_effort: 'medium', agent_reasoning_effort: '', agent_model: '' });
 
-    // Codex model catalog — ONE ordered list renders both the Model and
-    // Agent Model selects so the two dropdowns can never drift apart.
-    const CODEX_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o'];
+    // Codex model catalog — ONE ordered list renders the Model, Agent Model,
+    // and Auxiliary Model selects so the dropdowns can never drift apart.
+    // The 5.6 family first, then gpt-5.5 beneath it. The defunct gpt-4.1/
+    // gpt-4o/gpt-4o-mini/gpt-5/gpt-5-mini entries were removed.
+    const CODEX_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'];
     // model/agent_model are free strings server-side: an unknown configured
     // value (hand-edited or future model) must render as a temporary option —
     // a blank select would let the next save silently replace it.
@@ -408,6 +429,26 @@ export default {
       const v = codexForm.value.agent_model;
       return v && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
     });
+    // --- Auxiliary (cheap-model) ---
+    const auxForm = ref({ enabled: false, model: 'gpt-5.6-luna' });
+    const auxData = ref({ unavailable_reason: null });
+    // Same free-string contract as the main model dropdown: an unknown
+    // configured value renders as a temporary first option so the debounced
+    // save can't silently replace it.
+    const auxModelOptions = computed(() => {
+      const v = auxForm.value.model;
+      return v && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
+    });
+    // The single dropdown carries the enabled state: "Off" (empty value)
+    // disables the aux model (background jobs fall to the primary); picking a
+    // model enables it. We keep the last model so re-enabling restores it.
+    function onAuxModelChange(e) {
+      const v = e.target.value;
+      auxForm.value.enabled = v !== '';
+      if (v !== '') auxForm.value.model = v;
+      saveAuxConfigDebounced();
+    }
+    const savingAux = ref(false);
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096 });
     const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 });
     const ollamaKeyDirty = ref(false);
@@ -491,6 +532,13 @@ export default {
           kimiForm.value.enabled = data.kimi.enabled;
           kimiForm.value.model = data.kimi.model || '';
           kimiForm.value.max_tokens = data.kimi.max_tokens || 4096;
+        }
+        if (data.auxiliary) {
+          auxData.value = data.auxiliary;
+          if (!saveAuxConfigDebounced.pending()) {
+            auxForm.value.enabled = data.auxiliary.enabled;
+            auxForm.value.model = data.auxiliary.model || 'gpt-5.6-luna';
+          }
         }
       } catch (e) {
         llmStatus.value = { active_provider: 'codex', codex: { configured: false }, ollama: { configured: false }, kimi: { configured: false } };
@@ -684,7 +732,22 @@ export default {
 
     // Rapid-fire bindings (selects/checkboxes) go through these; explicit
     // actions (Enter on an input) keep the immediate savers.
+    async function saveAuxConfig() {
+      if (savingAux.value) { saveAuxConfigDebounced(); return; }
+      savingAux.value = true;
+      try {
+        await api.put('/api/llm/auxiliary/config', auxForm.value);
+        showToast('Auxiliary config saved');
+        await fetchLLMStatus();
+      } catch (e) {
+        showToast(e.message || 'Failed', 'error');
+        await fetchLLMStatus();
+      }
+      finally { savingAux.value = false; }
+    }
+
     const saveCodexConfigDebounced = debounce(saveCodexConfig);
+    const saveAuxConfigDebounced = debounce(saveAuxConfig);
     const saveOllamaConfigDebounced = debounce(saveOllamaConfig);
     const saveKimiConfigDebounced = debounce(saveKimiConfig);
     // Explicit saves (Enter) cancel the pending timer, then save immediately —
@@ -782,6 +845,7 @@ export default {
     onUnmounted(() => {
       if (pollController) pollController.cancelled = true;
       saveCodexConfigDebounced.cancel();
+      saveAuxConfigDebounced.cancel();
       saveOllamaConfigDebounced.cancel();
       saveKimiConfigDebounced.cancel();
     });
@@ -789,6 +853,7 @@ export default {
     return {
       loading, llmStatus, selectedProvider, switching,
       codexForm, codexModelOptions, codexAgentModelOptions,
+      auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
       ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,

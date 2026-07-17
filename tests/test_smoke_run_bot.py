@@ -372,16 +372,6 @@ class TestPhase9Imports:
         stats = CompressionStats()
         assert stats.compressions == 0
 
-    def test_model_router(self):
-        from src.llm.model_router import MessageIntent, RoutingStats
-        assert MessageIntent.CHAT is not None
-        assert MessageIntent.QUERY is not None
-        assert MessageIntent.TASK is not None
-        assert MessageIntent.COMPLEX is not None
-        stats = RoutingStats()
-        assert stats.total_routed == 0
-
-
 # ---------------------------------------------------------------------------
 # Phase 10 — Polish & final
 # ---------------------------------------------------------------------------
@@ -488,7 +478,6 @@ class TestImportSweep:
         "src.llm.system_prompt",
         "src.llm.auxiliary",
         "src.llm.context_compressor",
-        "src.llm.model_router",
         "src.tools.registry",
         "src.tools.git_ops",
         "src.tools.kubectl_ops",

@@ -45,11 +45,13 @@ openai_codex:
     enabled: true
     max_context_chars: 750000
     keep_recent_iterations: 30
-  model_routing:
+  # Auxiliary model: when enabled, a cheaper Codex model runs the background
+  # jobs (compaction, reflection, consolidation, background follow-up) with
+  # automatic fallback to the primary model on error. It shares the main Codex
+  # OAuth and token limit — only the model differs. Editable live from the WebUI.
+  auxiliary:
     enabled: false
-    confidence_threshold: 0.6
-    max_cheap_length: 200
-    strong_intents: ["task", "complex"]
+    model: gpt-5.6-luna
 
 ollama:
   enabled: false

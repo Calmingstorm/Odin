@@ -41,7 +41,6 @@ class LLMGateway:
         ollama_client: OllamaClient | None,
         kimi_client: KimiClient | None,
         subsystem_guard,
-        model_router,
         auxiliary_llm_client,
         cost_tracker,
         sessions,
@@ -52,12 +51,16 @@ class LLMGateway:
         self.ollama_client = ollama_client
         self.kimi_client = kimi_client
         self.subsystem_guard = subsystem_guard
-        self.model_router = model_router
         self.auxiliary_llm_client = auxiliary_llm_client
         self.cost_tracker = cost_tracker
         self.sessions = sessions
         self.reflector = reflector
         self.provider_lock = asyncio.Lock()
+        # Auxiliary live-reload state: a monotonic generation guards against a
+        # candidate built under a config a concurrent reload has since
+        # changed; _aux_drains tracks background drains of retired wrappers.
+        self._aux_reload_gen = 0
+        self._aux_drains: set = set()
         self.inflight_requests = 0
         self.switching = False
         # Called after a provider switch settles — wiring points it at the tool
@@ -86,28 +89,76 @@ class LLMGateway:
         # 300/500 caps guaranteed mid-output truncation on providers that honor
         # max_tokens (Ollama/Kimi) — truncated reflection JSON parsed to [] and
         # silently dropped lessons. (Codex ignores max_tokens entirely.)
-        async def _llm_compaction(messages: list[dict], system: str) -> str:
+        # These callbacks resolve the auxiliary pointer at CALL TIME, not wire
+        # time — capturing aux.make_chat_fn() here would pin the wrapper and
+        # break the live reload swap. When a named task is enabled on the
+        # CURRENT auxiliary wrapper (and Codex is the active provider), it
+        # routes cheap (with the wrapper's own primary fallback); otherwise
+        # the active client handles it, preserving today's token limits.
+        async def _named_task(
+            task: str, messages: list[dict], system: str, max_tokens: int
+        ) -> str:
+            aux = self.auxiliary_llm_client
+            provider_cfg = getattr(self.get_config(), "llm_provider", None)
+            active = provider_cfg.active_provider if provider_cfg else "codex"
+            if aux is not None and active == "codex":
+                return await aux.chat(messages, system, task=task, max_tokens=max_tokens)
             client = self.active_client
             if not client:
                 raise RuntimeError("No LLM provider configured")
-            return await client.chat(messages=messages, system=system, max_tokens=1500)
+            return await client.chat(messages=messages, system=system, max_tokens=max_tokens)
+
+        async def _llm_compaction(messages: list[dict], system: str) -> str:
+            return await _named_task("compaction", messages, system, 1500)
 
         async def _llm_reflection(messages: list[dict], system: str) -> str:
-            client = self.active_client
-            if not client:
-                raise RuntimeError("No LLM provider configured")
-            return await client.chat(messages=messages, system=system, max_tokens=2000)
+            return await _named_task("reflection", messages, system, 2000)
+
+        async def _llm_consolidation(messages: list[dict], system: str) -> str:
+            return await _named_task("consolidation", messages, system, 2000)
 
         self.sessions.set_compaction_fn(_llm_compaction)
         self.reflector.set_text_fn(_llm_reflection)
+        self.reflector.set_consolidation_fn(_llm_consolidation)
 
     # ---------- live reloads -------------------------------------------------
+
+    def _reconcile_auxiliary_primary(self) -> None:
+        """Keep the auxiliary wrapper consistent with the primary Codex client
+        after a primary lifecycle change (caller holds provider_lock).
+
+        Primary gone → retire auxiliary (its fallback would be a dead client).
+        Primary recreated with a live wrapper → rebind its fallback to the new
+        primary. Primary created while configured auxiliary is ABSENT (startup
+        credential miss, or after a disable→re-enable) → schedule the full
+        generation-safe reload_auxiliary OUTSIDE this lock so it builds and
+        probes the configured wrapper.
+        """
+        aux = self.auxiliary_llm_client
+        if self.codex_client is None:
+            if aux is not None:
+                self.auxiliary_llm_client = None
+                self._schedule_drain(aux)
+            return
+        if aux is not None:
+            if getattr(aux, "primary_client", None) is not self.codex_client:
+                aux.primary_client = self.codex_client
+            return
+        # Primary present, no live wrapper: build it if configured+enabled.
+        # reload_auxiliary is self-locking — schedule it so it runs AFTER this
+        # reload releases provider_lock (the task blocks on the lock meanwhile).
+        aux_cfg = getattr(self.get_config().openai_codex, "auxiliary", None)
+        if aux_cfg is not None and aux_cfg.enabled:
+            task = asyncio.ensure_future(self.reload_auxiliary())
+            self._aux_drains.add(task)
+            task.add_done_callback(self._aux_drains.discard)
 
     async def reload_codex_inner(self) -> dict:
         """Inner reload — caller must hold provider_lock."""
         config = self.get_config()
         if not config.openai_codex.enabled:
             self.codex_client = None
+            self._reconcile_auxiliary_primary()
             return {"configured": False, "reason": "openai_codex disabled in config"}
 
         if self.codex_client is not None:
@@ -164,6 +215,9 @@ class LLMGateway:
             stream_stall_timeout=config.openai_codex.stream_stall_timeout_seconds,
         )
         self.wire_callbacks()
+        # The primary was just (re)created — rebind the auxiliary fallback to
+        # it rather than leave the wrapper pointing at the old/absent primary.
+        self._reconcile_auxiliary_primary()
         log.info("Codex client created via live reload (model: %s)", config.openai_codex.model)
         return {"configured": True, "created": True, "accounts": len(auth._accounts)}
 
@@ -171,6 +225,227 @@ class LLMGateway:
         """Reload Codex credentials and create the client if it was missing at boot."""
         async with self.provider_lock:
             return await self.reload_codex_inner()
+
+    def _schedule_drain(self, wrapper) -> None:
+        """Retire a wrapper generation via a TRACKED background drain — it
+        waits for the lease count to reach zero (no wall-clock cut) then
+        closes, entirely outside provider_lock. Tracked so it isn't GC'd and
+        so shutdown can await outstanding drains."""
+        if wrapper is None:
+            return
+        task = asyncio.ensure_future(wrapper.drain_and_close())
+        self._aux_drains.add(task)
+        task.add_done_callback(self._aux_drains.discard)
+
+    def _apply_aux_desired(self, desired: dict) -> None:
+        """Commit a validated auxiliary spec onto live config (under lock)."""
+        aux_cfg = self.get_config().openai_codex.auxiliary
+        aux_cfg.enabled = desired["enabled"]
+        aux_cfg.model = desired["model"]
+
+    def _build_aux_candidate(self, desired: dict, primary):
+        """Construct a candidate wrapper from an IMMUTABLE desired spec bound
+        to ``primary``. Only the aux MODEL is spec-driven; the auth pool is
+        SHARED with the primary client (same account selection / rotation /
+        refresh lock) and the token limit is read from live config once here."""
+        from ..llm.auxiliary import AuxiliaryLLMClient
+
+        config = self.get_config()
+        aux_auth = primary.auth
+        if not aux_auth.is_configured():
+            return None, None
+        candidate_client = CodexChatClient(
+            auth=aux_auth,
+            model=desired["model"],
+            max_tokens=config.openai_codex.max_tokens,
+            max_retries=config.openai_codex.retry.max_retries,
+            retry_base_delay=config.openai_codex.retry.base_delay,
+            retry_max_delay=config.openai_codex.retry.max_delay,
+            pool_max_connections=config.openai_codex.connection_pool.max_connections,
+            pool_keepalive_timeout=config.openai_codex.connection_pool.keepalive_timeout,
+            request_timeout=config.openai_codex.request_timeout_seconds,
+            stream_stall_timeout=config.openai_codex.stream_stall_timeout_seconds,
+        )
+        candidate = AuxiliaryLLMClient(
+            aux_client=candidate_client,
+            primary_client=primary,
+            cost_tracker=self.cost_tracker,
+        )
+        return candidate, candidate_client
+
+    async def _probe_aux(self, client) -> str | None:
+        """Compatibility-probe a candidate's aux client OUTSIDE the lock: a
+        minimal request that fails fast on an unsupported model. Returns None
+        on success, else a reason string. A free-string model that the auth
+        path rejects is caught HERE, before install/persist."""
+        try:
+            await client.chat([{"role": "user", "content": "ok"}], "", max_tokens=1)
+            return None
+        except Exception as exc:
+            return f"model probe failed: {type(exc).__name__}"
+
+    async def run_persist_settled(self, persist_sync):
+        """Run the SYNC ``persist_sync`` write to settlement under the caller's
+        held lock, cancellation-SAFE — for EVERY LLM-config persistence path.
+
+        The write runs on an EXECUTOR future (``run_in_executor``), not an
+        ``asyncio.to_thread`` task: an executor future is not a ``Task``, so
+        the repository's ``asyncio.all_tasks()`` shutdown drain can't cancel
+        it, and the filesystem worker always runs to completion. We wait on
+        that future — repeatedly re-shielding through any caller cancellation
+        — so the lock is never released while the write is still in flight.
+        ``fut.exception()`` reflects the ACTUAL thread result: a cancelled
+        caller is NEVER mistaken for a successful write.
+
+        Returns ``(persist_exc_or_None, was_cancelled)``. The caller commits
+        or exactly-restores, then re-raises cancellation, once state is
+        coherent.
+        """
+        loop = asyncio.get_running_loop()
+        fut = loop.run_in_executor(None, persist_sync)
+        was_cancelled = False
+        while not fut.done():
+            try:
+                await asyncio.shield(fut)
+            except asyncio.CancelledError:
+                was_cancelled = True
+            except Exception:
+                break  # worker raised; fut.done() is now True
+        exc = fut.exception()
+        return exc, was_cancelled
+
+    def _snapshot_aux_config(self) -> dict:
+        aux_cfg = self.get_config().openai_codex.auxiliary
+        return {"enabled": aux_cfg.enabled, "model": aux_cfg.model}
+
+    async def reload_auxiliary(self, desired: dict | None = None, persist=None) -> dict:
+        """Transactional live reload of the auxiliary wrapper.
+
+        Self-locking — must NOT be called under ``provider_lock``. ``desired``
+        is an IMMUTABLE spec; when None the current config is snapshotted. The
+        candidate is built and compatibility-probed OUTSIDE the lock. UNDER the
+        lock, ONE transaction: verify primary + reload generation, apply
+        candidate pointers/config, then — if ``persist`` is given — run it as
+        part of the same transaction; a persist failure restores the EXACT
+        prior pointers/config before the lock releases (never a fresh probed
+        reload). The retired wrapper drains only AFTER a successful persist;
+        the candidate drains on any non-install exit. Nothing changes on disk
+        or in runtime unless the whole transaction commits.
+        """
+        if desired is None:
+            desired = self._snapshot_aux_config()
+        gen_at_build = self._aux_reload_gen
+
+        # --- disabled: retire + persist as one locked transaction ---
+        if not desired["enabled"]:
+            committed = False
+            was_cancelled = False
+            prior_aux = None
+            async with self.provider_lock:
+                if self._aux_reload_gen != gen_at_build:
+                    return {"committed": False, "effective_enabled": False,
+                            "reason": "concurrent reload; retry"}
+                prior_cfg = self._snapshot_aux_config()
+                prior_aux = self.auxiliary_llm_client
+                self.auxiliary_llm_client = None
+                self._apply_aux_desired(desired)
+                self._aux_reload_gen += 1
+                if persist is not None:
+                    persist_exc, was_cancelled = await self.run_persist_settled(persist)
+                    if persist_exc is not None:
+                        # EXACT restore — no probed reload; disk unchanged.
+                        self.auxiliary_llm_client = prior_aux
+                        self._apply_aux_desired(prior_cfg)
+                        self._aux_reload_gen += 1
+                        log.warning("Auxiliary disable persist failed (restored prior)")
+                        if not was_cancelled:
+                            return {"committed": False, "effective_enabled": False,
+                                    "reason": "persist failed"}
+                    else:
+                        committed = True
+                else:
+                    committed = True
+            # Post-lock: drain prior on commit, then re-raise a cancellation
+            # that arrived during persistence (state is now coherent).
+            if committed:
+                self._schedule_drain(prior_aux)
+            if was_cancelled:
+                raise asyncio.CancelledError
+            return {"committed": True, "effective_enabled": False,
+                    "reason": "auxiliary disabled"}
+
+        primary_at_build = self.codex_client
+        if primary_at_build is None:
+            return {"committed": False, "effective_enabled": False,
+                    "reason": "no primary Codex client to bind"}
+
+        # --- phase 1: build + probe OUTSIDE the lock ---
+        try:
+            candidate, candidate_client = self._build_aux_candidate(desired, primary_at_build)
+        except Exception as exc:
+            log.exception("Auxiliary reload: candidate build failed")
+            return {"committed": False, "effective_enabled": False,
+                    "reason": f"build failed: {exc}"}
+        if candidate is None:
+            return {"committed": False, "effective_enabled": False,
+                    "reason": "auxiliary credentials missing"}
+
+        # A single ``finally`` retires the candidate on EVERY non-install exit —
+        # probe failure, generation rejection, persist failure, and cancellation
+        # during the probe or while awaiting the lock — so an uninstalled session
+        # can't leak. Cancellation stays authoritative (re-raised after drain).
+        installed = False
+        retired = None
+        was_cancelled = False
+        try:
+            probe_reason = await self._probe_aux(candidate_client)
+            if probe_reason is not None:
+                return {"committed": False, "effective_enabled": False,
+                        "reason": probe_reason}
+            async with self.provider_lock:
+                if self.codex_client is not primary_at_build:
+                    return {"committed": False, "effective_enabled": False,
+                            "reason": "primary changed during reload"}
+                if self._aux_reload_gen != gen_at_build:
+                    return {"committed": False, "effective_enabled": False,
+                            "reason": "concurrent reload; retry"}
+                prior_cfg = self._snapshot_aux_config()
+                prior_aux = self.auxiliary_llm_client
+                self.auxiliary_llm_client = candidate
+                self._apply_aux_desired(desired)
+                self._aux_reload_gen += 1
+                if persist is not None:
+                    persist_exc, was_cancelled = await self.run_persist_settled(persist)
+                    if persist_exc is not None:
+                        # EXACT restore of the prior generation, then drain the
+                        # candidate (installed stays False → finally handles it).
+                        self.auxiliary_llm_client = prior_aux
+                        self._apply_aux_desired(prior_cfg)
+                        self._aux_reload_gen += 1
+                        log.warning("Auxiliary enable persist failed (restored prior)")
+                        if not was_cancelled:
+                            return {"committed": False, "effective_enabled": False,
+                                    "reason": "persist failed"}
+                        # cancelled + restored → candidate drains via finally,
+                        # cancellation re-raised after the lock.
+                    else:
+                        retired = prior_aux
+                        installed = True
+                else:
+                    retired = prior_aux
+                    installed = True
+            # Post-lock: drain the retired generation on commit; a cancellation
+            # that arrived during persistence is re-raised now (coherent state).
+            if installed:
+                self._schedule_drain(retired)
+            if was_cancelled:
+                raise asyncio.CancelledError
+            log.info("Auxiliary reloaded (model: %s)", desired["model"])
+            return {"committed": True, "effective_enabled": True,
+                    "model": desired["model"]}
+        finally:
+            if not installed:
+                self._schedule_drain(candidate)
 
     async def reload_ollama_inner(self) -> dict:
         """Inner reload — caller must hold provider_lock."""
@@ -243,8 +518,13 @@ class LLMGateway:
             result["health"] = await self.kimi_client.health_check()
         return result
 
-    async def switch_provider(self, provider: str) -> dict:
-        """Switch the active LLM provider at runtime."""
+    async def switch_provider(self, provider: str, persist=None) -> dict:
+        """Switch the active LLM provider at runtime.
+
+        Mutation AND persistence happen under ONE uninterrupted provider_lock
+        ownership: on a persist failure the prior provider is restored before
+        the lock releases, so the live switch and its disk state never split.
+        """
         if provider not in ("codex", "ollama", "kimi"):
             return {"error": f"Unknown provider: {provider}"}
 
@@ -257,6 +537,8 @@ class LLMGateway:
                 return {"error": "Kimi not configured — set api_key first"}
 
             self.switching = True
+            prior_provider = self.get_config().llm_provider.active_provider
+            was_cancelled = False
             try:
                 if self.inflight_requests > 0:
                     log.warning(
@@ -272,9 +554,32 @@ class LLMGateway:
                 self.wire_callbacks()
                 if self.on_provider_switch is not None:
                     self.on_provider_switch()
+
+                if persist is not None:
+                    persist_exc, was_cancelled = await self.run_persist_settled(persist)
+                    if persist_exc is not None and not was_cancelled:
+                        # Restore the prior provider under the same lock so the
+                        # live switch never outruns the (unchanged) disk state.
+                        self.get_config().llm_provider.active_provider = prior_provider
+                        self.wire_callbacks()
+                        if self.on_provider_switch is not None:
+                            self.on_provider_switch()
+                        log.warning("Provider-switch persist failed (restored %s)", prior_provider)
+                        return {"error": "persist failed"}
+                    if persist_exc is not None:
+                        # cancelled + persist failed → restore, then re-raise.
+                        self.get_config().llm_provider.active_provider = prior_provider
+                        self.wire_callbacks()
+                        if self.on_provider_switch is not None:
+                            self.on_provider_switch()
             finally:
                 self.switching = False
 
+        # Post-lock: re-raise a cancellation that arrived during persistence
+        # (runtime/disk state is coherent — committed on success, restored on
+        # failure — before the cancellation propagates).
+        if was_cancelled:
+            raise asyncio.CancelledError
         client = self.active_client
         model = getattr(client, "model", "unknown") if client else "none"
         log.info("LLM provider switched to %s (model: %s)", provider, model)
@@ -288,17 +593,14 @@ class LLMGateway:
         messages: list,
         system: str,
         tools: list,
-        user_message: str = "",
         user_id: str = "",
         channel_id: str = "",
         tools_used: list[str] | None = None,
         **kwargs,
     ):
-        """Wrap chat_with_tools with cost / subsystem / routing wiring.
+        """Wrap chat_with_tools with cost / subsystem wiring.
 
         - subsystem_guard.check() short-circuits if the provider is UNAVAILABLE
-        - model_router (when enabled and user_message given) picks cheap vs
-          strong model; cheap path uses auxiliary_llm_client when available
         - cost_tracker.record() captures token usage on every successful call
         - subsystem_guard.record_success / record_failure tracks provider health
         """
@@ -318,28 +620,6 @@ class LLMGateway:
             if err:
                 self.inflight_requests -= 1
                 raise RuntimeError(f"LLM subsystem unavailable: {err}")
-        # Auxiliary cheap-model routing is Codex-only (the aux client is always a
-        # CodexChatClient). When the operator has switched the active provider to
-        # ollama/kimi, do NOT divert "cheap" turns back to Codex — that defeats the
-        # provider switch and fails if Codex isn't authed. Let the active provider
-        # handle everything.
-        if (
-            user_message
-            and active == "codex"
-            and self.model_router is not None
-            and self.auxiliary_llm_client is not None
-        ):
-            try:
-                decision = await self.model_router.route(user_message)
-                if not decision.use_strong:
-                    client = self.auxiliary_llm_client
-                    log.debug(
-                        "model_router: routing to cheap model (intent=%s, conf=%.2f)",
-                        decision.intent.value,
-                        decision.confidence,
-                    )
-            except Exception:
-                log.exception("model_router.route failed; using strong model (non-fatal)")
 
         try:
             try:
@@ -354,7 +634,13 @@ class LLMGateway:
                 self.subsystem_guard.record_success(guard_key)
             if self.cost_tracker is not None:
                 try:
-                    active_model = getattr(client, "model", "unknown")
+                    # Single cost owner: prefer the response's truthful
+                    # provenance model (the routed wrapper has no .model);
+                    # fall back to the client's model for direct calls.
+                    active_model = (
+                        getattr(resp, "provenance_model", None)
+                        or getattr(client, "model", "unknown")
+                    )
                     self.cost_tracker.record(
                         int(getattr(resp, "input_tokens", 0) or 0),
                         int(getattr(resp, "output_tokens", 0) or 0),

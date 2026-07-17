@@ -12,15 +12,36 @@ TOOLS_SECTION: list[dict] = [
         "name": "spawn_agent",
         "description": (
             "Spawns an autonomous agent for a sub-task. Runs silently in background with "
-            "isolated context (cannot spawn sub-agents). Results are NOT posted to Discord — "
-            "use wait_for_agents to collect results, then deliver a cohesive summary yourself. "
-            "Max 5/channel, 1hr lifetime. Budget warnings injected near iteration limit."
+            "isolated context; it may spawn its own sub-agents up to the nesting limit. "
+            "Results are NOT posted to Discord — use wait_for_agents to collect results, then "
+            "deliver a cohesive summary yourself. Max 5/channel, 4h lifetime. Budget warnings "
+            "injected near iteration limit. Optionally set 'model' and/or 'reasoning_effort' to "
+            "run THIS agent on a specific Codex model/effort — match the tier to the work; omit "
+            "to inherit your configured agent defaults."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "label": {"type": "string", "description": "Short name (e.g. 'disk-audit')"},
                 "goal": {"type": "string", "description": "Full task description for the agent"},
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "Optional Codex model for this agent. gpt-5.6-sol = deepest reasoning, "
+                        "best for hard multi-step or ambiguous work; gpt-5.6-terra = balanced, "
+                        "a solid default for most tasks; gpt-5.6-luna = fastest/cheapest, good "
+                        "for simple lookups and mechanical work. Omit to inherit the configured "
+                        "agent model."
+                    ),
+                },
+                "reasoning_effort": {
+                    "type": "string",
+                    "enum": ["none", "low", "medium", "high", "xhigh"],
+                    "description": (
+                        "Optional reasoning effort for this agent — higher is more thorough but "
+                        "slower/costlier. Omit to inherit the configured agent effort."
+                    ),
+                },
                 "parent_id": {
                     "type": "string",
                     "description": (
@@ -107,7 +128,11 @@ TOOLS_SECTION: list[dict] = [
     # --- Loop-Agent integration ---
     {
         "name": "spawn_loop_agents",
-        "description": "Spawns agents from a loop iteration with context. Max 3/iter, 10/loop.",
+        "description": (
+            "Spawns agents from a loop iteration with context. Max 3/iter, 10/loop. Each task "
+            "may set its own 'model'/'reasoning_effort' to run on a specific Codex tier "
+            "(sol=deepest, terra=balanced, luna=fastest); omit to inherit the agent defaults."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -120,6 +145,22 @@ TOOLS_SECTION: list[dict] = [
                         "properties": {
                             "label": {"type": "string", "description": "Agent name"},
                             "goal": {"type": "string", "description": "Agent task"},
+                            "model": {
+                                "type": "string",
+                                "description": (
+                                    "Optional Codex model for this agent: gpt-5.6-sol "
+                                    "(deepest), gpt-5.6-terra (balanced), gpt-5.6-luna "
+                                    "(fastest). Omit to inherit the configured agent model."
+                                ),
+                            },
+                            "reasoning_effort": {
+                                "type": "string",
+                                "enum": ["none", "low", "medium", "high", "xhigh"],
+                                "description": (
+                                    "Optional reasoning effort (higher = more thorough, "
+                                    "slower). Omit to inherit the configured agent effort."
+                                ),
+                            },
                         },
                         "required": ["label", "goal"],
                     },

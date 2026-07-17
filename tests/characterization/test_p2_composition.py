@@ -82,3 +82,55 @@ class TestTwoStageComposition:
         src = inspect.getsource(OdinBot.on_ready)
         assert "self.scheduled_events._on_scheduled_task" in src
         assert "self.scheduled_events._on_schedule_failure" in src
+
+
+class TestAuxiliaryWiring:
+    """build_services builds the AuxiliaryLLMClient (no per-task gating) and
+    binds it onto the gateway when Codex + auxiliary are both enabled."""
+
+    def test_aux_client_built_and_bound(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        from unittest.mock import MagicMock
+
+        import src.discord.wiring as wiring
+
+        captured = {}
+
+        class _FakeAux:
+            def __init__(self, *, aux_client, primary_client, cost_tracker):
+                captured["instance"] = self
+
+        # AuxiliaryLLMClient is imported locally in build_services → patch it
+        # at its source module; the Codex classes are module-level in wiring.
+        import src.llm.auxiliary as aux_mod
+        monkeypatch.setattr(aux_mod, "AuxiliaryLLMClient", _FakeAux)
+        fake_pool = MagicMock()
+        fake_pool.is_configured.return_value = True
+        fake_pool._accounts = [object()]
+        monkeypatch.setattr(wiring, "CodexAuthPool", lambda *a, **k: fake_pool)
+        monkeypatch.setattr(wiring, "CodexChatClient", lambda *a, **k: MagicMock())
+
+        bot = make_bot(config_overrides={
+            "openai_codex": {
+                "enabled": True,
+                "credentials_path": "/fake/creds.json",
+                "auxiliary": {
+                    "enabled": True,
+                    "model": "gpt-5.6-terra",
+                },
+            },
+        })
+        assert captured.get("instance") is not None
+        assert bot.llm_gateway.auxiliary_llm_client is captured["instance"]
+
+
+class TestAuxiliaryFlatHandle:
+    def test_flat_handle_follows_gateway_swaps(self, tmp_path, monkeypatch):
+        # bot.auxiliary_llm_client is a property over the gateway's canonical
+        # pointer — it can never point at a retired generation.
+        monkeypatch.chdir(tmp_path)
+        bot = make_bot(fake_llm=FakeLLM([]))
+        assert bot.auxiliary_llm_client is bot.llm_gateway.auxiliary_llm_client
+        sentinel = object()
+        bot.llm_gateway.auxiliary_llm_client = sentinel
+        assert bot.auxiliary_llm_client is sentinel

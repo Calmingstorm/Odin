@@ -48,7 +48,6 @@ SERVICE_HANDLES = [
     "subsystem_guard",
     "audit_signer",
     "diff_tracker",
-    "model_router",
     "context_compressor",
     "prefix_tracker",
     "auxiliary_llm_client",

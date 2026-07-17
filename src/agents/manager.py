@@ -261,6 +261,12 @@ class AgentInfo:
     # an already-running agent's deadline or per-call budget.
     iteration_timeout: float = ITERATION_CB_TIMEOUT
     max_lifetime: float = MAX_AGENT_LIFETIME
+    # Per-spawn LLM overrides (the parent explicitly chose a model/effort for
+    # THIS agent). None = inherit the configured agent defaults. Recorded on
+    # the trajectory so an override is distinguishable from an inherited value;
+    # the actual request policy is resolved by the iteration callback.
+    model_override: str | None = None
+    reasoning_effort_override: str | None = None
     depth: int = 0
     parent_id: str | None = None
     children_ids: list[str] = field(default_factory=list)
@@ -329,6 +335,8 @@ class AgentManager:
         budget_warnings: builtins.list[int] | None = None,
         iteration_timeout: float | None = None,
         max_lifetime: float | None = None,
+        model_override: str | None = None,
+        reasoning_effort_override: str | None = None,
         context_compression_enabled: bool = False,
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
@@ -376,6 +384,8 @@ class AgentManager:
             parent_id=parent_id,
             iteration_timeout=iteration_timeout or ITERATION_CB_TIMEOUT,
             max_lifetime=max_lifetime or MAX_AGENT_LIFETIME,
+            model_override=model_override,
+            reasoning_effort_override=reasoning_effort_override,
         )
 
         # Register as child of parent
@@ -813,6 +823,8 @@ async def _run_agent(
         system_prompt_length=len(system_prompt),
         iteration_timeout=agent.iteration_timeout,
         max_lifetime=agent.max_lifetime,
+        model_override=agent.model_override,
+        reasoning_effort_override=agent.reasoning_effort_override,
     )
     agent_start = time.time()
 

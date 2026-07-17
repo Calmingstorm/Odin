@@ -361,22 +361,6 @@ def register_compression_stats(routes: web.RouteTableDef, bot) -> None:
         return web.json_response(tracker.as_dict())
 
 
-def register_routing_stats(routes: web.RouteTableDef, bot) -> None:
-    """Model routing stats (observability) (verbatim from the monolith)."""
-    # ------------------------------------------------------------------
-    # Model routing stats (observability)
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/routing/stats")
-    async def routing_stats(_request: web.Request) -> web.Response:
-        router = getattr(bot, "model_router", None)
-        if router is None:
-            return web.json_response({"error": "model router not available"}, status=503)
-        return web.json_response(router.get_metrics())
-
-
-
-
 def register_usage_cost(routes: web.RouteTableDef, bot) -> None:
     """Usage / cost tracking (verbatim from the monolith)."""
     # ------------------------------------------------------------------
