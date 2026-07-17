@@ -237,6 +237,44 @@ class TestLlmStatus:
             r = await c.post("/api/llm/switch", json={"provider": "ollama"})
             assert r.status == 200 and (await r.json())["provider"] == "ollama"
 
+    @pytest.mark.asyncio
+    async def test_llm_switch_persists_under_provider_lock(self):
+        # The switch persist must hold provider_lock so it can't race a config
+        # PUT and clobber it with a stale snapshot.
+        app, bot = _app(register_llm_provider)
+        _gw(bot)
+        bot.llm_gateway.switch_provider = AsyncMock(return_value={"provider": "codex"})
+        held = {}
+
+        async def _persist(_bot):
+            held["locked"] = bot.llm_gateway.provider_lock.locked()
+
+        with patch("src.web.api.llm_admin._persist_config", new=_persist):
+            async with TestClient(TestServer(app)) as c:
+                assert (await c.post("/api/llm/switch", json={"provider": "codex"})).status == 200
+        assert held["locked"] is True
+
+    @pytest.mark.asyncio
+    async def test_llm_switch_persist_failure_500(self):
+        app, bot = _app(register_llm_provider)
+        _gw(bot)
+        bot.llm_gateway.switch_provider = AsyncMock(return_value={"provider": "codex"})
+        with patch("src.web.api.llm_admin._persist_config",
+                   new=AsyncMock(side_effect=OSError("disk full"))):
+            async with TestClient(TestServer(app)) as c:
+                assert (await c.post("/api/llm/switch", json={"provider": "codex"})).status == 500
+
+    @pytest.mark.asyncio
+    async def test_llm_switch_persists_without_lock(self):
+        # Defensive fallback: no provider_lock present → persist directly.
+        app, bot = _app(register_llm_provider)
+        bot.llm_gateway.provider_lock = None
+        bot.llm_gateway.switch_provider = AsyncMock(return_value={"provider": "codex"})
+        with patch("src.web.api.llm_admin._persist_config", new=AsyncMock()) as persist:
+            async with TestClient(TestServer(app)) as c:
+                assert (await c.post("/api/llm/switch", json={"provider": "codex"})).status == 200
+            persist.assert_awaited_once()
+
 
 # --------------------------------------------------------------------------- #
 # Connection pools (existing coverage retained)
@@ -380,6 +418,30 @@ class TestProviderConfig:
             assert desired["tasks"] == ["compaction", "reflection"]
 
     @pytest.mark.asyncio
+    async def test_auxiliary_config_invokes_persist_callable(self):
+        # The route hands reload_auxiliary a persist callable; when the reload
+        # invokes it (its locked transaction), _persist_config runs.
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        ran = []
+
+        async def _reload(desired=None, persist=None):
+            await persist()  # exercise the route's persist closure
+            return {"committed": True, "effective_enabled": True,
+                    "model": desired["model"], "tasks": desired["tasks"]}
+
+        bot.llm_gateway.reload_auxiliary = _reload
+        with patch("src.web.api.llm_admin._persist_config",
+                   new=AsyncMock(side_effect=lambda _b: ran.append(True))):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/auxiliary/config",
+                                json={"enabled": True, "model": "gpt-5.6-terra",
+                                      "tasks": ["compaction"]})
+                assert r.status == 200
+        assert ran == [True]
+
+    @pytest.mark.asyncio
     async def test_auxiliary_config_rejects_unknown_task(self):
         app, bot = _app(register_provider_config)
         _gw(bot)
@@ -429,30 +491,27 @@ class TestProviderConfig:
             persist.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_auxiliary_config_persist_failure_reverts_runtime(self):
-        # committed=True but persistence raises → 500 and the runtime is
-        # reverted to the prior spec (live must not outrun disk).
+    async def test_auxiliary_config_persist_failure_500_via_transaction(self):
+        # Persistence now runs INSIDE reload_auxiliary's locked transaction:
+        # a persist failure comes back as committed=False reason="persist
+        # failed" → the route 500s. The route passes a persist callable and
+        # does NOT run a second probed reload.
         app, bot = _app(register_provider_config)
         _gw(bot)
-        bot.config.openai_codex.auxiliary.enabled = False
-        bot.config.openai_codex.auxiliary.model = "gpt-5.6-luna"
-        reload_calls = []
+        captured = {}
 
-        async def _reload(desired=None):
-            reload_calls.append(desired)
-            return {"committed": True, "effective_enabled": True}
+        async def _reload(desired=None, persist=None):
+            captured["persist"] = persist
+            return {"committed": False, "effective_enabled": False,
+                    "reason": "persist failed: disk full"}
 
         bot.llm_gateway.reload_auxiliary = _reload
-        with patch("src.web.api.llm_admin._persist_config",
-                   new=AsyncMock(side_effect=OSError("disk full"))):
-            async with TestClient(TestServer(app)) as c:
-                r = await c.put("/api/llm/auxiliary/config",
-                                json={"enabled": True, "model": "gpt-5.6-terra"})
-                assert r.status == 500
-        # reload called twice: the desired, then the prior (rollback)
-        assert len(reload_calls) == 2
-        assert reload_calls[1]["enabled"] is False
-        assert reload_calls[1]["model"] == "gpt-5.6-luna"
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/auxiliary/config",
+                            json={"enabled": True, "model": "gpt-5.6-terra"})
+            assert r.status == 500
+            assert "persist failed" in (await r.json())["error"]
+        assert captured["persist"] is not None  # persist folded into the reload
 
     @pytest.mark.asyncio
     async def test_auxiliary_config_unavailable_503(self):
@@ -928,8 +987,12 @@ class TestPersistHelpers:
         finally:
             _ui_set_secrets.discard("t.key")
 
-    def test_persist_no_file_is_noop(self):
-        _persist_llm_sections_sync(_bot())  # no config.yml in tmp → early return, no raise
+    def test_persist_no_file_raises(self):
+        # A mutation endpoint must not claim success when nothing persisted —
+        # missing config.yml is now a loud failure, not a silent no-op.
+        from src.web.api.llm_admin import PersistError
+        with pytest.raises(PersistError, match="does not exist"):
+            _persist_llm_sections_sync(_bot())
 
     def test_persist_round_trips_config(self):
         from pathlib import Path
@@ -943,6 +1006,17 @@ class TestPersistHelpers:
         assert "openai_codex" in written and "gpt-5.5" in written
         assert "reasoning_effort" in written and "xhigh" in written
         assert "ollama" in written and "kimi" in written and "llm_provider" in written
+
+    def test_persist_preserves_file_mode(self):
+        # os.replace of a mkstemp(0600) temp must NOT silently chmod the live
+        # 0664 config — the original mode is restored before replace.
+        import os
+        from pathlib import Path
+        p = Path("config.yml")
+        p.write_text("discord:\n  token: fake\n")
+        os.chmod(p, 0o664)
+        _persist_llm_sections_sync(_bot())
+        assert (os.stat(p).st_mode & 0o777) == 0o664
 
     def test_persist_atomic_write_failure_cleans_temp_and_original_intact(self, monkeypatch):
         # An os.replace failure must clean the temp file and NOT corrupt the
@@ -993,12 +1067,18 @@ class TestPersistHelpers:
         assert "agent_model" in written
         assert "agent_model: gpt-5.6-luna" not in written
 
-    def test_persist_empty_file_returns(self):
+    def test_persist_empty_file_raises(self):
         from pathlib import Path
-        Path("config.yml").write_text("")  # ry.load → None → early return
-        _persist_llm_sections_sync(_bot())  # no raise
 
-    def test_persist_malformed_yaml_returns(self):
+        from src.web.api.llm_admin import PersistError
+        Path("config.yml").write_text("")  # ry.load → None
+        with pytest.raises(PersistError, match="empty"):
+            _persist_llm_sections_sync(_bot())
+
+    def test_persist_malformed_yaml_raises(self):
         from pathlib import Path
+
+        from src.web.api.llm_admin import PersistError
         Path("config.yml").write_text("discord: {token: 'unterminated")  # ry.load raises
-        _persist_llm_sections_sync(_bot())  # except → return, no raise
+        with pytest.raises(PersistError, match="unreadable/malformed"):
+            _persist_llm_sections_sync(_bot())

@@ -715,3 +715,87 @@ class TestPersistAndConcurrency:
         # the uninstalled candidate was drained, never installed
         assert gw.auxiliary_llm_client is None
         candidate.drain_and_close.assert_awaited_once()
+
+
+class TestPersistTransaction:
+    """Persistence is folded into reload_auxiliary's locked transaction:
+    persist-failure EXACTLY restores the prior generation (no probed reload)."""
+
+    def _aux_cfg(self, enabled=True, model="gpt-5.6-terra"):
+        cfg = _cfg()
+        cfg.openai_codex.auxiliary = SimpleNamespace(
+            enabled=enabled, model=model, tasks=["compaction"],
+            max_tokens=2048, credentials_path="")
+        return cfg
+
+    async def test_enable_persist_failure_exactly_restores_prior(self):
+        cfg = self._aux_cfg(enabled=False, model="gpt-5.6-luna")
+        old = SimpleNamespace(drain_and_close=AsyncMock())
+        router = SimpleNamespace(aux_client=old)
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(cfg, codex=object(), router=router, aux=old)
+
+        async def _persist_fail():
+            raise OSError("disk full")
+
+        desired = {"enabled": True, "model": "gpt-5.6-terra", "tasks": ["compaction"],
+                   "credentials_path": "", "max_tokens": 2048}
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
+            pool_cls.return_value.is_configured.return_value = True
+            client_cls.return_value.chat = AsyncMock(return_value="ok")
+            r = await gw.reload_auxiliary(desired, persist=_persist_fail)
+            await asyncio.gather(*list(gw._aux_drains))
+        assert r["committed"] is False
+        assert "persist failed" in r["reason"]
+        # EXACT prior wrapper/pointers/config restored — the prior was NOT drained
+        assert gw.auxiliary_llm_client is old
+        assert router.aux_client is old
+        assert cfg.openai_codex.auxiliary.enabled is False
+        assert cfg.openai_codex.auxiliary.model == "gpt-5.6-luna"
+        old.drain_and_close.assert_not_called()   # prior survives
+        candidate.drain_and_close.assert_awaited_once()  # candidate drained
+
+    async def test_disable_persist_failure_restores_enabled_wrapper(self):
+        cfg = self._aux_cfg(enabled=True, model="gpt-5.6-terra")
+        old = SimpleNamespace(drain_and_close=AsyncMock())
+        router = SimpleNamespace(aux_client=old)
+        gw = _gw(cfg, codex=object(), router=router, aux=old)
+
+        async def _persist_fail():
+            raise OSError("disk full")
+
+        desired = {"enabled": False, "model": "gpt-5.6-terra", "tasks": ["compaction"],
+                   "credentials_path": "", "max_tokens": 2048}
+        r = await gw.reload_auxiliary(desired, persist=_persist_fail)
+        assert r["committed"] is False
+        # the enabled wrapper is restored, not drained
+        assert gw.auxiliary_llm_client is old
+        assert router.aux_client is old
+        assert cfg.openai_codex.auxiliary.enabled is True
+        old.drain_and_close.assert_not_called()
+
+    async def test_persist_success_drains_prior_after_commit(self):
+        cfg = self._aux_cfg(enabled=True)
+        old = SimpleNamespace(drain_and_close=AsyncMock())
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(cfg, codex=object(), aux=old)
+        persisted = []
+
+        async def _persist_ok():
+            persisted.append(True)
+
+        desired = {"enabled": True, "model": "gpt-5.6-terra", "tasks": ["compaction"],
+                   "credentials_path": "", "max_tokens": 2048}
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
+            pool_cls.return_value.is_configured.return_value = True
+            client_cls.return_value.chat = AsyncMock(return_value="ok")
+            r = await gw.reload_auxiliary(desired, persist=_persist_ok)
+            await asyncio.gather(*list(gw._aux_drains))
+        assert r["committed"] is True
+        assert persisted == [True]
+        assert gw.auxiliary_llm_client is candidate
+        old.drain_and_close.assert_awaited_once()  # prior drained only after persist

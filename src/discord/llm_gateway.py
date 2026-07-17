@@ -290,44 +290,60 @@ class LLMGateway:
         except Exception as exc:
             return f"model probe failed: {type(exc).__name__}"
 
-    async def reload_auxiliary(self, desired: dict | None = None) -> dict:
-        """Two-phase live reload of the auxiliary wrapper.
+    def _snapshot_aux_config(self) -> dict:
+        aux_cfg = self.get_config().openai_codex.auxiliary
+        return {
+            "enabled": aux_cfg.enabled, "model": aux_cfg.model,
+            "tasks": list(aux_cfg.tasks),
+            "credentials_path": aux_cfg.credentials_path,
+            "max_tokens": aux_cfg.max_tokens,
+        }
+
+    async def reload_auxiliary(self, desired: dict | None = None, persist=None) -> dict:
+        """Transactional live reload of the auxiliary wrapper.
 
         Self-locking — must NOT be called under ``provider_lock``. ``desired``
-        is an IMMUTABLE spec (enabled/model/tasks/credentials_path/max_tokens);
-        when None the current config is snapshotted. The candidate is built
-        and compatibility-probed OUTSIDE the lock; under the lock the primary
-        generation AND the auxiliary reload generation are verified before an
-        atomic commit of config + live pointers; retired/stale wrappers drain
-        via tracked background tasks OUTSIDE the lock. Config, YAML, and the
-        prior wrapper are left untouched on any failure.
+        is an IMMUTABLE spec; when None the current config is snapshotted. The
+        candidate is built and compatibility-probed OUTSIDE the lock. UNDER the
+        lock, ONE transaction: verify primary + reload generation, apply
+        candidate pointers/config, then — if ``persist`` is given — run it as
+        part of the same transaction; a persist failure restores the EXACT
+        prior pointers/config before the lock releases (never a fresh probed
+        reload). The retired wrapper drains only AFTER a successful persist;
+        the candidate drains on any non-install exit. Nothing changes on disk
+        or in runtime unless the whole transaction commits.
         """
-        config = self.get_config()
-        aux_cfg = config.openai_codex.auxiliary
         if desired is None:
-            desired = {
-                "enabled": aux_cfg.enabled, "model": aux_cfg.model,
-                "tasks": list(aux_cfg.tasks),
-                "credentials_path": aux_cfg.credentials_path,
-                "max_tokens": aux_cfg.max_tokens,
-            }
+            desired = self._snapshot_aux_config()
         gen_at_build = self._aux_reload_gen
 
-        # --- disabled: retire under the lock, drain outside ---
-        # ``committed`` is the route's persist gate: True only when config +
-        # live pointers were actually mutated (never on a rejected generation).
+        # --- disabled: retire + persist as one locked transaction ---
         if not desired["enabled"]:
             async with self.provider_lock:
                 if self._aux_reload_gen != gen_at_build:
                     return {"committed": False, "effective_enabled": False,
                             "reason": "concurrent reload; retry"}
-                retired = self.auxiliary_llm_client
+                prior_cfg = self._snapshot_aux_config()
+                prior_aux = self.auxiliary_llm_client
+                prior_router = self.model_router.aux_client if self.model_router else None
                 self.auxiliary_llm_client = None
                 if self.model_router is not None:
                     self.model_router.aux_client = None
                 self._apply_aux_desired(desired)
                 self._aux_reload_gen += 1
-            self._schedule_drain(retired)
+                if persist is not None:
+                    try:
+                        await persist()
+                    except Exception as exc:
+                        # EXACT restore — no probed reload.
+                        self.auxiliary_llm_client = prior_aux
+                        if self.model_router is not None:
+                            self.model_router.aux_client = prior_router
+                        self._apply_aux_desired(prior_cfg)
+                        self._aux_reload_gen += 1
+                        return {"committed": False, "effective_enabled": False,
+                                "reason": f"persist failed: {exc}"}
+            self._schedule_drain(prior_aux)
             return {"committed": True, "effective_enabled": False,
                     "reason": "auxiliary disabled"}
 
@@ -347,11 +363,12 @@ class LLMGateway:
             return {"committed": False, "effective_enabled": False,
                     "reason": "auxiliary credentials missing"}
 
-        # A single ``finally`` retires the candidate on EVERY non-install exit
-        # — probe failure, generation rejection, and cancellation during the
-        # probe or while awaiting the lock — so an uninstalled session can't
-        # leak. Cancellation stays authoritative (re-raised after the drain).
+        # A single ``finally`` retires the candidate on EVERY non-install exit —
+        # probe failure, generation rejection, persist failure, and cancellation
+        # during the probe or while awaiting the lock — so an uninstalled session
+        # can't leak. Cancellation stays authoritative (re-raised after drain).
         installed = False
+        retired = None
         try:
             probe_reason = await self._probe_aux(candidate_client)
             if probe_reason is not None:
@@ -364,12 +381,28 @@ class LLMGateway:
                 if self._aux_reload_gen != gen_at_build:
                     return {"committed": False, "effective_enabled": False,
                             "reason": "concurrent reload; retry"}
-                retired = self.auxiliary_llm_client
+                prior_cfg = self._snapshot_aux_config()
+                prior_aux = self.auxiliary_llm_client
+                prior_router = self.model_router.aux_client if self.model_router else None
                 self.auxiliary_llm_client = candidate
                 if self.model_router is not None:
                     self.model_router.aux_client = candidate
                 self._apply_aux_desired(desired)
                 self._aux_reload_gen += 1
+                if persist is not None:
+                    try:
+                        await persist()
+                    except Exception as exc:
+                        # EXACT restore of the prior generation, then drain the
+                        # candidate (installed stays False → finally handles it).
+                        self.auxiliary_llm_client = prior_aux
+                        if self.model_router is not None:
+                            self.model_router.aux_client = prior_router
+                        self._apply_aux_desired(prior_cfg)
+                        self._aux_reload_gen += 1
+                        return {"committed": False, "effective_enabled": False,
+                                "reason": f"persist failed: {exc}"}
+                retired = prior_aux
                 installed = True
             self._schedule_drain(retired)
             log.info(
