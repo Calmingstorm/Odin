@@ -169,3 +169,21 @@ class TestGetPromptSection:
         trace = SimpleNamespace(key=lambda k: k, learned=lambda **kw: None)
         out = r.get_prompt_section(query="database timeout", trace=trace)
         assert "correction" in out  # corrections are pinned
+
+
+class TestConsolidationFnSplit:
+    def test_consolidation_fn_used_when_set(self, tmp_path):
+        # A dedicated consolidation fn is preferred over the reflection
+        # _text_fn for the consolidation/repair paths (they route to a
+        # different auxiliary task); falls back to _text_fn when unset.
+        r = _reflector(tmp_path)
+        cons = AsyncMock(return_value="[]")
+        r.set_consolidation_fn(cons)
+        assert r._consolidation_text_fn is cons
+
+    def test_consolidation_falls_back_to_text_fn(self, tmp_path):
+        r = ConversationReflector(str(tmp_path / "learned.json"), enabled=True)
+        text = AsyncMock(return_value="[]")
+        r.set_text_fn(text)
+        # no consolidation fn set → the reflection text_fn is used
+        assert r._consolidation_text_fn is text

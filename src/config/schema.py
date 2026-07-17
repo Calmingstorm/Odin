@@ -279,8 +279,13 @@ class UsageConfig(BaseModel):
 
 
 class AuxiliaryLLMConfig(BaseModel):
+    # Default Luna: the Codex catalog positions it for extraction /
+    # classification / transformation / structured summaries — the auxiliary
+    # workload. gpt-4o-mini (the prior default) is absent from the current
+    # catalog. Existing gpt-4o-mini configs are NOT rewritten (preserved as a
+    # temporary dropdown option), only the absent-value default changed.
     enabled: bool = False
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-5.6-luna"
     max_tokens: int = 2048
     credentials_path: str = ""  # Empty = share main codex credentials
     tasks: list[str] = Field(
@@ -291,6 +296,24 @@ class AuxiliaryLLMConfig(BaseModel):
             "background_followup",
         ],
     )
+
+    @field_validator("tasks")
+    @classmethod
+    def _validate_tasks(cls, v: list[str]) -> list[str]:
+        """Reject unknown task names, dedupe, and store in one canonical
+        order (KNOWN_TASKS iteration order). An empty list is valid — the
+        wrapper is available but delegates no named jobs. Unknown names are
+        rejected rather than silently stored as no-ops."""
+        from ..llm.auxiliary import KNOWN_TASKS, KNOWN_TASKS_ORDER
+
+        unknown = [t for t in v if t not in KNOWN_TASKS]
+        if unknown:
+            raise ValueError(
+                f"unknown auxiliary task(s): {', '.join(sorted(set(unknown)))}; "
+                f"valid: {', '.join(KNOWN_TASKS_ORDER)}"
+            )
+        seen = set(v)
+        return [t for t in KNOWN_TASKS_ORDER if t in seen]
 
 
 # "minimal" is deliberately absent: it sits in the Codex API's generic

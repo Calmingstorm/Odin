@@ -184,11 +184,21 @@ class AgentTaskTools:
 
         self._channel_state.background_tasks[task.task_id] = task
 
-        # Build Codex callback for conversational follow-up
+        # Build Codex callback for conversational follow-up. Resolves the
+        # auxiliary pointer at CALL TIME so a live reload swap is honored and
+        # the 'background_followup' task routes cheap when enabled on the
+        # current wrapper (Codex active); else the active client handles it.
         codex_cb = None
         if self._llm_gateway.active_client:
 
             async def _codex_followup(messages: list[dict], system: str, max_tokens: int) -> str:
+                aux = getattr(self._llm_gateway, "auxiliary_llm_client", None)
+                provider_cfg = getattr(self._get_config(), "llm_provider", None)
+                active = provider_cfg.active_provider if provider_cfg else "codex"
+                if aux is not None and active == "codex" and aux.is_enabled("background_followup"):
+                    return await aux.chat(
+                        messages, system, task="background_followup", max_tokens=max_tokens
+                    )
                 return await self._llm_gateway.active_client.chat(
                     messages=messages,
                     system=system,

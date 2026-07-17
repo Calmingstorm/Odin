@@ -48,6 +48,9 @@ def _no_persist(monkeypatch):
 def _bot():
     bot = MagicMock()
     bot.config = Config(discord={"token": "fake"})
+    # Real gateways default this to None; without it the MagicMock
+    # auto-attr makes _auxiliary_status read a non-serializable mock.
+    bot.llm_gateway.auxiliary_llm_client = None
     return bot
 
 
@@ -150,6 +153,41 @@ class TestLlmStatus:
             body = await (await c.get("/api/llm/status")).json()
             assert body["codex"]["agent_reasoning_effort"] == "low"
             assert body["codex"]["effective_agent_reasoning_effort"] == "low"
+
+    @pytest.mark.asyncio
+    async def test_llm_status_auxiliary_configured_vs_effective(self):
+        app, bot = _app(register_llm_provider)
+        bot.llm_gateway.codex_client = object()
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.kimi_client = None
+        bot.llm_gateway.active_client = None
+        bot.llm_gateway.auxiliary_llm_client = None
+        bot.config.openai_codex.auxiliary.enabled = True
+        bot.config.openai_codex.auxiliary.model = "gpt-5.6-terra"
+        bot.config.openai_codex.auxiliary.tasks = ["compaction", "reflection"]
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/llm/status")).json()
+            aux = body["auxiliary"]
+            # configured reflects persisted config
+            assert aux["enabled"] is True
+            assert aux["model"] == "gpt-5.6-terra"
+            assert aux["tasks"] == ["compaction", "reflection"]
+            # enabled config but no live client → unavailable + effective off
+            assert aux["effective_enabled"] is False
+            assert aux["unavailable_reason"]
+            assert "classification" in aux["consumer_backed_tasks"]
+            assert "summarization" not in aux["consumer_backed_tasks"]
+            # a live wrapper flips effective_* on with the runtime task set
+            bot.llm_gateway.auxiliary_llm_client = SimpleNamespace(
+                aux_client=SimpleNamespace(model="gpt-5.6-terra"),
+                enabled_tasks={"compaction", "reflection"},
+            )
+            body = await (await c.get("/api/llm/status")).json()
+            aux = body["auxiliary"]
+            assert aux["effective_enabled"] is True
+            assert aux["effective_model"] == "gpt-5.6-terra"
+            assert aux["effective_tasks"] == ["compaction", "reflection"]
+            assert aux["unavailable_reason"] is None
 
     @pytest.mark.asyncio
     async def test_llm_status_agent_model_fields(self):
@@ -319,6 +357,83 @@ class TestProviderConfig:
         assert bot.config.openai_codex.reasoning_effort == "medium"
         assert bot.config.openai_codex.model != "changed-model"
         bot.llm_gateway.reload_codex_inner.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_config_enable_terra(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        bot.llm_gateway.reload_auxiliary = AsyncMock(
+            return_value={"effective_enabled": True, "model": "gpt-5.6-terra",
+                          "tasks": ["compaction"]}
+        )
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/auxiliary/config",
+                            json={"enabled": True, "model": "gpt-5.6-terra",
+                                  "tasks": ["compaction", "reflection"]})
+            assert r.status == 200
+            assert bot.config.openai_codex.auxiliary.enabled is True
+            assert bot.config.openai_codex.auxiliary.model == "gpt-5.6-terra"
+            assert bot.config.openai_codex.auxiliary.tasks == ["compaction", "reflection"]
+            bot.llm_gateway.reload_auxiliary.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_config_rejects_unknown_task(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.reload_auxiliary = AsyncMock()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/auxiliary/config",
+                            json={"tasks": ["compaction", "not_a_task"]})
+            assert r.status == 400
+            assert "unknown" in (await r.json())["error"].lower()
+        # nothing reloaded, nothing mutated
+        bot.llm_gateway.reload_auxiliary.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_config_guards(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.reload_auxiliary = AsyncMock()
+        async with TestClient(TestServer(app)) as c:
+            # invalid JSON → 400
+            assert (await c.put("/api/llm/auxiliary/config", data="bad")).status == 400
+            # tasks not a list → 400
+            assert (await c.put("/api/llm/auxiliary/config",
+                                json={"tasks": "compaction"})).status == 400
+            # reload raising → 500 with prior config restored
+            bot.llm_gateway.reload_auxiliary = AsyncMock(side_effect=RuntimeError("boom"))
+            prior = bot.config.openai_codex.auxiliary.enabled
+            r = await c.put("/api/llm/auxiliary/config", json={"enabled": True})
+            assert r.status == 500
+            assert bot.config.openai_codex.auxiliary.enabled == prior
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_config_unavailable_503(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.config.openai_codex.auxiliary = None
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/auxiliary/config", json={"enabled": True})
+            assert r.status == 503
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_config_rolls_back_on_enable_failure(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.config.openai_codex.auxiliary.enabled = False
+        bot.config.openai_codex.auxiliary.model = "gpt-5.6-luna"
+        bot.llm_gateway.reload_auxiliary = AsyncMock(
+            return_value={"effective_enabled": False, "reason": "credentials missing"}
+        )
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/auxiliary/config",
+                            json={"enabled": True, "model": "gpt-5.6-terra"})
+            assert r.status == 400
+            assert "credentials" in (await r.json())["error"]
+        # config restored to the prior (disabled) state
+        assert bot.config.openai_codex.auxiliary.enabled is False
+        assert bot.config.openai_codex.auxiliary.model == "gpt-5.6-luna"
 
     @pytest.mark.asyncio
     async def test_codex_agent_effort_set_persists_without_reload(self):

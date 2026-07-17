@@ -86,20 +86,37 @@ class LLMGateway:
         # 300/500 caps guaranteed mid-output truncation on providers that honor
         # max_tokens (Ollama/Kimi) — truncated reflection JSON parsed to [] and
         # silently dropped lessons. (Codex ignores max_tokens entirely.)
-        async def _llm_compaction(messages: list[dict], system: str) -> str:
+        # These callbacks resolve the auxiliary pointer at CALL TIME, not wire
+        # time — capturing aux.make_chat_fn() here would pin the wrapper and
+        # break the live reload swap. When a named task is enabled on the
+        # CURRENT auxiliary wrapper (and Codex is the active provider), it
+        # routes cheap (with the wrapper's own primary fallback); otherwise
+        # the active client handles it, preserving today's token limits.
+        async def _named_task(
+            task: str, messages: list[dict], system: str, max_tokens: int
+        ) -> str:
+            aux = self.auxiliary_llm_client
+            provider_cfg = getattr(self.get_config(), "llm_provider", None)
+            active = provider_cfg.active_provider if provider_cfg else "codex"
+            if aux is not None and active == "codex" and aux.is_enabled(task):
+                return await aux.chat(messages, system, task=task, max_tokens=max_tokens)
             client = self.active_client
             if not client:
                 raise RuntimeError("No LLM provider configured")
-            return await client.chat(messages=messages, system=system, max_tokens=1500)
+            return await client.chat(messages=messages, system=system, max_tokens=max_tokens)
+
+        async def _llm_compaction(messages: list[dict], system: str) -> str:
+            return await _named_task("compaction", messages, system, 1500)
 
         async def _llm_reflection(messages: list[dict], system: str) -> str:
-            client = self.active_client
-            if not client:
-                raise RuntimeError("No LLM provider configured")
-            return await client.chat(messages=messages, system=system, max_tokens=2000)
+            return await _named_task("reflection", messages, system, 2000)
+
+        async def _llm_consolidation(messages: list[dict], system: str) -> str:
+            return await _named_task("consolidation", messages, system, 2000)
 
         self.sessions.set_compaction_fn(_llm_compaction)
         self.reflector.set_text_fn(_llm_reflection)
+        self.reflector.set_consolidation_fn(_llm_consolidation)
 
     # ---------- live reloads -------------------------------------------------
 
@@ -171,6 +188,86 @@ class LLMGateway:
         """Reload Codex credentials and create the client if it was missing at boot."""
         async with self.provider_lock:
             return await self.reload_codex_inner()
+
+    async def reload_auxiliary(self) -> dict:
+        """Rebuild the auxiliary wrapper from current config, two-phase.
+
+        Unlike the ``*_inner`` reloads this is self-locking and must NOT be
+        called under ``provider_lock``: it builds/probes the candidate and
+        drains the retired wrapper OUTSIDE the lock (an in-flight auxiliary
+        call may run for minutes — waiting on it while holding the lock would
+        trade one outage for a worse one). The lock is held only for the
+        atomic pointer swap. On any failure the prior runtime wrapper and its
+        pointers are left untouched.
+        """
+        config = self.get_config()
+        aux_cfg = getattr(config.openai_codex, "auxiliary", None)
+
+        # --- disabled: retire the current wrapper ---
+        if not (aux_cfg and aux_cfg.enabled):
+            async with self.provider_lock:
+                retired = self.auxiliary_llm_client
+                self.auxiliary_llm_client = None
+                if self.model_router is not None:
+                    self.model_router.aux_client = None
+            if retired is not None:
+                await retired.close_when_idle()
+            return {"effective_enabled": False, "reason": "auxiliary disabled in config"}
+
+        if self.codex_client is None:
+            return {"effective_enabled": False, "reason": "no primary Codex client to bind"}
+
+        # --- phase 1: build + probe the candidate OUTSIDE the lock ---
+        primary_at_build = self.codex_client
+        try:
+            from ..llm.auxiliary import AuxiliaryLLMClient
+
+            aux_creds = aux_cfg.credentials_path or config.openai_codex.credentials_path
+            aux_auth = CodexAuthPool(aux_creds)
+            if not aux_auth.is_configured():
+                return {"effective_enabled": False, "reason": "auxiliary credentials missing"}
+            candidate_client = CodexChatClient(
+                auth=aux_auth,
+                model=aux_cfg.model,
+                max_tokens=aux_cfg.max_tokens,
+                max_retries=config.openai_codex.retry.max_retries,
+                retry_base_delay=config.openai_codex.retry.base_delay,
+                retry_max_delay=config.openai_codex.retry.max_delay,
+                pool_max_connections=config.openai_codex.connection_pool.max_connections,
+                pool_keepalive_timeout=config.openai_codex.connection_pool.keepalive_timeout,
+                request_timeout=config.openai_codex.request_timeout_seconds,
+                stream_stall_timeout=config.openai_codex.stream_stall_timeout_seconds,
+            )
+            candidate = AuxiliaryLLMClient(
+                aux_client=candidate_client,
+                primary_client=primary_at_build,
+                enabled_tasks=set(aux_cfg.tasks),
+                cost_tracker=self.cost_tracker,
+            )
+        except Exception as exc:
+            log.exception("Auxiliary reload: candidate build failed")
+            return {"effective_enabled": False, "reason": f"build failed: {exc}"}
+
+        # --- phase 2: swap atomically under the lock (generation-checked) ---
+        async with self.provider_lock:
+            if self.codex_client is not primary_at_build:
+                # The primary was recreated between build and swap; the
+                # candidate is bound to a stale primary — abort, drain it.
+                await candidate.close_when_idle(timeout=0.0)
+                return {"effective_enabled": False, "reason": "primary changed during reload"}
+            retired = self.auxiliary_llm_client
+            self.auxiliary_llm_client = candidate
+            if self.model_router is not None:
+                self.model_router.aux_client = candidate
+
+        # --- phase 3: drain the retired wrapper OUTSIDE the lock ---
+        if retired is not None:
+            await retired.close_when_idle()
+        log.info(
+            "Auxiliary reloaded (model: %s, tasks: %s)",
+            aux_cfg.model, ", ".join(aux_cfg.tasks) or "none",
+        )
+        return {"effective_enabled": True, "model": aux_cfg.model, "tasks": list(aux_cfg.tasks)}
 
     async def reload_ollama_inner(self) -> dict:
         """Inner reload — caller must hold provider_lock."""
@@ -323,6 +420,7 @@ class LLMGateway:
         # ollama/kimi, do NOT divert "cheap" turns back to Codex — that defeats the
         # provider switch and fails if Codex isn't authed. Let the active provider
         # handle everything.
+        route_cheap = False
         if (
             user_message
             and active == "codex"
@@ -332,7 +430,7 @@ class LLMGateway:
             try:
                 decision = await self.model_router.route(user_message)
                 if not decision.use_strong:
-                    client = self.auxiliary_llm_client
+                    route_cheap = True
                     log.debug(
                         "model_router: routing to cheap model (intent=%s, conf=%.2f)",
                         decision.intent.value,
@@ -343,9 +441,17 @@ class LLMGateway:
 
         try:
             try:
-                resp = await client.chat_with_tools(
-                    messages=messages, system=system, tools=tools, **kwargs
-                )
+                if route_cheap and self.auxiliary_llm_client is not None:
+                    # Whole-turn cheap routing goes through the UNGATED routed
+                    # path (the router already decided) — not chat_with_tools,
+                    # which would consult the classification checkbox.
+                    resp = await self.auxiliary_llm_client.chat_with_tools_routed(
+                        messages, system, tools
+                    )
+                else:
+                    resp = await client.chat_with_tools(
+                        messages=messages, system=system, tools=tools, **kwargs
+                    )
             except Exception as exc:
                 if self.subsystem_guard is not None:
                     self.subsystem_guard.record_failure(guard_key, str(exc))
@@ -354,7 +460,13 @@ class LLMGateway:
                 self.subsystem_guard.record_success(guard_key)
             if self.cost_tracker is not None:
                 try:
-                    active_model = getattr(client, "model", "unknown")
+                    # Single cost owner: prefer the response's truthful
+                    # provenance model (the routed wrapper has no .model);
+                    # fall back to the client's model for direct calls.
+                    active_model = (
+                        getattr(resp, "provenance_model", None)
+                        or getattr(client, "model", "unknown")
+                    )
                     self.cost_tracker.record(
                         int(getattr(resp, "input_tokens", 0) or 0),
                         int(getattr(resp, "output_tokens", 0) or 0),

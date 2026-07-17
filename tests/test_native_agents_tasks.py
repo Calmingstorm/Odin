@@ -640,3 +640,40 @@ class TestLoopAgentBridge:
         t._loop_agent_bridge.format_agent_results_for_context.return_value = "formatted"
         assert await t._handle_collect_loop_agents(
             {"loop_id": "L1", "agent_ids": ["a1"]}) == "formatted"
+
+
+class TestBackgroundFollowupRouting:
+    """The conversational-followup callback resolves the auxiliary pointer at
+    CALL time and routes 'background_followup' cheap when enabled on the
+    current wrapper (Codex active); else the active client handles it."""
+
+    async def _capture_cb(self, gateway):
+        captured = {}
+
+        async def _fake_run(*a, **k):
+            captured["cb"] = k.get("codex_callback")
+
+        deps = _deps(llm_gateway=gateway)
+        t = AgentTaskTools(deps)
+        with patch("src.discord.native_tools.agents_tasks.run_background_task",
+                   new=_fake_run):
+            await t._handle_delegate_task(_message(),
+                                          {"steps": [{"tool_name": "web_search"}]})
+            await asyncio.sleep(0)
+        return captured["cb"]
+
+    async def test_routes_cheap_when_enabled(self):
+        aux = SimpleNamespace(is_enabled=lambda t: t == "background_followup",
+                              chat=AsyncMock(return_value="cheap"))
+        active = SimpleNamespace(chat=AsyncMock(return_value="strong"))
+        gateway = SimpleNamespace(active_client=active, auxiliary_llm_client=aux)
+        cb = await self._capture_cb(gateway)
+        assert await cb([], "s", 200) == "cheap"
+        aux.chat.assert_awaited_once()
+
+    async def test_falls_to_active_when_no_aux(self):
+        active = SimpleNamespace(chat=AsyncMock(return_value="strong"))
+        gateway = SimpleNamespace(active_client=active, auxiliary_llm_client=None)
+        cb = await self._capture_cb(gateway)
+        assert await cb([], "s", 200) == "strong"
+        active.chat.assert_awaited_once()

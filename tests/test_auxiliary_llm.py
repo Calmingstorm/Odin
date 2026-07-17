@@ -64,7 +64,9 @@ class TestAuxiliaryLLMConfig:
     def test_defaults(self):
         cfg = AuxiliaryLLMConfig()
         assert cfg.enabled is False
-        assert cfg.model == "gpt-4o-mini"
+        # Default is Luna (v3.62.x): the Codex catalog's cheap extraction/
+        # classification tier; gpt-4o-mini is no longer in the catalog.
+        assert cfg.model == "gpt-5.6-luna"
         assert cfg.max_tokens == 2048
         assert cfg.credentials_path == ""
         assert "compaction" in cfg.tasks
@@ -80,6 +82,22 @@ class TestAuxiliaryLLMConfig:
         assert cfg.max_tokens == 1024
         assert cfg.credentials_path == "/custom/path.json"
         assert cfg.tasks == ["compaction"]
+
+    def test_tasks_reject_unknown(self):
+        import pytest
+        with pytest.raises(ValueError, match="unknown auxiliary task"):
+            AuxiliaryLLMConfig(tasks=["compaction", "not_a_task"])
+
+    def test_tasks_dedupe_and_canonical_order(self):
+        # Input order/dupes ignored; stored in KNOWN_TASKS_ORDER order.
+        cfg = AuxiliaryLLMConfig(
+            tasks=["reflection", "compaction", "reflection", "classification"]
+        )
+        assert cfg.tasks == ["compaction", "reflection", "classification"]
+
+    def test_tasks_empty_is_valid(self):
+        cfg = AuxiliaryLLMConfig(tasks=[])
+        assert cfg.tasks == []
 
     def test_nested_in_openai_codex_config(self):
         cfg = OpenAICodexConfig()
@@ -594,3 +612,100 @@ class TestImports:
     def test_config_exports(self):
         from src.config.schema import AuxiliaryLLMConfig
         assert AuxiliaryLLMConfig is not None
+
+
+# ---------------------------------------------------------------------------
+# Lease/drain + ungated routed path (v3.62.x auxiliary reload support)
+# ---------------------------------------------------------------------------
+
+class TestRoutedAndLease:
+    async def test_chat_with_tools_routed_bypasses_task_gate(self):
+        # Empty enabled_tasks: is_enabled() is False for everything, yet the
+        # routed path must still use the aux client (the router is the gate).
+        client, aux, primary = _make_client(enabled_tasks=set())
+        from src.llm.types import LLMResponse
+        aux.chat_with_tools = AsyncMock(
+            return_value=LLMResponse(text="cheap", tool_calls=[])
+        )
+        out = await client.chat_with_tools_routed([], "s", [])
+        assert out.text == "cheap"
+        aux.chat_with_tools.assert_awaited_once()
+        primary.chat_with_tools.assert_not_called()
+
+    async def test_routed_falls_back_to_primary_on_empty(self):
+        client, aux, primary = _make_client(enabled_tasks=set())
+        from src.llm.types import LLMResponse
+        aux.chat_with_tools = AsyncMock(return_value=LLMResponse(text="", tool_calls=[]))
+        primary.chat_with_tools = AsyncMock(
+            return_value=LLMResponse(text="strong", tool_calls=[])
+        )
+        out = await client.chat_with_tools_routed([], "s", [])
+        assert out.text == "strong"
+        primary.chat_with_tools.assert_awaited_once()
+
+    async def test_close_when_idle_waits_for_inflight(self):
+        import asyncio
+        client, aux, primary = _make_client(enabled_tasks={"summarization"})
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow(*a, **k):
+            started.set()
+            await release.wait()
+            return "done"
+
+        aux.chat = AsyncMock(side_effect=_slow)
+        call = asyncio.create_task(client.chat([], "s", task="summarization"))
+        await started.wait()
+        # a drain started now must not close until the call finishes
+        drain = asyncio.create_task(client.close_when_idle(timeout=5))
+        await asyncio.sleep(0.05)
+        assert not drain.done()
+        assert not aux.close.called
+        release.set()
+        await call
+        await drain
+        aux.close.assert_awaited_once()
+
+
+class TestDrainTimeout:
+    async def test_close_when_idle_times_out_then_closes(self):
+        client, aux, primary = _make_client(enabled_tasks={"summarization"})
+        started = asyncio.Event()
+
+        async def _never(*a, **k):
+            started.set()
+            await asyncio.Event().wait()  # never returns
+
+        aux.chat = AsyncMock(side_effect=_never)
+        call = asyncio.create_task(client.chat([], "s", task="summarization"))
+        await started.wait()
+        # bounded drain gives up and closes anyway despite the stuck call
+        await client.close_when_idle(timeout=0.05)
+        aux.close.assert_awaited_once()
+        call.cancel()
+
+    async def test_routed_circuit_open_falls_back(self):
+        client, aux, primary = _make_client(enabled_tasks=set())
+        from src.llm.circuit_breaker import CircuitOpenError
+        from src.llm.types import LLMResponse
+        aux.chat_with_tools = AsyncMock(side_effect=CircuitOpenError("open", retry_after=1.0))
+        primary.chat_with_tools = AsyncMock(
+            return_value=LLMResponse(text="strong", tool_calls=[])
+        )
+        out = await client.chat_with_tools_routed([], "s", [])
+        assert out.text == "strong"
+        assert client._fallback_calls == 1
+
+
+class TestRoutedGenericError:
+    async def test_routed_generic_exception_falls_back(self):
+        client, aux, primary = _make_client(enabled_tasks=set())
+        from src.llm.types import LLMResponse
+        aux.chat_with_tools = AsyncMock(side_effect=RuntimeError("kaboom"))
+        primary.chat_with_tools = AsyncMock(
+            return_value=LLMResponse(text="strong", tool_calls=[])
+        )
+        out = await client.chat_with_tools_routed([], "s", [])
+        assert out.text == "strong"
+        assert client._fallback_calls == 1

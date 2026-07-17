@@ -137,6 +137,7 @@ class ConversationReflector:
         self._injection_token_budget = injection_token_budget
         self._enabled = enabled
         self._text_fn: TextFn | None = None
+        self._consolidation_fn: TextFn | None = None
         self._injection_cache: tuple[float, dict] | None = None
         self._use_stamps: dict[str, str] = {}
 
@@ -144,10 +145,27 @@ class ConversationReflector:
         """Register an async callable for LLM text generation.
 
         The callable signature is ``async (messages, system) -> str``.
-        When set, ``_reflect()`` and ``_consolidate()`` use this instead
-        of direct API calls.
+        When set, the reflection paths (``_reflect()`` /
+        ``reflect_on_operation()``) use this instead of direct API calls.
         """
         self._text_fn = fn
+
+    def set_consolidation_fn(self, fn: TextFn) -> None:
+        """Register a distinct async callable for the consolidation paths
+        (``_consolidate()`` / ``_repair_damaged()``).
+
+        Same signature as ``set_text_fn``. Kept separate so consolidation and
+        reflection can route to different auxiliary tasks (a single shared
+        ``_text_fn`` erased that distinction). Falls back to ``_text_fn`` when
+        unset, preserving the prior single-callback behavior.
+        """
+        self._consolidation_fn = fn
+
+    @property
+    def _consolidation_text_fn(self) -> TextFn | None:
+        """The callable the consolidation paths use — the dedicated
+        consolidation fn when set, else the reflection ``_text_fn``."""
+        return self._consolidation_fn or self._text_fn
 
     def _load(self) -> dict:
         if self._path.exists():
@@ -817,7 +835,7 @@ class ConversationReflector:
         and the ``damaged`` flag are ever modified; repair is maintenance,
         not evidence of reuse, so timestamps and expiry semantics stay as-is.
         """
-        if not damaged or not self._text_fn:
+        if not damaged or not self._consolidation_text_fn:
             return [], damaged
         repaired: list[dict] = []
         still_damaged: list[dict] = []
@@ -841,7 +859,7 @@ class ConversationReflector:
                 "Lesson:\n" + lesson
             )
             try:
-                raw = await self._text_fn(
+                raw = await self._consolidation_text_fn(
                     [{"role": "user", "content": prompt}], _REPAIR_SYSTEM
                 )
             except Exception as exc:
@@ -973,10 +991,10 @@ class ConversationReflector:
             return kept + damaged
 
         try:
-            if not self._text_fn:
+            if not self._consolidation_text_fn:
                 log.warning("No text completion backend configured for consolidation")
                 return _fallback()
-            raw_text = await self._text_fn(
+            raw_text = await self._consolidation_text_fn(
                 [{"role": "user", "content": prompt}],
                 system_instruction,
             )

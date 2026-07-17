@@ -9,6 +9,8 @@ Falls back to the primary client transparently on error.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
@@ -21,15 +23,27 @@ if TYPE_CHECKING:
 
 log = get_logger("auxiliary_llm")
 
-# Tasks that can be routed to the auxiliary model
-KNOWN_TASKS = frozenset({
+# Tasks that can be routed to the auxiliary model. KNOWN_TASKS_ORDER is the
+# canonical persist/display order (KNOWN_TASKS is the membership set).
+# CONSUMER_BACKED names have real production call sites today; the rest are
+# forward-compat API values with no consumer yet (the UI marks them
+# unavailable rather than offering a checkbox that does nothing).
+KNOWN_TASKS_ORDER = (
     "compaction",
     "reflection",
     "consolidation",
     "background_followup",
-    "vision_description",
     "classification",
+    "vision_description",
     "summarization",
+)
+KNOWN_TASKS = frozenset(KNOWN_TASKS_ORDER)
+CONSUMER_BACKED_TASKS = frozenset({
+    "compaction",
+    "reflection",
+    "consolidation",
+    "background_followup",
+    "classification",
 })
 
 
@@ -64,6 +78,39 @@ class AuxiliaryLLMClient:
         self._aux_calls: int = 0
         self._fallback_calls: int = 0
         self._primary_direct_calls: int = 0
+        # Lease refcount so a live-reload swap can drain the RETIRED wrapper
+        # without cutting an in-flight call. Every entry point brackets its
+        # work with _lease(); close_when_idle() waits for the count to reach
+        # zero (bounded) before closing the aiohttp session.
+        self._inflight: int = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+
+    @contextlib.asynccontextmanager
+    async def _lease(self):
+        """Bracket one auxiliary call so a retiring wrapper can drain."""
+        self._inflight += 1
+        self._idle.clear()
+        try:
+            yield
+        finally:
+            self._inflight -= 1
+            if self._inflight == 0:
+                self._idle.set()
+
+    async def close_when_idle(self, timeout: float = 30.0) -> None:
+        """Wait (bounded) for in-flight calls to finish, then close the
+        aux client's session. Called on a RETIRED wrapper AFTER the live
+        pointer has been swapped away and the provider_lock released — never
+        while holding the lock (an hour-long call must not block a reload)."""
+        try:
+            await asyncio.wait_for(self._idle.wait(), timeout=timeout)
+        except TimeoutError:
+            log.warning(
+                "Retired auxiliary wrapper still had %d in-flight call(s) after %.0fs; "
+                "closing anyway", self._inflight, timeout,
+            )
+        await self.aux_client.close()
 
     def is_enabled(self, task: str) -> bool:
         """Return True if *task* should use the auxiliary model."""
@@ -86,6 +133,12 @@ class AuxiliaryLLMClient:
             self._primary_direct_calls += 1
             return await self.primary_client.chat(messages, system, max_tokens=max_tokens)
 
+        async with self._lease():
+            return await self._chat_aux(messages, system, task, max_tokens)
+
+    async def _chat_aux(
+        self, messages: list[dict], system: str, task: str, max_tokens: int | None
+    ) -> str:
         try:
             result = await self.aux_client.chat(messages, system, max_tokens=max_tokens)
             if result:
@@ -115,6 +168,12 @@ class AuxiliaryLLMClient:
             self._primary_direct_calls += 1
             return await self.primary_client.chat_with_tools(messages, system, tools)
 
+        async with self._lease():
+            return await self._chat_with_tools_aux(messages, system, tools, task)
+
+    async def _chat_with_tools_aux(
+        self, messages: list[dict], system: str, tools: list[dict], task: str
+    ) -> LLMResponse:
         try:
             result = await self.aux_client.chat_with_tools(messages, system, tools)
             if result.text or result.tool_calls:
@@ -130,6 +189,40 @@ class AuxiliaryLLMClient:
         self._fallback_calls += 1
         self._track_cost(task, is_fallback=True)
         return await self.primary_client.chat_with_tools(messages, system, tools)
+
+    async def chat_with_tools_routed(
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict],
+    ) -> LLMResponse:
+        """Run a WHOLE turn on the auxiliary model, ungated by the task set.
+
+        The ModelRouter has already decided this turn is cheap — its decision
+        IS the gate, so this path must not additionally consult
+        ``is_enabled()`` (that would make whole-turn routing secretly depend on
+        the ``classification`` checkbox, which gates only the router's own
+        intent sub-calls). Keeps the wrapper's transparent primary fallback.
+
+        Cost is NOT tracked here: the gateway's guarded call is the single
+        accounting owner for a whole turn (it records from the returned
+        ``LLMResponse`` token counts + provenance). Double-counting would
+        follow if the wrapper recorded too.
+        """
+        async with self._lease():
+            try:
+                result = await self.aux_client.chat_with_tools(messages, system, tools)
+                if result.text or result.tool_calls:
+                    self._aux_calls += 1
+                    return result
+                log.warning("Auxiliary LLM routed turn returned empty, falling back")
+            except CircuitOpenError:
+                log.warning("Auxiliary LLM circuit open for routed turn, falling back")
+            except Exception as exc:
+                log.warning("Auxiliary LLM error for routed turn: %s, falling back", exc)
+
+            self._fallback_calls += 1
+            return await self.primary_client.chat_with_tools(messages, system, tools)
 
     def make_chat_fn(self, task: str):
         """Return an ``async (messages, system) -> str`` callable for a specific task.

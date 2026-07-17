@@ -319,14 +319,19 @@ class TestCallWithTools:
     async def test_model_router_cheap_path(self):
         strong = SimpleNamespace(chat_with_tools=AsyncMock(), model="gpt-5.5")
         aux_resp = SimpleNamespace(input_tokens=1, output_tokens=1)
-        aux = SimpleNamespace(chat_with_tools=AsyncMock(return_value=aux_resp), model="cheap")
+        # Cheap whole-turn routing uses the UNGATED chat_with_tools_routed
+        # (the router is the gate) — not chat_with_tools, which would consult
+        # the classification checkbox.
+        aux = SimpleNamespace(
+            chat_with_tools_routed=AsyncMock(return_value=aux_resp), model="cheap"
+        )
         router = MagicMock()
         router.route = AsyncMock(return_value=SimpleNamespace(
             use_strong=False, intent=SimpleNamespace(value="chat"), confidence=0.9))
         gw = _gw(codex=strong, router=router, aux=aux)
         out = await gw.call_with_tools(messages=[], system="s", tools=[], user_message="hi")
         assert out is aux_resp  # routed to the cheap auxiliary client
-        aux.chat_with_tools.assert_awaited_once()
+        aux.chat_with_tools_routed.assert_awaited_once()
 
     async def test_call_with_tools_preserves_provenance(self):
         """The gateway wrapper returns the child response's provenance
@@ -349,16 +354,16 @@ class TestCallWithTools:
         about."""
         from src.llm.types import LLMResponse
         aux_resp = LLMResponse(text="ok", provenance_provider="codex",
-                               provenance_model="gpt-4o-mini")
+                               provenance_model="gpt-5.6-luna")
         strong = SimpleNamespace(chat_with_tools=AsyncMock(), model="gpt-5.6-sol")
-        aux = SimpleNamespace(chat_with_tools=AsyncMock(return_value=aux_resp),
-                              model="gpt-4o-mini")
+        aux = SimpleNamespace(chat_with_tools_routed=AsyncMock(return_value=aux_resp),
+                              model="gpt-5.6-luna")
         router = MagicMock()
         router.route = AsyncMock(return_value=SimpleNamespace(
             use_strong=False, intent=SimpleNamespace(value="chat"), confidence=0.9))
         gw = _gw(codex=strong, router=router, aux=aux)
         out = await gw.call_with_tools(messages=[], system="s", tools=[], user_message="hi")
-        assert out.provenance_model == "gpt-4o-mini"
+        assert out.provenance_model == "gpt-5.6-luna"
         strong.chat_with_tools.assert_not_awaited()
 
     async def test_cost_record_exception_non_fatal(self):
@@ -380,3 +385,140 @@ class TestCallWithTools:
         gw = _gw(codex=strong, router=router, aux=SimpleNamespace())
         out = await gw.call_with_tools(messages=[], system="s", tools=[], user_message="hi")
         assert out is resp  # router failure is non-fatal → strong client used
+
+
+class TestAuxiliaryRouting:
+    """wire_callbacks resolves the aux pointer at CALL time (a live reload
+    swap must be honored), and named tasks route through the wrapper."""
+
+    async def test_named_task_routes_through_current_aux_when_enabled(self):
+        aux = SimpleNamespace(
+            is_enabled=lambda t: t == "compaction",
+            chat=AsyncMock(return_value="cheap summary"),
+        )
+        client = SimpleNamespace(chat=AsyncMock(return_value="strong summary"))
+        gw = _gw(codex=client, aux=aux)
+        gw.wire_callbacks()
+        compaction_fn = gw.sessions.set_compaction_fn.call_args.args[0]
+        assert await compaction_fn([], "s") == "cheap summary"
+        aux.chat.assert_awaited_once()
+        client.chat.assert_not_called()
+
+    async def test_named_task_falls_to_active_when_task_disabled(self):
+        aux = SimpleNamespace(
+            is_enabled=lambda t: False,  # nothing delegated
+            chat=AsyncMock(return_value="cheap"),
+        )
+        client = SimpleNamespace(chat=AsyncMock(return_value="strong"))
+        gw = _gw(codex=client, aux=aux)
+        gw.wire_callbacks()
+        reflection_fn = gw.reflector.set_text_fn.call_args.args[0]
+        assert await reflection_fn([], "s") == "strong"
+        aux.chat.assert_not_called()
+
+    async def test_consolidation_wired_to_its_own_fn(self):
+        aux = SimpleNamespace(
+            is_enabled=lambda t: t == "consolidation",
+            chat=AsyncMock(return_value="cheap consolidation"),
+        )
+        client = SimpleNamespace(chat=AsyncMock(return_value="strong"))
+        gw = _gw(codex=client, aux=aux)
+        gw.wire_callbacks()
+        gw.reflector.set_consolidation_fn.assert_called_once()
+        consolidation_fn = gw.reflector.set_consolidation_fn.call_args.args[0]
+        assert await consolidation_fn([], "s") == "cheap consolidation"
+        aux.chat.assert_awaited_once()
+
+    async def test_named_task_uses_active_when_provider_not_codex(self):
+        # Aux routing is Codex-only; on an ollama switch the named job must
+        # stay on the active provider even if the task is "enabled".
+        aux = SimpleNamespace(is_enabled=lambda t: True, chat=AsyncMock(return_value="cheap"))
+        client = SimpleNamespace(chat=AsyncMock(return_value="ollama out"))
+        gw = _gw(_cfg("ollama"), codex=object(), ollama=client, aux=aux)
+        gw.wire_callbacks()
+        compaction_fn = gw.sessions.set_compaction_fn.call_args.args[0]
+        assert await compaction_fn([], "s") == "ollama out"
+        aux.chat.assert_not_called()
+
+
+class TestReloadAuxiliary:
+    def _aux_cfg(self, enabled=True, model="gpt-5.6-terra", tasks=("compaction",)):
+        cfg = _cfg()
+        cfg.openai_codex.auxiliary = SimpleNamespace(
+            enabled=enabled, model=model, tasks=list(tasks),
+            max_tokens=2048, credentials_path="",
+        )
+        return cfg
+
+    async def test_disabled_retires_current_wrapper(self):
+        old = SimpleNamespace(close_when_idle=AsyncMock())
+        router = SimpleNamespace(aux_client=old)
+        gw = _gw(self._aux_cfg(enabled=False), codex=object(), router=router, aux=old)
+        r = await gw.reload_auxiliary()
+        assert r["effective_enabled"] is False
+        assert gw.auxiliary_llm_client is None
+        assert router.aux_client is None
+        old.close_when_idle.assert_awaited_once()
+
+    async def test_enable_builds_swaps_and_drains(self):
+        old = SimpleNamespace(close_when_idle=AsyncMock())
+        router = SimpleNamespace(aux_client=old)
+        primary = object()
+        gw = _gw(self._aux_cfg(), codex=primary, router=router, aux=old)
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient"), \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient") as aux_cls:
+            pool_cls.return_value.is_configured.return_value = True
+            candidate = SimpleNamespace(close_when_idle=AsyncMock())
+            aux_cls.return_value = candidate
+            r = await gw.reload_auxiliary()
+        assert r["effective_enabled"] is True
+        assert gw.auxiliary_llm_client is candidate
+        assert router.aux_client is candidate
+        old.close_when_idle.assert_awaited_once()  # retired one drained
+
+    async def test_no_primary_client(self):
+        gw = _gw(self._aux_cfg(), codex=None)
+        r = await gw.reload_auxiliary()
+        assert r["effective_enabled"] is False
+        assert "no primary" in r["reason"].lower()
+
+    async def test_build_exception_leaves_prior_untouched(self):
+        old = SimpleNamespace(close_when_idle=AsyncMock())
+        gw = _gw(self._aux_cfg(), codex=object(), aux=old)
+        with patch("src.discord.llm_gateway.CodexAuthPool", side_effect=RuntimeError("boom")):
+            r = await gw.reload_auxiliary()
+        assert r["effective_enabled"] is False
+        assert "build failed" in r["reason"]
+        assert gw.auxiliary_llm_client is old
+
+    async def test_primary_changed_during_reload_aborts(self):
+        primary = object()
+        gw = _gw(self._aux_cfg(), codex=primary, aux=None)
+        candidate = SimpleNamespace(close_when_idle=AsyncMock())
+
+        def _build(*a, **k):
+            # The primary is recreated DURING the build phase (after
+            # primary_at_build was captured, before the swap lock).
+            gw.codex_client = object()
+            return candidate
+
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient"), \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", side_effect=_build):
+            pool_cls.return_value.is_configured.return_value = True
+            r = await gw.reload_auxiliary()
+        assert r["effective_enabled"] is False
+        assert "primary changed" in r["reason"]
+        assert gw.auxiliary_llm_client is None  # candidate not installed
+        candidate.close_when_idle.assert_awaited_once()
+
+    async def test_missing_credentials_leaves_prior_untouched(self):
+        old = SimpleNamespace(close_when_idle=AsyncMock())
+        gw = _gw(self._aux_cfg(), codex=object(), aux=old)
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls:
+            pool_cls.return_value.is_configured.return_value = False
+            r = await gw.reload_auxiliary()
+        assert r["effective_enabled"] is False
+        assert gw.auxiliary_llm_client is old  # unchanged
+        old.close_when_idle.assert_not_called()

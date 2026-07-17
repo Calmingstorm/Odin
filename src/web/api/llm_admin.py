@@ -114,6 +114,17 @@ def _persist_llm_sections_sync(bot) -> None:
     )
     existing["openai_codex"]["agent_model"] = bot.config.openai_codex.agent_model
 
+    # Auxiliary: persist ONLY the card-exposed fields (enabled/model/tasks).
+    # credentials_path and max_tokens are deliberately not exposed or
+    # overwritten by this surface.
+    aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
+    if aux_cfg is not None:
+        if "auxiliary" not in existing["openai_codex"]:
+            existing["openai_codex"]["auxiliary"] = {}
+        existing["openai_codex"]["auxiliary"]["enabled"] = aux_cfg.enabled
+        existing["openai_codex"]["auxiliary"]["model"] = aux_cfg.model
+        existing["openai_codex"]["auxiliary"]["tasks"] = list(aux_cfg.tasks)
+
     if "ollama" not in existing:
         existing["ollama"] = {}
     existing["ollama"]["enabled"] = bot.config.ollama.enabled
@@ -194,6 +205,37 @@ def register_connection_pools(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({"closed_count": count})
 
 
+def _auxiliary_status(bot) -> dict:
+    """Configured vs effective auxiliary state for /api/llm/status.
+
+    ``enabled``/``model``/``tasks`` are the persisted config; the
+    ``effective_*`` fields describe the live runtime wrapper (present only
+    when config produced a working client). ``unavailable_reason`` is set
+    when enabled config could NOT produce a live client (e.g. no auth).
+    ``consumer_backed_tasks`` tells the UI which task checkboxes actually
+    control a workload today vs which are forward-compat only.
+    """
+    from ...llm.auxiliary import CONSUMER_BACKED_TASKS, KNOWN_TASKS_ORDER
+
+    aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
+    live = getattr(bot.llm_gateway, "auxiliary_llm_client", None)
+    configured_enabled = bool(aux_cfg and aux_cfg.enabled)
+    unavailable_reason = None
+    if configured_enabled and live is None:
+        unavailable_reason = "enabled but no live auxiliary client (check credentials)"
+    return {
+        "enabled": configured_enabled,
+        "model": aux_cfg.model if aux_cfg else "",
+        "tasks": list(aux_cfg.tasks) if aux_cfg else [],
+        "effective_enabled": live is not None,
+        "effective_model": getattr(getattr(live, "aux_client", None), "model", None),
+        "effective_tasks": sorted(live.enabled_tasks) if live is not None else [],
+        "unavailable_reason": unavailable_reason,
+        "known_tasks": list(KNOWN_TASKS_ORDER),
+        "consumer_backed_tasks": sorted(CONSUMER_BACKED_TASKS),
+    }
+
+
 def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
     """LLM provider management (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -258,6 +300,7 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "max_tokens": kimi_cfg.max_tokens if kimi_cfg else 4096,
                 "has_api_key": kimi_has_key,
             },
+            "auxiliary": _auxiliary_status(bot),
         }
 
         client = bot.llm_gateway.active_client
@@ -387,6 +430,72 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             "agent_model": cfg.agent_model,
             "configured": bot.llm_gateway.codex_client is not None,
         })
+
+    @routes.put("/api/llm/auxiliary/config")
+    async def llm_auxiliary_config(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        from ...llm.auxiliary import KNOWN_TASKS, KNOWN_TASKS_ORDER
+
+        aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
+        if aux_cfg is None:
+            return web.json_response({"error": "auxiliary config unavailable"}, status=503)
+
+        # Validate the whole candidate BEFORE mutating (assignment does not
+        # run the pydantic field_validator). Presence-checked: an absent key
+        # leaves the existing value untouched.
+        tasks_present = "tasks" in body
+        new_tasks = None
+        if tasks_present:
+            raw = body.get("tasks")
+            if not isinstance(raw, list):
+                return web.json_response({"error": "tasks must be a list"}, status=400)
+            unknown = [t for t in raw if t not in KNOWN_TASKS]
+            if unknown:
+                return web.json_response(
+                    {"error": f"unknown auxiliary task(s): {sorted(set(unknown))}",
+                     "allowed": list(KNOWN_TASKS_ORDER)},
+                    status=400,
+                )
+            seen = set(raw)
+            new_tasks = [t for t in KNOWN_TASKS_ORDER if t in seen]
+
+        # Snapshot for rollback if the live rebuild fails.
+        prior = (aux_cfg.enabled, aux_cfg.model, list(aux_cfg.tasks))
+        changed = False
+        if "enabled" in body:
+            aux_cfg.enabled = bool(body["enabled"])
+            changed = True
+        if "model" in body and str(body["model"]).strip():
+            aux_cfg.model = str(body["model"]).strip()
+            changed = True
+        if tasks_present:
+            aux_cfg.tasks = new_tasks
+            changed = True
+
+        if changed:
+            # reload_auxiliary is self-locking (two-phase, drains outside the
+            # lock) — do NOT wrap it in provider_lock here.
+            try:
+                result = await bot.llm_gateway.reload_auxiliary()
+            except Exception as e:
+                aux_cfg.enabled, aux_cfg.model, aux_cfg.tasks = prior
+                log.exception("Auxiliary reload raised")
+                return web.json_response({"error": f"reload failed: {e}"}, status=500)
+            # A disabled result is expected when enabled=false; only roll back
+            # when we ASKED to enable but got an unavailable reason.
+            if aux_cfg.enabled and not result.get("effective_enabled"):
+                aux_cfg.enabled, aux_cfg.model, aux_cfg.tasks = prior
+                return web.json_response(
+                    {"error": result.get("reason", "auxiliary could not be enabled")},
+                    status=400,
+                )
+            await _persist_config(bot)
+
+        return web.json_response({"status": "updated", **_auxiliary_status(bot)})
 
     @routes.put("/api/llm/ollama/config")
     async def llm_ollama_config(request: web.Request) -> web.Response:

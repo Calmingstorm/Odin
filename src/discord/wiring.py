@@ -443,9 +443,22 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
                 auxiliary_llm_client = AuxiliaryLLMClient(
                     aux_client=aux_client,
                     primary_client=codex_client,
+                    # The configured task set — WITHOUT this the wrapper
+                    # defaulted to ALL known tasks, silently ignoring the
+                    # operator's list (the wiring bug this PR fixes).
+                    enabled_tasks=set(_aux.tasks),
                     cost_tracker=cost_tracker,
                 )
-                log.info("Auxiliary LLM client enabled (model: %s)", _aux.model)
+                # The router's cheap-LLM intent classifier needs the aux
+                # client too — it was constructed without one, so low-
+                # confidence turns never got a cheap second opinion.
+                if model_router is not None:
+                    model_router.aux_client = auxiliary_llm_client
+                log.info(
+                    "Auxiliary LLM client enabled (model: %s, tasks: %s)",
+                    _aux.model,
+                    ", ".join(_aux.tasks) or "none",
+                )
         except Exception:
             log.exception("Failed to initialize auxiliary LLM client")
 
@@ -906,11 +919,16 @@ async def shutdown_services(bot) -> None:
             except Exception:
                 log.exception("Error closing SSH pool")
 
-    # Close auxiliary LLM client
-    aux = getattr(bot, "auxiliary_llm_client", None)
+    # Close auxiliary LLM client — the gateway holds the CANONICAL live
+    # instance (reloads replace it there); the flat bot handle can be a
+    # retired generation. Prefer the gateway's, fall back to the flat handle.
+    _gateway = getattr(bot, "llm_gateway", None)
+    aux = getattr(_gateway, "auxiliary_llm_client", None) or getattr(
+        bot, "auxiliary_llm_client", None
+    )
     if aux is not None:
         try:
-            await aux.close()
+            await aux.close_when_idle()
         except Exception:
             log.exception("Error closing auxiliary LLM client")
 

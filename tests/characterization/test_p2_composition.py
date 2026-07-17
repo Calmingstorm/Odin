@@ -82,3 +82,48 @@ class TestTwoStageComposition:
         src = inspect.getsource(OdinBot.on_ready)
         assert "self.scheduled_events._on_scheduled_task" in src
         assert "self.scheduled_events._on_schedule_failure" in src
+
+
+class TestAuxiliaryWiring:
+    """The wiring bug fix: build_services must pass the configured task set
+    to the AuxiliaryLLMClient and bind the ModelRouter's aux classifier
+    client (both were missing — the wrapper defaulted to ALL tasks and the
+    router got no cheap classifier)."""
+
+    def test_enabled_tasks_passed_and_router_bound(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        from unittest.mock import MagicMock
+
+        import src.discord.wiring as wiring
+
+        captured = {}
+
+        class _FakeAux:
+            def __init__(self, *, aux_client, primary_client, enabled_tasks, cost_tracker):
+                captured["enabled_tasks"] = enabled_tasks
+
+        # AuxiliaryLLMClient is imported locally in build_services → patch it
+        # at its source module; the Codex classes are module-level in wiring.
+        import src.llm.auxiliary as aux_mod
+        monkeypatch.setattr(aux_mod, "AuxiliaryLLMClient", _FakeAux)
+        fake_pool = MagicMock()
+        fake_pool.is_configured.return_value = True
+        fake_pool._accounts = [object()]
+        monkeypatch.setattr(wiring, "CodexAuthPool", lambda *a, **k: fake_pool)
+        monkeypatch.setattr(wiring, "CodexChatClient", lambda *a, **k: MagicMock())
+
+        bot = make_bot(config_overrides={
+            "openai_codex": {
+                "enabled": True,
+                "credentials_path": "/fake/creds.json",
+                "model_routing": {"enabled": True},
+                "auxiliary": {
+                    "enabled": True,
+                    "model": "gpt-5.6-terra",
+                    "tasks": ["compaction", "reflection"],
+                },
+            },
+        })
+        assert captured["enabled_tasks"] == {"compaction", "reflection"}
+        assert bot.llm_gateway.model_router is not None
+        assert bot.llm_gateway.model_router.aux_client is bot.llm_gateway.auxiliary_llm_client
