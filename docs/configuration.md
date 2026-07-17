@@ -85,7 +85,25 @@ openai_codex:
     enabled: true
     max_context_chars: 48000
     keep_recent_iterations: 3
+  auxiliary:                     # cheaper model for delegated background jobs
+    enabled: false
+    model: gpt-5.6-luna
+    max_tokens: 2048
+    credentials_path: ""         # empty = share the main Codex credentials
+    tasks:                       # which jobs route to the auxiliary model
+      - compaction
+      - reflection
+      - consolidation
+      - background_followup
 ```
+
+The **auxiliary** model is an optional cheaper/secondary Codex model that
+handles delegated background jobs (compaction, reflection, consolidation,
+background follow-ups, and classification), falling back to the main model on
+any failure. It shares the main Codex credentials unless `credentials_path`
+is set, and its model and task list are editable live from the Web UI.
+`tasks` accepts only the wired job names above (unknown names are rejected at
+load); other API-valid task names are reserved for future consumers.
 
 Generate credentials: `python3 scripts/codex_login.py`
 

@@ -50,6 +50,23 @@ openai_codex:
     confidence_threshold: 0.6
     max_cheap_length: 200
     strong_intents: ["task", "complex"]
+  # Auxiliary model: a cheaper/secondary Codex model handles delegated
+  # background jobs, falling back to the main model on any failure. Shares the
+  # main Codex credentials unless credentials_path is set. Model and task list
+  # are editable live from the WebUI. tasks = which jobs route to it;
+  # compaction, reflection, consolidation, background_followup, and
+  # classification are wired today (other KNOWN task names are reserved API
+  # values with no consumer yet). Unknown task names are rejected at load.
+  auxiliary:
+    enabled: false
+    model: gpt-5.6-luna
+    max_tokens: 2048
+    credentials_path: ""   # empty = share the main Codex credentials
+    tasks:
+      - compaction
+      - reflection
+      - consolidation
+      - background_followup
 
 ollama:
   enabled: false
