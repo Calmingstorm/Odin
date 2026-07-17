@@ -344,50 +344,6 @@ class TestConnectionPools:
 # --------------------------------------------------------------------------- #
 # Provider config PUTs
 # --------------------------------------------------------------------------- #
-class TestProviderRoutePersistFailure:
-    """Round-5: the non-transactional provider routes now snapshot/restore
-    exact runtime state on a persist failure (my fail-loud PersistError made
-    a write failure leave rejected values live otherwise)."""
-
-    @pytest.mark.asyncio
-    async def test_codex_config_persist_failure_restores(self):
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        bot.llm_gateway.codex_client = object()
-        bot.config.openai_codex.model = "gpt-5.6-sol"
-        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), False))
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config", json={"model": "gpt-5.6-terra"})
-            assert r.status == 500
-        # rejected value restored, and the client reloaded back
-        assert bot.config.openai_codex.model == "gpt-5.6-sol"
-        assert bot.llm_gateway.reload_codex_inner.await_count == 2  # forward + restore
-
-    @pytest.mark.asyncio
-    async def test_ollama_config_persist_failure_restores(self):
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        bot.config.ollama.model = "qwen-old"
-        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), False))
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/ollama/config", json={"model": "qwen-new"})
-            assert r.status == 500
-        assert bot.config.ollama.model == "qwen-old"
-        assert bot.llm_gateway.reload_ollama_inner.await_count == 2
-
-    @pytest.mark.asyncio
-    async def test_kimi_config_persist_failure_restores(self):
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        bot.config.kimi.model = "kimi-old"
-        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), False))
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/kimi/config", json={"model": "kimi-new"})
-            assert r.status == 500
-        assert bot.config.kimi.model == "kimi-old"
-        assert bot.llm_gateway.reload_kimi_inner.await_count == 2
-
-
 class TestProviderConfig:
     @pytest.mark.asyncio
     async def test_codex_config(self):
@@ -856,19 +812,6 @@ class TestOllamaAdmin:
             assert r.status == 200 and (await r.json())["model"] == "q:7b"
 
     @pytest.mark.asyncio
-    async def test_set_model_persist_failure_restores(self):
-        app, bot = _app(register_ollama_admin)
-        _gw(bot)
-        bot.config.ollama.model = "q:old"
-        bot.llm_gateway.ollama_client = _provider_client(models=["q:new"])
-        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), False))
-        async with TestClient(TestServer(app)) as c:
-            r = await c.post("/api/ollama/model", json={"model": "q:new"})
-            assert r.status == 500
-        assert bot.config.ollama.model == "q:old"  # restored
-        assert bot.llm_gateway.ollama_client.model == "q:old"
-
-    @pytest.mark.asyncio
     async def test_set_model_no_lock(self):
         app, bot = _app(register_ollama_admin)
         bot.llm_gateway.provider_lock = None
@@ -930,19 +873,6 @@ class TestKimiAdmin:
             assert (await c.post("/api/kimi/model", json={"model": "other"})).status == 400
             r = await c.post("/api/kimi/model", json={"model": "kimi-k2"})
             assert r.status == 200 and (await r.json())["model"] == "kimi-k2"
-
-    @pytest.mark.asyncio
-    async def test_kimi_set_model_persist_failure_restores(self):
-        app, bot = _app(register_kimi_admin)
-        _gw(bot)
-        bot.config.kimi.model = "k-old"
-        bot.llm_gateway.kimi_client = _provider_client(models=["k-new"])
-        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), False))
-        async with TestClient(TestServer(app)) as c:
-            r = await c.post("/api/kimi/model", json={"model": "k-new"})
-            assert r.status == 500
-        assert bot.config.kimi.model == "k-old"
-        assert bot.llm_gateway.kimi_client.model == "k-old"
 
     @pytest.mark.asyncio
     async def test_kimi_set_model_no_lock(self):
@@ -1204,163 +1134,34 @@ class TestPersistHelpers:
             _persist_llm_sections_sync(_bot())
 
 
-class TestPersistOrRestore:
-    """Direct pins for _persist_or_restore's cancel/fallback branches."""
+class TestLegacyPersistConfig:
+    """The fail-soft `_persist_config` shared by the sibling provider routes
+    (Codex/Ollama/Kimi config + model-set). The filesystem worker settles via
+    the gateway's run_persist_settled; PersistError is swallowed (master's
+    silent no-op), a genuine write error propagates (500), and a cancellation
+    that arrived mid-write is re-raised — never swallowed."""
 
     @pytest.mark.asyncio
-    async def test_no_gateway_method_falls_back(self):
-        from src.web.api.llm_admin import _persist_or_restore
+    async def test_persist_error_swallowed_fail_soft(self):
+        from src.web.api.llm_admin import PersistError, _persist_config
         bot = _bot()
-        # a bare gateway without run_persist_settled → fallback to _persist_config
-        del bot.llm_gateway.run_persist_settled
-        bot.llm_gateway = SimpleNamespace()  # no run_persist_settled attr
-        restored = []
-        exc = await _persist_or_restore(bot, lambda: restored.append(True))
-        assert exc is None
-        assert restored == []  # success → no restore
+        bot.llm_gateway.run_persist_settled = AsyncMock(
+            return_value=(PersistError("config.yml does not exist"), False))
+        await _persist_config(bot)  # must NOT raise — legacy no-op
 
     @pytest.mark.asyncio
-    async def test_cancel_after_restore_reraises(self):
-        from src.web.api.llm_admin import _persist_or_restore
+    async def test_genuine_write_error_propagates(self):
+        from src.web.api.llm_admin import _persist_config
         bot = _bot()
-        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), True))
-        restored = []
-
-        async def _restore():
-            restored.append(True)
-
-        with pytest.raises(asyncio.CancelledError):
-            await _persist_or_restore(bot, _restore)
-        assert restored == [True]  # restored before re-raising the cancellation
+        bot.llm_gateway.run_persist_settled = AsyncMock(
+            return_value=(OSError("disk full"), False))
+        with pytest.raises(OSError, match="disk full"):
+            await _persist_config(bot)
 
     @pytest.mark.asyncio
-    async def test_cancel_after_success_reraises_without_restore(self):
-        from src.web.api.llm_admin import _persist_or_restore
+    async def test_cancellation_reraised_never_swallowed(self):
+        from src.web.api.llm_admin import _persist_config
         bot = _bot()
         bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(None, True))
-        restored = []
-
-        async def _restore():
-            restored.append(True)
-
         with pytest.raises(asyncio.CancelledError):
-            await _persist_or_restore(bot, _restore)
-        assert restored == []  # committed → NOT restored, just re-raised
-
-
-class TestRoundSixTransaction:
-    """Validate-before-mutate, forward-reload/cancel restore, secret-marker
-    restore, and shielded rollback (round-6 review)."""
-
-    @pytest.mark.asyncio
-    async def test_codex_invalid_field_leaves_config_untouched(self):
-        # {enabled:false, max_tokens:<invalid>} → 400, and enabled NOT applied.
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        bot.llm_gateway.codex_client = object()
-        bot.config.openai_codex.enabled = True
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"enabled": False, "max_tokens": "nope"})
-            assert r.status == 400
-        assert bot.config.openai_codex.enabled is True  # nothing mutated
-        bot.llm_gateway.reload_codex_inner.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_ollama_invalid_field_leaves_config_untouched(self):
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        bot.config.ollama.enabled = True
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/ollama/config",
-                            json={"enabled": False, "timeout": "bad"})
-            assert r.status == 400
-        assert bot.config.ollama.enabled is True
-        bot.llm_gateway.reload_ollama_inner.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_kimi_invalid_field_leaves_config_untouched(self):
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        bot.config.kimi.enabled = True
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/kimi/config",
-                            json={"enabled": False, "max_tokens": "bad"})
-            assert r.status == 400
-        assert bot.config.kimi.enabled is True
-        bot.llm_gateway.reload_kimi_inner.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_codex_forward_reload_failure_restores(self):
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        bot.config.openai_codex.model = "gpt-5.6-sol"
-        bot.llm_gateway.reload_codex_inner = AsyncMock(side_effect=RuntimeError("reload boom"))
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config", json={"model": "gpt-5.6-terra"})
-            assert r.status == 500
-        # forward reload failed → config restored (not left at the rejected value)
-        assert bot.config.openai_codex.model == "gpt-5.6-sol"
-
-    @pytest.mark.asyncio
-    async def test_ollama_api_key_marker_restored_on_failure(self):
-        from src.web.api.llm_admin import _ui_set_secrets
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        _ui_set_secrets.discard("ollama.api_key")  # not UI-set before
-        bot.config.ollama.api_key = "${ENV}"
-        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), False))
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/ollama/config", json={"api_key": "realsecret"})
-            assert r.status == 500
-        # both the value AND the UI-set marker are rolled back
-        assert bot.config.ollama.api_key == "${ENV}"
-        assert "ollama.api_key" not in _ui_set_secrets
-
-    @pytest.mark.asyncio
-    async def test_kimi_api_key_marker_restored_on_failure(self):
-        from src.web.api.llm_admin import _ui_set_secrets
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        _ui_set_secrets.discard("kimi.api_key")
-        bot.config.kimi.api_key = "${ENV}"
-        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), False))
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/kimi/config", json={"api_key": "realsecret"})
-            assert r.status == 500
-        assert bot.config.kimi.api_key == "${ENV}"
-        assert "kimi.api_key" not in _ui_set_secrets
-
-
-class TestCommitConfigCancellation:
-    """_commit_config's shielded restore + forward-reload-cancel handling."""
-
-    @pytest.mark.asyncio
-    async def test_forward_reload_cancel_restores_and_reraises(self):
-        from src.web.api.llm_admin import _commit_config
-        bot = _bot()
-        _gw(bot)
-        section = bot.config.openai_codex
-        section.model = "gpt-5.6-sol"
-
-        async def _reload():
-            raise asyncio.CancelledError
-
-        with pytest.raises(asyncio.CancelledError):
-            await _commit_config(bot, section, {"model": "gpt-5.6-terra"}, _reload)
-        assert section.model == "gpt-5.6-sol"  # restored before re-raise
-
-    @pytest.mark.asyncio
-    async def test_persist_cancel_shielded_restore_completes(self):
-        from src.web.api.llm_admin import _commit_config
-        bot = _bot()
-        _gw(bot)
-        section = bot.config.ollama
-        section.model = "old"
-        bot.llm_gateway.reload_ollama_inner = AsyncMock()
-        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), True))
-        with pytest.raises(asyncio.CancelledError):
-            await _commit_config(bot, section, {"model": "new"},
-                                 bot.llm_gateway.reload_ollama_inner)
-        # restore ran to completion despite the cancellation
-        assert section.model == "old"
+            await _persist_config(bot)
