@@ -9,9 +9,11 @@ one real external boundary) is patched; a chdir(tmp_path) autouse fixture keeps
 """
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -152,7 +154,10 @@ class TestChat:
                         last = await ws.receive_json()
                     assert last["type"] == "chat_error" and "rate limit" in last["error"]
 
-    async def test_chat_timeout(self):
+    async def test_natural_timeout_error_formatted_ordinarily(self):
+        # The 300s outer wall is gone; a TimeoutError raised naturally by the
+        # chat itself is presented like any other failure — never the old
+        # "timed out after Ns / may still be running" outer-timeout text.
         client, _ = _client()
         with patch("src.web.websocket.process_web_chat",
                    new=AsyncMock(side_effect=TimeoutError())):
@@ -160,9 +165,11 @@ class TestChat:
                 async with client.ws_connect("/api/ws") as ws:
                     await ws.send_json({"type": "chat", "content": "slow"})
                     resp = await ws.receive_json()
-                    assert resp["type"] == "chat_error" and "timed out" in resp["error"]
+                    assert resp["type"] == "chat_error"
+                    assert resp["error"] == "TimeoutError"
+                    assert "may still be running" not in resp["error"]
 
-    async def test_chat_generic_error_scrubbed(self):
+    async def test_chat_generic_error_formatted_and_bounded(self):
         client, _ = _client()
         with patch("src.web.websocket.process_web_chat",
                    new=AsyncMock(side_effect=RuntimeError("kaboom"))):
@@ -170,7 +177,57 @@ class TestChat:
                 async with client.ws_connect("/api/ws") as ws:
                     await ws.send_json({"type": "chat", "content": "boom"})
                     resp = await ws.receive_json()
-                    assert resp["type"] == "chat_error" and "kaboom" in resp["error"]
+                    assert resp["type"] == "chat_error"
+                    assert resp["error"] == "RuntimeError: kaboom"
+
+    async def test_delayed_chat_completes_without_any_wall(self):
+        async def _slow_chat(*args, **kwargs):
+            await asyncio.sleep(0.3)
+            return CHAT_RESULT
+
+        client, _ = _client()
+        with patch("src.web.websocket.process_web_chat", new=_slow_chat):
+            async with client:
+                async with client.ws_connect("/api/ws") as ws:
+                    await ws.send_json({"type": "chat", "content": "long task"})
+                    resp = await ws.receive_json()
+                    assert resp["type"] == "chat_response"
+                    assert resp["content"] == "hi there"
+
+    async def test_html_bearing_exception_never_reaches_client(self):
+        html = "<html><body>Internal Server Error<script>cf()</script></body></html>"
+        client, _ = _client()
+        with patch("src.web.websocket.process_web_chat",
+                   new=AsyncMock(side_effect=RuntimeError(html))):
+            async with client:
+                async with client.ws_connect("/api/ws") as ws:
+                    await ws.send_json({"type": "chat", "content": "boom"})
+                    resp = await ws.receive_json()
+                    assert resp["type"] == "chat_error"
+                    assert "<html" not in resp["error"]
+                    assert resp["error"] == "RuntimeError"
+
+    async def test_secretful_exception_scrubbed(self):
+        client, _ = _client()
+        secret = "sk-" + "a" * 24
+        with patch("src.web.websocket.process_web_chat",
+                   new=AsyncMock(side_effect=RuntimeError(f"auth failed for {secret}"))):
+            async with client:
+                async with client.ws_connect("/api/ws") as ws:
+                    await ws.send_json({"type": "chat", "content": "boom"})
+                    resp = await ws.receive_json()
+                    assert secret not in resp["error"]
+                    assert "[REDACTED]" in resp["error"]
+
+    async def test_cancellation_is_not_swallowed_into_chat_error(self):
+        client, _ = _client()
+        with patch("src.web.websocket.process_web_chat",
+                   new=AsyncMock(side_effect=asyncio.CancelledError())):
+            async with client:
+                async with client.ws_connect("/api/ws") as ws:
+                    await ws.send_json({"type": "chat", "content": "x"})
+                    msg = await ws.receive()
+                    assert msg.type is not aiohttp.WSMsgType.TEXT
 
 
 # --------------------------------------------------------------------------- #

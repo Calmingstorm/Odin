@@ -24,11 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 import discord
-from src.discord.intake_pipeline import (
-    MessagePipeline,
-    MessagePipelineDeps,
-    _user_facing_error,
-)
+from src.discord.intake_pipeline import MessagePipeline, MessagePipelineDeps
 from src.discord.tool_loop import (
     ToolLoopDeps,
     ToolLoopRunner,
@@ -206,43 +202,6 @@ class TestErrorSummary:
 # ---------------------------------------------------------------------------
 # _user_facing_error (chat presentation)
 # ---------------------------------------------------------------------------
-
-
-class TestUserFacingError:
-    def test_discord_http_exception_never_renders_body(self):
-        out = _user_facing_error(_http_500())
-        assert out == "Discord API error: HTTP 500 Internal Server Error"
-
-    def test_generic_html_reduced_to_type_name(self):
-        assert _user_facing_error(RuntimeError(CF_HTML)) == "RuntimeError"
-
-    def test_html_marker_mid_line_reduced_to_type_name(self):
-        assert _user_facing_error(RuntimeError("500 error: <html><body>")) == "RuntimeError"
-
-    def test_multiline_keeps_first_line_only(self):
-        out = _user_facing_error(RuntimeError("first line\nsecond line"))
-        assert out == "RuntimeError: first line"
-
-    def test_empty_timeout_renders_type_name(self):
-        assert _user_facing_error(TimeoutError()) == "TimeoutError"
-
-    def test_broken_str_falls_back_to_type_name(self):
-        assert _user_facing_error(_BrokenStrError()) == "_BrokenStrError"
-
-    def test_mass_mentions_neutralized(self):
-        out = _user_facing_error(RuntimeError("notify @everyone and @here now"))
-        assert "@everyone" not in out
-        assert "@here" not in out
-        assert "everyone" in out
-
-    def test_control_characters_stripped(self):
-        out = _user_facing_error(RuntimeError("bad\x07\x1bthing"))
-        assert "\x07" not in out
-        assert "\x1b" not in out
-        assert "badthing" in out
-
-    def test_entire_output_is_bounded(self):
-        assert len(_user_facing_error(RuntimeError("y" * 5000))) <= 200
 
 
 # ---------------------------------------------------------------------------
@@ -429,20 +388,6 @@ class _EvilStatusError(Exception):
 
 
 class TestUnicodeControlStripping:
-    def test_user_facing_error_strips_del_and_c1(self):
-        out = _user_facing_error(RuntimeError("bad\x7fmid\x9bthing"))
-        assert "\x7f" not in out
-        assert "\x9b" not in out
-        assert "badmidthing" in out
-
-    def test_user_facing_error_retains_tab(self):
-        assert "a\tb" in _user_facing_error(RuntimeError("a\tb"))
-
-    def test_user_facing_error_strips_format_chars(self):
-        out = _user_facing_error(RuntimeError("zero\u200bwidth"))
-        assert "\u200b" not in out
-        assert "zerowidth" in out
-
     def test_error_summary_strips_del_and_c1(self):
         out = _error_summary(RuntimeError("bad\x7fmid\x9bthing"))
         assert "\x7f" not in out
@@ -451,12 +396,6 @@ class TestUnicodeControlStripping:
 
 
 class TestFormatterFailSafes:
-    def test_user_facing_error_internal_failure_falls_back_to_type_name(self, monkeypatch):
-        import src.discord.intake_pipeline as ip
-
-        monkeypatch.setattr(ip.discord, "HTTPException", _InstanceCheckBombError)
-        assert _user_facing_error(RuntimeError("boom")) == "RuntimeError"
-
     def test_error_summary_internal_failure_falls_back_to_type_name(self):
         assert _error_summary(_EvilStatusError()) == "_EvilStatusError"
 
@@ -582,35 +521,6 @@ def _http_exc_with_reason(reason, status=500):
 
 
 class TestStructuredReasonSanitization:
-    def test_user_facing_error_strips_controls_in_reason(self):
-        out = _user_facing_error(_http_exc_with_reason("Bad\x9b\x7fReason\x00"))
-        assert "\x9b" not in out
-        assert "\x7f" not in out
-        assert "\x00" not in out
-        assert "BadReason" in out
-
-    def test_user_facing_error_neutralizes_mentions_in_reason(self):
-        out = _user_facing_error(_http_exc_with_reason("notify @everyone and @here"))
-        assert "@everyone" not in out
-        assert "@here" not in out
-        assert "everyone" in out
-
-    def test_user_facing_error_strips_format_chars_in_reason(self):
-        out = _user_facing_error(_http_exc_with_reason("zero\u200bwidth"))
-        assert "\u200b" not in out
-        assert "zerowidth" in out
-
-    def test_user_facing_error_html_reason_dropped_status_kept(self):
-        out = _user_facing_error(_http_exc_with_reason("<html>oops</html>"))
-        assert out == "Discord API error: HTTP 500"
-
-    def test_user_facing_error_non_int_status_renders_safely(self):
-        out = _user_facing_error(
-            _http_exc_with_reason("Internal Server Error", status="@everyone 500")
-        )
-        assert "@everyone" not in out
-        assert "HTTP ?" in out
-
     def test_error_summary_strips_controls_in_reason(self):
         out = _error_summary(_http_exc_with_reason("Bad\x9bReason\x7f"))
         assert "\x9b" not in out
