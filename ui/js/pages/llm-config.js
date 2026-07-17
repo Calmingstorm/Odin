@@ -327,6 +327,47 @@ export default {
           </div>
         </div>
 
+        <!-- ==================== Auxiliary (cheap-model) Config ==================== -->
+        <div class="hm-card">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-gray-300">Auxiliary Model (Codex)</h2>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" v-model="auxForm.enabled" @change="saveAuxConfigDebounced" class="provider-control" />
+              <span class="text-xs text-gray-400">Enabled</span>
+            </label>
+          </div>
+          <p class="text-xs text-gray-500 mb-3">
+            A cheaper Codex model for selected background jobs (routes with automatic fallback to the primary). Only jobs with a live consumer can be delegated.
+          </p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+            <div>
+              <label class="text-xs text-gray-400 block">Model
+              <select v-model="auxForm.model" @change="saveAuxConfigDebounced" class="hm-input">
+                <option v-for="m in auxModelOptions" :key="m" :value="m">{{ m }}</option>
+              </select>
+              </label>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs text-gray-400 mb-2">Delegated tasks</div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-1">
+              <label v-for="t in auxKnownTasks" :key="t"
+                     class="flex items-center gap-2"
+                     :class="auxConsumerBacked.includes(t) ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'">
+                <input type="checkbox" :value="t" v-model="auxForm.tasks"
+                       :disabled="!auxConsumerBacked.includes(t)"
+                       @change="saveAuxConfigDebounced" class="provider-control" />
+                <span class="text-xs text-gray-300">{{ t }}</span>
+                <span v-if="!auxConsumerBacked.includes(t)" class="text-xs text-gray-500">— No consumer yet</span>
+              </label>
+            </div>
+          </div>
+          <div v-if="auxData.unavailable_reason"
+               class="text-sm text-yellow-400 bg-yellow-900/20 rounded p-2 border border-yellow-800 mt-3">
+            {{ auxData.unavailable_reason }}
+          </div>
+        </div>
+
         <!-- ==================== Ollama Config ==================== -->
         <div class="hm-card">
           <div class="flex items-center justify-between mb-3">
@@ -396,7 +437,7 @@ export default {
 
     // Codex model catalog — ONE ordered list renders both the Model and
     // Agent Model selects so the two dropdowns can never drift apart.
-    const CODEX_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o'];
+    const CODEX_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'];
     // model/agent_model are free strings server-side: an unknown configured
     // value (hand-edited or future model) must render as a temporary option —
     // a blank select would let the next save silently replace it.
@@ -408,6 +449,19 @@ export default {
       const v = codexForm.value.agent_model;
       return v && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
     });
+    // --- Auxiliary (cheap-model) ---
+    const auxForm = ref({ enabled: false, model: 'gpt-5.6-luna', tasks: [] });
+    const auxData = ref({ known_tasks: [], consumer_backed_tasks: [], unavailable_reason: null });
+    const auxKnownTasks = computed(() => auxData.value.known_tasks || []);
+    const auxConsumerBacked = computed(() => auxData.value.consumer_backed_tasks || []);
+    // Same free-string contract as the main model dropdown: an unknown
+    // configured value (e.g. a preserved gpt-4o-mini) renders as a temporary
+    // first option so the debounced save can't silently replace it.
+    const auxModelOptions = computed(() => {
+      const v = auxForm.value.model;
+      return v && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
+    });
+    const savingAux = ref(false);
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096 });
     const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 });
     const ollamaKeyDirty = ref(false);
@@ -491,6 +545,14 @@ export default {
           kimiForm.value.enabled = data.kimi.enabled;
           kimiForm.value.model = data.kimi.model || '';
           kimiForm.value.max_tokens = data.kimi.max_tokens || 4096;
+        }
+        if (data.auxiliary) {
+          auxData.value = data.auxiliary;
+          if (!saveAuxConfigDebounced.pending()) {
+            auxForm.value.enabled = data.auxiliary.enabled;
+            auxForm.value.model = data.auxiliary.model || 'gpt-5.6-luna';
+            auxForm.value.tasks = [...(data.auxiliary.tasks || [])];
+          }
         }
       } catch (e) {
         llmStatus.value = { active_provider: 'codex', codex: { configured: false }, ollama: { configured: false }, kimi: { configured: false } };
@@ -684,7 +746,22 @@ export default {
 
     // Rapid-fire bindings (selects/checkboxes) go through these; explicit
     // actions (Enter on an input) keep the immediate savers.
+    async function saveAuxConfig() {
+      if (savingAux.value) { saveAuxConfigDebounced(); return; }
+      savingAux.value = true;
+      try {
+        await api.put('/api/llm/auxiliary/config', auxForm.value);
+        showToast('Auxiliary config saved');
+        await fetchLLMStatus();
+      } catch (e) {
+        showToast(e.message || 'Failed', 'error');
+        await fetchLLMStatus();
+      }
+      finally { savingAux.value = false; }
+    }
+
     const saveCodexConfigDebounced = debounce(saveCodexConfig);
+    const saveAuxConfigDebounced = debounce(saveAuxConfig);
     const saveOllamaConfigDebounced = debounce(saveOllamaConfig);
     const saveKimiConfigDebounced = debounce(saveKimiConfig);
     // Explicit saves (Enter) cancel the pending timer, then save immediately —
@@ -789,6 +866,7 @@ export default {
     return {
       loading, llmStatus, selectedProvider, switching,
       codexForm, codexModelOptions, codexAgentModelOptions,
+      auxForm, auxData, auxKnownTasks, auxConsumerBacked, auxModelOptions, savingAux, saveAuxConfigDebounced,
       ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,
