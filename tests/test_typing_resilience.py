@@ -18,6 +18,7 @@ surfaces were hardened, each pinned here:
 
 import asyncio
 import logging
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -623,3 +624,122 @@ class TestStructuredReasonSanitization:
     def test_error_summary_non_int_status_renders_safely(self):
         out = _error_summary(_http_exc_with_reason("ok", status="evil"))
         assert out == "HTTPException: HTTP ? ok"
+
+
+# ---------------------------------------------------------------------------
+# Follow-up (typing attempt timeout): a dead typing endpoint may cost at most
+# _TYPING_ATTEMPT_TIMEOUT per phase — wait briefly, then abandon the
+# ornamentation and do the actual work. Constant is read at call time so
+# these tests can shrink it.
+# ---------------------------------------------------------------------------
+
+
+class _SlowTypingCM:
+    def __init__(self, channel, slow_enter, slow_exit):
+        self._channel = channel
+        self._slow_enter = slow_enter
+        self._slow_exit = slow_exit
+
+    async def __aenter__(self):
+        self._channel.enters += 1
+        if self._slow_enter:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                self._channel.enter_cancelled = True
+                raise
+        self._channel.entered += 1
+        return self
+
+    async def __aexit__(self, *exc_info):
+        self._channel.exits += 1
+        if self._slow_exit:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                self._channel.exit_cancelled = True
+                raise
+        return False
+
+
+class SlowChannel:
+    """Channel whose typing enter/exit hangs far past any sane deadline."""
+
+    def __init__(self, slow_enter=False, slow_exit=False):
+        self.id = "c1"
+        self.typing_calls = 0
+        self.enters = 0
+        self.entered = 0
+        self.exits = 0
+        self.enter_cancelled = False
+        self.exit_cancelled = False
+        self._slow_enter = slow_enter
+        self._slow_exit = slow_exit
+
+    def typing(self):
+        self.typing_calls += 1
+        return _SlowTypingCM(self, self._slow_enter, self._slow_exit)
+
+
+class TestTypingAttemptTimeout:
+    async def test_slow_enter_abandoned_fast_and_body_runs(self, monkeypatch, caplog):
+        import src.discord.tool_loop as tl
+
+        monkeypatch.setattr(tl, "_TYPING_ATTEMPT_TIMEOUT", 0.05)
+        ch = SlowChannel(slow_enter=True)
+        ran = False
+        start = time.monotonic()
+        with caplog.at_level(logging.WARNING):
+            async with _best_effort_typing(ch):
+                ran = True
+        elapsed = time.monotonic() - start
+        assert ran
+        assert elapsed < 1.0
+        assert ch.enter_cancelled  # the hung enter received CancelledError
+        assert ch.exits == 0  # never entered -> exit never attempted
+        assert any("enter timed out" in r.getMessage() for r in caplog.records)
+
+    async def test_slow_exit_abandoned_fast(self, monkeypatch, caplog):
+        import src.discord.tool_loop as tl
+
+        monkeypatch.setattr(tl, "_TYPING_ATTEMPT_TIMEOUT", 0.05)
+        ch = SlowChannel(slow_exit=True)
+        ran = False
+        start = time.monotonic()
+        with caplog.at_level(logging.WARNING):
+            async with _best_effort_typing(ch):
+                ran = True
+        elapsed = time.monotonic() - start
+        assert ran
+        assert elapsed < 1.0
+        assert ch.exit_cancelled  # the hung exit received CancelledError
+        assert any("exit timed out" in r.getMessage() for r in caplog.records)
+
+    async def test_body_exception_wins_over_slow_exit_timeout(self, monkeypatch):
+        import src.discord.tool_loop as tl
+
+        monkeypatch.setattr(tl, "_TYPING_ATTEMPT_TIMEOUT", 0.05)
+        ch = SlowChannel(slow_exit=True)
+        with pytest.raises(ValueError, match="body boom"):
+            async with _best_effort_typing(ch):
+                raise ValueError("body boom")
+        assert ch.exit_cancelled
+
+    async def test_typing_still_attempted_every_call_after_timeouts(self, monkeypatch):
+        import src.discord.tool_loop as tl
+
+        monkeypatch.setattr(tl, "_TYPING_ATTEMPT_TIMEOUT", 0.05)
+        ch = SlowChannel(slow_enter=True)
+        async with _best_effort_typing(ch):
+            pass
+        async with _best_effort_typing(ch):
+            pass
+        assert ch.typing_calls == 2
+        assert ch.enters == 2
+
+    async def test_healthy_typing_unaffected(self):
+        ch = FakeChannel()
+        async with _best_effort_typing(ch):
+            pass
+        assert ch.entered == 1
+        assert ch.exits == 1

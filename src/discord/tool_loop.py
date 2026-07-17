@@ -131,22 +131,37 @@ def _error_summary(exc: BaseException, limit: int = 200) -> str:
         return name
 
 
+# Per-phase ceiling for typing attempts. A healthy POST is ~100-300ms; a
+# dead endpoint used to burn discord.py's internal 5xx retry (~17s) per
+# attempt during the 2026-07-16 incident. Deliberately a private constant,
+# not config — a knob someone can raise would resurrect the incident.
+_TYPING_ATTEMPT_TIMEOUT = 1.0
+
+
 @asynccontextmanager
 async def _best_effort_typing(channel):
-    """Discord typing indicator that can never fail the wrapped work.
+    """Discord typing indicator that can never fail or stall the wrapped work.
 
     The indicator is attempted on every call — no failure memory, so a
-    Discord API outage degrades cosmetics, not behavior — and any ordinary
-    ``Exception`` from typing setup or cleanup is logged bounded and
-    swallowed. Cancellation and exceptions raised by the wrapped body
-    always propagate; a cleanup failure never replaces a body exception.
+    Discord API outage degrades cosmetics, not behavior — but each phase
+    (enter/exit) is bounded by ``_TYPING_ATTEMPT_TIMEOUT`` (read at call
+    time): wait briefly, then abandon the ornamentation and do the actual
+    work. Any ordinary ``Exception`` from typing setup or cleanup is logged
+    bounded and swallowed. Cancellation and exceptions raised by the wrapped
+    body always propagate; a cleanup failure never replaces a body exception.
     """
     cm = None
     try:
         cm = channel.typing()
-        await cm.__aenter__()
+        await asyncio.wait_for(cm.__aenter__(), timeout=_TYPING_ATTEMPT_TIMEOUT)
     except asyncio.CancelledError:
         raise
+    except TimeoutError:
+        log.warning(
+            "Typing indicator enter timed out after %.1fs (non-fatal)",
+            _TYPING_ATTEMPT_TIMEOUT,
+        )
+        cm = None
     except Exception as exc:
         log.warning("Typing indicator failed (non-fatal): %s", _error_summary(exc))
         cm = None
@@ -155,9 +170,16 @@ async def _best_effort_typing(channel):
     finally:
         if cm is not None:
             try:
-                await cm.__aexit__(None, None, None)
+                await asyncio.wait_for(
+                    cm.__aexit__(None, None, None), timeout=_TYPING_ATTEMPT_TIMEOUT
+                )
             except asyncio.CancelledError:
                 raise
+            except TimeoutError:
+                log.warning(
+                    "Typing indicator exit timed out after %.1fs (non-fatal)",
+                    _TYPING_ATTEMPT_TIMEOUT,
+                )
             except Exception as exc:
                 log.warning(
                     "Typing indicator cleanup failed (non-fatal): %s", _error_summary(exc)
