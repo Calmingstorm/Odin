@@ -37,8 +37,8 @@ from aiohttp.resolver import DefaultResolver
 from ..odin_log import get_logger
 from .url_safety import (
     _METADATA_HOSTS,
-    _METADATA_IPS,
     _is_ip_blocked,
+    _is_metadata_ip,
     is_url_blocked,
 )
 
@@ -108,7 +108,7 @@ class _ValidatingResolver(AbstractResolver):
         host_allowed = (host, port) in self._allowed_hosts
         for r in results:
             ip = r["host"]
-            if ip in _METADATA_IPS:
+            if _is_metadata_ip(ip):
                 raise BlockedAddressError(f"{host} resolves to a metadata address ({ip})")
             if _is_ip_blocked(ip) and not host_allowed:
                 raise BlockedAddressError(f"{host} resolves to a blocked address ({ip})")
@@ -133,7 +133,7 @@ def _validate_hop_url(url: str, allowed_urls: list[str] | None) -> None:
     host = (parsed.hostname or "").lower()
     if not host:
         raise BlockedAddressError("URL has no host")
-    if host in _METADATA_HOSTS:
+    if host in _METADATA_HOSTS or _is_metadata_ip(host):
         raise BlockedAddressError("URL targets a cloud-metadata host")
     if is_url_blocked(url, allowed_urls=allowed_urls):
         raise BlockedAddressError(

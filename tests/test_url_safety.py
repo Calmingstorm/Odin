@@ -113,3 +113,49 @@ class TestReviewFixes:
         assert is_url_blocked(
             "http://127.0.0.1:8188/api/%2e%2e/admin", allowed_urls=allow, resolve_dns=False
         )
+
+    def test_ipv4_mapped_ipv6_metadata_blocked_even_if_allowlisted(self):
+        # ::ffff:169.254.169.254 (and the expanded form) is the metadata IP in a
+        # non-canonical spelling — must stay blocked even when allowlisted.
+        u = "http://[::ffff:169.254.169.254]/latest/meta-data/"
+        assert is_url_blocked(u, allowed_urls=[u], resolve_dns=False)
+        u2 = "http://[0:0:0:0:0:ffff:a9fe:a9fe]/x"
+        assert is_url_blocked(u2, allowed_urls=[u2], resolve_dns=False)
+
+    def test_is_metadata_ip_spellings(self):
+        from src.tools.url_safety import _is_metadata_ip
+
+        assert _is_metadata_ip("169.254.169.254")  # dotted (direct)
+        assert _is_metadata_ip("fd00:ec2::254")  # ipv6 metadata
+        assert _is_metadata_ip("::ffff:169.254.169.254")  # mapped
+        assert not _is_metadata_ip("example.com")  # non-IP host
+        assert not _is_metadata_ip("1.1.1.1")  # public
+
+    def test_dns_rebind_to_metadata_blocked_even_if_allowlisted(self, monkeypatch):
+        import socket as _socket
+
+        from src.tools import url_safety
+
+        def fake_gai(host, *a, **k):
+            return [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("169.254.169.254", 0))]
+
+        monkeypatch.setattr(url_safety.socket, "getaddrinfo", fake_gai)
+        allow = ["http://internal.example/api"]
+        # An allowlisted host that RESOLVES to metadata is still blocked
+        # (unconditional metadata check runs before the allowlist exemption).
+        assert url_safety.is_url_blocked(
+            "http://internal.example/api", allowed_urls=allow, resolve_dns=True
+        )
+
+    def test_resolves_to_metadata_dns_failure_permits_allowlist(self, monkeypatch):
+        from src.tools import url_safety
+
+        def fake_gai(host, *a, **k):
+            raise url_safety.socket.gaierror("nxdomain")
+
+        monkeypatch.setattr(url_safety.socket, "getaddrinfo", fake_gai)
+        allow = ["http://example.com/api"]
+        # DNS fails -> _resolves_to_metadata False -> allowlist applies (allowed).
+        assert not url_safety.is_url_blocked(
+            "http://example.com/api", allowed_urls=allow, resolve_dns=True
+        )

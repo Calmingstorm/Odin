@@ -176,13 +176,21 @@ class ConversationReflector:
 
     @staticmethod
     def _validate_learned_shape(data: dict) -> None:
-        """Nested-shape check run inside json_store's backup boundary: entries
-        must be a list of objects. A non-list or a non-object entry is
-        corruption — caught here so _migrate (which does entry.get(...)) never
-        sees a malformed entry, and so nested corruption is backed up + degrades
-        on reads / refuses on writes exactly like top-level corruption."""
+        """Full nested-shape check run inside json_store's backup boundary, so
+        NOTHING malformed reaches _migrate (which compares ``version`` and does
+        ``entry.get(...)``) or the injection/prompt formatting (which indexes
+        ``entry["category"]``) outside the safe boundary. A non-int version, a
+        non-list entries, a non-object entry, or an entry missing its string
+        ``key`` / ``category`` / ``content`` is corruption — backed up, degraded
+        on reads, refused on writes. Valid legacy v1 entries (which carry those
+        three fields) still migrate."""
         from ..json_store import StoreCorruptError
 
+        version = data.get("version", 1)
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise StoreCorruptError(
+                f"learned.json 'version' must be an int (got {type(version).__name__})"
+            )
         entries = data.get("entries", [])
         if not isinstance(entries, list):
             raise StoreCorruptError("learned.json 'entries' is not a list")
@@ -191,6 +199,11 @@ class ConversationReflector:
                 raise StoreCorruptError(
                     f"learned.json contains a non-object entry ({type(e).__name__})"
                 )
+            for field in ("key", "category", "content"):
+                if not isinstance(e.get(field), str):
+                    raise StoreCorruptError(
+                        f"learned.json entry has a missing/invalid {field!r} field"
+                    )
 
     def _load(self) -> dict:
         """READ path — corruption (top-level OR nested) degrades to an empty

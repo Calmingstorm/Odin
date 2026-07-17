@@ -333,7 +333,7 @@ async def run_background_task(
         await _send_progress(task, progress_msg, status_override=terminal)
         await _send_summary(task, status_override=terminal)
         if codex_callback and not task._cancel_event.is_set():
-            await _send_conversational_followup(task, codex_callback)
+            await _send_conversational_followup(task, codex_callback, status_override=terminal)
         if task.status == "running":  # not cancelled mid-follow-up
             task.status = terminal
 
@@ -546,7 +546,10 @@ async def _send_progress(
         lines.append(f"OK: {ok} | Errors: {errors} | Skipped: {skipped}")
 
     # When finished, show ALL steps; while running, show last 3
-    is_finished = task.status in ("completed", "failed", "cancelled")
+    # Use the effective (possibly overridden) status: task.status is kept
+    # 'running' during finalization so the follow-up stays cancellable, but the
+    # final render must still show all results + the full report attachment.
+    is_finished = status in ("completed", "failed", "cancelled")
     show_results = task.results if is_finished else task.results[-3:]
     if show_results:
         lines.append("")
@@ -640,6 +643,7 @@ async def _send_summary(task: BackgroundTask, status_override: str | None = None
 async def _send_conversational_followup(
     task: BackgroundTask,
     codex_callback: CodexCallback,
+    status_override: str | None = None,
 ) -> None:
     """Generate and post an LLM-written conversational summary of the task results."""
     # Build a concise context of what happened
@@ -657,7 +661,7 @@ async def _send_conversational_followup(
             "content": (
                 f"A background task just finished. Summarize the results conversationally.\n\n"
                 f"Task: {task.description}\n"
-                f"Status: {task.status}\n"
+                f"Status: {status_override or task.status}\n"
                 f"Requested by: {task.requester}\n\n"
                 f"Step results:\n{results_text}\n\n"
                 f"Write a concise, personality-infused summary (2-4 sentences). "
@@ -672,6 +676,11 @@ async def _send_conversational_followup(
 
     try:
         response = await codex_callback(messages, system, 200)
+        # A cancel may have won while the callback ran — e.g. a callback that
+        # swallows CancelledError and returns normally. Never post a follow-up
+        # after cancellation.
+        if task._cancel_event.is_set():
+            return
         response = scrub_output_secrets(response.strip())
         if response:
             await task.channel.send(response)

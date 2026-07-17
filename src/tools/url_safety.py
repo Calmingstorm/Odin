@@ -28,20 +28,50 @@ def _is_ip_blocked(addr_str: str) -> bool:
     permitted separately, BEFORE this check, by ``is_url_blocked``.
     """
     try:
-        addr = ipaddress.ip_address(addr_str)
+        addr = _canonical_ip(ipaddress.ip_address(addr_str))
     except ValueError:
         return False
     if not addr.is_global:
         return True
-    # Belt-and-suspenders for metadata endpoints (already non-global, but pin
-    # them explicitly in case a stdlib version classifies one as global).
-    if addr_str in ("169.254.169.254", "fd00::"):
+    # Metadata endpoints (recognized in any spelling) are always blocked.
+    if _is_metadata_ip(addr_str):
         return True
     return False
 
 
 _METADATA_HOSTS = frozenset({"169.254.169.254", "metadata.google.internal"})
 _METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
+
+
+def _canonical_ip(addr):
+    """Unwrap an IPv4-mapped IPv6 address (``::ffff:a.b.c.d`` / its expanded
+    form) to its IPv4 so a mapped spelling can't slip past address policy."""
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped if mapped is not None else addr
+
+
+def _is_metadata_ip(addr_str: str) -> bool:
+    """True if ``addr_str`` is a cloud-metadata IP in ANY spelling (dotted,
+    IPv4-mapped IPv6, expanded)."""
+    if addr_str in _METADATA_IPS:
+        return True
+    try:
+        return str(_canonical_ip(ipaddress.ip_address(addr_str))) in _METADATA_IPS
+    except ValueError:
+        return False
+
+
+def _resolves_to_metadata(host: str) -> bool:
+    """True if ``host`` resolves to a cloud-metadata IP (any spelling)."""
+    try:
+        for _f, _t, _p, _c, sockaddr in socket.getaddrinfo(
+            host, None, socket.AF_UNSPEC, socket.SOCK_STREAM
+        ):
+            if _is_metadata_ip(str(sockaddr[0])):
+                return True
+    except (socket.gaierror, OSError):
+        return False
+    return False
 
 
 def is_metadata_url(url: str, resolve_dns: bool = True) -> bool:
@@ -60,13 +90,13 @@ def is_metadata_url(url: str, resolve_dns: bool = True) -> bool:
         return True
     if not host:
         return False
-    if host in _METADATA_HOSTS or host in _METADATA_IPS:
+    if host in _METADATA_HOSTS or _is_metadata_ip(host):
         return True
     if resolve_dns:
         try:
             resolved = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
             for _f, _t, _p, _c, sockaddr in resolved:
-                if sockaddr[0] in _METADATA_IPS:
+                if _is_metadata_ip(str(sockaddr[0])):
                     log.warning("Metadata SSRF blocked: %s resolves to %s", host, sockaddr[0])
                     return True
         except (socket.gaierror, OSError):
@@ -125,7 +155,14 @@ def is_url_blocked(
     if not host:
         return True
 
-    if host in _METADATA_HOSTS:
+    if host in _METADATA_HOSTS or _is_metadata_ip(host):
+        return True
+
+    # Metadata via DNS is ALWAYS blocked, even for an allowlisted host — check
+    # it BEFORE the allowlist exemption. (Without an allowlist, a resolved
+    # metadata IP is already caught by _is_ip_blocked in the loop below, so the
+    # extra lookup only runs when an allowlist could otherwise exempt it.)
+    if allowed_urls and resolve_dns and _resolves_to_metadata(host):
         return True
 
     if allowed_urls and _matches_allowlist(parsed, allowed_urls):

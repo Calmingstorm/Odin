@@ -235,6 +235,62 @@ async def test_cancel_during_followup_is_honored():
     assert t.done()
 
 
+async def test_followup_not_posted_when_callback_swallows_cancel():
+    """A follow-up callback that catches CancelledError and returns must NOT
+    have its response posted after a cancel has won."""
+    executor = _InstantExecutor()
+    channel = FakeChannel(id=555)
+    started = asyncio.Event()
+
+    async def swallowing_followup(messages, system, max_tokens):
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            return "SWALLOWED-SHOULD-NOT-POST"  # swallow + return normally
+        return "normal"
+
+    task = make_task([{"tool_name": "run_command", "tool_input": {}}], channel=channel)
+
+    async def _run():
+        try:
+            await run_background_task(
+                task, executor, _FakeSkillManager(), codex_callback=swallowing_followup
+            )
+        except asyncio.CancelledError:
+            task.status = "cancelled"
+            raise
+
+    t = asyncio.create_task(_run())
+    task._asyncio_task = t
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await task.request_cancel()
+
+    assert task.status == "cancelled"
+    assert not any("SWALLOWED" in s for s in channel.sent_texts)
+    assert t.done()
+
+
+async def test_followup_prompt_and_final_render_use_terminal_status():
+    """task.status is kept 'running' through finalization, but the follow-up
+    prompt and the final progress render must show the terminal status."""
+    executor = _InstantExecutor()
+    channel = FakeChannel(id=555)
+    captured = {}
+
+    async def capture_followup(messages, system, max_tokens):
+        captured["prompt"] = messages[0]["content"]
+        return "summary"
+
+    task = make_task([{"tool_name": "run_command", "tool_input": {}}], channel=channel)
+    await run_background_task(
+        task, executor, _FakeSkillManager(), codex_callback=capture_followup
+    )
+    assert task.status == "completed"
+    assert "Status: completed" in captured["prompt"]
+    assert "Status: running" not in captured["prompt"]
+
+
 async def test_cancel_before_any_step_runs():
     executor = _InstantExecutor()
     channel = FakeChannel(id=555)

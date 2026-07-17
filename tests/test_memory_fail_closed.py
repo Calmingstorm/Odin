@@ -286,3 +286,22 @@ class TestReviewNestedCorruption:
         r = ConversationReflector(learned_path=str(p))
         # Must NOT crash _migrate (which does entry.get(...)) on non-dict entries.
         assert r.get_all_entries() == []
+
+    def test_learned_string_version_degrades_and_refuses(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        p = tmp_path / "learned.json"
+        p.write_text('{"version": "2", "entries": []}')  # string version crashes _migrate
+        r = ConversationReflector(learned_path=str(p))
+        assert r.get_all_entries() == []  # read degrades (no TypeError)
+        assert r.delete_entry("k") is False  # write refuses
+        assert list(tmp_path.glob("learned.json.corrupt-*"))
+
+    def test_learned_entry_missing_fields_degrades_and_refuses(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        p = tmp_path / "learned.json"
+        p.write_text('{"version": 2, "entries": [{}]}')  # missing key/category/content
+        r = ConversationReflector(learned_path=str(p))
+        assert r.get_all_entries() == []  # read degrades (no KeyError in formatting)
+        assert r.update_entry("k", content="x") is None  # write refuses
