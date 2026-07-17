@@ -66,7 +66,7 @@ STATEFUL_ATTRS = [
     "_permission_manager", "output_streamer", "_host_access", "_metrics",
     "_memory_lock", "_lists_lock", "risk_stats", "recovery_stats",
     "validation_stats", "command_governor", "_recovery_enabled",
-    "freshness_stats", "_branch_freshness_enabled", "_current_tool_timeout",
+    "freshness_stats", "_branch_freshness_enabled",
     "bulkheads", "ssh_pool",
 ]
 

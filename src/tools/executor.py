@@ -67,6 +67,16 @@ _user_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _user_tier_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "odin_tool_user_tier", default=None
 )
+# Request-scoped per-tool timeout, backed by a contextvar for the same reason:
+# it was previously a shared instance attribute that concurrent tool calls
+# overwrote across await points, so a 30s-timeout tool could shrink a concurrent
+# 900s command's inner wall (or a 3660s tool could stretch it). _try_tool sets
+# it per call and resets the token in finally; _exec_command reads it when the
+# caller passes no explicit timeout. Nested calls restore the outer value on
+# reset.
+_current_tool_timeout_ctx: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "odin_current_tool_timeout", default=None
+)
 
 
 def _build_bulkhead_registry(config: ToolsConfig) -> BulkheadRegistry:
@@ -159,7 +169,6 @@ class ToolExecutor:
         self._recovery_enabled = self.config.recovery.enabled
         self.freshness_stats = FreshnessStats()
         self._branch_freshness_enabled = self.config.branch_freshness.enabled
-        self._current_tool_timeout: int | None = None
         self.bulkheads = _build_bulkhead_registry(self.config)
         pool_cfg = self.config.ssh_pool
         self.ssh_pool: SSHConnectionPool | None = (
@@ -488,8 +497,8 @@ class ToolExecutor:
         tuple.  Tuples propagate exit codes into ToolResult without
         string-prefix parsing.
         """
+        token = _current_tool_timeout_ctx.set(timeout)
         try:
-            self._current_tool_timeout = timeout
             if tool_name in ("memory_manage", "manage_list"):
                 coro = handler(tool_input, user_id=user_id)
             else:
@@ -509,6 +518,10 @@ class ToolExecutor:
             self._metrics[tool_name]["errors"] += 1
             log.error("Tool %s failed: %s", tool_name, e)
             return f"Error executing {tool_name}: {e}", -1
+        finally:
+            # Always restore the outer value (nested calls) / clear it, even on
+            # timeout or cancellation — no stale timeout leaks to the next tool.
+            _current_tool_timeout_ctx.reset(token)
 
     # Categories excluded from tool-level recovery (they have their own
     # retry logic or the cost of retrying exceeds the benefit).
@@ -603,7 +616,7 @@ class ToolExecutor:
         callback as they arrive (in addition to being collected).
         """
         if timeout is None:
-            timeout = self._current_tool_timeout or self.config.command_timeout_seconds
+            timeout = _current_tool_timeout_ctx.get() or self.config.command_timeout_seconds
         if is_local_address(address):
             bh = self.bulkheads.get("subprocess")
             if bh:
