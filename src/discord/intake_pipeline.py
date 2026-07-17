@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import io
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -62,6 +63,62 @@ SECRET_SCRUB_PATTERNS = [
 
 def check_for_secrets(content: str) -> bool:
     return any(p.search(content) for p in SECRET_SCRUB_PATTERNS)
+
+
+_HTML_MARKERS = ("<html", "<!doctype")
+
+
+def _clean_detail(detail: str) -> str:
+    """Shared normalization for ANY exception-derived text fragment.
+
+    Every fragment that can carry upstream-controlled bytes -- str(exc)
+    first lines and HTTP response.reason phrases alike -- must pass through
+    here before reaching chat: category-C strip (C0, DEL, C1, format chars;
+    tab deliberately retained -- a plain ch >= " " check lets U+007F and
+    U+0080..U+009F through), HTML-page fragments dropped, and mass mentions
+    neutralized with a zero-width space so error text can never ping the
+    server.
+    """
+    detail = "".join(
+        ch for ch in detail if ch == "\t" or not unicodedata.category(ch).startswith("C")
+    )
+    if any(m in detail.lower() for m in _HTML_MARKERS):
+        return ""
+    detail = detail.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+    return detail.strip()
+
+
+def _user_facing_error(exc: BaseException, limit: int = 200) -> str:
+    """Bounded, HTML-free, mention-safe one-line exception summary for chat.
+
+    Presentation policy for the user-facing error boundary in _run_inner --
+    total and non-throwing (any internal failure falls back to the exception
+    type name). Never renders discord.HTTPException bodies: str(exc)/.text
+    carry the raw HTTP response, and Discord 500s are whole Cloudflare HTML
+    pages (the 2026-07-16 incident dumped them into chat verbatim).
+    Structured fields go through the SAME _clean_detail normalization -- the
+    reason phrase is upstream-controlled text too -- and a non-int status
+    renders as "?". Full diagnostics stay in the journal via exc_info.
+    """
+    name = type(exc).__name__
+    try:
+        if isinstance(exc, discord.HTTPException):
+            status = getattr(exc, "status", None)
+            status_s = str(status) if isinstance(status, int) else "?"
+            reason = _clean_detail(
+                str(getattr(getattr(exc, "response", None), "reason", "") or "")
+            )
+            return f"Discord API error: HTTP {status_s} {reason}".strip()[:limit]
+        try:
+            text = str(exc)
+        except Exception:
+            text = ""
+        lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+        detail = _clean_detail(lines[0] if lines else "")
+        out = f"{name}: {detail}" if detail else name
+        return out[:limit]
+    except Exception:
+        return name
 
 
 @dataclass(frozen=True)
@@ -615,12 +672,17 @@ class MessagePipeline:
                         trace=_trace,
                     )
                 except TimeoutError as codex_err:
-                    log.warning("Codex tool loop timed out: %s", codex_err)
-                    response = f"Tool execution timed out: {codex_err}"
+                    _err = _user_facing_error(codex_err)
+                    log.warning("Codex tool loop timed out: %s", _err)
+                    response = f"Tool execution timed out: {_err}"
                     is_error = True
                 except Exception as codex_err:
-                    log.error("Codex tool loop unexpected error: %s", codex_err, exc_info=True)
-                    response = f"Tool execution failed: {codex_err}"
+                    # exc_info carries the full traceback; the message arg is
+                    # bounded so upstream HTML bodies aren't duplicated into
+                    # the journal — and never reach chat.
+                    _err = _user_facing_error(codex_err)
+                    log.error("Codex tool loop unexpected error: %s", _err, exc_info=True)
+                    response = f"Tool execution failed: {_err}"
                     is_error = True
                     handoff = False
                 # Skill requested Codex handoff — route skill result to Codex for response
@@ -658,15 +720,18 @@ class MessagePipeline:
                         response = _skill_response
                         already_sent = False
         except (TimeoutError, discord.HTTPException, discord.Forbidden) as e:
+            # Same raw-interpolation disease as the tool-loop catch: str() on
+            # a discord.HTTPException carries the raw HTTP body (HTML pages).
+            _err = _user_facing_error(e)
             await self._delivery.set_status(None, task_end=True)
-            log.error("Discord/network error processing message: %s", e, exc_info=True)
+            log.error("Discord/network error processing message: %s", _err, exc_info=True)
             leaked = self._channel_state.pending_files.pop(channel_id, None)
             if leaked:
                 log.warning(
                     "Cleaned %d leaked pending file(s) for channel %s", len(leaked), channel_id
                 )
             await self._delivery.send_with_retry(
-                message, scrub_response_secrets(f"Something went wrong: {e}")
+                message, scrub_response_secrets(f"Something went wrong: {_err}")
             )
             self._sessions.remove_last_message(channel_id, "user")
             return
@@ -680,15 +745,16 @@ class MessagePipeline:
             self._sessions.remove_last_message(channel_id, "user")
             raise
         except Exception as e:
+            _err = _user_facing_error(e)
             await self._delivery.set_status(None, task_end=True)
-            log.error("Unexpected error processing message: %s", e, exc_info=True)
+            log.error("Unexpected error processing message: %s", _err, exc_info=True)
             leaked = self._channel_state.pending_files.pop(channel_id, None)
             if leaked:
                 log.warning(
                     "Cleaned %d leaked pending file(s) for channel %s", len(leaked), channel_id
                 )
             await self._delivery.send_with_retry(
-                message, scrub_response_secrets(f"Something went wrong: {e}")
+                message, scrub_response_secrets(f"Something went wrong: {_err}")
             )
             self._sessions.remove_last_message(channel_id, "user")
             return
