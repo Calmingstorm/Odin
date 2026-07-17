@@ -83,39 +83,89 @@ class TestParseDdgResults:
         assert web._parse_ddg_results("<html>nothing here</html>", 5) == "No results found."
 
 
+def _fake_safe_fetch(status=200, body=b"", content_type="text/html", reason=""):
+    """Patch target for ``safe_fetch`` returning a canned response. fetch_url
+    now routes through the hardened transport, so these tests exercise the
+    caller's response handling with the transport faked (no network)."""
+    from src.tools.safe_fetch import SafeFetchResponse
+
+    if isinstance(body, str):
+        body = body.encode()
+
+    async def _f(url, **kw):
+        return SafeFetchResponse(status, {}, body, content_type, url, reason)
+
+    return _f
+
+
+def _fake_safe_fetch_raises(exc):
+    async def _f(url, **kw):
+        raise exc
+
+    return _f
+
+
 class TestFetchUrl:
     async def test_blocked_url(self):
-        with patch("src.tools.url_safety.is_url_blocked", return_value=True):
+        from src.tools.safe_fetch import BlockedAddressError
+
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            _fake_safe_fetch_raises(BlockedAddressError("blocked")),
+        ):
             out = await web.fetch_url("http://169.254.169.254/latest/meta-data")
         assert "blocked address" in out
 
     async def test_html_success_and_json_and_text(self):
-        with patch("src.tools.url_safety.is_url_blocked", return_value=False):
-            with _session_patch(_Session(_Resp(
-                    headers={"Content-Type": "text/html"}, body="<p>hi there</p>"))):
-                assert "hi there" in await web.fetch_url("http://x")
-            with _session_patch(_Session(_Resp(
-                    headers={"Content-Type": "application/json"}, body='{"a":1}'))):
-                assert await web.fetch_url("http://x") == '{"a":1}'
-            with _session_patch(_Session(_Resp(
-                    headers={"Content-Type": "text/plain"}, body="plain text"))):
-                assert await web.fetch_url("http://x") == "plain text"
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            _fake_safe_fetch(content_type="text/html", body="<p>hi there</p>"),
+        ):
+            assert "hi there" in await web.fetch_url("http://x")
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            _fake_safe_fetch(content_type="application/json", body='{"a":1}'),
+        ):
+            assert await web.fetch_url("http://x") == '{"a":1}'
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            _fake_safe_fetch(content_type="text/plain", body="plain text"),
+        ):
+            assert await web.fetch_url("http://x") == "plain text"
 
     async def test_non_200_and_truncation(self):
-        with patch("src.tools.url_safety.is_url_blocked", return_value=False):
-            with _session_patch(_Session(_Resp(status=404, reason="Not Found"))):
-                assert "Error: HTTP 404: Not Found" in await web.fetch_url("http://x")
-            with _session_patch(_Session(_Resp(
-                    headers={"Content-Type": "text/plain"}, body="z" * 100))):
-                out = await web.fetch_url("http://x", max_chars=10)
-                assert out.startswith("z" * 10) and "truncated" in out
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            _fake_safe_fetch(status=404, reason="Not Found"),
+        ):
+            assert "Error: HTTP 404: Not Found" in await web.fetch_url("http://x")
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            _fake_safe_fetch(content_type="text/plain", body="z" * 100),
+        ):
+            out = await web.fetch_url("http://x", max_chars=10)
+            assert out.startswith("z" * 10) and "truncated" in out
 
     async def test_network_and_generic_errors(self):
-        with patch("src.tools.url_safety.is_url_blocked", return_value=False):
-            with _session_patch(_Session(raise_on_get=aiohttp.ClientError("neterr"))):
-                assert "network failure" in await web.fetch_url("http://x")
-            with _session_patch(_Session(raise_on_get=RuntimeError("boom"))):
-                assert "Error: boom" in await web.fetch_url("http://x")
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            _fake_safe_fetch_raises(aiohttp.ClientError("neterr")),
+        ):
+            assert "network failure" in await web.fetch_url("http://x")
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            _fake_safe_fetch_raises(RuntimeError("boom")),
+        ):
+            assert "Error: boom" in await web.fetch_url("http://x")
+
+    async def test_response_too_large(self):
+        from src.tools.safe_fetch import ResponseTooLargeError
+
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            _fake_safe_fetch_raises(ResponseTooLargeError("big")),
+        ):
+            assert "too large" in await web.fetch_url("http://x")
 
 
 class TestWebSearch:

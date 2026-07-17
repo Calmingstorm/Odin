@@ -123,22 +123,60 @@ class TestParsePageRange:
 
 class TestAnalyzePdf:
     async def test_url_scheme_and_ssrf(self):
+        # analyze_pdf now downloads via the hardened safe_fetch transport; the
+        # block surfaces as BlockedAddressError which the handler maps to its
+        # "blocked URL" message. fitz is imported before the fetch, so fake it.
+        from src.tools.safe_fetch import BlockedAddressError
+
         assert "http://" in await _tools()._handle_analyze_pdf({"url": "ftp://x"})
+
+        async def _blocked(url, **kw):
+            raise BlockedAddressError("blocked")
+
+        # Pass the pre-flight (public URL) so the block is raised by safe_fetch
+        # itself (e.g. a redirect hop to a private address).
+        with patch.dict(sys.modules, {"fitz": _fake_fitz()}), \
+             patch("src.tools.url_safety.is_url_blocked", return_value=False), \
+             patch("src.tools.safe_fetch.safe_fetch", _blocked):
+            assert "blocked URL" in await _tools()._handle_analyze_pdf(
+                {"url": "http://example.com/x"})
+
+    async def test_url_preflight_block_before_fitz(self):
+        # The pre-flight is_url_blocked check returns the block message even on
+        # a host without PyMuPDF (it runs before the fitz import).
         with patch("src.tools.url_safety.is_url_blocked", return_value=True):
             assert "blocked URL" in await _tools()._handle_analyze_pdf(
-                {"url": "http://169.254.169.254/x"})
+                {"url": "http://169.254.169.254/latest/meta-data"})
 
     async def test_url_success_and_http_error(self):
-        with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["hello pdf"])}), \
-             patch("src.tools.url_safety.is_url_blocked", return_value=False):
-            with patch("aiohttp.ClientSession", return_value=_Session(_Resp(200))):
+        from src.tools.safe_fetch import SafeFetchResponse
+
+        def _ff(status=200, body=b"%PDF fake"):
+            async def _f(url, **kw):
+                return SafeFetchResponse(status, {}, body, "application/pdf", url, "")
+            return _f
+
+        async def _raise(url, **kw):
+            raise RuntimeError("neterr")
+
+        with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["hello pdf"])}):
+            with patch("src.tools.safe_fetch.safe_fetch", _ff(200)):
                 out = await _tools()._handle_analyze_pdf({"url": "http://ok/doc.pdf"})
                 assert "Page 1" in out and "hello pdf" in out
-            with patch("aiohttp.ClientSession", return_value=_Session(_Resp(404))):
+            with patch("src.tools.safe_fetch.safe_fetch", _ff(404)):
                 assert "HTTP 404" in await _tools()._handle_analyze_pdf(
                     {"url": "http://ok/doc.pdf"})
-            with patch("aiohttp.ClientSession", side_effect=RuntimeError("neterr")):
+            with patch("src.tools.safe_fetch.safe_fetch", _raise):
                 assert "Failed to fetch PDF" in await _tools()._handle_analyze_pdf(
+                    {"url": "http://ok/doc.pdf"})
+
+            from src.tools.safe_fetch import ResponseTooLargeError
+
+            async def _too_big(url, **kw):
+                raise ResponseTooLargeError("big")
+
+            with patch("src.tools.safe_fetch.safe_fetch", _too_big):
+                assert "too large" in await _tools()._handle_analyze_pdf(
                     {"url": "http://ok/doc.pdf"})
 
     async def test_host_path(self):

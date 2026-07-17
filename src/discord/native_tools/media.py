@@ -20,6 +20,9 @@ from ...odin_log import get_logger
 
 log = get_logger("discord")
 
+# Hard cap on a URL-fetched image so a huge or hostile body can't exhaust memory.
+_ANALYZE_IMAGE_MAX_BYTES = 25 * 1024 * 1024  # 25 MiB
+
 
 class MediaTools:
     def __init__(
@@ -175,8 +178,6 @@ class MediaTools:
         Returns either an error string or a dict with ``__image_block__`` key
         that the tool loop injects as a vision content block.
         """
-        import aiohttp
-
         url = inp.get("url")
         host = inp.get("host")
         path = inp.get("path")
@@ -188,28 +189,38 @@ class MediaTools:
             # Validate URL scheme to prevent SSRF via file://, ftp://, etc.
             if not url.startswith(("http://", "https://")):
                 return "Only http:// and https:// URLs are supported."
-            # DNS-rebind-aware SSRF guard — scheme-only validation let this
-            # reach 169.254.169.254 / internal hosts.
-            from ...tools.url_safety import is_url_blocked
+            # Hardened transport with redirects DISABLED (images never need to
+            # follow one): per-hop SSRF validation, pinned connect IP, TLS
+            # verification, and a byte cap. Scheme-only validation was not
+            # SSRF-safe (http://169.254.169.254/... passed it).
+            from ...tools.safe_fetch import (
+                BlockedAddressError,
+                ResponseTooLargeError,
+                safe_fetch,
+            )
 
-            if is_url_blocked(url):
+            try:
+                resp = await safe_fetch(
+                    url,
+                    follow_redirects=False,
+                    max_bytes=_ANALYZE_IMAGE_MAX_BYTES,
+                    timeout=30.0,
+                )
+            except BlockedAddressError:
                 return (
                     "URL blocked: targets a private, loopback, link-local, "
                     "or cloud-metadata address (SSRF protection)."
                 )
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False
-                    ) as resp:
-                        if resp.status != 200:
-                            return f"Failed to fetch image from URL (HTTP {resp.status})"
-                        ct = resp.headers.get("Content-Type", "")
-                        if not ct.startswith("image/"):
-                            return f"URL does not point to an image (Content-Type: {ct})"
-                        image_bytes = await resp.read()
+            except ResponseTooLargeError:
+                return f"Image too large (max {_ANALYZE_IMAGE_MAX_BYTES} bytes)."
             except Exception as e:
                 return f"Failed to fetch image from URL: {e}"
+            if resp.status != 200:
+                return f"Failed to fetch image from URL (HTTP {resp.status})"
+            ct = resp.content_type
+            if not ct.startswith("image/"):
+                return f"URL does not point to an image (Content-Type: {ct})"
+            image_bytes = resp.body
         elif host and path:
             # Use executor to fetch from host via base64
             import shlex

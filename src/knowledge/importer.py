@@ -158,40 +158,30 @@ class BulkImporter:
         if not url.startswith(("http://", "https://")):
             return ImportResult(source=url, status="error", error="only http/https URLs supported")
 
-        from ..tools.url_safety import is_url_blocked
-        if is_url_blocked(url):
-            return ImportResult(
-                source=url,
-                status="error",
-                error="URL targets a blocked address (private IP, localhost, or metadata endpoint)",
-            )
-
         try:
             import fitz
         except ImportError:
             return ImportResult(source=url, status="error", error="PyMuPDF (fitz) not installed")
 
         src = source or url.rsplit("/", 1)[-1] or url
+        from ..tools.safe_fetch import BlockedAddressError, ResponseTooLargeError, safe_fetch
         try:
-            async with aiohttp.ClientSession(timeout=FETCH_TIMEOUT) as session:
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        return ImportResult(source=src, status="error", error=f"HTTP {resp.status}")
-                    try:
-                        cl = int(resp.headers.get("Content-Length", 0)) or None
-                    except (ValueError, TypeError):
-                        cl = None
-                    if cl is not None and cl > MAX_PDF_BYTES:
-                        return ImportResult(
-                            source=src,
-                            status="error",
-                            error=f"PDF too large ({cl} bytes, max {MAX_PDF_BYTES})",
-                        )
-                    pdf_bytes = await resp.read()
-                    if len(pdf_bytes) > MAX_PDF_BYTES:
-                        return ImportResult(source=src, status="error", error="PDF too large")
+            resp = await safe_fetch(url, max_bytes=MAX_PDF_BYTES, timeout=15.0)
+        except BlockedAddressError:
+            return ImportResult(
+                source=src,
+                status="error",
+                error="URL targets a blocked address (private IP, localhost, or metadata endpoint)",
+            )
+        except ResponseTooLargeError:
+            return ImportResult(
+                source=src, status="error", error=f"PDF too large (max {MAX_PDF_BYTES} bytes)"
+            )
         except Exception as e:
             return ImportResult(source=src, status="error", error=f"download failed: {e}")
+        if resp.status != 200:
+            return ImportResult(source=src, status="error", error=f"HTTP {resp.status}")
+        pdf_bytes = resp.body
 
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -225,31 +215,29 @@ class BulkImporter:
         if not url.startswith(("http://", "https://")):
             return ImportResult(source=url, status="error", error="only http/https URLs supported")
 
-        from ..tools.url_safety import is_url_blocked
-        if is_url_blocked(url):
-            return ImportResult(
-                source=url,
-                status="error",
-                error="URL targets a blocked address (private IP, localhost, or metadata endpoint)",
-            )
-
         from ..tools.web import _html_to_text
 
         src = source or url
+        from ..tools.safe_fetch import BlockedAddressError, safe_fetch
         try:
-            async with aiohttp.ClientSession(timeout=FETCH_TIMEOUT) as session:
-                async with session.get(
-                    url,
-                    headers={"User-Agent": "Mozilla/5.0 (compatible; OdinBot/1.0)"},
-                    allow_redirects=True,
-                    ssl=True,
-                ) as resp:
-                    if resp.status != 200:
-                        return ImportResult(source=src, status="error", error=f"HTTP {resp.status}")
-                    ct = resp.headers.get("Content-Type", "")
-                    body = await resp.text(errors="replace")
+            resp = await safe_fetch(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; OdinBot/1.0)"},
+                max_bytes=MAX_PDF_BYTES,
+                timeout=15.0,
+            )
+        except BlockedAddressError:
+            return ImportResult(
+                source=src,
+                status="error",
+                error="URL targets a blocked address (private IP, localhost, or metadata endpoint)",
+            )
         except Exception as e:
             return ImportResult(source=src, status="error", error=f"fetch failed: {e}")
+        if resp.status != 200:
+            return ImportResult(source=src, status="error", error=f"HTTP {resp.status}")
+        ct = resp.content_type
+        body = resp.text(errors="replace")
 
         if "html" in ct:
             content = _html_to_text(body)

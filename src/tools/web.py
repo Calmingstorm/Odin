@@ -67,45 +67,23 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
     """Fetch a URL and return its content as text.
 
     Handles HTML (converts to markdown-like text), JSON (returns raw),
-    and plain text. Truncates to max_chars.
+    and plain text. Truncates to max_chars. Routes through the hardened
+    ``safe_fetch`` transport: every redirect hop is validated (no SSRF via
+    redirect), the connection IP is pinned to the validated address, and TLS
+    certificates are verified.
     """
-    from .url_safety import is_url_blocked
+    from .safe_fetch import BlockedAddressError, ResponseTooLargeError, safe_fetch
 
-    if is_url_blocked(url):
-        return "Error: URL targets a blocked address (localhost, private IP, or metadata endpoint)"
     try:
-        async with aiohttp.ClientSession(timeout=FETCH_TIMEOUT) as session:
-            async with session.get(
-                url,
-                headers={"User-Agent": USER_AGENT},
-                allow_redirects=True,
-                ssl=False,
-            ) as resp:
-                if resp.status != 200:
-                    # Prefix with "Error:" so the recovery classifier
-                    # sees a known error shape and can attach a hint
-                    # (e.g. 404 → NOT_FOUND, 401/403 → AUTH_FAILURE).
-                    # Without the prefix, classify_error returns None
-                    # and operators get a bare status line with no
-                    # recovery guidance.
-                    return f"Error: HTTP {resp.status}: {resp.reason}"
-
-                content_type = resp.headers.get("Content-Type", "")
-                body = await resp.text(errors="replace")
-
-                if "json" in content_type:
-                    # Return raw JSON
-                    result = body
-                elif "html" in content_type:
-                    result = _html_to_text(body)
-                else:
-                    result = body
-
-                if len(result) > max_chars:
-                    result = result[:max_chars] + "\n\n... (content truncated)"
-
-                return result
-
+        resp = await safe_fetch(
+            url,
+            headers={"User-Agent": USER_AGENT},
+            timeout=15.0,
+        )
+    except BlockedAddressError:
+        return "Error: URL targets a blocked address (localhost, private IP, or metadata endpoint)"
+    except ResponseTooLargeError:
+        return "Error: fetch_url response too large"
     except aiohttp.ClientError as e:
         # Use the standard "Error:" prefix so classify_error can tag
         # connection/timeout/dns failures into their recovery categories.
@@ -113,6 +91,26 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
     except Exception as e:
         log.error("fetch_url failed for %s: %s", url, e)
         return f"Error: {e}"
+
+    if resp.status != 200:
+        # Prefix with "Error:" so the recovery classifier sees a known error
+        # shape and can attach a hint (e.g. 404 → NOT_FOUND, 401/403 →
+        # AUTH_FAILURE). Without the prefix, classify_error returns None and
+        # operators get a bare status line with no recovery guidance.
+        return f"Error: HTTP {resp.status}: {resp.reason}"
+
+    content_type = resp.content_type
+    body = resp.text(errors="replace")
+    if "json" in content_type:
+        result = body
+    elif "html" in content_type:
+        result = _html_to_text(body)
+    else:
+        result = body
+
+    if len(result) > max_chars:
+        result = result[:max_chars] + "\n\n... (content truncated)"
+    return result
 
 
 async def web_search(query: str, max_results: int = 5) -> str:

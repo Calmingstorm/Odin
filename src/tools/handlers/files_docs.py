@@ -14,6 +14,9 @@ import shlex
 
 from .deps import HandlerBase
 
+# Hard cap on a URL-fetched PDF so a huge or hostile body can't exhaust memory.
+_ANALYZE_PDF_MAX_BYTES = 50 * 1024 * 1024  # 50 MiB
+
 
 class FilesDocsTools(HandlerBase):
     async def _handle_read_file(self, inp: dict) -> str:
@@ -86,9 +89,9 @@ class FilesDocsTools(HandlerBase):
         # Validate URL scheme early (before heavy imports) to prevent SSRF
         if url and not url.startswith(("http://", "https://")):
             return "Only http:// and https:// URLs are supported."
-        # Block private/loopback/link-local/metadata targets (DNS-rebinding aware) —
-        # the same guard fetch_url/browser/skill HTTP use. The scheme check alone is
-        # NOT SSRF-safe (e.g. http://169.254.169.254/... passes it).
+        # Pre-flight block check before the heavy import so a blocked URL returns
+        # the block message even on a host without PyMuPDF (safe_fetch below
+        # re-validates every hop; this only preserves the original error order).
         if url:
             from ..url_safety import is_url_blocked
 
@@ -100,17 +103,23 @@ class FilesDocsTools(HandlerBase):
         pdf_bytes: bytes | None = None
 
         if url:
-            # Download PDF from URL
-            import aiohttp
+            # Download the PDF through the hardened transport: every redirect
+            # hop is SSRF-validated (the scheme check alone is not SSRF-safe —
+            # http://169.254.169.254/... passes it), the connect IP is pinned,
+            # TLS is verified, and a hard byte cap bounds memory use.
+            from ..safe_fetch import BlockedAddressError, ResponseTooLargeError, safe_fetch
 
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        if resp.status != 200:
-                            return f"Failed to fetch PDF from URL (HTTP {resp.status})"
-                        pdf_bytes = await resp.read()
+                resp = await safe_fetch(url, max_bytes=_ANALYZE_PDF_MAX_BYTES, timeout=30.0)
+            except BlockedAddressError:
+                return "Error: blocked URL (localhost / private IP / cloud-metadata address)."
+            except ResponseTooLargeError:
+                return f"PDF too large (max {_ANALYZE_PDF_MAX_BYTES} bytes)."
             except Exception as e:
                 return f"Failed to fetch PDF from URL: {e}"
+            if resp.status != 200:
+                return f"Failed to fetch PDF from URL (HTTP {resp.status})"
+            pdf_bytes = resp.body
         elif host and path:
             # Fetch from host via base64
             resolved = self._resolve_host(host)
