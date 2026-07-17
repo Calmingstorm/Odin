@@ -9,6 +9,7 @@ The deferred-close call_later is stubbed so nothing is scheduled on a live loop.
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -735,7 +736,7 @@ class TestPersistTransaction:
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
         gw = _gw(cfg, codex=object(), router=router, aux=old)
 
-        async def _persist_fail():
+        def _persist_fail():
             raise OSError("disk full")
 
         desired = {"enabled": True, "model": "gpt-5.6-terra", "tasks": ["compaction"],
@@ -763,7 +764,7 @@ class TestPersistTransaction:
         router = SimpleNamespace(aux_client=old)
         gw = _gw(cfg, codex=object(), router=router, aux=old)
 
-        async def _persist_fail():
+        def _persist_fail():
             raise OSError("disk full")
 
         desired = {"enabled": False, "model": "gpt-5.6-terra", "tasks": ["compaction"],
@@ -783,7 +784,7 @@ class TestPersistTransaction:
         gw = _gw(cfg, codex=object(), aux=old)
         persisted = []
 
-        async def _persist_ok():
+        def _persist_ok():
             persisted.append(True)
 
         desired = {"enabled": True, "model": "gpt-5.6-terra", "tasks": ["compaction"],
@@ -818,10 +819,12 @@ class TestCancellationDuringPersist:
         old = SimpleNamespace(drain_and_close=AsyncMock())
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
         gw = _gw(cfg, codex=object(), aux=old)
-        gate = asyncio.Event()
+        gate = threading.Event()
+        started = threading.Event()
 
-        async def _slow_persist():
-            await gate.wait()  # cancellation arrives while blocked here
+        def _slow_persist():
+            started.set()
+            gate.wait()  # blocks in the executor thread; cancel arrives meanwhile
 
         desired = {"enabled": True, "model": "gpt-5.6-terra", "tasks": ["compaction"],
                    "credentials_path": "", "max_tokens": 2048}
@@ -831,9 +834,10 @@ class TestCancellationDuringPersist:
             pool_cls.return_value.is_configured.return_value = True
             client_cls.return_value.chat = AsyncMock(return_value="ok")
             task = asyncio.create_task(gw.reload_auxiliary(desired, persist=_slow_persist))
-            await asyncio.sleep(0.02)
+            while not started.is_set():
+                await asyncio.sleep(0.005)
             task.cancel()
-            gate.set()  # let the shielded persist settle (succeeds)
+            gate.set()  # let the shielded persist worker settle (succeeds)
             with pytest.raises(asyncio.CancelledError):
                 await task
             await asyncio.gather(*list(gw._aux_drains))
@@ -847,18 +851,21 @@ class TestCancellationDuringPersist:
         cfg = self._aux_cfg(enabled=True, model="gpt-5.6-terra")
         old = SimpleNamespace(drain_and_close=AsyncMock())
         gw = _gw(cfg, codex=object(), aux=old)
-        gate = asyncio.Event()
+        gate = threading.Event()
+        started = threading.Event()
 
-        async def _slow_fail():
-            await gate.wait()
+        def _slow_fail():
+            started.set()
+            gate.wait()
             raise OSError("disk full")
 
         desired = {"enabled": False, "model": "gpt-5.6-terra", "tasks": ["compaction"],
                    "credentials_path": "", "max_tokens": 2048}
         task = asyncio.create_task(gw.reload_auxiliary(desired, persist=_slow_fail))
-        await asyncio.sleep(0.02)
+        while not started.is_set():
+            await asyncio.sleep(0.005)
         task.cancel()
-        gate.set()  # persist settles with failure
+        gate.set()  # persist worker settles with failure
         with pytest.raises(asyncio.CancelledError):
             await task
         # exact restore: the enabled wrapper survives, config re-enabled
@@ -878,7 +885,7 @@ class TestSwitchProviderTransaction:
         gw.wire_callbacks = lambda: None
         gw.on_provider_switch = lambda: None  # exercise the restore callback
 
-        async def _persist_fail():
+        def _persist_fail():
             raise OSError("disk full")
 
         r = await gw.switch_provider("ollama", persist=_persist_fail)
@@ -908,7 +915,7 @@ class TestSwitchProviderTransaction:
         gw.wire_callbacks = lambda: None
         persisted = []
 
-        async def _persist_ok():
+        def _persist_ok():
             persisted.append(True)
 
         r = await gw.switch_provider("ollama", persist=_persist_ok)
@@ -931,17 +938,20 @@ class TestCancellationBranchesComplete:
         cfg = self._aux_cfg(enabled=True)
         old = SimpleNamespace(drain_and_close=AsyncMock())
         gw = _gw(cfg, codex=object(), aux=old)
-        gate = asyncio.Event()
+        gate = threading.Event()
+        started = threading.Event()
 
-        async def _slow_ok():
-            await gate.wait()
+        def _slow_ok():
+            started.set()
+            gate.wait()
 
         desired = {"enabled": False, "model": "gpt-5.6-terra", "tasks": ["compaction"],
                    "credentials_path": "", "max_tokens": 2048}
         task = asyncio.create_task(gw.reload_auxiliary(desired, persist=_slow_ok))
-        await asyncio.sleep(0.02)
+        while not started.is_set():
+            await asyncio.sleep(0.005)
         task.cancel()
-        gate.set()  # persist settles OK
+        gate.set()  # persist worker settles OK
         with pytest.raises(asyncio.CancelledError):
             await task
         await asyncio.gather(*list(gw._aux_drains))
@@ -955,10 +965,12 @@ class TestCancellationBranchesComplete:
         old = SimpleNamespace(drain_and_close=AsyncMock())
         candidate = SimpleNamespace(drain_and_close=AsyncMock())
         gw = _gw(cfg, codex=object(), aux=old)
-        gate = asyncio.Event()
+        gate = threading.Event()
+        started = threading.Event()
 
-        async def _slow_fail():
-            await gate.wait()
+        def _slow_fail():
+            started.set()
+            gate.wait()
             raise OSError("disk full")
 
         desired = {"enabled": True, "model": "gpt-5.6-terra", "tasks": ["compaction"],
@@ -969,7 +981,8 @@ class TestCancellationBranchesComplete:
             pool_cls.return_value.is_configured.return_value = True
             client_cls.return_value.chat = AsyncMock(return_value="ok")
             task = asyncio.create_task(gw.reload_auxiliary(desired, persist=_slow_fail))
-            await asyncio.sleep(0.02)
+            while not started.is_set():
+                await asyncio.sleep(0.005)
             task.cancel()
             gate.set()
             with pytest.raises(asyncio.CancelledError):
@@ -985,16 +998,16 @@ class TestCancellationBranchesComplete:
         cfg = _cfg(active="codex")
         gw = _gw(cfg, codex=object(), ollama=object())
         gw.wire_callbacks = lambda: None
-        gate = asyncio.Event()
+        gate = threading.Event()
+        started = threading.Event()
 
-        started = asyncio.Event()
-
-        async def _slow_ok():
+        def _slow_ok():
             started.set()
-            await gate.wait()
+            gate.wait()
 
         task = asyncio.create_task(gw.switch_provider("ollama", persist=_slow_ok))
-        await started.wait()
+        while not started.is_set():
+            await asyncio.sleep(0.005)
         task.cancel()
         gate.set()
         with pytest.raises(asyncio.CancelledError):
@@ -1006,19 +1019,59 @@ class TestCancellationBranchesComplete:
         gw = _gw(cfg, codex=object(), ollama=object())
         gw.wire_callbacks = lambda: None
         gw.on_provider_switch = lambda: None  # exercise the restore callback
-        gate = asyncio.Event()
+        gate = threading.Event()
+        started = threading.Event()
 
-        started = asyncio.Event()
-
-        async def _slow_fail():
+        def _slow_fail():
             started.set()
-            await gate.wait()
+            gate.wait()
             raise OSError("disk full")
 
         task = asyncio.create_task(gw.switch_provider("ollama", persist=_slow_fail))
-        await started.wait()
+        while not started.is_set():
+            await asyncio.sleep(0.005)
         task.cancel()
         gate.set()
         with pytest.raises(asyncio.CancelledError):
             await task
         assert cfg.llm_provider.active_provider == "codex"  # restored
+
+
+class TestPersistWorkerAlwaysSettles:
+    """Blocker-3: run_persist_settled runs the write on an EXECUTOR future, so
+    the shutdown drain's asyncio.all_tasks() cancellation can't cancel the
+    child, and a cancelled caller is never mistaken for a successful write —
+    the lock is held until the real filesystem worker settles."""
+
+    async def test_direct_cancel_waits_for_real_worker(self):
+        gw = _gw(_cfg())
+        gate = threading.Event()
+        started = threading.Event()
+        finished = threading.Event()
+
+        def _blocking_write():
+            started.set()
+            gate.wait()          # a real blocked executor worker
+            finished.set()
+
+        async def _drive():
+            return await gw.run_persist_settled(_blocking_write)
+
+        task = asyncio.create_task(_drive())
+        while not started.is_set():
+            await asyncio.sleep(0.005)
+        task.cancel()            # cancel the CALLER (as the shutdown drain would)
+        await asyncio.sleep(0.02)
+        # the worker is still running — settle has NOT returned
+        assert not task.done()
+        assert not finished.is_set()
+        gate.set()               # let the real worker finish
+        exc, was_cancelled = None, None
+        try:
+            exc, was_cancelled = await task
+        except asyncio.CancelledError:
+            pass
+        assert finished.is_set()  # the write actually completed before return
+        # the settle observed the cancellation but only after the worker settled
+        assert was_cancelled is True
+        assert exc is None

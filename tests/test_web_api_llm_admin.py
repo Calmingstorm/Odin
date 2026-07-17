@@ -61,6 +61,8 @@ def _gw(bot):
     gw.reload_codex_inner = AsyncMock()
     gw.reload_ollama_inner = AsyncMock()
     gw.reload_kimi_inner = AsyncMock()
+    # Settle-safe persist runner (real gateway method): default = clean write.
+    gw.run_persist_settled = AsyncMock(return_value=(None, False))
     return gw
 
 
@@ -247,13 +249,13 @@ class TestLlmStatus:
 
         async def _switch(provider, persist=None):
             captured["persist"] = persist
-            await persist()  # switch_provider runs it inside its own lock
+            persist()  # SYNC persist callable — switch runs it under its lock
             return {"active_provider": provider}
 
         bot.llm_gateway.switch_provider = _switch
         ran = []
-        with patch("src.web.api.llm_admin._persist_config",
-                   new=AsyncMock(side_effect=lambda _b: ran.append(True))):
+        with patch("src.web.api.llm_admin._persist_llm_sections_sync",
+                   new=lambda _b: ran.append(True)):
             async with TestClient(TestServer(app)) as c:
                 assert (await c.post("/api/llm/switch", json={"provider": "codex"})).status == 200
         assert captured["persist"] is not None
@@ -342,6 +344,50 @@ class TestConnectionPools:
 # --------------------------------------------------------------------------- #
 # Provider config PUTs
 # --------------------------------------------------------------------------- #
+class TestProviderRoutePersistFailure:
+    """Round-5: the non-transactional provider routes now snapshot/restore
+    exact runtime state on a persist failure (my fail-loud PersistError made
+    a write failure leave rejected values live otherwise)."""
+
+    @pytest.mark.asyncio
+    async def test_codex_config_persist_failure_restores(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        bot.config.openai_codex.model = "gpt-5.6-sol"
+        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), False))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json={"model": "gpt-5.6-terra"})
+            assert r.status == 500
+        # rejected value restored, and the client reloaded back
+        assert bot.config.openai_codex.model == "gpt-5.6-sol"
+        assert bot.llm_gateway.reload_codex_inner.await_count == 2  # forward + restore
+
+    @pytest.mark.asyncio
+    async def test_ollama_config_persist_failure_restores(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.config.ollama.model = "qwen-old"
+        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), False))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/ollama/config", json={"model": "qwen-new"})
+            assert r.status == 500
+        assert bot.config.ollama.model == "qwen-old"
+        assert bot.llm_gateway.reload_ollama_inner.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_kimi_config_persist_failure_restores(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.config.kimi.model = "kimi-old"
+        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), False))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/kimi/config", json={"model": "kimi-new"})
+            assert r.status == 500
+        assert bot.config.kimi.model == "kimi-old"
+        assert bot.llm_gateway.reload_kimi_inner.await_count == 2
+
+
 class TestProviderConfig:
     @pytest.mark.asyncio
     async def test_codex_config(self):
@@ -422,13 +468,13 @@ class TestProviderConfig:
         ran = []
 
         async def _reload(desired=None, persist=None):
-            await persist()  # exercise the route's persist closure
+            persist()  # SYNC persist callable — exercise the route's closure
             return {"committed": True, "effective_enabled": True,
                     "model": desired["model"], "tasks": desired["tasks"]}
 
         bot.llm_gateway.reload_auxiliary = _reload
-        with patch("src.web.api.llm_admin._persist_config",
-                   new=AsyncMock(side_effect=lambda _b: ran.append(True))):
+        with patch("src.web.api.llm_admin._persist_llm_sections_sync",
+                   new=lambda _b: ran.append(True)):
             async with TestClient(TestServer(app)) as c:
                 r = await c.put("/api/llm/auxiliary/config",
                                 json={"enabled": True, "model": "gpt-5.6-terra",
@@ -810,6 +856,19 @@ class TestOllamaAdmin:
             assert r.status == 200 and (await r.json())["model"] == "q:7b"
 
     @pytest.mark.asyncio
+    async def test_set_model_persist_failure_restores(self):
+        app, bot = _app(register_ollama_admin)
+        _gw(bot)
+        bot.config.ollama.model = "q:old"
+        bot.llm_gateway.ollama_client = _provider_client(models=["q:new"])
+        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), False))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post("/api/ollama/model", json={"model": "q:new"})
+            assert r.status == 500
+        assert bot.config.ollama.model == "q:old"  # restored
+        assert bot.llm_gateway.ollama_client.model == "q:old"
+
+    @pytest.mark.asyncio
     async def test_set_model_no_lock(self):
         app, bot = _app(register_ollama_admin)
         bot.llm_gateway.provider_lock = None
@@ -871,6 +930,19 @@ class TestKimiAdmin:
             assert (await c.post("/api/kimi/model", json={"model": "other"})).status == 400
             r = await c.post("/api/kimi/model", json={"model": "kimi-k2"})
             assert r.status == 200 and (await r.json())["model"] == "kimi-k2"
+
+    @pytest.mark.asyncio
+    async def test_kimi_set_model_persist_failure_restores(self):
+        app, bot = _app(register_kimi_admin)
+        _gw(bot)
+        bot.config.kimi.model = "k-old"
+        bot.llm_gateway.kimi_client = _provider_client(models=["k-new"])
+        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), False))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post("/api/kimi/model", json={"model": "k-new"})
+            assert r.status == 500
+        assert bot.config.kimi.model == "k-old"
+        assert bot.llm_gateway.kimi_client.model == "k-old"
 
     @pytest.mark.asyncio
     async def test_kimi_set_model_no_lock(self):
@@ -1130,3 +1202,47 @@ class TestPersistHelpers:
         Path("config.yml").write_text("discord: {token: 'unterminated")  # ry.load raises
         with pytest.raises(PersistError, match="unreadable or malformed"):
             _persist_llm_sections_sync(_bot())
+
+
+class TestPersistOrRestore:
+    """Direct pins for _persist_or_restore's cancel/fallback branches."""
+
+    @pytest.mark.asyncio
+    async def test_no_gateway_method_falls_back(self):
+        from src.web.api.llm_admin import _persist_or_restore
+        bot = _bot()
+        # a bare gateway without run_persist_settled → fallback to _persist_config
+        del bot.llm_gateway.run_persist_settled
+        bot.llm_gateway = SimpleNamespace()  # no run_persist_settled attr
+        restored = []
+        exc = await _persist_or_restore(bot, lambda: restored.append(True))
+        assert exc is None
+        assert restored == []  # success → no restore
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_restore_reraises(self):
+        from src.web.api.llm_admin import _persist_or_restore
+        bot = _bot()
+        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(OSError("x"), True))
+        restored = []
+
+        async def _restore():
+            restored.append(True)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _persist_or_restore(bot, _restore)
+        assert restored == [True]  # restored before re-raising the cancellation
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_success_reraises_without_restore(self):
+        from src.web.api.llm_admin import _persist_or_restore
+        bot = _bot()
+        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(None, True))
+        restored = []
+
+        async def _restore():
+            restored.append(True)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _persist_or_restore(bot, _restore)
+        assert restored == []  # committed → NOT restored, just re-raised

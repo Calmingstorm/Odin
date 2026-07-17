@@ -211,6 +211,45 @@ async def _persist_config(bot) -> None:
     await asyncio.to_thread(_persist_llm_sections_sync, bot)
 
 
+def _snapshot_section(section, fields: tuple[str, ...]) -> dict:
+    return {f: getattr(section, f) for f in fields}
+
+
+def _restore_section(section, snap: dict) -> None:
+    for f, v in snap.items():
+        setattr(section, f, v)
+
+
+async def _persist_or_restore(bot, restore_and_reload) -> Exception | None:
+    """Settle-safe persist under the caller's held provider_lock, with EXACT
+    restore of runtime state on failure — the transactional contract every
+    LLM-config mutation route needs now that persistence fails loudly.
+
+    The write runs on an executor future (via the gateway) so the lock is
+    never released while the filesystem worker is in flight, and a cancelled
+    caller is never mistaken for a successful write. On a write FAILURE the
+    disk is unchanged, so ``restore_and_reload`` restores config + reloads the
+    live client to the prior generation. A caller cancellation is re-raised
+    AFTER state is coherent (committed on success, restored on failure).
+
+    Returns the persist exception on failure, else None.
+    """
+    gw = bot.llm_gateway
+    if not hasattr(gw, "run_persist_settled"):
+        await _persist_config(bot)  # test doubles without the gateway method
+        return None
+    exc, was_cancelled = await gw.run_persist_settled(
+        lambda: _persist_llm_sections_sync(bot))
+    if exc is not None:
+        await restore_and_reload()
+        if was_cancelled:
+            raise asyncio.CancelledError
+        return exc
+    if was_cancelled:
+        raise asyncio.CancelledError
+    return None
+
+
 def register_connection_pools(routes: web.RouteTableDef, bot) -> None:
     """Connection pool status (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -377,13 +416,11 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
             )
 
         # Mutation AND persistence happen under ONE provider_lock ownership:
-        # switch_provider runs the persist callback inside its own lock and
-        # restores the prior provider on persist failure — no interleaving
-        # window between the live switch and its disk write.
-        async def _persist():
-            await _persist_config(bot)
-
-        result = await bot.llm_gateway.switch_provider(provider, persist=_persist)
+        # switch_provider runs the SYNC persist on an executor future inside
+        # its own lock (settled before the lock releases) and restores the
+        # prior provider on persist failure — no interleaving window.
+        result = await bot.llm_gateway.switch_provider(
+            provider, persist=lambda: _persist_llm_sections_sync(bot))
         if "error" in result:
             reason = result["error"]
             status = 500 if "persist failed" in reason else 400
@@ -445,6 +482,10 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 if agent_model is not None:
                     agent_model = str(agent_model).strip() or None
                 changed = False
+                # Snapshot BEFORE mutation for exact restore on persist failure.
+                _prior = _snapshot_section(cfg, (
+                    "enabled", "model", "max_tokens", "reasoning_effort",
+                    "agent_reasoning_effort", "agent_model"))
                 # Agent effort is read from config at call time by the agent
                 # iteration callbacks — persisting it must NOT trigger a codex
                 # client reload (auth-pool refresh) when nothing else changed.
@@ -478,7 +519,14 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 if changed:
                     if needs_reload:
                         await bot.llm_gateway.reload_codex_inner()
-                    await _persist_config(bot)
+
+                    async def _restore():
+                        _restore_section(cfg, _prior)
+                        if needs_reload:
+                            await bot.llm_gateway.reload_codex_inner()
+
+                    if await _persist_or_restore(bot, _restore) is not None:
+                        return web.json_response({"error": "persist failed"}, status=500)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
 
@@ -543,14 +591,12 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             "credentials_path": aux_cfg.credentials_path, "max_tokens": aux_cfg.max_tokens,
         }
         # Persistence runs INSIDE reload_auxiliary's locked transaction: the
-        # candidate is applied, persisted, and (on persist failure) EXACTLY
-        # restored before the lock releases — no phantom success, no second
-        # probed reload. _persist_config is lock-free (already under the lock).
-        async def _persist():
-            await _persist_config(bot)
-
+        # SYNC write runs on an executor future (settled before the lock
+        # releases), the candidate is applied, persisted, and (on persist
+        # failure) EXACTLY restored — no phantom success, no probed reload.
         try:
-            result = await bot.llm_gateway.reload_auxiliary(desired, persist=_persist)
+            result = await bot.llm_gateway.reload_auxiliary(
+                desired, persist=lambda: _persist_llm_sections_sync(bot))
         except Exception as e:
             log.exception("Auxiliary reload raised")
             return web.json_response({"error": f"reload failed: {e}"}, status=500)
@@ -579,6 +625,8 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         try:
             async with lock:
                 cfg = bot.config.ollama
+                _prior = _snapshot_section(cfg, (
+                    "enabled", "base_url", "model", "max_tokens", "api_key", "timeout"))
                 changed = False
                 if "enabled" in body:
                     cfg.enabled = bool(body["enabled"])
@@ -601,7 +649,13 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     changed = True
                 if changed:
                     await bot.llm_gateway.reload_ollama_inner()
-                    await _persist_config(bot)
+
+                    async def _restore():
+                        _restore_section(cfg, _prior)
+                        await bot.llm_gateway.reload_ollama_inner()
+
+                    if await _persist_or_restore(bot, _restore) is not None:
+                        return web.json_response({"error": "persist failed"}, status=500)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
 
@@ -627,6 +681,8 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         try:
             async with lock:
                 cfg = bot.config.kimi
+                _prior = _snapshot_section(cfg, (
+                    "enabled", "api_key", "model", "max_tokens", "timeout"))
                 changed = False
                 if "enabled" in body:
                     cfg.enabled = bool(body["enabled"])
@@ -646,7 +702,13 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     changed = True
                 if changed:
                     await bot.llm_gateway.reload_kimi_inner()
-                    await _persist_config(bot)
+
+                    async def _restore():
+                        _restore_section(cfg, _prior)
+                        await bot.llm_gateway.reload_kimi_inner()
+
+                    if await _persist_or_restore(bot, _restore) is not None:
+                        return web.json_response({"error": "persist failed"}, status=500)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
 
@@ -769,9 +831,16 @@ def register_ollama_admin(routes: web.RouteTableDef, bot) -> None:
                         ),
                     }, status=400)
 
+            _prior_model = bot.config.ollama.model
             client.model = model
             bot.config.ollama.model = model
-            await _persist_config(bot)
+
+            async def _restore():
+                bot.config.ollama.model = _prior_model
+                client.model = _prior_model
+
+            if await _persist_or_restore(bot, _restore) is not None:
+                return web.json_response({"error": "persist failed"}, status=500)
         return web.json_response({"status": "updated", "model": model})
 
 
@@ -844,9 +913,16 @@ def register_kimi_admin(routes: web.RouteTableDef, bot) -> None:
                     "error": f"Model '{model}' not available. Models: {', '.join(available[:10])}",
                 }, status=400)
 
+            _prior_model = bot.config.kimi.model
             client.model = model
             bot.config.kimi.model = model
-            await _persist_config(bot)
+
+            async def _restore():
+                bot.config.kimi.model = _prior_model
+                client.model = _prior_model
+
+            if await _persist_or_restore(bot, _restore) is not None:
+                return web.json_response({"error": "persist failed"}, status=500)
         return web.json_response({"status": "updated", "model": model})
 
 

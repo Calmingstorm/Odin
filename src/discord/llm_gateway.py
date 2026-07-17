@@ -290,35 +290,34 @@ class LLMGateway:
         except Exception as exc:
             return f"model probe failed: {type(exc).__name__}"
 
-    async def _run_persist_settled(self, persist):
-        """Run ``persist`` under the caller's held lock, cancellation-SAFE.
+    async def run_persist_settled(self, persist_sync):
+        """Run the SYNC ``persist_sync`` write to settlement under the caller's
+        held lock, cancellation-SAFE — for EVERY LLM-config persistence path.
 
-        ``_persist_config`` awaits ``asyncio.to_thread`` — cancelling that
-        await does NOT stop the worker thread, so releasing the lock on
-        cancellation would let a supposedly-serialized YAML write continue in
-        the background. We shield the worker so a cancel can't abandon it
-        mid-write, then wait for it to SETTLE before returning. The caller
-        commits or restores deterministically and re-raises cancellation only
-        after runtime/disk ownership is coherent.
+        The write runs on an EXECUTOR future (``run_in_executor``), not an
+        ``asyncio.to_thread`` task: an executor future is not a ``Task``, so
+        the repository's ``asyncio.all_tasks()`` shutdown drain can't cancel
+        it, and the filesystem worker always runs to completion. We wait on
+        that future — repeatedly re-shielding through any caller cancellation
+        — so the lock is never released while the write is still in flight.
+        ``fut.exception()`` reflects the ACTUAL thread result: a cancelled
+        caller is NEVER mistaken for a successful write.
 
-        Returns ``(persist_exc_or_None, was_cancelled)``.
+        Returns ``(persist_exc_or_None, was_cancelled)``. The caller commits
+        or exactly-restores, then re-raises cancellation, once state is
+        coherent.
         """
-        task = asyncio.ensure_future(persist())
+        loop = asyncio.get_running_loop()
+        fut = loop.run_in_executor(None, persist_sync)
         was_cancelled = False
-        # Shield-loop: keep waiting (shielded) until the worker settles even
-        # under REPEATED cancellation. A cancel here only records intent —
-        # it must not abandon the in-flight write nor propagate before the
-        # caller has made a coherent commit-or-restore decision. A plain
-        # single await/gather would re-raise the pending cancellation on its
-        # next await and leak out mid-transaction.
-        while not task.done():
+        while not fut.done():
             try:
-                await asyncio.shield(task)
+                await asyncio.shield(fut)
             except asyncio.CancelledError:
                 was_cancelled = True
             except Exception:
-                break  # worker raised; task.done() is now True
-        exc = task.exception() if not task.cancelled() else None
+                break  # worker raised; fut.done() is now True
+        exc = fut.exception()
         return exc, was_cancelled
 
     def _snapshot_aux_config(self) -> dict:
@@ -366,7 +365,7 @@ class LLMGateway:
                 self._apply_aux_desired(desired)
                 self._aux_reload_gen += 1
                 if persist is not None:
-                    persist_exc, was_cancelled = await self._run_persist_settled(persist)
+                    persist_exc, was_cancelled = await self.run_persist_settled(persist)
                     if persist_exc is not None:
                         # EXACT restore — no probed reload; disk unchanged.
                         self.auxiliary_llm_client = prior_aux
@@ -435,7 +434,7 @@ class LLMGateway:
                 self._apply_aux_desired(desired)
                 self._aux_reload_gen += 1
                 if persist is not None:
-                    persist_exc, was_cancelled = await self._run_persist_settled(persist)
+                    persist_exc, was_cancelled = await self.run_persist_settled(persist)
                     if persist_exc is not None:
                         # EXACT restore of the prior generation, then drain the
                         # candidate (installed stays False → finally handles it).
@@ -581,7 +580,7 @@ class LLMGateway:
                     self.on_provider_switch()
 
                 if persist is not None:
-                    persist_exc, was_cancelled = await self._run_persist_settled(persist)
+                    persist_exc, was_cancelled = await self.run_persist_settled(persist)
                     if persist_exc is not None and not was_cancelled:
                         # Restore the prior provider under the same lock so the
                         # live switch never outruns the (unchanged) disk state.
