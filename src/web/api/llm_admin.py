@@ -453,6 +453,11 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             raw = body.get("tasks")
             if not isinstance(raw, list):
                 return web.json_response({"error": "tasks must be a list"}, status=400)
+            # Require every item to be a string BEFORE set membership /
+            # sorted() — a non-string ({}/int) would raise TypeError → 500.
+            if not all(isinstance(t, str) for t in raw):
+                return web.json_response(
+                    {"error": "every task must be a string"}, status=400)
             unknown = [t for t in raw if t not in KNOWN_TASKS]
             if unknown:
                 return web.json_response(
@@ -463,38 +468,35 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             seen = set(raw)
             new_tasks = [t for t in KNOWN_TASKS_ORDER if t in seen]
 
-        # Snapshot for rollback if the live rebuild fails.
-        prior = (aux_cfg.enabled, aux_cfg.model, list(aux_cfg.tasks))
-        changed = False
-        if "enabled" in body:
-            aux_cfg.enabled = bool(body["enabled"])
-            changed = True
+        # Build an IMMUTABLE desired spec (presence-merged with current
+        # config) WITHOUT mutating live config — reload_auxiliary commits it
+        # atomically under the lock, so a concurrent PUT can't install a
+        # candidate built from a config this handler already changed.
+        want_enabled = bool(body["enabled"]) if "enabled" in body else aux_cfg.enabled
+        want_model = aux_cfg.model
         if "model" in body and str(body["model"]).strip():
-            aux_cfg.model = str(body["model"]).strip()
-            changed = True
-        if tasks_present:
-            aux_cfg.tasks = new_tasks
-            changed = True
-
-        if changed:
-            # reload_auxiliary is self-locking (two-phase, drains outside the
-            # lock) — do NOT wrap it in provider_lock here.
-            try:
-                result = await bot.llm_gateway.reload_auxiliary()
-            except Exception as e:
-                aux_cfg.enabled, aux_cfg.model, aux_cfg.tasks = prior
-                log.exception("Auxiliary reload raised")
-                return web.json_response({"error": f"reload failed: {e}"}, status=500)
-            # A disabled result is expected when enabled=false; only roll back
-            # when we ASKED to enable but got an unavailable reason.
-            if aux_cfg.enabled and not result.get("effective_enabled"):
-                aux_cfg.enabled, aux_cfg.model, aux_cfg.tasks = prior
-                return web.json_response(
-                    {"error": result.get("reason", "auxiliary could not be enabled")},
-                    status=400,
-                )
-            await _persist_config(bot)
-
+            want_model = str(body["model"]).strip()
+        want_tasks = new_tasks if tasks_present else list(aux_cfg.tasks)
+        desired = {
+            "enabled": want_enabled, "model": want_model, "tasks": want_tasks,
+            "credentials_path": aux_cfg.credentials_path, "max_tokens": aux_cfg.max_tokens,
+        }
+        try:
+            # Self-locking (two-phase; probe + drain outside the lock) — do
+            # NOT wrap in provider_lock here.
+            result = await bot.llm_gateway.reload_auxiliary(desired)
+        except Exception as e:
+            log.exception("Auxiliary reload raised")
+            return web.json_response({"error": f"reload failed: {e}"}, status=500)
+        # We asked to enable but the live rebuild failed (bad model, missing
+        # creds, concurrent reload): config was NOT committed — surface it.
+        if want_enabled and not result.get("effective_enabled"):
+            return web.json_response(
+                {"error": result.get("reason", "auxiliary could not be enabled")},
+                status=400,
+            )
+        # reload committed config under the lock on success — persist the YAML.
+        await _persist_config(bot)
         return web.json_response({"status": "updated", **_auxiliary_status(bot)})
 
     @routes.put("/api/llm/ollama/config")

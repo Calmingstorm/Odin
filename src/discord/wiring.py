@@ -920,15 +920,19 @@ async def shutdown_services(bot) -> None:
                 log.exception("Error closing SSH pool")
 
     # Close auxiliary LLM client — the gateway holds the CANONICAL live
-    # instance (reloads replace it there); the flat bot handle can be a
-    # retired generation. Prefer the gateway's, fall back to the flat handle.
+    # instance (reloads replace it there). Await any outstanding background
+    # drains of retired generations first, then drain the live one.
     _gateway = getattr(bot, "llm_gateway", None)
-    aux = getattr(_gateway, "auxiliary_llm_client", None) or getattr(
-        bot, "auxiliary_llm_client", None
-    )
+    _drains = getattr(_gateway, "_aux_drains", None)
+    if _drains:
+        try:
+            await asyncio.gather(*list(_drains), return_exceptions=True)
+        except Exception:
+            log.exception("Error awaiting auxiliary drains")
+    aux = getattr(_gateway, "auxiliary_llm_client", None)
     if aux is not None:
         try:
-            await aux.close_when_idle()
+            await aux.drain_and_close()
         except Exception:
             log.exception("Error closing auxiliary LLM client")
 

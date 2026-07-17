@@ -58,6 +58,11 @@ class LLMGateway:
         self.sessions = sessions
         self.reflector = reflector
         self.provider_lock = asyncio.Lock()
+        # Auxiliary live-reload state: a monotonic generation guards against a
+        # candidate built under a config a concurrent reload has since
+        # changed; _aux_drains tracks background drains of retired wrappers.
+        self._aux_reload_gen = 0
+        self._aux_drains: set = set()
         self.inflight_requests = 0
         self.switching = False
         # Called after a provider switch settles — wiring points it at the tool
@@ -120,11 +125,32 @@ class LLMGateway:
 
     # ---------- live reloads -------------------------------------------------
 
+    def _reconcile_auxiliary_primary(self) -> None:
+        """Keep the auxiliary wrapper consistent with the primary Codex client
+        after a primary lifecycle change (caller holds provider_lock).
+
+        Primary gone → retire auxiliary (its fallback would be a dead client).
+        Primary recreated → rebind the wrapper's fallback to the live primary
+        rather than leave it pointing at a stale one. A full aux rebuild is
+        the next WebUI reload's job; this only prevents a stale-primary hole.
+        """
+        aux = self.auxiliary_llm_client
+        if aux is None:
+            return
+        if self.codex_client is None:
+            self.auxiliary_llm_client = None
+            if self.model_router is not None:
+                self.model_router.aux_client = None
+            self._schedule_drain(aux)
+        elif getattr(aux, "primary_client", None) is not self.codex_client:
+            aux.primary_client = self.codex_client
+
     async def reload_codex_inner(self) -> dict:
         """Inner reload — caller must hold provider_lock."""
         config = self.get_config()
         if not config.openai_codex.enabled:
             self.codex_client = None
+            self._reconcile_auxiliary_primary()
             return {"configured": False, "reason": "openai_codex disabled in config"}
 
         if self.codex_client is not None:
@@ -181,6 +207,9 @@ class LLMGateway:
             stream_stall_timeout=config.openai_codex.stream_stall_timeout_seconds,
         )
         self.wire_callbacks()
+        # The primary was just (re)created — rebind the auxiliary fallback to
+        # it rather than leave the wrapper pointing at the old/absent primary.
+        self._reconcile_auxiliary_primary()
         log.info("Codex client created via live reload (model: %s)", config.openai_codex.model)
         return {"configured": True, "created": True, "accounts": len(auth._accounts)}
 
@@ -189,85 +218,143 @@ class LLMGateway:
         async with self.provider_lock:
             return await self.reload_codex_inner()
 
-    async def reload_auxiliary(self) -> dict:
-        """Rebuild the auxiliary wrapper from current config, two-phase.
+    def _schedule_drain(self, wrapper) -> None:
+        """Retire a wrapper generation via a TRACKED background drain — it
+        waits for the lease count to reach zero (no wall-clock cut) then
+        closes, entirely outside provider_lock. Tracked so it isn't GC'd and
+        so shutdown can await outstanding drains."""
+        if wrapper is None:
+            return
+        task = asyncio.ensure_future(wrapper.drain_and_close())
+        self._aux_drains.add(task)
+        task.add_done_callback(self._aux_drains.discard)
 
-        Unlike the ``*_inner`` reloads this is self-locking and must NOT be
-        called under ``provider_lock``: it builds/probes the candidate and
-        drains the retired wrapper OUTSIDE the lock (an in-flight auxiliary
-        call may run for minutes — waiting on it while holding the lock would
-        trade one outage for a worse one). The lock is held only for the
-        atomic pointer swap. On any failure the prior runtime wrapper and its
-        pointers are left untouched.
+    def _apply_aux_desired(self, desired: dict) -> None:
+        """Commit a validated auxiliary spec onto live config (under lock)."""
+        aux_cfg = self.get_config().openai_codex.auxiliary
+        aux_cfg.enabled = desired["enabled"]
+        aux_cfg.model = desired["model"]
+        aux_cfg.tasks = list(desired["tasks"])
+
+    def _build_aux_candidate(self, desired: dict, primary):
+        """Construct a candidate wrapper from an IMMUTABLE desired spec bound
+        to ``primary`` — no live config read, so a concurrent config change
+        can't leak into this candidate."""
+        from ..llm.auxiliary import AuxiliaryLLMClient
+
+        config = self.get_config()
+        aux_creds = desired["credentials_path"] or config.openai_codex.credentials_path
+        aux_auth = CodexAuthPool(aux_creds)
+        if not aux_auth.is_configured():
+            return None, None
+        candidate_client = CodexChatClient(
+            auth=aux_auth,
+            model=desired["model"],
+            max_tokens=desired["max_tokens"],
+            max_retries=config.openai_codex.retry.max_retries,
+            retry_base_delay=config.openai_codex.retry.base_delay,
+            retry_max_delay=config.openai_codex.retry.max_delay,
+            pool_max_connections=config.openai_codex.connection_pool.max_connections,
+            pool_keepalive_timeout=config.openai_codex.connection_pool.keepalive_timeout,
+            request_timeout=config.openai_codex.request_timeout_seconds,
+            stream_stall_timeout=config.openai_codex.stream_stall_timeout_seconds,
+        )
+        candidate = AuxiliaryLLMClient(
+            aux_client=candidate_client,
+            primary_client=primary,
+            enabled_tasks=set(desired["tasks"]),
+            cost_tracker=self.cost_tracker,
+        )
+        return candidate, candidate_client
+
+    async def _probe_aux(self, client) -> str | None:
+        """Compatibility-probe a candidate's aux client OUTSIDE the lock: a
+        minimal request that fails fast on an unsupported model. Returns None
+        on success, else a reason string. A free-string model that the auth
+        path rejects is caught HERE, before install/persist."""
+        try:
+            await client.chat([{"role": "user", "content": "ok"}], "", max_tokens=1)
+            return None
+        except Exception as exc:
+            return f"model probe failed: {type(exc).__name__}"
+
+    async def reload_auxiliary(self, desired: dict | None = None) -> dict:
+        """Two-phase live reload of the auxiliary wrapper.
+
+        Self-locking — must NOT be called under ``provider_lock``. ``desired``
+        is an IMMUTABLE spec (enabled/model/tasks/credentials_path/max_tokens);
+        when None the current config is snapshotted. The candidate is built
+        and compatibility-probed OUTSIDE the lock; under the lock the primary
+        generation AND the auxiliary reload generation are verified before an
+        atomic commit of config + live pointers; retired/stale wrappers drain
+        via tracked background tasks OUTSIDE the lock. Config, YAML, and the
+        prior wrapper are left untouched on any failure.
         """
         config = self.get_config()
-        aux_cfg = getattr(config.openai_codex, "auxiliary", None)
+        aux_cfg = config.openai_codex.auxiliary
+        if desired is None:
+            desired = {
+                "enabled": aux_cfg.enabled, "model": aux_cfg.model,
+                "tasks": list(aux_cfg.tasks),
+                "credentials_path": aux_cfg.credentials_path,
+                "max_tokens": aux_cfg.max_tokens,
+            }
+        gen_at_build = self._aux_reload_gen
 
-        # --- disabled: retire the current wrapper ---
-        if not (aux_cfg and aux_cfg.enabled):
+        # --- disabled: retire under the lock, drain outside ---
+        if not desired["enabled"]:
             async with self.provider_lock:
+                if self._aux_reload_gen != gen_at_build:
+                    return {"effective_enabled": False, "reason": "concurrent reload; retry"}
                 retired = self.auxiliary_llm_client
                 self.auxiliary_llm_client = None
                 if self.model_router is not None:
                     self.model_router.aux_client = None
-            if retired is not None:
-                await retired.close_when_idle()
-            return {"effective_enabled": False, "reason": "auxiliary disabled in config"}
+                self._apply_aux_desired(desired)
+                self._aux_reload_gen += 1
+            self._schedule_drain(retired)
+            return {"effective_enabled": False, "reason": "auxiliary disabled"}
 
-        if self.codex_client is None:
+        primary_at_build = self.codex_client
+        if primary_at_build is None:
             return {"effective_enabled": False, "reason": "no primary Codex client to bind"}
 
-        # --- phase 1: build + probe the candidate OUTSIDE the lock ---
-        primary_at_build = self.codex_client
+        # --- phase 1: build + probe OUTSIDE the lock ---
         try:
-            from ..llm.auxiliary import AuxiliaryLLMClient
-
-            aux_creds = aux_cfg.credentials_path or config.openai_codex.credentials_path
-            aux_auth = CodexAuthPool(aux_creds)
-            if not aux_auth.is_configured():
-                return {"effective_enabled": False, "reason": "auxiliary credentials missing"}
-            candidate_client = CodexChatClient(
-                auth=aux_auth,
-                model=aux_cfg.model,
-                max_tokens=aux_cfg.max_tokens,
-                max_retries=config.openai_codex.retry.max_retries,
-                retry_base_delay=config.openai_codex.retry.base_delay,
-                retry_max_delay=config.openai_codex.retry.max_delay,
-                pool_max_connections=config.openai_codex.connection_pool.max_connections,
-                pool_keepalive_timeout=config.openai_codex.connection_pool.keepalive_timeout,
-                request_timeout=config.openai_codex.request_timeout_seconds,
-                stream_stall_timeout=config.openai_codex.stream_stall_timeout_seconds,
-            )
-            candidate = AuxiliaryLLMClient(
-                aux_client=candidate_client,
-                primary_client=primary_at_build,
-                enabled_tasks=set(aux_cfg.tasks),
-                cost_tracker=self.cost_tracker,
-            )
+            candidate, candidate_client = self._build_aux_candidate(desired, primary_at_build)
         except Exception as exc:
             log.exception("Auxiliary reload: candidate build failed")
             return {"effective_enabled": False, "reason": f"build failed: {exc}"}
+        if candidate is None:
+            return {"effective_enabled": False, "reason": "auxiliary credentials missing"}
+        probe_reason = await self._probe_aux(candidate_client)
+        if probe_reason is not None:
+            self._schedule_drain(candidate)
+            return {"effective_enabled": False, "reason": probe_reason}
 
-        # --- phase 2: swap atomically under the lock (generation-checked) ---
+        # --- phase 2: verify generation + revision, commit atomically ---
         async with self.provider_lock:
             if self.codex_client is not primary_at_build:
-                # The primary was recreated between build and swap; the
-                # candidate is bound to a stale primary — abort, drain it.
-                await candidate.close_when_idle(timeout=0.0)
+                self._schedule_drain(candidate)
                 return {"effective_enabled": False, "reason": "primary changed during reload"}
+            if self._aux_reload_gen != gen_at_build:
+                self._schedule_drain(candidate)
+                return {"effective_enabled": False, "reason": "concurrent reload; retry"}
             retired = self.auxiliary_llm_client
             self.auxiliary_llm_client = candidate
             if self.model_router is not None:
                 self.model_router.aux_client = candidate
+            self._apply_aux_desired(desired)
+            self._aux_reload_gen += 1
 
-        # --- phase 3: drain the retired wrapper OUTSIDE the lock ---
-        if retired is not None:
-            await retired.close_when_idle()
+        # --- phase 3: drain retired OUTSIDE the lock (tracked) ---
+        self._schedule_drain(retired)
         log.info(
             "Auxiliary reloaded (model: %s, tasks: %s)",
-            aux_cfg.model, ", ".join(aux_cfg.tasks) or "none",
+            desired["model"], ", ".join(desired["tasks"]) or "none",
         )
-        return {"effective_enabled": True, "model": aux_cfg.model, "tasks": list(aux_cfg.tasks)}
+        return {"effective_enabled": True, "model": desired["model"],
+                "tasks": list(desired["tasks"])}
 
     async def reload_ollama_inner(self) -> dict:
         """Inner reload — caller must hold provider_lock."""

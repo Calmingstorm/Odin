@@ -360,22 +360,24 @@ class TestProviderConfig:
 
     @pytest.mark.asyncio
     async def test_auxiliary_config_enable_terra(self):
+        # The PUT passes an IMMUTABLE desired spec to reload_auxiliary and does
+        # NOT mutate config itself (reload commits it atomically under lock).
         app, bot = _app(register_provider_config)
         _gw(bot)
         bot.llm_gateway.codex_client = object()
         bot.llm_gateway.reload_auxiliary = AsyncMock(
             return_value={"effective_enabled": True, "model": "gpt-5.6-terra",
-                          "tasks": ["compaction"]}
+                          "tasks": ["compaction", "reflection"]}
         )
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/llm/auxiliary/config",
                             json={"enabled": True, "model": "gpt-5.6-terra",
                                   "tasks": ["compaction", "reflection"]})
             assert r.status == 200
-            assert bot.config.openai_codex.auxiliary.enabled is True
-            assert bot.config.openai_codex.auxiliary.model == "gpt-5.6-terra"
-            assert bot.config.openai_codex.auxiliary.tasks == ["compaction", "reflection"]
-            bot.llm_gateway.reload_auxiliary.assert_awaited()
+            desired = bot.llm_gateway.reload_auxiliary.call_args.args[0]
+            assert desired["enabled"] is True
+            assert desired["model"] == "gpt-5.6-terra"
+            assert desired["tasks"] == ["compaction", "reflection"]
 
     @pytest.mark.asyncio
     async def test_auxiliary_config_rejects_unknown_task(self):
@@ -387,7 +389,6 @@ class TestProviderConfig:
                             json={"tasks": ["compaction", "not_a_task"]})
             assert r.status == 400
             assert "unknown" in (await r.json())["error"].lower()
-        # nothing reloaded, nothing mutated
         bot.llm_gateway.reload_auxiliary.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -401,12 +402,17 @@ class TestProviderConfig:
             # tasks not a list → 400
             assert (await c.put("/api/llm/auxiliary/config",
                                 json={"tasks": "compaction"})).status == 400
-            # reload raising → 500 with prior config restored
+            # non-string task item → 400 (must not TypeError → 500)
+            r = await c.put("/api/llm/auxiliary/config", json={"tasks": [{}]})
+            assert r.status == 400
+            assert "string" in (await r.json())["error"].lower()
+            r2 = await c.put("/api/llm/auxiliary/config", json={"tasks": ["compaction", 7]})
+            assert r2.status == 400
+            bot.llm_gateway.reload_auxiliary.assert_not_awaited()
+            # reload raising → 500
             bot.llm_gateway.reload_auxiliary = AsyncMock(side_effect=RuntimeError("boom"))
-            prior = bot.config.openai_codex.auxiliary.enabled
-            r = await c.put("/api/llm/auxiliary/config", json={"enabled": True})
-            assert r.status == 500
-            assert bot.config.openai_codex.auxiliary.enabled == prior
+            assert (await c.put("/api/llm/auxiliary/config",
+                                json={"enabled": True})).status == 500
 
     @pytest.mark.asyncio
     async def test_auxiliary_config_unavailable_503(self):
@@ -431,7 +437,8 @@ class TestProviderConfig:
                             json={"enabled": True, "model": "gpt-5.6-terra"})
             assert r.status == 400
             assert "credentials" in (await r.json())["error"]
-        # config restored to the prior (disabled) state
+        # config NOT committed (reload never committed on failure) — the PUT
+        # no longer pre-mutates config, so the prior state simply stands.
         assert bot.config.openai_codex.auxiliary.enabled is False
         assert bot.config.openai_codex.auxiliary.model == "gpt-5.6-luna"
 

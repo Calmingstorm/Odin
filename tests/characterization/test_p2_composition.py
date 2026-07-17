@@ -127,3 +127,15 @@ class TestAuxiliaryWiring:
         assert captured["enabled_tasks"] == {"compaction", "reflection"}
         assert bot.llm_gateway.model_router is not None
         assert bot.llm_gateway.model_router.aux_client is bot.llm_gateway.auxiliary_llm_client
+
+
+class TestAuxiliaryFlatHandle:
+    def test_flat_handle_follows_gateway_swaps(self, tmp_path, monkeypatch):
+        # bot.auxiliary_llm_client is a property over the gateway's canonical
+        # pointer — it can never point at a retired generation.
+        monkeypatch.chdir(tmp_path)
+        bot = make_bot(fake_llm=FakeLLM([]))
+        assert bot.auxiliary_llm_client is bot.llm_gateway.auxiliary_llm_client
+        sentinel = object()
+        bot.llm_gateway.auxiliary_llm_client = sentinel
+        assert bot.auxiliary_llm_client is sentinel

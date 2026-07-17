@@ -40,3 +40,15 @@ def test_all_vue_templates_compile_strict():
     assert result.returncode == 0, (
         f"Template validation failed:\n{result.stdout}\n{result.stderr}"
     )
+
+
+def test_auxiliary_debounce_cancelled_on_unmount():
+    """Blocker-4 pin (no JS test harness): the auxiliary save debounce must be
+    cancelled on component unmount alongside the other providers, so a pending
+    edit can't fire its PUT after navigation (the #224 lifecycle guard)."""
+    src = (REPO_ROOT / "ui" / "js" / "pages" / "llm-config.js").read_text()
+    unmount = src[src.index("onUnmounted("):]
+    unmount = unmount[: unmount.index("});") + 3]
+    assert "saveAuxConfigDebounced.cancel()" in unmount, (
+        "saveAuxConfigDebounced.cancel() missing from onUnmounted"
+    )

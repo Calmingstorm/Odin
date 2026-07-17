@@ -95,7 +95,10 @@ class OdinBot(commands.Bot):
         self.model_router = services.model_router
         self.context_compressor = services.context_compressor
         self.prefix_tracker = services.prefix_tracker
-        self.auxiliary_llm_client = services.auxiliary_llm_client
+        # The gateway holds the CANONICAL auxiliary pointer — live reloads
+        # swap it there. The flat bot handle is a property over it so it can
+        # never drift to a retired generation (see the auxiliary_llm_client
+        # property below).
         self.outbound_webhook_dispatcher = services.outbound_webhook_dispatcher
         self.stuck_loop_tracker_cls = services.stuck_loop_tracker_cls
         self.classify_command_risk = services.classify_command_risk
@@ -144,6 +147,13 @@ class OdinBot(commands.Bot):
         self._log_startup_config()
 
     # ---------- Runtime-swappable stores ------------------------------------
+
+    @property
+    def auxiliary_llm_client(self):
+        """The live auxiliary wrapper — canonical on the gateway, which swaps
+        it on reload. A property (not a stored attr) so the flat handle can
+        never point at a retired generation."""
+        return self.llm_gateway.auxiliary_llm_client
 
     @property
     def knowledge(self):

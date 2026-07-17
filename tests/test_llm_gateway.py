@@ -450,32 +450,115 @@ class TestReloadAuxiliary:
         )
         return cfg
 
+    @staticmethod
+    async def _flush_drains(gw):
+        # Retirement drains are TRACKED background tasks (never awaited under
+        # the lock) — let them finish so drain assertions are deterministic.
+        if gw._aux_drains:
+            await asyncio.gather(*list(gw._aux_drains))
+
+    @staticmethod
+    def _patch_probe_ok(pool_cls, client_cls):
+        pool_cls.return_value.is_configured.return_value = True
+        client_cls.return_value.chat = AsyncMock(return_value="ok")
+
     async def test_disabled_retires_current_wrapper(self):
-        old = SimpleNamespace(close_when_idle=AsyncMock())
+        old = SimpleNamespace(drain_and_close=AsyncMock())
         router = SimpleNamespace(aux_client=old)
         gw = _gw(self._aux_cfg(enabled=False), codex=object(), router=router, aux=old)
         r = await gw.reload_auxiliary()
+        await self._flush_drains(gw)
         assert r["effective_enabled"] is False
         assert gw.auxiliary_llm_client is None
         assert router.aux_client is None
-        old.close_when_idle.assert_awaited_once()
+        old.drain_and_close.assert_awaited_once()
 
     async def test_enable_builds_swaps_and_drains(self):
-        old = SimpleNamespace(close_when_idle=AsyncMock())
+        old = SimpleNamespace(drain_and_close=AsyncMock())
         router = SimpleNamespace(aux_client=old)
-        primary = object()
-        gw = _gw(self._aux_cfg(), codex=primary, router=router, aux=old)
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(self._aux_cfg(), codex=object(), router=router, aux=old)
         with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
-             patch("src.discord.llm_gateway.CodexChatClient"), \
-             patch("src.llm.auxiliary.AuxiliaryLLMClient") as aux_cls:
-            pool_cls.return_value.is_configured.return_value = True
-            candidate = SimpleNamespace(close_when_idle=AsyncMock())
-            aux_cls.return_value = candidate
+             patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
+            self._patch_probe_ok(pool_cls, client_cls)
             r = await gw.reload_auxiliary()
+        await self._flush_drains(gw)
         assert r["effective_enabled"] is True
         assert gw.auxiliary_llm_client is candidate
         assert router.aux_client is candidate
-        old.close_when_idle.assert_awaited_once()  # retired one drained
+        old.drain_and_close.assert_awaited_once()  # retired one drained
+
+    async def test_unsupported_model_probe_rolls_back(self):
+        # An unsupported free-string model fails the probe BEFORE install —
+        # the prior wrapper and config stay put; the candidate is drained.
+        old = SimpleNamespace(drain_and_close=AsyncMock())
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(self._aux_cfg(model="gpt-bogus"), codex=object(), aux=old)
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
+            pool_cls.return_value.is_configured.return_value = True
+            client_cls.return_value.chat = AsyncMock(side_effect=RuntimeError("400 model"))
+            r = await gw.reload_auxiliary()
+        await self._flush_drains(gw)
+        assert r["effective_enabled"] is False
+        assert "probe" in r["reason"]
+        assert gw.auxiliary_llm_client is old  # unchanged
+        candidate.drain_and_close.assert_awaited_once()
+
+    async def test_stale_generation_rejected(self):
+        # A candidate built while another reload committed (generation moved)
+        # is rejected under the lock and drained — never installed.
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(self._aux_cfg(), codex=object(), aux=None)
+
+        def _build(*a, **k):
+            gw._aux_reload_gen += 1  # simulate a concurrent commit
+            return candidate
+
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", side_effect=_build):
+            self._patch_probe_ok(pool_cls, client_cls)
+            r = await gw.reload_auxiliary()
+        await self._flush_drains(gw)
+        assert r["effective_enabled"] is False
+        assert "concurrent" in r["reason"]
+        assert gw.auxiliary_llm_client is None
+        candidate.drain_and_close.assert_awaited_once()
+
+    async def test_enable_with_no_prior_wrapper(self):
+        # retired is None → _schedule_drain(None) is a quiet no-op.
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(self._aux_cfg(), codex=object(), aux=None)
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
+            self._patch_probe_ok(pool_cls, client_cls)
+            r = await gw.reload_auxiliary()
+        await self._flush_drains(gw)
+        assert r["effective_enabled"] is True
+        assert gw.auxiliary_llm_client is candidate
+
+    async def test_disabled_path_concurrent_reload_rejected(self):
+        old = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(self._aux_cfg(enabled=False), codex=object(), aux=old)
+        real_lock = gw.provider_lock
+
+        class _BumpingLock:
+            async def __aenter__(self):
+                gw._aux_reload_gen += 1  # a concurrent reload commits first
+                await real_lock.acquire()
+
+            async def __aexit__(self, *a):
+                real_lock.release()
+
+        gw.provider_lock = _BumpingLock()
+        r = await gw.reload_auxiliary()
+        assert r["effective_enabled"] is False
+        assert "concurrent" in r["reason"]
+        assert gw.auxiliary_llm_client is old  # not retired
 
     async def test_no_primary_client(self):
         gw = _gw(self._aux_cfg(), codex=None)
@@ -484,7 +567,7 @@ class TestReloadAuxiliary:
         assert "no primary" in r["reason"].lower()
 
     async def test_build_exception_leaves_prior_untouched(self):
-        old = SimpleNamespace(close_when_idle=AsyncMock())
+        old = SimpleNamespace(drain_and_close=AsyncMock())
         gw = _gw(self._aux_cfg(), codex=object(), aux=old)
         with patch("src.discord.llm_gateway.CodexAuthPool", side_effect=RuntimeError("boom")):
             r = await gw.reload_auxiliary()
@@ -493,32 +576,62 @@ class TestReloadAuxiliary:
         assert gw.auxiliary_llm_client is old
 
     async def test_primary_changed_during_reload_aborts(self):
-        primary = object()
-        gw = _gw(self._aux_cfg(), codex=primary, aux=None)
-        candidate = SimpleNamespace(close_when_idle=AsyncMock())
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(self._aux_cfg(), codex=object(), aux=None)
 
         def _build(*a, **k):
-            # The primary is recreated DURING the build phase (after
-            # primary_at_build was captured, before the swap lock).
-            gw.codex_client = object()
+            gw.codex_client = object()  # primary recreated during build
             return candidate
 
         with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
-             patch("src.discord.llm_gateway.CodexChatClient"), \
+             patch("src.discord.llm_gateway.CodexChatClient") as client_cls, \
              patch("src.llm.auxiliary.AuxiliaryLLMClient", side_effect=_build):
-            pool_cls.return_value.is_configured.return_value = True
+            self._patch_probe_ok(pool_cls, client_cls)
             r = await gw.reload_auxiliary()
+        await self._flush_drains(gw)
         assert r["effective_enabled"] is False
         assert "primary changed" in r["reason"]
-        assert gw.auxiliary_llm_client is None  # candidate not installed
-        candidate.close_when_idle.assert_awaited_once()
+        assert gw.auxiliary_llm_client is None
+        candidate.drain_and_close.assert_awaited_once()
 
     async def test_missing_credentials_leaves_prior_untouched(self):
-        old = SimpleNamespace(close_when_idle=AsyncMock())
+        old = SimpleNamespace(drain_and_close=AsyncMock())
         gw = _gw(self._aux_cfg(), codex=object(), aux=old)
         with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls:
             pool_cls.return_value.is_configured.return_value = False
             r = await gw.reload_auxiliary()
         assert r["effective_enabled"] is False
         assert gw.auxiliary_llm_client is old  # unchanged
-        old.close_when_idle.assert_not_called()
+        old.drain_and_close.assert_not_called()
+
+
+class TestPrimaryLifecycleReconcile:
+    """reload_codex_inner must retire/rebind auxiliary when the primary
+    changes, and the flat handle follows via the client property."""
+
+    def _cfg_codex_disabled(self):
+        cfg = _cfg()
+        cfg.openai_codex.enabled = False
+        return cfg
+
+    async def test_primary_disabled_retires_auxiliary(self):
+        aux = SimpleNamespace(drain_and_close=AsyncMock(), primary_client=object())
+        router = SimpleNamespace(aux_client=aux)
+        gw = _gw(self._cfg_codex_disabled(), codex=object(), router=router, aux=aux)
+        await gw.reload_codex_inner()
+        assert gw.codex_client is None
+        assert gw.auxiliary_llm_client is None  # retired
+        assert router.aux_client is None
+
+    async def test_primary_recreated_rebinds_auxiliary_fallback(self):
+        old_primary = object()
+        aux = SimpleNamespace(drain_and_close=AsyncMock(), primary_client=old_primary)
+        gw = _gw(_cfg(), codex=None, aux=aux)  # primary absent at boot
+        with patch("src.discord.llm_gateway.CodexAuthPool") as pool_cls, \
+             patch("src.discord.llm_gateway.CodexChatClient", return_value=object()):
+            pool_cls.return_value.is_configured.return_value = True
+            pool_cls.return_value._accounts = [object()]
+            await gw.reload_codex_inner()
+        # aux fallback rebound to the newly-created primary, not the old one
+        assert aux.primary_client is gw.codex_client
+        assert aux.primary_client is not old_primary

@@ -643,7 +643,7 @@ class TestRoutedAndLease:
         assert out.text == "strong"
         primary.chat_with_tools.assert_awaited_once()
 
-    async def test_close_when_idle_waits_for_inflight(self):
+    async def test_drain_and_close_waits_for_inflight(self):
         import asyncio
         client, aux, primary = _make_client(enabled_tasks={"summarization"})
         started = asyncio.Event()
@@ -658,7 +658,7 @@ class TestRoutedAndLease:
         call = asyncio.create_task(client.chat([], "s", task="summarization"))
         await started.wait()
         # a drain started now must not close until the call finishes
-        drain = asyncio.create_task(client.close_when_idle(timeout=5))
+        drain = asyncio.create_task(client.drain_and_close())
         await asyncio.sleep(0.05)
         assert not drain.done()
         assert not aux.close.called
@@ -668,20 +668,30 @@ class TestRoutedAndLease:
         aux.close.assert_awaited_once()
 
 
-class TestDrainTimeout:
-    async def test_close_when_idle_times_out_then_closes(self):
+class TestDrainNeverCuts:
+    async def test_drain_never_cuts_a_long_lease(self):
+        # A legitimately long in-flight call is NEVER severed by a wall-clock
+        # timeout — the drain waits for the lease to reach zero.
         client, aux, primary = _make_client(enabled_tasks={"summarization"})
         started = asyncio.Event()
+        release = asyncio.Event()
 
-        async def _never(*a, **k):
+        async def _long(*a, **k):
             started.set()
-            await asyncio.Event().wait()  # never returns
+            await release.wait()
+            return "done"
 
-        aux.chat = AsyncMock(side_effect=_never)
+        aux.chat = AsyncMock(side_effect=_long)
         call = asyncio.create_task(client.chat([], "s", task="summarization"))
         await started.wait()
-        # bounded drain gives up and closes anyway despite the stuck call
-        await client.close_when_idle(timeout=0.05)
+        drain = asyncio.create_task(client.drain_and_close())
+        # even well past any old 30s wall-clock cut, the session stays open
+        await asyncio.sleep(0.1)
+        assert not drain.done()
+        assert not aux.close.called
+        release.set()
+        await call
+        await drain
         aux.close.assert_awaited_once()
         call.cancel()
 

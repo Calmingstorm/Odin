@@ -859,6 +859,7 @@ export default {
     onUnmounted(() => {
       if (pollController) pollController.cancelled = true;
       saveCodexConfigDebounced.cancel();
+      saveAuxConfigDebounced.cancel();
       saveOllamaConfigDebounced.cancel();
       saveKimiConfigDebounced.cancel();
     });

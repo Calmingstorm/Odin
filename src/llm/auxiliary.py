@@ -98,18 +98,14 @@ class AuxiliaryLLMClient:
             if self._inflight == 0:
                 self._idle.set()
 
-    async def close_when_idle(self, timeout: float = 30.0) -> None:
-        """Wait (bounded) for in-flight calls to finish, then close the
-        aux client's session. Called on a RETIRED wrapper AFTER the live
-        pointer has been swapped away and the provider_lock released — never
-        while holding the lock (an hour-long call must not block a reload)."""
-        try:
-            await asyncio.wait_for(self._idle.wait(), timeout=timeout)
-        except TimeoutError:
-            log.warning(
-                "Retired auxiliary wrapper still had %d in-flight call(s) after %.0fs; "
-                "closing anyway", self._inflight, timeout,
-            )
+    async def drain_and_close(self) -> None:
+        """Wait for ALL in-flight leased calls to finish, then close the aux
+        client's session — no wall-clock cut, so a legitimately long request
+        (auxiliary turns can run minutes) is never severed. Called on a
+        RETIRED wrapper AFTER the live pointer has been swapped away and the
+        provider_lock released, typically as a tracked background task (an
+        hour-long call must never block a reload)."""
+        await self._idle.wait()
         await self.aux_client.close()
 
     def is_enabled(self, task: str) -> bool:
