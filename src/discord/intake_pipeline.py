@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import io
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -89,7 +90,11 @@ def _user_facing_error(exc: BaseException, limit: int = 200) -> str:
             text = ""
         lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
         detail = lines[0] if lines else ""
-        detail = "".join(ch for ch in detail if ch == "\t" or ch >= " ")
+        # Category-aware strip: C* covers C0, DEL, C1, and format chars —
+        # a plain `ch >= " "` check lets U+007F/U+0080–U+009F through.
+        detail = "".join(
+            ch for ch in detail if ch == "\t" or not unicodedata.category(ch).startswith("C")
+        )
         if any(m in detail.lower() for m in _HTML_MARKERS):
             detail = ""
         # Zero-width space after "@" — error text must not ping the server.
@@ -699,15 +704,18 @@ class MessagePipeline:
                         response = _skill_response
                         already_sent = False
         except (TimeoutError, discord.HTTPException, discord.Forbidden) as e:
+            # Same raw-interpolation disease as the tool-loop catch: str() on
+            # a discord.HTTPException carries the raw HTTP body (HTML pages).
+            _err = _user_facing_error(e)
             await self._delivery.set_status(None, task_end=True)
-            log.error("Discord/network error processing message: %s", e, exc_info=True)
+            log.error("Discord/network error processing message: %s", _err, exc_info=True)
             leaked = self._channel_state.pending_files.pop(channel_id, None)
             if leaked:
                 log.warning(
                     "Cleaned %d leaked pending file(s) for channel %s", len(leaked), channel_id
                 )
             await self._delivery.send_with_retry(
-                message, scrub_response_secrets(f"Something went wrong: {e}")
+                message, scrub_response_secrets(f"Something went wrong: {_err}")
             )
             self._sessions.remove_last_message(channel_id, "user")
             return
@@ -721,15 +729,16 @@ class MessagePipeline:
             self._sessions.remove_last_message(channel_id, "user")
             raise
         except Exception as e:
+            _err = _user_facing_error(e)
             await self._delivery.set_status(None, task_end=True)
-            log.error("Unexpected error processing message: %s", e, exc_info=True)
+            log.error("Unexpected error processing message: %s", _err, exc_info=True)
             leaked = self._channel_state.pending_files.pop(channel_id, None)
             if leaked:
                 log.warning(
                     "Cleaned %d leaked pending file(s) for channel %s", len(leaked), channel_id
                 )
             await self._delivery.send_with_retry(
-                message, scrub_response_secrets(f"Something went wrong: {e}")
+                message, scrub_response_secrets(f"Something went wrong: {_err}")
             )
             self._sessions.remove_last_message(channel_id, "user")
             return

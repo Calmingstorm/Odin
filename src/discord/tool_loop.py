@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import unicodedata
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -108,6 +109,13 @@ def _error_summary(exc: BaseException, limit: int = 200) -> str:
                 text = ""
             lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
             detail = lines[0] if lines else ""
+            # Category-aware strip (C0, DEL, C1, format chars) — journal and
+            # trajectory text must not carry control/CSI sequences either.
+            detail = "".join(
+                ch
+                for ch in detail
+                if ch == "\t" or not unicodedata.category(ch).startswith("C")
+            )
             if "<html" in detail.lower() or "<!doctype" in detail.lower():
                 detail = ""
         out = f"{name}: {detail}" if detail else name

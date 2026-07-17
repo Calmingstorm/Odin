@@ -23,7 +23,11 @@ from types import SimpleNamespace
 import pytest
 
 import discord
-from src.discord.intake_pipeline import _user_facing_error
+from src.discord.intake_pipeline import (
+    MessagePipeline,
+    MessagePipelineDeps,
+    _user_facing_error,
+)
 from src.discord.tool_loop import (
     ToolLoopDeps,
     ToolLoopRunner,
@@ -401,3 +405,165 @@ class TestCallSitesSurviveTypingFailure:
         kind, val = await runner._call_llm(st)
         assert (kind, val) == ("ok", resp)
         assert ch.typing_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 additions (PR #233): Unicode-category stripping, formatter
+# fail-safes, and pipeline-level coverage of the _run_inner error paths.
+# ---------------------------------------------------------------------------
+
+class _RaisingInstanceCheckMeta(type):
+    def __instancecheck__(cls, instance):
+        raise RuntimeError("isinstance exploded")
+
+
+class _InstanceCheckBombError(Exception, metaclass=_RaisingInstanceCheckMeta):
+    pass
+
+
+class _EvilStatusError(Exception):
+    @property
+    def status(self):
+        raise RuntimeError("status exploded")
+
+
+class TestUnicodeControlStripping:
+    def test_user_facing_error_strips_del_and_c1(self):
+        out = _user_facing_error(RuntimeError("bad\x7fmid\x9bthing"))
+        assert "\x7f" not in out
+        assert "\x9b" not in out
+        assert "badmidthing" in out
+
+    def test_user_facing_error_retains_tab(self):
+        assert "a\tb" in _user_facing_error(RuntimeError("a\tb"))
+
+    def test_user_facing_error_strips_format_chars(self):
+        out = _user_facing_error(RuntimeError("zero\u200bwidth"))
+        assert "\u200b" not in out
+        assert "zerowidth" in out
+
+    def test_error_summary_strips_del_and_c1(self):
+        out = _error_summary(RuntimeError("bad\x7fmid\x9bthing"))
+        assert "\x7f" not in out
+        assert "\x9b" not in out
+        assert "badmidthing" in out
+
+
+class TestFormatterFailSafes:
+    def test_user_facing_error_internal_failure_falls_back_to_type_name(self, monkeypatch):
+        import src.discord.intake_pipeline as ip
+
+        monkeypatch.setattr(ip.discord, "HTTPException", _InstanceCheckBombError)
+        assert _user_facing_error(RuntimeError("boom")) == "RuntimeError"
+
+    def test_error_summary_internal_failure_falls_back_to_type_name(self):
+        assert _error_summary(_EvilStatusError()) == "_EvilStatusError"
+
+
+class _FakeSessions:
+    def __init__(self):
+        self.added = []
+        self.removed = []
+        self.task_history_exc = None
+
+    def add_message(self, channel_id, role, content, user_id=None):
+        self.added.append((channel_id, role, content))
+
+    async def get_task_history(self, channel_id, max_messages=160, current_query=None, trace=None):
+        if self.task_history_exc is not None:
+            raise self.task_history_exc
+        return [{"role": "user", "content": "hi"}]
+
+    def remove_last_message(self, channel_id, role):
+        self.removed.append((channel_id, role))
+
+    def prune(self):
+        pass
+
+    def save(self):
+        pass
+
+
+class _FakeDelivery:
+    def __init__(self):
+        self.chunked = []
+        self.retried = []
+
+    async def set_status(self, *args, **kwargs):
+        pass
+
+    async def send_chunked(self, message, response):
+        self.chunked.append(response)
+
+    async def send_with_retry(self, message, text):
+        self.retried.append(text)
+
+
+def _make_pipeline(tool_loop_exc=None, sessions=None):
+    sessions = sessions or _FakeSessions()
+    delivery = _FakeDelivery()
+
+    async def _run(message, history, system_prompt_override=None, trace=None):
+        if tool_loop_exc is not None:
+            raise tool_loop_exc
+        return ("ok-response", False, False, [], False)
+
+    deps = MessagePipelineDeps(
+        channel_state=SimpleNamespace(pending_files={}, last_op_details={}),
+        sessions=sessions,
+        permissions=SimpleNamespace(is_guest=lambda uid: False),
+        llm_gateway=SimpleNamespace(active_client=object()),
+        prompt_builder=SimpleNamespace(build_full_prompt=lambda **kwargs: "sys"),
+        turn_recorder=SimpleNamespace(_new_context_trace=lambda: None),
+        tool_loop=SimpleNamespace(run=_run),
+        delivery=delivery,
+        housekeeping=SimpleNamespace(maybe_cleanup=lambda: None),
+    )
+    return MessagePipeline(deps), sessions, delivery
+
+
+def _msg():
+    return SimpleNamespace(
+        author=SimpleNamespace(id=42, display_name="Tester", name="tester"),
+        channel=SimpleNamespace(id="c1"),
+    )
+
+
+class TestRunInnerErrorPresentation:
+    """The incident path end-to-end: what actually reaches chat on failure."""
+
+    async def test_tool_loop_discord_500_sends_sanitized_error(self):
+        pipeline, sessions, delivery = _make_pipeline(tool_loop_exc=_http_500())
+        await pipeline._run_inner(_msg(), "do the thing", "c1")
+        assert delivery.chunked == [
+            "Tool execution failed: Discord API error: HTTP 500 Internal Server Error"
+        ]
+        assert all("<html" not in t for t in delivery.chunked)
+        assert (
+            "c1",
+            "assistant",
+            "[Previous request encountered an error before tool execution.]",
+        ) in sessions.added
+
+    async def test_tool_loop_timeout_sends_sanitized_error(self):
+        pipeline, _sessions, delivery = _make_pipeline(tool_loop_exc=TimeoutError())
+        await pipeline._run_inner(_msg(), "do the thing", "c1")
+        assert delivery.chunked == ["Tool execution timed out: TimeoutError"]
+
+    async def test_outer_discord_error_path_sends_sanitized_error(self):
+        sessions = _FakeSessions()
+        sessions.task_history_exc = _http_500()
+        pipeline, _sessions, delivery = _make_pipeline(sessions=sessions)
+        await pipeline._run_inner(_msg(), "do the thing", "c1")
+        assert delivery.retried == [
+            "Something went wrong: Discord API error: HTTP 500 Internal Server Error"
+        ]
+        assert sessions.removed == [("c1", "user")]
+
+    async def test_outer_generic_error_path_sends_sanitized_error(self):
+        sessions = _FakeSessions()
+        sessions.task_history_exc = RuntimeError(CF_HTML)
+        pipeline, _sessions, delivery = _make_pipeline(sessions=sessions)
+        await pipeline._run_inner(_msg(), "do the thing", "c1")
+        assert delivery.retried == ["Something went wrong: RuntimeError"]
+        assert all("<html" not in t for t in delivery.retried)
