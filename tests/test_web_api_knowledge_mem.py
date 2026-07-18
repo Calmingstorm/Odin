@@ -330,3 +330,17 @@ class TestLearnedContext:
             # The store is untouched and still readable.
             body = await (await c.get("/api/learned")).json()
             assert body["count"] == 2
+
+    async def test_update_rejects_non_objects_nulls_and_empty_updates(self, learned_bot):
+        async with TestClient(TestServer(_app(register_learned_context, bot=learned_bot))) as c:
+            before = await (await c.get("/api/learned")).json()
+            original = next(e for e in before["entries"] if e["key"] == "e2")
+
+            for body in ([], 42, "x", None):
+                assert (await c.put("/api/learned/e2", json=body)).status == 400
+            for body in ({}, {"unknown": "value"}, {"content": None}, {"category": None}):
+                assert (await c.put("/api/learned/e2", json=body)).status == 400
+
+            after = await (await c.get("/api/learned")).json()
+            current = next(e for e in after["entries"] if e["key"] == "e2")
+            assert current == original

@@ -339,3 +339,173 @@ class TestReviewNestedCorruption:
             # Read degrades (never reaches prompt/consolidation, no TypeError).
             assert r.get_all_entries() == []
             assert r.delete_entry("k") is False  # write refuses
+
+
+class TestLearnedConsumerHardening:
+    """Malformed persisted data degrades; direct consumer inputs cannot crash."""
+
+    @staticmethod
+    def _reflector(tmp_path, name="learned.json"):
+        from src.learning.reflector import ConversationReflector
+
+        return ConversationReflector(learned_path=str(tmp_path / name))
+
+    def test_tags_null_degrades_and_refuses_with_backup(self, tmp_path):
+        p = tmp_path / "learned.json"
+        original = {
+            "version": 2,
+            "entries": [
+                {
+                    "key": "k",
+                    "category": "operational",
+                    "content": "lesson",
+                    "tags": None,
+                }
+            ],
+        }
+        p.write_text(json.dumps(original))
+        r = self._reflector(tmp_path)
+
+        assert r.get_all_entries() == []
+        assert r.update_entry("k", content="changed") is None
+        assert json.loads(p.read_text()) == original
+        assert list(tmp_path.glob("learned.json.corrupt-*"))
+
+    @pytest.mark.parametrize("field", ["updated_at", "created_at", "last_used_at"])
+    def test_naive_timestamps_are_normalized_and_expiry_is_safe(self, tmp_path, field):
+        p = tmp_path / f"{field}.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "entries": [
+                        {
+                            "key": "k",
+                            "category": "operational",
+                            "content": "lesson",
+                            field: "2026-07-17T12:34:56",
+                        }
+                    ],
+                }
+            )
+        )
+        r = self._reflector(tmp_path, p.name)
+
+        loaded = r.get_all_entries()
+        assert loaded[0][field] == "2026-07-17T12:34:56+00:00"
+        assert r._expire_entries(loaded) == loaded
+
+    @pytest.mark.parametrize("field", ["updated_at", "created_at", "last_used_at"])
+    def test_invalid_timestamp_degrades_and_refuses(self, tmp_path, field):
+        p = tmp_path / f"invalid_{field}.json"
+        original = {
+            "version": 2,
+            "entries": [
+                {
+                    "key": "k",
+                    "category": "operational",
+                    "content": "lesson",
+                    field: "not-a-timestamp",
+                }
+            ],
+        }
+        p.write_text(json.dumps(original))
+        r = self._reflector(tmp_path, p.name)
+
+        assert r.get_all_entries() == []
+        assert r.delete_entry("k") is False
+        assert json.loads(p.read_text()) == original
+        assert list(tmp_path.glob(f"{p.name}.corrupt-*"))
+
+    def test_consumers_sanitize_untrusted_in_memory_fields(self, tmp_path):
+        import src.learning.reflector as reflector_module
+
+        r = self._reflector(tmp_path)
+        entries = [
+            {
+                "key": "k",
+                "category": "operational",
+                "content": "lesson",
+                "topic": 123,
+                "tags": None,
+                "updated_at": "2026-07-17T12:34:56",
+            }
+        ] * (r._REFLECTION_CONTEXT_TOP_K + 1)
+
+        # Direct/in-memory callers are outside json_store's read boundary. They
+        # still cannot take either relevance consumer or expiry down.
+        assert "lesson" in r._relevant_existing_text(entries, "lesson")
+        assert r._expire_entries(entries) == entries
+
+        r._injection_token_budget = 1
+        r._read_for_injection = lambda: {"entries": entries}
+        assert "lesson" in r.get_prompt_section(query="lesson")
+
+        mixed_tags = dict(entries[0], tags=["valid", 42, None])
+        assert "valid" in reflector_module._entry_search_text(mixed_tags)
+
+    def test_timestamp_helpers_fail_safe_for_direct_inputs(self, tmp_path, monkeypatch):
+        import src.learning.reflector as reflector_module
+
+        r = self._reflector(tmp_path)
+        no_ref = {
+            "key": "none",
+            "category": "operational",
+            "content": "lesson",
+        }
+        malformed = dict(no_ref, key="bad", updated_at="not-a-timestamp")
+        assert r._expire_entries([no_ref, malformed]) == [no_ref, malformed]
+        assert reflector_module._neg_iso("not-a-timestamp") == 0.0
+
+        class BadTimestamp:
+            def timestamp(self):
+                raise OSError("unrepresentable")
+
+        monkeypatch.setattr(
+            reflector_module, "_parse_entry_timestamp", lambda _value: BadTimestamp()
+        )
+        assert reflector_module._neg_iso("anything") == 0.0
+
+    def test_normalizer_ignores_already_rejected_shapes(self, tmp_path):
+        r = self._reflector(tmp_path)
+        wrong_entries = {"entries": "not-a-list"}
+        assert r._normalize_learned_data(wrong_entries) is wrong_entries
+
+        data = {"entries": [42, {"key": "k", "updated_at": "bad"}]}
+        assert r._normalize_learned_data(data) is data
+        assert data["entries"][1]["updated_at"] == "bad"
+
+    def test_update_entry_rejects_empty_and_invalid_direct_calls(self, tmp_path):
+        p = tmp_path / "learned.json"
+        original = {
+            "version": 2,
+            "entries": [
+                {"key": "k", "category": "operational", "content": "lesson"}
+            ],
+        }
+        p.write_text(json.dumps(original))
+        r = self._reflector(tmp_path)
+
+        assert r.update_entry("k") is None
+        assert r.update_entry("k", content=42) is None
+        assert r.update_entry("k", category=42) is None
+        assert json.loads(p.read_text()) == original
+
+    def test_save_validates_all_in_memory_results(self, tmp_path):
+        from src.json_store import StoreCorruptError
+
+        r = self._reflector(tmp_path)
+        malformed = {
+            "version": 2,
+            "entries": [
+                {
+                    "key": "k",
+                    "category": "operational",
+                    "content": "lesson",
+                    "tags": None,
+                }
+            ],
+        }
+        with pytest.raises(StoreCorruptError):
+            r._save(malformed)
+        assert not (tmp_path / "learned.json").exists()
