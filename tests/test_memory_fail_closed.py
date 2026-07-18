@@ -1,0 +1,511 @@
+"""Corruption fail-closed for the small JSON stores (memory / learned / lists /
+skill memory).
+
+Before this fix every store's loader returned an EMPTY store on ANY read/parse
+error and the next save wrote that back — silently wiping the whole corpus
+while reporting success. Now: mutations REFUSE (never overwrite) and preserve a
+backup; reads DEGRADE to empty without crashing.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import threading
+from types import SimpleNamespace
+
+import pytest
+
+from src.json_store import StoreCorruptError
+from src.tools.executor import ToolExecutor
+from src.tools.handlers.state import StateTools
+
+CORRUPT = "{ this is not valid json "
+
+
+def _state_tools(tmp_path):
+    """A real StateTools wired to a real ToolExecutor's strict memory loader."""
+    ex = ToolExecutor(memory_path=str(tmp_path / "memory.json"))
+    deps = SimpleNamespace(
+        memory_path=lambda: ex._memory_path,
+        memory_lock=lambda: ex._memory_lock,
+        lists_lock=lambda: ex._lists_lock,
+        load_all_memory=ex._load_all_memory,
+        save_all_memory=ex._save_all_memory,
+    )
+    st = StateTools.__new__(StateTools)
+    st._deps = deps
+    st._load_all_memory = ex._load_all_memory
+    st._save_all_memory = ex._save_all_memory
+    return st, ex
+
+
+class TestMemoryJson:
+    def test_strict_load_raises_and_backs_up(self, tmp_path):
+        p = tmp_path / "memory.json"
+        p.write_text(CORRUPT)
+        ex = ToolExecutor(memory_path=str(p))
+        with pytest.raises(StoreCorruptError):
+            ex._load_all_memory()
+        assert p.read_text() == CORRUPT  # live file untouched
+        assert list(tmp_path.glob("memory.json.corrupt-*"))  # backup preserved
+
+    def test_read_path_degrades(self, tmp_path):
+        p = tmp_path / "memory.json"
+        p.write_text(CORRUPT)
+        ex = ToolExecutor(memory_path=str(p))
+        assert ex._load_memory_for_user("u1") == {}  # no crash, empty
+        assert ex._load_memory() == {}
+
+    async def test_save_refuses_and_does_not_wipe(self, tmp_path):
+        p = tmp_path / "memory.json"
+        p.write_text(CORRUPT)
+        st, _ex = _state_tools(tmp_path)
+        out = await st._handle_memory_manage(
+            {"action": "save", "scope": "global", "key": "k", "value": "v"}, user_id="u1"
+        )
+        assert "corrupt" in out.lower()
+        assert "Saved" not in out
+        assert p.read_text() == CORRUPT  # NOT wiped
+
+    async def test_top_level_wrong_shape_refuses(self, tmp_path):
+        p = tmp_path / "memory.json"
+        p.write_text('["a list, not an object"]')
+        st, _ex = _state_tools(tmp_path)
+        out = await st._handle_memory_manage(
+            {"action": "save", "scope": "global", "key": "k", "value": "v"}, user_id="u1"
+        )
+        assert "corrupt" in out.lower()
+        assert p.read_text() == '["a list, not an object"]'
+
+    async def test_section_wrong_shape_refuses(self, tmp_path):
+        p = tmp_path / "memory.json"
+        p.write_text('{"global": ["not a dict"]}')
+        st, _ex = _state_tools(tmp_path)
+        out = await st._handle_memory_manage(
+            {"action": "save", "scope": "global", "key": "k", "value": "v"}, user_id="u1"
+        )
+        assert "corrupt" in out.lower()
+
+    async def test_missing_file_saves_normally(self, tmp_path):
+        st, _ex = _state_tools(tmp_path)  # no memory.json yet
+        out = await st._handle_memory_manage(
+            {"action": "save", "scope": "global", "key": "k", "value": "v"}, user_id="u1"
+        )
+        assert "Saved" in out
+        assert (tmp_path / "memory.json").exists()
+        got = await st._handle_memory_manage({"action": "get", "key": "k"}, user_id="u1")
+        assert "v" in got
+
+    async def test_get_list_delete_actions_refuse_on_corrupt(self, tmp_path):
+        st, _ex = _state_tools(tmp_path)
+        (tmp_path / "memory.json").write_text("{bad json")
+        for action in ("get", "list", "delete"):
+            out = await st._handle_memory_manage(
+                {"action": action, "key": "k"}, user_id="u1"
+            )
+            assert "corrupt" in out.lower()
+
+
+class TestListsJson:
+    async def test_list_mutation_refuses_on_corrupt(self, tmp_path):
+        lp = tmp_path / "lists.json"
+        lp.write_text(CORRUPT)
+        st, _ex = _state_tools(tmp_path)
+        out = await st._handle_manage_list(
+            {"action": "add", "list_name": "groceries", "items": ["milk"]}, user_id="u1"
+        )
+        assert "corrupt" in out.lower()
+        assert lp.read_text() == CORRUPT  # NOT wiped
+
+    async def test_list_add_works_when_missing(self, tmp_path):
+        st, _ex = _state_tools(tmp_path)
+        out = await st._handle_manage_list(
+            {"action": "add", "list_name": "groceries", "items": ["milk"]}, user_id="u1"
+        )
+        assert "corrupt" not in out.lower()
+        assert (tmp_path / "lists.json").exists()
+
+    def test_load_lists_returns_valid_data(self, tmp_path):
+        st, _ex = _state_tools(tmp_path)
+        (tmp_path / "lists.json").write_text('{"g": {"owner": "shared", "items": []}}')
+        expected = {"g": {"owner": "shared", "items": []}}
+        # Both the read and the write loader return the valid store unchanged
+        # (no degrade, no migration).
+        assert st._load_lists() == expected
+        assert st._load_lists_for_write() == expected
+
+    def test_load_lists_for_write_no_path(self, tmp_path):
+        st, _ex = _state_tools(tmp_path)
+        st._deps.memory_path = lambda: None  # no store path -> empty guard
+        assert st._load_lists_for_write() == {}
+
+
+class TestLearnedJson:
+    def _reflector(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        return ConversationReflector(learned_path=str(tmp_path / "learned.json"))
+
+    def test_delete_refuses_no_wipe(self, tmp_path):
+        p = tmp_path / "learned.json"
+        p.write_text(CORRUPT)
+        r = self._reflector(tmp_path)
+        assert r.delete_entry("k") is False
+        assert p.read_text() == CORRUPT
+        assert list(tmp_path.glob("learned.json.corrupt-*"))
+
+    def test_update_refuses_no_wipe(self, tmp_path):
+        p = tmp_path / "learned.json"
+        p.write_text(CORRUPT)
+        r = self._reflector(tmp_path)
+        assert r.update_entry("k", content="x") is None
+        assert p.read_text() == CORRUPT
+
+    def test_read_degrades(self, tmp_path):
+        p = tmp_path / "learned.json"
+        p.write_text(CORRUPT)
+        r = self._reflector(tmp_path)
+        assert r.get_all_entries() == []  # no crash
+
+    async def test_reflection_merge_skips_on_corrupt_without_wipe(self, tmp_path):
+        p = tmp_path / "learned.json"
+        p.write_text(CORRUPT)
+        before = p.read_bytes()
+        r = self._reflector(tmp_path)
+        r._enabled = True
+
+        async def _text_fn(messages, system):
+            return '[{"key":"k1","category":"operational","content":"a lesson","topic":"t"}]'
+
+        r.set_text_fn(_text_fn)
+        # The prompt-context read degrades to empty, but the merge uses the
+        # strict loader and REFUSES — the corpus must not be overwritten.
+        await r.reflect_on_operation("req", ["tool"], [{"tool": "x"}], "resp", is_error=False)
+        assert p.read_bytes() == before
+
+    async def test_session_reflection_skips_on_corrupt_without_wipe(self, tmp_path):
+        from types import SimpleNamespace
+
+        p = tmp_path / "learned.json"
+        p.write_text(CORRUPT)
+        before = p.read_bytes()
+        r = self._reflector(tmp_path)
+        r._enabled = True
+
+        async def _text_fn(messages, system):
+            return '[{"key":"k","category":"operational","content":"c","topic":"t"}]'
+
+        r.set_text_fn(_text_fn)
+        session = SimpleNamespace(
+            messages=[
+                SimpleNamespace(role="user", content="hi"),
+                SimpleNamespace(role="assistant", content="hello there"),
+                SimpleNamespace(role="user", content="bye"),
+            ],
+            summary="",
+        )
+        # _reflect refuses at its strict load (before merging) — no wipe.
+        await r.reflect_on_session(session)
+        assert p.read_bytes() == before
+
+    def test_delete_works_on_valid_store(self, tmp_path):
+        p = tmp_path / "learned.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "last_reflection": None,
+                    "entries": [{"key": "k", "content": "c", "category": "operational"}],
+                }
+            )
+        )
+        r = self._reflector(tmp_path)
+        assert r.delete_entry("k") is True
+
+
+class TestSkillMemory:
+    def _ctx(self, tmp_path):
+        from src.tools.skill_context import SkillContext
+
+        sc = SkillContext.__new__(SkillContext)
+        sc._memory_path = tmp_path / "skill_mem.json"
+        sc._skill_memory_lock = threading.Lock()
+        sc._log = logging.getLogger("test.skill")
+        return sc
+
+    def test_remember_refuses_no_wipe(self, tmp_path):
+        p = tmp_path / "skill_mem.json"
+        p.write_text(CORRUPT)
+        sc = self._ctx(tmp_path)
+        sc.remember("k", "v")  # refuses (void), does not raise
+        assert p.read_text() == CORRUPT  # NOT wiped
+        assert list(tmp_path.glob("skill_mem.json.corrupt-*"))
+
+    def test_recall_degrades(self, tmp_path):
+        (tmp_path / "skill_mem.json").write_text(CORRUPT)
+        sc = self._ctx(tmp_path)
+        assert sc.recall("k") is None  # no crash
+
+    def test_remember_works_when_missing(self, tmp_path):
+        sc = self._ctx(tmp_path)
+        sc.remember("k", "v")
+        assert sc.recall("k") == "v"
+
+
+class TestReviewNestedCorruption:
+    """Odin PR#238 review: nested-shape corruption is backed up (inside the
+    json_store boundary) and degrades on reads / refuses on writes."""
+
+    async def test_memory_section_corruption_backs_up(self, tmp_path):
+        p = tmp_path / "memory.json"
+        p.write_text('{"global": ["not a dict"]}')
+        st, _ex = _state_tools(tmp_path)
+        out = await st._handle_memory_manage(
+            {"action": "save", "scope": "global", "key": "k", "value": "v"}
+        )
+        assert "corrupt" in out.lower()
+        assert p.read_text() == '{"global": ["not a dict"]}'  # not wiped
+        assert list(tmp_path.glob("memory.json.corrupt-*"))  # nested backup (#9)
+
+    def test_learned_nonobject_entry_refuses_and_backs_up(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        p = tmp_path / "learned.json"
+        p.write_text('{"version": 2, "entries": ["not an object"]}')
+        r = ConversationReflector(learned_path=str(p))
+        assert r.delete_entry("k") is False
+        assert r.update_entry("k", content="x") is None
+        assert p.read_text() == '{"version": 2, "entries": ["not an object"]}'
+        assert list(tmp_path.glob("learned.json.corrupt-*"))
+
+    def test_learned_nonobject_entry_read_degrades(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        p = tmp_path / "learned.json"
+        p.write_text('{"version": 2, "entries": [42, "x"]}')
+        r = ConversationReflector(learned_path=str(p))
+        # Must NOT crash _migrate (which does entry.get(...)) on non-dict entries.
+        assert r.get_all_entries() == []
+
+    def test_learned_string_version_degrades_and_refuses(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        p = tmp_path / "learned.json"
+        p.write_text('{"version": "2", "entries": []}')  # string version crashes _migrate
+        r = ConversationReflector(learned_path=str(p))
+        assert r.get_all_entries() == []  # read degrades (no TypeError)
+        assert r.delete_entry("k") is False  # write refuses
+        assert list(tmp_path.glob("learned.json.corrupt-*"))
+
+    def test_learned_entry_missing_fields_degrades_and_refuses(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        p = tmp_path / "learned.json"
+        p.write_text('{"version": 2, "entries": [{}]}')  # missing key/category/content
+        r = ConversationReflector(learned_path=str(p))
+        assert r.get_all_entries() == []  # read degrades (no KeyError in formatting)
+        assert r.update_entry("k", content="x") is None  # write refuses
+
+    def test_update_entry_rejects_non_string_content_no_corruption(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        p = tmp_path / "learned.json"
+        p.write_text(
+            '{"version": 2, "entries": '
+            '[{"key": "k", "category": "operational", "content": "c"}]}'
+        )
+        r = ConversationReflector(learned_path=str(p))
+        # A numeric content is rejected (the RESULT would be read-path corrupt).
+        assert r.update_entry("k", content=42) is None
+        # The store was never written corrupt: still valid, unchanged, no backup.
+        assert r.get_all_entries()[0]["content"] == "c"
+        assert not list(tmp_path.glob("learned.json.corrupt-*"))
+
+    def test_learned_malformed_optional_fields_degrade(self, tmp_path):
+        from src.learning.reflector import ConversationReflector
+
+        base = (
+            '{{"version": 2, "entries": '
+            '[{{"key": "k", "category": "c", "content": "x", {bad}}}]}}'
+        )
+        malformed = (
+            '"topic": 123', '"tags": [1]', '"updated_at": 123',
+            '"created_at": 123', '"last_used_at": 123',
+        )
+        for i, bad in enumerate(malformed):
+            p = tmp_path / f"learned_{i}.json"
+            p.write_text(base.format(bad=bad))
+            r = ConversationReflector(learned_path=str(p))
+            # Read degrades (never reaches prompt/consolidation, no TypeError).
+            assert r.get_all_entries() == []
+            assert r.delete_entry("k") is False  # write refuses
+
+
+class TestLearnedConsumerHardening:
+    """Malformed persisted data degrades; direct consumer inputs cannot crash."""
+
+    @staticmethod
+    def _reflector(tmp_path, name="learned.json"):
+        from src.learning.reflector import ConversationReflector
+
+        return ConversationReflector(learned_path=str(tmp_path / name))
+
+    def test_tags_null_degrades_and_refuses_with_backup(self, tmp_path):
+        p = tmp_path / "learned.json"
+        original = {
+            "version": 2,
+            "entries": [
+                {
+                    "key": "k",
+                    "category": "operational",
+                    "content": "lesson",
+                    "tags": None,
+                }
+            ],
+        }
+        p.write_text(json.dumps(original))
+        r = self._reflector(tmp_path)
+
+        assert r.get_all_entries() == []
+        assert r.update_entry("k", content="changed") is None
+        assert json.loads(p.read_text()) == original
+        assert list(tmp_path.glob("learned.json.corrupt-*"))
+
+    @pytest.mark.parametrize("field", ["updated_at", "created_at", "last_used_at"])
+    def test_naive_timestamps_are_normalized_and_expiry_is_safe(self, tmp_path, field):
+        p = tmp_path / f"{field}.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "entries": [
+                        {
+                            "key": "k",
+                            "category": "operational",
+                            "content": "lesson",
+                            field: "2026-07-17T12:34:56",
+                        }
+                    ],
+                }
+            )
+        )
+        r = self._reflector(tmp_path, p.name)
+
+        loaded = r.get_all_entries()
+        assert loaded[0][field] == "2026-07-17T12:34:56+00:00"
+        assert r._expire_entries(loaded) == loaded
+
+    @pytest.mark.parametrize("field", ["updated_at", "created_at", "last_used_at"])
+    def test_invalid_timestamp_degrades_and_refuses(self, tmp_path, field):
+        p = tmp_path / f"invalid_{field}.json"
+        original = {
+            "version": 2,
+            "entries": [
+                {
+                    "key": "k",
+                    "category": "operational",
+                    "content": "lesson",
+                    field: "not-a-timestamp",
+                }
+            ],
+        }
+        p.write_text(json.dumps(original))
+        r = self._reflector(tmp_path, p.name)
+
+        assert r.get_all_entries() == []
+        assert r.delete_entry("k") is False
+        assert json.loads(p.read_text()) == original
+        assert list(tmp_path.glob(f"{p.name}.corrupt-*"))
+
+    def test_consumers_sanitize_untrusted_in_memory_fields(self, tmp_path):
+        import src.learning.reflector as reflector_module
+
+        r = self._reflector(tmp_path)
+        entries = [
+            {
+                "key": "k",
+                "category": "operational",
+                "content": "lesson",
+                "topic": 123,
+                "tags": None,
+                "updated_at": "2026-07-17T12:34:56",
+            }
+        ] * (r._REFLECTION_CONTEXT_TOP_K + 1)
+
+        # Direct/in-memory callers are outside json_store's read boundary. They
+        # still cannot take either relevance consumer or expiry down.
+        assert "lesson" in r._relevant_existing_text(entries, "lesson")
+        assert r._expire_entries(entries) == entries
+
+        r._injection_token_budget = 1
+        r._read_for_injection = lambda: {"entries": entries}
+        assert "lesson" in r.get_prompt_section(query="lesson")
+
+        mixed_tags = dict(entries[0], tags=["valid", 42, None])
+        assert "valid" in reflector_module._entry_search_text(mixed_tags)
+
+    def test_timestamp_helpers_fail_safe_for_direct_inputs(self, tmp_path, monkeypatch):
+        import src.learning.reflector as reflector_module
+
+        r = self._reflector(tmp_path)
+        no_ref = {
+            "key": "none",
+            "category": "operational",
+            "content": "lesson",
+        }
+        malformed = dict(no_ref, key="bad", updated_at="not-a-timestamp")
+        assert r._expire_entries([no_ref, malformed]) == [no_ref, malformed]
+        assert reflector_module._neg_iso("not-a-timestamp") == 0.0
+
+        class BadTimestamp:
+            def timestamp(self):
+                raise OSError("unrepresentable")
+
+        monkeypatch.setattr(
+            reflector_module, "_parse_entry_timestamp", lambda _value: BadTimestamp()
+        )
+        assert reflector_module._neg_iso("anything") == 0.0
+
+    def test_normalizer_ignores_already_rejected_shapes(self, tmp_path):
+        r = self._reflector(tmp_path)
+        wrong_entries = {"entries": "not-a-list"}
+        assert r._normalize_learned_data(wrong_entries) is wrong_entries
+
+        data = {"entries": [42, {"key": "k", "updated_at": "bad"}]}
+        assert r._normalize_learned_data(data) is data
+        assert data["entries"][1]["updated_at"] == "bad"
+
+    def test_update_entry_rejects_empty_and_invalid_direct_calls(self, tmp_path):
+        p = tmp_path / "learned.json"
+        original = {
+            "version": 2,
+            "entries": [
+                {"key": "k", "category": "operational", "content": "lesson"}
+            ],
+        }
+        p.write_text(json.dumps(original))
+        r = self._reflector(tmp_path)
+
+        assert r.update_entry("k") is None
+        assert r.update_entry("k", content=42) is None
+        assert r.update_entry("k", category=42) is None
+        assert json.loads(p.read_text()) == original
+
+    def test_save_validates_all_in_memory_results(self, tmp_path):
+        from src.json_store import StoreCorruptError
+
+        r = self._reflector(tmp_path)
+        malformed = {
+            "version": 2,
+            "entries": [
+                {
+                    "key": "k",
+                    "category": "operational",
+                    "content": "lesson",
+                    "tags": None,
+                }
+            ],
+        }
+        with pytest.raises(StoreCorruptError):
+            r._save(malformed)
+        assert not (tmp_path / "learned.json").exists()

@@ -23,7 +23,13 @@ import discord
 from ...agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ...async_utils import fire_and_forget
 from ...odin_log import get_logger
-from ..background_task import MAX_STEPS, BackgroundTask, create_task_id, run_background_task
+from ..background_task import (
+    MAX_STEPS,
+    BackgroundTask,
+    _send_progress,
+    create_task_id,
+    run_background_task,
+)
 from ..tool_loop import _LoopMessageProxy
 
 if TYPE_CHECKING:
@@ -66,11 +72,16 @@ def _agent_llm_policy(
     """
     codex_cfg = getattr(config, "openai_codex", None)
     is_codex = hasattr(client, "reasoning_effort")
+    # Resolution order (Odin): accepted spawn override -> fixed agent config ->
+    # main setting when the axis is null (inherit) or "auto". "auto" is config
+    # policy and is NEVER sent to a provider, so it resolves to inherit-main
+    # (None effort / the main model) exactly like null.
     agent_effort: str | None
     if effort_override is not None:
         agent_effort = effort_override
     else:
-        agent_effort = getattr(codex_cfg, "agent_reasoning_effort", None)
+        cfg_effort = getattr(codex_cfg, "agent_reasoning_effort", None)
+        agent_effort = None if cfg_effort in (None, "auto") else cfg_effort
     if not is_codex:
         return agent_effort, None
     resolved_model: str | None
@@ -79,17 +90,39 @@ def _agent_llm_policy(
     else:
         raw = getattr(codex_cfg, "agent_model", None)
         agent_model = (str(raw).strip() or None) if raw else None
+        if agent_model == "auto":
+            agent_model = None
         resolved_model = agent_model or getattr(codex_cfg, "model", None)
     return agent_effort, resolved_model
 
 
-def _parse_spawn_overrides(inp: dict) -> tuple[str | None, str | None, str | None]:
+def _parse_spawn_overrides(
+    inp: dict, *, model_mode: str = "auto", effort_mode: str = "auto"
+) -> tuple[str | None, str | None, str | None]:
     """Extract per-spawn ``(model_override, effort_override, error)`` from a
-    spawn/task dict. Empty/whitespace = inherit (None). An invalid
-    ``reasoning_effort`` is REJECTED (returns an error string) — never clamped,
-    so a typo fails loudly instead of silently running the wrong effort.
+    spawn/task dict, enforced at the SPAWN BOUNDARY against the axis modes.
+
+    An axis field is only accepted when that axis is ``auto``; on a fixed or
+    inherited axis it is HARD-REJECTED (a clear error, never silently dropped —
+    a dropped override could run an expensive task on the wrong policy while
+    appearing to succeed). The check is on KEY PRESENCE, not truthiness: the
+    schema omits the field on a non-auto axis, so even a hand-built
+    ``"model": null`` is outside the contract. Empty/whitespace on an accepted
+    axis = inherit (None). An invalid ``reasoning_effort`` is rejected (never
+    clamped) so a typo fails loudly.
     """
     from ...config.schema import CODEX_REASONING_EFFORTS
+
+    if "model" in inp and model_mode != "auto":
+        return None, None, (
+            "model is not accepted because Agent Model is not set to Auto — select "
+            "'Auto — choose per spawn' in the WebUI to allow per-spawn model selection"
+        )
+    if "reasoning_effort" in inp and effort_mode != "auto":
+        return None, None, (
+            "reasoning_effort is not accepted because Agent Reasoning is not set to Auto — "
+            "select 'Auto — choose per spawn' in the WebUI to allow per-spawn effort selection"
+        )
 
     raw_model = inp.get("model")
     model_override = (str(raw_model).strip() or None) if raw_model else None
@@ -257,9 +290,23 @@ class AgentTaskTools:
                     audit_logger=self._audit,
                     codex_callback=codex_cb,
                 )
+            except asyncio.CancelledError:
+                # cancel_task interrupted a step mid-run: request_cancel already
+                # set status='cancelled'. The loop unwound before its own
+                # completion path, so post one final progress line (shielded so
+                # it isn't re-cancelled), skip summary + follow-up, and re-raise
+                # so the task settles as cancelled.
+                task.status = "cancelled"
+                try:
+                    await asyncio.shield(_send_progress(task, None))
+                except Exception:
+                    pass
+                raise
             except Exception as e:
                 log.error("Background task %s crashed: %s", task.task_id, e, exc_info=True)
-                task.status = "failed"
+                # Never overwrite a cancellation that already won with 'failed'.
+                if task.status != "cancelled":
+                    task.status = "failed"
 
         task._asyncio_task = asyncio.create_task(_run())
 
@@ -315,16 +362,21 @@ class AgentTaskTools:
             )
         return "\n".join(lines)
 
-    def _handle_cancel_task(self, inp: dict) -> str:
-        """Cancel a running background task."""
+    async def _handle_cancel_task(self, inp: dict) -> str:
+        """Cancel a running background task and wait for it to actually stop.
+
+        Uses ``request_cancel`` (not the cooperative ``cancel``) so an in-flight
+        step is interrupted rather than run to completion; returns only after
+        the task has settled as cancelled.
+        """
         task_id = inp.get("task_id", "")
         task = self._channel_state.background_tasks.get(task_id)
         if not task:
             return f"No task found with ID `{task_id}`."
-        if task.status != "running":
+        cancelled = await task.request_cancel()
+        if not cancelled:
             return f"Task `{task_id}` is not running (status: {task.status})."
-        task.cancel()
-        return f"Cancellation requested for task `{task_id}`."
+        return f"Task `{task_id}` cancelled."
 
     def _handle_start_loop(self, message: discord.Message, inp: dict) -> str:
         """Start an autonomous loop."""
@@ -427,7 +479,12 @@ class AgentTaskTools:
         if not label or not goal:
             return "Both 'label' and 'goal' are required."
 
-        model_override, effort_override, ovr_err = _parse_spawn_overrides(inp)
+        from ...tools.agent_tool_policy import agent_axis_modes
+
+        _model_mode, _effort_mode = agent_axis_modes(self._get_config())
+        model_override, effort_override, ovr_err = _parse_spawn_overrides(
+            inp, model_mode=_model_mode, effort_mode=_effort_mode
+        )
         if ovr_err:
             return f"Error: {ovr_err}"
 
@@ -752,13 +809,18 @@ class AgentTaskTools:
         tools = filter_agent_tools(all_tools)
 
         # Validate + normalize each task's optional per-agent model/effort
-        # override — a single bad reasoning_effort rejects the WHOLE batch
-        # (nothing spawns) rather than silently running the wrong effort.
+        # override — a single bad or non-eligible override rejects the WHOLE
+        # batch (nothing spawns) rather than silently running the wrong policy.
+        from ...tools.agent_tool_policy import agent_axis_modes
+
+        _model_mode, _effort_mode = agent_axis_modes(self._get_config())
         validated_tasks = []
         for t in tasks:
             if not isinstance(t, dict):
                 return "Error: each task must be an object with 'label' and 'goal'."
-            mo, eo, err = _parse_spawn_overrides(t)
+            mo, eo, err = _parse_spawn_overrides(
+                t, model_mode=_model_mode, effort_mode=_effort_mode
+            )
             if err:
                 return f"Error: task '{t.get('label', '?')}': {err}"
             validated_tasks.append({

@@ -69,7 +69,8 @@ def _message(cid=42, uid=7):
 def _task(status="running", results=None, steps=None, tid="T1", desc="job"):
     return SimpleNamespace(
         task_id=tid, description=desc, status=status,
-        steps=steps or [{"tool_name": "x"}], results=results or [], cancel=MagicMock())
+        steps=steps or [{"tool_name": "x"}], results=results or [], cancel=MagicMock(),
+        request_cancel=AsyncMock(return_value=(status == "running")))
 
 
 # --------------------------------------------------------------------------- #
@@ -96,6 +97,38 @@ class TestDelegateTask:
                 msg, {"description": "deploy", "steps": [{"tool_name": "web_search"}]})
             await asyncio.sleep(0)  # let the fire-and-forget _run() settle
         assert "Background task started" in out and "deploy" in out
+
+    async def test_cancel_mid_run_settles_cancelled(self):
+        # A cancel that interrupts the runner mid-step hits the _run wrapper's
+        # CancelledError branch: status stays 'cancelled', it re-raises.
+        t = _tools()
+        msg = _message()
+        started = asyncio.Event()
+
+        async def _blocking_run(*a, **k):
+            started.set()
+            await asyncio.sleep(3600)  # block until cancelled
+
+        async def _boom_progress(*a, **k):
+            raise RuntimeError("progress send failed")  # exercise the defensive except
+
+        # Everything stays inside the patch: the fire-and-forget _run() executes
+        # the patched (blocking) runner only while the patch is active. The
+        # final-progress post is forced to raise so the cancel branch's guarded
+        # except is covered; the task must still settle 'cancelled'.
+        with patch("src.discord.native_tools.agents_tasks.run_background_task", _blocking_run), \
+             patch("src.discord.native_tools.agents_tasks._send_progress", _boom_progress):
+            out = await t._handle_delegate_task(
+                msg, {"description": "job", "steps": [{"tool_name": "web_search"}]})
+            assert "Background task started" in out
+            task = next(iter(t._channel_state.background_tasks.values()))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            task._asyncio_task.cancel()
+            try:
+                await task._asyncio_task
+            except asyncio.CancelledError:
+                pass  # the wrapper re-raises after marking the task cancelled
+        assert task.status == "cancelled"
         assert len(t._channel_state.background_tasks) == 1
 
     async def test_prunes_old_completed(self):
@@ -143,14 +176,15 @@ class TestListCancelTasks:
         out = AgentTaskTools(deps)._handle_list_tasks({"task_id": "T1"})
         assert "truncated" in out
 
-    def test_cancel(self):
+    async def test_cancel(self):
         deps = _deps()
         deps.channel_state.background_tasks = {"T1": _task(status="running")}
         t = AgentTaskTools(deps)
-        assert "No task found" in t._handle_cancel_task({"task_id": "ghost"})
-        assert "Cancellation requested" in t._handle_cancel_task({"task_id": "T1"})
+        assert "No task found" in await t._handle_cancel_task({"task_id": "ghost"})
+        # The handler now drives async request_cancel (real interrupt).
+        assert "cancelled" in (await t._handle_cancel_task({"task_id": "T1"})).lower()
         deps.channel_state.background_tasks["T2"] = _task(status="completed", tid="T2")
-        assert "is not running" in t._handle_cancel_task({"task_id": "T2"})
+        assert "is not running" in await t._handle_cancel_task({"task_id": "T2"})
 
 
 # --------------------------------------------------------------------------- #
@@ -576,7 +610,8 @@ class TestPerSpawnModelEffort:
     async def test_spawn_override_wins_over_config(self):
         client = _FakeEffortClient()
         cfg = _cfg()
-        cfg.openai_codex = self._codex_cfg()
+        # Per-spawn overrides are only accepted when the axis is Auto.
+        cfg.openai_codex = self._codex_cfg(agent_model="auto", agent_effort="auto")
         t = _tools(get_config=lambda: cfg,
                    llm_gateway=SimpleNamespace(active_client=client))
         t._agent_manager.spawn.return_value = "agent-o"
@@ -614,7 +649,8 @@ class TestPerSpawnModelEffort:
     async def test_invalid_effort_rejects_without_spawning(self):
         client = _FakeEffortClient()
         cfg = _cfg()
-        cfg.openai_codex = self._codex_cfg()
+        # Effort axis Auto so the field is accepted for value-validation.
+        cfg.openai_codex = self._codex_cfg(agent_effort="auto")
         t = _tools(get_config=lambda: cfg,
                    llm_gateway=SimpleNamespace(active_client=client))
         t._agent_manager._agents = {}
@@ -626,7 +662,8 @@ class TestPerSpawnModelEffort:
     async def test_loop_per_task_overrides_and_batch_rejection(self):
         client = _FakeEffortClient()
         cfg = _cfg()
-        cfg.openai_codex = self._codex_cfg()
+        # Both axes Auto so per-task model + effort overrides are accepted.
+        cfg.openai_codex = self._codex_cfg(agent_model="auto", agent_effort="auto")
         t = _tools(get_config=lambda: cfg,
                    llm_gateway=SimpleNamespace(active_client=client))
         t._loop_manager._loops = {"L1": SimpleNamespace(

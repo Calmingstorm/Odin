@@ -50,13 +50,20 @@ class StateTools(HandlerBase):
                 "Example: {'action': 'get', 'key': 'foo'}."
             )
         scope = inp.get("scope", "personal")
+        from ...json_store import StoreCorruptError
 
         async with self._memory_lock:
             if action in ("get", "recall", "read"):
                 key = inp.get("key")
                 if not key:
                     return "'key' is required for get."
-                all_mem = await asyncio.to_thread(self._load_all_memory)
+                try:
+                    all_mem = await asyncio.to_thread(self._load_all_memory)
+                except StoreCorruptError as exc:
+                    return (
+                        "Memory store is currently unreadable or corrupt (a backup copy was "
+                        f"preserved). Cannot complete '{action}' to avoid data loss. Details: {exc}"
+                    )
                 user_key = f"user_{user_id}" if user_id else None
                 if user_key and key in all_mem.get(user_key, {}):
                     return f"**{key}** (personal): {all_mem[user_key][key]}"
@@ -65,7 +72,13 @@ class StateTools(HandlerBase):
                 return f"No note found with key '{key}'."
 
             if action == "list":
-                all_mem = await asyncio.to_thread(self._load_all_memory)
+                try:
+                    all_mem = await asyncio.to_thread(self._load_all_memory)
+                except StoreCorruptError as exc:
+                    return (
+                        "Memory store is currently unreadable or corrupt (a backup copy was "
+                        f"preserved). Cannot complete '{action}' to avoid data loss. Details: {exc}"
+                    )
                 global_mem = all_mem.get("global", {})
                 user_mem = all_mem.get(f"user_{user_id}", {}) if user_id else {}
                 lines = []
@@ -82,7 +95,13 @@ class StateTools(HandlerBase):
                 value = inp.get("value")
                 if not key or not value:
                     return "Both 'key' and 'value' are required for save."
-                all_mem = await asyncio.to_thread(self._load_all_memory)
+                try:
+                    all_mem = await asyncio.to_thread(self._load_all_memory)
+                except StoreCorruptError as exc:
+                    return (
+                        "Memory store is currently unreadable or corrupt (a backup copy was "
+                        f"preserved). Cannot complete '{action}' to avoid data loss. Details: {exc}"
+                    )
                 if scope == "global":
                     section = "global"
                 elif user_id:
@@ -116,7 +135,13 @@ class StateTools(HandlerBase):
                 key = inp.get("key")
                 if not key:
                     return "'key' is required for delete."
-                all_mem = await asyncio.to_thread(self._load_all_memory)
+                try:
+                    all_mem = await asyncio.to_thread(self._load_all_memory)
+                except StoreCorruptError as exc:
+                    return (
+                        "Memory store is currently unreadable or corrupt (a backup copy was "
+                        f"preserved). Cannot complete '{action}' to avoid data loss. Details: {exc}"
+                    )
                 user_key = f"user_{user_id}" if user_id else None
                 if user_key and key in all_mem.get(user_key, {}):
                     del all_mem[user_key][key]
@@ -150,13 +175,13 @@ class StateTools(HandlerBase):
         path = self._lists_path()
         if not path:
             return {}
-        if path.exists():
-            try:
-                data = json.loads(path.read_text())
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
+        from ...json_store import load_json_store_safe
+
+        # READ path: corruption degrades (and a corrupt copy is preserved) so a
+        # damaged file can't crash; mutations use _load_lists_for_write.
+        data, ok = load_json_store_safe(path, container=dict, what="lists.json")
+        if ok and data:
+            return data
         # Auto-migrate old grocery_list.json if it exists
         old_grocery = path.parent / "grocery_list.json"
         if old_grocery.exists():
@@ -180,6 +205,20 @@ class StateTools(HandlerBase):
                 pass
         return {}
 
+    def _load_lists_for_write(self) -> dict:
+        """MUTATION path — raises StoreCorruptError on a corrupt lists.json so
+        the caller refuses rather than overwriting (which would wipe the
+        lists). Missing/empty falls back to the read path (grocery migration)."""
+        from ...json_store import load_json_store
+
+        path = self._lists_path()
+        if not path:
+            return {}
+        data = load_json_store(path, container=dict)
+        if data:
+            return data
+        return self._load_lists()
+
     def _save_lists(self, data: dict) -> None:
         path = self._lists_path()
         if path:
@@ -200,7 +239,19 @@ class StateTools(HandlerBase):
         from datetime import datetime
 
         async with self._lists_lock:
-            lists = await asyncio.to_thread(self._load_lists)
+            from ...json_store import StoreCorruptError
+
+            try:
+                lists = await asyncio.to_thread(self._load_lists_for_write)
+            except StoreCorruptError as exc:
+                # Reads degrade to an empty view; mutations refuse — never
+                # overwrite a corrupt file, which would wipe the lists.
+                if action not in ("list_all", "show"):
+                    return (
+                        "Lists store is unreadable or corrupt (a backup copy was preserved). "
+                        f"Refusing to modify it to avoid data loss. Details: {exc}"
+                    )
+                lists = {}
 
             if action == "list_all":
                 if not lists:

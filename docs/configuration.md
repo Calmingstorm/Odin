@@ -72,8 +72,8 @@ openai_codex:
   model: gpt-5.5                 # ChatGPT subscription path
   max_tokens: 4096
   reasoning_effort: medium       # none | low | medium | high | xhigh
-  agent_reasoning_effort: null   # spawned agents only; null = inherit reasoning_effort
-  agent_model: null              # spawned agents only; null = inherit model
+  agent_reasoning_effort: null   # spawned agents; null = inherit, "auto" = per-spawn choice
+  agent_model: null              # spawned agents; null = inherit, "auto" = per-spawn choice
   credentials_path: ./data/codex_auth.json
   request_timeout_seconds: 3600  # whole-request backstop; long reasoning turns stream past 10 min
   stream_stall_timeout_seconds: 180  # fail fast when no stream bytes arrive for this long

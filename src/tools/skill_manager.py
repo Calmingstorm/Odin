@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -598,6 +599,10 @@ class SkillManager:
         else:
             self._memory_path = None
         self._skills: dict[str, LoadedSkill] = {}
+        # ONE lock shared across every SkillContext this manager creates — all
+        # contexts write the same <memory>_skills.json, so a per-context lock
+        # would let concurrent remember() calls race and collide on the .tmp.
+        self._skill_memory_lock = threading.Lock()
         self._disabled: set[str] = self._load_disabled_set()
         # Optional service references — set after construction via set_services()
         self._knowledge_store = None
@@ -1138,6 +1143,7 @@ class SkillManager:
             scheduler=self._scheduler,
             skill_config=skill_config,
             resource_tracker=tracker,
+            skill_memory_lock=self._skill_memory_lock,
         )
 
         start = time.monotonic()
@@ -1194,39 +1200,31 @@ class SkillManager:
             return f"Invalid URL scheme '{parsed.scheme}'. Only http/https allowed."
         if not parsed.netloc:
             return "Invalid URL: no host specified."
-        from .url_safety import is_url_blocked
+        # Download through the hardened transport: each redirect hop is
+        # SSRF-validated (critical — this file is executed as a skill), the
+        # connect IP is pinned, TLS is verified, and the body is byte-capped.
+        from .safe_fetch import BlockedAddressError, ResponseTooLargeError, safe_fetch
 
-        if is_url_blocked(url):
-            return "Error: blocked URL (localhost / private IP / cloud-metadata address)."
-
-        # Download
         try:
-            import aiohttp
-
-            timeout = aiohttp.ClientTimeout(total=_URL_DOWNLOAD_TIMEOUT)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        return f"Download failed: HTTP {resp.status}"
-                    # Check content length header if available
-                    cl = resp.content_length
-                    if cl and cl > MAX_SKILL_DOWNLOAD_BYTES:
-                        return (
-                            f"File too large ({cl} bytes). Maximum is {MAX_SKILL_DOWNLOAD_BYTES}."
-                        )
-                    data = await resp.content.read(MAX_SKILL_DOWNLOAD_BYTES + 1)
-                    if len(data) > MAX_SKILL_DOWNLOAD_BYTES:
-                        return (
-                            f"File too large (>{MAX_SKILL_DOWNLOAD_BYTES} bytes). "
-                            f"Maximum is {MAX_SKILL_DOWNLOAD_BYTES}."
-                        )
-                    code = data.decode("utf-8")
-        except UnicodeDecodeError:
-            return "Downloaded file is not valid UTF-8 text."
+            resp = await safe_fetch(
+                url,
+                max_bytes=MAX_SKILL_DOWNLOAD_BYTES,
+                timeout=float(_URL_DOWNLOAD_TIMEOUT),
+            )
+        except BlockedAddressError:
+            return "Error: blocked URL (localhost / private IP / cloud-metadata address)."
+        except ResponseTooLargeError:
+            return f"File too large. Maximum is {MAX_SKILL_DOWNLOAD_BYTES} bytes."
         except TimeoutError:
             return f"Download timed out after {_URL_DOWNLOAD_TIMEOUT}s."
         except Exception as e:
             return f"Download error: {e}"
+        if resp.status != 200:
+            return f"Download failed: HTTP {resp.status}"
+        try:
+            code = resp.body.decode("utf-8")
+        except UnicodeDecodeError:
+            return "Downloaded file is not valid UTF-8 text."
 
         # Validate the code
         report = self.validate_skill_code(code, url)

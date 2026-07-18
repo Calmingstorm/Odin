@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from aiohttp import web
@@ -294,19 +294,26 @@ def _mock_fitz_doc(text_per_page=None, page_count=1):
 
 
 def _mock_aiohttp_response(status=200, read_data=b"", text_data="", headers=None):
-    mock_resp = AsyncMock()
-    mock_resp.status = status
-    mock_resp.read = AsyncMock(return_value=read_data)
-    mock_resp.text = AsyncMock(return_value=text_data)
-    mock_resp.headers = headers or {}
-    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-    mock_resp.__aexit__ = AsyncMock(return_value=False)
+    """Return a fake ``safe_fetch`` callable. import_pdf_url/import_web_url now
+    route through the hardened transport; these tests exercise the caller's
+    response handling with the transport faked (no network). Body is bytes for
+    PDF (``read_data``) and encoded text for web (``text_data``)."""
+    from src.tools.safe_fetch import SafeFetchResponse
 
-    mock_session = AsyncMock()
-    mock_session.get = MagicMock(return_value=mock_resp)
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=False)
-    return mock_session
+    body = read_data if read_data else text_data.encode()
+    ct = (headers or {}).get("Content-Type", "")
+
+    async def _f(url, **kw):
+        return SafeFetchResponse(status, headers or {}, body, ct, url, "")
+
+    return _f
+
+
+def _fake_safe_fetch_raises(exc):
+    async def _f(url, **kw):
+        raise exc
+
+    return _f
 
 
 class TestImportPdfUrl:
@@ -334,7 +341,7 @@ class TestImportPdfUrl:
             mock_fitz = MagicMock()
             mock_session = _mock_aiohttp_response(status=404)
             with patch.dict("sys.modules", {"fitz": mock_fitz}), \
-                 patch("aiohttp.ClientSession", return_value=mock_session):
+                 patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_pdf_url("https://example.com/missing.pdf")
                 assert r.status == "error"
                 assert "404" in r.error
@@ -351,7 +358,7 @@ class TestImportPdfUrl:
             mock_session = _mock_aiohttp_response(status=200, read_data=b"fake pdf bytes")
 
             with patch.dict("sys.modules", {"fitz": mock_fitz}), \
-                 patch("aiohttp.ClientSession", return_value=mock_session):
+                 patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_pdf_url("https://example.com/test.pdf")
                 assert r.status == "ok"
                 assert r.chunks > 0
@@ -368,7 +375,7 @@ class TestImportPdfUrl:
             mock_session = _mock_aiohttp_response(status=200, read_data=b"pdf bytes")
 
             with patch.dict("sys.modules", {"fitz": mock_fitz}), \
-                 patch("aiohttp.ClientSession", return_value=mock_session):
+                 patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_pdf_url(
                     "https://example.com/test.pdf",
                     source="my-custom-doc",
@@ -387,7 +394,7 @@ class TestImportPdfUrl:
             mock_session = _mock_aiohttp_response(status=200, read_data=b"pdf bytes")
 
             with patch.dict("sys.modules", {"fitz": mock_fitz}), \
-                 patch("aiohttp.ClientSession", return_value=mock_session):
+                 patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_pdf_url("https://example.com/empty.pdf")
                 assert r.status == "skipped"
                 assert "no text" in r.error
@@ -397,12 +404,12 @@ class TestImportPdfUrl:
     async def test_pdf_too_large(self):
         importer, store = _make_importer()
         try:
-            big_bytes = b"x" * (MAX_PDF_BYTES + 1)
+            from src.tools.safe_fetch import ResponseTooLargeError
             mock_fitz = MagicMock()
-            mock_session = _mock_aiohttp_response(status=200, read_data=big_bytes)
 
             with patch.dict("sys.modules", {"fitz": mock_fitz}), \
-                 patch("aiohttp.ClientSession", return_value=mock_session):
+                 patch("src.tools.safe_fetch.safe_fetch",
+                       _fake_safe_fetch_raises(ResponseTooLargeError("too large"))):
                 r = await importer.import_pdf_url("https://example.com/huge.pdf")
                 assert r.status == "error"
                 assert "too large" in r.error
@@ -418,7 +425,7 @@ class TestImportPdfUrl:
             mock_session = _mock_aiohttp_response(status=200, read_data=b"pdf bytes")
 
             with patch.dict("sys.modules", {"fitz": mock_fitz}), \
-                 patch("aiohttp.ClientSession", return_value=mock_session):
+                 patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_pdf_url("https://example.com/path/to/manual.pdf")
                 assert r.source == "manual.pdf"
         finally:
@@ -436,7 +443,7 @@ class TestImportPdfUrl:
             mock_session = _mock_aiohttp_response(status=200, read_data=b"pdf bytes")
 
             with patch.dict("sys.modules", {"fitz": mock_fitz}), \
-                 patch("aiohttp.ClientSession", return_value=mock_session):
+                 patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_pdf_url("https://example.com/multi.pdf")
                 assert r.status == "ok"
                 content = store.get_source_content("multi.pdf")
@@ -455,7 +462,7 @@ class TestImportPdfUrl:
             mock_session = _mock_aiohttp_response(status=200, read_data=b"pdf bytes")
 
             with patch.dict("sys.modules", {"fitz": mock_fitz}), \
-                 patch("aiohttp.ClientSession", return_value=mock_session):
+                 patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_pdf_url("https://example.com/big.pdf")
                 assert r.status == "ok"
                 content = store.get_source_content(r.source)
@@ -484,7 +491,7 @@ class TestImportWebUrl:
         importer, store = _make_importer()
         try:
             mock_session = _mock_aiohttp_response(status=500)
-            with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_web_url("https://example.com/bad")
                 assert r.status == "error"
                 assert "500" in r.error
@@ -500,7 +507,7 @@ class TestImportWebUrl:
                            "for testing.</p></body></html>"),
                 headers={"Content-Type": "text/html; charset=utf-8"},
             )
-            with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_web_url("https://example.com/docs")
                 assert r.status == "ok"
                 assert r.chunks > 0
@@ -516,7 +523,7 @@ class TestImportWebUrl:
                 text_data="Plain text knowledge content here.",
                 headers={"Content-Type": "text/plain"},
             )
-            with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_web_url("https://example.com/plain.txt")
                 assert r.status == "ok"
                 assert r.chunks > 0
@@ -531,7 +538,7 @@ class TestImportWebUrl:
                 text_data="Content for custom source.",
                 headers={"Content-Type": "text/plain"},
             )
-            with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_web_url(
                     "https://example.com/page",
                     source="my-docs",
@@ -548,7 +555,7 @@ class TestImportWebUrl:
                 text_data="<html><body></body></html>",
                 headers={"Content-Type": "text/html"},
             )
-            with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_web_url("https://example.com/empty")
                 assert r.status == "skipped"
                 assert "no content" in r.error
@@ -564,7 +571,7 @@ class TestImportWebUrl:
                 text_data=big_content,
                 headers={"Content-Type": "text/plain"},
             )
-            with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_web_url("https://example.com/huge")
                 assert r.status == "ok"
                 content = store.get_source_content("https://example.com/huge")
@@ -581,7 +588,7 @@ class TestImportWebUrl:
                 text_data="edge case content",
                 headers={"Content-Type": "text/plain"},
             )
-            with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_web_url("https://docs.example.com/guide")
                 assert r.source == "https://docs.example.com/guide"
         finally:
@@ -650,7 +657,7 @@ class TestImportBatch:
                 text_data="batch url import content",
                 headers={"Content-Type": "text/plain"},
             )
-            with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 batch = await importer.import_batch([
                     {"type": "url", "url": "https://example.com/page"},
                 ])
@@ -687,7 +694,7 @@ class TestImportBatch:
                     text_data="web content for mixed batch",
                     headers={"Content-Type": "text/plain"},
                 )
-                with patch("aiohttp.ClientSession", return_value=mock_session):
+                with patch("src.tools.safe_fetch.safe_fetch", mock_session):
                     batch = await importer.import_batch([
                         {"type": "directory", "path": tmpdir},
                         {"type": "url", "url": "https://example.com/page"},
@@ -743,7 +750,7 @@ class TestImportBatch:
             mock_session = _mock_aiohttp_response(status=200, read_data=b"pdf bytes")
 
             with patch.dict("sys.modules", {"fitz": mock_fitz}), \
-                 patch("aiohttp.ClientSession", return_value=mock_session):
+                 patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 batch = await importer.import_batch([
                     {"type": "pdf", "url": "https://example.com/doc.pdf"},
                 ])
@@ -760,7 +767,7 @@ class TestImportBatch:
             mock_session = _mock_aiohttp_response(status=200, read_data=b"pdf bytes")
 
             with patch.dict("sys.modules", {"fitz": mock_fitz}), \
-                 patch("aiohttp.ClientSession", return_value=mock_session):
+                 patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 batch = await importer.import_batch([
                     {"type": "pdf", "url": "https://example.com/doc.pdf", "source": "my-pdf"},
                 ])
@@ -1156,13 +1163,10 @@ class TestEdgeCases:
         importer, store = _make_importer()
         try:
             mock_fitz = MagicMock()
-            mock_session = AsyncMock()
-            mock_session.get = MagicMock(side_effect=Exception("connection refused"))
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=False)
 
             with patch.dict("sys.modules", {"fitz": mock_fitz}), \
-                 patch("aiohttp.ClientSession", return_value=mock_session):
+                 patch("src.tools.safe_fetch.safe_fetch",
+                       _fake_safe_fetch_raises(Exception("connection refused"))):
                 r = await importer.import_pdf_url("https://example.com/err.pdf")
                 assert r.status == "error"
                 assert "download failed" in r.error
@@ -1172,12 +1176,8 @@ class TestEdgeCases:
     async def test_web_fetch_exception(self):
         importer, store = _make_importer()
         try:
-            mock_session = AsyncMock()
-            mock_session.get = MagicMock(side_effect=Exception("timeout"))
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=False)
-
-            with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("src.tools.safe_fetch.safe_fetch",
+                       _fake_safe_fetch_raises(Exception("timeout"))):
                 r = await importer.import_web_url("https://example.com/timeout")
                 assert r.status == "error"
                 assert "fetch failed" in r.error

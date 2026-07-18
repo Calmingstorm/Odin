@@ -199,34 +199,68 @@ class TestHttp:
             c._tracker.http_requests = MAX_SKILL_HTTP_REQUESTS
             assert "limit" in await c.http_get("http://ok")
 
-    async def test_get_json_bytes_text(self):
+    async def test_get_and_post_redirect_blocked(self):
+        # A redirect hop that targets a blocked address surfaces as
+        # BlockedAddressError from safe_fetch; both http_get and http_post map
+        # it to the "Access denied" refusal (pre-flight is_url_blocked passes).
+        from src.tools.safe_fetch import BlockedAddressError
+
+        async def _blocked(url, **kw):
+            raise BlockedAddressError("redirect to private")
+
         c = _ctx()
         with patch("src.tools.skill_context.is_url_blocked", return_value=False):
-            with patch("aiohttp.ClientSession",
-                       return_value=_Session(_Resp("application/json", json_data={"ok": 1}))):
+            with patch("src.tools.safe_fetch.safe_fetch", _blocked):
+                assert "Access denied" in await c.http_get("http://ok")
+            with patch("src.tools.safe_fetch.safe_fetch", _blocked):
+                assert "Access denied" in await c.http_post("http://ok", json={"a": 1})
+
+    async def test_get_json_bytes_text(self):
+        # http_get now routes through safe_fetch (its pre-flight is_url_blocked
+        # check is unchanged and still patched here).
+        from src.tools.safe_fetch import SafeFetchResponse
+
+        def _ff(ct, body):
+            if isinstance(body, str):
+                body = body.encode()
+
+            async def _f(url, **kw):
+                return SafeFetchResponse(200, {}, body, ct, url, "")
+
+            return _f
+
+        c = _ctx()
+        with patch("src.tools.skill_context.is_url_blocked", return_value=False):
+            with patch("src.tools.safe_fetch.safe_fetch", _ff("application/json", '{"ok": 1}')):
                 assert (await c.http_get("http://ok"))["ok"] == 1
-            with patch("aiohttp.ClientSession",
-                       return_value=_Session(_Resp("image/png", data=b"\x89PNG"))):
+            with patch("src.tools.safe_fetch.safe_fetch", _ff("image/png", b"\x89PNG")):
                 assert await c.http_get("http://ok") == b"\x89PNG"
-            with patch("aiohttp.ClientSession",
-                       return_value=_Session(_Resp("text/plain", text="plain text"))):
+            with patch("src.tools.safe_fetch.safe_fetch", _ff("text/plain", "plain text")):
                 assert await c.http_get("http://ok") == "plain text"
-            with patch("aiohttp.ClientSession",
-                       return_value=_Session(_Resp("text/plain", text='{"j": 2}'))):
+            with patch("src.tools.safe_fetch.safe_fetch", _ff("text/plain", '{"j": 2}')):
                 # text that parses as json; also passes custom headers (merged)
                 assert (await c.http_get("http://ok", headers={"X-K": "v"}))["j"] == 2
 
     async def test_post(self):
+        from src.tools.safe_fetch import SafeFetchResponse
+
+        def _ff(ct, body):
+            if isinstance(body, str):
+                body = body.encode()
+
+            async def _f(url, **kw):
+                return SafeFetchResponse(200, {}, body, ct, url, "")
+
+            return _f
+
         c = _ctx()
         with patch("src.tools.skill_context.is_url_blocked", return_value=True):
             assert "Access denied" in await c.http_post("http://localhost")
         with patch("src.tools.skill_context.is_url_blocked", return_value=False):
-            with patch("aiohttp.ClientSession",
-                       return_value=_Session(_Resp("application/json", json_data={"r": 1}))):
+            with patch("src.tools.safe_fetch.safe_fetch", _ff("application/json", '{"r": 1}')):
                 assert (await c.http_post("http://ok", json={"a": 1},
                                           headers={"X-K": "v"}))["r"] == 1  # custom headers merged
-            with patch("aiohttp.ClientSession",
-                       return_value=_Session(_Resp("text/plain", text="posted"))):
+            with patch("src.tools.safe_fetch.safe_fetch", _ff("text/plain", "posted")):
                 assert await c.http_post("http://ok", data="x") == "posted"
             c._tracker.http_requests = MAX_SKILL_HTTP_REQUESTS
             assert "limit" in await c.http_post("http://ok")

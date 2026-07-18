@@ -9,8 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import aiohttp
-
 from ..odin_log import get_logger
 
 if TYPE_CHECKING:
@@ -144,11 +142,14 @@ class SkillContext:
         scheduler: Scheduler | None = None,
         skill_config: dict[str, Any] | None = None,
         resource_tracker: ResourceTracker | None = None,
+        skill_memory_lock: threading.Lock | None = None,
     ) -> None:
         self._executor = tool_executor
         self._log = get_logger(f"skills.{skill_name}")
         self._memory_path = Path(memory_path) if memory_path else None
-        self._skill_memory_lock = threading.Lock()
+        # Shared across all contexts by the SkillManager (they write one file);
+        # a private lock is only a fallback for direct construction (e.g. tests).
+        self._skill_memory_lock = skill_memory_lock or threading.Lock()
         self._message_callback = message_callback
         self._file_callback = file_callback
         self._knowledge_store = knowledge_store
@@ -230,11 +231,24 @@ class SkillContext:
             self._log.warning("post_file called but no channel callback available")
 
     def remember(self, key: str, value: str) -> None:
-        """Save a key/value pair to persistent memory."""
+        """Save a key/value pair to persistent memory.
+
+        Refuses (without saving) when the store is corrupt, so a transient
+        read failure can't wipe the skill's memory — the void contract is kept;
+        the refusal is logged and a corrupt copy is preserved.
+        """
         if not self._memory_path:
             return
+        from ..json_store import StoreCorruptError
+
         with self._skill_memory_lock:
-            memory = self._load_memory()
+            try:
+                memory = self._load_memory_for_write()
+            except StoreCorruptError as exc:
+                self._log.error(
+                    "Skill memory corrupt (backup preserved); not saving %r: %s", key, exc
+                )
+                return
             memory[key] = value
             self._save_memory(memory)
 
@@ -283,27 +297,32 @@ class SkillContext:
         merged = {"Accept": "application/json"}
         if headers:
             merged.update(headers)
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                params=params,
-                headers=merged,
-                timeout=aiohttp.ClientTimeout(total=timeout),
-            ) as resp:
-                ct = resp.content_type or ""
-                if "json" in ct:
-                    return await resp.json()
-                # Return raw bytes for binary content (images, gifs, etc.)
-                if ct.startswith(("image/", "application/octet-stream", "video/")):
-                    data = await resp.read()
-                    self._tracker.bytes_downloaded += len(data)
-                    return data
-                text = await resp.text()
-                self._tracker.bytes_downloaded += len(text.encode())
-                try:
-                    return _json.loads(text)
-                except (ValueError, TypeError):
-                    return text
+        from yarl import URL
+
+        from .safe_fetch import BlockedAddressError, safe_fetch
+
+        target = str(URL(url).update_query(params)) if params else url
+        allowed = list(_SKILL_ALLOWED_URLS) if _SKILL_ALLOWED_URLS else None
+        try:
+            resp = await safe_fetch(
+                target, headers=merged, timeout=float(timeout), allowed_urls=allowed
+            )
+        except BlockedAddressError:
+            self._log.warning("Skill attempted blocked URL (via redirect): %s", url)
+            return "Access denied: internal/private URLs are not allowed from skills."
+        ct = resp.content_type or ""
+        if "json" in ct:
+            return _json.loads(resp.text())
+        # Return raw bytes for binary content (images, gifs, etc.)
+        if ct.startswith(("image/", "application/octet-stream", "video/")):
+            self._tracker.bytes_downloaded += len(resp.body)
+            return resp.body
+        text = resp.text()
+        self._tracker.bytes_downloaded += len(text.encode())
+        try:
+            return _json.loads(text)
+        except (ValueError, TypeError):
+            return text
 
     async def http_post(
         self,
@@ -326,23 +345,31 @@ class SkillContext:
         merged: dict[str, str] = {}
         if headers:
             merged.update(headers)
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        from .safe_fetch import BlockedAddressError, safe_fetch
+
+        allowed = list(_SKILL_ALLOWED_URLS) if _SKILL_ALLOWED_URLS else None
+        try:
+            resp = await safe_fetch(
                 url,
-                json=json,
+                method="POST",
+                json_body=json,
                 data=data,
-                headers=merged or None,
-                timeout=aiohttp.ClientTimeout(total=timeout),
-            ) as resp:
-                ct = resp.content_type or ""
-                if "json" in ct:
-                    return await resp.json()
-                text = await resp.text()
-                self._tracker.bytes_downloaded += len(text.encode())
-                try:
-                    return _json.loads(text)
-                except (ValueError, TypeError):
-                    return text
+                headers=merged,
+                timeout=float(timeout),
+                allowed_urls=allowed,
+            )
+        except BlockedAddressError:
+            self._log.warning("Skill attempted blocked URL (via redirect): %s", url)
+            return "Access denied: internal/private URLs are not allowed from skills."
+        ct = resp.content_type or ""
+        if "json" in ct:
+            return _json.loads(resp.text())
+        text = resp.text()
+        self._tracker.bytes_downloaded += len(text.encode())
+        try:
+            return _json.loads(text)
+        except (ValueError, TypeError):
+            return text
 
     async def search_knowledge(self, query: str, limit: int = 5) -> list[dict]:
         """Search the knowledge base. Returns list of {content, source, score}."""
@@ -431,12 +458,21 @@ class SkillContext:
         self._log.info("%s", msg)
 
     def _load_memory(self) -> dict[str, str]:
-        if not self._memory_path or not self._memory_path.exists():
-            return {}
-        try:
-            return json.loads(self._memory_path.read_text())
-        except Exception:
-            return {}
+        """READ path — corruption degrades to an empty store (never raises)."""
+        from ..json_store import load_json_store_safe
+
+        data, _ok = load_json_store_safe(
+            self._memory_path, container=dict, what="skill memory"
+        )
+        return data
+
+    def _load_memory_for_write(self) -> dict[str, str]:
+        """MUTATION path — raises StoreCorruptError so remember() refuses to
+        overwrite rather than wiping the skill's memory (a corrupt copy is
+        preserved by load_json_store)."""
+        from ..json_store import load_json_store
+
+        return load_json_store(self._memory_path, container=dict)
 
     def _save_memory(self, data: dict[str, str]) -> None:
         if not self._memory_path:

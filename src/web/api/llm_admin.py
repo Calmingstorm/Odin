@@ -16,7 +16,11 @@ import urllib.parse as _urlparse
 
 from aiohttp import web
 
-from ...config.schema import CODEX_REASONING_EFFORTS, active_config_path
+from ...config.schema import (
+    AGENT_SETTING_AUTO,
+    CODEX_REASONING_EFFORTS,
+    active_config_path,
+)
 from ...odin_log import get_logger
 
 log = get_logger("web.api")
@@ -342,10 +346,14 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 # Configured agent policy (null = inherit) and what the next
                 # agent iteration will actually use (override, else the live
                 # client's own effort — mirrors the callback's resolution).
+                # configured may be "auto" (per-spawn selection); effective_*
+                # resolves "auto" (and null) to the inherited MAIN setting — it
+                # must never surface the "auto" sentinel, which is never sent to
+                # a provider.
                 "agent_reasoning_effort": bot.config.openai_codex.agent_reasoning_effort,
                 "effective_agent_reasoning_effort": (
                     bot.config.openai_codex.agent_reasoning_effort
-                    if bot.config.openai_codex.agent_reasoning_effort is not None
+                    if bot.config.openai_codex.agent_reasoning_effort not in (None, "auto")
                     else getattr(bot.llm_gateway.codex_client, "reasoning_effort", None)
                 ),
                 # Codex-scoped configuration status (agent_model ?? model) —
@@ -354,7 +362,7 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "agent_model": bot.config.openai_codex.agent_model,
                 "effective_agent_model": (
                     bot.config.openai_codex.agent_model
-                    if bot.config.openai_codex.agent_model is not None
+                    if bot.config.openai_codex.agent_model not in (None, "auto")
                     else bot.config.openai_codex.model
                 ),
             },
@@ -449,11 +457,16 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 agent_effort = body.get("agent_reasoning_effort")
                 if agent_effort in ("", None):
                     agent_effort = None
-                elif str(agent_effort) not in CODEX_REASONING_EFFORTS:
+                elif (
+                    str(agent_effort) not in CODEX_REASONING_EFFORTS
+                    and str(agent_effort) != AGENT_SETTING_AUTO
+                ):
+                    # "auto" is a valid agent-axis value (per-spawn selection);
+                    # it is NOT a real effort and is never sent to a provider.
                     return web.json_response(
                         {
                             "error": f"invalid agent_reasoning_effort: {agent_effort!r}",
-                            "allowed": [*sorted(CODEX_REASONING_EFFORTS), None],
+                            "allowed": [*sorted(CODEX_REASONING_EFFORTS), AGENT_SETTING_AUTO, None],
                         },
                         status=400,
                     )
@@ -484,16 +497,25 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     cfg.reasoning_effort = str(effort)
                     changed = True
                     needs_reload = True
+                axis_changed = False
                 if agent_effort_present:
                     cfg.agent_reasoning_effort = (
                         None if agent_effort is None else str(agent_effort)
                     )
                     changed = True
+                    axis_changed = True
                 if agent_model_present:
                     # Read at call time by the agent callbacks — no client
                     # reload needed (mirrors agent_reasoning_effort).
                     cfg.agent_model = agent_model
                     changed = True
+                    axis_changed = True
+                # An axis change mutates live cfg immediately, and the per-spawn
+                # tool schema depends on it — invalidate NOW (before reload /
+                # persist) so a later reload/persist failure can never leave the
+                # catalog cached against the old schema while cfg already moved.
+                if axis_changed and getattr(bot, "tool_catalog", None):
+                    bot.tool_catalog.invalidate()
                 if changed:
                     if needs_reload:
                         await bot.llm_gateway.reload_codex_inner()

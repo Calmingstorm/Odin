@@ -183,22 +183,14 @@ class TestTS0005HttpPostJsonShadowing:
             return False
 
     def _patch_session(self, monkeypatch, resp):
-        import aiohttp
+        # http_post now routes through the hardened safe_fetch transport; fake
+        # it to return the canned response (content-type drives text vs JSON).
+        from src.tools.safe_fetch import SafeFetchResponse
 
-        class _FakeSession:
-            def __init__(self, *args, **kwargs):
-                pass
+        async def _fake_safe_fetch(url, **kwargs):
+            return SafeFetchResponse(200, {}, resp._body.encode(), resp.content_type, url)
 
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *exc):
-                return False
-
-            def post(self, url, **kwargs):
-                return resp
-
-        monkeypatch.setattr(aiohttp, "ClientSession", _FakeSession)
+        monkeypatch.setattr("src.tools.safe_fetch.safe_fetch", _fake_safe_fetch)
 
     def _ctx(self):
         ctx = SkillContext.__new__(SkillContext)

@@ -14,6 +14,7 @@ import asyncio
 
 from aiohttp import web
 
+from ...json_store import StoreCorruptError
 from ...odin_log import get_logger
 from ..api_common import (
     _MAX_CONTENT_LEN,
@@ -237,11 +238,17 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
     # Memory (persistent notes — global + per-user scopes)
     # ------------------------------------------------------------------
 
+    corrupt_read = {"error": "memory store unavailable (corrupt)"}
+    corrupt_write = {
+        "error": "memory store is corrupt; refusing to modify (a backup was preserved)"
+    }
+
     @routes.get("/api/memory")
     async def list_memory(_request: web.Request) -> web.Response:
-        all_mem = await asyncio.to_thread(
-            bot.tool_executor._load_all_memory
-        )
+        try:
+            all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
+        except StoreCorruptError:
+            return web.json_response(corrupt_read, status=503)
         result = {}
         for scope, entries in all_mem.items():
             result[scope] = {
@@ -254,9 +261,10 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
     async def get_memory(request: web.Request) -> web.Response:
         scope = request.match_info["scope"]
         key = request.match_info["key"]
-        all_mem = await asyncio.to_thread(
-            bot.tool_executor._load_all_memory
-        )
+        try:
+            all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
+        except StoreCorruptError:
+            return web.json_response(corrupt_read, status=503)
         section = all_mem.get(scope, {})
         if key not in section:
             return web.json_response({"error": "key not found"}, status=404)
@@ -270,27 +278,33 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
         value = data.get("value")
         if value is None:
             return web.json_response({"error": "value is required"}, status=400)
-        all_mem = await asyncio.to_thread(
-            bot.tool_executor._load_all_memory
-        )
-        if scope not in all_mem:
-            all_mem[scope] = {}
-        all_mem[scope][key] = str(value)
-        await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
+        # Serialize with the executor's memory lock so a WebUI write cannot
+        # interleave with a tool-path write; refuse (never overwrite) on corrupt.
+        async with bot.tool_executor._memory_lock:
+            try:
+                all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
+            except StoreCorruptError:
+                return web.json_response(corrupt_write, status=409)
+            if scope not in all_mem:
+                all_mem[scope] = {}
+            all_mem[scope][key] = str(value)
+            await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
         return web.json_response({"status": "saved", "scope": scope, "key": key})
 
     @routes.delete("/api/memory/{scope}/{key}")
     async def delete_memory(request: web.Request) -> web.Response:
         scope = request.match_info["scope"]
         key = request.match_info["key"]
-        all_mem = await asyncio.to_thread(
-            bot.tool_executor._load_all_memory
-        )
-        section = all_mem.get(scope, {})
-        if key not in section:
-            return web.json_response({"error": "key not found"}, status=404)
-        del all_mem[scope][key]
-        await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
+        async with bot.tool_executor._memory_lock:
+            try:
+                all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
+            except StoreCorruptError:
+                return web.json_response(corrupt_write, status=409)
+            section = all_mem.get(scope, {})
+            if key not in section:
+                return web.json_response({"error": "key not found"}, status=404)
+            del all_mem[scope][key]
+            await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
         return web.json_response({"status": "deleted", "scope": scope, "key": key})
 
     @routes.post("/api/memory/bulk-delete")
@@ -304,18 +318,20 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
             return web.json_response(
                 {"error": "entries must be a non-empty list of {scope, key}"}, status=400
             )
-        all_mem = await asyncio.to_thread(
-            bot.tool_executor._load_all_memory
-        )
-        deleted = 0
-        for entry in entries:
-            scope = entry.get("scope")
-            key = entry.get("key")
-            if scope and key and scope in all_mem and key in all_mem[scope]:
-                del all_mem[scope][key]
-                deleted += 1
-        if deleted:
-            await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
+        async with bot.tool_executor._memory_lock:
+            try:
+                all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
+            except StoreCorruptError:
+                return web.json_response(corrupt_write, status=409)
+            deleted = 0
+            for entry in entries:
+                scope = entry.get("scope")
+                key = entry.get("key")
+                if scope and key and scope in all_mem and key in all_mem[scope]:
+                    del all_mem[scope][key]
+                    deleted += 1
+            if deleted:
+                await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
         return web.json_response({"status": "deleted", "count": deleted})
 
 
@@ -345,10 +361,23 @@ def register_learned_context(routes: web.RouteTableDef, bot) -> None:
             data = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({"error": "JSON body must be an object"}, status=400)
+        supported = {"content", "category"}
+        if not supported.intersection(data):
+            return web.json_response(
+                {"error": "content or category is required"}, status=400
+            )
+        content = data.get("content")
+        category = data.get("category")
+        # Presence is authoritative: explicit null is an invalid update, not an
+        # omitted field. Refuse it before the reflector can bump updated_at.
+        if "content" in data and not isinstance(content, str):
+            return web.json_response({"error": "content must be a string"}, status=400)
+        if "category" in data and not isinstance(category, str):
+            return web.json_response({"error": "category must be a string"}, status=400)
         updated = await bot.reflector.update_entry_async(
-            key,
-            content=data.get("content"),
-            category=data.get("category"),
+            key, content=content, category=category
         )
         if updated:
             return web.json_response(updated)

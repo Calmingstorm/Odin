@@ -1483,20 +1483,16 @@ class TestPatternCoverageGaps:
         category here — the str form of aiohttp errors varies across
         versions, and classification of network errors is covered by
         the broader CONNECTION_ERROR tests using known patterns."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import patch
 
         import aiohttp
 
         from src.tools.web import fetch_url
 
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.get = MagicMock(
-            side_effect=aiohttp.ClientConnectionError("connection reset")
-        )
+        async def _raise(url, **kw):
+            raise aiohttp.ClientConnectionError("connection reset")
 
-        with patch("src.tools.web.aiohttp.ClientSession", return_value=mock_session):
+        with patch("src.tools.safe_fetch.safe_fetch", _raise):
             result = await fetch_url("https://example.com/anything")
 
         assert str(result).startswith("Error:"), f"expected 'Error:' prefix, got: {result!r}"
@@ -1507,23 +1503,16 @@ class TestPatternCoverageGaps:
         """Round-trip the 404 path: the handler emits 'Error: HTTP 404:
         Not Found' and classify_error then tags NOT_FOUND. Proves the
         two PR halves (handler prefix + recovery pattern) compose."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import patch
 
         from src.tools.recovery import RecoveryCategory, classify_error
+        from src.tools.safe_fetch import SafeFetchResponse
         from src.tools.web import fetch_url
 
-        mock_resp = MagicMock()
-        mock_resp.status = 404
-        mock_resp.reason = "Not Found"
-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_resp.__aexit__ = AsyncMock(return_value=None)
+        async def _resp(url, **kw):
+            return SafeFetchResponse(404, {}, b"", "text/html", url, "Not Found")
 
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.get = MagicMock(return_value=mock_resp)
-
-        with patch("src.tools.web.aiohttp.ClientSession", return_value=mock_session):
+        with patch("src.tools.safe_fetch.safe_fetch", _resp):
             result = await fetch_url("https://example.com/missing")
 
         assert str(result) == "Error: HTTP 404: Not Found"

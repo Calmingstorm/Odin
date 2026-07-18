@@ -8,8 +8,9 @@ and DNS-resolved IPs to prevent rebinding attacks.
 from __future__ import annotations
 
 import ipaddress
+import posixpath
 import socket
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from ..odin_log import get_logger
 
@@ -19,20 +20,58 @@ ALLOWED_SCHEMES = ("http://", "https://")
 
 
 def _is_ip_blocked(addr_str: str) -> bool:
-    """Check if an IP address string is private/loopback/link-local/metadata."""
+    """True for any address SSRF must never reach.
+
+    Blocks every NON-GLOBAL address — private, loopback, link-local, the
+    CGNAT / Tailscale ``100.64.0.0/10`` overlay range, reserved, multicast,
+    unspecified — not just the RFC1918 subset. Allowlisted origins are
+    permitted separately, BEFORE this check, by ``is_url_blocked``.
+    """
     try:
-        addr = ipaddress.ip_address(addr_str)
+        addr = _canonical_ip(ipaddress.ip_address(addr_str))
     except ValueError:
         return False
-    if addr.is_private or addr.is_loopback or addr.is_link_local:
+    if not addr.is_global:
         return True
-    if addr_str in ("169.254.169.254", "fd00::"):
+    # Metadata endpoints (recognized in any spelling) are always blocked.
+    if _is_metadata_ip(addr_str):
         return True
     return False
 
 
 _METADATA_HOSTS = frozenset({"169.254.169.254", "metadata.google.internal"})
 _METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
+
+
+def _canonical_ip(addr):
+    """Unwrap an IPv4-mapped IPv6 address (``::ffff:a.b.c.d`` / its expanded
+    form) to its IPv4 so a mapped spelling can't slip past address policy."""
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped if mapped is not None else addr
+
+
+def _is_metadata_ip(addr_str: str) -> bool:
+    """True if ``addr_str`` is a cloud-metadata IP in ANY spelling (dotted,
+    IPv4-mapped IPv6, expanded)."""
+    if addr_str in _METADATA_IPS:
+        return True
+    try:
+        return str(_canonical_ip(ipaddress.ip_address(addr_str))) in _METADATA_IPS
+    except ValueError:
+        return False
+
+
+def _resolves_to_metadata(host: str) -> bool:
+    """True if ``host`` resolves to a cloud-metadata IP (any spelling)."""
+    try:
+        for _f, _t, _p, _c, sockaddr in socket.getaddrinfo(
+            host, None, socket.AF_UNSPEC, socket.SOCK_STREAM
+        ):
+            if _is_metadata_ip(str(sockaddr[0])):
+                return True
+    except (socket.gaierror, OSError):
+        return False
+    return False
 
 
 def is_metadata_url(url: str, resolve_dns: bool = True) -> bool:
@@ -51,13 +90,13 @@ def is_metadata_url(url: str, resolve_dns: bool = True) -> bool:
         return True
     if not host:
         return False
-    if host in _METADATA_HOSTS or host in _METADATA_IPS:
+    if host in _METADATA_HOSTS or _is_metadata_ip(host):
         return True
     if resolve_dns:
         try:
             resolved = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
             for _f, _t, _p, _c, sockaddr in resolved:
-                if sockaddr[0] in _METADATA_IPS:
+                if _is_metadata_ip(str(sockaddr[0])):
                     log.warning("Metadata SSRF blocked: %s resolves to %s", host, sockaddr[0])
                     return True
         except (socket.gaierror, OSError):
@@ -82,8 +121,14 @@ def _matches_allowlist(parsed, allowed_urls: list[str]) -> bool:
         allow_port = allowed.port or (443 if allowed.scheme == "https" else 80)
         if req_port != allow_port:
             continue
-        if allowed.path and allowed.path != "/":
-            if not (parsed.path or "/").startswith(allowed.path):
+        allow_path = allowed.path
+        if allow_path and allow_path != "/":
+            # Normalize percent-encoding + collapse traversal, then require a
+            # SEGMENT-BOUNDARY match: "/allowed-evil" must not match "/allowed",
+            # and "/allowed/%2e%2e/admin" must not escape the allowed prefix.
+            req_norm = posixpath.normpath(unquote(parsed.path or "/"))
+            allow_norm = posixpath.normpath(unquote(allow_path)).rstrip("/")
+            if req_norm != allow_norm and not req_norm.startswith(allow_norm + "/"):
                 continue
         return True
     return False
@@ -110,7 +155,14 @@ def is_url_blocked(
     if not host:
         return True
 
-    if host in _METADATA_HOSTS:
+    if host in _METADATA_HOSTS or _is_metadata_ip(host):
+        return True
+
+    # Metadata via DNS is ALWAYS blocked, even for an allowlisted host — check
+    # it BEFORE the allowlist exemption. (Without an allowlist, a resolved
+    # metadata IP is already caught by _is_ip_blocked in the loop below, so the
+    # extra lookup only runs when an allowlist could otherwise exempt it.)
+    if allowed_urls and resolve_dns and _resolves_to_metadata(host):
         return True
 
     if allowed_urls and _matches_allowlist(parsed, allowed_urls):

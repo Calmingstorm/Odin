@@ -92,7 +92,38 @@ class BackgroundTask:
     _asyncio_task: asyncio.Task | None = field(default=None, repr=False)
 
     def cancel(self) -> None:
+        """Signal cooperative cancellation (observed between steps)."""
         self._cancel_event.set()
+
+    async def request_cancel(self) -> bool:
+        """Cancel a running task and wait for it to settle.
+
+        Idempotent: returns ``False`` if the task already reached a terminal
+        state (a completed/failed task that finished first wins). The terminal
+        status and the cooperative event are set BEFORE the asyncio task is
+        cancelled, so the runner's cancellation cleanup sees the decision. The
+        settlement wait is shielded so cancelling the caller (the ``cancel_task``
+        tool turn itself) cannot sever the runner mid-cleanup — its subprocess /
+        SSH teardown runs to completion.
+        """
+        if self.status != "running":
+            return False
+        self.status = "cancelled"
+        self._cancel_event.set()
+        t = self._asyncio_task
+        if t is not None and not t.done() and t is not asyncio.current_task():
+            t.cancel()
+            try:
+                await asyncio.shield(t)
+            except asyncio.CancelledError:
+                # t's own cancellation acknowledgement — unless OUR turn was
+                # cancelled (t not yet done), in which case propagate and let
+                # the shielded runner keep settling.
+                if not t.done():
+                    raise
+            except Exception:
+                pass  # runner raised during its own teardown; already cancelled
+        return True
 
 
 async def run_background_task(
@@ -243,6 +274,13 @@ async def run_background_task(
                 break
 
         except Exception as e:
+            # Cancellation is authoritative: a cancel that arrived while this
+            # step ran (or a cleanup exception surfacing during it) must NOT be
+            # masked as a failure — that would fire the summary + the forbidden
+            # post-cancel LLM follow-up.
+            if task._cancel_event.is_set():
+                task.status = "cancelled"
+                break
             elapsed_ms = int((time.monotonic() - t0) * 1000)
             error_msg = str(e)
             task.results.append(StepResult(
@@ -277,17 +315,27 @@ async def run_background_task(
             progress_msg = await _send_progress(task, progress_msg)
             last_update = now
 
-    # Final status
-    if task.status == "running":
-        task.status = "completed"
+    # A cancel that landed between steps (or right at the end) wins.
+    if task._cancel_event.is_set() and task.status == "running":
+        task.status = "cancelled"
 
-    # Final progress update
-    await _send_progress(task, progress_msg)
-    await _send_summary(task)
-
-    # Generate conversational follow-up via LLM
-    if codex_callback:
-        await _send_conversational_followup(task, codex_callback)
+    if task.status == "cancelled":
+        # Post only the final progress line — no summary and no LLM follow-up
+        # (cancellation won; there is nothing to conclude).
+        await _send_progress(task, progress_msg)
+    else:
+        # Render the terminal outcome, but keep task.status == 'running' so a
+        # cancel arriving during the summary / (potentially long) LLM follow-up
+        # is still honored (request_cancel refuses once the status is terminal).
+        # Publish the real terminal status only AFTER post-processing settles.
+        terminal = "failed" if task.status == "failed" else "completed"
+        task.status = "running"
+        await _send_progress(task, progress_msg, status_override=terminal)
+        await _send_summary(task, status_override=terminal)
+        if codex_callback and not task._cancel_event.is_set():
+            await _send_conversational_followup(task, codex_callback, status_override=terminal)
+        if task.status == "running":  # not cancelled mid-follow-up
+            task.status = terminal
 
     log.info(
         "Background task %s finished: %s (%d/%d steps)",
@@ -456,8 +504,14 @@ def _check_condition(condition: str, prev_output: str) -> bool:
 async def _send_progress(
     task: BackgroundTask,
     existing_msg: discord.Message | None,
+    status_override: str | None = None,
 ) -> discord.Message | None:
-    """Post or edit a progress message in the channel."""
+    """Post or edit a progress message in the channel.
+
+    ``status_override`` renders the terminal outcome while ``task.status`` is
+    deliberately kept ``running`` (cancellable) through post-processing.
+    """
+    status = status_override or task.status
     total = len(task.steps)
     done = len(task.results)
     ok = sum(1 for r in task.results if r.status == "ok")
@@ -465,11 +519,11 @@ async def _send_progress(
     skipped = sum(1 for r in task.results if r.status == "skipped")
 
     # Status emoji
-    if task.status == "completed":
+    if status == "completed":
         status_icon = "DONE"
-    elif task.status == "failed":
+    elif status == "failed":
         status_icon = "FAILED"
-    elif task.status == "cancelled":
+    elif status == "cancelled":
         status_icon = "CANCELLED"
     else:
         status_icon = f"Step {task.current_step + 1}/{total}"
@@ -492,7 +546,10 @@ async def _send_progress(
         lines.append(f"OK: {ok} | Errors: {errors} | Skipped: {skipped}")
 
     # When finished, show ALL steps; while running, show last 3
-    is_finished = task.status in ("completed", "failed", "cancelled")
+    # Use the effective (possibly overridden) status: task.status is kept
+    # 'running' during finalization so the follow-up stays cancellable, but the
+    # final render must still show all results + the full report attachment.
+    is_finished = status in ("completed", "failed", "cancelled")
     show_results = task.results if is_finished else task.results[-3:]
     if show_results:
         lines.append("")
@@ -534,21 +591,22 @@ async def _send_progress(
         return existing_msg
 
 
-async def _send_summary(task: BackgroundTask) -> None:
+async def _send_summary(task: BackgroundTask, status_override: str | None = None) -> None:
     """Post a natural language summary of the completed task."""
+    status = status_override or task.status
     ok = [r for r in task.results if r.status == "ok"]
     errors = [r for r in task.results if r.status == "error"]
 
     lines = [f"**Task complete: {task.description}**"]
 
-    if task.status == "completed" and not errors:
+    if status == "completed" and not errors:
         lines.append(f"All {len(ok)} steps succeeded.")
-    elif task.status == "completed" and errors:
+    elif status == "completed" and errors:
         lines.append(f"{len(ok)} succeeded, {len(errors)} failed.")
-    elif task.status == "failed":
+    elif status == "failed":
         lines.append(f"Task aborted after {len(task.results)} of {len(task.steps)} steps "
                      f"({len(errors)} error(s)).")
-    elif task.status == "cancelled":
+    elif status == "cancelled":
         lines.append(f"Task was cancelled after {len(task.results)} of {len(task.steps)} steps.")
 
     # Include all results with their output
@@ -585,6 +643,7 @@ async def _send_summary(task: BackgroundTask) -> None:
 async def _send_conversational_followup(
     task: BackgroundTask,
     codex_callback: CodexCallback,
+    status_override: str | None = None,
 ) -> None:
     """Generate and post an LLM-written conversational summary of the task results."""
     # Build a concise context of what happened
@@ -602,7 +661,7 @@ async def _send_conversational_followup(
             "content": (
                 f"A background task just finished. Summarize the results conversationally.\n\n"
                 f"Task: {task.description}\n"
-                f"Status: {task.status}\n"
+                f"Status: {status_override or task.status}\n"
                 f"Requested by: {task.requester}\n\n"
                 f"Step results:\n{results_text}\n\n"
                 f"Write a concise, personality-infused summary (2-4 sentences). "
@@ -617,6 +676,11 @@ async def _send_conversational_followup(
 
     try:
         response = await codex_callback(messages, system, 200)
+        # A cancel may have won while the callback ran — e.g. a callback that
+        # swallows CancelledError and returns normally. Never post a follow-up
+        # after cancellation.
+        if task._cancel_event.is_set():
+            return
         response = scrub_output_secrets(response.strip())
         if response:
             await task.channel.send(response)

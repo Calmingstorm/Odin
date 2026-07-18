@@ -122,6 +122,7 @@ export default {
               <select v-model="codexForm.agent_model" @change="saveCodexConfigDebounced"
                       class="hm-input">
                 <option value="">Inherit chat model</option>
+                <option value="auto">Auto — choose per spawn</option>
                 <option v-for="m in codexAgentModelOptions" :key="m" :value="m">{{ m }}</option>
               </select>
               </label>
@@ -143,6 +144,7 @@ export default {
               <select v-model="codexForm.agent_reasoning_effort" @change="saveCodexConfigDebounced"
                       class="hm-input">
                 <option value="">Inherit chat setting</option>
+                <option value="auto">Auto — choose per spawn</option>
                 <option value="none">None</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
@@ -427,7 +429,9 @@ export default {
     });
     const codexAgentModelOptions = computed(() => {
       const v = codexForm.value.agent_model;
-      return v && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
+      // '' (inherit) and 'auto' are already fixed template options — do not
+      // inject them as a temporary/unknown option, which would duplicate them.
+      return v && v !== 'auto' && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
     });
     // --- Auxiliary (cheap-model) ---
     const auxForm = ref({ enabled: false, model: 'gpt-5.6-luna' });

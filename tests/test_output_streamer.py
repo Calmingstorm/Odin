@@ -577,7 +577,6 @@ class TestExecCommandStreaming:
         from src.tools.executor import ToolExecutor
 
         executor = ToolExecutor.__new__(ToolExecutor)
-        executor._current_tool_timeout = None
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
         executor.bulkheads = MagicMock()
@@ -601,7 +600,6 @@ class TestExecCommandStreaming:
         from src.tools.executor import ToolExecutor
 
         executor = ToolExecutor.__new__(ToolExecutor)
-        executor._current_tool_timeout = None
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
         executor.config.ssh_key_path = "/key"
@@ -628,7 +626,6 @@ class TestExecCommandStreaming:
         from src.tools.executor import ToolExecutor
 
         executor = ToolExecutor.__new__(ToolExecutor)
-        executor._current_tool_timeout = None
         executor.config = MagicMock()
         executor.config.command_timeout_seconds = 30
         executor.bulkheads = MagicMock()

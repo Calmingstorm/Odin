@@ -214,22 +214,41 @@ class TestAnalyzeImage:
                 _message(), {"url": "http://169.254.169.254"})
 
     async def test_url_fetch_variants(self):
-        with patch("src.tools.url_safety.is_url_blocked", return_value=False):
-            with patch("aiohttp.ClientSession", return_value=_Session(_Resp(status=404))):
-                assert "HTTP 404" in await _tools()._handle_analyze_image(
-                    _message(), {"url": "http://ok/img"})
-            with patch("aiohttp.ClientSession",
-                       return_value=_Session(_Resp(ct="text/html"))):
-                assert "does not point to an image" in await _tools()._handle_analyze_image(
-                    _message(), {"url": "http://ok/x"})
-            with patch("aiohttp.ClientSession", return_value=_Session(_Resp())):
-                out = await _tools()._handle_analyze_image(
-                    _message(), {"url": "http://ok/img", "prompt": "what?"})
-                assert isinstance(out, dict) and "__image_block__" in out
-                assert out["__prompt__"] == "what?"
-            with patch("aiohttp.ClientSession", side_effect=RuntimeError("neterr")):
-                assert "Failed to fetch image" in await _tools()._handle_analyze_image(
-                    _message(), {"url": "http://ok/x"})
+        # analyze_image now routes through the hardened safe_fetch transport
+        # (follow_redirects=False); patch it to return canned responses.
+        from src.tools.safe_fetch import SafeFetchResponse
+
+        def _ff(status=200, ct="image/png", data=PNG):
+            async def _f(url, **kw):
+                return SafeFetchResponse(status, {}, data, ct, url, "")
+            return _f
+
+        async def _raise(url, **kw):
+            raise RuntimeError("neterr")
+
+        with patch("src.tools.safe_fetch.safe_fetch", _ff(status=404)):
+            assert "HTTP 404" in await _tools()._handle_analyze_image(
+                _message(), {"url": "http://ok/img"})
+        with patch("src.tools.safe_fetch.safe_fetch", _ff(ct="text/html")):
+            assert "does not point to an image" in await _tools()._handle_analyze_image(
+                _message(), {"url": "http://ok/x"})
+        with patch("src.tools.safe_fetch.safe_fetch", _ff()):
+            out = await _tools()._handle_analyze_image(
+                _message(), {"url": "http://ok/img", "prompt": "what?"})
+            assert isinstance(out, dict) and "__image_block__" in out
+
+        from src.tools.safe_fetch import ResponseTooLargeError
+
+        async def _too_big(url, **kw):
+            raise ResponseTooLargeError("big")
+
+        with patch("src.tools.safe_fetch.safe_fetch", _too_big):
+            assert "too large" in await _tools()._handle_analyze_image(
+                _message(), {"url": "http://ok/img"})
+            assert out["__prompt__"] == "what?"
+        with patch("src.tools.safe_fetch.safe_fetch", _raise):
+            assert "Failed to fetch image" in await _tools()._handle_analyze_image(
+                _message(), {"url": "http://ok/x"})
 
     async def test_host_path(self):
         ex = _executor(exec_ret=(0, base64.b64encode(PNG).decode()))

@@ -18,14 +18,63 @@ TextFn = Callable[[list[dict], str], Awaitable[str]]
 log = get_logger("learning")
 
 
-def _neg_iso(iso: str) -> float:
+_ENTRY_TIMESTAMP_FIELDS = ("updated_at", "created_at", "last_used_at")
+
+
+def _parse_entry_timestamp(value: object) -> datetime | None:
+    """Parse a learned-entry timestamp into an aware UTC datetime.
+
+    Legacy stores may contain offset-naive ISO strings. Treat those as UTC —
+    the timestamps were always written as UTC — so consumers never mix naive
+    values with ``datetime.now(UTC)``. Malformed values return ``None`` rather
+    than escaping into expiry/sorting code.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _entry_string(entry: dict, field: str) -> str:
+    """Return a consumer-safe string for optional or externally loaded data."""
+    value = entry.get(field)
+    return value if isinstance(value, str) else ""
+
+
+def _entry_tags(entry: dict) -> list[str]:
+    """Return only usable string tags; malformed values can never break joins."""
+    value = entry.get("tags")
+    if not isinstance(value, list):
+        return []
+    return [tag for tag in value if isinstance(tag, str)]
+
+
+def _entry_search_text(entry: dict) -> str:
+    """Render the fields used by relevance ranking without trusting their types."""
+    return " ".join(
+        (
+            _entry_string(entry, "content"),
+            _entry_string(entry, "topic"),
+            " ".join(_entry_tags(entry)),
+            _entry_string(entry, "key"),
+        )
+    )
+
+
+def _neg_iso(iso: object) -> float:
     """Negative epoch seconds for an ISO timestamp — sorts newest-first when
     used ascending. Missing/unparseable timestamps sort last (oldest)."""
-    if not iso:
+    parsed = _parse_entry_timestamp(iso)
+    if parsed is None:
         return 0.0
     try:
-        return -datetime.fromisoformat(iso).timestamp()
-    except (ValueError, TypeError):
+        return -parsed.timestamp()
+    except (OSError, OverflowError, ValueError):
         return 0.0
 
 # Content length policy. The soft limit is prompt guidance to the LLM; the
@@ -167,18 +216,116 @@ class ConversationReflector:
         consolidation fn when set, else the reflection ``_text_fn``."""
         return self._consolidation_fn or self._text_fn
 
-    def _load(self) -> dict:
-        if self._path.exists():
-            try:
-                data = json.loads(self._path.read_text())
-                return self._migrate(data)
-            except (json.JSONDecodeError, OSError) as e:
-                log.error("Failed to load learned.json: %s", e)
+    def _empty_store(self) -> dict:
         return {
             "version": _LEARNED_SCHEMA_VERSION,
             "last_reflection": None,
             "entries": [],
         }
+
+    @staticmethod
+    def _validate_learned_shape(data: dict) -> None:
+        """Full nested-shape check run inside json_store's backup boundary, so
+        NOTHING malformed reaches _migrate (which compares ``version`` and does
+        ``entry.get(...)``) or the injection/prompt formatting (which indexes
+        ``entry["category"]``) outside the safe boundary. A non-int version, a
+        non-list entries, a non-object entry, or an entry missing its string
+        ``key`` / ``category`` / ``content`` is corruption — backed up, degraded
+        on reads, refused on writes. Valid legacy v1 entries (which carry those
+        three fields) still migrate."""
+        from ..json_store import StoreCorruptError
+
+        version = data.get("version", 1)
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise StoreCorruptError(
+                f"learned.json 'version' must be an int (got {type(version).__name__})"
+            )
+        entries = data.get("entries", [])
+        if not isinstance(entries, list):
+            raise StoreCorruptError("learned.json 'entries' is not a list")
+        for e in entries:
+            if not isinstance(e, dict):
+                raise StoreCorruptError(
+                    f"learned.json contains a non-object entry ({type(e).__name__})"
+                )
+            for field in ("key", "category", "content"):
+                if not isinstance(e.get(field), str):
+                    raise StoreCorruptError(
+                        f"learned.json entry has a missing/invalid {field!r} field"
+                    )
+            # Optional consumer-facing fields are strict when PRESENT. In
+            # particular, explicit null is data, not absence: ``tags: null``
+            # used to escape validation and crash both relevance joins.
+            if "topic" in e and not isinstance(e["topic"], str):
+                raise StoreCorruptError("learned.json entry 'topic' is not a string")
+            if "tags" in e:
+                tags = e["tags"]
+                if not isinstance(tags, list) or not all(
+                    isinstance(tag, str) for tag in tags
+                ):
+                    raise StoreCorruptError(
+                        "learned.json entry 'tags' is not a list of strings"
+                    )
+            for field in _ENTRY_TIMESTAMP_FIELDS:
+                if field not in e:
+                    continue
+                if not isinstance(e[field], str):
+                    raise StoreCorruptError(
+                        f"learned.json entry {field!r} is not a string"
+                    )
+                if _parse_entry_timestamp(e[field]) is None:
+                    raise StoreCorruptError(
+                        f"learned.json entry {field!r} is not a valid ISO timestamp"
+                    )
+
+    @staticmethod
+    def _normalize_learned_data(data: dict) -> dict:
+        """Normalize valid loaded timestamps before any consumer sees them.
+
+        Validation remains fail-closed for malformed data. This second layer
+        handles valid legacy offset-naive timestamps and makes every consumer
+        receive an aware UTC value, even before a later mutation persists it.
+        """
+        entries = data.get("entries", [])
+        if not isinstance(entries, list):
+            return data
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            for field in _ENTRY_TIMESTAMP_FIELDS:
+                if field not in entry:
+                    continue
+                parsed = _parse_entry_timestamp(entry[field])
+                if parsed is not None:
+                    entry[field] = parsed.isoformat()
+        return data
+
+    def _load(self) -> dict:
+        """READ path — corruption (top-level OR nested) degrades to an empty
+        store (never raises) so prompt injection and WebUI reads can't be taken
+        down by a damaged file. A corrupt copy is preserved by load_json_store."""
+        from ..json_store import load_json_store_safe
+
+        data, ok = load_json_store_safe(
+            self._path, container=dict, what="learned.json",
+            validate=self._validate_learned_shape,
+        )
+        if not ok or not data:
+            return self._empty_store()
+        return self._migrate(self._normalize_learned_data(data))
+
+    def _load_for_write(self) -> dict:
+        """MUTATION path — raises ``StoreCorruptError`` on a damaged file
+        (top-level OR nested) so the caller REFUSES to overwrite. A silent
+        empty-and-save here would wipe the entire learned corpus."""
+        from ..json_store import load_json_store
+
+        data = load_json_store(
+            self._path, container=dict, validate=self._validate_learned_shape
+        )
+        if not data:
+            return self._empty_store()
+        return self._migrate(self._normalize_learned_data(data))
 
     def _migrate(self, data: dict) -> dict:
         """One-time v1→v2 migration: flag legacy chop damage, backfill metadata.
@@ -212,6 +359,11 @@ class ConversationReflector:
         return data
 
     def _save(self, data: dict) -> None:
+        # Every write funnels through the same full schema check. Callers may
+        # build entries in memory without going through the disk loader; never
+        # let one malformed result poison a store that the next read rejects.
+        self._validate_learned_shape(data)
+        self._normalize_learned_data(data)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         # Atomic temp+replace — a crash mid-write must never corrupt the
         # learned store (the whole point of this subsystem is integrity).
@@ -234,7 +386,13 @@ class ConversationReflector:
         """Synchronous delete. Prefer delete_entry_async from async callers —
         without the lock a delete racing an in-flight reflection is undone when
         the reflection writes back its pre-delete snapshot."""
-        data = self._load()
+        from ..json_store import StoreCorruptError
+
+        try:
+            data = self._load_for_write()
+        except StoreCorruptError as exc:
+            log.error("Refusing to delete from learned.json (corrupt; backup preserved): %s", exc)
+            return False
         entries = data.get("entries", [])
         before = len(entries)
         data["entries"] = [e for e in entries if e.get("key") != key]
@@ -253,7 +411,20 @@ class ConversationReflector:
 
     def update_entry(self, key: str, content: str | None = None, category: str | None = None) -> dict | None:
         """Synchronous update. Prefer update_entry_async from async callers."""
-        data = self._load()
+        from ..json_store import StoreCorruptError
+
+        if content is None and category is None:
+            return None
+        if content is not None and not isinstance(content, str):
+            return None
+        if category is not None and not isinstance(category, str):
+            return None
+
+        try:
+            data = self._load_for_write()
+        except StoreCorruptError as exc:
+            log.error("Refusing to update learned.json (corrupt; backup preserved): %s", exc)
+            return None
         for e in data.get("entries", []):
             if e.get("key") == key:
                 if content is not None:
@@ -261,6 +432,14 @@ class ConversationReflector:
                 if category is not None:
                     e["category"] = category
                 e["updated_at"] = datetime.now(UTC).isoformat()
+                # Enforce the full schema on the RESULT before persisting, so no
+                # caller (e.g. the update API) can write a document the read path
+                # would then reject and degrade the whole corpus over.
+                try:
+                    self._validate_learned_shape(data)
+                except StoreCorruptError:
+                    log.warning("Refusing learned update for %r — result malformed", key)
+                    return None
                 self._save(data)
                 return e
         return None
@@ -358,10 +537,7 @@ class ConversationReflector:
             )
         else:
             def entry_text(e: dict) -> str:
-                return " ".join([
-                    e.get("content", ""), e.get("topic", ""),
-                    " ".join(e.get("tags", [])), e.get("key", ""),
-                ])
+                return _entry_search_text(e)
 
             corrections = [e for e in filtered if e["category"] == "correction"]
             corrections = corrections[-self._PIN_CORRECTIONS_CAP:]
@@ -469,16 +645,14 @@ class ConversationReflector:
             from ..relevance import rank as relevance_rank
             ranked = relevance_rank(
                 context_text, entries,
-                lambda e: " ".join([
-                    e.get("content", ""), e.get("topic", ""),
-                    " ".join(e.get("tags", [])), e.get("key", ""),
-                ]),
+                _entry_search_text,
                 top_k=ConversationReflector._REFLECTION_CONTEXT_TOP_K,
             )
             chosen = {id(e) for e in ranked}
             entries = [e for e in entries if id(e) in chosen]
         return "\n".join(
-            f"- [{e['category']}] {e['key']}: {e['content']}"
+            f"- [{_entry_string(e, 'category')}] {_entry_string(e, 'key')}: "
+            f"{_entry_string(e, 'content')}"
             for e in entries
         )
 
@@ -583,7 +757,16 @@ class ConversationReflector:
                         entry["user_id"] = single_user
 
             async with self._lock:
-                data = await asyncio.to_thread(self._load)
+                from ..json_store import StoreCorruptError
+
+                try:
+                    data = await asyncio.to_thread(self._load_for_write)
+                except StoreCorruptError as exc:
+                    log.error(
+                        "Skipping reflection merge — learned.json corrupt "
+                        "(backup preserved): %s", exc,
+                    )
+                    return
                 existing = data.get("entries", [])
                 self._apply_use_stamps(existing)
                 merged = self._merge_entries(existing, new_entries)
@@ -647,7 +830,15 @@ class ConversationReflector:
         user_ids: list[str] | None = None,
     ) -> None:
         async with self._lock:
-            data = await asyncio.to_thread(self._load)
+            from ..json_store import StoreCorruptError
+
+            try:
+                data = await asyncio.to_thread(self._load_for_write)
+            except StoreCorruptError as exc:
+                log.error(
+                    "Skipping reflection — learned.json corrupt (backup preserved): %s", exc
+                )
+                return
             existing = data.get("entries", [])
 
             existing_text = self._relevant_existing_text(existing, conversation)
@@ -783,12 +974,18 @@ class ConversationReflector:
             if not ref:
                 kept.append(e)
                 continue
-            try:
-                ref_dt = datetime.fromisoformat(ref)
-            except ValueError:
+            ref_dt = _parse_entry_timestamp(ref)
+            if ref_dt is None:
                 kept.append(e)
                 continue
-            if now - ref_dt <= timedelta(days=days):
+            try:
+                is_recent = now - ref_dt <= timedelta(days=days)
+            except (TypeError, ValueError, OverflowError):
+                # Defense in depth for direct/in-memory callers. Disk-backed
+                # entries are validated and normalized before reaching here.
+                kept.append(e)
+                continue
+            if is_recent:
                 kept.append(e)
             else:
                 expired += 1
