@@ -57,6 +57,18 @@ def _overlaps(workspace: Path, root: Path) -> bool:
     return workspace == root or root in workspace.parents or workspace in root.parents
 
 
+def _reject_overlap(
+    workspace: Path, protected_roots: Sequence[str | os.PathLike[str]] | None
+) -> None:
+    """Raise if ``workspace`` overlaps any protected root, in either direction."""
+    for root in protected_roots or []:
+        canonical_root = _canonical(root)
+        if _overlaps(workspace, canonical_root):
+            raise WorkspaceError(
+                f"local_working_dir must not overlap {canonical_root}: {workspace}"
+            )
+
+
 def resolve_workspace(
     configured: str,
     *,
@@ -87,6 +99,13 @@ def resolve_workspace(
 
     workspace = _canonical(raw)
 
+    # Protected-root overlap is checked BEFORE any mkdir. Creating the
+    # directory first and rejecting afterwards would leave a new directory
+    # inside the very tree this exists to protect — fail-closed must not mean
+    # "reject after modifying the place we promised not to touch" (PR #239
+    # round-4 review, reproduced).
+    _reject_overlap(workspace, protected_roots)
+
     # Self-provision when we can. Upgrades must be seamless: a packaged install
     # gets this from systemd StateDirectory= and the postinstall, but a source
     # checkout or a git-based self-update lands on new code whose unit file was
@@ -112,12 +131,10 @@ def resolve_workspace(
     if not workspace.is_dir():
         raise WorkspaceError(f"local_working_dir is not a directory: {workspace}")
 
-    for root in protected_roots or []:
-        canonical_root = _canonical(root)
-        if _overlaps(workspace, canonical_root):
-            raise WorkspaceError(
-                f"local_working_dir must not overlap {canonical_root}: {workspace}"
-            )
+    # Re-checked after creation/canonicalization: the pre-mkdir check used the
+    # same canonical path, but re-running it keeps the guarantee local to the
+    # value actually about to be used.
+    _reject_overlap(workspace, protected_roots)
 
     info = workspace.stat()
 

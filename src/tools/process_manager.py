@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..odin_log import get_logger
-from .workspace import workspace_env
+from .workspace import WorkspaceError, workspace_env
 
 log = get_logger("process_manager")
 
@@ -90,6 +90,12 @@ class ProcessRegistry:
             # (`sh -c 'x & ...'`) instead of just the shell leader.
             workspace = self._resolve_workspace()
             env = workspace_env(Path(workspace)) if workspace else None
+        except WorkspaceError as e:
+            # The workspace is unusable. This is a REFUSAL, not a spawn error:
+            # it must read as a failure to the tool loop, not as a started
+            # process (PR #239 round-4 — the plain string was classified ok).
+            return f"Error: cannot start background process — {e}"
+        try:
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,

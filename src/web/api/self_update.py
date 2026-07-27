@@ -7,6 +7,10 @@ section, same registrar shape, same composition position.
 from __future__ import annotations
 
 import asyncio
+import os
+import stat
+import subprocess
+from pathlib import Path
 
 from aiohttp import web
 
@@ -151,6 +155,24 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
                     ),
                 }, status=409)
 
+            # PREFLIGHT: the incoming code runs local commands in a validated
+            # workspace outside the install and REFUSES to run without one.
+            # This updater re-execs in place, so systemd never starts the
+            # service and never applies StateDirectory= — meaning an update
+            # could succeed and leave Odin unable to run any local command
+            # (PR #239 round-4 review, verified against the live install).
+            # Provision it here, BEFORE committing to the update, and refuse
+            # the update rather than transition to code that cannot work.
+            ws_error = _ensure_local_workspace_for_update(base)
+            if ws_error:
+                return web.json_response({
+                    "error": (
+                        "update refused: the local command workspace could not be "
+                        f"provisioned, so the updated Odin would be unable to run "
+                        f"local commands. {ws_error}"
+                    ),
+                }, status=409)
+
             # Reset only the preserved config files for clean pull
             for fname in _preserve:
                 subprocess.run(
@@ -236,3 +258,72 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
     async def stop_all_loops(_request: web.Request) -> web.Response:
         result = bot.loop_manager.stop_loop("all")
         return web.json_response({"result": result})
+
+
+def _ensure_local_workspace_for_update(base: str | None = None) -> str | None:
+    """Provision the local command workspace ahead of an in-place update.
+
+    Returns None on success, or an operator-actionable message on failure.
+
+    The updater re-execs the process directly, so a packaged install's
+    ``StateDirectory=`` never runs and a unit file written before this feature
+    existed never gains it. Without this preflight an update completes and the
+    first local command fails closed.
+    """
+    # The configured path is read WITHOUT constructing a full Config:
+    # load_config() raises SystemExit when required environment variables are
+    # absent, which must never happen inside a request handler, and its result
+    # depends on the process working directory. Read the one key directly.
+    configured = ""
+    try:
+        from ...config.schema import ToolsConfig
+
+        configured = ToolsConfig().local_working_dir
+    except BaseException:  # pragma: no cover - schema import cannot realistically fail
+        configured = "/var/lib/odin-workspace"
+
+    try:
+        import yaml
+
+        config_path = Path(base) / "config.yml" if base else Path("config.yml")
+        if config_path.is_file():
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            override = (raw.get("tools") or {}).get("local_working_dir")
+            if isinstance(override, str) and override.strip():
+                configured = override.strip()
+    except BaseException:
+        pass  # an unreadable/invalid config must not block the preflight
+
+    path = Path(configured)
+    if path.is_dir():
+        try:
+            if stat.S_IMODE(path.stat().st_mode) != 0o700:
+                path.chmod(0o700)
+        except OSError as exc:
+            return f"{path} exists but its mode could not be corrected: {exc}"
+        return None
+
+    try:
+        path.mkdir(mode=0o700, parents=True)
+        path.chmod(0o700)
+        return None
+    except OSError:
+        pass
+
+    # Unprivileged service account under a root-owned parent: try sudo, which
+    # packaged installs configure for exactly this class of operation.
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "install", "-d", "-m", "0700",
+             "-o", str(os.getuid()), "-g", str(os.getgid()), str(path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and path.is_dir():
+            return None
+    except Exception:
+        pass
+
+    return (
+        f"Create it before updating: sudo install -d -m 0700 "
+        f"-o odin -g odin {path}"
+    )

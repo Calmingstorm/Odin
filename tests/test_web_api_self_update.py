@@ -157,6 +157,32 @@ class TestApplyUpdate:
         # main() re-execs in place after shutdown only because this was set
         assert restart.restart_requested() is True
 
+    async def test_refuses_when_the_workspace_cannot_be_provisioned(self):
+        """PR #239 round-4 blocker 1: this updater re-execs IN PLACE, so systemd
+        never starts the service and never applies StateDirectory=. If the local
+        command workspace cannot be provisioned, the update must be REFUSED —
+        otherwise it completes and Odin cannot run a single local command
+        afterwards (verified against the live install during review)."""
+        with patch(
+            "src.web.api.self_update._ensure_local_workspace_for_update",
+            return_value=(
+                "Create it before updating: sudo install -d -m 0700 "
+                "-o odin -g odin /var/lib/odin-workspace"
+            ),
+        ), patch("subprocess.run", side_effect=_run_ok) as run:
+            async with TestClient(TestServer(_app())) as c:
+                r = await c.post("/api/update/apply", json={"version": "latest"})
+                assert r.status == 409
+                body = await r.json()
+                assert "update refused" in body["error"]
+                assert "install -d -m 0700" in body["error"], "must stay actionable"
+        # Refusal happens BEFORE the repository is touched.
+        assert not any(
+            "merge" in " ".join(map(str, call.args[0]))
+            for call in run.call_args_list
+            if call.args and isinstance(call.args[0], list)
+        ), "the update must not have been committed"
+
     async def test_unexpected_exception_500(self):
         # subprocess raising mid-flow (inside the try) surfaces as a 500
         def _boom(cmd, **kw):
