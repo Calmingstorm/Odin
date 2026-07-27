@@ -35,6 +35,7 @@ import os
 import stat
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 # The accepted operational contract: a real directory owned by the execution
 # identity, private, and fully usable by that owner (0700). 0300 is private
@@ -78,11 +79,51 @@ def _reject_overlap(
             )
 
 
+# Live-state paths declared by the FULL configuration, with their DECLARED
+# file/directory semantics. Any of these can be relocated independently of the
+# data directory, and a workspace overlapping one is as dangerous as a
+# workspace inside ./data — round 8 reproduced a valid Config whose
+# sessions.persist_directory WAS the workspace, accepted by every caller
+# because only audit/trajectory/memory were protected.
+#
+# Deliberately excluded: tools.claude_code_dir and email.allowed_attachment_dirs
+# are working directories for a tool and user-nominated source directories, not
+# Odin's own state; protecting them would reject legitimate configurations.
+# Paths wiring hardcodes (channel_config.json, channel_logs) sit beside
+# memory.json and are covered by its parent.
+_DECLARED_STATE_PATHS: tuple[tuple[str, bool], ...] = (
+    ("tools.audit_log_path", True),
+    ("tools.trajectory_path", False),
+    ("tools.ssh_key_path", True),
+    ("tools.ssh_known_hosts_path", True),
+    ("tools.ssh_pool.socket_dir", False),
+    ("context.directory", False),
+    ("sessions.persist_directory", False),
+    ("logging.directory", False),
+    ("usage.directory", False),
+    # Treated as a file: wiring derives its sibling fts.db via `.parent`.
+    ("search.search_db_path", True),
+    ("permissions.overrides_path", True),
+    ("openai_codex.credentials_path", True),
+    ("attachments.temp_directory", False),
+)
+
+
+def _dotted(source: object, path: str) -> object:
+    """Resolve ``a.b.c`` against nested config objects, tolerating absence."""
+    current = source
+    for part in path.split("."):
+        current = getattr(current, part, None)
+        if current is None:
+            return None
+    return current
+
+
 def command_protected_roots(
     install_root: str | os.PathLike[str],
+    config: object = None,
     *,
-    audit_log_path: object = None,
-    trajectory_path: object = None,
+    tools: object = None,
     memory_path: object = DEFAULT_MEMORY_PATH,
 ) -> list[str]:
     """THE derivation of directories a command workspace must never overlap.
@@ -90,8 +131,14 @@ def command_protected_roots(
     Every caller — executor, startup migration, self-update preflight — uses
     this one function, so a workspace accepted by one is accepted by all. When
     they each derived their own, the preflight approved (and created) a
-    workspace inside the live-data directory that the executor then rejected,
-    which both mutated live data and stranded local commands.
+    workspace beside live memory.json that the executor then rejected.
+
+    Pass the FULL ``config`` wherever one exists: live state is not confined to
+    the data directory, and sessions, context, logs, usage, the search index,
+    permissions and Codex credentials can each be relocated independently.
+    ``tools`` is the reduced fallback for callers holding only a ToolsConfig
+    (the executor's ``__new__`` patch seam and unit tests); it yields a strict
+    SUBSET, never a different answer.
 
     Paths are classified by DECLARED semantics, never guessed from the name: a
     ``Path.suffix`` heuristic misreads dotted directories and extensionless
@@ -100,12 +147,18 @@ def command_protected_roots(
     than the target (``/aliases/memory.json -> /live-data/memory.json`` would
     protect ``/aliases`` and accept ``/live-data/workspace``).
     """
+    source: object = config
+    if source is None:
+        source = SimpleNamespace(tools=tools) if tools is not None else SimpleNamespace()
+
     roots = [str(_canonical(install_root))]
     declared: list[tuple[object, bool]] = [
-        (audit_log_path, True),  # file
-        (trajectory_path, False),  # directory
-        (memory_path, True),  # file
+        (_dotted(source, dotted), is_file) for dotted, is_file in _DECLARED_STATE_PATHS
     ]
+    # The live memory.json is supplied by wiring rather than by config, so it
+    # is passed in rather than declared above.
+    declared.append((memory_path, True))
+
     for configured, is_file in declared:
         if configured is None:
             continue
@@ -113,7 +166,9 @@ def command_protected_roots(
         if not text:
             continue
         resolved = _canonical(text)
-        roots.append(str(resolved.parent if is_file else resolved))
+        root = str(resolved.parent if is_file else resolved)
+        if root not in roots:
+            roots.append(root)
     return roots
 
 

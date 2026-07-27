@@ -320,16 +320,13 @@ def _command_protected_roots(config) -> list[str]:
     workspace beside it was provisioned at startup and then refused on every
     command (PR #239 round-6 review).
 
-    ``memory_path`` is intentionally left at its default: production wiring
+    The FULL config is passed so every independently relocatable live-state
+    path is covered. ``memory_path`` is left at its default: production wiring
     hardcodes that path, and startup runs before wiring exists.
     """
     from src.tools.workspace import command_protected_roots
 
-    return command_protected_roots(
-        Path(__file__).resolve().parents[1],
-        audit_log_path=getattr(config.tools, "audit_log_path", None),
-        trajectory_path=getattr(config.tools, "trajectory_path", None),
-    )
+    return command_protected_roots(Path(__file__).resolve().parents[1], config)
 
 
 # The entrypoint guard MUST stay the last statement in this module. Python

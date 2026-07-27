@@ -365,15 +365,34 @@ def test_discord_execution_path_excludes_the_legacy_dag_surfaces(
 
 def _executor_with_workspace(workspace: Path, protected: Path):
     """A ToolExecutor whose local commands run in ``workspace``."""
-    from src.config.schema import ToolsConfig
+    from src.config.schema import ToolHost, ToolsConfig
     from src.tools.executor import ToolExecutor
 
-    config = ToolsConfig(local_working_dir=str(workspace))
+    config = ToolsConfig(
+        local_working_dir=str(workspace),
+        # A resolvable localhost so tests drive the PRODUCTION dispatch route
+        # rather than the shared _exec_command primitive.
+        hosts={"localhost": ToolHost(address="127.0.0.1")},
+    )
     executor = ToolExecutor(config=config)
     # Protected roots are normally derived from the running app; point them at
     # the fixture so the test exercises real validation against a fake install.
     executor._protected_roots = lambda: [str(protected)]  # type: ignore[method-assign]
     return executor
+
+
+async def _run_command(executor, command: str) -> tuple[int, str]:
+    """Drive the REAL run_command tool, end to end.
+
+    Deliberately not `_exec_command`: since round 8 the workspace is opt-in at
+    the call site, because that shared primitive also backs git_ops, docker,
+    terraform, kubectl, claude_code and PDF host reads, whose cwd semantics
+    must not change. Testing the primitive would therefore no longer prove
+    that the tool Odin actually calls gets the workspace — removing
+    `use_workspace=True` from the run_command handler has to fail these tests.
+    """
+    result = await executor.execute("run_command", {"command": command, "host": "localhost"})
+    return (0 if result.ok else 1), str(result.output)
 
 
 async def test_executor_replays_the_incident_without_touching_the_install(
@@ -392,25 +411,22 @@ async def test_executor_replays_the_incident_without_touching_the_install(
     assert Path.cwd() == fake_install.resolve()
     executor = _executor_with_workspace(workspace, fake_install)
 
-    code, out = await executor._exec_command(
-        "localhost",
+    code, out = await _run_command(
+        executor,
         f"jar xf {ae2_jar} data/ae2/recipe/network/blocks/pattern_providers_interface.json"
         f" || unzip -o {ae2_jar} 'data/ae2/recipe/network/blocks/*' > /dev/null",
-        timeout=30,
     )
     assert code == 0, out
     assert (workspace / "data/ae2/recipe/network/blocks").exists()
     assert not (fake_install / "data" / "ae2").exists()
 
-    code, out = await executor._exec_command(
-        "localhost",
-        "cat data/ae2/recipe/network/blocks/pattern_providers_interface.json",
-        timeout=30,
+    code, out = await _run_command(
+        executor, "cat data/ae2/recipe/network/blocks/pattern_providers_interface.json"
     )
     assert code == 0 and "ae2:shaped" in out
 
     assert Path(str(workspace)).is_relative_to(tmp_path)  # bounded before deleting
-    code, _ = await executor._exec_command("localhost", "rm -rf data", timeout=30)
+    code, _ = await _run_command(executor, "rm -rf data")
     assert code == 0
     assert not (workspace / "data").exists(), "cleanup must work"
     assert (fake_install / "data" / "sentinel").read_text(encoding="utf-8") == "live odin state"
@@ -418,7 +434,7 @@ async def test_executor_replays_the_incident_without_touching_the_install(
 
 async def test_executor_pwd_is_the_workspace(fake_install: Path, workspace: Path) -> None:
     executor = _executor_with_workspace(workspace, fake_install)
-    code, out = await executor._exec_command("localhost", "pwd", timeout=30)
+    code, out = await _run_command(executor, "pwd")
     assert code == 0
     assert out.strip() == str(workspace.resolve())
 
@@ -428,9 +444,7 @@ async def test_executor_explicit_cd_into_install_still_works(
 ) -> None:
     """Aaron's bar: deliberately working inside his own install is untouched."""
     executor = _executor_with_workspace(workspace, fake_install)
-    code, out = await executor._exec_command(
-        "localhost", f"cd {fake_install} && cat data/sentinel", timeout=30
-    )
+    code, out = await _run_command(executor, f"cd {fake_install} && cat data/sentinel")
     assert code == 0 and "live odin state" in out
 
 
@@ -466,7 +480,9 @@ async def test_executor_refuses_to_run_with_an_invalid_workspace(
     directory — that fallback is the hazard."""
     executor = _executor_with_workspace(tmp_path / "no-parent" / "ws", fake_install)
     with pytest.raises(WorkspaceError):
-        await executor._exec_command("localhost", "echo should-not-run", timeout=10)
+        await executor._exec_command(
+            "localhost", "echo should-not-run", timeout=10, use_workspace=True
+        )
 
 
 # --- protected roots: real deployment shapes --------------------------------
@@ -547,7 +563,9 @@ async def test_executor_enforces_its_protected_roots(fake_install: Path) -> None
     inside.mkdir(mode=0o700)
     executor = _executor_with_workspace(inside, fake_install)
     with pytest.raises(WorkspaceError, match="overlap"):
-        await executor._exec_command("localhost", "echo should-not-run", timeout=10)
+        await executor._exec_command(
+            "localhost", "echo should-not-run", timeout=10, use_workspace=True
+        )
 
 
 def test_executor_derives_real_roots_from_the_running_app() -> None:
@@ -630,14 +648,16 @@ async def test_workspace_is_revalidated_before_every_command(
     monkeypatch.chdir(fake_install)
     executor = _executor_with_workspace(workspace, fake_install)
 
-    code, out = await executor._exec_command("localhost", "pwd", timeout=30)
+    code, out = await _run_command(executor, "pwd")
     assert code == 0 and out.strip() == str(workspace.resolve())
 
     # Swap the validated directory for a symlink pointing into the install.
     workspace.rmdir()
     workspace.symlink_to(fake_install)
     with pytest.raises(WorkspaceError):
-        await executor._exec_command("localhost", "cat data/sentinel", timeout=30)
+        await executor._exec_command(
+            "localhost", "cat data/sentinel", timeout=30, use_workspace=True
+        )
 
 
 async def test_mode_change_after_first_command_is_caught(
@@ -645,11 +665,13 @@ async def test_mode_change_after_first_command_is_caught(
 ) -> None:
     """A post-validation chmod must not be ignored either."""
     executor = _executor_with_workspace(workspace, fake_install)
-    assert (await executor._exec_command("localhost", "pwd", timeout=30))[0] == 0
+    assert (await _run_command(executor, "pwd"))[0] == 0
     workspace.chmod(0o755)
     try:
         with pytest.raises(WorkspaceError, match="mode"):
-            await executor._exec_command("localhost", "pwd", timeout=30)
+            await executor._exec_command(
+                "localhost", "pwd", timeout=30, use_workspace=True
+            )
     finally:
         workspace.chmod(0o700)
 
@@ -1352,3 +1374,192 @@ def test_all_three_callers_share_one_protected_root_derivation(
     assert live in executor._protected_roots()
     assert live in entrypoint._command_protected_roots(config)
     assert live in _live_protected_roots(bot, str(layout["install"]))
+
+
+# --- Round 8: the workspace must not leak into unrelated tools ---------------
+
+
+async def test_git_ops_with_omitted_repo_keeps_process_cwd_semantics(
+    tmp_path: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-8 blocker 1, reproduced by Odin as `fatal: not a git repository`.
+
+    git_ops documents an omitted ``repo`` as ``"."`` — which has always meant
+    the process cwd, i.e. Odin's own install repo. Applying the workspace
+    unconditionally in the shared _exec_command primitive silently repointed
+    that at a scratch directory and broke `git_ops status`. The same class hits
+    docker build ``"."``, compose's implicit project directory, and terraform
+    without ``working_dir``.
+    """
+    repo = tmp_path / "a-real-repo"
+    repo.mkdir()
+    for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"],
+                ["git", "config", "user.name", "t"]):
+        subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+    (repo / "tracked.txt").write_text("x", encoding="utf-8")
+    monkeypatch.chdir(repo)
+
+    executor = _executor_with_workspace(workspace, tmp_path / "unrelated-install")
+    result = await executor.execute("git_ops", {"action": "status", "host": "localhost"})
+
+    assert result.ok, result.output
+    assert "not a git repository" not in str(result.output)
+    assert "tracked.txt" in str(result.output)
+
+
+async def test_an_unusable_workspace_does_not_disable_unrelated_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sharp version of the same contract.
+
+    A workspace that fails validation must take down raw user commands ONLY.
+    If it also took down git_ops/docker/terraform/kubectl, one bad directory
+    would cost most of Odin's capability — far beyond the accepted mechanism.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"],
+                ["git", "config", "user.name", "t"]):
+        subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+    monkeypatch.chdir(repo)
+
+    protected = tmp_path / "install"
+    protected.mkdir()
+    # Overlaps the protected root: unusable by construction.
+    executor = _executor_with_workspace(protected / "inside", protected)
+
+    user_command = await executor.execute(
+        "run_command", {"command": "echo should-not-run", "host": "localhost"}
+    )
+    assert not user_command.ok
+    assert "should-not-run" not in str(user_command.output)
+
+    git_status = await executor.execute("git_ops", {"action": "status", "host": "localhost"})
+    assert git_status.ok, "an unusable workspace must not disable unrelated tools"
+
+
+# --- Round 8: protected roots come from the FULL live configuration ---------
+
+
+def _config_with(**overrides):
+    """A real Config, so the derivation is exercised against production shape."""
+    from src.config.schema import Config
+
+    return Config(discord={"token": "test-token"}, **overrides)
+
+
+def test_relocated_state_directory_is_protected(tmp_path: Path) -> None:
+    """Round-8 blocker 2, reproduced by Odin with sessions.persist_directory
+    EQUAL to the configured workspace and accepted by every caller."""
+    from src.tools.workspace import command_protected_roots
+
+    relocated = tmp_path / "relocated-sessions"
+    config = _config_with(
+        sessions={"persist_directory": str(relocated)},
+        tools={"local_working_dir": str(relocated)},
+    )
+    roots = command_protected_roots(tmp_path / "install", config)
+    assert str(relocated.resolve()) in roots
+
+    with pytest.raises(WorkspaceError, match="overlap"):
+        provision_workspace(str(relocated), protected_roots=roots)
+    assert not relocated.exists()
+
+
+def test_relocated_state_file_protects_its_directory(tmp_path: Path) -> None:
+    """A relocated FILE protects the directory holding it — the workspace must
+    not sit beside live permissions/credential state either."""
+    from src.tools.workspace import command_protected_roots
+
+    live = tmp_path / "relocated-state"
+    live.mkdir()
+    config = _config_with(permissions={"overrides_path": str(live / "permissions.json")})
+    roots = command_protected_roots(tmp_path / "install", config)
+    assert str(live.resolve()) in roots
+
+    with pytest.raises(WorkspaceError, match="overlap"):
+        provision_workspace(str(live / "workspace"), protected_roots=roots)
+    assert not (live / "workspace").exists()
+
+
+def test_overlap_with_relocated_state_is_rejected_in_both_directions(
+    tmp_path: Path,
+) -> None:
+    """A workspace that CONTAINS live state is as unusable as one inside it."""
+    from src.tools.workspace import command_protected_roots
+
+    parent = tmp_path / "parent"
+    (parent / "live-context").mkdir(parents=True)
+    config = _config_with(context={"directory": str(parent / "live-context")})
+    roots = command_protected_roots(tmp_path / "install", config)
+
+    with pytest.raises(WorkspaceError, match="overlap"):
+        provision_workspace(str(parent), protected_roots=roots)
+
+
+def test_every_declared_state_path_is_covered(tmp_path: Path) -> None:
+    """Each declared live-state path contributes a root, so relocating any one
+    of them cannot silently drop it from protection."""
+    from src.tools.workspace import _DECLARED_STATE_PATHS, command_protected_roots
+
+    relocations = {
+        "tools.audit_log_path": (tmp_path / "s-audit" / "audit.jsonl", tmp_path / "s-audit"),
+        "tools.trajectory_path": (tmp_path / "s-traj", tmp_path / "s-traj"),
+        "tools.ssh_key_path": (tmp_path / "s-ssh" / "id", tmp_path / "s-ssh"),
+        "tools.ssh_known_hosts_path": (tmp_path / "s-kh" / "known", tmp_path / "s-kh"),
+        "tools.ssh_pool.socket_dir": (tmp_path / "s-sock", tmp_path / "s-sock"),
+        "context.directory": (tmp_path / "s-ctx", tmp_path / "s-ctx"),
+        "sessions.persist_directory": (tmp_path / "s-sess", tmp_path / "s-sess"),
+        "logging.directory": (tmp_path / "s-log", tmp_path / "s-log"),
+        "usage.directory": (tmp_path / "s-usage", tmp_path / "s-usage"),
+        "search.search_db_path": (tmp_path / "s-search" / "db", tmp_path / "s-search"),
+        "permissions.overrides_path": (tmp_path / "s-perm" / "p.json", tmp_path / "s-perm"),
+        "openai_codex.credentials_path": (tmp_path / "s-codex" / "c.json", tmp_path / "s-codex"),
+        "attachments.temp_directory": (tmp_path / "s-att", tmp_path / "s-att"),
+    }
+    assert set(relocations) == {dotted for dotted, _ in _DECLARED_STATE_PATHS}, (
+        "a declared state path has no relocation case — add one so protection "
+        "cannot be dropped silently"
+    )
+
+    overrides: dict[str, dict] = {}
+    for dotted, (value, _expected) in relocations.items():
+        section, _, leaf = dotted.partition(".")
+        node = overrides.setdefault(section, {})
+        while "." in leaf:  # nested section, e.g. tools.ssh_pool.socket_dir
+            head, _, leaf = leaf.partition(".")
+            node = node.setdefault(head, {})
+        node[leaf] = str(value)
+
+    roots = command_protected_roots(tmp_path / "install", _config_with(**overrides))
+    for dotted, (_value, expected) in relocations.items():
+        assert str(expected.resolve()) in roots, f"{dotted} is not protected"
+
+
+def test_reduced_derivation_is_a_subset_never_a_different_answer(tmp_path: Path) -> None:
+    """Callers holding only a ToolsConfig (the __new__ patch seam, unit tests)
+    must not disagree with the full derivation — they may only know less."""
+    from src.config.schema import ToolsConfig
+    from src.tools.workspace import command_protected_roots
+
+    tools = ToolsConfig(
+        audit_log_path=str(tmp_path / "a" / "audit.jsonl"),
+        trajectory_path=str(tmp_path / "t"),
+    )
+    config = _config_with(tools=tools.model_dump())
+    full = command_protected_roots(tmp_path / "install", config)
+    reduced = command_protected_roots(tmp_path / "install", tools=tools)
+    assert set(reduced) <= set(full)
+
+
+def test_wiring_supplies_the_full_config_to_the_executor() -> None:
+    """The reduced derivation must never be what production runs on."""
+    import inspect
+
+    from src.discord import wiring
+
+    source = inspect.getsource(wiring.build_services)
+    assert "app_config=config" in source, (
+        "wiring must pass the full config to ToolExecutor, or production falls "
+        "back to the reduced protected-root derivation"
+    )

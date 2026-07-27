@@ -61,6 +61,8 @@ class SystemTools(HandlerBase):
             command,
             ssh_user,
             on_output=on_output,
+            # run_command is THE tool the 2026-07-27 wipe came through.
+            use_workspace=True,
         )
         if finish_cb:
             try:
@@ -144,6 +146,8 @@ class SystemTools(HandlerBase):
             cmd,
             ssh_user,
             on_output=on_output,
+            # run_script executes arbitrary user script text, same hazard.
+            use_workspace=True,
         )
         if finish_cb:
             try:
@@ -193,7 +197,7 @@ class SystemTools(HandlerBase):
                 allowed_hosts.append(h)
 
         async def _run_one(alias: str) -> tuple[str, bool]:
-            raw = await self._run_on_host(alias, command)
+            raw = await self._run_on_host(alias, command, use_workspace=True)
             if isinstance(raw, tuple):
                 text, code = raw[0], raw[1]
                 host_err = code != 0

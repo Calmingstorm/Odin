@@ -326,11 +326,9 @@ def _live_protected_roots(bot, base: str | None) -> list[str]:
     """
     from src.tools.workspace import DEFAULT_MEMORY_PATH, command_protected_roots
 
-    tools = getattr(getattr(bot, "config", None), "tools", None)
     memory_path = getattr(getattr(bot, "tool_executor", None), "_memory_path", None)
     return command_protected_roots(
         Path(base).resolve() if base else Path(__file__).resolve().parents[3],
-        audit_log_path=getattr(tools, "audit_log_path", None),
-        trajectory_path=getattr(tools, "trajectory_path", None),
+        getattr(bot, "config", None),
         memory_path=memory_path or DEFAULT_MEMORY_PATH,
     )

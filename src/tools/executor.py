@@ -158,8 +158,16 @@ class ToolExecutor:
         output_streamer: ToolOutputStreamer | None = None,
         host_access_manager: HostAccessManager | None = None,
         email_config: object | None = None,
+        app_config: object | None = None,
     ) -> None:
         self.config = config or ToolsConfig()
+        # The FULL live config, supplied by wiring. Live state is not confined
+        # to the data directory — sessions, context, logs, usage, the search
+        # index, permissions and Codex credentials are each independently
+        # relocatable, and a workspace overlapping any of them is as dangerous
+        # as one inside ./data (PR #239 round-8 review, reproduced). Optional
+        # so tests and the __new__ patch seam still construct.
+        self._app_config = app_config
         self._email_config = email_config
         # The configured workspace VALUE is restart-required, but it is
         # re-validated on every local command rather than cached: existence,
@@ -334,14 +342,13 @@ class ToolExecutor:
         return command_protected_roots(
             # Install root: the package's own location (…/src/tools/executor.py).
             Path(__file__).resolve().parents[2],
-            audit_log_path=getattr(self.config, "audit_log_path", None),
-            trajectory_path=getattr(self.config, "trajectory_path", None),
-            # The live memory.json is supplied by wiring, not ToolsConfig.
-            # getattr-guarded: the sanctioned __new__ patch seam builds
-            # executors without __init__, so this attribute may not exist —
-            # falling back to the shared default rather than to no protection.
-            memory_path=getattr(self, "_memory_path", None)
-            or DEFAULT_MEMORY_PATH,
+            # getattr-guarded throughout: the sanctioned __new__ patch seam
+            # builds executors without __init__, so these may not exist.
+            getattr(self, "_app_config", None),
+            tools=getattr(self, "config", None),
+            # The live memory.json is supplied by wiring, not ToolsConfig;
+            # falling back to the shared default rather than no protection.
+            memory_path=getattr(self, "_memory_path", None) or DEFAULT_MEMORY_PATH,
         )
 
     def get_workspace_metrics(self) -> dict[str, float]:
@@ -728,6 +735,7 @@ class ToolExecutor:
         ssh_user: str = "root",
         timeout: int | None = None,
         on_output: OutputCallback | None = None,
+        use_workspace: bool = False,
     ) -> tuple[int, str]:
         """Execute a command locally or via SSH depending on host address.
 
@@ -744,6 +752,16 @@ class ToolExecutor:
         if timeout is None:
             timeout = _current_tool_timeout_ctx.get() or self.config.command_timeout_seconds
         if is_local_address(address):
+            # The workspace applies ONLY to raw user commands, and only because
+            # the caller asked for it. This primitive also backs git_ops,
+            # docker, terraform, kubectl, claude_code, PDF host reads and
+            # validation probes, whose documented defaults resolve against the
+            # process cwd — git_ops with `repo` omitted means ".", i.e. the
+            # install repo, and silently repointing that at a scratch directory
+            # broke `git_ops status` with "fatal: not a git repository"
+            # (PR #239 round-8 review, reproduced). Default False keeps every
+            # such tool byte-identical to pre-PR behaviour.
+            cwd = self._ensure_local_workspace() if use_workspace else None
             bh = self.bulkheads.get("subprocess")
             if bh:
                 try:
@@ -752,12 +770,12 @@ class ToolExecutor:
                             command,
                             timeout=timeout,
                             on_output=on_output,
-                            cwd=self._ensure_local_workspace(),
+                            cwd=cwd,
                         )
                 except BulkheadFullError:
                     return 1, "Error: subprocess bulkhead full — too many concurrent local commands"
             return await run_local_command(
-                command, timeout=timeout, on_output=on_output, cwd=self._ensure_local_workspace()
+                command, timeout=timeout, on_output=on_output, cwd=cwd
             )
         ssh_retry = self.config.ssh_retry
         ssh_kwargs: dict[str, Any] = dict(
@@ -782,12 +800,23 @@ class ToolExecutor:
                 return 1, "Error: SSH bulkhead full — too many concurrent SSH commands"
         return await run_ssh_command(**ssh_kwargs)
 
-    async def _run_on_host(self, alias: str, command: str) -> str | tuple[str, int]:
+    async def _run_on_host(
+        self, alias: str, command: str, use_workspace: bool = False
+    ) -> str | tuple[str, int]:
+        """Run a command on an aliased host.
+
+        ``use_workspace`` is opt-in for the same reason as _exec_command: this
+        also backs read_file/write_file host reads, skill_context.run_on_host,
+        and the audit diff tracker, whose paths are absolute and whose cwd
+        semantics must not change.
+        """
         resolved = self._resolve_host(alias)
         if not resolved:
             return f"Unknown or disallowed host: {alias}"
         address, ssh_user, _os = resolved
-        code, output = await self._exec_command(address, command, ssh_user)
+        code, output = await self._exec_command(
+            address, command, ssh_user, use_workspace=use_workspace
+        )
         if code != 0:
             return f"Command failed (exit {code}):\n{output}", code
         return output, 0

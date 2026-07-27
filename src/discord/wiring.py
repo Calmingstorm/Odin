@@ -261,6 +261,9 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
     tool_executor = ToolExecutor(
         config.tools,
         memory_path=memory_path,
+        # Full config so the workspace's protected roots cover every relocatable
+        # live-state path, not just the ones ToolsConfig declares.
+        app_config=config,
         browser_manager=browser_manager,
         output_streamer=output_streamer,
         host_access_manager=host_access_manager,

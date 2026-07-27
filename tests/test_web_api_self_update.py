@@ -184,8 +184,12 @@ class TestApplyUpdate:
             if call.args and isinstance(call.args[0], list)
         ), "the update must not have been committed"
 
-    async def test_refuses_a_blank_persisted_workspace_before_touching_the_repo(self):
-        """PR #239 round-7 blocker: the persisted-config path, end to end.
+    async def test_refuses_a_blank_live_workspace_before_touching_the_repo(self):
+        """PR #239 round-7 blocker: a blank LIVE workspace, end to end.
+
+        The persistence half — that PUT /api/config normalizes blank away — is
+        pinned separately in test_web_api_config_admin; this drives the update
+        route against a live config that already holds a raw blank value.
 
         local_working_dir accepts free strings and can be blanked through
         PUT /api/config. The preflight used to treat a present-but-blank value

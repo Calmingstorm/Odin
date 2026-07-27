@@ -285,6 +285,36 @@ class TestDiscordConfig:
         assert "model_routing" not in oc
 
     @pytest.mark.asyncio
+    async def test_blanking_the_workspace_normalizes_everywhere(self):
+        """PR #239 round-8 follow-up: the persisted-config path, for real.
+
+        tools.local_working_dir accepts free strings and can be blanked through
+        this endpoint. Blank must normalize to the default in the RESPONSE, in
+        the runtime config, on disk, and on a fresh reload — otherwise the
+        self-update preflight and the restarted process disagree about which
+        directory they are validating, which is how a blank value used to
+        approve an update that then failed closed on every local command.
+        """
+        from pathlib import Path
+
+        from ruamel.yaml import YAML
+
+        from src.config.schema import Config as _Config
+
+        Path("config.yml").write_text("discord:\n  token: fake\n")
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/config", json={"tools": {"local_working_dir": "   "}})
+            assert r.status == 200
+
+        default = "/var/lib/odin-workspace"
+        assert bot.config.tools.local_working_dir == default, "runtime config"
+        on_disk = YAML().load(Path("config.yml").read_text())["tools"]["local_working_dir"]
+        assert on_disk == default, "persisted YAML"
+        reloaded = _Config(**YAML().load(Path("config.yml").read_text()))
+        assert reloaded.tools.local_working_dir == default, "fresh reload"
+
+    @pytest.mark.asyncio
     async def test_health_and_resource_and_streams(self):
         app, bot = _app(register_discord_config)
         bot.tool_executor.output_streamer = SimpleNamespace(
