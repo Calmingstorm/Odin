@@ -279,9 +279,6 @@ def _ensure_local_workspace_for_update(bot=None, base: str | None = None) -> str
     )
 
     configured = _live_workspace_setting(bot)
-    if not configured:
-        return None  # nothing configured to validate; runtime default applies
-
     try:
         provision_workspace(configured, protected_roots=_live_protected_roots(bot, base))
         return None
@@ -292,19 +289,25 @@ def _ensure_local_workspace_for_update(bot=None, base: str | None = None) -> str
 
 
 def _live_workspace_setting(bot) -> str:
-    """The workspace path the RESTARTED process will actually use."""
+    """The workspace path the RESTARTED process will actually use.
+
+    Returned VERBATIM from the live config, never substituted. Treating a
+    present-but-blank value as "nothing configured" and validating the default
+    instead let the preflight approve an update whose restarted process then
+    failed closed on every local command (PR #239 round-7 review). The schema
+    normalizes blank to the default, so a blank value here means the live
+    config is not a validated ToolsConfig — which is exactly when guessing is
+    least safe. The default is used ONLY when there is no live config at all.
+    """
     try:
         configured = bot.config.tools.local_working_dir
-        if isinstance(configured, str) and configured.strip():
-            return configured.strip()
+        if isinstance(configured, str):
+            return configured
     except Exception:
         pass
-    try:
-        from ...config.schema import ToolsConfig
+    from ...config.schema import ToolsConfig
 
-        return ToolsConfig().local_working_dir
-    except Exception:  # pragma: no cover - schema import cannot realistically fail
-        return "/var/lib/odin-workspace"
+    return ToolsConfig().local_working_dir
 
 
 def _live_protected_roots(bot, base: str | None) -> list[str]:
@@ -331,5 +334,3 @@ def _live_protected_roots(bot, base: str | None) -> list[str]:
         trajectory_path=getattr(tools, "trajectory_path", None),
         memory_path=memory_path or DEFAULT_MEMORY_PATH,
     )
-
-

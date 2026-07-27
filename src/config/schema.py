@@ -236,6 +236,27 @@ class ToolsConfig(BaseModel):
     # cross-command continuity this preserves.
     local_working_dir: str = "/var/lib/odin-workspace"
 
+    @field_validator("local_working_dir")
+    @classmethod
+    def _workspace_blank_means_default(cls, v):
+        """Blank or whitespace-only normalizes to the default, here at the
+        boundary, so every consumer sees the same value.
+
+        The field accepts free strings and can be blanked through
+        PUT /api/config. Left un-normalized, the self-update preflight
+        substituted the default and approved, while the restarted process
+        loaded the blank value and failed closed on every local command —
+        preflight and runtime disagreeing about the very path being validated
+        (PR #239 round-7 review, reproduced).
+
+        Normalizing rather than rejecting keeps the update seamless: a blanked
+        value costs no capability and cannot brick startup, which a hard
+        validation error on a persisted config would.
+        """
+        if not isinstance(v, str) or not v.strip():
+            return "/var/lib/odin-workspace"
+        return v.strip()
+
     @field_validator("command_timeout_seconds")
     @classmethod
     def _timeout_positive(cls, v):

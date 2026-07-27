@@ -1085,15 +1085,53 @@ def test_preflight_falls_back_to_the_schema_default_without_a_bot(
     assert _live_workspace_setting(_Broken()) == ToolsConfig().local_working_dir
 
 
-def test_preflight_skips_validation_when_nothing_is_configured(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With no configured workspace at all there is nothing to validate, and
-    the update must not be blocked on a value that does not exist."""
-    import src.web.api.self_update as su
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_blank_workspace_normalizes_to_the_default_at_the_boundary(blank: str) -> None:
+    """The field accepts free strings and can be blanked through PUT /api/config.
 
-    monkeypatch.setattr(su, "_live_workspace_setting", lambda _bot: "")
-    assert su._ensure_local_workspace_for_update(None, None) is None
+    Round-7 regression. Left un-normalized, a blank value made the self-update
+    preflight validate the DEFAULT and approve, while the restarted process
+    loaded the blank value and failed closed on every local command. Normalizing
+    here means every consumer — preflight, startup migration, executor — reads
+    the identical path.
+    """
+    assert ToolsConfig(local_working_dir=blank).local_working_dir == "/var/lib/odin-workspace"
+
+
+def test_configured_workspace_is_stripped_not_reinterpreted() -> None:
+    """Normalization must not silently relocate a real configured path."""
+    assert ToolsConfig(local_working_dir="  /srv/ws  ").local_working_dir == "/srv/ws"
+
+
+def test_preflight_validates_the_exact_live_value_never_a_substitute() -> None:
+    """A present-but-blank live value must be REFUSED, not replaced.
+
+    The schema normalizes blank away, so reaching the preflight with one means
+    the live config is not a validated ToolsConfig — precisely when substituting
+    a plausible default is least safe, because the restarted process will use
+    the real value and fail closed (PR #239 round-7 review, reproduced).
+    """
+    from src.web.api.self_update import _ensure_local_workspace_for_update
+
+    bot = SimpleNamespace(config=SimpleNamespace(tools=SimpleNamespace(local_working_dir="   ")))
+    error = _ensure_local_workspace_for_update(bot, None)
+    assert error is not None and "empty" in error
+
+
+def test_preflight_uses_the_schema_default_only_when_there_is_no_live_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No reachable bot is the ONE case where the default is the honest answer."""
+    import src.web.api.self_update as su
+    from src.config.schema import ToolsConfig as _ToolsConfig
+
+    class _Unreachable:
+        @property
+        def config(self):  # noqa: ANN201 - deliberately raises
+            raise RuntimeError("bot not ready")
+
+    assert su._live_workspace_setting(None) == _ToolsConfig().local_working_dir
+    assert su._live_workspace_setting(_Unreachable()) == _ToolsConfig().local_working_dir
 
 
 # --- Round 6: the entrypoint and the protected-root contract ------------------
