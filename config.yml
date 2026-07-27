@@ -92,6 +92,15 @@ sessions:
 
 tools:
   enabled: true
+  # Working directory for local user commands (run_command, run_script,
+  # run_command_multi, background processes, skill run_on_host). A bare
+  # relative path in a command resolves HERE, not in the install directory —
+  # which is what stopped an extracted archive's `rm -rf data` from deleting
+  # Odin's own live state. Must be an absolute path, owned by the service
+  # account, mode 0700, and outside the install and data directories.
+  # Provisioned automatically on start; if it is unusable, local commands
+  # refuse to run rather than falling back to the install directory.
+  local_working_dir: /var/lib/odin-workspace
   # Customize SSH key path for your deployment
   ssh_key_path: /app/.ssh/id_ed25519
   # Customize SSH known hosts path for your deployment

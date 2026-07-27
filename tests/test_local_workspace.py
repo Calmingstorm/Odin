@@ -2181,3 +2181,82 @@ def test_usage_refresh_skips_files_it_cannot_stat(
 
     assert metrics["files"] == 1
     assert metrics["bytes"] == 0
+
+
+# --- The operator-visible surface: startup diagnostics and the template ------
+
+
+def test_startup_diagnostic_reports_an_unusable_workspace(tmp_path: Path) -> None:
+    """Local commands fail closed on a bad workspace, so the startup report has
+    to SAY so. Without this the symptom is every run_command failing with
+    nothing in the diagnostics to explain it.
+
+    This gap was mine, found by sweeping the operator-visible surfaces rather
+    than by review — the same sweep that should have preceded the change.
+    """
+    from src.config.schema import ToolsConfig
+    from src.health.startup import check_local_workspace
+
+    result = check_local_workspace(ToolsConfig(local_working_dir="relative/nope"))
+    assert result.passed is False
+    assert result.name == "local_workspace"
+    assert "absolute" in result.detail
+    assert "install -d -m 0700" in result.recommendation, "must name the fix"
+
+
+def test_startup_diagnostic_passes_for_a_usable_workspace(
+    tmp_path: Path, workspace: Path
+) -> None:
+    from src.config.schema import ToolsConfig
+    from src.health.startup import check_local_workspace
+
+    result = check_local_workspace(ToolsConfig(local_working_dir=str(workspace)))
+    assert result.passed is True
+    assert str(workspace.resolve()) in result.detail
+
+
+def test_startup_diagnostic_uses_the_shared_protected_roots() -> None:
+    """A diagnostic applying different rules than the executor would be worse
+    than no diagnostic: it would pass a workspace the runtime then refuses."""
+    from src.health.startup import _workspace_protected_roots
+    from src.tools.workspace import command_protected_roots
+
+    assert _workspace_protected_roots() == command_protected_roots(
+        Path(__file__).resolve().parents[1]
+    )
+
+
+def test_startup_report_includes_the_workspace_check() -> None:
+    """Registered in the real runner, not merely defined — an unregistered
+    check reports nothing, and this is the surface an operator reads when
+    local commands have stopped working."""
+    from src.config.schema import Config
+    from src.health.startup import run_startup_diagnostics
+
+    report = run_startup_diagnostics(yaml_config=Config(discord={"token": "fake"}))
+    names = [r.name for r in report.results]
+    assert "local_workspace" in names, f"check not run; got {names}"
+
+
+
+def test_tracked_config_template_documents_the_workspace() -> None:
+    """CONTRIBUTING is binding: config examples stay aligned with reality. An
+    undocumented knob is undiscoverable precisely when an operator needs it —
+    when fail-closed has taken local commands away."""
+    repo = Path(__file__).resolve().parents[1]
+    template = (repo / "config.yml").read_text(encoding="utf-8")
+    assert "local_working_dir:" in template
+
+    import re as _re
+
+    import yaml
+    for name in set(_re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", template)):
+        os.environ.setdefault(name, "test-value")
+    parsed = yaml.safe_load(template)
+    # Against the module CONSTANT, not ToolsConfig() — conftest patches the
+    # field default to a temp directory for the whole test session.
+    from src.config.schema import DEFAULT_LOCAL_WORKING_DIR
+
+    assert parsed["tools"]["local_working_dir"] == DEFAULT_LOCAL_WORKING_DIR, (
+        "the template must not drift from the schema default"
+    )

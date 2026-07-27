@@ -618,6 +618,17 @@ class TestCheckCodexModel:
 # ---------------------------------------------------------------------------
 
 
+
+def _usable_workspace():
+    """A 0700 directory owned by this user, outside the repo and data roots."""
+    import tempfile
+    from pathlib import Path
+
+    path = Path(tempfile.mkdtemp(prefix="odin-diag-ws-"))
+    path.chmod(0o700)
+    return path
+
+
 class TestRunStartupDiagnostics:
     def test_no_config(self):
         report = run_startup_diagnostics()
@@ -644,6 +655,9 @@ class TestRunStartupDiagnostics:
         yaml_cfg.openai_codex = MagicMock()
         yaml_cfg.openai_codex.enabled = False
         yaml_cfg.tools = MagicMock()
+        # A real path: local_workspace is a registered check now, and a
+        # MagicMock attribute is not a workspace (PR #239).
+        yaml_cfg.tools.local_working_dir = str(_usable_workspace())
         yaml_cfg.tools.hosts = {}
         yaml_cfg.sessions = MagicMock()
         yaml_cfg.sessions.persist_directory = str(tmp_path / "sessions")
@@ -669,6 +683,9 @@ class TestRunStartupDiagnostics:
         yaml_cfg.openai_codex = MagicMock()
         yaml_cfg.openai_codex.enabled = False
         yaml_cfg.tools = MagicMock()
+        # A real path: local_workspace is a registered check now, and a
+        # MagicMock attribute is not a workspace (PR #239).
+        yaml_cfg.tools.local_working_dir = str(_usable_workspace())
         yaml_cfg.tools.hosts = {}
         yaml_cfg.sessions = MagicMock()
         yaml_cfg.sessions.persist_directory = ""
@@ -705,6 +722,9 @@ class TestRunStartupDiagnostics:
             lambda self: (_ for _ in ()).throw(RuntimeError("boom"))
         )
         yaml_cfg.tools = MagicMock()
+        # A real path: local_workspace is a registered check now, and a
+        # MagicMock attribute is not a workspace (PR #239).
+        yaml_cfg.tools.local_working_dir = str(_usable_workspace())
         yaml_cfg.tools.hosts = {}
         yaml_cfg.sessions = MagicMock()
         yaml_cfg.sessions.persist_directory = ""
@@ -746,7 +766,7 @@ class TestConfigChecksRegistry:
         assert len(names) == len(set(names)), "Duplicate check names"
 
     def test_check_count(self):
-        assert len(_CONFIG_CHECKS) == 7
+        assert len(_CONFIG_CHECKS) == 8
 
 
 # ---------------------------------------------------------------------------
@@ -841,6 +861,9 @@ class TestRealWorldScenarios:
         yaml_cfg.openai_codex.credentials_path = str(cred_file)
         yaml_cfg.openai_codex.model = "gpt-4o"
         yaml_cfg.tools = MagicMock()
+        # A real path: local_workspace is a registered check now, and a
+        # MagicMock attribute is not a workspace (PR #239).
+        yaml_cfg.tools.local_working_dir = str(_usable_workspace())
         yaml_cfg.tools.hosts = {"web1": MagicMock(), "db1": MagicMock()}
         yaml_cfg.tools.ssh_key_path = str(ssh_key)
         yaml_cfg.tools.ssh_known_hosts_path = str(known_hosts)
@@ -871,6 +894,9 @@ class TestRealWorldScenarios:
         yaml_cfg.openai_codex = MagicMock()
         yaml_cfg.openai_codex.enabled = False
         yaml_cfg.tools = MagicMock()
+        # A real path: local_workspace is a registered check now, and a
+        # MagicMock attribute is not a workspace (PR #239).
+        yaml_cfg.tools.local_working_dir = str(_usable_workspace())
         yaml_cfg.tools.hosts = {}
         yaml_cfg.sessions = MagicMock()
         yaml_cfg.sessions.persist_directory = ""
@@ -898,6 +924,9 @@ class TestRealWorldScenarios:
         yaml_cfg.openai_codex.credentials_path = "/nonexistent/creds.json"
         yaml_cfg.openai_codex.model = ""
         yaml_cfg.tools = MagicMock()
+        # A real path: local_workspace is a registered check now, and a
+        # MagicMock attribute is not a workspace (PR #239).
+        yaml_cfg.tools.local_working_dir = str(_usable_workspace())
         yaml_cfg.tools.hosts = {"web1": MagicMock()}
         yaml_cfg.tools.ssh_key_path = "/nonexistent/key"
         yaml_cfg.tools.ssh_known_hosts_path = "/nonexistent/known"

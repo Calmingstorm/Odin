@@ -187,6 +187,12 @@ class GovernorConfig(BaseModel):
     host_overrides: dict[str, str] = Field(default_factory=dict)
 
 
+# The default local command workspace, spelled ONCE: the field default, the
+# blank-value normalizer, the tracked config.yml template and the packaging
+# scripts must never drift apart.
+DEFAULT_LOCAL_WORKING_DIR = "/var/lib/odin-workspace"
+
+
 class ToolsConfig(BaseModel):
     enabled: bool = True
     governor: GovernorConfig = GovernorConfig()
@@ -234,7 +240,7 @@ class ToolsConfig(BaseModel):
     # read it in the next, which would cost capability. Restart-required, not
     # hot-reloadable — swapping workspaces at runtime would break exactly the
     # cross-command continuity this preserves.
-    local_working_dir: str = "/var/lib/odin-workspace"
+    local_working_dir: str = DEFAULT_LOCAL_WORKING_DIR
 
     @field_validator("local_working_dir")
     @classmethod
@@ -254,7 +260,7 @@ class ToolsConfig(BaseModel):
         validation error on a persisted config would.
         """
         if not isinstance(v, str) or not v.strip():
-            return "/var/lib/odin-workspace"
+            return DEFAULT_LOCAL_WORKING_DIR
         return v.strip()
 
     @field_validator("command_timeout_seconds")

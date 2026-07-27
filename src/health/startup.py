@@ -426,6 +426,54 @@ def check_config_sections(config: Any) -> DiagnosticResult:
     )
 
 
+def check_local_workspace(tools_config: Any) -> DiagnosticResult:
+    """Verify the local command workspace is usable.
+
+    Local user commands FAIL CLOSED when this directory is missing, wrongly
+    owned, or not 0700 — deliberately, because falling back to the install
+    directory is the hazard this exists to remove. That makes it an operator-
+    visible dependency: without this check a broken workspace shows up as
+    every run_command failing, with nothing in the startup report to say why.
+    """
+    from ..tools.workspace import WorkspaceError, provisioning_hint, resolve_workspace
+
+    configured = getattr(tools_config, "local_working_dir", "") or ""
+    try:
+        workspace = resolve_workspace(configured, protected_roots=_workspace_protected_roots())
+    except WorkspaceError as exc:
+        return DiagnosticResult(
+            name="local_workspace",
+            passed=False,
+            detail=f"Local command workspace unusable: {exc}",
+            recommendation=provisioning_hint(configured),
+            metadata={"configured": configured},
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return DiagnosticResult(
+            name="local_workspace",
+            passed=False,
+            detail=f"Local command workspace check failed: {exc}",
+            recommendation=provisioning_hint(configured),
+            metadata={"configured": configured},
+        )
+    return DiagnosticResult(
+        name="local_workspace",
+        passed=True,
+        detail=f"Local command workspace ready: {workspace}",
+        metadata={"path": str(workspace)},
+    )
+
+
+def _workspace_protected_roots() -> list[str]:
+    """Protected roots for the diagnostic, from the same shared derivation the
+    executor uses — a check that applied different rules would be worse than
+    no check at all."""
+    from ..config.schema import Config  # noqa: F401 - imported for typing clarity
+    from ..tools.workspace import command_protected_roots
+
+    return command_protected_roots(Path(__file__).resolve().parents[2])
+
+
 def check_data_directories() -> DiagnosticResult:
     """Verify core data directories exist or can be created."""
     dirs = [
@@ -508,6 +556,7 @@ _CONFIG_CHECKS = [
     ("ssh_hosts", check_ssh_hosts, "tools"),
     ("sessions_directory", check_sessions_directory, "sessions"),
     ("knowledge_db", check_knowledge_db, "search"),
+    ("local_workspace", check_local_workspace, "tools"),
     ("config_consistency", check_config_sections, None),  # uses full Config
 ]
 
