@@ -172,3 +172,89 @@ def workspace_env(workspace: Path, base: dict[str, str] | None = None) -> dict[s
     env["PWD"] = str(workspace)
     env["OLDPWD"] = str(workspace)
     return env
+
+
+def provision_workspace(
+    configured: str,
+    *,
+    protected_roots: Sequence[str | os.PathLike[str]] | None = None,
+    allow_sudo: bool = True,
+    owner_uid: int | None = None,
+) -> Path:
+    """THE authoritative provision-then-validate routine. Returns the workspace.
+
+    One implementation, used by every caller — startup migration and the
+    self-update preflight both go through here. A second, weaker contract
+    elsewhere is worse than none: it can create a directory the runtime will
+    then refuse, or provision a different directory from the one actually used
+    (PR #239 round-5 review, which reproduced four such mismatches).
+
+    Order matters. Everything that can be judged from the path alone —
+    absolute, not a symlink, not overlapping a protected root — is checked
+    BEFORE anything is created, so a rejected configuration never leaves a
+    directory inside the tree this protects. Creation is attempted directly,
+    then via ``sudo -n`` (packaged installs configure passwordless sudo for
+    exactly this class of operation), and the FULL :func:`resolve_workspace`
+    contract is applied afterwards.
+    """
+    if not configured or not str(configured).strip():
+        raise WorkspaceError("tools.local_working_dir is empty")
+
+    raw = Path(str(configured).strip()).expanduser()
+    if not raw.is_absolute():
+        raise WorkspaceError(f"local_working_dir must be absolute: {configured!r}")
+    if raw.is_symlink():
+        raise WorkspaceError(f"local_working_dir must not be a symlink: {raw}")
+
+    target = _canonical(raw)
+    _reject_overlap(target, protected_roots)
+
+    if not target.exists():
+        try:
+            # parents=False deliberately: silently materialising a whole path
+            # prefix is how a typo becomes a new directory tree.
+            target.mkdir(mode=REQUIRED_MODE, parents=False)
+            target.chmod(REQUIRED_MODE)
+        except OSError:
+            if allow_sudo:
+                _sudo_create(target, owner_uid)
+
+    # Full contract, including ownership, exact mode and usability. Creation
+    # above is never a substitute for validation.
+    return resolve_workspace(
+        str(target),
+        protected_roots=protected_roots,
+        owner_uid=owner_uid,
+        create_if_missing=False,
+    )
+
+
+def _sudo_create(target: Path, owner_uid: int | None) -> None:
+    """Best-effort privileged creation; failures fall through to validation,
+    which produces the actionable error."""
+    import subprocess
+
+    uid = os.getuid() if owner_uid is None else owner_uid
+    try:
+        subprocess.run(
+            [
+                "sudo", "-n", "install", "-d",
+                f"-m{REQUIRED_MODE:o}",
+                "-o", str(uid),
+                "-g", str(os.getgid()),
+                str(target),
+            ],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def provisioning_hint(configured: str) -> str:
+    """The operator-actionable instruction, in one place."""
+    return (
+        f"Create it as the service account: "
+        f"sudo install -d -m 0700 -o odin -g odin {configured}"
+    )

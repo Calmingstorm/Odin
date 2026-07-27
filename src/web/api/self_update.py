@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import stat
 import subprocess
 from pathlib import Path
 
@@ -31,7 +30,6 @@ def _repo_root() -> str:
     preservation joined the wrong directory, and the bot kept reporting
     the pre-update version from stale package metadata.
     """
-    import os
 
     path = os.path.dirname(os.path.abspath(__file__))
     for _ in range(8):
@@ -83,10 +81,8 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
 
     @routes.post("/api/update/apply")
     async def apply_update(request: web.Request) -> web.Response:
-        import os
         import re as _re
         import shutil
-        import subprocess
         try:
             data = await request.json()
         except Exception:
@@ -163,7 +159,7 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
             # (PR #239 round-4 review, verified against the live install).
             # Provision it here, BEFORE committing to the update, and refuse
             # the update rather than transition to code that cannot work.
-            ws_error = _ensure_local_workspace_for_update(base)
+            ws_error = _ensure_local_workspace_for_update(bot, base)
             if ws_error:
                 return web.json_response({
                     "error": (
@@ -260,70 +256,69 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({"result": result})
 
 
-def _ensure_local_workspace_for_update(base: str | None = None) -> str | None:
+def _ensure_local_workspace_for_update(bot=None, base: str | None = None) -> str | None:
     """Provision the local command workspace ahead of an in-place update.
 
     Returns None on success, or an operator-actionable message on failure.
 
-    The updater re-execs the process directly, so a packaged install's
-    ``StateDirectory=`` never runs and a unit file written before this feature
-    existed never gains it. Without this preflight an update completes and the
-    first local command fails closed.
+    Delegates to the SINGLE authoritative implementation rather than
+    reimplementing a weaker contract here. An independent copy accepted
+    workspaces the runtime then rejected — a relative path, a symlink, one
+    inside the install — and could create a directory the restarted executor
+    would refuse, or provision a different directory from the one it actually
+    uses (PR #239 round-5 review reproduced four such mismatches).
+
+    The configuration comes from the LIVE bot when available, so the path
+    checked here is the path the restarted process will use, including any
+    alternate config file or environment substitution already applied.
     """
-    # The configured path is read WITHOUT constructing a full Config:
-    # load_config() raises SystemExit when required environment variables are
-    # absent, which must never happen inside a request handler, and its result
-    # depends on the process working directory. Read the one key directly.
-    configured = ""
+    from ...tools.workspace import (
+        WorkspaceError,
+        provision_workspace,
+        provisioning_hint,
+    )
+
+    configured = _live_workspace_setting(bot)
+    if not configured:
+        return None  # nothing configured to validate; runtime default applies
+
+    try:
+        provision_workspace(configured, protected_roots=_live_protected_roots(bot, base))
+        return None
+    except WorkspaceError as exc:
+        return f"{exc} {provisioning_hint(configured)}"
+    except Exception as exc:  # pragma: no cover - defensive
+        return f"{exc} {provisioning_hint(configured)}"
+
+
+def _live_workspace_setting(bot) -> str:
+    """The workspace path the RESTARTED process will actually use."""
+    try:
+        configured = bot.config.tools.local_working_dir
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
+    except Exception:
+        pass
     try:
         from ...config.schema import ToolsConfig
 
-        configured = ToolsConfig().local_working_dir
-    except BaseException:  # pragma: no cover - schema import cannot realistically fail
-        configured = "/var/lib/odin-workspace"
+        return ToolsConfig().local_working_dir
+    except Exception:  # pragma: no cover - schema import cannot realistically fail
+        return "/var/lib/odin-workspace"
 
-    try:
-        import yaml
 
-        config_path = Path(base) / "config.yml" if base else Path("config.yml")
-        if config_path.is_file():
-            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-            override = (raw.get("tools") or {}).get("local_working_dir")
-            if isinstance(override, str) and override.strip():
-                configured = override.strip()
-    except BaseException:
-        pass  # an unreadable/invalid config must not block the preflight
-
-    path = Path(configured)
-    if path.is_dir():
-        try:
-            if stat.S_IMODE(path.stat().st_mode) != 0o700:
-                path.chmod(0o700)
-        except OSError as exc:
-            return f"{path} exists but its mode could not be corrected: {exc}"
-        return None
-
-    try:
-        path.mkdir(mode=0o700, parents=True)
-        path.chmod(0o700)
-        return None
-    except OSError:
-        pass
-
-    # Unprivileged service account under a root-owned parent: try sudo, which
-    # packaged installs configure for exactly this class of operation.
-    try:
-        result = subprocess.run(
-            ["sudo", "-n", "install", "-d", "-m", "0700",
-             "-o", str(os.getuid()), "-g", str(os.getgid()), str(path)],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode == 0 and path.is_dir():
-            return None
-    except Exception:
-        pass
-
-    return (
-        f"Create it before updating: sudo install -d -m 0700 "
-        f"-o odin -g odin {path}"
-    )
+def _live_protected_roots(bot, base: str | None) -> list[str]:
+    """Install root plus canonical live-data roots, from the live config."""
+    roots: list[str] = []
+    roots.append(str(Path(base).resolve()) if base else str(Path(__file__).resolve().parents[3]))
+    tools = getattr(getattr(bot, "config", None), "tools", None)
+    declared = [
+        (getattr(tools, "audit_log_path", None), True),
+        (getattr(tools, "trajectory_path", None), False),
+    ]
+    for configured, is_file in declared:
+        if not isinstance(configured, str) or not configured.strip():
+            continue
+        resolved = Path(configured.strip()).resolve()
+        roots.append(str(resolved.parent if is_file else resolved))
+    return roots

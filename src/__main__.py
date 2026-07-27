@@ -113,6 +113,38 @@ def main() -> None:
     log = get_logger("main")
     log.info("Starting Odin")
 
+    # STARTUP MIGRATION — must run after the real configuration is loaded and
+    # before any command service begins.
+    #
+    # Local user commands run in a validated workspace outside the install and
+    # refuse to run without one. A preflight in the self-updater cannot
+    # bootstrap that: the update which INTRODUCES the preflight is executed by
+    # the previous release's handler, which has none, so the very first upgrade
+    # would re-exec into code whose workspace was never created (PR #239
+    # round-5 review, verified against a live install). Provisioning here runs
+    # in the NEW code on the restart that follows any update, however the
+    # update arrived.
+    #
+    # Failure is logged, not fatal: an unusable workspace must not prevent
+    # Odin from starting and answering on Discord. Local commands then fail
+    # closed individually, with the same actionable error.
+    try:
+        from src.tools.workspace import WorkspaceError, provision_workspace, provisioning_hint
+
+        workspace = provision_workspace(
+            config.tools.local_working_dir,
+            protected_roots=_command_protected_roots(config),
+        )
+        log.info("Local command workspace ready: %s", workspace)
+    except WorkspaceError as exc:
+        log.error(
+            "Local command workspace unusable — local commands will refuse to run: %s. %s",
+            exc,
+            provisioning_hint(config.tools.local_working_dir),
+        )
+    except Exception as exc:  # never block startup on provisioning
+        log.error("Local command workspace provisioning failed unexpectedly: %s", exc)
+
     health = HealthServer(
         port=config.web.port,
         webhook_config=config.webhook,
@@ -280,3 +312,26 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def _command_protected_roots(config) -> list[str]:
+    """Install root plus canonical live-data roots, mirroring the executor.
+
+    Kept beside the startup migration so both the migration and the executor
+    protect the same directories; the executor derives its own at call time
+    from the same declared paths.
+    """
+    from pathlib import Path
+
+    roots = [str(Path(__file__).resolve().parents[1])]
+    declared = [
+        (getattr(config.tools, "audit_log_path", None), True),
+        (getattr(config.tools, "trajectory_path", None), False),
+        (getattr(getattr(config, "memory", None), "path", None), True),
+    ]
+    for configured, is_file in declared:
+        if not isinstance(configured, str) or not configured.strip():
+            continue
+        resolved = Path(configured.strip()).resolve()
+        roots.append(str(resolved.parent if is_file else resolved))
+    return roots

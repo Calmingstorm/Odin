@@ -921,51 +921,6 @@ async def test_background_workspace_refusal_is_visible_as_an_error(
     assert "mode" in result, "the operator still needs the reason"
 
 
-def test_self_update_preflight_provisions_before_committing(tmp_path: Path) -> None:
-    """PR #239 round-4 blocker 1, verified by Odin against the LIVE install:
-    the WebUI updater re-execs in place, so systemd never runs and
-    StateDirectory= never applies. Without a preflight, an update succeeds and
-    the first local command fails closed."""
-    from src.web.api.self_update import _ensure_local_workspace_for_update
-
-    target = tmp_path / "state" / "odin-workspace"
-    base = tmp_path / "install"
-    base.mkdir()
-    (base / "config.yml").write_text(
-        f"tools:\n  local_working_dir: {target}\n", encoding="utf-8"
-    )
-
-    assert _ensure_local_workspace_for_update(str(base)) is None
-    assert target.is_dir()
-    assert stat.S_IMODE(target.stat().st_mode) == 0o700
-    # Idempotent: a second update must not fail because it already exists.
-    assert _ensure_local_workspace_for_update(str(base)) is None
-
-
-def test_self_update_preflight_returns_actionable_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When it genuinely cannot provision, the updater must REFUSE with an
-    actionable message rather than transition to code that cannot work."""
-    import src.web.api.self_update as su
-
-    base = tmp_path / "install"
-    base.mkdir()
-    (base / "config.yml").write_text(
-        "tools:\n  local_working_dir: /proc/definitely-not-creatable/ws\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        su.subprocess,
-        "run",
-        lambda *a, **k: type("R", (), {"returncode": 1, "stdout": "", "stderr": "no sudo"})(),
-    )
-    message = su._ensure_local_workspace_for_update(str(base))
-    assert message is not None
-    assert "install -d -m 0700" in message
-
-
-
 def test_incus_deployment_path_provisions_the_workspace() -> None:
     """PR #239 round-4 blocker 2: Incus is an executable deployment path and
     was missed — its unprivileged odin user cannot create /var/lib/odin-workspace."""
@@ -977,112 +932,154 @@ def test_incus_deployment_path_provisions_the_workspace() -> None:
     assert "StateDirectoryMode=0700" in script
 
 
-def test_preflight_corrects_a_loose_mode_on_an_existing_workspace(
-    tmp_path: Path,
-) -> None:
-    """An update must not be refused because a previously-provisioned
-    workspace drifted to a loose mode — correct it and continue."""
-    from src.web.api.self_update import _ensure_local_workspace_for_update
+# --- round 5: one authoritative provisioner, and the bootstrap it must survive
+
+
+def _fake_bot(workspace: Path, install: Path):
+    """A bot-shaped object exposing only what the preflight reads."""
+    class _Tools:
+        local_working_dir = str(workspace)
+        audit_log_path = str(install / "data" / "audit.jsonl")
+        trajectory_path = str(install / "data" / "trajectories")
+
+    class _Config:
+        tools = _Tools()
+
+    class _Bot:
+        config = _Config()
+
+    return _Bot()
+
+
+def test_provision_workspace_is_the_single_contract(tmp_path: Path, fake_install: Path) -> None:
+    """provision_workspace creates AND fully validates, so no caller can accept
+    a workspace the runtime would reject."""
+    from src.tools.workspace import provision_workspace
 
     target = tmp_path / "ws"
-    target.mkdir(mode=0o755)
-    base = tmp_path / "install"
-    base.mkdir()
-    (base / "config.yml").write_text(
-        f"tools:\n  local_working_dir: {target}\n", encoding="utf-8"
-    )
-    assert _ensure_local_workspace_for_update(str(base)) is None
+    result = provision_workspace(str(target), protected_roots=[str(fake_install)])
+    assert result == target.resolve()
     assert stat.S_IMODE(target.stat().st_mode) == 0o700
 
 
-def test_preflight_tolerates_an_unreadable_config(tmp_path: Path) -> None:
-    """A malformed or unreadable config must not block the preflight — it falls
-    back to the schema default rather than refusing the update outright."""
+@pytest.mark.parametrize(
+    "case",
+    ["relative", "symlink", "inside_install", "wrong_owner"],
+    ids=["relative-path", "workspace-symlink", "inside-install", "wrong-owner"],
+)
+def test_provisioner_rejects_everything_the_runtime_rejects(
+    case: str, tmp_path: Path, fake_install: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #239 round-5 blocker 2: the updater had a SECOND, weaker contract and
+    accepted four things the runtime refuses. One implementation now serves
+    both, so these cannot diverge again."""
+    from src.tools.workspace import provision_workspace
+
+    if case == "relative":
+        monkeypatch.chdir(tmp_path)
+        configured = "relative-ws"
+    elif case == "symlink":
+        real = tmp_path / "real"
+        real.mkdir(mode=0o700)
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        configured = str(link)
+    elif case == "inside_install":
+        configured = str(fake_install / "ws")
+    else:
+        target = tmp_path / "owned-elsewhere"
+        target.mkdir(mode=0o700)
+        configured = str(target)
+
+    kwargs = {"protected_roots": [str(fake_install)], "allow_sudo": False}
+    if case == "wrong_owner":
+        kwargs["owner_uid"] = os.getuid() + 4242
+
+    with pytest.raises(WorkspaceError):
+        provision_workspace(configured, **kwargs)
+
+    if case == "inside_install":
+        assert not (fake_install / "ws").exists(), "must not create inside the install"
+    if case == "relative":
+        assert not (tmp_path / "relative-ws").exists(), "must not create a relative workspace"
+
+
+def test_startup_migration_provisions_before_commands_are_served() -> None:
+    """PR #239 round-5 blocker 1 — the bootstrap paradox.
+
+    The self-update preflight is NEW code, so the update that installs it is
+    executed by the PREVIOUS release's handler, which has no preflight. Only a
+    startup migration in the incoming code can bootstrap the workspace, because
+    that runs after re-exec however the update arrived.
+    """
+    main_src = (Path(__file__).resolve().parents[1] / "src/__main__.py").read_text(
+        encoding="utf-8"
+    )
+    assert "provision_workspace(" in main_src, "startup must provision the workspace"
+    provision_at = main_src.index("provision_workspace(")
+    bot_at = main_src.index("bot = OdinBot(config)")
+    config_at = main_src.index("config = load_config(config_path)")
+    assert config_at < provision_at < bot_at, (
+        "provisioning must run after the real config loads and before the bot "
+        "(and therefore command service) is constructed"
+    )
+    # Failure must not prevent Odin from starting and answering on Discord.
+    assert "never block startup" in main_src or "not fatal" in main_src
+
+
+def test_preflight_uses_the_live_config_not_a_reparsed_file(
+    tmp_path: Path, fake_install: Path
+) -> None:
+    """The preflight must validate the path the RESTARTED process will use.
+    Re-reading config.yml missed alternate config paths and environment
+    substitution, and could provision a different directory entirely."""
+    from src.web.api.self_update import _live_workspace_setting
+
+    workspace = tmp_path / "live-ws"
+    workspace.mkdir(mode=0o700)
+    bot = _fake_bot(workspace, fake_install)
+    assert _live_workspace_setting(bot) == str(workspace)
+
+
+async def test_preflight_refuses_a_workspace_the_runtime_would_reject(
+    fake_install: Path,
+) -> None:
+    """End-to-end: a workspace inside the install must be refused by the
+    preflight, and nothing may be created."""
     from src.web.api.self_update import _ensure_local_workspace_for_update
 
-    base = tmp_path / "install"
-    base.mkdir()
-    (base / "config.yml").write_text("tools: [not, a, mapping\n", encoding="utf-8")
-    # Resolves the schema default (a temp dir under the session fixture), so
-    # this succeeds rather than raising on the malformed YAML.
-    assert _ensure_local_workspace_for_update(str(base)) is None
-
-
-def test_preflight_accepts_a_sudo_provisioned_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Packaged installs run an unprivileged service account under a root-owned
-    /var/lib, so direct creation fails and the preflight falls back to sudo. A
-    successful sudo run must be accepted rather than reported as a failure."""
-    import os as _os
-
-    import src.web.api.self_update as su
-
-    target = tmp_path / "sudo-made" / "ws"
-    base = tmp_path / "install"
-    base.mkdir()
-    (base / "config.yml").write_text(
-        f"tools:\n  local_working_dir: {target}\n", encoding="utf-8"
-    )
-
-    # Direct creation fails, exactly as it does under a root-owned /var/lib.
-    def _refuse_mkdir(self: Path, *a: object, **k: object) -> None:
-        raise PermissionError("permission denied")
-
-    monkeypatch.setattr(Path, "mkdir", _refuse_mkdir)
-
-    def _fake_sudo(*_a: object, **_k: object) -> object:
-        _os.makedirs(target, mode=0o700, exist_ok=True)
-        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-
-    monkeypatch.setattr(su.subprocess, "run", _fake_sudo)
-    assert su._ensure_local_workspace_for_update(str(base)) is None
-    assert target.is_dir()
-
-
-
-def test_preflight_reports_an_uncorrectable_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """If an existing workspace has a loose mode that cannot be corrected, the
-    updater refuses with the reason rather than proceeding into code that will
-    reject it on the first command."""
-    from src.web.api.self_update import _ensure_local_workspace_for_update
-
-    target = tmp_path / "ws"
-    target.mkdir(mode=0o755)
-    base = tmp_path / "install"
-    base.mkdir()
-    (base / "config.yml").write_text(
-        f"tools:\n  local_working_dir: {target}\n", encoding="utf-8"
-    )
-
-    def _refuse_chmod(self: Path, mode: int) -> None:
-        raise OSError("read-only filesystem")
-
-    monkeypatch.setattr(Path, "chmod", _refuse_chmod)
-    message = _ensure_local_workspace_for_update(str(base))
+    target = fake_install / "ws-inside"
+    bot = _fake_bot(target, fake_install)
+    message = _ensure_local_workspace_for_update(bot, str(fake_install))
     assert message is not None
-    assert "mode could not be corrected" in message
-
-
-def test_preflight_survives_sudo_being_unavailable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """sudo may not exist at all; the preflight must return actionable guidance
-    rather than propagating the OSError out of the update handler."""
-    import src.web.api.self_update as su
-
-    base = tmp_path / "install"
-    base.mkdir()
-    (base / "config.yml").write_text(
-        "tools:\n  local_working_dir: /proc/nope/ws\n", encoding="utf-8"
-    )
-
-    def _no_sudo(*_a: object, **_k: object) -> object:
-        raise FileNotFoundError("sudo not installed")
-
-    monkeypatch.setattr(su.subprocess, "run", _no_sudo)
-    message = su._ensure_local_workspace_for_update(str(base))
-    assert message is not None
+    assert "overlap" in message
     assert "install -d -m 0700" in message
+    assert not target.exists(), "a refused preflight must not create anything"
+
+
+def test_preflight_falls_back_to_the_schema_default_without_a_bot(
+    tmp_path: Path,
+) -> None:
+    """Called without a live bot (or with one that cannot answer), the setting
+    still resolves to the schema default rather than guessing or crashing."""
+    from src.config.schema import ToolsConfig
+    from src.web.api.self_update import _live_workspace_setting
+
+    class _Broken:
+        @property
+        def config(self):  # noqa: ANN201 - deliberately raises
+            raise RuntimeError("bot not ready")
+
+    assert _live_workspace_setting(None) == ToolsConfig().local_working_dir
+    assert _live_workspace_setting(_Broken()) == ToolsConfig().local_working_dir
+
+
+def test_preflight_skips_validation_when_nothing_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no configured workspace at all there is nothing to validate, and
+    the update must not be blocked on a value that does not exist."""
+    import src.web.api.self_update as su
+
+    monkeypatch.setattr(su, "_live_workspace_setting", lambda _bot: "")
+    assert su._ensure_local_workspace_for_update(None, None) is None
