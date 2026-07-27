@@ -5,6 +5,7 @@ import contextvars
 import json
 import os
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -188,8 +189,11 @@ class ToolExecutor:
         # is what would restore the 2026-07-27 hazard.
         self._local_workspace: str | None = None
         self._local_workspace_resolved = False
-        # (monotonic_stamp, bytes, files) from the last workspace usage walk.
+        # (completed_at_monotonic, bytes, files) from the last usage walk,
+        # refreshed off-thread; the lock makes the refresh single-flight.
         self._workspace_usage_cache: tuple[float, float, float] | None = None
+        self._workspace_usage_refreshing = False
+        self._workspace_usage_lock = threading.Lock()
         self._memory_path = Path(memory_path) if memory_path else None
         self._browser_manager = browser_manager
         self._permission_manager = permission_manager
@@ -374,32 +378,22 @@ class ToolExecutor:
         except Exception:
             return {}
 
-        # The size/count walk is CACHED for WORKSPACE_METRICS_TTL. /metrics is
-        # unauthenticated and can be scraped at any rate, and this deliberately
-        # un-pruned directory only grows — walking every file synchronously on
-        # each request is an event-loop stall that gets worse over time
-        # (PR #239 round-9 review). Free space and inodes are cheap statvfs
-        # calls and stay live. On a stale-cache read the previous walk's
-        # numbers are reused; on the first-ever call the walk runs inline.
-        now = time.monotonic()
+        # The size/count walk NEVER runs on the calling thread. /metrics is
+        # unauthenticated and served on the event loop, and this directory
+        # deliberately never prunes, so a synchronous walk is a stall that only
+        # grows (PR #239 round-9/10 review). A stale cache triggers a
+        # single-flight background refresh and the previous numbers are served
+        # meanwhile; until the first refresh completes, usage is simply absent
+        # rather than blocking. The timestamp is recorded when the walk
+        # COMPLETES — stamping at the start makes a walk longer than the TTL
+        # instantly stale, so every scrape would launch another one.
+        self._refresh_workspace_usage(root)
         cached = getattr(self, "_workspace_usage_cache", None)
-        if cached is not None and (now - cached[0]) < WORKSPACE_METRICS_TTL:
-            total_bytes, files = cached[1], cached[2]
-        else:
-            total_bytes = 0.0
-            files = 0.0
-            try:
-                for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
-                    for name in filenames:
-                        files += 1
-                        try:
-                            total_bytes += os.lstat(os.path.join(dirpath, name)).st_size
-                        except OSError:
-                            pass
-            except OSError:
-                return {}
-            self._workspace_usage_cache = (now, total_bytes, files)
-        metrics = {"bytes": total_bytes, "files": files}
+        metrics: dict[str, float] = {}
+        if cached is not None:
+            metrics["bytes"], metrics["files"] = cached[1], cached[2]
+        # Cheap statvfs calls: these stay LIVE on every scrape, cached usage
+        # or not, because free space is the number an operator alerts on.
         try:
             usage = shutil.disk_usage(root)
             metrics["free_bytes"] = float(usage.free)
@@ -411,6 +405,51 @@ class ToolExecutor:
         except (OSError, AttributeError):
             pass
         return metrics
+
+    def _refresh_workspace_usage(self, root: Path) -> None:
+        """Start a single-flight background walk if the cache is stale.
+
+        Never blocks the caller. Never raises: metrics collection must not be
+        able to break anything, least of all the event loop it runs on.
+        """
+        cached = getattr(self, "_workspace_usage_cache", None)
+        if cached is not None and (time.monotonic() - cached[0]) < WORKSPACE_METRICS_TTL:
+            return
+        lock = getattr(self, "_workspace_usage_lock", None)
+        if lock is None:  # __new__ patch seam
+            return
+        with lock:
+            if self._workspace_usage_refreshing:
+                return
+            self._workspace_usage_refreshing = True
+
+        def _walk() -> None:
+            total_bytes = 0.0
+            files = 0.0
+            try:
+                for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+                    for name in filenames:
+                        files += 1
+                        try:
+                            total_bytes += os.lstat(os.path.join(dirpath, name)).st_size
+                        except OSError:
+                            pass
+            except OSError:
+                return
+            finally:
+                with lock:
+                    self._workspace_usage_refreshing = False
+            # Stamped on COMPLETION, so a long walk does not read as stale the
+            # moment it finishes.
+            self._workspace_usage_cache = (time.monotonic(), total_bytes, files)
+
+        try:
+            threading.Thread(
+                target=_walk, name="odin-workspace-usage", daemon=True
+            ).start()
+        except Exception:  # pragma: no cover - thread creation cannot realistically fail
+            with lock:
+                self._workspace_usage_refreshing = False
 
     def _ensure_local_workspace(self) -> str:
         """Resolve and re-validate the cwd for local user commands.

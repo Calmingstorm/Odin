@@ -109,20 +109,35 @@ _DECLARED_STATE_PATHS: tuple[tuple[str, bool], ...] = (
 )
 
 
-def _active_config_file() -> str | None:
-    """Absolute path the live config was loaded from, if any.
+def _active_config_roots() -> list[tuple[str, bool]]:
+    """Config file paths the live process depends on, if any.
+
+    BOTH the canonical target and the path as given on the command line: the
+    self-update re-exec replays ``sys.argv``, so an aliased config
+    (``/etc/odin/config.yml -> /srv/real/odin.yml``) needs its alias directory
+    protected too — deleting the alias breaks the next restart even though the
+    target survives (PR #239 round-10 review, reproduced).
 
     Imported lazily and guarded: workspace validation must never depend on the
     config module being importable, and a process that never loaded a config
     (tests, one-off scripts) has nothing to protect.
     """
     try:
-        from ..config.schema import active_config_path
+        from ..config.schema import active_config_launch_path, active_config_path
 
-        path = active_config_path()
+        canonical = active_config_path()
+        launch = active_config_launch_path()
     except Exception:  # pragma: no cover - defensive
-        return None
-    return str(path) if path else None
+        return []
+    roots: list[tuple[str, bool]] = []
+    if canonical:
+        roots.append((str(canonical), True))
+    if launch:
+        # As a DIRECTORY: the launch path's own parent, canonicalized. Treating
+        # it as a file would resolve the symlink and yield the target's
+        # directory again — the alias directory is the one re-exec reopens.
+        roots.append((str(Path(launch).parent), False))
+    return roots
 
 
 def _dotted(source: object, path: str) -> object:
@@ -179,7 +194,7 @@ def command_protected_roots(
     # too, or a bare relative command can delete the file needed to restart —
     # reproduced with an alternate config whose parent WAS the configured
     # workspace (PR #239 round-9 review).
-    declared.append((_active_config_file(), True))
+    declared.extend(_active_config_roots())
 
     for configured, is_file in declared:
         if configured is None:

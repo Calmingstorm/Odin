@@ -25,9 +25,12 @@ import os
 import stat
 import subprocess
 import sys
+import threading
+import time
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -728,6 +731,21 @@ def test_leaf_symlinked_data_paths_protect_the_target(tmp_path: Path) -> None:
 # --- workspace growth metrics (the operational half of "no auto-prune") -----
 
 
+def _metrics_after_refresh(executor, timeout: float = 5.0) -> dict[str, float]:
+    """Scrape, wait for the off-thread usage walk, scrape again.
+
+    Usage is refreshed in the background since round 10 — /metrics is served on
+    the event loop and this directory never prunes, so the walk must not run on
+    the calling thread. Tests that assert on usage therefore have to let the
+    refresh land.
+    """
+    executor.get_workspace_metrics()
+    deadline = time.monotonic() + timeout
+    while executor._workspace_usage_cache is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return executor.get_workspace_metrics()
+
+
 def test_workspace_metrics_report_usage(workspace: Path, fake_install: Path) -> None:
     """No automatic pruning was always paired with observability, so growth is
     alertable and cleanup stays an explicit operator action."""
@@ -736,7 +754,7 @@ def test_workspace_metrics_report_usage(workspace: Path, fake_install: Path) -> 
     (workspace / "nested").mkdir()
     (workspace / "nested" / "more.txt").write_text("hello", encoding="utf-8")
 
-    metrics = executor.get_workspace_metrics()
+    metrics = _metrics_after_refresh(executor)
     assert metrics["files"] == 2
     assert metrics["bytes"] >= 2048
     assert metrics["free_bytes"] > 0
@@ -758,6 +776,7 @@ def test_workspace_gauges_render_for_prometheus(
 
     executor = _executor_with_workspace(workspace, fake_install)
     (workspace / "f").write_bytes(b"12345")
+    _metrics_after_refresh(executor)  # let the background usage walk land
     collector = MetricsCollector()
     collector.register_source("workspace", executor.get_workspace_metrics)
     rendered = collector.render()
@@ -830,6 +849,9 @@ def test_workspace_metrics_degrade_when_filesystem_stats_fail(
 
     def _fail_statvfs(_path: object) -> object:
         raise OSError("statvfs unavailable")
+
+    metrics = _metrics_after_refresh(executor)  # usage lands before we break statfs
+    assert metrics["bytes"] == 3 and metrics["files"] == 1
 
     monkeypatch.setattr(_shutil, "disk_usage", _fail_usage)
     monkeypatch.setattr(os, "statvfs", _fail_statvfs)
@@ -1684,42 +1706,29 @@ def test_no_active_config_protects_nothing_extra(tmp_path: Path) -> None:
         set_active_config_path(previous)
 
 
-def test_workspace_usage_walk_is_cached_between_metrics_scrapes(
-    fake_install: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
+def test_repeated_scrapes_inside_the_ttl_do_not_re_walk(
+    fake_install: Path, workspace: Path
 ) -> None:
-    """/metrics is unauthenticated and this directory deliberately never
-    prunes, so walking every file per scrape is an event-loop stall that grows
-    without bound (PR #239 round-9 review). Free space stays live; the walk is
-    reused for WORKSPACE_METRICS_TTL.
-    """
-    import src.tools.executor as executor_module
-
+    """A scrape loop must not walk continuously. /metrics is unauthenticated,
+    and the workspace deliberately never prunes."""
     executor = _executor_with_workspace(workspace, fake_install)
     (workspace / "one").write_text("x" * 10, encoding="utf-8")
 
     walks = 0
-    real_walk = executor_module.os.walk
+    real_walk = os.walk
 
     def counting_walk(*args, **kwargs):
         nonlocal walks
         walks += 1
         return real_walk(*args, **kwargs)
 
-    monkeypatch.setattr(executor_module.os, "walk", counting_walk)
+    with patch("src.tools.executor.os.walk", counting_walk):
+        _metrics_after_refresh(executor)
+        assert walks == 1
+        for _ in range(5):
+            executor.get_workspace_metrics()
+        assert walks == 1, "scrapes inside the TTL must reuse the cached walk"
 
-    first = executor.get_workspace_metrics()
-    assert first["files"] == 1 and walks == 1
-
-    (workspace / "two").write_text("y" * 10, encoding="utf-8")
-    second = executor.get_workspace_metrics()
-    assert walks == 1, "a second scrape inside the TTL must not re-walk"
-    assert second["files"] == 1, "the cached count is served"
-    assert "free_bytes" in second, "cheap statvfs metrics stay live"
-
-    # Past the TTL the walk runs again and picks up the new file.
-    monkeypatch.setattr(executor_module, "WORKSPACE_METRICS_TTL", 0.0)
-    third = executor.get_workspace_metrics()
-    assert walks == 2 and third["files"] == 2
 
 
 # --- The complete set of local-execution routes, held closed -----------------
@@ -1818,3 +1827,287 @@ def test_every_local_execution_route_is_classified() -> None:
 
     stale = declared - actual
     assert not stale, f"no longer spawn processes; drop from the table: {sorted(stale)}"
+
+
+def test_wiring_hardcoded_state_paths_are_all_covered(tmp_path: Path) -> None:
+    """The third leg of the protected-root surface.
+
+    Config-declared paths are held by the exhaustive table, and the active
+    config file is handled as runtime state — but wiring also hardcodes a set
+    of live-state paths (learned, channel config and logs, host access, skills,
+    schedules, audit, API tokens). They are covered today because they sit
+    beside memory.json under ./data, whose parent IS protected. This asserts
+    that rather than assuming it, so relocating one out of ./data without
+    declaring it fails here instead of silently losing protection.
+    """
+    import ast
+
+    from src.tools.workspace import command_protected_roots
+
+    repo = Path(__file__).resolve().parents[1]
+    tree = ast.parse((repo / "src" / "discord" / "wiring.py").read_text(encoding="utf-8"))
+    hardcoded = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.startswith("./data/")
+    }
+    assert len(hardcoded) >= 8, f"expected wiring's data paths, found {sorted(hardcoded)}"
+
+    roots = [Path(r) for r in command_protected_roots(tmp_path / "install")]
+    for raw in sorted(hardcoded):
+        resolved = Path(raw).expanduser().resolve()
+        covered = any(resolved == root or root in resolved.parents for root in roots)
+        assert covered, (
+            f"{raw} is live state that no protected root covers — declare it in "
+            "_DECLARED_STATE_PATHS or keep it under the protected data directory"
+        )
+
+
+# --- Every _exec_command / _run_on_host CALLER classified --------------------
+
+# The route-classification test above covers where processes are SPAWNED. This
+# covers who ASKS for one, which is the axis Odin's round-10 review found twice
+# (validate_action and write_file both reached the install cwd through the
+# shared helpers). A call site is either a raw user-command route that opts
+# into the workspace, or it must say why it does not.
+_CLASSIFIED_COMMAND_CALLERS: dict[tuple[str, str], str] = {
+    # --- opt in: arbitrary user-supplied command text -----------------------
+    ("src/tools/handlers/system.py", "_handle_run_command"): "WORKSPACE",
+    ("src/tools/handlers/system.py", "_handle_run_script"): "WORKSPACE",
+    ("src/tools/handlers/system.py", "_run_one"): "WORKSPACE",  # run_command_multi
+    ("src/tools/handlers/validation.py", "_exec"): "WORKSPACE",
+    ("src/tools/skill_context.py", "run_on_host"): "WORKSPACE",
+    # --- do not: fixed command shapes with caller-supplied absolute paths ----
+    ("src/tools/handlers/devops.py", "_handle_git_ops"): "documented repo default is the cwd",
+    ("src/tools/handlers/devops.py", "_handle_kubectl"): "fixed kubectl argv",
+    ("src/tools/handlers/devops.py", "_handle_docker_ops"): "docker build context is caller-given",
+    ("src/tools/handlers/devops.py", "_handle_terraform_ops"): "terraform working_dir is explicit",
+    ("src/tools/handlers/coding.py", "_handle_claude_code"): "claude_code has its own cwd config",
+    ("src/tools/handlers/browser_web.py", "_handle_http_probe"): "fixed curl argv",
+    ("src/tools/handlers/files_docs.py", "_handle_read_file"): "reads a caller-given path",
+    ("src/tools/handlers/files_docs.py", "_handle_write_file"): "absolute path enforced",
+    ("src/tools/handlers/files_docs.py", "_handle_analyze_pdf"): "reads a caller-given path",
+    ("src/discord/native_tools/media.py", "_handle_analyze_image"): "base64 of a given path",
+    ("src/audit/diff_tracker.py", "capture_before"): "cat of a governed absolute path",
+    # --- plumbing -----------------------------------------------------------
+    ("src/tools/executor.py", "_run_on_host"): "the shared helper itself",
+    ("src/tools/executor.py", "__init__"): "HandlerDeps lambdas forwarding **kwargs",
+}
+
+
+def _command_call_sites() -> dict[tuple[str, str], bool]:
+    """(file, enclosing function) -> whether it passes use_workspace=True."""
+    import ast
+
+    repo = Path(__file__).resolve().parents[1]
+    sites: dict[tuple[str, str], bool] = {}
+    for path in sorted((repo / "src").rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover
+            continue
+        parents: dict[ast.AST, ast.AST] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute):
+                continue
+            if func.attr not in {"_exec_command", "_run_on_host"}:
+                continue
+            enclosing = "<module>"
+            walker: ast.AST | None = node
+            while walker is not None:
+                if isinstance(walker, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    enclosing = walker.name
+                    break
+                walker = parents.get(walker)
+            opts_in = any(
+                kw.arg == "use_workspace"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value is True
+                for kw in node.keywords
+            )
+            key = (str(path.relative_to(repo)), enclosing)
+            sites[key] = sites.get(key, False) or opts_in
+    return sites
+
+
+def test_every_command_caller_is_classified() -> None:
+    """Round-10 regression, both blockers of that shape at once.
+
+    validate_action and write_file each reached Odin's install directory
+    through these shared helpers because nobody had decided what they were.
+    Adding a new call site now fails until it is classified, and flipping an
+    existing one's opt-in fails too.
+    """
+    actual = _command_call_sites()
+    declared = set(_CLASSIFIED_COMMAND_CALLERS)
+
+    unclassified = set(actual) - declared
+    assert not unclassified, (
+        f"unclassified command call sites: {sorted(unclassified)} — decide whether "
+        "each is a raw user-command route (use_workspace=True) or record why not"
+    )
+    stale = declared - set(actual)
+    assert not stale, f"no longer call the helpers; drop from the table: {sorted(stale)}"
+
+    for key, expected in _CLASSIFIED_COMMAND_CALLERS.items():
+        should_opt_in = expected == "WORKSPACE"
+        assert actual[key] is should_opt_in, (
+            f"{key[0]}::{key[1]} use_workspace={actual[key]}, expected {should_opt_in} "
+            f"({expected})"
+        )
+
+
+async def test_validate_action_command_check_runs_in_the_workspace(
+    fake_install: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-10 blocker 1, reproduced by Odin through the real dispatch: a
+    command check is user-supplied command text, so it can replay the same
+    relative-path mechanism."""
+    monkeypatch.chdir(fake_install)
+    executor = _executor_with_workspace(workspace, fake_install)
+
+    await executor.execute("validate_action", {
+        "host": "localhost",
+        "checks": [{"type": "command", "target": "touch from-validate"}],
+    })
+    assert (workspace / "from-validate").exists(), "the check ran in the workspace"
+    assert not (fake_install / "from-validate").exists(), "and NOT in the install"
+
+
+async def test_validate_action_fails_closed_on_an_invalid_workspace(
+    fake_install: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same fail-closed contract as every other raw command route."""
+    monkeypatch.chdir(fake_install)
+    executor = _executor_with_workspace(tmp_path / "no-parent" / "ws", fake_install)
+
+    result = await executor.execute("validate_action", {
+        "host": "localhost",
+        "checks": [{"type": "command", "target": "touch should-not-run"}],
+    })
+    assert not (fake_install / "should-not-run").exists()
+    assert not (workspace_leaked := (tmp_path / "should-not-run")).exists(), workspace_leaked
+    assert result is not None
+
+
+@pytest.mark.parametrize("relative", ["notes.md", "./notes.md", "data/notes.md"])
+async def test_write_file_rejects_relative_paths(
+    fake_install: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    """Round-10 blocker 4, reproduced by Odin: the schema documents an absolute
+    path but nothing enforced it, so a relative one wrote into the install."""
+    monkeypatch.chdir(fake_install)
+    executor = _executor_with_workspace(workspace, fake_install)
+
+    result = await executor.execute("write_file", {
+        "host": "localhost", "path": relative, "content": "x",
+    })
+    assert not result.ok
+    assert "absolute path" in str(result.output)
+    assert not (fake_install / relative).exists(), "nothing may be written to the install"
+
+
+async def test_write_file_still_accepts_absolute_paths(
+    fake_install: Path, workspace: Path, tmp_path: Path
+) -> None:
+    """The documented capability is untouched."""
+    executor = _executor_with_workspace(workspace, fake_install)
+    target = tmp_path / "written.txt"
+    result = await executor.execute("write_file", {
+        "host": "localhost", "path": str(target), "content": "hello",
+    })
+    assert result.ok, result.output
+    assert target.read_text(encoding="utf-8").strip() == "hello"
+
+
+def test_aliased_config_protects_both_the_alias_and_the_target(tmp_path: Path) -> None:
+    """Round-10 blocker 2, reproduced by Odin.
+
+    set_active_config_path canonicalizes, but restart.reexec replays sys.argv —
+    so the launch path is what the next process opens. Deleting the alias
+    breaks the restart even though the target survives.
+    """
+    from src.config.schema import active_config_path, set_active_config_path
+    from src.tools.workspace import command_protected_roots
+
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    real_file = real_dir / "odin.yml"
+    real_file.write_text("discord:\n  token: fake\n", encoding="utf-8")
+    alias_dir = tmp_path / "alias"
+    alias_dir.mkdir()
+    (alias_dir / "odin.yml").symlink_to(real_file)
+
+    previous = active_config_path()
+    set_active_config_path(alias_dir / "odin.yml")
+    try:
+        roots = command_protected_roots(tmp_path / "install")
+        assert str(real_dir.resolve()) in roots, "canonical target"
+        assert str(alias_dir.resolve()) in roots, "launch path re-exec will reopen"
+        with pytest.raises(WorkspaceError, match="overlap"):
+            provision_workspace(str(alias_dir), protected_roots=roots)
+    finally:
+        set_active_config_path(previous)
+
+
+def test_workspace_usage_is_never_walked_on_the_calling_thread(
+    fake_install: Path, workspace: Path
+) -> None:
+    """Round-10 metrics correction: /metrics is served on the event loop, so
+    the walk must happen off-thread, and free space must stay live even when
+    usage is served from cache."""
+    executor = _executor_with_workspace(workspace, fake_install)
+    (workspace / "one").write_text("x" * 10, encoding="utf-8")
+
+    calling_thread = threading.get_ident()
+    walk_threads: list[int] = []
+    real_walk = os.walk
+
+    def recording_walk(*args, **kwargs):
+        walk_threads.append(threading.get_ident())
+        return real_walk(*args, **kwargs)
+
+    with patch("src.tools.executor.os.walk", recording_walk):
+        first = executor.get_workspace_metrics()
+        # Free space is live from the very first scrape, with no walk yet.
+        assert "free_bytes" in first and "free_inodes" in first
+        deadline = time.monotonic() + 5
+        while executor._workspace_usage_cache is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+    assert walk_threads, "the refresh never ran"
+    assert calling_thread not in walk_threads, "the walk must not block the caller"
+
+    second = executor.get_workspace_metrics()
+    assert second["files"] == 1 and second["bytes"] >= 10
+    assert "free_bytes" in second and "free_inodes" in second, "cheap metrics stay live"
+
+
+def test_workspace_usage_timestamp_is_recorded_on_completion(
+    fake_install: Path, workspace: Path
+) -> None:
+    """Stamping at the START would make any walk longer than the TTL stale the
+    instant it finished, so every scrape would launch another one."""
+    executor = _executor_with_workspace(workspace, fake_install)
+    started = time.monotonic()
+
+    def slow_walk(*args, **kwargs):
+        time.sleep(0.3)
+        return iter(())
+
+    with patch("src.tools.executor.os.walk", slow_walk):
+        executor.get_workspace_metrics()
+        deadline = time.monotonic() + 5
+        while executor._workspace_usage_cache is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+    stamped_at = executor._workspace_usage_cache[0]
+    assert stamped_at >= started + 0.3, "the stamp must be taken after the walk finished"

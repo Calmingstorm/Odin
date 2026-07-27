@@ -17,7 +17,7 @@ from pathlib import Path
 from aiohttp import web
 
 from ... import restart
-from ...config.schema import Config
+from ...config.schema import Config, active_config_path
 from ...odin_log import get_logger
 from ...setup_wizard import (
     build_config,
@@ -387,7 +387,13 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         # pre-normalized merge, so fields removed from the schema (a legacy
         # model_routing block, auxiliary tasks/max_tokens/credentials_path)
         # can't linger on disk after runtime has dropped them.
-        config_path = Path("config.yml")
+        # The ACTIVE config, not whatever config.yml sits in the cwd: Odin can
+        # be launched with `python -m src /somewhere/odin.yml`, and writing to
+        # the wrong file meant a change appeared in live config and in the
+        # self-update preflight but vanished on re-exec — contradicting the
+        # preflight's contract that it validates what the restarted process
+        # will use (PR #239 round-10 review). llm_admin already does this.
+        config_path = active_config_path() or Path("config.yml")
         if config_path.exists():
             try:
                 await asyncio.to_thread(_write_config, config_path, new_config.model_dump())

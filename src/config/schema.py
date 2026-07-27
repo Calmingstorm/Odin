@@ -905,6 +905,18 @@ def _substitute_env_vars(text: str) -> str:
 # (a test or one-off script that never called load_config) cannot silently
 # overwrite a real deployment's config.yml from the wrong working directory.
 _ACTIVE_CONFIG_PATH: Path | None = None
+# The path AS GIVEN (absolutized, symlinks intact). restart.reexec() replays
+# sys.argv, so an alias like /etc/odin/config.yml -> /srv/real/odin.yml is what
+# the restarted process opens — protecting only the canonical target would let
+# a relative command delete the alias and break the next restart (PR #239
+# round-10 review, reproduced).
+_LAUNCH_CONFIG_PATH: Path | None = None
+
+
+def active_config_launch_path() -> Path | None:
+    """The config path as given on the command line, absolutized but with
+    symlinks intact — what ``restart.reexec()`` will hand the next process."""
+    return _LAUNCH_CONFIG_PATH
 
 
 def active_config_path() -> Path | None:
@@ -917,8 +929,9 @@ def set_active_config_path(path: str | Path | None) -> None:
     """Record (or clear) the active config path. ``load_config`` calls this on a
     successful load; tests/tools that persist a hand-built Config point it at
     their own file."""
-    global _ACTIVE_CONFIG_PATH
+    global _ACTIVE_CONFIG_PATH, _LAUNCH_CONFIG_PATH
     _ACTIVE_CONFIG_PATH = Path(path).resolve() if path is not None else None
+    _LAUNCH_CONFIG_PATH = Path(os.path.abspath(path)) if path is not None else None
 
 
 def load_config(path: str | Path = "config.yml") -> Config:

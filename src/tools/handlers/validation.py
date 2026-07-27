@@ -61,7 +61,13 @@ class ValidationTools(HandlerBase):
                     return 1, f"validate_action: governor check raised {type(ge).__name__}: {ge}"
                 if not decision.allowed:
                     return 1, f"governor-blocked: {decision.denial_message()}"
-            return await self._exec_command(address, command, ssh_user, timeout=timeout)
+            # use_workspace=True: command checks execute user-supplied command
+            # text, which makes this a raw command route like run_command — it
+            # was still inheriting the install cwd and could replay the
+            # relative-path wipe (PR #239 round-10 review, reproduced).
+            return await self._exec_command(
+                address, command, ssh_user, timeout=timeout, use_workspace=True
+            )
 
         report = await run_bundle(
             raw_checks,

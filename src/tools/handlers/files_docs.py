@@ -46,6 +46,18 @@ class FilesDocsTools(HandlerBase):
             return "Error: 'content' is required for write_file."
         if not host:
             return "Error: 'host' is required for write_file."
+        # The schema documents this path as absolute, but nothing enforced it,
+        # so a relative path silently resolved against Odin's install directory
+        # and wrote there (PR #239 round-10 review, reproduced). Rejecting is
+        # better than quietly redirecting into the workspace: a write whose
+        # destination the caller did not choose is its own hazard, and no
+        # documented capability is lost.
+        if not str(path).startswith("/"):
+            return (
+                f"Error: write_file requires an absolute path, got {path!r}. "
+                "A relative path would resolve against Odin's working directory "
+                "rather than where you intend."
+            )
         safe_path = shlex.quote(path)
         # Govern the write before executing — write_file reaches the filesystem
         # via _run_on_host, which does NOT itself govern. Check a representative
