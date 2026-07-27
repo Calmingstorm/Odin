@@ -1877,7 +1877,9 @@ _CLASSIFIED_COMMAND_CALLERS: dict[tuple[str, str], str] = {
     ("src/tools/handlers/system.py", "_handle_run_command"): "WORKSPACE",
     ("src/tools/handlers/system.py", "_handle_run_script"): "WORKSPACE",
     ("src/tools/handlers/system.py", "_run_one"): "WORKSPACE",  # run_command_multi
-    ("src/tools/handlers/validation.py", "_exec"): "WORKSPACE",
+    # CONDITIONAL: forwards run_bundle's per-check decision — command
+    # checks opt in, fixed-shape probes keep process cwd (round 11).
+    ("src/tools/handlers/validation.py", "_exec"): "CONDITIONAL",
     ("src/tools/skill_context.py", "run_on_host"): "WORKSPACE",
     # --- do not: fixed command shapes with caller-supplied absolute paths ----
     ("src/tools/handlers/devops.py", "_handle_git_ops"): "documented repo default is the cwd",
@@ -1892,13 +1894,19 @@ _CLASSIFIED_COMMAND_CALLERS: dict[tuple[str, str], str] = {
     ("src/discord/native_tools/media.py", "_handle_analyze_image"): "base64 of a given path",
     ("src/audit/diff_tracker.py", "capture_before"): "cat of a governed absolute path",
     # --- plumbing -----------------------------------------------------------
-    ("src/tools/executor.py", "_run_on_host"): "the shared helper itself",
+    ("src/tools/executor.py", "_run_on_host"): "CONDITIONAL",  # forwards its caller's decision
     ("src/tools/executor.py", "__init__"): "HandlerDeps lambdas forwarding **kwargs",
 }
 
 
-def _command_call_sites() -> dict[tuple[str, str], bool]:
-    """(file, enclosing function) -> whether it passes use_workspace=True."""
+def _command_call_sites() -> dict[tuple[str, str], list[str]]:
+    """(file, enclosing function) -> category of EVERY call, in order.
+
+    Per call, not per function: an OR over a function's calls let an opted-in
+    function silently gain a second, unopted call (PR #239 round-11 review).
+    Categories: "true" (constant opt-in), "dynamic" (forwards a decision made
+    upstream), "none" (no opt-in).
+    """
     import ast
 
     repo = Path(__file__).resolve().parents[1]
@@ -1927,14 +1935,18 @@ def _command_call_sites() -> dict[tuple[str, str], bool]:
                     enclosing = walker.name
                     break
                 walker = parents.get(walker)
-            opts_in = any(
-                kw.arg == "use_workspace"
-                and isinstance(kw.value, ast.Constant)
-                and kw.value.value is True
-                for kw in node.keywords
-            )
+            category = "none"
+            for kw in node.keywords:
+                if kw.arg != "use_workspace":
+                    continue
+                if isinstance(kw.value, ast.Constant):
+                    category = "true" if kw.value.value is True else "none"
+                else:
+                    # A forwarded variable/attribute: the decision is made
+                    # upstream (run_bundle's per-check flag).
+                    category = "dynamic"
             key = (str(path.relative_to(repo)), enclosing)
-            sites[key] = sites.get(key, False) or opts_in
+            sites.setdefault(key, []).append(category)
     return sites
 
 
@@ -1958,11 +1970,22 @@ def test_every_command_caller_is_classified() -> None:
     assert not stale, f"no longer call the helpers; drop from the table: {sorted(stale)}"
 
     for key, expected in _CLASSIFIED_COMMAND_CALLERS.items():
-        should_opt_in = expected == "WORKSPACE"
-        assert actual[key] is should_opt_in, (
-            f"{key[0]}::{key[1]} use_workspace={actual[key]}, expected {should_opt_in} "
-            f"({expected})"
-        )
+        calls = actual[key]
+        if expected == "WORKSPACE":
+            assert calls and all(c == "true" for c in calls), (
+                f"{key[0]}::{key[1]}: every call must opt in, got {calls} — a new "
+                "call in an opted-in function must not ride its neighbours' opt-in"
+            )
+        elif expected == "CONDITIONAL":
+            assert calls and all(c == "dynamic" for c in calls), (
+                f"{key[0]}::{key[1]}: every call must forward the upstream "
+                f"decision, got {calls}"
+            )
+        else:
+            assert all(c == "none" for c in calls), (
+                f"{key[0]}::{key[1]} is classified as NOT a command route "
+                f"({expected}) but a call passes use_workspace: {calls}"
+            )
 
 
 async def test_validate_action_command_check_runs_in_the_workspace(
@@ -2260,3 +2283,88 @@ def test_tracked_config_template_documents_the_workspace() -> None:
     assert parsed["tools"]["local_working_dir"] == DEFAULT_LOCAL_WORKING_DIR, (
         "the template must not drift from the schema default"
     )
+
+
+# --- Round 11: per-check-type workspace, and symlinked launch ancestors ------
+
+
+async def test_fixed_shape_validation_checks_survive_an_unusable_workspace(
+    fake_install: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-11 blocker 1, reproduced by Odin: opting the WHOLE validate_action
+    exec callback into the workspace made every check type depend on it —
+    an unusable workspace stopped service/process/http/port probes that are
+    fixed command shapes, not raw user commands. The narrowed scope is:
+    an invalid workspace disables raw user-command routes ONLY.
+    """
+    monkeypatch.chdir(fake_install)
+    executor = _executor_with_workspace(tmp_path / "no-parent" / "ws", fake_install)
+
+    result = await executor.execute("validate_action", {
+        "host": "localhost",
+        "checks": [
+            # Fixed-shape probes: must EXECUTE despite the broken workspace.
+            {"type": "process", "target": "init", "severity": "warn"},
+            {"type": "port", "target": "1", "severity": "warn"},
+            # Raw user command text: must fail closed, visibly.
+            {"type": "command", "target": "touch should-not-run"},
+        ],
+    })
+    report = str(result.output)
+    assert "local_working_dir" in report, "the command check must fail closed, visibly"
+    # The probes produced real pass/fail verdicts rather than workspace errors:
+    # exactly one check errored (the command one).
+    assert report.count("local_working_dir") == 1, report
+    assert not (fake_install / "should-not-run").exists()
+
+
+async def test_command_checks_still_run_in_the_workspace_when_it_is_valid(
+    fake_install: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other side of the round-11 narrowing: conditional must not mean
+    never — type=command checks keep the round-10 behaviour."""
+    monkeypatch.chdir(fake_install)
+    executor = _executor_with_workspace(workspace, fake_install)
+    await executor.execute("validate_action", {
+        "host": "localhost",
+        "checks": [{"type": "command", "target": "touch from-conditional"}],
+    })
+    assert (workspace / "from-conditional").exists()
+    assert not (fake_install / "from-conditional").exists()
+
+
+def test_symlinked_ancestor_of_the_launch_config_is_protected(tmp_path: Path) -> None:
+    """Round-11 blocker 2, reproduced by Odin.
+
+    Round 10 protected a symlinked config FILE; a symlinked DIRECTORY earlier
+    in the launch path (ws/cfg -> real/) still canonicalized onto the target,
+    so a workspace at ws/ was accepted and a relative `rm -rf cfg` would
+    remove the path restart.reexec() replays while the canonical target
+    survived. The launch-side parent is now kept lexical.
+    """
+    from src.config.schema import active_config_path, set_active_config_path
+    from src.tools.workspace import command_protected_roots
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "odin.yml").write_text("discord:\n  token: fake\n", encoding="utf-8")
+    ws = tmp_path / "ws"
+    ws.mkdir(mode=0o700)
+    (ws / "cfg").symlink_to(real, target_is_directory=True)
+
+    previous = active_config_path()
+    set_active_config_path(ws / "cfg" / "odin.yml")
+    try:
+        roots = command_protected_roots(tmp_path / "install")
+        assert str(real.resolve()) in roots, "canonical target still protected"
+        assert str(ws / "cfg") in roots, "the LEXICAL launch parent must survive"
+
+        # The workspace containing the alias component is rejected...
+        with pytest.raises(WorkspaceError, match="overlap"):
+            provision_workspace(str(ws), protected_roots=roots)
+        # ...and so is a workspace that IS the alias target reached lexically.
+        with pytest.raises(WorkspaceError, match="overlap"):
+            provision_workspace(str(ws / "cfg" / "sub"), protected_roots=roots)
+        assert not (real / "sub").exists()
+    finally:
+        set_active_config_path(previous)

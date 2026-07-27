@@ -15,7 +15,7 @@ class TestValidateActionEndToEnd:
 
     @pytest.mark.asyncio
     async def test_full_pipeline_mixed_severity(self):
-        async def fake_exec(addr, cmd, user, *, timeout):
+        async def fake_exec(addr, cmd, user, *, timeout, use_workspace=False):
             if "curl" in cmd:
                 return (0, "200")
             if "systemctl is-active" in cmd:

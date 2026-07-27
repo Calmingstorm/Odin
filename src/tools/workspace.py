@@ -72,11 +72,16 @@ def _reject_overlap(
 ) -> None:
     """Raise if ``workspace`` overlaps any protected root, in either direction."""
     for root in protected_roots or []:
-        canonical_root = _canonical(root)
-        if _overlaps(workspace, canonical_root):
-            raise WorkspaceError(
-                f"local_working_dir must not overlap {canonical_root}: {workspace}"
-            )
+        # BOTH spellings: lexical-absolute (as given) and canonical (symlinks
+        # resolved). For ordinary roots they coincide; for the deliberately-
+        # lexical launch-path root they do not, and resolving it here would
+        # collapse the alias back onto its target and un-protect the component
+        # the restart traverses (PR #239 round-11 review).
+        for candidate in {Path(os.path.abspath(root)), _canonical(root)}:
+            if _overlaps(workspace, candidate):
+                raise WorkspaceError(
+                    f"local_working_dir must not overlap {candidate}: {workspace}"
+                )
 
 
 # Live-state paths declared by the FULL configuration, with their DECLARED
@@ -109,14 +114,21 @@ _DECLARED_STATE_PATHS: tuple[tuple[str, bool], ...] = (
 )
 
 
-def _active_config_roots() -> list[tuple[str, bool]]:
-    """Config file paths the live process depends on, if any.
+def _active_config_roots() -> list[str]:
+    """Directory roots the live config depends on, as FINAL root strings.
 
-    BOTH the canonical target and the path as given on the command line: the
-    self-update re-exec replays ``sys.argv``, so an aliased config
-    (``/etc/odin/config.yml -> /srv/real/odin.yml``) needs its alias directory
-    protected too — deleting the alias breaks the next restart even though the
-    target survives (PR #239 round-10 review, reproduced).
+    Two spellings, deliberately different in kind:
+
+    - the CANONICAL target's directory (symlinks fully resolved), so the real
+      file is protected wherever any alias points;
+    - the LAUNCH path's parent kept LEXICAL — absolutized but with symlinks
+      NOT resolved — because ``restart.reexec()`` replays ``sys.argv``. With a
+      symlinked ancestor component (``workspace/cfg -> real/``, launched as
+      ``workspace/cfg/odin.yml``), canonicalizing the parent collapses it onto
+      ``real`` and leaves the component the restart actually traverses
+      unprotected: a workspace-relative ``rm -rf cfg`` breaks the next re-exec
+      while the canonical target survives (PR #239 round-11 review,
+      reproduced; round 10 had only handled a symlinked leaf FILE).
 
     Imported lazily and guarded: workspace validation must never depend on the
     config module being importable, and a process that never loaded a config
@@ -129,14 +141,14 @@ def _active_config_roots() -> list[tuple[str, bool]]:
         launch = active_config_launch_path()
     except Exception:  # pragma: no cover - defensive
         return []
-    roots: list[tuple[str, bool]] = []
+    roots: list[str] = []
     if canonical:
-        roots.append((str(canonical), True))
+        roots.append(str(_canonical(canonical).parent))
     if launch:
-        # As a DIRECTORY: the launch path's own parent, canonicalized. Treating
-        # it as a file would resolve the symlink and yield the target's
-        # directory again — the alias directory is the one re-exec reopens.
-        roots.append((str(Path(launch).parent), False))
+        # os.path.abspath normalizes WITHOUT resolving symlinks — that is the
+        # point. (active_config_launch_path already stores an abspath; applied
+        # again here defensively, it is idempotent.)
+        roots.append(str(Path(os.path.abspath(launch)).parent))
     return roots
 
 
@@ -194,7 +206,9 @@ def command_protected_roots(
     # too, or a bare relative command can delete the file needed to restart —
     # reproduced with an alternate config whose parent WAS the configured
     # workspace (PR #239 round-9 review).
-    declared.extend(_active_config_roots())
+    for config_root in _active_config_roots():
+        if config_root not in roots:
+            roots.append(config_root)
 
     for configured, is_file in declared:
         if configured is None:

@@ -42,7 +42,12 @@ class ValidationTools(HandlerBase):
         governor = getattr(self, "command_governor", None)
 
         async def _exec(
-            address: str, command: str, ssh_user: str, *, timeout: int
+            address: str,
+            command: str,
+            ssh_user: str,
+            *,
+            timeout: int,
+            use_workspace: bool = False,
         ) -> tuple[int, str]:
             # Never mutate shared state here — concurrent checks would race.
             # _exec_command accepts a per-call timeout, which is honored
@@ -61,12 +66,13 @@ class ValidationTools(HandlerBase):
                     return 1, f"validate_action: governor check raised {type(ge).__name__}: {ge}"
                 if not decision.allowed:
                     return 1, f"governor-blocked: {decision.denial_message()}"
-            # use_workspace=True: command checks execute user-supplied command
-            # text, which makes this a raw command route like run_command — it
-            # was still inheriting the install cwd and could replay the
-            # relative-path wipe (PR #239 round-10 review, reproduced).
+            # Forwarded per check from run_bundle: True only for type=command
+            # (user-supplied text, a raw command route like run_command —
+            # round 10); fixed-shape probes must keep pre-PR cwd semantics so
+            # an unusable workspace cannot disable service/process/http/port
+            # validation (round 11).
             return await self._exec_command(
-                address, command, ssh_user, timeout=timeout, use_workspace=True
+                address, command, ssh_user, timeout=timeout, use_workspace=use_workspace
             )
 
         report = await run_bundle(

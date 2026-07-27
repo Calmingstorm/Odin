@@ -464,7 +464,14 @@ async def run_bundle(
 ) -> ValidationReport:
     """Run a validation bundle. Host resolution: explicit > default > localhost.
 
-    exec_command signature: (address, command, ssh_user, timeout=...) -> (exit_code, output)
+    exec_command signature:
+        (address, command, ssh_user, timeout=..., use_workspace=...) -> (exit_code, output)
+    ``use_workspace`` is True ONLY for ``type=command`` checks — those execute
+    user-supplied command text, exactly the raw route the local workspace
+    exists for. Fixed-shape probes (http/port/service/process/log) are
+    generated command strings whose behaviour must not depend on the
+    workspace: an unusable workspace must not stop a service probe
+    (PR #239 round-11 review, reproduced).
     """
     start = time.monotonic()
     if grace_seconds > 0:
@@ -526,7 +533,15 @@ async def run_bundle(
                     return result
                 try:
                     exit_code, output = await asyncio.wait_for(
-                        exec_command(address, command, ssh_user, timeout=check.timeout_seconds),
+                        exec_command(
+                            address,
+                            command,
+                            ssh_user,
+                            timeout=check.timeout_seconds,
+                            # Raw user command text opts into the workspace;
+                            # fixed-shape probes keep pre-PR cwd semantics.
+                            use_workspace=check.type == "command",
+                        ),
                         timeout=check.timeout_seconds + 5,
                     )
                 except TimeoutError:

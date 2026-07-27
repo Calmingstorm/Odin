@@ -357,7 +357,7 @@ class TestVerdict:
 class TestRunBundleIntegration:
     @pytest.mark.asyncio
     async def test_full_bundle_mixed_results(self):
-        async def fake_exec(addr, cmd, user, *, timeout):
+        async def fake_exec(addr, cmd, user, *, timeout, use_workspace=False):
             if "curl" in cmd:
                 return (0, "200")
             if "dev/tcp" in cmd:
@@ -437,7 +437,7 @@ class TestRunBundleIntegration:
     async def test_host_resolution_order(self):
         seen_hosts: list[str] = []
 
-        async def fake_exec(addr, cmd, user, *, timeout):
+        async def fake_exec(addr, cmd, user, *, timeout, use_workspace=False):
             seen_hosts.append(addr)
             return (0, "active")
 
@@ -480,7 +480,7 @@ class TestRunBundleIntegration:
         """Round 2 review — no shared-state timeout race across concurrent checks."""
         observed: list[tuple[int, float]] = []
 
-        async def timed_exec(addr, cmd, user, *, timeout):
+        async def timed_exec(addr, cmd, user, *, timeout, use_workspace=False):
             t0 = asyncio.get_event_loop().time()
             # Fast/slow checks finish at different times; neither should see
             # the other's timeout bleed in.
@@ -529,7 +529,7 @@ class TestRunBundleIntegration:
         max_in_flight = 0
         lock = asyncio.Lock()
 
-        async def tracking_exec(addr, cmd, user, *, timeout):
+        async def tracking_exec(addr, cmd, user, *, timeout, use_workspace=False):
             nonlocal in_flight, max_in_flight
             async with lock:
                 in_flight += 1
@@ -609,7 +609,7 @@ class TestExecutorGovernorPath:
 
         gov = _FailingGovernor()
 
-        async def wrapped(addr, cmd, user, *, timeout):
+        async def wrapped(addr, cmd, user, *, timeout, use_workspace=False):
             try:
                 gov.check(cmd)
             except Exception as ge:
