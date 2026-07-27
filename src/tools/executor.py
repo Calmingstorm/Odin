@@ -45,7 +45,7 @@ from .ssh import (
     run_ssh_command,
 )
 from .ssh_pool import SSHConnectionPool
-from .workspace import WorkspaceError, resolve_workspace
+from .workspace import resolve_workspace
 
 log = get_logger("tools")
 
@@ -351,8 +351,13 @@ class ToolExecutor:
             if not text:
                 continue
             candidate = Path(text)
-            data_dir = candidate.parent if is_file else candidate
-            roots.append(str(data_dir.resolve()))
+            # Resolve the COMPLETE declared path first. Taking .parent before
+            # canonicalization protects the alias directory rather than the
+            # target: /aliases/memory.json -> /live-data/memory.json would
+            # protect /aliases and accept /live-data/workspace (reproduced in
+            # review as UNSAFE_ACCEPTED).
+            resolved = candidate.resolve()
+            roots.append(str(resolved.parent if is_file else resolved))
         return roots
 
     def get_workspace_metrics(self) -> dict[str, float]:
@@ -402,20 +407,20 @@ class ToolExecutor:
         Deliberately no fallback: inheriting the process cwd is exactly the
         behaviour that let a bare `rm -rf data` delete the live install.
         """
-        # getattr-guarded: tests and the sanctioned RFC-004 patch seam build
-        # executors via __new__, bypassing __init__. Lazy resolution still
-        # applies to those instances rather than crashing on a missing flag.
-        if not getattr(self, "_local_workspace_resolved", False):
-            self._local_workspace = str(
-                resolve_workspace(
-                    self.config.local_working_dir,
-                    protected_roots=self._protected_roots(),
-                )
+        # Validated on EVERY call, not cached (PR #239 round-3 review): the
+        # configured VALUE is restart-required, but existence, type, ownership
+        # and mode are mutable filesystem state. Caching them meant fail-closed
+        # only applied to the first command — replacing the directory with a
+        # symlink into the install afterwards was accepted, and a post-
+        # validation chmod was ignored. The check is a handful of stat calls.
+        workspace = str(
+            resolve_workspace(
+                self.config.local_working_dir,
+                protected_roots=self._protected_roots(),
             )
-            self._local_workspace_resolved = True
-        workspace = self._local_workspace
-        if workspace is None:  # pragma: no cover - resolve_workspace raises instead
-            raise WorkspaceError("local workspace unresolved")
+        )
+        self._local_workspace = workspace
+        self._local_workspace_resolved = True
         return workspace
 
     def _ensure_process_registry(self):
@@ -428,9 +433,9 @@ class ToolExecutor:
         if not hasattr(self, "_process_registry"):
             from .process_manager import ProcessRegistry
 
-            self._process_registry = ProcessRegistry(
-                workspace=self._ensure_local_workspace()
-            )
+            # Pass the RESOLVER, not a resolved string: each background spawn
+            # must re-verify the workspace's mutable filesystem invariants.
+            self._process_registry = ProcessRegistry(workspace=self._ensure_local_workspace)
         return self._process_registry
 
     def check_permission(self, tool_name: str, user_id: str | None) -> str | None:

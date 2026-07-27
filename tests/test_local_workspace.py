@@ -21,6 +21,7 @@ asserts that before any deletion runs.
 from __future__ import annotations
 
 import os
+import stat
 import zipfile
 from pathlib import Path
 
@@ -68,15 +69,20 @@ def test_valid_workspace_resolves(workspace: Path, fake_install: Path) -> None:
     assert resolved == workspace.resolve()
 
 
-@pytest.mark.parametrize("value", ["", "   ", "relative/path", "~/tilde-but-relative"])
+@pytest.mark.parametrize("value", ["", "   ", "relative/path", "./also/relative"])
 def test_rejects_non_absolute_or_empty(value: str, fake_install: Path) -> None:
     with pytest.raises(WorkspaceError):
         resolve_workspace(value, protected_roots=[str(fake_install)])
 
 
-def test_rejects_missing_directory(tmp_path: Path, fake_install: Path) -> None:
-    with pytest.raises(WorkspaceError, match="does not exist"):
-        resolve_workspace(str(tmp_path / "nope"), protected_roots=[str(fake_install)])
+def test_rejects_uncreatable_directory(tmp_path: Path, fake_install: Path) -> None:
+    """A missing workspace whose PARENT also does not exist cannot be
+    self-provisioned, so it fails closed. (A missing workspace with a writable
+    parent is created instead — see the upgrade-seamlessness tests.)"""
+    with pytest.raises(WorkspaceError, match="could not be created"):
+        resolve_workspace(
+            str(tmp_path / "no-parent" / "nope"), protected_roots=[str(fake_install)]
+        )
 
 
 def test_rejects_file_masquerading_as_directory(tmp_path: Path, fake_install: Path) -> None:
@@ -292,65 +298,58 @@ def test_remote_execution_signature_has_no_workspace() -> None:
     assert "cwd" not in inspect.signature(run_ssh_command).parameters
 
 
-def test_discord_execution_path_excludes_the_legacy_dag_surfaces() -> None:
+def test_discord_execution_path_excludes_the_legacy_dag_surfaces(
+    workspace: Path, fake_install: Path
+) -> None:
     """The legacy `src/odin/tools/{shell,process}.py` surfaces spawn subprocesses
-    that inherit the application cwd, so if the Discord path ever adopted them
-    the 2026-07-27 mechanism reopens behind this fix.
+    that inherit the application cwd, so if the Discord path adopted them the
+    2026-07-27 mechanism reopens behind this fix.
 
-    The previous version of this test only grepped two literal import spellings
-    in executor.py, and would have stayed green under transitive wiring —
-    `ToolRegistry.with_defaults()` already registers `ShellTool` for the
-    separate legacy CLI (PR #239 round-2 review). This instead characterizes
-    the ACTUAL Discord-reachable boundary by importing it and proving the
-    legacy modules are absent from everything it can route to.
+    Round-2 rewrote this from a grep; round 3 showed it was still vacuous —
+    `__new__` creates no handler owners, so the loop inspected nothing, and it
+    reloaded the executor rather than the Discord tool-loop path. This builds a
+    REAL executor and inspects every resolved owner's module, then imports the
+    Discord path in a CLEAN interpreter and proves neither legacy module loads.
     """
+    import subprocess
     import sys
 
-    from src.tools.executor import EXECUTOR_HANDLERS, ToolExecutor
-    from src.tools.registry import TOOLS
+    from src.tools.executor import EXECUTOR_HANDLERS
 
-    legacy_modules = {"src.odin.tools.shell", "src.odin.tools.process"}
+    executor = _executor_with_workspace(workspace, fake_install)
 
-    # 1. Nothing the Discord tool catalog exposes may be owned by a legacy module.
-    for tool in TOOLS:
-        name = tool.get("name") if isinstance(tool, dict) else None
-        assert name, "every published tool must be named"
-
-    # 2. Every executor handler resolves to a module inside src.tools.*,
-    #    never the legacy DAG surfaces.
+    inspected: list[str] = []
     for tool_name, (owner_key, attr) in EXECUTOR_HANDLERS.items():
-        assert not owner_key.startswith("odin."), (
-            f"{tool_name} routes through a legacy owner: {owner_key}.{attr}"
+        # _handler_owners is the real late-bound registry (RFC-004); owner_key
+        # is a registry key like "system", not an attribute name.
+        owner = executor._handler_owners.get(owner_key)
+        assert owner is not None, f"{tool_name}: handler owner {owner_key!r} did not resolve"
+        module = type(owner).__module__
+        inspected.append(module)
+        assert not module.startswith("src.odin.tools"), (
+            f"{tool_name} is served by legacy module {module}.{attr}"
         )
+    assert inspected, "no handler owners were inspected — the check would be vacuous"
 
-    # 3. Importing the Discord execution path must not pull the legacy modules
-    #    in transitively. Import it fresh and check what landed in sys.modules.
-    for module in list(legacy_modules):
-        sys.modules.pop(module, None)
-    import importlib
-
-    importlib.reload(importlib.import_module("src.tools.executor"))
-    still_absent = legacy_modules - set(sys.modules)
-    assert still_absent == legacy_modules, (
-        f"the Discord execution path transitively imports {legacy_modules - still_absent}; "
-        "those surfaces inherit the application cwd and would reopen the wipe mechanism"
+    # A clean interpreter: importing the Discord execution path must not pull
+    # the legacy surfaces in, transitively or otherwise.
+    probe = (
+        "import sys; import src.discord.tool_loop; "
+        "leaked=[m for m in ('src.odin.tools.shell','src.odin.tools.process') "
+        "if m in sys.modules]; print(','.join(leaked))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True, text=True, timeout=120,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+    leaked = result.stdout.strip()
+    assert leaked == "", (
+        f"the Discord tool-loop path imports {leaked}; those surfaces inherit "
+        "the application cwd and would reopen the wipe mechanism"
     )
 
-    # 4. The executor's own handler domains must not expose a legacy shell tool.
-    executor = ToolExecutor.__new__(ToolExecutor)
-    for owner_key, _attr in EXECUTOR_HANDLERS.values():
-        owner = getattr(executor, owner_key, None)
-        if owner is None:
-            continue
-        assert "odin.tools" not in type(owner).__module__
-
-
-# --- THE SEAM THAT ACTUALLY FAILED: through ToolExecutor --------------------
-#
-# PR #239 review, blocker 4: the low-level replay proves run_local_command
-# honors a supplied cwd, but NOT that the executor supplies one. Deleting
-# `cwd=self._ensure_local_workspace()` from the executor would reopen the
-# incident while the low-level test still passed. These exercise the real path.
 
 
 def _executor_with_workspace(workspace: Path, protected: Path):
@@ -431,7 +430,10 @@ async def test_executor_background_process_uses_the_workspace(
     the registry must get its workspace FROM the executor."""
     executor = _executor_with_workspace(workspace, fake_install)
     registry = executor._ensure_process_registry()
-    assert registry._workspace == str(workspace.resolve())
+    # A RESOLVER, not a frozen string: each spawn re-verifies the workspace's
+    # mutable filesystem invariants (PR #239 round-3).
+    assert callable(registry._workspace)
+    assert registry._resolve_workspace() == str(workspace.resolve())
 
     await registry.start("localhost", "pwd; sleep 0.2")
     import asyncio
@@ -451,7 +453,7 @@ async def test_executor_refuses_to_run_with_an_invalid_workspace(
     """Fail closed at the point of use: no subprocess may run against an
     unvalidated cwd, and there is deliberately no fallback to the inherited
     directory — that fallback is the hazard."""
-    executor = _executor_with_workspace(tmp_path / "does-not-exist", fake_install)
+    executor = _executor_with_workspace(tmp_path / "no-parent" / "ws", fake_install)
     with pytest.raises(WorkspaceError):
         await executor._exec_command("localhost", "echo should-not-run", timeout=10)
 
@@ -605,3 +607,283 @@ def test_path_classification_is_declared_not_guessed(tmp_path: Path) -> None:
     assert dotted_dir.parent.resolve() not in roots, "suffix heuristic would over-protect"
     # The audit FILE contributes its parent directory, which is correct.
     assert audit_dir.resolve() in roots
+
+
+async def test_workspace_is_revalidated_before_every_command(
+    fake_install: Path, workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #239 round-3 blocker 1, reproduced by Odin: caching the validated
+    path meant fail-closed applied only to the FIRST command. Replacing the
+    directory with a symlink into the install afterwards was accepted, and the
+    second command read live data."""
+    monkeypatch.chdir(fake_install)
+    executor = _executor_with_workspace(workspace, fake_install)
+
+    code, out = await executor._exec_command("localhost", "pwd", timeout=30)
+    assert code == 0 and out.strip() == str(workspace.resolve())
+
+    # Swap the validated directory for a symlink pointing into the install.
+    workspace.rmdir()
+    workspace.symlink_to(fake_install)
+    with pytest.raises(WorkspaceError):
+        await executor._exec_command("localhost", "cat data/sentinel", timeout=30)
+
+
+async def test_mode_change_after_first_command_is_caught(
+    fake_install: Path, workspace: Path
+) -> None:
+    """A post-validation chmod must not be ignored either."""
+    executor = _executor_with_workspace(workspace, fake_install)
+    assert (await executor._exec_command("localhost", "pwd", timeout=30))[0] == 0
+    workspace.chmod(0o755)
+    try:
+        with pytest.raises(WorkspaceError, match="mode"):
+            await executor._exec_command("localhost", "pwd", timeout=30)
+    finally:
+        workspace.chmod(0o700)
+
+
+async def test_background_spawn_revalidates_too(
+    fake_install: Path, workspace: Path
+) -> None:
+    """Verification must bind to background spawns as well, or manage_process
+    becomes the surviving route past a swapped workspace."""
+    executor = _executor_with_workspace(workspace, fake_install)
+    registry = executor._ensure_process_registry()
+    assert registry._resolve_workspace() == str(workspace.resolve())
+    workspace.chmod(0o750)
+    try:
+        with pytest.raises(WorkspaceError):
+            registry._resolve_workspace()
+    finally:
+        workspace.chmod(0o700)
+
+
+def test_leaf_symlinked_data_paths_protect_the_target(tmp_path: Path) -> None:
+    """PR #239 round-3 blocker 2, reproduced as UNSAFE_ACCEPTED: taking .parent
+    BEFORE canonicalization protects the alias directory rather than the real
+    data directory, so a workspace beside the true memory.json was accepted."""
+    from src.config.schema import ToolsConfig
+    from src.tools.executor import ToolExecutor
+
+    live = tmp_path / "live-data"
+    live.mkdir()
+    (live / "memory.json").write_text("{}", encoding="utf-8")
+    (live / "audit.jsonl").write_text("", encoding="utf-8")
+    aliases = tmp_path / "aliases"
+    aliases.mkdir()
+    (aliases / "memory.json").symlink_to(live / "memory.json")
+    (aliases / "audit.jsonl").symlink_to(live / "audit.jsonl")
+
+    workspace = live / "workspace"          # beside the REAL data
+    workspace.mkdir(mode=0o700)
+
+    executor = ToolExecutor(
+        config=ToolsConfig(
+            local_working_dir=str(workspace),
+            audit_log_path=str(aliases / "audit.jsonl"),
+            trajectory_path=str(tmp_path / "elsewhere"),
+        ),
+        memory_path=str(aliases / "memory.json"),
+    )
+    roots = [Path(r).resolve() for r in executor._protected_roots()]
+    assert live.resolve() in roots, "the symlink TARGET's directory must be protected"
+    with pytest.raises(WorkspaceError, match="overlap"):
+        executor._ensure_local_workspace()
+
+
+# --- workspace growth metrics (the operational half of "no auto-prune") -----
+
+
+def test_workspace_metrics_report_usage(workspace: Path, fake_install: Path) -> None:
+    """No automatic pruning was always paired with observability, so growth is
+    alertable and cleanup stays an explicit operator action."""
+    executor = _executor_with_workspace(workspace, fake_install)
+    (workspace / "artifact.bin").write_bytes(b"x" * 2048)
+    (workspace / "nested").mkdir()
+    (workspace / "nested" / "more.txt").write_text("hello", encoding="utf-8")
+
+    metrics = executor.get_workspace_metrics()
+    assert metrics["files"] == 2
+    assert metrics["bytes"] >= 2048
+    assert metrics["free_bytes"] > 0
+    assert metrics["free_inodes"] > 0
+
+
+def test_workspace_metrics_never_raise_on_an_invalid_workspace(
+    tmp_path: Path, fake_install: Path
+) -> None:
+    """Metrics collection must not be able to break a command path."""
+    executor = _executor_with_workspace(tmp_path / "no-parent" / "missing", fake_install)
+    assert executor.get_workspace_metrics() == {}
+
+
+def test_workspace_gauges_render_for_prometheus(
+    workspace: Path, fake_install: Path
+) -> None:
+    from src.health.metrics import MetricsCollector
+
+    executor = _executor_with_workspace(workspace, fake_install)
+    (workspace / "f").write_bytes(b"12345")
+    collector = MetricsCollector()
+    collector.register_source("workspace", executor.get_workspace_metrics)
+    rendered = collector.render()
+    for name in (
+        "odin_workspace_bytes",
+        "odin_workspace_files",
+        "odin_workspace_free_bytes",
+        "odin_workspace_free_inodes",
+    ):
+        assert f"# TYPE {name} gauge" in rendered
+        assert any(
+            line.startswith(f"{name} ") for line in rendered.splitlines()
+        ), f"{name} value line missing"
+
+
+def test_workspace_gauges_tolerate_partial_and_failing_sources() -> None:
+    """A partial dict renders what it has; a raising source is swallowed so the
+    metrics endpoint cannot be taken down by workspace trouble."""
+    from src.health.metrics import MetricsCollector
+
+    partial = MetricsCollector()
+    partial.register_source("workspace", lambda: {"bytes": 10.0})
+    rendered = partial.render()
+    assert "odin_workspace_bytes 10" in rendered
+    assert "odin_workspace_free_inodes" not in rendered
+
+    def _boom() -> dict[str, float]:
+        raise OSError("filesystem unavailable")
+
+    failing = MetricsCollector()
+    failing.register_source("workspace", _boom)
+    assert "odin_workspace_bytes" not in failing.render()
+
+    empty = MetricsCollector()
+    empty.register_source("workspace", dict)
+    assert "odin_workspace_bytes" not in empty.render()
+
+
+def test_blank_configured_data_paths_are_skipped(tmp_path: Path, workspace: Path) -> None:
+    """A blank/whitespace data path contributes no protected root rather than
+    protecting the process's current directory by accident."""
+    from src.config.schema import ToolsConfig
+    from src.tools.executor import ToolExecutor
+
+    executor = ToolExecutor(
+        config=ToolsConfig(
+            local_working_dir=str(workspace),
+            audit_log_path="   ",
+            trajectory_path="",
+        )
+    )
+    roots = [Path(r).resolve() for r in executor._protected_roots()]
+    assert Path.cwd().resolve() not in roots or roots.count(Path.cwd().resolve()) <= 1
+    assert roots, "the install root must still be protected"
+
+
+def test_workspace_metrics_degrade_when_filesystem_stats_fail(
+    workspace: Path, fake_install: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Free-space/inode probes are best-effort: if the filesystem refuses them
+    the usage figures still report, because breaking metrics must never break
+    a command path."""
+    import shutil as _shutil
+
+    executor = _executor_with_workspace(workspace, fake_install)
+    (workspace / "f").write_bytes(b"abc")
+
+    def _fail_usage(_path: object) -> object:
+        raise OSError("statfs unavailable")
+
+    def _fail_statvfs(_path: object) -> object:
+        raise OSError("statvfs unavailable")
+
+    monkeypatch.setattr(_shutil, "disk_usage", _fail_usage)
+    monkeypatch.setattr(os, "statvfs", _fail_statvfs)
+
+    metrics = executor.get_workspace_metrics()
+    assert metrics["bytes"] == 3
+    assert metrics["files"] == 1
+    assert "free_bytes" not in metrics
+    assert "free_inodes" not in metrics
+
+
+# --- upgrade seamlessness: fresh installs AND updates ------------------------
+
+
+def test_workspace_is_self_provisioned_when_the_parent_is_writable(
+    tmp_path: Path, fake_install: Path
+) -> None:
+    """Upgrades must be seamless. A source checkout or a git-based self-update
+    lands on new code whose systemd unit was never refreshed, so the runtime
+    creates the workspace itself when it can — with the same 0700 contract a
+    deployment-provisioned one satisfies."""
+    target = tmp_path / "fresh-workspace"
+    assert not target.exists()
+    resolved = resolve_workspace(str(target), protected_roots=[str(fake_install)])
+    assert resolved == target.resolve()
+    assert target.is_dir()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700, "must not inherit a loose umask"
+
+
+def test_self_provisioning_does_not_bypass_validation(
+    tmp_path: Path, fake_install: Path
+) -> None:
+    """Creating it is not the dangerous fallback (that would be inheriting the
+    install directory) — everything is still validated afterwards."""
+    inside = fake_install / "would-be-created"
+    with pytest.raises(WorkspaceError, match="overlap"):
+        resolve_workspace(str(inside), protected_roots=[str(fake_install)])
+    assert not inside.exists() or inside.is_dir()
+
+
+def test_unwritable_parent_still_fails_closed_with_actionable_guidance(
+    tmp_path: Path, fake_install: Path
+) -> None:
+    """When self-provisioning cannot work (root-owned /var/lib for a non-root
+    service account), the error names the exact command to run rather than
+    silently degrading."""
+    with pytest.raises(WorkspaceError) as excinfo:
+        resolve_workspace(
+            str(tmp_path / "missing-parent" / "ws"),
+            protected_roots=[str(fake_install)],
+        )
+    message = str(excinfo.value)
+    assert "could not be created" in message
+    assert "install -d -m 0700" in message, "the error must be actionable"
+
+
+def test_creation_can_be_disabled_for_strict_callers(
+    tmp_path: Path, fake_install: Path
+) -> None:
+    target = tmp_path / "never-created"
+    with pytest.raises(WorkspaceError, match="could not be created"):
+        resolve_workspace(
+            str(target), protected_roots=[str(fake_install)], create_if_missing=False
+        )
+    assert not target.exists()
+
+
+def test_every_upgrade_path_provisions_the_workspace() -> None:
+    """Fresh installs AND updates must both land working, with no manual step:
+
+    - .deb install/upgrade  -> postinstall creates it
+    - any systemd start     -> StateDirectory= recreates it (covers restarts
+                               after a self-update, even if postinstall never ran)
+    - Docker                -> image directory + named volume
+    - source / git self-update -> runtime self-provisioning (tested above)
+    """
+    repo = Path(__file__).resolve().parents[1]
+
+    unit = (repo / "packaging/odin.service").read_text(encoding="utf-8")
+    assert "StateDirectory=odin-workspace" in unit
+    assert "StateDirectoryMode=0700" in unit
+
+    postinstall = (repo / "packaging/postinstall.sh").read_text(encoding="utf-8")
+    assert "/var/lib/odin-workspace" in postinstall and "chmod 0700" in postinstall
+
+    dockerfile = (repo / "Dockerfile").read_text(encoding="utf-8")
+    assert "/var/lib/odin-workspace" in dockerfile and "0700" in dockerfile
+
+    compose = (repo / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "odin-workspace:/var/lib/odin-workspace" in compose, "named volume, not a bind"

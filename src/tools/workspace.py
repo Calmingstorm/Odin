@@ -63,6 +63,7 @@ def resolve_workspace(
     protected_roots: Sequence[str | os.PathLike[str]] | None = None,
     require_owner: bool = True,
     owner_uid: int | None = None,
+    create_if_missing: bool = True,
 ) -> Path:
     """Validate ``configured`` and return the canonical workspace path.
 
@@ -85,10 +86,28 @@ def resolve_workspace(
         raise WorkspaceError(f"local_working_dir must not be a symlink: {raw}")
 
     workspace = _canonical(raw)
+
+    # Self-provision when we can. Upgrades must be seamless: a packaged install
+    # gets this from systemd StateDirectory= and the postinstall, but a source
+    # checkout or a git-based self-update lands on new code whose unit file was
+    # never refreshed, and failing closed there would silently cost local
+    # commands. Creating it is NOT the dangerous fallback — that would be
+    # inheriting the install directory. Everything below still validates.
+    if create_if_missing and not workspace.exists():
+        try:
+            workspace.mkdir(mode=REQUIRED_MODE, parents=False)
+            # mkdir's mode is masked by umask; set it explicitly so a
+            # self-provisioned workspace satisfies the same 0700 contract that
+            # a deployment-provisioned one does.
+            workspace.chmod(REQUIRED_MODE)
+        except OSError:
+            pass  # unwritable parent (e.g. root-owned /var/lib) — report below
+
     if not workspace.exists():
         raise WorkspaceError(
-            f"local_working_dir does not exist: {workspace} "
-            "(deployment must create it 0700, owned by the service account)"
+            f"local_working_dir does not exist and could not be created: {workspace}. "
+            f"Create it as the service account, e.g. "
+            f"sudo install -d -m 0700 -o odin -g odin {workspace}"
         )
     if not workspace.is_dir():
         raise WorkspaceError(f"local_working_dir is not a directory: {workspace}")

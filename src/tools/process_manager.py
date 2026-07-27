@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,13 +46,24 @@ class ProcessInfo:
 class ProcessRegistry:
     """Registry for background processes with full lifecycle management."""
 
-    def __init__(self, workspace: str | None = None) -> None:
+    def __init__(self, workspace: str | Callable[[], str] | None = None) -> None:
         self._processes: dict[int, ProcessInfo] = {}
         # Background starts share the foreground workspace. Without this,
         # `manage_process start` stays an alternate route to the 2026-07-27
         # incident: a bare relative path resolving against the live install
         # (29 historical background starts had no explicit cd).
+        #
+        # A CALLABLE is preferred: the workspace's existence, type, ownership
+        # and mode are mutable, so they must be re-verified immediately before
+        # each spawn rather than trusted from construction time (PR #239
+        # round-3 review — a cached path accepted a directory later replaced
+        # by a symlink into the install).
         self._workspace = workspace
+
+    def _resolve_workspace(self) -> str | None:
+        if callable(self._workspace):
+            return self._workspace()
+        return self._workspace
 
     # ------------------------------------------------------------------
     # Public API
@@ -76,14 +88,15 @@ class ProcessRegistry:
             # start_new_session puts the shell at the head of its own process
             # group, so kill()/shutdown() can take out descendants
             # (`sh -c 'x & ...'`) instead of just the shell leader.
-            env = workspace_env(Path(self._workspace)) if self._workspace else None
+            workspace = self._resolve_workspace()
+            env = workspace_env(Path(workspace)) if workspace else None
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 stdin=asyncio.subprocess.PIPE,
                 start_new_session=True,
-                cwd=self._workspace,
+                cwd=workspace,
                 env=env,
             )
         except Exception as e:
