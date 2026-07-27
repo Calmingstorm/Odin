@@ -1720,3 +1720,101 @@ def test_workspace_usage_walk_is_cached_between_metrics_scrapes(
     monkeypatch.setattr(executor_module, "WORKSPACE_METRICS_TTL", 0.0)
     third = executor.get_workspace_metrics()
     assert walks == 2 and third["files"] == 2
+
+
+# --- The complete set of local-execution routes, held closed -----------------
+
+# Every module in src/ that spawns a local process, and why it does or does not
+# use the command workspace. Odin's reviews found bypasses one at a time
+# (round 9: SkillContext.run_on_host); this holds the whole surface closed, so
+# a NEW spawn site has to be classified rather than silently inheriting the
+# process cwd.
+_SPAWN_PRIMITIVES = {
+    "create_subprocess_shell",
+    "create_subprocess_exec",
+    "run",  # subprocess.run
+    "Popen",
+    "system",  # os.system
+    # Process REPLACEMENT counts too: it is how the self-update restarts, and
+    # it carries the cwd forward into the new image.
+    "execv",
+    "execve",
+    "execvp",
+    "execvpe",
+    "execl",
+    "execle",
+    "execlp",
+}
+
+_CLASSIFIED_SPAWN_SITES: dict[str, str] = {
+    # --- uses the workspace -------------------------------------------------
+    "src/tools/ssh.py": "run_local_command — takes cwd from the caller; THE seam",
+    "src/tools/process_manager.py": "background manage_process — resolves workspace per spawn",
+    # --- deliberately does not ----------------------------------------------
+    "src/discord/native_tools/media.py": "argv-form ssh to a REMOTE host; local cwd is irrelevant",
+    "src/tools/ssh_pool.py": "argv-form ssh control-socket management, no user command text",
+    "src/tools/mcp_client.py": "operator-configured MCP server process, not a user command",
+    "src/tools/skill_manager.py": "argv-form `pip install <specs>`, no user-supplied relative path",
+    "src/tools/workspace.py": "`sudo -n install -d` provisioning the workspace itself",
+    "src/web/api/self_update.py": "argv-form git/gh during self-update, inside the install",
+    "src/packaging/validate.py": "build-time packaging check, not a runtime path",
+    "src/restart.py": "os.execve re-exec of Odin himself",
+    # --- legacy CLI surface, unreachable from Discord (pinned separately) ----
+    "src/odin/tools/shell.py": "legacy CLI ShellTool; excluded from the Discord tool loop",
+    "src/odin/tools/process.py": "legacy CLI ProcessTool; excluded from the Discord tool loop",
+}
+
+
+def _modules_that_spawn_processes() -> set[str]:
+    """Every src/ module calling a process-spawning primitive, by AST.
+
+    AST rather than grep so comments, docstrings and this test's own tables
+    cannot register as spawn sites.
+    """
+    import ast
+
+    repo = Path(__file__).resolve().parents[1]
+    found: set[str] = set()
+    for path in sorted((repo / "src").rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover - src must always parse
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr not in _SPAWN_PRIMITIVES:
+                continue
+            # `subprocess.run` / `os.system` / `asyncio.create_subprocess_*`
+            # only — not arbitrary `.run(...)` methods on unrelated objects.
+            owner = func.value
+            owner_name = getattr(owner, "id", None) or getattr(owner, "attr", None)
+            if func.attr in {"run", "Popen"} and owner_name != "subprocess":
+                continue
+            if func.attr == "system" and owner_name != "os":
+                continue
+            if func.attr.startswith("exec") and owner_name != "os":
+                continue
+            found.add(str(path.relative_to(repo)))
+    return found
+
+
+def test_every_local_execution_route_is_classified() -> None:
+    """No unclassified way to run a local process may exist in src/.
+
+    A new spawn site added later inherits Odin's process cwd by default —
+    which is exactly the 2026-07-27 mechanism. This fails until it is either
+    routed through the workspace or explicitly justified here.
+    """
+    actual = _modules_that_spawn_processes()
+    declared = set(_CLASSIFIED_SPAWN_SITES)
+
+    unclassified = actual - declared
+    assert not unclassified, (
+        "these modules spawn local processes but are not classified: "
+        f"{sorted(unclassified)} — route them through the workspace or record why not"
+    )
+
+    stale = declared - actual
+    assert not stale, f"no longer spawn processes; drop from the table: {sorted(stale)}"
