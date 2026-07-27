@@ -41,6 +41,15 @@ from pathlib import Path
 # and writable but not readable, which breaks ordinary workspace use.
 REQUIRED_MODE = 0o700
 
+# The live working-memory file. Production wiring hardcodes this path rather
+# than taking it from config, so it is defined HERE and imported there: the
+# startup migration and the self-update preflight both run before (or without)
+# wiring and must protect the same file the executor protects. Three
+# independent spellings of "the protected roots" is exactly how round 6 found
+# the updater creating a workspace beside live memory.json and reporting
+# success, then handing over to an executor that refused every command.
+DEFAULT_MEMORY_PATH = "./data/memory.json"
+
 
 class WorkspaceError(RuntimeError):
     """The configured local workspace is unusable. Never fall back to cwd."""
@@ -67,6 +76,45 @@ def _reject_overlap(
             raise WorkspaceError(
                 f"local_working_dir must not overlap {canonical_root}: {workspace}"
             )
+
+
+def command_protected_roots(
+    install_root: str | os.PathLike[str],
+    *,
+    audit_log_path: object = None,
+    trajectory_path: object = None,
+    memory_path: object = DEFAULT_MEMORY_PATH,
+) -> list[str]:
+    """THE derivation of directories a command workspace must never overlap.
+
+    Every caller — executor, startup migration, self-update preflight — uses
+    this one function, so a workspace accepted by one is accepted by all. When
+    they each derived their own, the preflight approved (and created) a
+    workspace inside the live-data directory that the executor then rejected,
+    which both mutated live data and stranded local commands.
+
+    Paths are classified by DECLARED semantics, never guessed from the name: a
+    ``Path.suffix`` heuristic misreads dotted directories and extensionless
+    files. Each declared path is resolved COMPLETELY before ``.parent`` is
+    taken, because taking the parent first protects the alias directory rather
+    than the target (``/aliases/memory.json -> /live-data/memory.json`` would
+    protect ``/aliases`` and accept ``/live-data/workspace``).
+    """
+    roots = [str(_canonical(install_root))]
+    declared: list[tuple[object, bool]] = [
+        (audit_log_path, True),  # file
+        (trajectory_path, False),  # directory
+        (memory_path, True),  # file
+    ]
+    for configured, is_file in declared:
+        if configured is None:
+            continue
+        text = str(configured).strip()
+        if not text:
+            continue
+        resolved = _canonical(text)
+        roots.append(str(resolved.parent if is_file else resolved))
+    return roots
 
 
 def resolve_workspace(

@@ -308,17 +308,28 @@ def _live_workspace_setting(bot) -> str:
 
 
 def _live_protected_roots(bot, base: str | None) -> list[str]:
-    """Install root plus canonical live-data roots, from the live config."""
-    roots: list[str] = []
-    roots.append(str(Path(base).resolve()) if base else str(Path(__file__).resolve().parents[3]))
+    """Install root plus canonical live-data roots, from the LIVE config.
+
+    Delegates to the ONE shared derivation so the preflight cannot approve a
+    workspace the restarted executor refuses. Deriving them here separately
+    omitted live memory.json entirely, so with audit/trajectory paths relocated
+    the updater created a workspace beside memory.json, reported success, and
+    handed over to an executor that rejected every local command (PR #239
+    round-6 review, reproduced).
+
+    The live memory path is read from the running executor when reachable —
+    that is the value wiring actually supplied — and falls back to the shared
+    default otherwise.
+    """
+    from src.tools.workspace import DEFAULT_MEMORY_PATH, command_protected_roots
+
     tools = getattr(getattr(bot, "config", None), "tools", None)
-    declared = [
-        (getattr(tools, "audit_log_path", None), True),
-        (getattr(tools, "trajectory_path", None), False),
-    ]
-    for configured, is_file in declared:
-        if not isinstance(configured, str) or not configured.strip():
-            continue
-        resolved = Path(configured.strip()).resolve()
-        roots.append(str(resolved.parent if is_file else resolved))
-    return roots
+    memory_path = getattr(getattr(bot, "tool_executor", None), "_memory_path", None)
+    return command_protected_roots(
+        Path(base).resolve() if base else Path(__file__).resolve().parents[3],
+        audit_log_path=getattr(tools, "audit_log_path", None),
+        trajectory_path=getattr(tools, "trajectory_path", None),
+        memory_path=memory_path or DEFAULT_MEMORY_PATH,
+    )
+
+

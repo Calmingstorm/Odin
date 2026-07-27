@@ -310,28 +310,34 @@ def main() -> None:
         sys.exit(exit_code)
 
 
+def _command_protected_roots(config) -> list[str]:
+    """Install root plus canonical live-data roots for the startup migration.
+
+    Delegates to the ONE shared derivation so startup, the self-update
+    preflight, and the executor protect exactly the same directories. Deriving
+    them separately here silently protected nothing (``Config`` has no
+    ``memory`` section) while the executor protected live memory.json — so a
+    workspace beside it was provisioned at startup and then refused on every
+    command (PR #239 round-6 review).
+
+    ``memory_path`` is intentionally left at its default: production wiring
+    hardcodes that path, and startup runs before wiring exists.
+    """
+    from src.tools.workspace import command_protected_roots
+
+    return command_protected_roots(
+        Path(__file__).resolve().parents[1],
+        audit_log_path=getattr(config.tools, "audit_log_path", None),
+        trajectory_path=getattr(config.tools, "trajectory_path", None),
+    )
+
+
+# The entrypoint guard MUST stay the last statement in this module. Python
+# executes a module top-to-bottom, so a guard placed above a helper runs main()
+# before that helper's `def` is reached: the startup migration raised NameError
+# and its own nonfatal handler swallowed it, leaving the workspace uncreated and
+# resurrecting the first-update bootstrap failure this migration exists to fix
+# (PR #239 round-6 review). tests/test_local_workspace.py executes `python -m src`
+# for real to keep this honest.
 if __name__ == "__main__":
     main()
-
-
-def _command_protected_roots(config) -> list[str]:
-    """Install root plus canonical live-data roots, mirroring the executor.
-
-    Kept beside the startup migration so both the migration and the executor
-    protect the same directories; the executor derives its own at call time
-    from the same declared paths.
-    """
-    from pathlib import Path
-
-    roots = [str(Path(__file__).resolve().parents[1])]
-    declared = [
-        (getattr(config.tools, "audit_log_path", None), True),
-        (getattr(config.tools, "trajectory_path", None), False),
-        (getattr(getattr(config, "memory", None), "path", None), True),
-    ]
-    for configured, is_file in declared:
-        if not isinstance(configured, str) or not configured.strip():
-            continue
-        resolved = Path(configured.strip()).resolve()
-        roots.append(str(resolved.parent if is_file else resolved))
-    return roots

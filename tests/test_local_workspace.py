@@ -20,16 +20,27 @@ asserts that before any deletion runs.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from src.config.schema import ToolsConfig
+from src.tools.executor import ToolExecutor
 from src.tools.process_manager import ProcessRegistry
 from src.tools.ssh import run_local_command
-from src.tools.workspace import WorkspaceError, resolve_workspace, workspace_env
+from src.tools.workspace import (
+    WorkspaceError,
+    provision_workspace,
+    resolve_workspace,
+    workspace_env,
+)
 
 
 @pytest.fixture
@@ -1083,3 +1094,223 @@ def test_preflight_skips_validation_when_nothing_is_configured(
 
     monkeypatch.setattr(su, "_live_workspace_setting", lambda _bot: "")
     assert su._ensure_local_workspace_for_update(None, None) is None
+
+
+# --- Round 6: the entrypoint and the protected-root contract ------------------
+
+_ENTRYPOINT_DRIVER = r"""
+import json, os, re, runpy, sys
+from pathlib import Path
+
+repo, tmp, ws = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])
+
+# Env vars the shipped template substitutes; values are irrelevant, presence is not.
+template = (Path(repo) / "config.yml").read_text()
+for name in set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", template)):
+    os.environ.setdefault(name, "test-value")
+
+import yaml
+cfg = tmp / "config.yml"
+parsed = yaml.safe_load(template)
+parsed.setdefault("tools", {})["local_working_dir"] = str(ws)
+cfg.write_text(yaml.safe_dump(parsed))
+
+os.chdir(tmp)
+observed = {}
+
+class _StopStartup(Exception):
+    pass
+
+import src.discord.client as client_module
+
+class _RecordingBot:
+    def __init__(self, *a, **k):
+        # THE assertion point: by the time anything that can run a command
+        # exists, the workspace must already be there.
+        observed["workspace_at_bot_construction"] = ws.is_dir()
+        raise _StopStartup()
+
+client_module.OdinBot = _RecordingBot
+sys.argv = ["src", str(cfg)]
+try:
+    runpy.run_module("src", run_name="__main__")
+except _StopStartup:
+    observed["reached_bot_construction"] = True
+except BaseException as exc:
+    observed["error"] = f"{type(exc).__name__}: {exc}"
+
+print("RESULT " + json.dumps(observed))
+"""
+
+
+def test_python_m_src_provisions_the_workspace_before_the_bot_exists(
+    tmp_path: Path,
+) -> None:
+    """Executes the REAL entrypoint, as `python -m src` does.
+
+    Round-6 regression. The startup migration sat above
+    ``_command_protected_roots``'s ``def``, so running the module as
+    ``__main__`` raised NameError mid-module; the migration's own nonfatal
+    handler swallowed it and the workspace was never created — silently
+    restoring the first-update bootstrap failure the migration exists to fix.
+
+    A source-order comparison cannot see this: it is Python's execution order
+    that matters, so this test runs the module for real in a subprocess and
+    asserts the workspace exists at the moment the bot is constructed.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    workspace = tmp_path / "workspace"
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root)
+    proc = subprocess.run(
+        [sys.executable, "-c", _ENTRYPOINT_DRIVER, str(repo_root), str(tmp_path), str(workspace)],
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path),
+        env=env,
+        timeout=180,
+    )
+    result_lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
+    assert result_lines, (
+        f"driver produced no result.\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    observed = json.loads(result_lines[-1][len("RESULT ") :])
+
+    assert observed.get("error") is None, observed["error"]
+    assert observed.get("reached_bot_construction") is True, observed
+    assert observed.get("workspace_at_bot_construction") is True, (
+        "the workspace did not exist when the bot was constructed — the startup "
+        f"migration did not run: {observed}"
+    )
+    assert workspace.is_dir()
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
+
+
+def _relocated_data_layout(tmp_path: Path) -> dict[str, Path]:
+    """The packaged shape that defeated the per-caller root derivations.
+
+    install/data is a SYMLINK to the live-data directory (as /opt/odin/data ->
+    /var/lib/odin is), audit and trajectories are configured somewhere else
+    entirely, and the proposed workspace sits beside live memory.json.
+    """
+    install = tmp_path / "install"
+    live = tmp_path / "var-lib-odin"
+    elsewhere = tmp_path / "elsewhere"
+    for directory in (install, live, elsewhere):
+        directory.mkdir()
+    (live / "memory.json").write_text("{}")
+    (install / "data").symlink_to(live)
+    return {
+        "install": install,
+        "live": live,
+        "memory": live / "memory.json",
+        "audit": elsewhere / "audit.jsonl",
+        "trajectory": elsewhere / "trajectories",
+        "workspace": live / "workspace",
+    }
+
+
+def test_executor_rejects_a_workspace_beside_relocated_live_memory(
+    tmp_path: Path,
+) -> None:
+    """Executor arm of the shared-contract scenario."""
+    layout = _relocated_data_layout(tmp_path)
+    executor = ToolExecutor(
+        ToolsConfig(
+            local_working_dir=str(layout["workspace"]),
+            audit_log_path=str(layout["audit"]),
+            trajectory_path=str(layout["trajectory"]),
+        ),
+        memory_path=str(layout["memory"]),
+    )
+    with pytest.raises(WorkspaceError):
+        executor._ensure_local_workspace()
+    assert not layout["workspace"].exists()
+
+
+def test_startup_migration_rejects_a_workspace_beside_relocated_live_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Startup arm. Startup runs before wiring, so it protects the shared
+    default memory path — which, from the install directory, resolves through
+    the data symlink onto the real live-data root."""
+    import src.__main__ as entrypoint
+
+    layout = _relocated_data_layout(tmp_path)
+    monkeypatch.chdir(layout["install"])
+
+    config = SimpleNamespace(
+        tools=SimpleNamespace(
+            local_working_dir=str(layout["workspace"]),
+            audit_log_path=str(layout["audit"]),
+            trajectory_path=str(layout["trajectory"]),
+        )
+    )
+    roots = entrypoint._command_protected_roots(config)
+    assert str(layout["live"].resolve()) in roots
+
+    with pytest.raises(WorkspaceError):
+        provision_workspace(str(layout["workspace"]), protected_roots=roots)
+    assert not layout["workspace"].exists()
+
+
+def test_self_update_preflight_rejects_a_workspace_beside_relocated_live_memory(
+    tmp_path: Path,
+) -> None:
+    """Updater arm — the one that previously said yes.
+
+    It omitted live memory.json from its own root derivation, so with audit and
+    trajectory paths relocated it CREATED the workspace inside the live-data
+    directory, reported success, and handed over to an executor that refused
+    every local command (PR #239 round-6 review, reproduced).
+    """
+    from src.web.api.self_update import _ensure_local_workspace_for_update
+
+    layout = _relocated_data_layout(tmp_path)
+    bot = SimpleNamespace(
+        config=SimpleNamespace(
+            tools=SimpleNamespace(
+                local_working_dir=str(layout["workspace"]),
+                audit_log_path=str(layout["audit"]),
+                trajectory_path=str(layout["trajectory"]),
+            )
+        ),
+        tool_executor=SimpleNamespace(_memory_path=Path(layout["memory"])),
+    )
+
+    error = _ensure_local_workspace_for_update(bot, str(layout["install"]))
+    assert error is not None
+    assert "overlap" in error
+    assert not layout["workspace"].exists(), "preflight created a directory inside live data"
+
+
+def test_all_three_callers_share_one_protected_root_derivation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The load-bearing property behind the three tests above: executor,
+    startup, and the updater must agree about the live-data root. When they
+    each derived their own, one accepted what another rejected."""
+    import src.__main__ as entrypoint
+    from src.web.api.self_update import _live_protected_roots
+
+    layout = _relocated_data_layout(tmp_path)
+    monkeypatch.chdir(layout["install"])
+    live = str(layout["live"].resolve())
+
+    executor = ToolExecutor(
+        ToolsConfig(
+            local_working_dir=str(layout["workspace"]),
+            audit_log_path=str(layout["audit"]),
+            trajectory_path=str(layout["trajectory"]),
+        ),
+        memory_path=str(layout["memory"]),
+    )
+    config = SimpleNamespace(tools=executor.config)
+    bot = SimpleNamespace(
+        config=config, tool_executor=SimpleNamespace(_memory_path=Path(layout["memory"]))
+    )
+
+    assert live in executor._protected_roots()
+    assert live in entrypoint._command_protected_roots(config)
+    assert live in _live_protected_roots(bot, str(layout["install"]))

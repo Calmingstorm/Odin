@@ -45,7 +45,7 @@ from .ssh import (
     run_ssh_command,
 )
 from .ssh_pool import SSHConnectionPool
-from .workspace import resolve_workspace
+from .workspace import DEFAULT_MEMORY_PATH, command_protected_roots, resolve_workspace
 
 log = get_logger("tools")
 
@@ -161,9 +161,10 @@ class ToolExecutor:
     ) -> None:
         self.config = config or ToolsConfig()
         self._email_config = email_config
-        # The user-command workspace is resolved once and cached — restart-
-        # required by design, since swapping workspaces mid-run would break the
-        # cross-command continuity that makes this invisible to normal use.
+        # The configured workspace VALUE is restart-required, but it is
+        # re-validated on every local command rather than cached: existence,
+        # type, ownership and mode are mutable filesystem state (see
+        # _ensure_local_workspace).
         #
         # Resolution is LAZY (first local command) rather than at construction:
         # constructing an executor must not depend on deployment having created
@@ -323,42 +324,25 @@ class ToolExecutor:
         and for source checkouts, and packaged ``/opt/odin/data`` is a symlink
         to ``/var/lib/odin`` — so the live-data root is taken from the actual
         configured data paths and canonicalized, not string-joined.
-        """
-        roots: list[str] = []
-        # Install root: the package's own location (…/src/tools/executor.py).
-        roots.append(str(Path(__file__).resolve().parents[2]))
 
-        # Live-data roots, canonicalized so a symlinked data dir (packaged
-        # /opt/odin/data -> /var/lib/odin) cannot be smuggled past the overlap
-        # check. Each path is classified by DECLARED semantics, never guessed
-        # from its name: a `Path.suffix` heuristic misreads dotted directories
-        # and extensionless files (PR #239 round-2 review).
-        declared: list[tuple[object, bool]] = [
-            (getattr(self.config, "audit_log_path", None), True),  # file
-            (getattr(self.config, "trajectory_path", None), False),  # directory
-            # The live memory.json is supplied by wiring, not ToolsConfig. It is
-            # the most valuable file in the tree, and omitting it meant a
-            # workspace beside it was accepted whenever audit/trajectory paths
-            # were relocated (reproduced in review).
+        Derivation itself lives in workspace.command_protected_roots so the
+        startup migration and the self-update preflight protect exactly the
+        same directories. When each caller derived its own, the preflight
+        accepted (and created) a workspace beside live memory.json that the
+        executor then rejected (PR #239 round-6 review).
+        """
+        return command_protected_roots(
+            # Install root: the package's own location (…/src/tools/executor.py).
+            Path(__file__).resolve().parents[2],
+            audit_log_path=getattr(self.config, "audit_log_path", None),
+            trajectory_path=getattr(self.config, "trajectory_path", None),
+            # The live memory.json is supplied by wiring, not ToolsConfig.
             # getattr-guarded: the sanctioned __new__ patch seam builds
-            # executors without __init__, so this attribute may not exist.
-            (getattr(self, "_memory_path", None), True),  # file
-        ]
-        for configured, is_file in declared:
-            if configured is None:
-                continue
-            text = str(configured).strip()
-            if not text:
-                continue
-            candidate = Path(text)
-            # Resolve the COMPLETE declared path first. Taking .parent before
-            # canonicalization protects the alias directory rather than the
-            # target: /aliases/memory.json -> /live-data/memory.json would
-            # protect /aliases and accept /live-data/workspace (reproduced in
-            # review as UNSAFE_ACCEPTED).
-            resolved = candidate.resolve()
-            roots.append(str(resolved.parent if is_file else resolved))
-        return roots
+            # executors without __init__, so this attribute may not exist —
+            # falling back to the shared default rather than to no protection.
+            memory_path=getattr(self, "_memory_path", None)
+            or DEFAULT_MEMORY_PATH,
+        )
 
     def get_workspace_metrics(self) -> dict[str, float]:
         """Usage of the local command workspace, for Prometheus.
@@ -401,7 +385,7 @@ class ToolExecutor:
         return metrics
 
     def _ensure_local_workspace(self) -> str:
-        """Resolve (once) the validated cwd for local user commands.
+        """Resolve and re-validate the cwd for local user commands.
 
         Raises :class:`WorkspaceError` if the configured directory is unusable.
         Deliberately no fallback: inheriting the process cwd is exactly the
