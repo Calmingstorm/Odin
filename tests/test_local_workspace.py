@@ -1170,7 +1170,11 @@ for name in set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", template)):
     os.environ.setdefault(name, "test-value")
 
 import yaml
-cfg = tmp / "config.yml"
+# The config lives in its own directory: since round 9 the ACTIVE config
+# file's directory is protected, and production keeps config.yml inside the
+# install root (already protected) with the workspace elsewhere.
+(tmp / "etc").mkdir(exist_ok=True)
+cfg = tmp / "etc" / "config.yml"
 parsed = yaml.safe_load(template)
 parsed.setdefault("tools", {})["local_working_dir"] = str(ws)
 cfg.write_text(yaml.safe_dump(parsed))
@@ -1563,3 +1567,156 @@ def test_wiring_supplies_the_full_config_to_the_executor() -> None:
         "wiring must pass the full config to ToolExecutor, or production falls "
         "back to the reduced protected-root derivation"
     )
+
+
+# --- Round 9: the last arbitrary-command route, and the live config file -----
+
+
+async def test_skill_run_on_host_replays_the_incident_safely(
+    fake_install: Path, workspace: Path, ae2_jar: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-9 blocker 1, reproduced by Odin: SkillContext.run_on_host is
+    arbitrary command execution exposed to user-created skills, and it was
+    still inheriting the process cwd — an alternate route straight back into
+    the wipe. Remote hosts are unaffected; the workspace applies only after
+    local-address resolution.
+    """
+    from src.tools.skill_context import SkillContext
+
+    monkeypatch.chdir(fake_install)  # a regression can only destroy the fixture
+    executor = _executor_with_workspace(workspace, fake_install)
+    ctx = SkillContext.__new__(SkillContext)
+    ctx._executor = executor
+
+    await ctx.run_on_host("localhost", "mkdir -p data && touch data/from-skill")
+    assert (workspace / "data" / "from-skill").exists()
+
+    await ctx.run_on_host("localhost", "rm -rf data")
+    assert not (workspace / "data").exists(), "the skill's own cleanup must work"
+    assert (fake_install / "data" / "sentinel").read_text(encoding="utf-8") == "live odin state"
+
+
+async def test_skill_run_on_host_fails_closed_on_an_invalid_workspace(
+    fake_install: Path, tmp_path: Path
+) -> None:
+    """Same fail-closed contract as the other raw command routes."""
+    from src.tools.skill_context import SkillContext
+
+    executor = _executor_with_workspace(tmp_path / "no-parent" / "ws", fake_install)
+    ctx = SkillContext.__new__(SkillContext)
+    ctx._executor = executor
+    with pytest.raises(WorkspaceError):
+        await ctx.run_on_host("localhost", "echo should-not-run")
+
+
+def test_active_config_file_directory_is_protected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-9 blocker 2, reproduced by Odin with an alternate config whose
+    parent WAS the configured workspace.
+
+    Odin accepts `python -m src /arbitrary/path/odin.yml`. That file is runtime
+    state, not a Config field, so the exhaustive-declaration test cannot cover
+    it — and a bare relative command could delete the file needed to restart.
+    """
+    from src.config.schema import active_config_path, set_active_config_path
+    from src.tools.workspace import command_protected_roots
+
+    live = tmp_path / "live-config-and-workspace"
+    live.mkdir()
+    config_file = live / "odin-custom.yml"
+    config_file.write_text("discord:\n  token: fake\n", encoding="utf-8")
+
+    previous = active_config_path()
+    set_active_config_path(config_file)
+    try:
+        roots = command_protected_roots(tmp_path / "install")
+        assert str(live.resolve()) in roots
+
+        with pytest.raises(WorkspaceError, match="overlap"):
+            provision_workspace(str(live), protected_roots=roots)
+        # ...and in the other direction: a workspace CONTAINING the config file.
+        with pytest.raises(WorkspaceError, match="overlap"):
+            provision_workspace(str(tmp_path), protected_roots=roots)
+    finally:
+        set_active_config_path(previous)
+
+
+def test_active_config_symlink_protects_the_target_directory(
+    tmp_path: Path,
+) -> None:
+    """The complete file path is resolved before taking .parent, so an aliased
+    config cannot protect the alias directory instead of the real one."""
+    from src.config.schema import active_config_path, set_active_config_path
+    from src.tools.workspace import command_protected_roots
+
+    real_dir = tmp_path / "real-config-dir"
+    real_dir.mkdir()
+    real_file = real_dir / "odin.yml"
+    real_file.write_text("discord:\n  token: fake\n", encoding="utf-8")
+    alias_dir = tmp_path / "aliases"
+    alias_dir.mkdir()
+    (alias_dir / "odin.yml").symlink_to(real_file)
+
+    previous = active_config_path()
+    set_active_config_path(alias_dir / "odin.yml")
+    try:
+        roots = command_protected_roots(tmp_path / "install")
+        assert str(real_dir.resolve()) in roots
+        with pytest.raises(WorkspaceError, match="overlap"):
+            provision_workspace(str(real_dir / "ws"), protected_roots=roots)
+    finally:
+        set_active_config_path(previous)
+
+
+def test_no_active_config_protects_nothing_extra(tmp_path: Path) -> None:
+    """A process that never loaded a config has nothing to protect, and must
+    not guess a path — guessing would reject legitimate workspaces."""
+    from src.config.schema import active_config_path, set_active_config_path
+    from src.tools.workspace import command_protected_roots
+
+    previous = active_config_path()
+    set_active_config_path(None)
+    try:
+        roots = command_protected_roots(tmp_path / "install")
+        assert roots == [str((tmp_path / "install").resolve()), str(Path("./data").resolve())]
+    finally:
+        set_active_config_path(previous)
+
+
+def test_workspace_usage_walk_is_cached_between_metrics_scrapes(
+    fake_install: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/metrics is unauthenticated and this directory deliberately never
+    prunes, so walking every file per scrape is an event-loop stall that grows
+    without bound (PR #239 round-9 review). Free space stays live; the walk is
+    reused for WORKSPACE_METRICS_TTL.
+    """
+    import src.tools.executor as executor_module
+
+    executor = _executor_with_workspace(workspace, fake_install)
+    (workspace / "one").write_text("x" * 10, encoding="utf-8")
+
+    walks = 0
+    real_walk = executor_module.os.walk
+
+    def counting_walk(*args, **kwargs):
+        nonlocal walks
+        walks += 1
+        return real_walk(*args, **kwargs)
+
+    monkeypatch.setattr(executor_module.os, "walk", counting_walk)
+
+    first = executor.get_workspace_metrics()
+    assert first["files"] == 1 and walks == 1
+
+    (workspace / "two").write_text("y" * 10, encoding="utf-8")
+    second = executor.get_workspace_metrics()
+    assert walks == 1, "a second scrape inside the TTL must not re-walk"
+    assert second["files"] == 1, "the cached count is served"
+    assert "free_bytes" in second, "cheap statvfs metrics stay live"
+
+    # Past the TTL the walk runs again and picks up the new file.
+    monkeypatch.setattr(executor_module, "WORKSPACE_METRICS_TTL", 0.0)
+    third = executor.get_workspace_metrics()
+    assert walks == 2 and third["files"] == 2

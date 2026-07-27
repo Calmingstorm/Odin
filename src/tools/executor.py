@@ -81,6 +81,11 @@ _current_tool_timeout_ctx: contextvars.ContextVar[int | None] = contextvars.Cont
     "odin_current_tool_timeout", default=None
 )
 
+# How long a workspace size/count walk is reused. Growth is an operator signal
+# measured in hours, so a minute of staleness costs nothing; scraping /metrics
+# in a loop against an ever-growing directory costs the event loop a great deal.
+WORKSPACE_METRICS_TTL = 60.0
+
 
 def _validate_memory_shape(data: dict) -> None:
     """Nested-shape check for memory.json, run inside json_store's backup
@@ -183,6 +188,8 @@ class ToolExecutor:
         # is what would restore the 2026-07-27 hazard.
         self._local_workspace: str | None = None
         self._local_workspace_resolved = False
+        # (monotonic_stamp, bytes, files) from the last workspace usage walk.
+        self._workspace_usage_cache: tuple[float, float, float] | None = None
         self._memory_path = Path(memory_path) if memory_path else None
         self._browser_manager = browser_manager
         self._permission_manager = permission_manager
@@ -366,18 +373,32 @@ class ToolExecutor:
             root = Path(self._ensure_local_workspace())
         except Exception:
             return {}
-        total_bytes = 0.0
-        files = 0.0
-        try:
-            for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
-                for name in filenames:
-                    files += 1
-                    try:
-                        total_bytes += os.lstat(os.path.join(dirpath, name)).st_size
-                    except OSError:
-                        pass
-        except OSError:
-            return {}
+
+        # The size/count walk is CACHED for WORKSPACE_METRICS_TTL. /metrics is
+        # unauthenticated and can be scraped at any rate, and this deliberately
+        # un-pruned directory only grows — walking every file synchronously on
+        # each request is an event-loop stall that gets worse over time
+        # (PR #239 round-9 review). Free space and inodes are cheap statvfs
+        # calls and stay live. On a stale-cache read the previous walk's
+        # numbers are reused; on the first-ever call the walk runs inline.
+        now = time.monotonic()
+        cached = getattr(self, "_workspace_usage_cache", None)
+        if cached is not None and (now - cached[0]) < WORKSPACE_METRICS_TTL:
+            total_bytes, files = cached[1], cached[2]
+        else:
+            total_bytes = 0.0
+            files = 0.0
+            try:
+                for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+                    for name in filenames:
+                        files += 1
+                        try:
+                            total_bytes += os.lstat(os.path.join(dirpath, name)).st_size
+                        except OSError:
+                            pass
+            except OSError:
+                return {}
+            self._workspace_usage_cache = (now, total_bytes, files)
         metrics = {"bytes": total_bytes, "files": files}
         try:
             usage = shutil.disk_usage(root)

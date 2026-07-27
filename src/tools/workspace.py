@@ -109,6 +109,22 @@ _DECLARED_STATE_PATHS: tuple[tuple[str, bool], ...] = (
 )
 
 
+def _active_config_file() -> str | None:
+    """Absolute path the live config was loaded from, if any.
+
+    Imported lazily and guarded: workspace validation must never depend on the
+    config module being importable, and a process that never loaded a config
+    (tests, one-off scripts) has nothing to protect.
+    """
+    try:
+        from ..config.schema import active_config_path
+
+        path = active_config_path()
+    except Exception:  # pragma: no cover - defensive
+        return None
+    return str(path) if path else None
+
+
 def _dotted(source: object, path: str) -> object:
     """Resolve ``a.b.c`` against nested config objects, tolerating absence."""
     current = source
@@ -158,6 +174,12 @@ def command_protected_roots(
     # The live memory.json is supplied by wiring rather than by config, so it
     # is passed in rather than declared above.
     declared.append((memory_path, True))
+    # The ACTIVE config file is runtime state, not a Config field: Odin accepts
+    # `python -m src /arbitrary/path/odin.yml`. Its directory must be protected
+    # too, or a bare relative command can delete the file needed to restart —
+    # reproduced with an alternate config whose parent WAS the configured
+    # workspace (PR #239 round-9 review).
+    declared.append((_active_config_file(), True))
 
     for configured, is_file in declared:
         if configured is None:
