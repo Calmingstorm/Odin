@@ -10,6 +10,8 @@ services:
     volumes:
       - ./config.yml:/app/config.yml:ro
       - ./data:/app/data
+      # Persisted so relative files survive restarts (see Dockerfile).
+      - ./workspace:/var/lib/odin-workspace
       - ./data/context:/app/data/context:ro
       - ./ssh:/app/.ssh:ro
     extra_hosts:

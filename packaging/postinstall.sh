@@ -14,6 +14,10 @@ SERVICE_GROUP="odin"
 APP_DIR="/opt/odin"
 CONFIG_DIR="/etc/odin"
 DATA_DIR="/var/lib/odin"
+# Working directory for local user commands (tools.local_working_dir).
+# A SIBLING of DATA_DIR, never inside it: local commands run here so a bare
+# relative path cannot resolve against the install or the live data.
+WORKSPACE_DIR="/var/lib/odin-workspace"
 LOG_DIR="/var/log/odin"
 WEB_PORT="3000"  # matches config.yml default web.port
 
@@ -34,6 +38,7 @@ fi
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$DATA_DIR"/{sessions,context,skills,search,knowledge,trajectories}
 mkdir -p "$LOG_DIR"
+mkdir -p "$WORKSPACE_DIR"
 
 # Enable passwordless sudo for the odin user (Odin runs privileged host
 # operations; scope this down in /etc/sudoers.d/99-odin-passwordless if you
@@ -99,6 +104,11 @@ fi
 
 # Set ownership and permissions
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR" "$DATA_DIR" "$LOG_DIR"
+# Odin refuses to run local commands unless this is 0700 and owned by the
+# service account — validation fails closed rather than falling back to the
+# install directory, which is what allowed the 2026-07-27 data wipe.
+chown "$SERVICE_USER:$SERVICE_GROUP" "$WORKSPACE_DIR"
+chmod 0700 "$WORKSPACE_DIR"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR"
 chmod 600 "$CONFIG_DIR/.env"
 chown root:root /usr/lib/systemd/system/odin.service

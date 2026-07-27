@@ -313,6 +313,32 @@ class ToolExecutor:
         hosts = list(self.config.hosts.keys())
         return hosts[0] if hosts else ""
 
+    def _protected_roots(self) -> list[str]:
+        """Roots the local workspace must not overlap, derived from the RUNNING
+        application rather than assumed (PR #239 review).
+
+        A hardcoded ``/opt/odin`` is wrong under Docker (install root ``/app``)
+        and for source checkouts, and packaged ``/opt/odin/data`` is a symlink
+        to ``/var/lib/odin`` — so the live-data root is taken from the actual
+        configured data paths and canonicalized, not string-joined.
+        """
+        roots: list[str] = []
+        # Install root: the package's own location (…/src/tools/executor.py).
+        roots.append(str(Path(__file__).resolve().parents[2]))
+        # Live-data roots: wherever the configured data paths actually live,
+        # following symlinks. audit_log_path/trajectory_path are the two
+        # declared data-dir members on ToolsConfig.
+        for configured in (
+            getattr(self.config, "audit_log_path", None),
+            getattr(self.config, "trajectory_path", None),
+        ):
+            if not isinstance(configured, str) or not configured.strip():
+                continue
+            candidate = Path(configured.strip())
+            data_dir = candidate.parent if candidate.suffix else candidate
+            roots.append(str(data_dir.resolve()))
+        return roots
+
     def _ensure_local_workspace(self) -> str:
         """Resolve (once) the validated cwd for local user commands.
 
@@ -324,7 +350,12 @@ class ToolExecutor:
         # executors via __new__, bypassing __init__. Lazy resolution still
         # applies to those instances rather than crashing on a missing flag.
         if not getattr(self, "_local_workspace_resolved", False):
-            self._local_workspace = str(resolve_workspace(self.config.local_working_dir))
+            self._local_workspace = str(
+                resolve_workspace(
+                    self.config.local_working_dir,
+                    protected_roots=self._protected_roots(),
+                )
+            )
             self._local_workspace_resolved = True
         workspace = self._local_workspace
         if workspace is None:  # pragma: no cover - resolve_workspace raises instead
