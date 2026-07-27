@@ -2111,3 +2111,73 @@ def test_workspace_usage_timestamp_is_recorded_on_completion(
 
     stamped_at = executor._workspace_usage_cache[0]
     assert stamped_at >= started + 0.3, "the stamp must be taken after the walk finished"
+
+
+def test_usage_refresh_is_single_flight(fake_install: Path, workspace: Path) -> None:
+    """A slow walk must not have a second one piled on top by the next scrape."""
+    executor = _executor_with_workspace(workspace, fake_install)
+    executor._workspace_usage_refreshing = True  # a walk is already in flight
+
+    started = []
+    def _record(**kw):
+        started.append(kw)
+        return _NoThread()
+
+    with patch("src.tools.executor.threading.Thread", _record):
+        executor.get_workspace_metrics()
+    assert not started, "a refresh was already running; a second must not start"
+
+
+class _NoThread:
+    def start(self) -> None:  # pragma: no cover - never reached when single-flight holds
+        raise AssertionError("thread should not have been started")
+
+
+def test_usage_refresh_is_inert_without_executor_state(workspace: Path) -> None:
+    """The sanctioned __new__ patch seam builds executors without __init__, so
+    the lock may not exist. Metrics must degrade, never raise."""
+    from src.tools.executor import ToolExecutor as _Executor
+
+    bare = _Executor.__new__(_Executor)
+    bare._refresh_workspace_usage(workspace)  # must not raise
+    assert getattr(bare, "_workspace_usage_cache", None) is None
+
+
+def test_usage_refresh_survives_a_failing_walk(fake_install: Path, workspace: Path) -> None:
+    """An unreadable workspace leaves usage unreported and, critically, clears
+    the in-flight flag so later scrapes can still refresh."""
+    executor = _executor_with_workspace(workspace, fake_install)
+
+    def _boom(*_a, **_kw):
+        raise OSError("walk refused")
+
+    with patch("src.tools.executor.os.walk", _boom):
+        executor.get_workspace_metrics()
+        deadline = time.monotonic() + 5
+        while executor._workspace_usage_refreshing and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+    assert executor._workspace_usage_cache is None, "no usage numbers to report"
+    assert executor._workspace_usage_refreshing is False, "the flag must not stick"
+
+    # ...and a later scrape still refreshes normally.
+    (workspace / "f").write_text("xyz", encoding="utf-8")
+    assert _metrics_after_refresh(executor)["files"] == 1
+
+
+def test_usage_refresh_skips_files_it_cannot_stat(
+    fake_install: Path, workspace: Path
+) -> None:
+    """A file that vanishes mid-walk is counted but not sized, rather than
+    aborting the whole scan."""
+    executor = _executor_with_workspace(workspace, fake_install)
+    (workspace / "gone").write_text("x" * 5, encoding="utf-8")
+
+    def _refuse(*_a, **_kw):
+        raise OSError("stat refused")
+
+    with patch("src.tools.executor.os.lstat", _refuse):
+        metrics = _metrics_after_refresh(executor)
+
+    assert metrics["files"] == 1
+    assert metrics["bytes"] == 0
