@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -325,19 +327,73 @@ class ToolExecutor:
         roots: list[str] = []
         # Install root: the package's own location (…/src/tools/executor.py).
         roots.append(str(Path(__file__).resolve().parents[2]))
-        # Live-data roots: wherever the configured data paths actually live,
-        # following symlinks. audit_log_path/trajectory_path are the two
-        # declared data-dir members on ToolsConfig.
-        for configured in (
-            getattr(self.config, "audit_log_path", None),
-            getattr(self.config, "trajectory_path", None),
-        ):
-            if not isinstance(configured, str) or not configured.strip():
+
+        # Live-data roots, canonicalized so a symlinked data dir (packaged
+        # /opt/odin/data -> /var/lib/odin) cannot be smuggled past the overlap
+        # check. Each path is classified by DECLARED semantics, never guessed
+        # from its name: a `Path.suffix` heuristic misreads dotted directories
+        # and extensionless files (PR #239 round-2 review).
+        declared: list[tuple[object, bool]] = [
+            (getattr(self.config, "audit_log_path", None), True),  # file
+            (getattr(self.config, "trajectory_path", None), False),  # directory
+            # The live memory.json is supplied by wiring, not ToolsConfig. It is
+            # the most valuable file in the tree, and omitting it meant a
+            # workspace beside it was accepted whenever audit/trajectory paths
+            # were relocated (reproduced in review).
+            # getattr-guarded: the sanctioned __new__ patch seam builds
+            # executors without __init__, so this attribute may not exist.
+            (getattr(self, "_memory_path", None), True),  # file
+        ]
+        for configured, is_file in declared:
+            if configured is None:
                 continue
-            candidate = Path(configured.strip())
-            data_dir = candidate.parent if candidate.suffix else candidate
+            text = str(configured).strip()
+            if not text:
+                continue
+            candidate = Path(text)
+            data_dir = candidate.parent if is_file else candidate
             roots.append(str(data_dir.resolve()))
         return roots
+
+    def get_workspace_metrics(self) -> dict[str, float]:
+        """Usage of the local command workspace, for Prometheus.
+
+        The accepted design deliberately does NOT auto-prune — age-based
+        deletion would destroy the cross-command continuity the stable
+        workspace exists to provide — so growth must be observable instead,
+        with cleanup an explicit operator action (PR #239 round-2 review).
+
+        Never raises: metrics collection must not be able to break a command
+        path, and an unresolvable workspace simply reports nothing.
+        """
+        try:
+            root = Path(self._ensure_local_workspace())
+        except Exception:
+            return {}
+        total_bytes = 0.0
+        files = 0.0
+        try:
+            for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+                for name in filenames:
+                    files += 1
+                    try:
+                        total_bytes += os.lstat(os.path.join(dirpath, name)).st_size
+                    except OSError:
+                        pass
+        except OSError:
+            return {}
+        metrics = {"bytes": total_bytes, "files": files}
+        try:
+            usage = shutil.disk_usage(root)
+            metrics["free_bytes"] = float(usage.free)
+        except OSError:
+            pass
+        try:
+            stats = os.statvfs(root)
+            metrics["free_inodes"] = float(stats.f_favail)
+        except (OSError, AttributeError):
+            pass
+        return metrics
 
     def _ensure_local_workspace(self) -> str:
         """Resolve (once) the validated cwd for local user commands.

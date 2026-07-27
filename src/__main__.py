@@ -32,6 +32,11 @@ def _wire_observability(health, bot, log) -> None:
     tool_executor = getattr(bot, "tool_executor", None)
     if tool_executor is not None and hasattr(tool_executor, "get_metrics"):
         metrics.register_source("tools", tool_executor.get_metrics)
+    if tool_executor is not None and hasattr(tool_executor, "get_workspace_metrics"):
+        # Paired with the deliberate absence of auto-pruning: growth in the
+        # local command workspace must be alertable rather than silently
+        # unbounded (PR #239 round-2 review).
+        metrics.register_source("workspace", tool_executor.get_workspace_metrics)
 
     cost_tracker = getattr(bot, "cost_tracker", None)
     if cost_tracker is not None and hasattr(cost_tracker, "get_prometheus_metrics"):

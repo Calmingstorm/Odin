@@ -117,6 +117,17 @@ playwright install chromium          # optional — enables browser_* tools
 
 cp .env.example .env                 # set DISCORD_TOKEN
 $EDITOR config.yml                   # hosts, LLM, permissions
+
+# Local commands run in a workspace OUTSIDE the install, so a bare relative
+# path (e.g. cleaning up after extracting an archive whose internal layout
+# starts with `data/`) can never resolve against your live data. It must
+# exist, be private, and be owned by you — validation fails closed rather
+# than silently falling back to the install directory.
+sudo install -d -m 0700 -o "$USER" -g "$(id -gn)" /var/lib/odin-workspace
+# …or point `tools.local_working_dir` in config.yml at any private directory
+# outside the checkout, e.g.:
+#   mkdir -p -m 0700 ~/.local/share/odin-workspace
+
 python -m src
 ```
 

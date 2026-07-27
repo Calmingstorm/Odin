@@ -292,20 +292,57 @@ def test_remote_execution_signature_has_no_workspace() -> None:
     assert "cwd" not in inspect.signature(run_ssh_command).parameters
 
 
-def test_legacy_dag_surfaces_are_classified() -> None:
-    """src/odin/tools/{shell,process}.py also inherit cwd today. They are NOT on
-    the Discord execution path, but if either is ever wired in without a
-    workspace it silently reopens the 2026-07-27 mechanism. This pin exists so
-    that wiring cannot happen quietly."""
-    repo = Path(__file__).resolve().parents[1]
-    for legacy in (repo / "src/odin/tools/shell.py", repo / "src/odin/tools/process.py"):
-        if not legacy.exists():
+def test_discord_execution_path_excludes_the_legacy_dag_surfaces() -> None:
+    """The legacy `src/odin/tools/{shell,process}.py` surfaces spawn subprocesses
+    that inherit the application cwd, so if the Discord path ever adopted them
+    the 2026-07-27 mechanism reopens behind this fix.
+
+    The previous version of this test only grepped two literal import spellings
+    in executor.py, and would have stayed green under transitive wiring —
+    `ToolRegistry.with_defaults()` already registers `ShellTool` for the
+    separate legacy CLI (PR #239 round-2 review). This instead characterizes
+    the ACTUAL Discord-reachable boundary by importing it and proving the
+    legacy modules are absent from everything it can route to.
+    """
+    import sys
+
+    from src.tools.executor import EXECUTOR_HANDLERS, ToolExecutor
+    from src.tools.registry import TOOLS
+
+    legacy_modules = {"src.odin.tools.shell", "src.odin.tools.process"}
+
+    # 1. Nothing the Discord tool catalog exposes may be owned by a legacy module.
+    for tool in TOOLS:
+        name = tool.get("name") if isinstance(tool, dict) else None
+        assert name, "every published tool must be named"
+
+    # 2. Every executor handler resolves to a module inside src.tools.*,
+    #    never the legacy DAG surfaces.
+    for tool_name, (owner_key, attr) in EXECUTOR_HANDLERS.items():
+        assert not owner_key.startswith("odin."), (
+            f"{tool_name} routes through a legacy owner: {owner_key}.{attr}"
+        )
+
+    # 3. Importing the Discord execution path must not pull the legacy modules
+    #    in transitively. Import it fresh and check what landed in sys.modules.
+    for module in list(legacy_modules):
+        sys.modules.pop(module, None)
+    import importlib
+
+    importlib.reload(importlib.import_module("src.tools.executor"))
+    still_absent = legacy_modules - set(sys.modules)
+    assert still_absent == legacy_modules, (
+        f"the Discord execution path transitively imports {legacy_modules - still_absent}; "
+        "those surfaces inherit the application cwd and would reopen the wipe mechanism"
+    )
+
+    # 4. The executor's own handler domains must not expose a legacy shell tool.
+    executor = ToolExecutor.__new__(ToolExecutor)
+    for owner_key, _attr in EXECUTOR_HANDLERS.values():
+        owner = getattr(executor, owner_key, None)
+        if owner is None:
             continue
-        source = legacy.read_text(encoding="utf-8")
-        assert "create_subprocess_shell" in source
-        executor = (repo / "src/tools/executor.py").read_text(encoding="utf-8")
-        assert "src.odin.tools.shell" not in executor
-        assert "from ..odin.tools" not in executor
+        assert "odin.tools" not in type(owner).__module__
 
 
 # --- THE SEAM THAT ACTUALLY FAILED: through ToolExecutor --------------------
@@ -511,3 +548,60 @@ def test_executor_derives_real_roots_from_the_running_app() -> None:
     repo = Path(__file__).resolve().parents[1]
     assert repo.resolve() in roots, "the actual install/package root must be protected"
     assert any("data" in str(r) for r in roots), "the live-data root must be protected"
+
+
+def test_memory_path_directory_is_protected_when_other_paths_relocate(tmp_path: Path) -> None:
+    """PR #239 round-2 blocker 1, reproduced by Odin as UNSAFE_ACCEPTED.
+
+    Deriving data roots from audit/trajectory alone means that if those are
+    configured elsewhere, a workspace sitting beside the live memory.json is
+    accepted. memory.json is the most valuable file in the tree.
+    """
+    from src.config.schema import ToolsConfig
+    from src.tools.executor import ToolExecutor
+
+    live_data = tmp_path / "var-lib-odin"
+    live_data.mkdir()
+    (live_data / "memory.json").write_text("{}", encoding="utf-8")
+    workspace = live_data / "workspace"       # beside the live memory file
+    workspace.mkdir(mode=0o700)
+
+    # audit + trajectories deliberately relocated away from the data root
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    config = ToolsConfig(
+        local_working_dir=str(workspace),
+        audit_log_path=str(elsewhere / "audit.jsonl"),
+        trajectory_path=str(elsewhere / "trajectories"),
+    )
+    executor = ToolExecutor(config=config, memory_path=str(live_data / "memory.json"))
+
+    roots = [Path(r).resolve() for r in executor._protected_roots()]
+    assert live_data.resolve() in roots, "the live memory directory must be protected"
+    with pytest.raises(WorkspaceError, match="overlap"):
+        executor._ensure_local_workspace()
+
+
+def test_path_classification_is_declared_not_guessed(tmp_path: Path) -> None:
+    """A `Path.suffix` heuristic misreads dotted directories and extensionless
+    files; classification comes from declared semantics instead."""
+    from src.config.schema import ToolsConfig
+    from src.tools.executor import ToolExecutor
+
+    dotted_dir = tmp_path / "traj" / "trajectories.d"  # a DIRECTORY with a suffix
+    dotted_dir.mkdir(parents=True)
+    audit_dir = tmp_path / "audit"
+    audit_dir.mkdir()
+    executor = ToolExecutor(
+        config=ToolsConfig(
+            audit_log_path=str(audit_dir / "audit.jsonl"),   # declared FILE
+            trajectory_path=str(dotted_dir),                 # declared DIRECTORY
+        )
+    )
+    roots = [Path(r).resolve() for r in executor._protected_roots()]
+    # The dotted directory is protected as ITSELF; a suffix heuristic would
+    # have mistaken it for a file and protected its parent instead.
+    assert dotted_dir.resolve() in roots
+    assert dotted_dir.parent.resolve() not in roots, "suffix heuristic would over-protect"
+    # The audit FILE contributes its parent directory, which is correct.
+    assert audit_dir.resolve() in roots
