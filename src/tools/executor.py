@@ -43,6 +43,7 @@ from .ssh import (
     run_ssh_command,
 )
 from .ssh_pool import SSHConnectionPool
+from .workspace import WorkspaceError, resolve_workspace
 
 log = get_logger("tools")
 
@@ -158,6 +159,19 @@ class ToolExecutor:
     ) -> None:
         self.config = config or ToolsConfig()
         self._email_config = email_config
+        # The user-command workspace is resolved once and cached — restart-
+        # required by design, since swapping workspaces mid-run would break the
+        # cross-command continuity that makes this invisible to normal use.
+        #
+        # Resolution is LAZY (first local command) rather than at construction:
+        # constructing an executor must not depend on deployment having created
+        # the directory, or every test and fresh checkout breaks. The safety
+        # property is unchanged, because it binds where it matters — a local
+        # command never runs with an unvalidated cwd, and an unusable workspace
+        # raises instead of silently falling back to the inherited cwd, which
+        # is what would restore the 2026-07-27 hazard.
+        self._local_workspace: str | None = None
+        self._local_workspace_resolved = False
         self._memory_path = Path(memory_path) if memory_path else None
         self._browser_manager = browser_manager
         self._permission_manager = permission_manager
@@ -299,6 +313,24 @@ class ToolExecutor:
         hosts = list(self.config.hosts.keys())
         return hosts[0] if hosts else ""
 
+    def _ensure_local_workspace(self) -> str:
+        """Resolve (once) the validated cwd for local user commands.
+
+        Raises :class:`WorkspaceError` if the configured directory is unusable.
+        Deliberately no fallback: inheriting the process cwd is exactly the
+        behaviour that let a bare `rm -rf data` delete the live install.
+        """
+        # getattr-guarded: tests and the sanctioned RFC-004 patch seam build
+        # executors via __new__, bypassing __init__. Lazy resolution still
+        # applies to those instances rather than crashing on a missing flag.
+        if not getattr(self, "_local_workspace_resolved", False):
+            self._local_workspace = str(resolve_workspace(self.config.local_working_dir))
+            self._local_workspace_resolved = True
+        workspace = self._local_workspace
+        if workspace is None:  # pragma: no cover - resolve_workspace raises instead
+            raise WorkspaceError("local workspace unresolved")
+        return workspace
+
     def _ensure_process_registry(self):
         """Lazy-init the ProcessRegistry ON THE EXECUTOR (RFC-004 P4).
 
@@ -309,7 +341,9 @@ class ToolExecutor:
         if not hasattr(self, "_process_registry"):
             from .process_manager import ProcessRegistry
 
-            self._process_registry = ProcessRegistry()
+            self._process_registry = ProcessRegistry(
+                workspace=self._ensure_local_workspace()
+            )
         return self._process_registry
 
     def check_permission(self, tool_name: str, user_id: str | None) -> str | None:
@@ -639,11 +673,16 @@ class ToolExecutor:
                 try:
                     async with bh.acquire():
                         return await run_local_command(
-                            command, timeout=timeout, on_output=on_output
+                            command,
+                            timeout=timeout,
+                            on_output=on_output,
+                            cwd=self._ensure_local_workspace(),
                         )
                 except BulkheadFullError:
                     return 1, "Error: subprocess bulkhead full — too many concurrent local commands"
-            return await run_local_command(command, timeout=timeout, on_output=on_output)
+            return await run_local_command(
+                command, timeout=timeout, on_output=on_output, cwd=self._ensure_local_workspace()
+            )
         ssh_retry = self.config.ssh_retry
         ssh_kwargs: dict[str, Any] = dict(
             host=address,

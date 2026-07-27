@@ -217,6 +217,24 @@ class ToolsConfig(BaseModel):
     # Loops typically need more budget for exploration + execution + verify + commit.
     max_tool_iterations_chat: int = 500
     max_tool_iterations_loop: int = 500
+    # Working directory for USER-COMMAND local execution (run_command,
+    # run_script, manage_process). Before this existed, those subprocesses
+    # inherited systemd's WorkingDirectory=/opt/odin, so a bare relative path
+    # in a command resolved against the live install — on 2026-07-27 an AE2 jar
+    # whose internal layout is `data/` was extracted and cleaned up with
+    # `rm -rf data`, which deleted /opt/odin/data.
+    #
+    # Deliberately a SIBLING of /var/lib/odin, not a child: packaged installs
+    # use /var/lib/odin as the live data directory behind /opt/odin/data.
+    # Not /tmp or /var/tmp (tmpfiles policy can age those out) and not $HOME
+    # (packaged Odin declares /opt/odin as the service account's home).
+    #
+    # Stable and persistent BY DESIGN: a fresh directory per command would
+    # break two-step workflows that write a relative file in one command and
+    # read it in the next, which would cost capability. Restart-required, not
+    # hot-reloadable — swapping workspaces at runtime would break exactly the
+    # cross-command continuity this preserves.
+    local_working_dir: str = "/var/lib/odin-workspace"
 
     @field_validator("command_timeout_seconds")
     @classmethod

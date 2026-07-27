@@ -11,8 +11,10 @@ import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ..odin_log import get_logger
+from .workspace import workspace_env
 
 log = get_logger("process_manager")
 
@@ -43,8 +45,13 @@ class ProcessInfo:
 class ProcessRegistry:
     """Registry for background processes with full lifecycle management."""
 
-    def __init__(self) -> None:
+    def __init__(self, workspace: str | None = None) -> None:
         self._processes: dict[int, ProcessInfo] = {}
+        # Background starts share the foreground workspace. Without this,
+        # `manage_process start` stays an alternate route to the 2026-07-27
+        # incident: a bare relative path resolving against the live install
+        # (29 historical background starts had no explicit cd).
+        self._workspace = workspace
 
     # ------------------------------------------------------------------
     # Public API
@@ -69,12 +76,15 @@ class ProcessRegistry:
             # start_new_session puts the shell at the head of its own process
             # group, so kill()/shutdown() can take out descendants
             # (`sh -c 'x & ...'`) instead of just the shell leader.
+            env = workspace_env(Path(self._workspace)) if self._workspace else None
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 stdin=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                cwd=self._workspace,
+                env=env,
             )
         except Exception as e:
             return f"Failed to start process: {e}"
@@ -155,9 +165,7 @@ class ProcessRegistry:
                 # would otherwise outlive an in-place restart's exec).
                 # owned_pgid: start() spawns with start_new_session=True, so
                 # the group stays signallable after the leader exits.
-                await terminate_process_tree(
-                    info.process, grace=5.0, owned_pgid=info.process.pid
-                )
+                await terminate_process_tree(info.process, grace=5.0, owned_pgid=info.process.pid)
             info.status = "failed"
             info.exit_code = -9
             log.info("Killed process PID %d", pid)
@@ -272,9 +280,7 @@ class ProcessRegistry:
             from ..tools.ssh import terminate_process_tree
 
             try:
-                await terminate_process_tree(
-                    info.process, grace=2.0, owned_pgid=info.process.pid
-                )
+                await terminate_process_tree(info.process, grace=2.0, owned_pgid=info.process.pid)
             except Exception:
                 log.debug("group reap after PID %d exit failed", info.pid, exc_info=True)
 
