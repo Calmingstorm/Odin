@@ -328,7 +328,7 @@ def _live_protected_roots(bot, base: str | None) -> list[str]:
 
     memory_path = getattr(getattr(bot, "tool_executor", None), "_memory_path", None)
     return command_protected_roots(
-        Path(base).resolve() if base else Path(__file__).resolve().parents[3],
+        Path(base).absolute() if base else Path(__file__).absolute().parents[3],
         getattr(bot, "config", None),
         memory_path=memory_path or DEFAULT_MEMORY_PATH,
     )

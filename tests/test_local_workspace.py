@@ -526,6 +526,119 @@ def test_rejects_workspace_that_contains_a_protected_root(tmp_path: Path) -> Non
         resolve_workspace(str(parent), protected_roots=[str(install)])
 
 
+def test_declared_state_path_protects_lexical_alias_and_canonical_target(
+    tmp_path: Path,
+) -> None:
+    """A live-state path may contain a symlinked directory component. Protect
+    both the alias traversed by runtime code and the canonical target it reaches.
+    """
+    from src.config.schema import Config
+    from src.tools.workspace import command_protected_roots
+
+    install = tmp_path / "install"
+    install.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(mode=0o700)
+    live = tmp_path / "live"
+    (live / "sessions").mkdir(parents=True)
+    (workspace / "state").symlink_to(live, target_is_directory=True)
+    config = Config(
+        discord={"token": "fake"},
+        sessions={"persist_directory": str(workspace / "state" / "sessions")},
+    )
+
+    roots = command_protected_roots(
+        install,
+        config,
+        memory_path=tmp_path / "memory" / "memory.json",
+    )
+    assert str(workspace / "state" / "sessions") in roots
+    assert str((live / "sessions").resolve()) in roots
+    with pytest.raises(WorkspaceError, match="overlap"):
+        resolve_workspace(str(workspace), protected_roots=roots)
+
+
+def test_install_root_protects_lexical_alias_and_canonical_checkout(tmp_path: Path) -> None:
+    """In-place re-exec needs the checkout's launch alias as well as its target."""
+    from src.tools.workspace import command_protected_roots
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(mode=0o700)
+    real_install = tmp_path / "real-install"
+    real_install.mkdir()
+    (workspace / "checkout").symlink_to(real_install, target_is_directory=True)
+
+    roots = command_protected_roots(
+        workspace / "checkout",
+        memory_path=tmp_path / "memory" / "memory.json",
+    )
+    assert str(workspace / "checkout") in roots
+    assert str(real_install.resolve()) in roots
+    with pytest.raises(WorkspaceError, match="overlap"):
+        resolve_workspace(str(workspace), protected_roots=roots)
+
+
+def _symlinked_checkout_layout(tmp_path: Path) -> tuple[Path, Path]:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(mode=0o700)
+    real_install = tmp_path / "real-install"
+    real_install.mkdir()
+    checkout = workspace / "checkout"
+    checkout.symlink_to(real_install, target_is_directory=True)
+    return workspace, checkout
+
+
+def test_executor_passes_lexical_install_root_to_shared_derivation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.tools.executor as executor_module
+
+    workspace, checkout = _symlinked_checkout_layout(tmp_path)
+    monkeypatch.setattr(executor_module, "__file__", str(checkout / "src/tools/executor.py"))
+    executor = ToolExecutor(
+        ToolsConfig(local_working_dir=str(workspace)),
+        memory_path=str(tmp_path / "memory/memory.json"),
+    )
+    with pytest.raises(WorkspaceError, match="overlap"):
+        executor._ensure_local_workspace()
+
+
+def test_startup_passes_lexical_install_root_to_shared_derivation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.__main__ as entrypoint
+    from src.config.schema import Config
+
+    workspace, checkout = _symlinked_checkout_layout(tmp_path)
+    monkeypatch.setattr(entrypoint, "__file__", str(checkout / "src/__main__.py"))
+    config = Config(
+        discord={"token": "fake"},
+        tools={"local_working_dir": str(workspace)},
+    )
+    roots = entrypoint._command_protected_roots(config)
+    with pytest.raises(WorkspaceError, match="overlap"):
+        resolve_workspace(str(workspace), protected_roots=roots)
+
+
+def test_updater_passes_lexical_install_root_to_shared_derivation(tmp_path: Path) -> None:
+    from src.config.schema import Config
+    from src.web.api.self_update import _live_protected_roots
+
+    workspace, checkout = _symlinked_checkout_layout(tmp_path)
+    bot = SimpleNamespace(
+        config=Config(
+            discord={"token": "fake"},
+            tools={"local_working_dir": str(workspace)},
+        ),
+        tool_executor=SimpleNamespace(
+            _memory_path=tmp_path / "memory/memory.json",
+        ),
+    )
+    roots = _live_protected_roots(bot, str(checkout))
+    with pytest.raises(WorkspaceError, match="overlap"):
+        resolve_workspace(str(workspace), protected_roots=roots)
+
+
 def test_rejects_wrong_owner(tmp_path: Path, fake_install: Path) -> None:
     """The contract is a directory owned by the execution identity."""
     ws = tmp_path / "otherowner"
@@ -2151,6 +2264,41 @@ def test_usage_refresh_is_single_flight(fake_install: Path, workspace: Path) -> 
     assert not started, "a refresh was already running; a second must not start"
 
 
+def test_usage_cache_is_published_before_single_flight_clears(
+    fake_install: Path, workspace: Path
+) -> None:
+    """No scrape may observe refreshing=False while the completed cache is
+    still absent/stale, or it can launch a duplicate usage walk."""
+    executor = _executor_with_workspace(workspace, fake_install)
+    (workspace / "one").write_text("x", encoding="utf-8")
+    inner = threading.Lock()
+    invalid_transitions: list[str] = []
+
+    class _ObservingLock:
+        def __enter__(self):
+            inner.acquire()
+            return self
+
+        def __exit__(self, *_exc):
+            if (
+                executor._workspace_usage_refreshing is False
+                and executor._workspace_usage_cache is None
+            ):
+                invalid_transitions.append("refresh cleared before cache publish")
+            inner.release()
+
+    executor._workspace_usage_lock = _ObservingLock()
+    executor.get_workspace_metrics()
+
+    deadline = time.monotonic() + 5
+    while executor._workspace_usage_refreshing and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert invalid_transitions == []
+    assert executor._workspace_usage_refreshing is False
+    assert executor._workspace_usage_cache is not None
+
+
 class _NoThread:
     def start(self) -> None:  # pragma: no cover - never reached when single-flight holds
         raise AssertionError("thread should not have been started")
@@ -2236,6 +2384,26 @@ def test_startup_diagnostic_passes_for_a_usable_workspace(
     result = check_local_workspace(ToolsConfig(local_working_dir=str(workspace)))
     assert result.passed is True
     assert str(workspace.resolve()) in result.detail
+
+
+def test_startup_diagnostic_uses_full_config_for_relocated_state(tmp_path: Path) -> None:
+    """The real diagnostic registry must not say ready when runtime rejects the
+    same workspace for overlapping an independently relocated state directory.
+    """
+    from src.config.schema import Config
+    from src.health.startup import run_startup_diagnostics
+
+    workspace = tmp_path / "state"
+    workspace.mkdir(mode=0o700)
+    config = Config(
+        discord={"token": "fake"},
+        tools={"local_working_dir": str(workspace)},
+        sessions={"persist_directory": str(workspace)},
+    )
+    report = run_startup_diagnostics(yaml_config=config)
+    result = next(item for item in report.results if item.name == "local_workspace")
+    assert result.passed is False
+    assert "overlap" in result.detail
 
 
 def test_startup_diagnostic_uses_the_shared_protected_roots() -> None:
@@ -2331,6 +2499,22 @@ async def test_command_checks_still_run_in_the_workspace_when_it_is_valid(
     })
     assert (workspace / "from-conditional").exists()
     assert not (fake_install / "from-conditional").exists()
+
+
+async def test_port_probe_target_cannot_execute_in_the_inherited_cwd(
+    fake_install: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Port is a fixed-shape probe only when its host cannot escape the nested
+    shell. Before the fix this target created the marker in the install cwd.
+    """
+    monkeypatch.chdir(fake_install)
+    executor = _executor_with_workspace(workspace, fake_install)
+    await executor.execute("validate_action", {
+        "host": "localhost",
+        "checks": [{"type": "port", "target": "$(touch injected-by-port):1"}],
+    })
+    assert not (fake_install / "injected-by-port").exists()
+    assert not (workspace / "injected-by-port").exists()
 
 
 def test_symlinked_ancestor_of_the_launch_config_is_protected(tmp_path: Path) -> None:

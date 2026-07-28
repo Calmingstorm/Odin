@@ -62,6 +62,24 @@ def _canonical(path: str | os.PathLike[str]) -> Path:
     return Path(path).expanduser().resolve(strict=False)
 
 
+def _lexical_absolute(path: str | os.PathLike[str]) -> Path:
+    """Absolute spelling with ``..`` removed but symlink components intact.
+
+    Canonical paths protect the object reached through an alias. Lexical paths
+    protect the alias components a running process will traverse again. Both
+    matter: deleting an alias can strand sessions, credentials, or the checkout
+    used for an in-place restart even when the canonical target survives.
+    """
+    return Path(os.path.abspath(Path(path).expanduser()))
+
+
+def _path_spellings(path: str | os.PathLike[str]) -> tuple[Path, ...]:
+    """Unique lexical and canonical spellings, in stable order."""
+    lexical = _lexical_absolute(path)
+    canonical = _canonical(path)
+    return (lexical,) if lexical == canonical else (lexical, canonical)
+
+
 def _overlaps(workspace: Path, root: Path) -> bool:
     """True when the two paths are the same or either contains the other."""
     return workspace == root or root in workspace.parents or workspace in root.parents
@@ -77,7 +95,7 @@ def _reject_overlap(
         # lexical launch-path root they do not, and resolving it here would
         # collapse the alias back onto its target and un-protect the component
         # the restart traverses (PR #239 round-11 review).
-        for candidate in {Path(os.path.abspath(root)), _canonical(root)}:
+        for candidate in _path_spellings(root):
             if _overlaps(workspace, candidate):
                 raise WorkspaceError(
                     f"local_working_dir must not overlap {candidate}: {workspace}"
@@ -185,16 +203,30 @@ def command_protected_roots(
 
     Paths are classified by DECLARED semantics, never guessed from the name: a
     ``Path.suffix`` heuristic misreads dotted directories and extensionless
-    files. Each declared path is resolved COMPLETELY before ``.parent`` is
-    taken, because taking the parent first protects the alias directory rather
-    than the target (``/aliases/memory.json -> /live-data/memory.json`` would
-    protect ``/aliases`` and accept ``/live-data/workspace``).
+    files. Each declared path is kept under both its lexical and canonical
+    spelling before file parents are taken: the lexical spelling protects the
+    alias a running subsystem traverses, while the canonical spelling protects
+    its target (``/aliases/memory.json -> /live-data/memory.json`` needs both).
     """
     source: object = config
     if source is None:
         source = SimpleNamespace(tools=tools) if tools is not None else SimpleNamespace()
 
-    roots = [str(_canonical(install_root))]
+    roots: list[str] = []
+
+    def _append_path(path: object, *, is_file: bool) -> None:
+        """Protect both how a path is named and what that name reaches."""
+        if path is None:
+            return
+        text = str(path).strip()
+        if not text:
+            return
+        for spelling in _path_spellings(text):
+            root = str(spelling.parent if is_file else spelling)
+            if root not in roots:
+                roots.append(root)
+
+    _append_path(install_root, is_file=False)
     declared: list[tuple[object, bool]] = [
         (_dotted(source, dotted), is_file) for dotted, is_file in _DECLARED_STATE_PATHS
     ]
@@ -207,19 +239,10 @@ def command_protected_roots(
     # reproduced with an alternate config whose parent WAS the configured
     # workspace (PR #239 round-9 review).
     for config_root in _active_config_roots():
-        if config_root not in roots:
-            roots.append(config_root)
+        _append_path(config_root, is_file=False)
 
     for configured, is_file in declared:
-        if configured is None:
-            continue
-        text = str(configured).strip()
-        if not text:
-            continue
-        resolved = _canonical(text)
-        root = str(resolved.parent if is_file else resolved)
-        if root not in roots:
-            roots.append(root)
+        _append_path(configured, is_file=is_file)
     return roots
 
 

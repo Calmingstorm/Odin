@@ -426,8 +426,8 @@ def check_config_sections(config: Any) -> DiagnosticResult:
     )
 
 
-def check_local_workspace(tools_config: Any) -> DiagnosticResult:
-    """Verify the local command workspace is usable.
+def check_local_workspace(config: Any) -> DiagnosticResult:
+    """Verify the local command workspace against the full live config.
 
     Local user commands FAIL CLOSED when this directory is missing, wrongly
     owned, or not 0700 — deliberately, because falling back to the install
@@ -437,9 +437,19 @@ def check_local_workspace(tools_config: Any) -> DiagnosticResult:
     """
     from ..tools.workspace import WorkspaceError, provisioning_hint, resolve_workspace
 
+    # Production passes the full Config so independently relocated sessions,
+    # context, logs, credentials, and other state are protected exactly as the
+    # startup migration and executor protect them. Accept ToolsConfig directly
+    # only for focused callers/tests; that intentionally yields the reduced
+    # fallback contract.
+    tools_config = getattr(config, "tools", config)
+    full_config = config if tools_config is not config else None
     configured = getattr(tools_config, "local_working_dir", "") or ""
     try:
-        workspace = resolve_workspace(configured, protected_roots=_workspace_protected_roots())
+        workspace = resolve_workspace(
+            configured,
+            protected_roots=_workspace_protected_roots(full_config),
+        )
     except WorkspaceError as exc:
         return DiagnosticResult(
             name="local_workspace",
@@ -464,14 +474,12 @@ def check_local_workspace(tools_config: Any) -> DiagnosticResult:
     )
 
 
-def _workspace_protected_roots() -> list[str]:
-    """Protected roots for the diagnostic, from the same shared derivation the
-    executor uses — a check that applied different rules would be worse than
-    no check at all."""
-    from ..config.schema import Config  # noqa: F401 - imported for typing clarity
+def _workspace_protected_roots(config: object = None) -> list[str]:
+    """Protected roots for the diagnostic, from the same full live config and
+    shared derivation used by startup migration and executor."""
     from ..tools.workspace import command_protected_roots
 
-    return command_protected_roots(Path(__file__).resolve().parents[2])
+    return command_protected_roots(Path(__file__).absolute().parents[2], config)
 
 
 def check_data_directories() -> DiagnosticResult:
@@ -556,7 +564,9 @@ _CONFIG_CHECKS = [
     ("ssh_hosts", check_ssh_hosts, "tools"),
     ("sessions_directory", check_sessions_directory, "sessions"),
     ("knowledge_db", check_knowledge_db, "search"),
-    ("local_workspace", check_local_workspace, "tools"),
+    # Full Config, not only ToolsConfig: every relocatable live-state path
+    # must be judged by the same contract as runtime command execution.
+    ("local_workspace", check_local_workspace, None),
     ("config_consistency", check_config_sections, None),  # uses full Config
 ]
 

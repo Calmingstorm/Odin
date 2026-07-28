@@ -283,11 +283,17 @@ def _build_command(check: Check) -> str | None:
             h, p = tgt.rsplit(":", 1)
         else:
             h, p = "127.0.0.1", tgt
-        if not p.isdigit():
+        if not h or not p.isdigit():
             return None
+        # Do not interpolate a quoted host inside another quoted shell program.
+        # ``shlex.quote(h)`` embedded in ``bash -c '...{h}...'`` lets the outer
+        # shell evaluate substitutions in crafted hosts before Bash starts.
+        # Positional arguments keep the inner program constant and quote each
+        # user value exactly once for the outer shell.
+        script = 'cat < /dev/null > "/dev/tcp/$1/$2"'
         return (
-            f"timeout {timeout} bash -c 'cat < /dev/null > /dev/tcp/{shlex.quote(h)}/{p}'"
-            " && echo OPEN || echo CLOSED"
+            f"timeout {timeout} bash -c {shlex.quote(script)} _ "
+            f"{shlex.quote(h)} {shlex.quote(p)} && echo OPEN || echo CLOSED"
         )
     if t == "service":
         return f"systemctl is-active {shlex.quote(tgt)} 2>/dev/null || true"

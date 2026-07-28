@@ -326,7 +326,7 @@ def _command_protected_roots(config) -> list[str]:
     """
     from src.tools.workspace import command_protected_roots
 
-    return command_protected_roots(Path(__file__).resolve().parents[1], config)
+    return command_protected_roots(Path(__file__).absolute().parents[1], config)
 
 
 # The entrypoint guard MUST stay the last statement in this module. Python

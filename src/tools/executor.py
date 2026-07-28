@@ -352,7 +352,7 @@ class ToolExecutor:
         """
         return command_protected_roots(
             # Install root: the package's own location (…/src/tools/executor.py).
-            Path(__file__).resolve().parents[2],
+            Path(__file__).absolute().parents[2],
             # getattr-guarded throughout: the sanctioned __new__ patch seam
             # builds executors without __init__, so these may not exist.
             getattr(self, "_app_config", None),
@@ -435,13 +435,16 @@ class ToolExecutor:
                         except OSError:
                             pass
             except OSError:
-                return
-            finally:
                 with lock:
                     self._workspace_usage_refreshing = False
-            # Stamped on COMPLETION, so a long walk does not read as stale the
-            # moment it finishes.
-            self._workspace_usage_cache = (time.monotonic(), total_bytes, files)
+                return
+            # Publish the completed cache and clear the single-flight flag as
+            # one locked transition. Clearing first leaves a race where a scrape
+            # can launch a duplicate walk before the fresh cache is visible.
+            completed_at = time.monotonic()
+            with lock:
+                self._workspace_usage_cache = (completed_at, total_bytes, files)
+                self._workspace_usage_refreshing = False
 
         try:
             threading.Thread(
