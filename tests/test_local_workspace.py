@@ -2758,6 +2758,20 @@ def test_usage_cache_and_flag_are_published_atomically(
     assert executor._workspace_usage_cache is not None
 
 
+def _unprovisionable(tmp_path: Path) -> Path:
+    """A path that CANNOT be created under any identity.
+
+    Deliberately not "a missing parent": provision_workspace falls back to
+    `sudo -n install -d`, which creates parent chains, so on a runner with
+    passwordless sudo (GitHub Actions) that premise silently evaporates and the
+    test asserts nothing. A parent that is a regular FILE defeats both mkdir
+    and install -d, as root or otherwise — verified under both.
+    """
+    blocker = tmp_path / "blocker-file"
+    blocker.write_text("not a directory", encoding="utf-8")
+    return blocker / "ws"
+
+
 def test_legacy_fallback_is_visible_not_silent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2785,7 +2799,7 @@ def test_legacy_fallback_is_visible_not_silent(
     monkeypatch.setenv("HOME", str(home))
 
     legacy = ToolsConfig()
-    object.__setattr__(legacy, "local_working_dir", str(tmp_path / "no-parent" / "ws"))
+    object.__setattr__(legacy, "local_working_dir", str(_unprovisionable(tmp_path)))
     legacy.model_fields_set.discard("local_working_dir")
 
     seen: list[tuple[Path, str]] = []
@@ -2840,7 +2854,7 @@ def test_explicit_workspace_is_never_replaced_by_the_fallback(
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
 
-    explicit = ToolsConfig(local_working_dir=str(tmp_path / "no-parent" / "ws"))
+    explicit = ToolsConfig(local_working_dir=str(_unprovisionable(tmp_path)))
     with pytest.raises(WorkspaceError):
         provision_startup_workspace(explicit, protected_roots=[str(tmp_path / "install")])
     assert not (home / ".odin-workspace").exists(), "nothing may be provisioned"
