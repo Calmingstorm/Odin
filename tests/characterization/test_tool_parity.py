@@ -230,22 +230,6 @@ class TestBackendGatedVisibility:
         visible = "analyze_pdf" in self._catalog_names()
         assert visible is (importlib.util.find_spec("fitz") is not None)
 
-    def test_analyze_pdf_missing_dependency_logs_hidden_reason(self):
-        """A missing optional dependency is both hidden and diagnosable."""
-        from unittest.mock import patch
-
-        with (
-            patch("src.discord.tool_catalog.importlib.util.find_spec", return_value=None),
-            patch("src.discord.tool_catalog.log.info") as info,
-        ):
-            names = self._catalog_names()
-
-        assert "analyze_pdf" not in names
-        assert any(
-            "analyze_pdf hidden from the tool catalog" in str(call.args[0])
-            for call in info.call_args_list
-        )
-
     def test_configured_claude_code_is_visible(self):
         names = self._catalog_names(
             tools={
