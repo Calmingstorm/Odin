@@ -2552,3 +2552,50 @@ def test_symlinked_ancestor_of_the_launch_config_is_protected(tmp_path: Path) ->
         assert not (real / "sub").exists()
     finally:
         set_active_config_path(previous)
+
+
+def test_usage_refresh_flag_never_survives_the_thread(
+    fake_install: Path, workspace: Path
+) -> None:
+    """Cross-review of Odin's round-12 single-flight fix.
+
+    Publishing the cache and clearing the flag as one locked transition is
+    correct — clearing first lets a scrape launch a duplicate walk before the
+    fresh cache is visible. But dropping the `finally` alongside it meant any
+    exception that is NOT OSError left the flag set forever, and every later
+    scrape then declined to refresh: usage metrics frozen permanently, with no
+    recovery. Both properties are required, so both are pinned.
+    """
+    executor = _executor_with_workspace(workspace, fake_install)
+
+    def _unexpected(*_a, **_kw):
+        raise RuntimeError("not an OSError")
+
+    with patch("src.tools.executor.os.walk", _unexpected):
+        executor.get_workspace_metrics()
+        deadline = time.monotonic() + 5
+        while executor._workspace_usage_refreshing and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+    assert executor._workspace_usage_refreshing is False, (
+        "the single-flight flag must not survive the thread on ANY exception"
+    )
+
+    # ...and metrics recover on the next scrape rather than staying frozen.
+    (workspace / "f").write_text("xyz", encoding="utf-8")
+    assert _metrics_after_refresh(executor)["files"] == 1
+
+
+def test_usage_cache_and_flag_are_published_atomically(
+    fake_install: Path, workspace: Path
+) -> None:
+    """Odin's finding: a scrape landing between 'flag cleared' and 'cache
+    published' starts a redundant walk. The fresh cache must be visible to any
+    observer that sees the flag cleared."""
+    executor = _executor_with_workspace(workspace, fake_install)
+    (workspace / "one").write_text("x" * 10, encoding="utf-8")
+
+    _metrics_after_refresh(executor)
+    # Whenever the flag is clear, a cache is present — never the gap.
+    assert executor._workspace_usage_refreshing is False
+    assert executor._workspace_usage_cache is not None

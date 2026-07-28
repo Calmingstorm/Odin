@@ -426,6 +426,7 @@ class ToolExecutor:
         def _walk() -> None:
             total_bytes = 0.0
             files = 0.0
+            published = False
             try:
                 for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
                     for name in filenames:
@@ -434,17 +435,27 @@ class ToolExecutor:
                             total_bytes += os.lstat(os.path.join(dirpath, name)).st_size
                         except OSError:
                             pass
-            except OSError:
+                # Publish the completed cache and clear the single-flight flag
+                # as ONE locked transition. Clearing first leaves a race where
+                # a scrape launches a duplicate walk before the fresh cache is
+                # visible (Odin, PR #239 round-12).
+                completed_at = time.monotonic()
                 with lock:
+                    self._workspace_usage_cache = (completed_at, total_bytes, files)
                     self._workspace_usage_refreshing = False
-                return
-            # Publish the completed cache and clear the single-flight flag as
-            # one locked transition. Clearing first leaves a race where a scrape
-            # can launch a duplicate walk before the fresh cache is visible.
-            completed_at = time.monotonic()
-            with lock:
-                self._workspace_usage_cache = (completed_at, total_bytes, files)
-                self._workspace_usage_refreshing = False
+                    published = True
+            except OSError:
+                pass
+            finally:
+                # The flag must never survive this thread. Clearing it only on
+                # the OSError and success paths wedged usage metrics FOREVER on
+                # any other exception — the flag stayed set, so every later
+                # scrape declined to start a refresh (cross-review of round 12,
+                # reproduced). Guarded by `published` so the success path's
+                # atomic publish is not split apart.
+                if not published:
+                    with lock:
+                        self._workspace_usage_refreshing = False
 
         try:
             threading.Thread(
