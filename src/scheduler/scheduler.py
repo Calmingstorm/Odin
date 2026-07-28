@@ -713,7 +713,16 @@ class Scheduler:
 
         log.info("Manual run: schedule %s (%s)", schedule_id, schedule.get("description", ""))
         failures_before = schedule.get("consecutive_failures", 0)
-        await self._execute_and_record(schedule)
+        executed = await self._execute_and_record(schedule)
+        if not executed:
+            skipped_result = {
+                "status": "skipped",
+                "schedule_id": schedule_id,
+                "error": "schedule is already executing",
+            }
+            if schedule.get("paused"):
+                skipped_result["warning"] = "schedule is paused — this was a manual override"
+            return skipped_result
 
         failed = schedule.get("consecutive_failures", 0) > failures_before
         result: dict = {
@@ -833,7 +842,7 @@ class Scheduler:
         retry_time = datetime.now(UTC) + timedelta(seconds=delay)
         return retry_time.isoformat()
 
-    async def _execute_and_record(self, schedule: dict) -> None:
+    async def _execute_and_record(self, schedule: dict) -> bool:
         """Execute the schedule callback and record the result in history.
 
         For 'webhook' actions, the built-in HTTP executor is used directly.
@@ -848,10 +857,11 @@ class Scheduler:
             log.warning(
                 "Schedule %s is already executing — skipping overlapping fire", sid,
             )
-            return
+            return False
         self._in_flight.add(sid)
         try:
             await self._execute_and_record_inner(schedule)
+            return True
         finally:
             self._in_flight.discard(sid)
 
@@ -1021,15 +1031,19 @@ class Scheduler:
                     log.error("Schedule save failed (in-memory state may diverge from disk): %s", e)
 
         # Execute callbacks OUTSIDE the lock so callbacks can safely
-        # call add()/delete()/update() without deadlocking.
+        # call add()/delete()/update() without deadlocking.  Keep only the
+        # executions this tick actually owned: an overlapping run_now may hold
+        # the in-flight guard, and a skipped one-time task is not completed.
+        executed: list[dict] = []
         for schedule in to_fire:
-            await self._execute_and_record(schedule)
+            if await self._execute_and_record(schedule):
+                executed.append(schedule)
 
         # Remove a one-time schedule only after confirmed success.  A failed
         # delivery remains persisted even when automatic retries are disabled,
         # so an operator can run it again instead of losing the reminder.
         one_time_done = [
-            s["id"] for s in to_fire
+            s["id"] for s in executed
             if s.get("one_time")
             and not s.get("retry_at")
             and not s.get("last_error")

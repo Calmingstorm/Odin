@@ -1229,6 +1229,37 @@ class TestSchedulerRunNow:
         assert len(entries) == 1
         assert entries[0]["status"] == "success"
 
+
+
+    async def test_tick_does_not_complete_one_time_already_in_flight(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        sched = await s.add("busy tick", "reminder", "chan1", run_at=past)
+        s._in_flight.add(sched["id"])
+
+        await s._tick()
+
+        assert [item["id"] for item in s.list_all()] == [sched["id"]]
+        s._callback.assert_not_awaited()
+
+    async def test_run_now_does_not_complete_one_time_already_in_flight(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        sched = await s.add("busy", "reminder", "chan1", run_at=future)
+        s._in_flight.add(sched["id"])
+
+        result = await s.run_now(sched["id"])
+
+        assert result == {
+            "status": "skipped",
+            "schedule_id": sched["id"],
+            "error": "schedule is already executing",
+        }
+        assert [item["id"] for item in s.list_all()] == [sched["id"]]
+        s._callback.assert_not_awaited()
+
     async def test_run_now_reports_failure(self, tmp_path):
         """run_now returns failure status when callback raises."""
         s = _make_scheduler(tmp_path)
