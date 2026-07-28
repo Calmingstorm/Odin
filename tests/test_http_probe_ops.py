@@ -222,9 +222,85 @@ class TestBuildMethods:
         cmd = build_http_probe_command({"url": "https://example.com", "method": "PATCH"})
         assert "-X PATCH" in cmd
 
-    def test_head(self):
+    def test_head_uses_native_no_body_mode(self):
+        """HEAD must use curl's -I, never -X HEAD.
+
+        `-X HEAD` sends the HEAD token but leaves libcurl expecting a response
+        body, so it blocks until the timeout and exits 18 ("transfer closed
+        with N bytes remaining"). Measured against a healthy server: 5.1s and
+        exit 18 with -X HEAD, versus 0.065s and exit 0 with -I. This test
+        previously asserted "-X HEAD" in cmd — it pinned the bug.
+        """
         cmd = build_http_probe_command({"url": "https://example.com", "method": "HEAD"})
-        assert "-X HEAD" in cmd
+        assert "-I" in cmd.split(), cmd
+        assert "-X HEAD" not in cmd, "the -X override reintroduces the hang"
+
+    def test_head_suppresses_the_header_include_flag(self):
+        """-I already routes response headers to output; adding -i as well is
+        redundant and makes the output contract depend on how a given curl
+        version coalesces the two."""
+        cmd = build_http_probe_command({"url": "https://example.com", "method": "HEAD"})
+        assert "-i" not in cmd.split(), cmd
+
+    def test_non_head_methods_keep_the_include_flag_and_override(self):
+        """The fix must stay HEAD-specific: other methods may legitimately
+        return zero-length bodies and curl frames those normally (verified:
+        -X OPTIONS exits 0 in 0.067s)."""
+        for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+            cmd = build_http_probe_command({"url": "https://example.com", "method": method})
+            assert f"-X {method}" in cmd, method
+            assert "-i" in cmd.split(), method
+            assert "-I" not in cmd.split(), method
+
+    def test_get_is_unchanged(self):
+        cmd = build_http_probe_command({"url": "https://example.com", "method": "GET"})
+        assert "-i" in cmd.split()
+        assert "-I" not in cmd.split()
+        assert "-X" not in cmd.split()
+
+    def test_head_keeps_follow_redirects(self):
+        """curl -I -L performs HEAD across the redirect chain, matching the
+        requested method and the existing follow-redirects contract; dropping
+        -L only for HEAD would make its behaviour inconsistent."""
+        cmd = build_http_probe_command({"url": "https://example.com", "method": "HEAD"})
+        assert "-L" in cmd.split()
+
+    def test_head_without_follow_redirects_omits_follow_flag(self):
+        cmd = build_http_probe_command({
+            "url": "https://example.com", "method": "HEAD", "follow_redirects": False,
+        })
+        assert "-L" not in cmd.split()
+        assert "-I" in cmd.split()
+
+    def test_head_keeps_the_timing_trailer_and_its_sentinel(self):
+        """The timing block is parsed from a distinct sentinel rather than from
+        body termination, so it survives HEAD's empty body."""
+        cmd = build_http_probe_command({"url": "https://example.com", "method": "HEAD"})
+        assert "---PROBE-RESULTS---" in cmd
+        assert "%{http_code}" in cmd
+        assert "%{time_total}" in cmd
+
+    def test_head_honours_the_timeout(self):
+        cmd = build_http_probe_command({
+            "url": "https://example.com", "method": "HEAD", "timeout": 7,
+        })
+        assert "--max-time 7" in cmd
+
+    def test_head_rejects_a_request_body(self):
+        """Rejected, not silently dropped: data flags combined with -I make
+        curl's method selection ambiguous, and HEAD request-body semantics are
+        not worth preserving."""
+        with pytest.raises(ValueError, match="HEAD"):
+            build_http_probe_command({
+                "url": "https://example.com", "method": "HEAD", "body": "x=1",
+            })
+
+    def test_head_with_empty_body_is_accepted(self):
+        """Only a NONEMPTY body is a conflict."""
+        cmd = build_http_probe_command({
+            "url": "https://example.com", "method": "HEAD", "body": "",
+        })
+        assert "-I" in cmd.split()
 
     def test_options(self):
         cmd = build_http_probe_command({"url": "https://example.com", "method": "OPTIONS"})
@@ -327,13 +403,21 @@ class TestBuildBody:
         })
         assert "-d" not in cmd
 
-    def test_head_body_ignored(self):
-        cmd = build_http_probe_command({
-            "url": "https://example.com",
-            "method": "HEAD",
-            "body": "should not appear",
-        })
-        assert "-d" not in cmd
+    def test_head_body_rejected(self):
+        """CONTRACT CHANGE: a body on HEAD used to be silently dropped; it is
+        now rejected.
+
+        Silently discarding it hid a caller mistake, and data flags combined
+        with curl's -I make method selection ambiguous. Rejecting is the
+        deliberate choice (Odin's design call on this fix); the previous
+        assertion here was that the body simply never reached the command.
+        """
+        with pytest.raises(ValueError, match="HEAD"):
+            build_http_probe_command({
+                "url": "https://example.com",
+                "method": "HEAD",
+                "body": "should not appear",
+            })
 
     def test_empty_body_not_added(self):
         cmd = build_http_probe_command({

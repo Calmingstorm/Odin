@@ -123,7 +123,18 @@ class FilesDocsTools(HandlerBase):
             if is_url_blocked(url):
                 return "Error: blocked URL (localhost / private IP / cloud-metadata address)."
 
-        import fitz
+        # Structural gating hides this tool when PyMuPDF is missing, but the
+        # handler must still degrade cleanly: find_spec proves the module is
+        # importable, not that its native library loads, and a direct call can
+        # reach here on an install whose catalog was built elsewhere.
+        try:
+            import fitz
+        except Exception as exc:
+            return (
+                "PDF support unavailable: PyMuPDF could not be loaded "
+                f"({type(exc).__name__}: {exc}). Install the 'pdf' extra "
+                "(pip install '.[pdf]') and restart Odin."
+            )
 
         pdf_bytes: bytes | None = None
 

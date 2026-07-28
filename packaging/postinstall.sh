@@ -85,8 +85,11 @@ fi
 # Install Python dependencies from pyproject.toml
 echo "  Installing Python dependencies (this can take a few minutes)..."
 if [ -f "$APP_DIR/pyproject.toml" ]; then
-    "$APP_DIR/.venv/bin/pip" install --quiet "$APP_DIR" 2>/dev/null || \
-        echo "  Warning: pip install failed — run '$APP_DIR/.venv/bin/pip install $APP_DIR' manually"
+    # [pdf] installs PyMuPDF so the advertised analyze_pdf tool actually works.
+    # Without it the tool is hidden by the catalog gate, so an official package
+    # would silently ship without a capability it documents.
+    "$APP_DIR/.venv/bin/pip" install --quiet "$APP_DIR[pdf]" 2>/dev/null || \
+        echo "  Warning: pip install failed — run '$APP_DIR/.venv/bin/pip install $APP_DIR[pdf]' manually"
 fi
 
 # Install Playwright browsers for native browser support (optional feature)

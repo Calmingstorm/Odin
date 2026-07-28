@@ -224,3 +224,26 @@ class TestAnalyzePdf:
             out = await _tools(exec_ret=(0, b64))._handle_analyze_pdf(
                 {"host": "s", "path": "/p"})
             assert "truncated" in out
+
+
+async def test_analyze_pdf_degrades_cleanly_without_pymupdf(monkeypatch):
+    """find_spec proves the module is importable, not that its native library
+    loads — and a direct call can reach the handler on an install whose catalog
+    was built elsewhere. Either way the caller gets a clean, actionable result
+    rather than a raw ImportError (v3.65.0 smoke test: "No module named 'fitz'").
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_fitz(name, *args, **kwargs):
+        if name == "fitz":
+            raise ImportError("No module named 'fitz'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_fitz)
+
+    tools = _tools()
+    result = await tools._handle_analyze_pdf({"host": "localhost", "path": "/tmp/x.pdf"})
+    assert "PDF support unavailable" in result
+    assert "pdf" in result and "install" in result.lower(), "must name the remedy"

@@ -182,6 +182,20 @@ class TestBackendGatedVisibility:
     GATED = {"claude_code", "email_send", "email_search", "email_read",
              "email_list_recent", "issue_tracker", "generate_image"}
 
+    @staticmethod
+    def _dependency_gated() -> set[str]:
+        """Tools gated by an installed DEPENDENCY rather than by config.
+
+        analyze_pdf needs PyMuPDF, which lives in the optional `pdf` extra, so
+        whether it is visible depends on the environment rather than the Config
+        under test. Computing this instead of hardcoding keeps the arithmetic
+        below true on a machine with the extra AND on one without — a fixed
+        constant would pass locally and fail in CI, or vice versa.
+        """
+        import importlib.util
+
+        return set() if importlib.util.find_spec("fitz") else {"analyze_pdf"}
+
     def _catalog_names(self, **config_kwargs) -> set[str]:
         from src.config.schema import Config
         from src.discord.client import OdinBot
@@ -196,8 +210,25 @@ class TestBackendGatedVisibility:
         names = self._catalog_names()
         leaked = self.GATED & names
         assert not leaked, f"backend-gated tools visible without config: {sorted(leaked)}"
-        # exact arithmetic: full registry minus the six gated tools
-        assert len(names) == len(EXPECTED_TOOL_ORDER) - len(self.GATED)
+        dependency_gated = self._dependency_gated()
+        assert not (dependency_gated & names), (
+            f"tools with a missing dependency are advertised: {sorted(dependency_gated & names)}"
+        )
+        # exact arithmetic: full registry minus config-gated minus
+        # dependency-gated tools
+        assert len(names) == len(EXPECTED_TOOL_ORDER) - len(self.GATED) - len(dependency_gated)
+
+    def test_analyze_pdf_follows_its_dependency(self):
+        """analyze_pdf must be advertised exactly when PyMuPDF can be imported.
+
+        It was previously advertised unconditionally while no install path
+        installed the `pdf` extra, so every call failed with
+        "No module named 'fitz'" (found in the v3.65.0 smoke test).
+        """
+        import importlib.util
+
+        visible = "analyze_pdf" in self._catalog_names()
+        assert visible is (importlib.util.find_spec("fitz") is not None)
 
     def test_configured_claude_code_is_visible(self):
         names = self._catalog_names(
