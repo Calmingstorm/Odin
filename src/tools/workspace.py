@@ -406,6 +406,61 @@ def provision_workspace(
     )
 
 
+def provision_startup_workspace(
+    tools_config: object,
+    *,
+    protected_roots: Sequence[str | os.PathLike[str]] | None = None,
+    owner_uid: int | None = None,
+) -> Path:
+    """Provision the workspace used by the incoming process at startup.
+
+    Existing source/git installs have config files from before
+    ``local_working_dir`` existed. On their first in-place update the old
+    updater cannot run the new preflight, and an unprivileged developer account
+    commonly cannot create the schema default under ``/var/lib`` or use
+    ``sudo -n``. Failing closed there would preserve safety by silently losing
+    all local-command capability.
+
+    Explicit configuration is authoritative and never substituted. Only a
+    genuinely absent legacy field may fall back, after the normal default
+    cannot be provisioned, to a stable private directory in the service user's
+    home. The selected value is written into the live ``ToolsConfig`` object so
+    startup, the executor, diagnostics, and the next self-update all use the
+    identical path for this process. A later PUT /api/config persists it through
+    the normal validated config path; otherwise the deterministic migration is
+    repeated on future starts.
+    """
+    configured = str(getattr(tools_config, "local_working_dir", "") or "")
+    try:
+        return provision_workspace(
+            configured,
+            protected_roots=protected_roots,
+            owner_uid=owner_uid,
+        )
+    except WorkspaceError as default_error:
+        fields_set: set[str] = set(getattr(tools_config, "model_fields_set", set()))
+        if "local_working_dir" in fields_set:
+            raise
+
+        # A direct child of HOME needs no recursive parent creation, remains
+        # stable across commands/restarts, and is outside a normal source
+        # checkout. Packaged Odin declares HOME=/opt/odin, so a broken packaged
+        # default still rejects on protected-root overlap rather than hiding a
+        # packaging failure inside the install.
+        fallback = Path.home() / ".odin-workspace"
+        try:
+            workspace = provision_workspace(
+                str(fallback),
+                protected_roots=protected_roots,
+                owner_uid=owner_uid,
+                allow_sudo=False,
+            )
+        except WorkspaceError:
+            raise default_error
+        setattr(tools_config, "local_working_dir", str(workspace))
+        return workspace
+
+
 def _sudo_create(target: Path, owner_uid: int | None) -> None:
     """Best-effort privileged creation; failures fall through to validation,
     which produces the actionable error."""

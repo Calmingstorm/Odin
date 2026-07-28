@@ -1172,6 +1172,74 @@ def test_provisioner_rejects_everything_the_runtime_rejects(
         assert not (tmp_path / "relative-ws").exists(), "must not create a relative workspace"
 
 
+def test_legacy_source_config_falls_back_when_var_lib_cannot_be_provisioned(
+    tmp_path: Path, fake_install: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first update to this feature is executed by old updater code.
+
+    A pre-PR source config has no workspace field, and its unprivileged account
+    cannot normally create /var/lib/odin-workspace or use sudo. Preserve local
+    command capability with a stable HOME fallback, but only for that absent
+    legacy field.
+    """
+    import src.tools.workspace as ws_module
+    from src.config.schema import DEFAULT_LOCAL_WORKING_DIR
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    # Simulate the validated shape produced from a pre-feature config file.
+    # The session fixture changes ToolsConfig's default for unrelated tests, so
+    # model this migration boundary explicitly rather than accidentally testing
+    # the fixture's temporary value.
+    tools = SimpleNamespace(
+        local_working_dir=DEFAULT_LOCAL_WORKING_DIR,
+        model_fields_set=set(),
+    )
+    real_provision = ws_module.provision_workspace
+
+    def _default_unavailable(configured: str, **kwargs):
+        if configured == DEFAULT_LOCAL_WORKING_DIR:
+            raise WorkspaceError("simulated root-owned /var/lib and denied sudo")
+        return real_provision(configured, **kwargs)
+
+    monkeypatch.setattr(ws_module, "provision_workspace", _default_unavailable)
+    result = ws_module.provision_startup_workspace(
+        tools, protected_roots=[str(fake_install)]
+    )
+
+    assert result == (home / ".odin-workspace").resolve()
+    assert stat.S_IMODE(result.stat().st_mode) == 0o700
+    assert tools.local_working_dir == str(result), "all runtime consumers must see the migration"
+
+
+def test_explicit_workspace_never_uses_the_legacy_source_fallback(
+    tmp_path: Path, fake_install: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a missing pre-feature field migrates; an explicit operator value is
+    authoritative even when unusable."""
+    import src.tools.workspace as ws_module
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    explicit = tmp_path / "missing-parent" / "operator-workspace"
+    tools = SimpleNamespace(
+        local_working_dir=str(explicit),
+        model_fields_set={"local_working_dir"},
+    )
+
+    def _unavailable(_configured: str, **_kwargs):
+        raise WorkspaceError("operator workspace unavailable")
+
+    monkeypatch.setattr(ws_module, "provision_workspace", _unavailable)
+    with pytest.raises(WorkspaceError, match="operator workspace unavailable"):
+        ws_module.provision_startup_workspace(
+            tools, protected_roots=[str(fake_install)]
+        )
+    assert tools.local_working_dir == str(explicit)
+    assert not (home / ".odin-workspace").exists()
+
+
 def test_startup_migration_provisions_before_commands_are_served() -> None:
     """PR #239 round-5 blocker 1 — the bootstrap paradox.
 
@@ -1183,8 +1251,8 @@ def test_startup_migration_provisions_before_commands_are_served() -> None:
     main_src = (Path(__file__).resolve().parents[1] / "src/__main__.py").read_text(
         encoding="utf-8"
     )
-    assert "provision_workspace(" in main_src, "startup must provision the workspace"
-    provision_at = main_src.index("provision_workspace(")
+    assert "provision_startup_workspace(" in main_src, "startup must provision the workspace"
+    provision_at = main_src.index("provision_startup_workspace(")
     bot_at = main_src.index("bot = OdinBot(config)")
     config_at = main_src.index("config = load_config(config_path)")
     assert config_at < provision_at < bot_at, (
@@ -2152,16 +2220,29 @@ async def test_write_file_rejects_relative_paths(
 
 
 async def test_write_file_still_accepts_absolute_paths(
-    fake_install: Path, workspace: Path, tmp_path: Path
+    fake_install: Path,
+    workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The documented capability is untouched."""
+    """The documented capability is untouched, including spaces in the path.
+
+    The old ``mkdir -p $(dirname <quoted path>)`` still word-split dirname's
+    output. An absolute ``.../intended parent/file`` therefore created a
+    relative ``parent`` directory in the inherited install cwd and then failed
+    the intended write — another fixed-shape route touching the install.
+    """
+    monkeypatch.chdir(fake_install)
     executor = _executor_with_workspace(workspace, fake_install)
-    target = tmp_path / "written.txt"
+    target = tmp_path / "intended parent" / "written file.txt"
     result = await executor.execute("write_file", {
         "host": "localhost", "path": str(target), "content": "hello",
     })
     assert result.ok, result.output
-    assert target.read_text(encoding="utf-8").strip() == "hello"
+    assert target.read_text(encoding="utf-8") == "hello"
+    assert not (fake_install / "parent").exists(), (
+        "an absolute write must not create word-split relative directories in the install"
+    )
 
 
 def test_aliased_config_protects_both_the_alias_and_the_target(tmp_path: Path) -> None:
@@ -2262,6 +2343,57 @@ def test_usage_refresh_is_single_flight(fake_install: Path, workspace: Path) -> 
     with patch("src.tools.executor.threading.Thread", _record):
         executor.get_workspace_metrics()
     assert not started, "a refresh was already running; a second must not start"
+
+
+def test_waiting_usage_refresh_rechecks_a_newly_published_cache(
+    fake_install: Path, workspace: Path
+) -> None:
+    """The unlocked TTL check is only a fast path. If this caller waits for
+    the lock while another refresh publishes, it must re-check freshness under
+    the lock instead of launching an immediate duplicate walk."""
+    executor = _executor_with_workspace(workspace, fake_install)
+    executor._workspace_usage_cache = (0.0, 1.0, 1.0)  # stale at first check
+    real_thread = threading.Thread
+    attempted = threading.Event()
+    inner = threading.Lock()
+    started: list[dict] = []
+
+    class _GateLock:
+        def __enter__(self):
+            attempted.set()
+            inner.acquire()
+            return self
+
+        def __exit__(self, *_exc):
+            inner.release()
+
+    class _RecordedThread:
+        def __init__(self, **kwargs):
+            started.append(kwargs)
+
+        def start(self) -> None:
+            return None
+
+    executor._workspace_usage_lock = _GateLock()
+    inner.acquire()
+    caller = real_thread(target=executor._refresh_workspace_usage, args=(workspace,))
+    caller.start()
+    try:
+        assert attempted.wait(5), "refresh caller never reached the locked re-check"
+        # Simulate the refresh that completed while this caller waited.
+        executor._workspace_usage_cache = (time.monotonic(), 2.0, 2.0)
+        executor._workspace_usage_refreshing = False
+        with patch("src.tools.executor.threading.Thread", _RecordedThread):
+            inner.release()
+            caller.join(5)
+    finally:
+        # Never strand the test thread on a failing assertion.
+        if inner.locked():
+            inner.release()
+        caller.join(5)
+
+    assert not caller.is_alive()
+    assert started == [], "a newly fresh cache must suppress the duplicate walk"
 
 
 def test_usage_cache_is_published_before_single_flight_clears(
@@ -2571,12 +2703,37 @@ def test_usage_refresh_flag_never_survives_the_thread(
     def _unexpected(*_a, **_kw):
         raise RuntimeError("not an OSError")
 
-    with patch("src.tools.executor.os.walk", _unexpected):
-        executor.get_workspace_metrics()
-        deadline = time.monotonic() + 5
-        while executor._workspace_usage_refreshing and time.monotonic() < deadline:
-            time.sleep(0.02)
+    # Observe exceptions leaving the worker directly rather than letting
+    # pytest reduce them to a non-failing PytestUnhandledThreadExceptionWarning.
+    # The exact ee0d68d CI run was green while emitting that warning, so checking
+    # only the recovered flag is not enough.
+    real_thread = threading.Thread
+    escaped: list[BaseException] = []
+    finished = threading.Event()
 
+    class _ObservedThread:
+        def __init__(self, *, target, **_kwargs):
+            self._target = target
+
+        def start(self) -> None:
+            def _run() -> None:
+                try:
+                    self._target()
+                except BaseException as exc:
+                    escaped.append(exc)
+                finally:
+                    finished.set()
+
+            real_thread(target=_run, daemon=True).start()
+
+    with (
+        patch("src.tools.executor.os.walk", _unexpected),
+        patch("src.tools.executor.threading.Thread", _ObservedThread),
+    ):
+        executor.get_workspace_metrics()
+        assert finished.wait(5), "usage worker did not finish"
+
+    assert escaped == [], "metrics worker exceptions must not escape the daemon thread"
     assert executor._workspace_usage_refreshing is False, (
         "the single-flight flag must not survive the thread on ANY exception"
     )

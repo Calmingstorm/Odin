@@ -10,6 +10,7 @@ lazy relative imports re-anchored one level (``.url_safety`` →
 from __future__ import annotations
 
 import base64
+import posixpath
 import shlex
 
 from .deps import HandlerBase
@@ -58,7 +59,16 @@ class FilesDocsTools(HandlerBase):
                 "A relative path would resolve against Odin's working directory "
                 "rather than where you intend."
             )
+        path = str(path)
         safe_path = shlex.quote(path)
+        # Compute and quote the parent as its own shell argument. Embedding a
+        # quoted path in ``$(dirname ...)`` and then leaving the substitution
+        # unquoted word-splits a parent containing spaces; ``mkdir`` can create
+        # those extra relative words in Odin's inherited install cwd even though
+        # the requested file path itself is absolute (PR #239 final review,
+        # reproduced). Remote managed hosts are POSIX, matching the absolute-path
+        # contract above.
+        safe_parent = shlex.quote(posixpath.dirname(path) or "/")
         # Govern the write before executing — write_file reaches the filesystem
         # via _run_on_host, which does NOT itself govern. Check a representative
         # redirect-to-path command so policy (e.g. writes to sensitive targets)
@@ -67,8 +77,11 @@ class FilesDocsTools(HandlerBase):
         if not allowed:
             return denial
         # Base64-encode content to avoid shell injection via heredoc delimiter
-        encoded = base64.b64encode(content.encode()).decode()
-        cmd = f"mkdir -p $(dirname {safe_path}) && echo '{encoded}' | base64 -d > {safe_path}"
+        encoded = shlex.quote(base64.b64encode(content.encode()).decode())
+        cmd = (
+            f"mkdir -p -- {safe_parent} && "
+            f"printf %s {encoded} | base64 -d > {safe_path}"
+        )
         return await self._run_on_host(host, cmd)
 
     @staticmethod

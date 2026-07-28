@@ -129,10 +129,14 @@ def main() -> None:
     # Odin from starting and answering on Discord. Local commands then fail
     # closed individually, with the same actionable error.
     try:
-        from src.tools.workspace import WorkspaceError, provision_workspace, provisioning_hint
+        from src.tools.workspace import (
+            WorkspaceError,
+            provision_startup_workspace,
+            provisioning_hint,
+        )
 
-        workspace = provision_workspace(
-            config.tools.local_working_dir,
+        workspace = provision_startup_workspace(
+            config.tools,
             protected_roots=_command_protected_roots(config),
         )
         log.info("Local command workspace ready: %s", workspace)

@@ -419,6 +419,15 @@ class ToolExecutor:
         if lock is None:  # __new__ patch seam
             return
         with lock:
+            # Re-check freshness after acquiring the lock. Another scrape may
+            # have completed and published while this caller was waiting; the
+            # unlocked fast-path observation above is not authoritative once
+            # lock acquisition blocks. Without this second check, concurrent
+            # scrapes can launch an immediate duplicate walk after a fast first
+            # refresh finishes.
+            cached = getattr(self, "_workspace_usage_cache", None)
+            if cached is not None and (time.monotonic() - cached[0]) < WORKSPACE_METRICS_TTL:
+                return
             if self._workspace_usage_refreshing:
                 return
             self._workspace_usage_refreshing = True
@@ -444,7 +453,13 @@ class ToolExecutor:
                     self._workspace_usage_cache = (completed_at, total_bytes, files)
                     self._workspace_usage_refreshing = False
                     published = True
-            except OSError:
+            except Exception:
+                # A metrics walk is best-effort. Letting an unexpected error
+                # escape a daemon thread still invokes threading.excepthook
+                # (and produces an unhandled-thread warning in pytest/logging),
+                # contradicting this collector's never-raises contract. The
+                # finally block below clears the single-flight flag so the next
+                # scrape can recover.
                 pass
             finally:
                 # The flag must never survive this thread. Clearing it only on
