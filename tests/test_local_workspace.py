@@ -2071,8 +2071,11 @@ _CLASSIFIED_COMMAND_CALLERS: dict[tuple[str, str], str] = {
     ("src/tools/handlers/browser_web.py", "_handle_http_probe"): "fixed curl argv",
     ("src/tools/handlers/files_docs.py", "_handle_read_file"): "reads a caller-given path",
     ("src/tools/handlers/files_docs.py", "_handle_write_file"): "absolute path enforced",
-    ("src/tools/handlers/files_docs.py", "_handle_analyze_pdf"): "reads a caller-given path",
-    ("src/discord/native_tools/media.py", "_handle_analyze_image"): "base64 of a given path",
+
+    # analyze_pdf and analyze_image no longer appear here: they read host
+    # binaries through ssh.read_binary_file, not the text command pipeline,
+    # because base64 over that pipeline was truncated at MAX_OUTPUT_CHARS
+    # (adversarial review of v3.65.1).
     ("src/audit/diff_tracker.py", "capture_before"): "cat of a governed absolute path",
     # --- plumbing -----------------------------------------------------------
     ("src/tools/executor.py", "_run_on_host"): "CONDITIONAL",  # forwards its caller's decision

@@ -206,6 +206,19 @@ class TestPostFile:
                 msg, {"host": "localhost", "path": str(f)})
 
 
+def _binary_image(data: bytes = b"", error: str = ""):
+    """Patch the BINARY host-read path used by analyze_image.
+
+    Host images used to arrive as base64 through the text pipeline, which
+    truncates at 16,000 chars — so anything over ~12KB was corrupt on arrival
+    (adversarial review of v3.65.1).
+    """
+    async def _read(address, path, **kwargs):
+        return (None, error) if error else (data, "")
+
+    return patch("src.tools.ssh.read_binary_file", _read)
+
+
 class TestAnalyzeImage:
     async def test_url_scheme_and_ssrf(self):
         assert "http://" in await _tools()._handle_analyze_image(_message(), {"url": "ftp://x"})
@@ -251,40 +264,55 @@ class TestAnalyzeImage:
                 _message(), {"url": "http://ok/x"})
 
     async def test_host_path(self):
-        ex = _executor(exec_ret=(0, base64.b64encode(PNG).decode()))
-        out = await _tools(tool_executor=ex)._handle_analyze_image(
-            _message(), {"host": "srv", "path": "/img.png"})
+        with _binary_image(PNG):
+            out = await _tools(tool_executor=_executor())._handle_analyze_image(
+                _message(), {"host": "srv", "path": "/img.png"})
         assert isinstance(out, dict) and "__image_block__" in out
 
     async def test_host_path_errors(self):
         assert "Unknown or disallowed host" in await _tools(
             tool_executor=_executor(resolve=None))._handle_analyze_image(
                 _message(), {"host": "h", "path": "/p"})
-        assert "Failed to read image" in await _tools(
-            tool_executor=_executor(exec_ret=(1, "err")))._handle_analyze_image(
-                _message(), {"host": "srv", "path": "/p"})
+        # Patched: without this the handler attempts a REAL ssh to the fake
+        # host and the test waits out a connection timeout.
+        with _binary_image(error="err"):
+            assert "Failed to read image" in await _tools(
+                tool_executor=_executor())._handle_analyze_image(
+                    _message(), {"host": "srv", "path": "/p"})
 
-    async def test_host_path_decode_error_and_empty(self):
-        # malformed base64 (wrong padding) from the host → decode raises → handled
-        assert "Failed to decode" in await _tools(
-            tool_executor=_executor(exec_ret=(0, "YQ")))._handle_analyze_image(
+    async def test_host_read_failure_and_empty(self):
+        # A read failure is reported with its reason (base64 decoding is gone:
+        # the binary path returns bytes, so there is nothing to mis-decode).
+        with _binary_image(error="permission denied"):
+            assert "Failed to read image from host" in await _tools(
+                tool_executor=_executor())._handle_analyze_image(
+                    _message(), {"host": "s", "path": "/p"})
+        with _binary_image(b""):
+            assert "No image data" in await _tools(
+                tool_executor=_executor())._handle_analyze_image(
+                    _message(), {"host": "s", "path": "/p"})
+
+    async def test_host_image_larger_than_the_text_transport(self):
+        """The defect: >12KB was truncated by the old base64-over-stdout path."""
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 60_000
+        with _binary_image(png):
+            out = await _tools(tool_executor=_executor())._handle_analyze_image(
                 _message(), {"host": "s", "path": "/p"})
-        # empty output decodes to no bytes
-        assert "No image data" in await _tools(
-            tool_executor=_executor(exec_ret=(0, "")))._handle_analyze_image(
-                _message(), {"host": "s", "path": "/p"})
+        assert "Failed to read" not in out and "No image data" not in out
 
     async def test_neither_source(self):
         assert "Provide either" in await _tools()._handle_analyze_image(_message(), {})
 
     async def test_size_and_format_limits(self):
         big = b"\x89PNG\r\n\x1a\n" + b"\x00" * (5 * 1024 * 1024)
-        ex = _executor(exec_ret=(0, base64.b64encode(big).decode()))
-        assert "exceeds 5MB" in await _tools(tool_executor=ex)._handle_analyze_image(
-            _message(), {"host": "s", "path": "/p"})
-        ex2 = _executor(exec_ret=(0, base64.b64encode(b"notanimage!!").decode()))
-        assert "Unsupported image format" in await _tools(tool_executor=ex2)._handle_analyze_image(
-            _message(), {"host": "s", "path": "/p"})
+        with _binary_image(big):
+            assert "exceeds 5MB" in await _tools(
+                tool_executor=_executor())._handle_analyze_image(
+                    _message(), {"host": "s", "path": "/p"})
+        with _binary_image(b"notanimage!!"):
+            assert "Unsupported image format" in await _tools(
+                tool_executor=_executor())._handle_analyze_image(
+                    _message(), {"host": "s", "path": "/p"})
 
 
 class TestGenerateImage:

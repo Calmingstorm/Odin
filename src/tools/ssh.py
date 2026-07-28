@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import shlex
 import signal
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -396,3 +398,89 @@ async def run_ssh_command(
             return 1, f"SSH error: {e}"
 
     return last_exit_code, _truncate_output(last_output)
+
+
+# Binary payloads must NEVER travel the text pipeline. run_local_command and
+# run_ssh_command decode to str and truncate at MAX_OUTPUT_CHARS, so a
+# base64-over-stdout read silently lost its tail: base64 crosses 16,000 chars
+# at roughly 12,000 source bytes, and the caller got "Incorrect padding" for
+# any ordinary PDF or image on a managed host (adversarial review of v3.65.1,
+# reproduced with a valid 20,853-byte PDF). This path returns raw bytes with an
+# explicit size bound and no truncation.
+async def read_binary_file(
+    address: str,
+    path: str,
+    *,
+    max_bytes: int,
+    ssh_key_path: str = "",
+    known_hosts_path: str = "",
+    ssh_user: str = "root",
+    timeout: int = 60,
+) -> tuple[bytes | None, str]:
+    """Read a file as BYTES from a local or remote host.
+
+    Returns ``(data, "")`` on success or ``(None, error_message)``. Oversize is
+    an explicit error rather than a silent truncation, because a partial binary
+    is indistinguishable from a corrupt one.
+    """
+    if is_local_address(address):
+        def _read() -> tuple[bytes | None, str]:
+            try:
+                size = os.path.getsize(path)
+            except OSError as exc:
+                return None, f"cannot stat {path}: {exc}"
+            if size > max_bytes:
+                return None, f"file is {size} bytes, over the {max_bytes}-byte limit"
+            try:
+                with open(path, "rb") as handle:
+                    return handle.read(max_bytes + 1), ""
+            except OSError as exc:
+                return None, f"cannot read {path}: {exc}"
+
+        data, err = await asyncio.to_thread(_read)
+        if err:
+            return None, err
+        if data is not None and len(data) > max_bytes:
+            return None, f"file exceeds the {max_bytes}-byte limit"
+        return data, ""
+
+    # Remote: cat the file and capture stdout as raw bytes. `--` stops option
+    # parsing so a path beginning with '-' cannot become a cat flag.
+    quoted = shlex.quote(path)
+    ssh_args = [
+        "ssh",
+        "-i",
+        ssh_key_path,
+        "-o",
+        f"UserKnownHostsFile={known_hosts_path}",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "BatchMode=yes",
+        f"{ssh_user}@{address}",
+        f"cat -- {quoted}",
+    ]
+    log.info("SSH binary read from %s@%s: %s", ssh_user, address, path)
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *ssh_args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        if proc is not None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        return None, f"timed out reading {path} after {timeout}s"
+    except OSError as exc:
+        return None, f"ssh failed: {exc}"
+    if proc.returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip()[:200]
+        return None, detail or f"remote read failed (exit {proc.returncode})"
+    if len(stdout) > max_bytes:
+        return None, f"file is {len(stdout)} bytes, over the {max_bytes}-byte limit"
+    return stdout, ""

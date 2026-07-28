@@ -169,18 +169,21 @@ class FilesDocsTools(HandlerBase):
             if not resolved:
                 return f"Unknown or disallowed host: {host}"
             address, ssh_user, _os = resolved
-            safe_path = shlex.quote(path)
-            code, output = await self._exec_command(
+            # Binary payloads do NOT travel the text pipeline: base64 over
+            # stdout was truncated at MAX_OUTPUT_CHARS, so any PDF over roughly
+            # 12KB arrived corrupt and failed to decode (adversarial review).
+            from ..ssh import read_binary_file
+
+            pdf_bytes, read_error = await read_binary_file(
                 address,
-                f"base64 -w0 {safe_path}",
-                ssh_user,
+                path,
+                max_bytes=_ANALYZE_PDF_MAX_BYTES,
+                ssh_key_path=self.config.ssh_key_path,
+                known_hosts_path=self.config.ssh_known_hosts_path,
+                ssh_user=ssh_user,
             )
-            if code != 0:
-                return f"Failed to read PDF from host: {output}", 1
-            try:
-                pdf_bytes = base64.b64decode(output.strip())
-            except Exception as e:
-                return f"Failed to decode PDF data: {e}", 1
+            if read_error:
+                return f"Failed to read PDF from host: {read_error}", 1
         else:
             return "Provide either 'url' or both 'host' and 'path'."
 
