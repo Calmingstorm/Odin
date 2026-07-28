@@ -426,6 +426,84 @@ def check_config_sections(config: Any) -> DiagnosticResult:
     )
 
 
+def check_local_workspace(config: Any) -> DiagnosticResult:
+    """Verify the local command workspace against the full live config.
+
+    Local user commands FAIL CLOSED when this directory is missing, wrongly
+    owned, or not 0700 — deliberately, because falling back to the install
+    directory is the hazard this exists to remove. That makes it an operator-
+    visible dependency: without this check a broken workspace shows up as
+    every run_command failing, with nothing in the startup report to say why.
+    """
+    from ..tools.workspace import WorkspaceError, provisioning_hint, resolve_workspace
+
+    # Production passes the full Config so independently relocated sessions,
+    # context, logs, credentials, and other state are protected exactly as the
+    # startup migration and executor protect them. Accept ToolsConfig directly
+    # only for focused callers/tests; that intentionally yields the reduced
+    # fallback contract.
+    tools_config = getattr(config, "tools", config)
+    full_config = config if tools_config is not config else None
+    configured = getattr(tools_config, "local_working_dir", "") or ""
+    try:
+        workspace = resolve_workspace(
+            configured,
+            protected_roots=_workspace_protected_roots(full_config),
+        )
+    except WorkspaceError as exc:
+        return DiagnosticResult(
+            name="local_workspace",
+            passed=False,
+            detail=f"Local command workspace unusable: {exc}",
+            recommendation=provisioning_hint(configured),
+            metadata={"configured": configured},
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return DiagnosticResult(
+            name="local_workspace",
+            passed=False,
+            detail=f"Local command workspace check failed: {exc}",
+            recommendation=provisioning_hint(configured),
+            metadata={"configured": configured},
+        )
+    # A legacy-config fallback is usable, so this still passes — but it must
+    # be visible in the report an operator reads, not buried as a path they
+    # would have to notice (cross-review of PR #239 round 13).
+    from ..tools.workspace import startup_fallback
+
+    fallback = startup_fallback()
+    if fallback is not None and str(workspace) == fallback[0]:
+        _active, intended, reason = fallback
+        return DiagnosticResult(
+            name="local_workspace",
+            passed=True,
+            detail=(
+                f"Local command workspace ready at FALLBACK {workspace} — the "
+                f"configured default {intended!r} could not be provisioned ({reason})"
+            ),
+            recommendation=provisioning_hint(intended),
+            metadata={
+                "path": str(workspace),
+                "configured": intended,
+                "fallback": True,
+            },
+        )
+    return DiagnosticResult(
+        name="local_workspace",
+        passed=True,
+        detail=f"Local command workspace ready: {workspace}",
+        metadata={"path": str(workspace)},
+    )
+
+
+def _workspace_protected_roots(config: object = None) -> list[str]:
+    """Protected roots for the diagnostic, from the same full live config and
+    shared derivation used by startup migration and executor."""
+    from ..tools.workspace import command_protected_roots
+
+    return command_protected_roots(Path(__file__).absolute().parents[2], config)
+
+
 def check_data_directories() -> DiagnosticResult:
     """Verify core data directories exist or can be created."""
     dirs = [
@@ -508,6 +586,9 @@ _CONFIG_CHECKS = [
     ("ssh_hosts", check_ssh_hosts, "tools"),
     ("sessions_directory", check_sessions_directory, "sessions"),
     ("knowledge_db", check_knowledge_db, "search"),
+    # Full Config, not only ToolsConfig: every relocatable live-state path
+    # must be judged by the same contract as runtime command execution.
+    ("local_workspace", check_local_workspace, None),
     ("config_consistency", check_config_sections, None),  # uses full Config
 ]
 

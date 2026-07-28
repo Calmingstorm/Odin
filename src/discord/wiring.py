@@ -46,6 +46,7 @@ from ..search import LocalEmbedder, SessionVectorStore
 from ..sessions import SessionManager
 from ..tools import SkillManager, ToolExecutor
 from ..tools.autonomous_loop import LoopManager
+from ..tools.workspace import DEFAULT_MEMORY_PATH
 from ..trajectories.saver import TrajectorySaver
 from .channel_config import ChannelConfigManager
 from .channel_logger import ChannelLogger
@@ -206,7 +207,10 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
     )
     sessions.load()
 
-    memory_path = "./data/memory.json"
+    # Imported, not re-spelled: the startup migration and the self-update
+    # preflight protect this file before/without wiring, and three
+    # independent spellings is how they fell out of sync (PR #239 round 6).
+    memory_path = DEFAULT_MEMORY_PATH
     channel_config = ChannelConfigManager("./data/channel_config.json")
 
     # Passive channel logger — writes ALL guild messages to JSONL (zero LLM tokens)
@@ -257,6 +261,9 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
     tool_executor = ToolExecutor(
         config.tools,
         memory_path=memory_path,
+        # Full config so the workspace's protected roots cover every relocatable
+        # live-state path, not just the ones ToolsConfig declares.
+        app_config=config,
         browser_manager=browser_manager,
         output_streamer=output_streamer,
         host_access_manager=host_access_manager,

@@ -118,6 +118,38 @@ class MetricsCollector:
             except Exception:
                 pass
 
+        # -- Local command workspace (no auto-prune, so growth is observable) --
+        ws_source = self._sources.get("workspace")
+        if ws_source:
+            try:
+                ws = ws_source() or {}
+                if ws:
+                    gauges = {
+                        "bytes": (
+                            "odin_workspace_bytes",
+                            "Bytes stored in the local command workspace",
+                        ),
+                        "files": (
+                            "odin_workspace_files",
+                            "Files in the local command workspace",
+                        ),
+                        "free_bytes": (
+                            "odin_workspace_free_bytes",
+                            "Free bytes on the workspace filesystem",
+                        ),
+                        "free_inodes": (
+                            "odin_workspace_free_inodes",
+                            "Free inodes on the workspace filesystem",
+                        ),
+                    }
+                    for key, (name, helptext) in gauges.items():
+                        if key in ws:
+                            sections.append(f"# HELP {name} {helptext}")
+                            sections.append(f"# TYPE {name} gauge")
+                            sections.append(_format_metric(name, ws[key], include_header=False))
+            except Exception:
+                pass
+
         # -- Tool execution metrics --
         tool_source = self._sources.get("tools")
         if tool_source:

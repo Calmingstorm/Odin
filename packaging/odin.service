@@ -9,6 +9,15 @@ Type=simple
 User=odin
 Group=odin
 WorkingDirectory=/opt/odin
+# Local command workspace (tools.local_working_dir). systemd creates
+# /var/lib/odin-workspace on EVERY start, owned by User= with mode 0700, so
+# fresh installs, package upgrades, and restarts after a self-update all get a
+# valid workspace with no manual step. Local commands run there instead of the
+# install directory, so a bare relative path — e.g. cleaning up after
+# extracting an archive whose internal layout starts with data/ — cannot
+# resolve against live data.
+StateDirectory=odin-workspace
+StateDirectoryMode=0700
 ExecStart=/opt/odin/.venv/bin/python -m src
 EnvironmentFile=/etc/odin/.env
 Restart=always

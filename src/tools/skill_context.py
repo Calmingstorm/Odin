@@ -164,7 +164,13 @@ class SkillContext:
         # _run_on_host returns (output, exit_code) for resolved hosts and a bare
         # denial string for unknown ones (TS-0004 — forwarding the raw tuple
         # violated this method's documented str contract for every real host).
-        raw = await self._executor._run_on_host(alias, command)
+        # use_workspace=True: this is arbitrary command execution exposed to
+        # user-created skills, so it is a raw user-command route exactly like
+        # run_command — leaving it out made it an alternate path back into the
+        # 2026-07-27 wipe, reproduced through this method (PR #239 round-9
+        # review). Remote hosts are unaffected: the workspace applies only
+        # after local-address resolution.
+        raw = await self._executor._run_on_host(alias, command, use_workspace=True)
         if isinstance(raw, tuple):
             return raw[0]
         return raw

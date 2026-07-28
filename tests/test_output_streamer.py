@@ -11,6 +11,18 @@ from src.tools.output_streamer import (
     _ActiveStream,
 )
 
+
+def _session_workspace() -> str:
+    """A valid local-command workspace for tests that stub config with a mock.
+
+    ToolExecutor refuses to run a local command against an unvalidated cwd —
+    deliberately, since inheriting the install directory is what allowed the
+    2026-07-27 wipe — so a mocked config still needs a real directory here.
+    """
+    from src.config.schema import ToolsConfig
+
+    return ToolsConfig().local_working_dir
+
 # ---------------------------------------------------------------------------
 # StreamChunk
 # ---------------------------------------------------------------------------
@@ -578,6 +590,8 @@ class TestExecCommandStreaming:
 
         executor = ToolExecutor.__new__(ToolExecutor)
         executor.config = MagicMock()
+        # Real path: the workspace is validated fail-closed (no cwd fallback).
+        executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
         executor.bulkheads = MagicMock()
         executor.bulkheads.get.return_value = None
@@ -601,6 +615,8 @@ class TestExecCommandStreaming:
 
         executor = ToolExecutor.__new__(ToolExecutor)
         executor.config = MagicMock()
+        # Real path: the workspace is validated fail-closed (no cwd fallback).
+        executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
         executor.config.ssh_key_path = "/key"
         executor.config.ssh_known_hosts_path = "/known"
@@ -627,6 +643,8 @@ class TestExecCommandStreaming:
 
         executor = ToolExecutor.__new__(ToolExecutor)
         executor.config = MagicMock()
+        # Real path: the workspace is validated fail-closed (no cwd fallback).
+        executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
         executor.bulkheads = MagicMock()
         executor.bulkheads.get.return_value = None
@@ -654,6 +672,8 @@ class TestHandleRunCommandStreaming:
 
         executor = ToolExecutor()
         executor.config = MagicMock()
+        # Real path: the workspace is validated fail-closed (no cwd fallback).
+        executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
         executor.config.hosts = {"myhost": MagicMock(
             address="127.0.0.1",
@@ -692,6 +712,8 @@ class TestHandleRunCommandStreaming:
 
         executor = ToolExecutor()
         executor.config = MagicMock()
+        # Real path: the workspace is validated fail-closed (no cwd fallback).
+        executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
         executor.config.hosts = {"myhost": MagicMock(
             address="127.0.0.1",
@@ -726,6 +748,8 @@ class TestHandleRunCommandStreaming:
 
         executor = ToolExecutor()
         executor.config = MagicMock()
+        # Real path: the workspace is validated fail-closed (no cwd fallback).
+        executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
         executor.config.hosts = {"myhost": MagicMock(
             address="127.0.0.1",
@@ -756,6 +780,8 @@ class TestHandleRunCommandStreaming:
 
         executor = ToolExecutor()
         executor.config = MagicMock()
+        # Real path: the workspace is validated fail-closed (no cwd fallback).
+        executor.config.local_working_dir = _session_workspace()
         executor.config.hosts = {}
         executor._branch_freshness_enabled = False
         executor._host_access = None
@@ -784,6 +810,8 @@ class TestHandleRunScriptStreaming:
 
         executor = ToolExecutor()
         executor.config = MagicMock()
+        # Real path: the workspace is validated fail-closed (no cwd fallback).
+        executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
         executor.config.hosts = {"myhost": MagicMock(
             address="127.0.0.1",
@@ -821,6 +849,8 @@ class TestHandleRunScriptStreaming:
 
         executor = ToolExecutor()
         executor.config = MagicMock()
+        # Real path: the workspace is validated fail-closed (no cwd fallback).
+        executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
         executor.config.hosts = {"myhost": MagicMock(
             address="127.0.0.1",

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -118,14 +120,17 @@ class TestBuildCommand:
 
     def test_port_with_host(self):
         cmd = _build_command(Check(type="port", target="1.2.3.4:8080"))
-        assert "/dev/tcp/1.2.3.4/8080" in cmd
+        assert '"/dev/tcp/$1/$2"' in cmd
+        assert cmd.endswith("_ 1.2.3.4 8080 && echo OPEN || echo CLOSED")
 
     def test_port_bare(self):
         cmd = _build_command(Check(type="port", target="5432"))
-        assert "/dev/tcp/127.0.0.1/5432" in cmd
+        assert '"/dev/tcp/$1/$2"' in cmd
+        assert cmd.endswith("_ 127.0.0.1 5432 && echo OPEN || echo CLOSED")
 
     def test_port_invalid(self):
         assert _build_command(Check(type="port", target="notaport")) is None
+        assert _build_command(Check(type="port", target=":80")) is None
 
     def test_service(self):
         cmd = _build_command(Check(type="service", target="nginx"))
@@ -143,6 +148,17 @@ class TestBuildCommand:
 
     def test_command_passthrough(self):
         assert _build_command(Check(type="command", target="echo hi")) == "echo hi"
+
+    def test_port_host_cannot_escape_the_constant_inner_script(self, tmp_path: Path):
+        """A port probe is fixed-shape only if its target cannot become shell
+        syntax. This payload executed in Odin's inherited cwd before the fix.
+        """
+        marker = tmp_path / "port-target-executed"
+        payload = f"$(touch {marker}):1"
+        cmd = _build_command(Check(type="port", target=payload, timeout_seconds=1))
+        assert cmd is not None
+        subprocess.run(cmd, shell=True, cwd=tmp_path, capture_output=True, timeout=5)
+        assert not marker.exists()
 
 
 class TestEvaluate:
@@ -357,7 +373,7 @@ class TestVerdict:
 class TestRunBundleIntegration:
     @pytest.mark.asyncio
     async def test_full_bundle_mixed_results(self):
-        async def fake_exec(addr, cmd, user, *, timeout):
+        async def fake_exec(addr, cmd, user, *, timeout, use_workspace=False):
             if "curl" in cmd:
                 return (0, "200")
             if "dev/tcp" in cmd:
@@ -437,7 +453,7 @@ class TestRunBundleIntegration:
     async def test_host_resolution_order(self):
         seen_hosts: list[str] = []
 
-        async def fake_exec(addr, cmd, user, *, timeout):
+        async def fake_exec(addr, cmd, user, *, timeout, use_workspace=False):
             seen_hosts.append(addr)
             return (0, "active")
 
@@ -480,7 +496,7 @@ class TestRunBundleIntegration:
         """Round 2 review — no shared-state timeout race across concurrent checks."""
         observed: list[tuple[int, float]] = []
 
-        async def timed_exec(addr, cmd, user, *, timeout):
+        async def timed_exec(addr, cmd, user, *, timeout, use_workspace=False):
             t0 = asyncio.get_event_loop().time()
             # Fast/slow checks finish at different times; neither should see
             # the other's timeout bleed in.
@@ -529,7 +545,7 @@ class TestRunBundleIntegration:
         max_in_flight = 0
         lock = asyncio.Lock()
 
-        async def tracking_exec(addr, cmd, user, *, timeout):
+        async def tracking_exec(addr, cmd, user, *, timeout, use_workspace=False):
             nonlocal in_flight, max_in_flight
             async with lock:
                 in_flight += 1
@@ -609,7 +625,7 @@ class TestExecutorGovernorPath:
 
         gov = _FailingGovernor()
 
-        async def wrapped(addr, cmd, user, *, timeout):
+        async def wrapped(addr, cmd, user, *, timeout, use_workspace=False):
             try:
                 gov.check(cmd)
             except Exception as ge:

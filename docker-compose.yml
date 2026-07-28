@@ -10,6 +10,11 @@ services:
     volumes:
       - ./config.yml:/app/config.yml:ro
       - ./data:/app/data
+      # NAMED volume, not a bind mount: Docker initializes a named volume from
+      # the image directory, preserving the 0700 ownership the resolver
+      # requires. A fresh bind mount is created 755 root:root, which fails
+      # closed and costs local-command capability on first run (PR #239 r2).
+      - odin-workspace:/var/lib/odin-workspace
       - ./data/context:/app/data/context:ro
       - ./ssh:/app/.ssh:ro
     extra_hosts:
@@ -57,3 +62,8 @@ services:
               capabilities: [gpu]
     networks:
       - default
+
+volumes:
+  # Local command workspace (tools.local_working_dir). Initialized from the
+  # image's 0700 directory so a fresh deployment satisfies the resolver.
+  odin-workspace:

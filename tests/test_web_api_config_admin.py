@@ -274,15 +274,102 @@ class TestDiscordConfig:
         from pathlib import Path
 
         from ruamel.yaml import YAML
+
+        from src.config.schema import active_config_path, set_active_config_path
+
         Path("config.yml").write_text("discord:\n  token: fake\n")
-        app, bot = _app(register_discord_config)
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/config", json={
-                "openai_codex": {"model_routing": {"enabled": True}},
-            })
-            assert r.status == 200
+        previous = active_config_path()
+        set_active_config_path(Path("config.yml"))
+        try:
+            app, bot = _app(register_discord_config)
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/config", json={
+                    "openai_codex": {"model_routing": {"enabled": True}},
+                })
+                assert r.status == 200
+        finally:
+            set_active_config_path(previous)
         oc = YAML().load(Path("config.yml").read_text()).get("openai_codex", {})
         assert "model_routing" not in oc
+
+    @pytest.mark.asyncio
+    async def test_blanking_the_workspace_normalizes_everywhere(self):
+        """PR #239 round-8 follow-up: the persisted-config path, for real.
+
+        tools.local_working_dir accepts free strings and can be blanked through
+        this endpoint. Blank must normalize to the default in the RESPONSE, in
+        the runtime config, on disk, and on a fresh reload — otherwise the
+        self-update preflight and the restarted process disagree about which
+        directory they are validating, which is how a blank value used to
+        approve an update that then failed closed on every local command.
+        """
+        from pathlib import Path
+
+        from ruamel.yaml import YAML
+
+        from src.config.schema import Config as _Config
+        from src.config.schema import active_config_path, set_active_config_path
+
+        Path("config.yml").write_text("discord:\n  token: fake\n")
+        # Explicit: persistence targets the ACTIVE config path, and any earlier
+        # test that called load_config leaves that module global set.
+        previous = active_config_path()
+        set_active_config_path(Path("config.yml"))
+        try:
+            app, bot = _app(register_discord_config)
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/config", json={"tools": {"local_working_dir": "   "}})
+                assert r.status == 200
+        finally:
+            set_active_config_path(previous)
+
+        default = "/var/lib/odin-workspace"
+        assert bot.config.tools.local_working_dir == default, "runtime config"
+        on_disk = YAML().load(Path("config.yml").read_text())["tools"]["local_working_dir"]
+        assert on_disk == default, "persisted YAML"
+        reloaded = _Config(**YAML().load(Path("config.yml").read_text()))
+        assert reloaded.tools.local_working_dir == default, "fresh reload"
+
+    @pytest.mark.asyncio
+    async def test_writes_to_the_active_config_not_cwd_config_yml(self):
+        """PR #239 round-10 blocker 3: alternate-config deployments.
+
+        Odin can be launched with `python -m src /somewhere/odin.yml`, and
+        restart.reexec replays that argument. Persisting to a cwd-relative
+        config.yml meant a change lived in bot.config, was validated by the
+        self-update preflight, and then vanished on re-exec — contradicting the
+        preflight's contract that it validates what the restarted process will
+        use. llm_admin already wrote to the active path; this one did not.
+        """
+        from pathlib import Path
+
+        from ruamel.yaml import YAML
+
+        from src.config.schema import active_config_path, set_active_config_path
+
+        alternate = Path("odin-alternate.yml")
+        alternate.write_text("discord:\n  token: fake\n")
+        decoy = Path("config.yml")
+        decoy.write_text("discord:\n  token: fake\n")
+
+        previous = active_config_path()
+        set_active_config_path(alternate)
+        try:
+            app, bot = _app(register_discord_config)
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put(
+                    "/api/config", json={"tools": {"local_working_dir": "/srv/ws"}}
+                )
+                assert r.status == 200
+        finally:
+            set_active_config_path(previous)
+
+        written = YAML().load(alternate.read_text())["tools"]["local_working_dir"]
+        assert written == "/srv/ws", "the ACTIVE config must receive the change"
+        assert bot.config.tools.local_working_dir == "/srv/ws", "runtime agrees"
+        assert "tools" not in (YAML().load(decoy.read_text()) or {}), (
+            "the cwd config.yml is a decoy here and must not be written"
+        )
 
     @pytest.mark.asyncio
     async def test_health_and_resource_and_streams(self):

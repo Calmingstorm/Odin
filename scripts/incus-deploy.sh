@@ -71,6 +71,12 @@ incus exec "$INSTANCE" -- bash -c "
     id odin &>/dev/null || useradd -m -s /bin/bash odin
     mkdir -p /app/src /app/data/context /app/data/sessions /app/data/logs \
              /app/data/usage /app/data/skills /app/data/chromadb /app/.ssh
+    # Local command workspace (tools.local_working_dir). OUTSIDE /app so a bare
+    # relative path in a command cannot resolve against the install or its data.
+    # The unprivileged odin user cannot create it under /var/lib itself.
+    mkdir -p /var/lib/odin-workspace
+    chown odin:odin /var/lib/odin-workspace
+    chmod 0700 /var/lib/odin-workspace
     chown -R odin:odin /app
     chmod 700 /app/.ssh
 "
@@ -118,6 +124,8 @@ After=network.target
 Type=simple
 User=odin
 WorkingDirectory=/app
+StateDirectory=odin-workspace
+StateDirectoryMode=0700
 EnvironmentFile=/app/.env
 ExecStart=/usr/bin/python3 -m src
 Restart=on-failure

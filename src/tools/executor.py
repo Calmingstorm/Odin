@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import os
+import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -43,6 +46,7 @@ from .ssh import (
     run_ssh_command,
 )
 from .ssh_pool import SSHConnectionPool
+from .workspace import DEFAULT_MEMORY_PATH, command_protected_roots, resolve_workspace
 
 log = get_logger("tools")
 
@@ -77,6 +81,11 @@ _user_tier_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _current_tool_timeout_ctx: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "odin_current_tool_timeout", default=None
 )
+
+# How long a workspace size/count walk is reused. Growth is an operator signal
+# measured in hours, so a minute of staleness costs nothing; scraping /metrics
+# in a loop against an ever-growing directory costs the event loop a great deal.
+WORKSPACE_METRICS_TTL = 60.0
 
 
 def _validate_memory_shape(data: dict) -> None:
@@ -155,9 +164,36 @@ class ToolExecutor:
         output_streamer: ToolOutputStreamer | None = None,
         host_access_manager: HostAccessManager | None = None,
         email_config: object | None = None,
+        app_config: object | None = None,
     ) -> None:
         self.config = config or ToolsConfig()
+        # The FULL live config, supplied by wiring. Live state is not confined
+        # to the data directory — sessions, context, logs, usage, the search
+        # index, permissions and Codex credentials are each independently
+        # relocatable, and a workspace overlapping any of them is as dangerous
+        # as one inside ./data (PR #239 round-8 review, reproduced). Optional
+        # so tests and the __new__ patch seam still construct.
+        self._app_config = app_config
         self._email_config = email_config
+        # The configured workspace VALUE is restart-required, but it is
+        # re-validated on every local command rather than cached: existence,
+        # type, ownership and mode are mutable filesystem state (see
+        # _ensure_local_workspace).
+        #
+        # Resolution is LAZY (first local command) rather than at construction:
+        # constructing an executor must not depend on deployment having created
+        # the directory, or every test and fresh checkout breaks. The safety
+        # property is unchanged, because it binds where it matters — a local
+        # command never runs with an unvalidated cwd, and an unusable workspace
+        # raises instead of silently falling back to the inherited cwd, which
+        # is what would restore the 2026-07-27 hazard.
+        self._local_workspace: str | None = None
+        self._local_workspace_resolved = False
+        # (completed_at_monotonic, bytes, files) from the last usage walk,
+        # refreshed off-thread; the lock makes the refresh single-flight.
+        self._workspace_usage_cache: tuple[float, float, float] | None = None
+        self._workspace_usage_refreshing = False
+        self._workspace_usage_lock = threading.Lock()
         self._memory_path = Path(memory_path) if memory_path else None
         self._browser_manager = browser_manager
         self._permission_manager = permission_manager
@@ -299,6 +335,174 @@ class ToolExecutor:
         hosts = list(self.config.hosts.keys())
         return hosts[0] if hosts else ""
 
+    def _protected_roots(self) -> list[str]:
+        """Roots the local workspace must not overlap, derived from the RUNNING
+        application rather than assumed (PR #239 review).
+
+        A hardcoded ``/opt/odin`` is wrong under Docker (install root ``/app``)
+        and for source checkouts, and packaged ``/opt/odin/data`` is a symlink
+        to ``/var/lib/odin`` — so the live-data root is taken from the actual
+        configured data paths and canonicalized, not string-joined.
+
+        Derivation itself lives in workspace.command_protected_roots so the
+        startup migration and the self-update preflight protect exactly the
+        same directories. When each caller derived its own, the preflight
+        accepted (and created) a workspace beside live memory.json that the
+        executor then rejected (PR #239 round-6 review).
+        """
+        return command_protected_roots(
+            # Install root: the package's own location (…/src/tools/executor.py).
+            Path(__file__).absolute().parents[2],
+            # getattr-guarded throughout: the sanctioned __new__ patch seam
+            # builds executors without __init__, so these may not exist.
+            getattr(self, "_app_config", None),
+            tools=getattr(self, "config", None),
+            # The live memory.json is supplied by wiring, not ToolsConfig;
+            # falling back to the shared default rather than no protection.
+            memory_path=getattr(self, "_memory_path", None) or DEFAULT_MEMORY_PATH,
+        )
+
+    def get_workspace_metrics(self) -> dict[str, float]:
+        """Usage of the local command workspace, for Prometheus.
+
+        The accepted design deliberately does NOT auto-prune — age-based
+        deletion would destroy the cross-command continuity the stable
+        workspace exists to provide — so growth must be observable instead,
+        with cleanup an explicit operator action (PR #239 round-2 review).
+
+        Never raises: metrics collection must not be able to break a command
+        path, and an unresolvable workspace simply reports nothing.
+        """
+        try:
+            root = Path(self._ensure_local_workspace())
+        except Exception:
+            return {}
+
+        # The size/count walk NEVER runs on the calling thread. /metrics is
+        # unauthenticated and served on the event loop, and this directory
+        # deliberately never prunes, so a synchronous walk is a stall that only
+        # grows (PR #239 round-9/10 review). A stale cache triggers a
+        # single-flight background refresh and the previous numbers are served
+        # meanwhile; until the first refresh completes, usage is simply absent
+        # rather than blocking. The timestamp is recorded when the walk
+        # COMPLETES — stamping at the start makes a walk longer than the TTL
+        # instantly stale, so every scrape would launch another one.
+        self._refresh_workspace_usage(root)
+        cached = getattr(self, "_workspace_usage_cache", None)
+        metrics: dict[str, float] = {}
+        if cached is not None:
+            metrics["bytes"], metrics["files"] = cached[1], cached[2]
+        # Cheap statvfs calls: these stay LIVE on every scrape, cached usage
+        # or not, because free space is the number an operator alerts on.
+        try:
+            usage = shutil.disk_usage(root)
+            metrics["free_bytes"] = float(usage.free)
+        except OSError:
+            pass
+        try:
+            stats = os.statvfs(root)
+            metrics["free_inodes"] = float(stats.f_favail)
+        except (OSError, AttributeError):
+            pass
+        return metrics
+
+    def _refresh_workspace_usage(self, root: Path) -> None:
+        """Start a single-flight background walk if the cache is stale.
+
+        Never blocks the caller. Never raises: metrics collection must not be
+        able to break anything, least of all the event loop it runs on.
+        """
+        cached = getattr(self, "_workspace_usage_cache", None)
+        if cached is not None and (time.monotonic() - cached[0]) < WORKSPACE_METRICS_TTL:
+            return
+        lock = getattr(self, "_workspace_usage_lock", None)
+        if lock is None:  # __new__ patch seam
+            return
+        with lock:
+            # Re-check freshness after acquiring the lock. Another scrape may
+            # have completed and published while this caller was waiting; the
+            # unlocked fast-path observation above is not authoritative once
+            # lock acquisition blocks. Without this second check, concurrent
+            # scrapes can launch an immediate duplicate walk after a fast first
+            # refresh finishes.
+            cached = getattr(self, "_workspace_usage_cache", None)
+            if cached is not None and (time.monotonic() - cached[0]) < WORKSPACE_METRICS_TTL:
+                return
+            if self._workspace_usage_refreshing:
+                return
+            self._workspace_usage_refreshing = True
+
+        def _walk() -> None:
+            total_bytes = 0.0
+            files = 0.0
+            published = False
+            try:
+                for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+                    for name in filenames:
+                        files += 1
+                        try:
+                            total_bytes += os.lstat(os.path.join(dirpath, name)).st_size
+                        except OSError:
+                            pass
+                # Publish the completed cache and clear the single-flight flag
+                # as ONE locked transition. Clearing first leaves a race where
+                # a scrape launches a duplicate walk before the fresh cache is
+                # visible (Odin, PR #239 round-12).
+                completed_at = time.monotonic()
+                with lock:
+                    self._workspace_usage_cache = (completed_at, total_bytes, files)
+                    self._workspace_usage_refreshing = False
+                    published = True
+            except Exception:
+                # A metrics walk is best-effort. Letting an unexpected error
+                # escape a daemon thread still invokes threading.excepthook
+                # (and produces an unhandled-thread warning in pytest/logging),
+                # contradicting this collector's never-raises contract. The
+                # finally block below clears the single-flight flag so the next
+                # scrape can recover.
+                pass
+            finally:
+                # The flag must never survive this thread. Clearing it only on
+                # the OSError and success paths wedged usage metrics FOREVER on
+                # any other exception — the flag stayed set, so every later
+                # scrape declined to start a refresh (cross-review of round 12,
+                # reproduced). Guarded by `published` so the success path's
+                # atomic publish is not split apart.
+                if not published:
+                    with lock:
+                        self._workspace_usage_refreshing = False
+
+        try:
+            threading.Thread(
+                target=_walk, name="odin-workspace-usage", daemon=True
+            ).start()
+        except Exception:  # pragma: no cover - thread creation cannot realistically fail
+            with lock:
+                self._workspace_usage_refreshing = False
+
+    def _ensure_local_workspace(self) -> str:
+        """Resolve and re-validate the cwd for local user commands.
+
+        Raises :class:`WorkspaceError` if the configured directory is unusable.
+        Deliberately no fallback: inheriting the process cwd is exactly the
+        behaviour that let a bare `rm -rf data` delete the live install.
+        """
+        # Validated on EVERY call, not cached (PR #239 round-3 review): the
+        # configured VALUE is restart-required, but existence, type, ownership
+        # and mode are mutable filesystem state. Caching them meant fail-closed
+        # only applied to the first command — replacing the directory with a
+        # symlink into the install afterwards was accepted, and a post-
+        # validation chmod was ignored. The check is a handful of stat calls.
+        workspace = str(
+            resolve_workspace(
+                self.config.local_working_dir,
+                protected_roots=self._protected_roots(),
+            )
+        )
+        self._local_workspace = workspace
+        self._local_workspace_resolved = True
+        return workspace
+
     def _ensure_process_registry(self):
         """Lazy-init the ProcessRegistry ON THE EXECUTOR (RFC-004 P4).
 
@@ -309,7 +513,9 @@ class ToolExecutor:
         if not hasattr(self, "_process_registry"):
             from .process_manager import ProcessRegistry
 
-            self._process_registry = ProcessRegistry()
+            # Pass the RESOLVER, not a resolved string: each background spawn
+            # must re-verify the workspace's mutable filesystem invariants.
+            self._process_registry = ProcessRegistry(workspace=self._ensure_local_workspace)
         return self._process_registry
 
     def check_permission(self, tool_name: str, user_id: str | None) -> str | None:
@@ -618,6 +824,7 @@ class ToolExecutor:
         ssh_user: str = "root",
         timeout: int | None = None,
         on_output: OutputCallback | None = None,
+        use_workspace: bool = False,
     ) -> tuple[int, str]:
         """Execute a command locally or via SSH depending on host address.
 
@@ -634,16 +841,31 @@ class ToolExecutor:
         if timeout is None:
             timeout = _current_tool_timeout_ctx.get() or self.config.command_timeout_seconds
         if is_local_address(address):
+            # The workspace applies ONLY to raw user commands, and only because
+            # the caller asked for it. This primitive also backs git_ops,
+            # docker, terraform, kubectl, claude_code, PDF host reads and
+            # validation probes, whose documented defaults resolve against the
+            # process cwd — git_ops with `repo` omitted means ".", i.e. the
+            # install repo, and silently repointing that at a scratch directory
+            # broke `git_ops status` with "fatal: not a git repository"
+            # (PR #239 round-8 review, reproduced). Default False keeps every
+            # such tool byte-identical to pre-PR behaviour.
+            cwd = self._ensure_local_workspace() if use_workspace else None
             bh = self.bulkheads.get("subprocess")
             if bh:
                 try:
                     async with bh.acquire():
                         return await run_local_command(
-                            command, timeout=timeout, on_output=on_output
+                            command,
+                            timeout=timeout,
+                            on_output=on_output,
+                            cwd=cwd,
                         )
                 except BulkheadFullError:
                     return 1, "Error: subprocess bulkhead full — too many concurrent local commands"
-            return await run_local_command(command, timeout=timeout, on_output=on_output)
+            return await run_local_command(
+                command, timeout=timeout, on_output=on_output, cwd=cwd
+            )
         ssh_retry = self.config.ssh_retry
         ssh_kwargs: dict[str, Any] = dict(
             host=address,
@@ -667,12 +889,23 @@ class ToolExecutor:
                 return 1, "Error: SSH bulkhead full — too many concurrent SSH commands"
         return await run_ssh_command(**ssh_kwargs)
 
-    async def _run_on_host(self, alias: str, command: str) -> str | tuple[str, int]:
+    async def _run_on_host(
+        self, alias: str, command: str, use_workspace: bool = False
+    ) -> str | tuple[str, int]:
+        """Run a command on an aliased host.
+
+        ``use_workspace`` is opt-in for the same reason as _exec_command: this
+        also backs read_file/write_file host reads, skill_context.run_on_host,
+        and the audit diff tracker, whose paths are absolute and whose cwd
+        semantics must not change.
+        """
         resolved = self._resolve_host(alias)
         if not resolved:
             return f"Unknown or disallowed host: {alias}"
         address, ssh_user, _os = resolved
-        code, output = await self._exec_command(address, command, ssh_user)
+        code, output = await self._exec_command(
+            address, command, ssh_user, use_workspace=use_workspace
+        )
         if code != 0:
             return f"Command failed (exit {code}):\n{output}", code
         return output, 0

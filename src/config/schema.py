@@ -187,6 +187,12 @@ class GovernorConfig(BaseModel):
     host_overrides: dict[str, str] = Field(default_factory=dict)
 
 
+# The default local command workspace, spelled ONCE: the field default, the
+# blank-value normalizer, the tracked config.yml template and the packaging
+# scripts must never drift apart.
+DEFAULT_LOCAL_WORKING_DIR = "/var/lib/odin-workspace"
+
+
 class ToolsConfig(BaseModel):
     enabled: bool = True
     governor: GovernorConfig = GovernorConfig()
@@ -217,6 +223,45 @@ class ToolsConfig(BaseModel):
     # Loops typically need more budget for exploration + execution + verify + commit.
     max_tool_iterations_chat: int = 500
     max_tool_iterations_loop: int = 500
+    # Working directory for USER-COMMAND local execution (run_command,
+    # run_script, manage_process). Before this existed, those subprocesses
+    # inherited systemd's WorkingDirectory=/opt/odin, so a bare relative path
+    # in a command resolved against the live install — on 2026-07-27 an AE2 jar
+    # whose internal layout is `data/` was extracted and cleaned up with
+    # `rm -rf data`, which deleted /opt/odin/data.
+    #
+    # Deliberately a SIBLING of /var/lib/odin, not a child: packaged installs
+    # use /var/lib/odin as the live data directory behind /opt/odin/data.
+    # Not /tmp or /var/tmp (tmpfiles policy can age those out) and not $HOME
+    # (packaged Odin declares /opt/odin as the service account's home).
+    #
+    # Stable and persistent BY DESIGN: a fresh directory per command would
+    # break two-step workflows that write a relative file in one command and
+    # read it in the next, which would cost capability. Restart-required, not
+    # hot-reloadable — swapping workspaces at runtime would break exactly the
+    # cross-command continuity this preserves.
+    local_working_dir: str = DEFAULT_LOCAL_WORKING_DIR
+
+    @field_validator("local_working_dir")
+    @classmethod
+    def _workspace_blank_means_default(cls, v):
+        """Blank or whitespace-only normalizes to the default, here at the
+        boundary, so every consumer sees the same value.
+
+        The field accepts free strings and can be blanked through
+        PUT /api/config. Left un-normalized, the self-update preflight
+        substituted the default and approved, while the restarted process
+        loaded the blank value and failed closed on every local command —
+        preflight and runtime disagreeing about the very path being validated
+        (PR #239 round-7 review, reproduced).
+
+        Normalizing rather than rejecting keeps the update seamless: a blanked
+        value costs no capability and cannot brick startup, which a hard
+        validation error on a persisted config would.
+        """
+        if not isinstance(v, str) or not v.strip():
+            return DEFAULT_LOCAL_WORKING_DIR
+        return v.strip()
 
     @field_validator("command_timeout_seconds")
     @classmethod
@@ -866,6 +911,18 @@ def _substitute_env_vars(text: str) -> str:
 # (a test or one-off script that never called load_config) cannot silently
 # overwrite a real deployment's config.yml from the wrong working directory.
 _ACTIVE_CONFIG_PATH: Path | None = None
+# The path AS GIVEN (absolutized, symlinks intact). restart.reexec() replays
+# sys.argv, so an alias like /etc/odin/config.yml -> /srv/real/odin.yml is what
+# the restarted process opens — protecting only the canonical target would let
+# a relative command delete the alias and break the next restart (PR #239
+# round-10 review, reproduced).
+_LAUNCH_CONFIG_PATH: Path | None = None
+
+
+def active_config_launch_path() -> Path | None:
+    """The config path as given on the command line, absolutized but with
+    symlinks intact — what ``restart.reexec()`` will hand the next process."""
+    return _LAUNCH_CONFIG_PATH
 
 
 def active_config_path() -> Path | None:
@@ -878,8 +935,9 @@ def set_active_config_path(path: str | Path | None) -> None:
     """Record (or clear) the active config path. ``load_config`` calls this on a
     successful load; tests/tools that persist a hand-built Config point it at
     their own file."""
-    global _ACTIVE_CONFIG_PATH
+    global _ACTIVE_CONFIG_PATH, _LAUNCH_CONFIG_PATH
     _ACTIVE_CONFIG_PATH = Path(path).resolve() if path is not None else None
+    _LAUNCH_CONFIG_PATH = Path(os.path.abspath(path)) if path is not None else None
 
 
 def load_config(path: str | Path = "config.yml") -> Config:

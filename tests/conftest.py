@@ -208,3 +208,27 @@ def _reset_restart_intent():
     yield
     restart.reset()
 
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _test_local_workspace(tmp_path_factory):
+    """Provision a valid local command workspace for the whole test session.
+
+    ToolExecutor resolves ``tools.local_working_dir`` fail-closed before running
+    any local command — there is deliberately no fallback to the inherited cwd,
+    since that inheritance is what let a bare `rm -rf data` delete the live
+    install on 2026-07-27. Production provisions the directory at deploy time;
+    tests provision this one, so executor construction never depends on the
+    host having been deployed to.
+    """
+    from src.config.schema import ToolsConfig
+
+    workspace = tmp_path_factory.mktemp("odin-test-workspace")
+    workspace.chmod(0o700)
+    field = ToolsConfig.model_fields["local_working_dir"]
+    original = field.default
+    field.default = str(workspace)
+    ToolsConfig.model_rebuild(force=True)
+    yield workspace
+    field.default = original
+    ToolsConfig.model_rebuild(force=True)

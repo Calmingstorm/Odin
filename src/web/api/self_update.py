@@ -7,6 +7,9 @@ section, same registrar shape, same composition position.
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+from pathlib import Path
 
 from aiohttp import web
 
@@ -27,7 +30,6 @@ def _repo_root() -> str:
     preservation joined the wrong directory, and the bot kept reporting
     the pre-update version from stale package metadata.
     """
-    import os
 
     path = os.path.dirname(os.path.abspath(__file__))
     for _ in range(8):
@@ -79,10 +81,8 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
 
     @routes.post("/api/update/apply")
     async def apply_update(request: web.Request) -> web.Response:
-        import os
         import re as _re
         import shutil
-        import subprocess
         try:
             data = await request.json()
         except Exception:
@@ -148,6 +148,24 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
                     "error": (
                         f"Worktree has unexpected modifications ({', '.join(dirty[:5])}). "
                         "Only config.yml and .env are preserved automatically."
+                    ),
+                }, status=409)
+
+            # PREFLIGHT: the incoming code runs local commands in a validated
+            # workspace outside the install and REFUSES to run without one.
+            # This updater re-execs in place, so systemd never starts the
+            # service and never applies StateDirectory= — meaning an update
+            # could succeed and leave Odin unable to run any local command
+            # (PR #239 round-4 review, verified against the live install).
+            # Provision it here, BEFORE committing to the update, and refuse
+            # the update rather than transition to code that cannot work.
+            ws_error = _ensure_local_workspace_for_update(bot, base)
+            if ws_error:
+                return web.json_response({
+                    "error": (
+                        "update refused: the local command workspace could not be "
+                        f"provisioned, so the updated Odin would be unable to run "
+                        f"local commands. {ws_error}"
                     ),
                 }, status=409)
 
@@ -236,3 +254,81 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
     async def stop_all_loops(_request: web.Request) -> web.Response:
         result = bot.loop_manager.stop_loop("all")
         return web.json_response({"result": result})
+
+
+def _ensure_local_workspace_for_update(bot=None, base: str | None = None) -> str | None:
+    """Provision the local command workspace ahead of an in-place update.
+
+    Returns None on success, or an operator-actionable message on failure.
+
+    Delegates to the SINGLE authoritative implementation rather than
+    reimplementing a weaker contract here. An independent copy accepted
+    workspaces the runtime then rejected — a relative path, a symlink, one
+    inside the install — and could create a directory the restarted executor
+    would refuse, or provision a different directory from the one it actually
+    uses (PR #239 round-5 review reproduced four such mismatches).
+
+    The configuration comes from the LIVE bot when available, so the path
+    checked here is the path the restarted process will use, including any
+    alternate config file or environment substitution already applied.
+    """
+    from ...tools.workspace import (
+        WorkspaceError,
+        provision_workspace,
+        provisioning_hint,
+    )
+
+    configured = _live_workspace_setting(bot)
+    try:
+        provision_workspace(configured, protected_roots=_live_protected_roots(bot, base))
+        return None
+    except WorkspaceError as exc:
+        return f"{exc} {provisioning_hint(configured)}"
+    except Exception as exc:  # pragma: no cover - defensive
+        return f"{exc} {provisioning_hint(configured)}"
+
+
+def _live_workspace_setting(bot) -> str:
+    """The workspace path the RESTARTED process will actually use.
+
+    Returned VERBATIM from the live config, never substituted. Treating a
+    present-but-blank value as "nothing configured" and validating the default
+    instead let the preflight approve an update whose restarted process then
+    failed closed on every local command (PR #239 round-7 review). The schema
+    normalizes blank to the default, so a blank value here means the live
+    config is not a validated ToolsConfig — which is exactly when guessing is
+    least safe. The default is used ONLY when there is no live config at all.
+    """
+    try:
+        configured = bot.config.tools.local_working_dir
+        if isinstance(configured, str):
+            return configured
+    except Exception:
+        pass
+    from ...config.schema import ToolsConfig
+
+    return ToolsConfig().local_working_dir
+
+
+def _live_protected_roots(bot, base: str | None) -> list[str]:
+    """Install root plus canonical live-data roots, from the LIVE config.
+
+    Delegates to the ONE shared derivation so the preflight cannot approve a
+    workspace the restarted executor refuses. Deriving them here separately
+    omitted live memory.json entirely, so with audit/trajectory paths relocated
+    the updater created a workspace beside memory.json, reported success, and
+    handed over to an executor that rejected every local command (PR #239
+    round-6 review, reproduced).
+
+    The live memory path is read from the running executor when reachable —
+    that is the value wiring actually supplied — and falls back to the shared
+    default otherwise.
+    """
+    from src.tools.workspace import DEFAULT_MEMORY_PATH, command_protected_roots
+
+    memory_path = getattr(getattr(bot, "tool_executor", None), "_memory_path", None)
+    return command_protected_roots(
+        Path(base).absolute() if base else Path(__file__).absolute().parents[3],
+        getattr(bot, "config", None),
+        memory_path=memory_path or DEFAULT_MEMORY_PATH,
+    )

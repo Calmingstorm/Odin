@@ -32,6 +32,11 @@ def _wire_observability(health, bot, log) -> None:
     tool_executor = getattr(bot, "tool_executor", None)
     if tool_executor is not None and hasattr(tool_executor, "get_metrics"):
         metrics.register_source("tools", tool_executor.get_metrics)
+    if tool_executor is not None and hasattr(tool_executor, "get_workspace_metrics"):
+        # Paired with the deliberate absence of auto-pruning: growth in the
+        # local command workspace must be alertable rather than silently
+        # unbounded (PR #239 round-2 review).
+        metrics.register_source("workspace", tool_executor.get_workspace_metrics)
 
     cost_tracker = getattr(bot, "cost_tracker", None)
     if cost_tracker is not None and hasattr(cost_tracker, "get_prometheus_metrics"):
@@ -107,6 +112,57 @@ def main() -> None:
     )
     log = get_logger("main")
     log.info("Starting Odin")
+
+    # STARTUP MIGRATION — must run after the real configuration is loaded and
+    # before any command service begins.
+    #
+    # Local user commands run in a validated workspace outside the install and
+    # refuse to run without one. A preflight in the self-updater cannot
+    # bootstrap that: the update which INTRODUCES the preflight is executed by
+    # the previous release's handler, which has none, so the very first upgrade
+    # would re-exec into code whose workspace was never created (PR #239
+    # round-5 review, verified against a live install). Provisioning here runs
+    # in the NEW code on the restart that follows any update, however the
+    # update arrived.
+    #
+    # Failure is logged, not fatal: an unusable workspace must not prevent
+    # Odin from starting and answering on Discord. Local commands then fail
+    # closed individually, with the same actionable error.
+    try:
+        from src.tools.workspace import (
+            WorkspaceError,
+            provision_startup_workspace,
+            provisioning_hint,
+        )
+
+        def _warn_fallback(path, configured, reason) -> None:
+            # A fallback is not a failure, but it must never look like normal
+            # operation: on a packaged install it means the packaged default
+            # could not be provisioned, which the operator needs to know
+            # (cross-review of PR #239 round 13).
+            log.warning(
+                "Local command workspace fell back to %s — the configured "
+                "default could not be provisioned (%s). Local commands work, "
+                "but this indicates a packaging or permissions problem. %s",
+                path,
+                reason,
+                provisioning_hint(configured),
+            )
+
+        workspace = provision_startup_workspace(
+            config.tools,
+            protected_roots=_command_protected_roots(config),
+            on_fallback=_warn_fallback,
+        )
+        log.info("Local command workspace ready: %s", workspace)
+    except WorkspaceError as exc:
+        log.error(
+            "Local command workspace unusable — local commands will refuse to run: %s. %s",
+            exc,
+            provisioning_hint(config.tools.local_working_dir),
+        )
+    except Exception as exc:  # never block startup on provisioning
+        log.error("Local command workspace provisioning failed unexpectedly: %s", exc)
 
     health = HealthServer(
         port=config.web.port,
@@ -273,5 +329,31 @@ def main() -> None:
         sys.exit(exit_code)
 
 
+def _command_protected_roots(config) -> list[str]:
+    """Install root plus canonical live-data roots for the startup migration.
+
+    Delegates to the ONE shared derivation so startup, the self-update
+    preflight, and the executor protect exactly the same directories. Deriving
+    them separately here silently protected nothing (``Config`` has no
+    ``memory`` section) while the executor protected live memory.json — so a
+    workspace beside it was provisioned at startup and then refused on every
+    command (PR #239 round-6 review).
+
+    The FULL config is passed so every independently relocatable live-state
+    path is covered. ``memory_path`` is left at its default: production wiring
+    hardcodes that path, and startup runs before wiring exists.
+    """
+    from src.tools.workspace import command_protected_roots
+
+    return command_protected_roots(Path(__file__).absolute().parents[1], config)
+
+
+# The entrypoint guard MUST stay the last statement in this module. Python
+# executes a module top-to-bottom, so a guard placed above a helper runs main()
+# before that helper's `def` is reached: the startup migration raised NameError
+# and its own nonfatal handler swallowed it, leaving the workspace uncreated and
+# resurrecting the first-update bootstrap failure this migration exists to fix
+# (PR #239 round-6 review). tests/test_local_workspace.py executes `python -m src`
+# for real to keep this honest.
 if __name__ == "__main__":
     main()

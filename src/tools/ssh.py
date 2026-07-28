@@ -4,10 +4,12 @@ import asyncio
 import os
 import signal
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..llm.backoff import compute_backoff
 from ..odin_log import get_logger
+from .workspace import workspace_env
 
 if TYPE_CHECKING:
     from .ssh_pool import SSHConnectionPool
@@ -115,9 +117,7 @@ async def terminate_process_tree(
     # (``pgid == proc.pid``) and (b) a safe, foreign target. A pgid that is
     # broadcast/own-group — however it arose (a bad owned_pgid, a recycled pid) —
     # is dropped here and cleanup falls back to signalling the child alone.
-    owns_group = (
-        pgid is not None and pgid == proc.pid and _is_signallable_group(pgid)
-    )
+    owns_group = pgid is not None and pgid == proc.pid and _is_signallable_group(pgid)
 
     if proc.returncode is not None and not owns_group:
         return  # child-only cleanup and the child is already reaped
@@ -207,17 +207,29 @@ async def run_local_command(
     command: str,
     timeout: int = 30,
     on_output: OutputCallback | None = None,
+    cwd: str | None = None,
 ) -> tuple[int, str]:
     """Run a command locally via subprocess. Returns (exit_code, output).
 
     Used for localhost hosts — no SSH overhead, no key needed.
     When *on_output* is provided, stdout is streamed line-by-line to the
     callback in addition to being collected for the return value.
+
+    *cwd* is the resolved local workspace (``tools.local_working_dir``). It only
+    changes where a BARE RELATIVE path lands: explicit ``cd``, absolute paths,
+    and ``git -C <path>`` are unaffected, so deliberately working inside the
+    install remains possible. ``None`` inherits the process cwd — the
+    pre-2026-07-27 behaviour, kept only for internal callers that legitimately
+    depend on the application directory.
     """
     log.info("Local exec: %s", command)
 
     proc: asyncio.subprocess.Process | None = None
     try:
+        # PWD/OLDPWD are normalized alongside cwd: cwd= alone leaves an
+        # inherited OLDPWD pointing at the install, so a bare `cd -` would walk
+        # right back into it (review finding, 2026-07-27).
+        env = workspace_env(Path(cwd)) if cwd else None
         # start_new_session puts the shell at the head of its own process
         # group, so timeout/cancellation cleanup can take out descendants
         # (`sh -c 'x & ...'`) instead of just the shell leader.
@@ -226,11 +238,11 @@ async def run_local_command(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
+            cwd=cwd,
+            env=env,
         )
         if on_output is not None:
-            return await _read_lines_with_callback(
-                proc, timeout, on_output, owned_pgid=proc.pid
-            )
+            return await _read_lines_with_callback(proc, timeout, on_output, owned_pgid=proc.pid)
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = stdout.decode("utf-8", errors="replace")
         return proc.returncode or 0, _truncate_output(output)

@@ -812,7 +812,12 @@ class TestInvokeSkillTool:
         assert "ok" in text
         assert "strict" in text
         assert exit_code == 1  # a host was denied → not ok
-        exe._run_on_host.assert_called_once_with("dev", "systemctl restart nginx")
+        # use_workspace=True is load-bearing: run_command_multi is a raw
+        # user-command route and must land in the workspace, not the install
+        # (PR #239). Unrelated tools deliberately omit it.
+        exe._run_on_host.assert_called_once_with(
+            "dev", "systemctl restart nginx", use_workspace=True
+        )
 
     @pytest.mark.asyncio
     async def test_memory_manage_get_action(self, tmp_path):

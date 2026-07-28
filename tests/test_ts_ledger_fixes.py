@@ -22,7 +22,10 @@ class _FakeExecutor:
         self._raw = raw
         self.config = MagicMock()
 
-    async def _run_on_host(self, alias, command):
+    async def _run_on_host(self, alias, command, use_workspace=False):
+        # Recorded, not asserted: skills opt IN (arbitrary command execution),
+        # the audit diff tracker deliberately does NOT (PR #239 round 9).
+        self.last_use_workspace = use_workspace
         if isinstance(self._raw, Exception):
             raise self._raw
         return self._raw
@@ -67,6 +70,15 @@ class TestTS0004SkillRunOnHostContract:
         ctx = SkillContext.__new__(SkillContext)
         ctx._executor = _FakeExecutor(raw)
         return ctx
+
+    @pytest.mark.asyncio
+    async def test_skill_commands_opt_into_the_workspace(self):
+        """PR #239 round 9: this is arbitrary command execution exposed to
+        user-created skills, so it is a raw command route and must land in the
+        workspace — omitting it left an alternate path back into the wipe."""
+        ctx = self._ctx(("ok", 0))
+        await ctx.run_on_host("localhost", "rm -rf data")
+        assert ctx._executor.last_use_workspace is True
 
     @pytest.mark.asyncio
     async def test_resolved_host_returns_output_string(self):

@@ -10,6 +10,7 @@ ever executes; we assert only on request parsing and response shaping.
 from __future__ import annotations
 
 from subprocess import CompletedProcess
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from aiohttp import web
@@ -156,6 +157,69 @@ class TestApplyUpdate:
         kill.assert_not_called()
         # main() re-execs in place after shutdown only because this was set
         assert restart.restart_requested() is True
+
+    async def test_refuses_when_the_workspace_cannot_be_provisioned(self):
+        """PR #239 round-4 blocker 1: this updater re-execs IN PLACE, so systemd
+        never starts the service and never applies StateDirectory=. If the local
+        command workspace cannot be provisioned, the update must be REFUSED —
+        otherwise it completes and Odin cannot run a single local command
+        afterwards (verified against the live install during review)."""
+        with patch(
+            "src.web.api.self_update._ensure_local_workspace_for_update",
+            return_value=(
+                "Create it before updating: sudo install -d -m 0700 "
+                "-o odin -g odin /var/lib/odin-workspace"
+            ),
+        ), patch("subprocess.run", side_effect=_run_ok) as run:
+            async with TestClient(TestServer(_app())) as c:
+                r = await c.post("/api/update/apply", json={"version": "latest"})
+                assert r.status == 409
+                body = await r.json()
+                assert "update refused" in body["error"]
+                assert "install -d -m 0700" in body["error"], "must stay actionable"
+        # Refusal happens BEFORE the repository is touched.
+        assert not any(
+            "merge" in " ".join(map(str, call.args[0]))
+            for call in run.call_args_list
+            if call.args and isinstance(call.args[0], list)
+        ), "the update must not have been committed"
+
+    async def test_refuses_a_blank_live_workspace_before_touching_the_repo(self):
+        """PR #239 round-7 blocker: a blank LIVE workspace, end to end.
+
+        The persistence half — that PUT /api/config normalizes blank away — is
+        pinned separately in test_web_api_config_admin; this drives the update
+        route against a live config that already holds a raw blank value.
+
+        local_working_dir accepts free strings and can be blanked through
+        PUT /api/config. The preflight used to treat a present-but-blank value
+        as "nothing configured" and validate the DEFAULT instead, so the update
+        was approved while the restarted process loaded the blank value and
+        failed closed on every local command.
+
+        Nothing is stubbed here except the exec primitives: this drives the real
+        preflight from a live bot config.
+        """
+        bot = SimpleNamespace(
+            config=SimpleNamespace(
+                tools=SimpleNamespace(
+                    local_working_dir="   ",
+                    audit_log_path=None,
+                    trajectory_path=None,
+                )
+            )
+        )
+        with patch("subprocess.run", side_effect=_run_ok) as run:
+            async with TestClient(TestServer(_app(bot))) as c:
+                r = await c.post("/api/update/apply", json={"version": "latest"})
+                assert r.status == 409
+                assert "update refused" in (await r.json())["error"]
+        assert not any(
+            "merge" in " ".join(map(str, call.args[0]))
+            for call in run.call_args_list
+            if call.args and isinstance(call.args[0], list)
+        ), "the update must not have been committed"
+        assert restart.restart_requested() is False
 
     async def test_unexpected_exception_500(self):
         # subprocess raising mid-flow (inside the try) surfaces as a 500
