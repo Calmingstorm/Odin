@@ -10,6 +10,7 @@ a valid 20,853-byte PDF.
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 import pytest
@@ -114,8 +115,9 @@ async def test_remote_read_returns_raw_bytes(monkeypatch):
     assert error == "" and data == payload
     argv = captured["argv"]
     assert argv[0] == "ssh"
-    # `--` stops option parsing so a path beginning with '-' cannot become a flag.
-    assert any("cat -- " in str(a) for a in argv), argv
+    # The remote producer is capped at max+1 bytes; `--` protects option-like paths.
+    remote_cmd = str(argv[-1])
+    assert "head -c 1000001 -- " in remote_cmd, argv
 
 
 async def test_remote_oversize_is_rejected(monkeypatch):
@@ -130,6 +132,24 @@ async def test_remote_oversize_is_rejected(monkeypatch):
         ssh_key_path="/k", known_hosts_path="/kh",
     )
     assert data is None and "over the" in error
+
+
+async def test_remote_command_caps_output_before_buffering(monkeypatch):
+    import src.tools.ssh as ssh_module
+
+    captured = {}
+
+    async def _exec(*args, **kwargs):
+        captured["remote_command"] = args[-1]
+        return await _fake_proc(b"x" * 101)
+
+    monkeypatch.setattr(ssh_module.asyncio, "create_subprocess_exec", _exec)
+    data, error = await read_binary_file(
+        "example.host", "/tmp/huge.bin", max_bytes=100,
+        ssh_key_path="/k", known_hosts_path="/kh",
+    )
+    assert data is None and "over the" in error
+    assert captured["remote_command"].startswith("head -c 101 -- ")
 
 
 async def test_remote_failure_reports_stderr(monkeypatch):
@@ -154,12 +174,20 @@ async def test_remote_timeout_is_reported(monkeypatch):
     async def _exec(*args, **kwargs):
         class _Hanging:
             returncode = None
+            pid = 999999
 
             async def communicate(self):  # pragma: no cover - never completes
                 await _asyncio.sleep(3600)
 
+            async def wait(self):
+                self.returncode = -9
+                return -9
+
+            def send_signal(self, _sig):
+                self.returncode = -9
+
             def kill(self):
-                pass
+                self.returncode = -9
 
         return _Hanging()
 
@@ -207,3 +235,77 @@ async def test_file_growing_between_stat_and_read_is_rejected(tmp_path, monkeypa
 
     assert data is None
     assert "exceeds" in error or "over the" in error
+
+
+async def test_local_read_failure_after_stat_reports_cleanly(tmp_path, monkeypatch):
+    import builtins
+
+    target = tmp_path / "exists.bin"
+    target.write_bytes(b"x")
+    real_open = builtins.open
+
+    def _deny(path, *args, **kwargs):
+        if str(path) == str(target):
+            raise PermissionError("denied after stat")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _deny)
+    data, error = await read_binary_file(
+        "127.0.0.1", str(target), max_bytes=100
+    )
+    assert data is None and "cannot read" in error
+
+
+async def test_negative_limit_is_rejected_locally(tmp_path):
+    target = tmp_path / "f.bin"
+    target.write_bytes(b"x")
+    data, error = await read_binary_file(
+        "127.0.0.1", str(target), max_bytes=-1
+    )
+    assert data is None and "must be >= 0" in error
+
+
+async def test_negative_limit_is_rejected_before_remote_spawn(monkeypatch):
+    import src.tools.ssh as ssh_module
+
+    called = False
+
+    async def _exec(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("must not spawn")
+
+    monkeypatch.setattr(ssh_module.asyncio, "create_subprocess_exec", _exec)
+    data, error = await read_binary_file(
+        "example.host", "/tmp/f", max_bytes=-1,
+        ssh_key_path="/k", known_hosts_path="/kh",
+    )
+    assert data is None and "must be >= 0" in error
+    assert called is False
+
+
+async def test_remote_cancellation_reaps_and_propagates(monkeypatch):
+    import src.tools.ssh as ssh_module
+
+    class _Cancelled:
+        returncode = None
+
+        async def communicate(self):
+            raise asyncio.CancelledError
+
+    reaped = []
+
+    async def _exec(*args, **kwargs):
+        return _Cancelled()
+
+    async def _reap(proc, *args, **kwargs):
+        reaped.append(proc)
+
+    monkeypatch.setattr(ssh_module.asyncio, "create_subprocess_exec", _exec)
+    monkeypatch.setattr(ssh_module, "terminate_process_tree", _reap)
+    with pytest.raises(asyncio.CancelledError):
+        await read_binary_file(
+            "example.host", "/tmp/f", max_bytes=100,
+            ssh_key_path="/k", known_hosts_path="/kh",
+        )
+    assert len(reaped) == 1

@@ -445,6 +445,15 @@ class TestBuildBody:
                 "body": "x" * (MAX_BODY_SIZE + 1),
             })
 
+    def test_body_limit_is_measured_in_utf8_bytes(self):
+        # 30k code points but 60k UTF-8 bytes: the public limit says bytes.
+        with pytest.raises(ValueError, match="60000 bytes"):
+            build_http_probe_command({
+                "url": "https://example.com",
+                "method": "POST",
+                "body": "é" * 30_000,
+            })
+
     def test_body_at_the_limit_is_accepted(self):
         cmd = build_http_probe_command({
             "url": "https://example.com",
@@ -796,15 +805,17 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_validation_error_returned(self, executor):
-        result = await executor.browser_web_tools._handle_http_probe({
+        message, code = await executor.browser_web_tools._handle_http_probe({
             "url": "ftp://example.com",
         })
-        assert "http_probe error" in result
+        assert "http_probe error" in message
+        assert code != 0
 
     @pytest.mark.asyncio
     async def test_missing_url_error(self, executor):
-        result = await executor.browser_web_tools._handle_http_probe({})
-        assert "http_probe error" in result
+        message, code = await executor.browser_web_tools._handle_http_probe({})
+        assert "http_probe error" in message
+        assert code != 0
 
     @pytest.mark.asyncio
     async def test_command_failure_with_output(self, executor):
@@ -933,13 +944,13 @@ class TestEdgeCases:
         cmd = build_http_probe_command({"url": "http://localhost:3000/health"})
         assert "http://localhost:3000/health" in cmd
 
-    def test_body_non_string_ignored(self):
-        cmd = build_http_probe_command({
-            "url": "https://example.com",
-            "method": "POST",
-            "body": 12345,
-        })
-        assert "-d" not in cmd
+    def test_body_non_string_rejected(self):
+        with pytest.raises(ValueError, match="must be a string"):
+            build_http_probe_command({
+                "url": "https://example.com",
+                "method": "POST",
+                "body": 12345,
+            })
 
     def test_method_default_is_get(self):
         cmd = build_http_probe_command({"url": "https://example.com"})

@@ -100,7 +100,9 @@ class BrowserWebTools(HandlerBase):
         try:
             cmd = build_http_probe_command(inp)
         except ValueError as e:
-            return f"http_probe error: {e}"
+            # Invalid probe input is a failed tool call, not a successful probe
+            # whose prose happens to describe a rejection.
+            return f"http_probe error: {e}", 1
 
         code, output = await self._exec_command(address, cmd, ssh_user)
         # curl's exit code is the ground truth and was being discarded: a

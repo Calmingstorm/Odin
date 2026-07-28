@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import shlex
 import signal
@@ -423,6 +422,9 @@ async def read_binary_file(
     an explicit error rather than a silent truncation, because a partial binary
     is indistinguishable from a corrupt one.
     """
+    if max_bytes < 0:
+        return None, "max_bytes must be >= 0"
+
     if is_local_address(address):
         def _read() -> tuple[bytes | None, str]:
             try:
@@ -444,9 +446,13 @@ async def read_binary_file(
             return None, f"file exceeds the {max_bytes}-byte limit"
         return data, ""
 
-    # Remote: cat the file and capture stdout as raw bytes. `--` stops option
-    # parsing so a path beginning with '-' cannot become a cat flag.
+    # Remote: cap stdout at the SOURCE. `communicate()` buffers all output, so
+    # `cat` followed by a post-read length check still let an arbitrarily large
+    # remote file exhaust Odin's memory before being rejected. Reading exactly
+    # max+1 bytes bounds the transport and preserves an unambiguous oversize
+    # signal. `--` stops option parsing for option-like paths.
     quoted = shlex.quote(path)
+    remote_command = f"head -c {max_bytes + 1} -- {quoted}"
     ssh_args = [
         "ssh",
         "-i",
@@ -460,10 +466,10 @@ async def read_binary_file(
         "-o",
         "BatchMode=yes",
         f"{ssh_user}@{address}",
-        f"cat -- {quoted}",
+        remote_command,
     ]
     log.info("SSH binary read from %s@%s: %s", ssh_user, address, path)
-    proc = None
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *ssh_args,
@@ -473,14 +479,17 @@ async def read_binary_file(
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
         if proc is not None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
+            await terminate_process_tree(proc)
         return None, f"timed out reading {path} after {timeout}s"
+    except asyncio.CancelledError:
+        if proc is not None:
+            await terminate_process_tree(proc)
+        raise
     except OSError as exc:
         return None, f"ssh failed: {exc}"
     if proc.returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip()[:200]
         return None, detail or f"remote read failed (exit {proc.returncode})"
     if len(stdout) > max_bytes:
-        return None, f"file is {len(stdout)} bytes, over the {max_bytes}-byte limit"
+        return None, f"file is over the {max_bytes}-byte limit"
     return stdout, ""

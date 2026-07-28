@@ -241,48 +241,67 @@ class SystemTools(HandlerBase):
             command = inp.get("command")
             host = inp.get("host")
             if not command:
-                return "command is required for start action."
+                return "command is required for start action.", 1
             if not host:
-                return "host is required for start action."
+                return "host is required for start action.", 1
             allowed, denial, _ = self._govern_command(command, host)
             if not allowed:
-                return denial
+                return denial, 1
             # Validate host against configured hosts
             resolved = self._resolve_host(host)
             if not resolved:
-                return f"Unknown or disallowed host: {host}"
+                return f"Unknown or disallowed host: {host}", 1
             # Periodic cleanup
             registry.cleanup()
-            return await registry.start(host, command)
+            result = await registry.start(host, command)
+            if result.startswith(
+                ("Cannot start", "Failed to start", "Error:", "manage_process only")
+            ):
+                return result, 1
+            return result, 0
 
         elif action == "poll":
             pid = inp.get("pid")
             if pid is None:
-                return "pid is required for poll action."
-            return registry.poll(int(pid))
+                return "pid is required for poll action.", 1
+            result = registry.poll(int(pid))
+            if result.startswith("No process with PID"):
+                return result, 1
+            return result, 0
 
         elif action == "write":
             pid = inp.get("pid")
             text = inp.get("input_text", "")
             if pid is None:
-                return "pid is required for write action."
+                return "pid is required for write action.", 1
             if not text:
-                return "input_text is required for write action."
+                return "input_text is required for write action.", 1
             # Writing to a managed process's stdin can drive an interactive
             # shell — govern the input as a command so a `rm -rf /`-class line
             # is caught, matching run_command.
             allowed, denial, _ = self._govern_command(text)
             if not allowed:
-                return denial
-            return await registry.write(int(pid), text)
+                return denial, 1
+            result = await registry.write(int(pid), text)
+            if result.startswith(("No process with PID", "Process ", "Failed to write")):
+                # The only successful ProcessRegistry.write result starts
+                # "Wrote"; all Process-prefixed returns describe terminal/no-stdin states.
+                return result, 1
+            return result, 0
 
         elif action == "kill":
             pid = inp.get("pid")
             if pid is None:
-                return "pid is required for kill action."
-            return await registry.kill(int(pid))
+                return "pid is required for kill action.", 1
+            result = await registry.kill(int(pid))
+            if (
+                result.startswith(("No process with PID", "Failed to kill"))
+                or " already " in result
+            ):
+                return result, 1
+            return result, 0
 
         elif action == "list":
-            return registry.list_all()
+            return registry.list_all(), 0
 
         return f"Unknown action: {action}", 1

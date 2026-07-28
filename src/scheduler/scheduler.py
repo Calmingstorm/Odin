@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import re
@@ -599,13 +600,24 @@ class Scheduler:
         if cron_timezone is not None:
             self._validate_timezone(cron_timezone)
         async with self._lock:
-            target: dict | None = None
-            for s in self._schedules:
-                if s["id"] == schedule_id:
-                    target = s
+            target_index: int | None = None
+            for i, schedule in enumerate(self._schedules):
+                if schedule["id"] == schedule_id:
+                    target_index = i
                     break
-            if target is None:
+            if target_index is None:
                 return None
+
+            # Apply the complete update to a detached candidate. Validation of
+            # cron/trigger/webhook/timing fields occurs throughout this method;
+            # mutating the live dict first let ANY later ValueError leave
+            # rejected fields in memory, where a subsequent valid update would
+            # persist them. Commit only after every supplied field is valid.
+            original = self._schedules[target_index]
+            target = copy.deepcopy(original)
+            action = target["action"]
+            if steps is not None and action == "workflow":
+                self._validate_workflow_steps(steps)
 
             # --- simple text fields ---
             if description is not None:
@@ -618,7 +630,6 @@ class Scheduler:
                 target["paused"] = paused
 
             # --- action-specific payload fields ---
-            action = target["action"]
             if tool_name is not None:
                 if action == "check":
                     if tool_name not in ALLOWED_CHECK_TOOLS:
@@ -630,8 +641,6 @@ class Scheduler:
             if tool_input is not None:
                 target["tool_input"] = tool_input
             if steps is not None:
-                if action == "workflow":
-                    self._validate_workflow_steps(steps)
                 target["steps"] = steps
             if webhook_config is not None:
                 self._validate_webhook_config(webhook_config)
@@ -684,7 +693,14 @@ class Scheduler:
                 # Timezone changed on an existing cron schedule — recompute.
                 target["next_run"] = _cron_next_run(target["cron"], cron_timezone)
 
-            await asyncio.to_thread(self._save)
+            self._schedules[target_index] = target
+            try:
+                await asyncio.to_thread(self._save)
+            except Exception:
+                # Persistence failure must not leave an in-memory update that
+                # disagrees with disk and may be serialized by a later write.
+                self._schedules[target_index] = original
+                raise
             log.info("Updated schedule %s", schedule_id)
             return dict(target)
 

@@ -222,7 +222,7 @@ class MediaTools:
                 return f"URL does not point to an image (Content-Type: {ct})"
             image_bytes = resp.body
         elif host and path:
-            # Use executor to fetch from host via base64
+            # Fetch from host as bounded raw bytes
 
             resolved = self.tool_executor._resolve_host(host)
             if not resolved:

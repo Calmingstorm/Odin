@@ -44,6 +44,22 @@ def _executor(tmp_path):
         # An action the tool does not implement is a failure, not a result.
         ("git_ops", {"action": "not_a_real_action", "host": "localhost"}, "Unknown git action"),
         ("manage_process", {"action": "not_a_real_action", "host": "localhost"}, "Unknown action"),
+        # Bad/missing process state was the original reproduction, not merely an
+        # unknown action. Every operation must preserve that failure status.
+        ("manage_process", {"action": "poll", "pid": 999_999_999}, "No process"),
+        (
+            "manage_process",
+            {"action": "write", "pid": 999_999_999, "input_text": "x"},
+            "No process",
+        ),
+        ("manage_process", {"action": "kill", "pid": 999_999_999}, "No process"),
+        ("http_probe", {"url": "https://example.com", "method": "TRACE"}, "http_probe error"),
+        (
+            "http_probe",
+            {"url": "https://example.com", "method": "POST", "body": "x" * 50_001},
+            "over the",
+        ),
+        ("analyze_pdf", {"url": "file:///tmp/nope.pdf"}, "Only http"),
     ],
 )
 async def test_failures_are_reported_as_failures(tmp_path, tool, params, needle):

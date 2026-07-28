@@ -34,7 +34,7 @@ class FilesDocsTools(HandlerBase):
             # nothing at all — neither is what a caller asking for N lines
             # means (adversarial review).
             lines = max(1, min(int(inp.get("lines", 200)), 1000))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             lines = 200
         safe_path = shlex.quote(path)
         return await self._run_on_host(
@@ -119,7 +119,7 @@ class FilesDocsTools(HandlerBase):
 
         # Validate URL scheme early (before heavy imports) to prevent SSRF
         if url and not url.startswith(("http://", "https://")):
-            return "Only http:// and https:// URLs are supported."
+            return "Only http:// and https:// URLs are supported.", 1
         # Pre-flight block check before the heavy import so a blocked URL returns
         # the block message even on a host without PyMuPDF (safe_fetch below
         # re-validates every hop; this only preserves the original error order).
@@ -127,7 +127,7 @@ class FilesDocsTools(HandlerBase):
             from ..url_safety import is_url_blocked
 
             if is_url_blocked(url):
-                return "Error: blocked URL (localhost / private IP / cloud-metadata address)."
+                return "Error: blocked URL (localhost / private IP / cloud-metadata address).", 1
 
         # Structural gating hides this tool when PyMuPDF is missing, but the
         # handler must still degrade cleanly: find_spec proves the module is
@@ -155,19 +155,19 @@ class FilesDocsTools(HandlerBase):
             try:
                 resp = await safe_fetch(url, max_bytes=_ANALYZE_PDF_MAX_BYTES, timeout=30.0)
             except BlockedAddressError:
-                return "Error: blocked URL (localhost / private IP / cloud-metadata address)."
+                return "Error: blocked URL (localhost / private IP / cloud-metadata address).", 1
             except ResponseTooLargeError:
-                return f"PDF too large (max {_ANALYZE_PDF_MAX_BYTES} bytes)."
+                return f"PDF too large (max {_ANALYZE_PDF_MAX_BYTES} bytes).", 1
             except Exception as e:
                 return f"Failed to fetch PDF from URL: {e}", 1
             if resp.status != 200:
                 return f"Failed to fetch PDF from URL (HTTP {resp.status})", 1
             pdf_bytes = resp.body
         elif host and path:
-            # Fetch from host via base64
+            # Fetch from host as bounded raw bytes
             resolved = self._resolve_host(host)
             if not resolved:
-                return f"Unknown or disallowed host: {host}"
+                return f"Unknown or disallowed host: {host}", 1
             address, ssh_user, _os = resolved
             # Binary payloads do NOT travel the text pipeline: base64 over
             # stdout was truncated at MAX_OUTPUT_CHARS, so any PDF over roughly
@@ -185,7 +185,7 @@ class FilesDocsTools(HandlerBase):
             if read_error:
                 return f"Failed to read PDF from host: {read_error}", 1
         else:
-            return "Provide either 'url' or both 'host' and 'path'."
+            return "Provide either 'url' or both 'host' and 'path'.", 1
 
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")

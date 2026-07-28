@@ -94,6 +94,10 @@ class TestReadFile:
         assert "head -n 200" in t._run_on_host.call_args.args[1]  # bad → default 200
         await t._handle_read_file({"path": "/etc/x", "host": "h", "lines": 5000})
         assert "head -n 1000" in t._run_on_host.call_args.args[1]  # clamped to 1000
+        await t._handle_read_file({"path": "/etc/x", "host": "h", "lines": -2})
+        assert "head -n 1" in t._run_on_host.call_args.args[1]  # clamped to lower bound
+        await t._handle_read_file({"path": "/etc/x", "host": "h", "lines": float("inf")})
+        assert "head -n 200" in t._run_on_host.call_args.args[1]  # overflow → default
 
 
 class TestWriteFile:
@@ -135,7 +139,9 @@ class TestAnalyzePdf:
         # "blocked URL" message. fitz is imported before the fetch, so fake it.
         from src.tools.safe_fetch import BlockedAddressError
 
-        assert "http://" in await _tools()._handle_analyze_pdf({"url": "ftp://x"})
+        assert _failed(
+            await _tools()._handle_analyze_pdf({"url": "ftp://x"}), "http://"
+        )
 
         async def _blocked(url, **kw):
             raise BlockedAddressError("blocked")
@@ -145,15 +151,21 @@ class TestAnalyzePdf:
         with patch.dict(sys.modules, {"fitz": _fake_fitz()}), \
              patch("src.tools.url_safety.is_url_blocked", return_value=False), \
              patch("src.tools.safe_fetch.safe_fetch", _blocked):
-            assert "blocked URL" in await _tools()._handle_analyze_pdf(
-                {"url": "http://example.com/x"})
+            assert _failed(
+                await _tools()._handle_analyze_pdf({"url": "http://example.com/x"}),
+                "blocked URL",
+            )
 
     async def test_url_preflight_block_before_fitz(self):
         # The pre-flight is_url_blocked check returns the block message even on
         # a host without PyMuPDF (it runs before the fitz import).
         with patch("src.tools.url_safety.is_url_blocked", return_value=True):
-            assert "blocked URL" in await _tools()._handle_analyze_pdf(
-                {"url": "http://169.254.169.254/latest/meta-data"})
+            assert _failed(
+                await _tools()._handle_analyze_pdf(
+                    {"url": "http://169.254.169.254/latest/meta-data"}
+                ),
+                "blocked URL",
+            )
 
     async def test_url_success_and_http_error(self):
         from src.tools.safe_fetch import SafeFetchResponse
@@ -183,8 +195,10 @@ class TestAnalyzePdf:
                 raise ResponseTooLargeError("big")
 
             with patch("src.tools.safe_fetch.safe_fetch", _too_big):
-                assert "too large" in await _tools()._handle_analyze_pdf(
-                    {"url": "http://ok/doc.pdf"})
+                assert _failed(
+                    await _tools()._handle_analyze_pdf({"url": "http://ok/doc.pdf"}),
+                    "too large",
+                )
 
     async def test_host_path(self):
         with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["from host"])}), _binary():
@@ -209,8 +223,12 @@ class TestAnalyzePdf:
 
     async def test_host_path_errors(self):
         with patch.dict(sys.modules, {"fitz": _fake_fitz()}):
-            assert "Unknown or disallowed host" in await _tools(
-                resolve=None)._handle_analyze_pdf({"host": "h", "path": "/p"})
+            assert _failed(
+                await _tools(resolve=None)._handle_analyze_pdf(
+                    {"host": "h", "path": "/p"}
+                ),
+                "Unknown or disallowed host",
+            )
             with _binary(error="denied"):
                 assert _failed(
                     await _tools()._handle_analyze_pdf({"host": "s", "path": "/p"}),
@@ -219,7 +237,7 @@ class TestAnalyzePdf:
 
     async def test_neither_source(self):
         with patch.dict(sys.modules, {"fitz": _fake_fitz()}):
-            assert "Provide either" in await _tools()._handle_analyze_pdf({})
+            assert _failed(await _tools()._handle_analyze_pdf({}), "Provide either")
 
     async def test_open_failure(self):
         with patch.dict(
