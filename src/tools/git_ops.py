@@ -34,6 +34,20 @@ def _sq(value: str) -> str:
     return shlex.quote(value)
 
 
+def _safe_ref(value: str, field: str) -> str:
+    """Reject option-like values used where Git expects a ref or remote.
+
+    Shell quoting prevents shell injection, but it does not stop Git itself
+    from parsing a positional value such as ``--help`` as an option.  Some Git
+    subcommands support ``--end-of-options`` while others give ``--`` a
+    different meaning (notably checkout and diff), so one explicit rule keeps
+    every builder safe and compatible.
+    """
+    if value.startswith("-"):
+        raise ValueError(f"{field} must not start with '-'")
+    return value
+
+
 def build_git_command(action: str, params: dict) -> str | list[str]:
     """Build one or more shell commands for a git action.
 
@@ -61,7 +75,7 @@ def _build_clone(params: dict) -> str:
 
     parts = ["git", "clone"]
     if branch:
-        parts += ["--branch", _sq(branch)]
+        parts += ["--branch", _sq(_safe_ref(branch, "branch"))]
     if depth is not None:
         try:
             d = int(depth)
@@ -101,7 +115,7 @@ def _build_diff(params: dict) -> str:
         except (TypeError, ValueError):
             pass
     if target:
-        parts.append(_sq(target))
+        parts.append(_sq(_safe_ref(target, "target")))
     return " ".join(parts)
 
 
@@ -114,9 +128,9 @@ def _build_branch(params: dict) -> str:
     if list_all or (not name and not delete):
         return f"git -C {_sq(repo)} branch -a --no-color"
     if delete and name:
-        return f"git -C {_sq(repo)} branch -d {_sq(name)}"
+        return f"git -C {_sq(repo)} branch -d -- {_sq(_safe_ref(name, 'name'))}"
     if name:
-        return f"git -C {_sq(repo)} branch {_sq(name)}"
+        return f"git -C {_sq(repo)} branch -- {_sq(_safe_ref(name, 'name'))}"
     return f"git -C {_sq(repo)} branch -a --no-color"
 
 
@@ -135,7 +149,7 @@ def _build_commit(params: dict) -> str:
         if isinstance(files, str):
             files = [files]
         quoted = " ".join(_sq(f) for f in files)
-        cmds.append(f"git -C {_sq(repo)} add {quoted}")
+        cmds.append(f"git -C {_sq(repo)} add -- {quoted}")
 
     cmds.append(f"git -C {_sq(repo)} commit -m {_sq(message)}")
     return " && ".join(cmds)
@@ -154,11 +168,16 @@ def _build_push(params: dict) -> list[str]:
     force = params.get("force", False)
     set_upstream = params.get("set_upstream", False)
 
+    if remote:
+        _safe_ref(remote, "remote")
+    if branch:
+        _safe_ref(branch, "branch")
+
     sq_repo = _sq(repo)
     sq_remote = _sq(remote)
 
     freshness_script = (
-        f"git -C {sq_repo} fetch {sq_remote} --quiet 2>&1 && "
+        f"git -C {sq_repo} fetch --quiet -- {sq_remote} 2>&1 && "
         f"LOCAL=$(git -C {sq_repo} rev-parse HEAD) && "
         f"MERGE_BASE=$(git -C {sq_repo} merge-base HEAD "
         f"{sq_remote}/$(git -C {sq_repo} rev-parse --abbrev-ref HEAD) 2>/dev/null || echo NONE) && "
@@ -202,7 +221,7 @@ def _build_log(params: dict) -> str:
     else:
         parts.append("--format=%h %s (%an, %ar)")
     if branch:
-        parts.append(_sq(branch))
+        parts.append(_sq(_safe_ref(branch, "branch")))
     return " ".join(parts)
 
 
@@ -215,9 +234,9 @@ def _build_pull(params: dict) -> str:
     parts = ["git", "-C", _sq(repo), "pull"]
     if rebase:
         parts.append("--rebase")
-    parts.append(_sq(remote))
+    parts.append(_sq(_safe_ref(remote, "remote")))
     if branch:
-        parts.append(_sq(branch))
+        parts.append(_sq(_safe_ref(branch, "branch")))
     return " ".join(parts)
 
 
@@ -231,7 +250,7 @@ def _build_checkout(params: dict) -> str:
     parts = ["git", "-C", _sq(repo), "checkout"]
     if create:
         parts.append("-b")
-    parts.append(_sq(target))
+    parts.append(_sq(_safe_ref(target, "target")))
     return " ".join(parts)
 
 
@@ -240,7 +259,7 @@ def _build_fetch(params: dict) -> str:
     remote = params.get("remote", "origin")
     prune = params.get("prune", False)
 
-    parts = ["git", "-C", _sq(repo), "fetch", _sq(remote)]
+    parts = ["git", "-C", _sq(repo), "fetch", _sq(_safe_ref(remote, "remote"))]
     if prune:
         parts.append("--prune")
     return " ".join(parts)

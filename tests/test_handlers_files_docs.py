@@ -22,6 +22,13 @@ def _tools(run_ret="file contents", govern=(True, "", None),
     t._govern_command = MagicMock(return_value=govern)
     t._resolve_host = lambda host: resolve
     t._exec_command = AsyncMock(return_value=exec_ret)
+    # analyze_pdf reads host binaries directly (not via the text pipeline), so
+    # it needs the ssh paths config exposes.
+    t._deps = SimpleNamespace(
+        config=lambda: SimpleNamespace(
+            ssh_key_path="/dev/null", ssh_known_hosts_path="/dev/null"
+        )
+    )
     return t
 
 
@@ -87,6 +94,10 @@ class TestReadFile:
         assert "head -n 200" in t._run_on_host.call_args.args[1]  # bad → default 200
         await t._handle_read_file({"path": "/etc/x", "host": "h", "lines": 5000})
         assert "head -n 1000" in t._run_on_host.call_args.args[1]  # clamped to 1000
+        await t._handle_read_file({"path": "/etc/x", "host": "h", "lines": -2})
+        assert "head -n 1" in t._run_on_host.call_args.args[1]  # clamped to lower bound
+        await t._handle_read_file({"path": "/etc/x", "host": "h", "lines": float("inf")})
+        assert "head -n 200" in t._run_on_host.call_args.args[1]  # overflow → default
 
 
 class TestWriteFile:
@@ -128,7 +139,9 @@ class TestAnalyzePdf:
         # "blocked URL" message. fitz is imported before the fetch, so fake it.
         from src.tools.safe_fetch import BlockedAddressError
 
-        assert "http://" in await _tools()._handle_analyze_pdf({"url": "ftp://x"})
+        assert _failed(
+            await _tools()._handle_analyze_pdf({"url": "ftp://x"}), "http://"
+        )
 
         async def _blocked(url, **kw):
             raise BlockedAddressError("blocked")
@@ -138,15 +151,21 @@ class TestAnalyzePdf:
         with patch.dict(sys.modules, {"fitz": _fake_fitz()}), \
              patch("src.tools.url_safety.is_url_blocked", return_value=False), \
              patch("src.tools.safe_fetch.safe_fetch", _blocked):
-            assert "blocked URL" in await _tools()._handle_analyze_pdf(
-                {"url": "http://example.com/x"})
+            assert _failed(
+                await _tools()._handle_analyze_pdf({"url": "http://example.com/x"}),
+                "blocked URL",
+            )
 
     async def test_url_preflight_block_before_fitz(self):
         # The pre-flight is_url_blocked check returns the block message even on
         # a host without PyMuPDF (it runs before the fitz import).
         with patch("src.tools.url_safety.is_url_blocked", return_value=True):
-            assert "blocked URL" in await _tools()._handle_analyze_pdf(
-                {"url": "http://169.254.169.254/latest/meta-data"})
+            assert _failed(
+                await _tools()._handle_analyze_pdf(
+                    {"url": "http://169.254.169.254/latest/meta-data"}
+                ),
+                "blocked URL",
+            )
 
     async def test_url_success_and_http_error(self):
         from src.tools.safe_fetch import SafeFetchResponse
@@ -164,11 +183,11 @@ class TestAnalyzePdf:
                 out = await _tools()._handle_analyze_pdf({"url": "http://ok/doc.pdf"})
                 assert "Page 1" in out and "hello pdf" in out
             with patch("src.tools.safe_fetch.safe_fetch", _ff(404)):
-                assert "HTTP 404" in await _tools()._handle_analyze_pdf(
-                    {"url": "http://ok/doc.pdf"})
+                assert _failed(await _tools()._handle_analyze_pdf(
+                    {"url": "http://ok/doc.pdf"}), "HTTP 404")
             with patch("src.tools.safe_fetch.safe_fetch", _raise):
-                assert "Failed to fetch PDF" in await _tools()._handle_analyze_pdf(
-                    {"url": "http://ok/doc.pdf"})
+                assert _failed(await _tools()._handle_analyze_pdf(
+                    {"url": "http://ok/doc.pdf"}), "Failed to fetch PDF")
 
             from src.tools.safe_fetch import ResponseTooLargeError
 
@@ -176,54 +195,104 @@ class TestAnalyzePdf:
                 raise ResponseTooLargeError("big")
 
             with patch("src.tools.safe_fetch.safe_fetch", _too_big):
-                assert "too large" in await _tools()._handle_analyze_pdf(
-                    {"url": "http://ok/doc.pdf"})
+                assert _failed(
+                    await _tools()._handle_analyze_pdf({"url": "http://ok/doc.pdf"}),
+                    "too large",
+                )
 
     async def test_host_path(self):
-        b64 = base64.b64encode(b"%PDF fake").decode()
-        with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["from host"])}):
-            t = _tools(exec_ret=(0, b64))
-            out = await t._handle_analyze_pdf({"host": "srv", "path": "/doc.pdf"})
+        with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["from host"])}), _binary():
+            out = await _tools()._handle_analyze_pdf({"host": "srv", "path": "/doc.pdf"})
             assert "from host" in out
+
+    async def test_host_path_large_file(self):
+        """The actual defect: a payload larger than the old 16,000-char text
+        transport could carry. base64 crossed that at ~12,000 source bytes, so
+        an ordinary 20KB PDF returned "Incorrect padding"."""
+        big = b"%PDF" + b"x" * 20_000
+        with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["big doc"])}), _binary(big):
+            out = await _tools()._handle_analyze_pdf({"host": "srv", "path": "/big.pdf"})
+            assert "big doc" in out
+
+    async def test_host_read_error_is_reported(self):
+        with patch.dict(sys.modules, {"fitz": _fake_fitz()}), _binary(error="denied"):
+            assert _failed(
+                await _tools()._handle_analyze_pdf({"host": "s", "path": "/p"}),
+                "Failed to read PDF from host",
+            )
 
     async def test_host_path_errors(self):
         with patch.dict(sys.modules, {"fitz": _fake_fitz()}):
-            assert "Unknown or disallowed host" in await _tools(
-                resolve=None)._handle_analyze_pdf({"host": "h", "path": "/p"})
-            assert "Failed to read PDF from host" in await _tools(
-                exec_ret=(1, "denied"))._handle_analyze_pdf({"host": "s", "path": "/p"})
-            # malformed base64 (wrong padding) → decode raises → handled
-            assert "Failed to decode PDF" in await _tools(
-                exec_ret=(0, "YQ"))._handle_analyze_pdf({"host": "s", "path": "/p"})
+            assert _failed(
+                await _tools(resolve=None)._handle_analyze_pdf(
+                    {"host": "h", "path": "/p"}
+                ),
+                "Unknown or disallowed host",
+            )
+            with _binary(error="denied"):
+                assert _failed(
+                    await _tools()._handle_analyze_pdf({"host": "s", "path": "/p"}),
+                    "Failed to read PDF from host",
+                )
 
     async def test_neither_source(self):
         with patch.dict(sys.modules, {"fitz": _fake_fitz()}):
-            assert "Provide either" in await _tools()._handle_analyze_pdf({})
+            assert _failed(await _tools()._handle_analyze_pdf({}), "Provide either")
 
     async def test_open_failure(self):
-        b64 = base64.b64encode(b"garbage").decode()
-        with patch.dict(sys.modules, {"fitz": _fake_fitz(error=RuntimeError("bad pdf"))}):
-            assert "Failed to open PDF" in await _tools(
-                exec_ret=(0, b64))._handle_analyze_pdf({"host": "s", "path": "/p"})
+        with patch.dict(
+            sys.modules, {"fitz": _fake_fitz(error=RuntimeError("bad pdf"))}
+        ), _binary(b"garbage"):
+            assert _failed(
+                await _tools()._handle_analyze_pdf({"host": "s", "path": "/p"}),
+                "Failed to open PDF",
+            )
 
     async def test_page_selection_and_empty(self):
-        b64 = base64.b64encode(b"x").decode()
-        with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["one", "two", "three"])}):
-            out = await _tools(exec_ret=(0, b64))._handle_analyze_pdf(
+        with patch.dict(
+            sys.modules, {"fitz": _fake_fitz(pages=["one", "two", "three"])}
+        ), _binary():
+            out = await _tools()._handle_analyze_pdf(
                 {"host": "s", "path": "/p", "pages": "2"})
             assert "Page 2" in out and "two" in out and "Page 1" not in out
         # a 0-page doc yields no parts → empty result → the no-text fallback
-        with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=[])}):
-            out = await _tools(exec_ret=(0, b64))._handle_analyze_pdf(
+        with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=[])}), _binary():
+            out = await _tools()._handle_analyze_pdf(
                 {"host": "s", "path": "/p"})
             assert "no extractable text" in out
 
     async def test_truncation(self):
-        b64 = base64.b64encode(b"x").decode()
-        with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["x" * 13000])}):
-            out = await _tools(exec_ret=(0, b64))._handle_analyze_pdf(
+        with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["x" * 13000])}), _binary():
+            out = await _tools()._handle_analyze_pdf(
                 {"host": "s", "path": "/p"})
             assert "truncated" in out
+
+
+def _binary(data: bytes = b"%PDF fake", error: str = ""):
+    """Patch the BINARY host-read path.
+
+    analyze_pdf used to pull host files as base64 through the text exec
+    pipeline, which truncates at 16,000 chars — so anything over ~12KB arrived
+    corrupt. It now reads raw bytes, and these tests fake that path instead.
+    """
+    async def _read(address, path, **kwargs):
+        return (None, error) if error else (data, "")
+
+    return patch("src.tools.ssh.read_binary_file", _read)
+
+
+def _failed(result, needle: str) -> bool:
+    """A structured failure return: (message, nonzero_exit).
+
+    analyze_pdf's failures used to be bare strings whose text matched none of
+    the executor's error prefixes, so real failures were classified ok=True and
+    audited as approved (adversarial review). Asserting the STATUS as well as
+    the text is what pins that.
+    """
+    assert isinstance(result, tuple), f"expected a structured failure, got {result!r}"
+    message, code = result
+    assert code != 0, f"failure must carry a nonzero exit, got {code}"
+    return needle in message
 
 
 async def test_analyze_pdf_degrades_cleanly_without_pymupdf(monkeypatch):
@@ -245,5 +314,6 @@ async def test_analyze_pdf_degrades_cleanly_without_pymupdf(monkeypatch):
 
     tools = _tools()
     result = await tools._handle_analyze_pdf({"host": "localhost", "path": "/tmp/x.pdf"})
-    assert "PDF support unavailable" in result
-    assert "pdf" in result and "install" in result.lower(), "must name the remedy"
+    assert _failed(result, "PDF support unavailable")
+    message = result[0]
+    assert "pdf" in message and "install" in message.lower(), "must name the remedy"

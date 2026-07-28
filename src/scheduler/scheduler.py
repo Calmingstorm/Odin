@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import re
@@ -180,11 +181,7 @@ class Scheduler:
                 raise ValueError("'webhook_config' (dict) is required for 'webhook' actions")
             self._validate_webhook_config(webhook_config)
         elif action == "workflow":
-            if not steps or not isinstance(steps, list):
-                raise ValueError("'steps' (list) is required for 'workflow' actions")
-            for i, step in enumerate(steps):
-                if not isinstance(step, dict) or "tool_name" not in step:
-                    raise ValueError(f"Step {i}: must be a dict with 'tool_name'")
+            self._validate_workflow_steps(steps)
 
         if trigger is not None:
             self._validate_trigger(trigger)
@@ -275,6 +272,42 @@ class Scheduler:
             ZoneInfo(tz_name)
         except (ZoneInfoNotFoundError, ValueError) as e:
             raise ValueError(f"Invalid timezone {tz_name!r}: {e}") from e
+
+    # Required inputs for the command-executing tools. A workflow step naming
+    # run_command with no command is not a workflow step, it is a silent no-op
+    # that reports success — and update used to accept it (adversarial review).
+    _STEP_REQUIRED_INPUTS = {
+        "run_command": "command",
+        "run_script": "script",
+        "run_command_multi": "command",
+    }
+
+    @classmethod
+    def _validate_workflow_steps(cls, steps: Any) -> None:
+        """THE workflow-steps contract, shared by add() and update().
+
+        Creation enforced this and update did not, so an existing workflow
+        could be updated to an empty list, or to steps missing the input their
+        tool requires, and the invalid version was persisted (adversarial
+        review of v3.65.1, reproduced with [], [{"tool_name": "run_command",
+        "tool_input": {}}] and [{"tool_name": "run_command"}]).
+        """
+        if not steps or not isinstance(steps, list):
+            raise ValueError("'steps' (list) is required for 'workflow' actions")
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict) or "tool_name" not in step:
+                raise ValueError(f"Step {i}: must be a dict with 'tool_name'")
+            tool_name = step.get("tool_name")
+            required = cls._STEP_REQUIRED_INPUTS.get(str(tool_name))
+            if required:
+                tool_input = step.get("tool_input")
+                if not isinstance(tool_input, dict) or not str(
+                    tool_input.get(required, "")
+                ).strip():
+                    raise ValueError(
+                        f"Step {i}: {tool_name} requires "
+                        f"'tool_input.{required}'"
+                    )
 
     @staticmethod
     def _validate_trigger(trigger: dict) -> None:
@@ -567,13 +600,24 @@ class Scheduler:
         if cron_timezone is not None:
             self._validate_timezone(cron_timezone)
         async with self._lock:
-            target: dict | None = None
-            for s in self._schedules:
-                if s["id"] == schedule_id:
-                    target = s
+            target_index: int | None = None
+            for i, schedule in enumerate(self._schedules):
+                if schedule["id"] == schedule_id:
+                    target_index = i
                     break
-            if target is None:
+            if target_index is None:
                 return None
+
+            # Apply the complete update to a detached candidate. Validation of
+            # cron/trigger/webhook/timing fields occurs throughout this method;
+            # mutating the live dict first let ANY later ValueError leave
+            # rejected fields in memory, where a subsequent valid update would
+            # persist them. Commit only after every supplied field is valid.
+            original = self._schedules[target_index]
+            target = copy.deepcopy(original)
+            action = target["action"]
+            if steps is not None and action == "workflow":
+                self._validate_workflow_steps(steps)
 
             # --- simple text fields ---
             if description is not None:
@@ -586,7 +630,6 @@ class Scheduler:
                 target["paused"] = paused
 
             # --- action-specific payload fields ---
-            action = target["action"]
             if tool_name is not None:
                 if action == "check":
                     if tool_name not in ALLOWED_CHECK_TOOLS:
@@ -598,10 +641,6 @@ class Scheduler:
             if tool_input is not None:
                 target["tool_input"] = tool_input
             if steps is not None:
-                if action == "workflow":
-                    for i, step in enumerate(steps):
-                        if not isinstance(step, dict) or "tool_name" not in step:
-                            raise ValueError(f"Step {i}: must be a dict with 'tool_name'")
                 target["steps"] = steps
             if webhook_config is not None:
                 self._validate_webhook_config(webhook_config)
@@ -654,7 +693,14 @@ class Scheduler:
                 # Timezone changed on an existing cron schedule — recompute.
                 target["next_run"] = _cron_next_run(target["cron"], cron_timezone)
 
-            await asyncio.to_thread(self._save)
+            self._schedules[target_index] = target
+            try:
+                await asyncio.to_thread(self._save)
+            except Exception:
+                # Persistence failure must not leave an in-memory update that
+                # disagrees with disk and may be serialized by a later write.
+                self._schedules[target_index] = original
+                raise
             log.info("Updated schedule %s", schedule_id)
             return dict(target)
 
@@ -683,7 +729,16 @@ class Scheduler:
 
         log.info("Manual run: schedule %s (%s)", schedule_id, schedule.get("description", ""))
         failures_before = schedule.get("consecutive_failures", 0)
-        await self._execute_and_record(schedule)
+        executed = await self._execute_and_record(schedule)
+        if not executed:
+            skipped_result = {
+                "status": "skipped",
+                "schedule_id": schedule_id,
+                "error": "schedule is already executing",
+            }
+            if schedule.get("paused"):
+                skipped_result["warning"] = "schedule is paused — this was a manual override"
+            return skipped_result
 
         failed = schedule.get("consecutive_failures", 0) > failures_before
         result: dict = {
@@ -694,6 +749,16 @@ class Scheduler:
             result["error"] = schedule.get("last_error", "unknown error")
         if schedule.get("paused"):
             result["warning"] = "schedule is paused — this was a manual override"
+
+        # Persist callback outcome.  A successful manual recovery completes a
+        # one-time schedule; a failed one remains inert and recoverable.
+        async with self._lock:
+            if not failed and schedule.get("one_time"):
+                self._schedules = [s for s in self._schedules if s["id"] != schedule_id]
+            try:
+                await asyncio.to_thread(self._save)
+            except Exception as e:
+                log.error("Schedule save failed after manual execution: %s", e)
         return result
 
     async def delete(self, schedule_id: str) -> bool:
@@ -793,7 +858,7 @@ class Scheduler:
         retry_time = datetime.now(UTC) + timedelta(seconds=delay)
         return retry_time.isoformat()
 
-    async def _execute_and_record(self, schedule: dict) -> None:
+    async def _execute_and_record(self, schedule: dict) -> bool:
         """Execute the schedule callback and record the result in history.
 
         For 'webhook' actions, the built-in HTTP executor is used directly.
@@ -808,10 +873,11 @@ class Scheduler:
             log.warning(
                 "Schedule %s is already executing — skipping overlapping fire", sid,
             )
-            return
+            return False
         self._in_flight.add(sid)
         try:
             await self._execute_and_record_inner(schedule)
+            return True
         finally:
             self._in_flight.discard(sid)
 
@@ -885,6 +951,8 @@ class Scheduler:
         """Reset failure tracking after a successful execution."""
         schedule["consecutive_failures"] = 0
         schedule["retry_count"] = 0
+        schedule["last_error"] = None
+        schedule["last_error_at"] = None
         schedule.pop("retry_at", None)
 
     async def _handle_failure(self, schedule: dict, error: Exception) -> None:
@@ -907,6 +975,10 @@ class Scheduler:
             )
         else:
             schedule.pop("retry_at", None)
+            # A terminally failed one-time schedule must remain available for
+            # manual recovery without firing again on every scheduler tick.
+            if schedule.get("one_time"):
+                schedule.pop("next_run", None)
             if max_retries > 0:
                 log.error(
                     "Schedule %s exhausted all %d retries: %s",
@@ -975,20 +1047,32 @@ class Scheduler:
                     log.error("Schedule save failed (in-memory state may diverge from disk): %s", e)
 
         # Execute callbacks OUTSIDE the lock so callbacks can safely
-        # call add()/delete()/update() without deadlocking.
+        # call add()/delete()/update() without deadlocking.  Keep only the
+        # executions this tick actually owned: an overlapping run_now may hold
+        # the in-flight guard, and a skipped one-time task is not completed.
+        executed: list[dict] = []
         for schedule in to_fire:
-            await self._execute_and_record(schedule)
+            if await self._execute_and_record(schedule):
+                executed.append(schedule)
 
-        # Remove completed one-time schedules AFTER callbacks have run
-        # (callbacks may set retry_at on failure, deferring removal).
+        # Remove a one-time schedule only after confirmed success.  A failed
+        # delivery remains persisted even when automatic retries are disabled,
+        # so an operator can run it again instead of losing the reminder.
         one_time_done = [
-            s["id"] for s in to_fire
-            if s.get("one_time") and not s.get("retry_at")
+            s["id"] for s in executed
+            if s.get("one_time")
+            and not s.get("retry_at")
+            and not s.get("last_error")
         ]
-        if one_time_done:
+        if to_fire:
             async with self._lock:
-                self._schedules = [s for s in self._schedules if s["id"] not in one_time_done]
+                if one_time_done:
+                    self._schedules = [
+                        s for s in self._schedules if s["id"] not in one_time_done
+                    ]
                 try:
+                    # Persist retries, terminal failure state, and successful
+                    # counter resets even when no one-time item was removed.
                     await asyncio.to_thread(self._save)
                 except Exception as e:
-                    log.error("Schedule save failed after one-time cleanup: %s", e)
+                    log.error("Schedule save failed after execution: %s", e)

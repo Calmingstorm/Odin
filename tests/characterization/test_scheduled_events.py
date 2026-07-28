@@ -44,16 +44,18 @@ class TestScheduledTaskRouting:
         )
         assert channel.sent_texts == ["**Scheduled reminder:** water the servers"]
 
-    async def test_missing_channel_id_is_silently_skipped(self, bot_and_channel):
+    async def test_missing_channel_id_is_a_delivery_failure(self, bot_and_channel):
         bot, channel = bot_and_channel
-        await bot.scheduled_events._on_scheduled_task(
-            schedule(action="reminder", channel_id="", message="x")
-        )
+        with pytest.raises(RuntimeError, match="has no channel_id"):
+            await bot.scheduled_events._on_scheduled_task(
+                schedule(action="reminder", channel_id="", message="x")
+            )
         assert channel.sent == []
 
-    async def test_unknown_action_is_ignored_without_raise(self, bot_and_channel):
+    async def test_unknown_action_is_a_failure(self, bot_and_channel):
         bot, channel = bot_and_channel
-        await bot.scheduled_events._on_scheduled_task(schedule(action="mystery"))
+        with pytest.raises(RuntimeError, match="Unknown scheduled action"):
+            await bot.scheduled_events._on_scheduled_task(schedule(action="mystery"))
         assert channel.sent == []
 
     async def test_check_success_posts_result(self, bot_and_channel):

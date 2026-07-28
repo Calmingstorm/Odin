@@ -434,13 +434,33 @@ class TestBuildBody:
         })
         assert "-d" not in cmd
 
-    def test_oversized_body_ignored(self):
+    def test_oversized_body_rejected(self):
+        """CONTRACT CHANGE: an oversized body used to be silently omitted, so
+        the probe ran as a bodyless POST that could look successful. It is now
+        rejected, matching the HEAD-with-body behaviour."""
+        with pytest.raises(ValueError, match="over the"):
+            build_http_probe_command({
+                "url": "https://example.com",
+                "method": "POST",
+                "body": "x" * (MAX_BODY_SIZE + 1),
+            })
+
+    def test_body_limit_is_measured_in_utf8_bytes(self):
+        # 30k code points but 60k UTF-8 bytes: the public limit says bytes.
+        with pytest.raises(ValueError, match="60000 bytes"):
+            build_http_probe_command({
+                "url": "https://example.com",
+                "method": "POST",
+                "body": "é" * 30_000,
+            })
+
+    def test_body_at_the_limit_is_accepted(self):
         cmd = build_http_probe_command({
             "url": "https://example.com",
             "method": "POST",
-            "body": "x" * (MAX_BODY_SIZE + 1),
+            "body": "x" * MAX_BODY_SIZE,
         })
-        assert "-d" not in cmd
+        assert "-d " in cmd
 
     def test_body_at_limit_included(self):
         body = "x" * MAX_BODY_SIZE
@@ -785,40 +805,49 @@ class TestHandleHttpProbe:
 
     @pytest.mark.asyncio
     async def test_validation_error_returned(self, executor):
-        result = await executor.browser_web_tools._handle_http_probe({
+        message, code = await executor.browser_web_tools._handle_http_probe({
             "url": "ftp://example.com",
         })
-        assert "http_probe error" in result
+        assert "http_probe error" in message
+        assert code != 0
 
     @pytest.mark.asyncio
     async def test_missing_url_error(self, executor):
-        result = await executor.browser_web_tools._handle_http_probe({})
-        assert "http_probe error" in result
+        message, code = await executor.browser_web_tools._handle_http_probe({})
+        assert "http_probe error" in message
+        assert code != 0
 
     @pytest.mark.asyncio
     async def test_command_failure_with_output(self, executor):
         executor._exec_command.return_value = (7, "curl: (7) Failed to connect")
-        result = await executor.browser_web_tools._handle_http_probe({
+        message, code = await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
         })
-        assert "Failed to connect" in result
+        assert "Failed to connect" in message
+        # curl's exit code must survive to the executor: a connection failure
+        # classified as ok=True is how a dead probe got audited as approved
+        # (adversarial review).
+        assert code == 7
 
     @pytest.mark.asyncio
     async def test_command_failure_no_output(self, executor):
         executor._exec_command.return_value = (1, "")
-        result = await executor.browser_web_tools._handle_http_probe({
+        message, code = await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
         })
-        assert "http_probe failed" in result
-        assert "exit 1" in result
+        assert "http_probe failed" in message
+        assert "exit 1" in message
+        assert code == 1
 
     @pytest.mark.asyncio
     async def test_empty_success(self, executor):
         executor._exec_command.return_value = (0, "")
-        result = await executor.browser_web_tools._handle_http_probe({
+        message, code = await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
         })
-        assert "no response received" in result
+        assert "no response received" in message
+        # No response is a failure even though curl exited 0.
+        assert code != 0
 
     @pytest.mark.asyncio
     async def test_success_returns_output(self, executor):
@@ -826,11 +855,13 @@ class TestHandleHttpProbe:
             0,
             "HTTP/1.1 200 OK\nContent-Type: text/plain\n\nHello"
         )
-        result = await executor.browser_web_tools._handle_http_probe({
+        message, code = await executor.browser_web_tools._handle_http_probe({
             "url": "https://example.com",
         })
-        assert "HTTP/1.1 200 OK" in result
-        assert "Hello" in result
+        assert "HTTP/1.1 200 OK" in message
+        assert "Hello" in message
+        # A healthy probe must still be a success — the fix must not invert.
+        assert code == 0
 
     @pytest.mark.asyncio
     async def test_get_dispatch(self, executor):
@@ -913,13 +944,13 @@ class TestEdgeCases:
         cmd = build_http_probe_command({"url": "http://localhost:3000/health"})
         assert "http://localhost:3000/health" in cmd
 
-    def test_body_non_string_ignored(self):
-        cmd = build_http_probe_command({
-            "url": "https://example.com",
-            "method": "POST",
-            "body": 12345,
-        })
-        assert "-d" not in cmd
+    def test_body_non_string_rejected(self):
+        with pytest.raises(ValueError, match="must be a string"):
+            build_http_probe_command({
+                "url": "https://example.com",
+                "method": "POST",
+                "body": 12345,
+            })
 
     def test_method_default_is_get(self):
         cmd = build_http_probe_command({"url": "https://example.com"})

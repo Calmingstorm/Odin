@@ -222,25 +222,28 @@ class MediaTools:
                 return f"URL does not point to an image (Content-Type: {ct})"
             image_bytes = resp.body
         elif host and path:
-            # Use executor to fetch from host via base64
-            import shlex
+            # Fetch from host as bounded raw bytes
 
             resolved = self.tool_executor._resolve_host(host)
             if not resolved:
                 return f"Unknown or disallowed host: {host}"
             address, ssh_user, _os = resolved
-            safe_path = shlex.quote(path)
-            code, output = await self.tool_executor._exec_command(
+            # Same defect as analyze_pdf: base64 over the text pipeline is
+            # truncated at MAX_OUTPUT_CHARS, so any image over roughly 12KB
+            # arrived corrupt (adversarial review). Raw bounded bytes instead.
+            from ...tools.ssh import read_binary_file
+
+            cfg = self.tool_executor.config
+            image_bytes, read_error = await read_binary_file(
                 address,
-                f"base64 -w0 {safe_path}",
-                ssh_user,
+                path,
+                max_bytes=_ANALYZE_IMAGE_MAX_BYTES,
+                ssh_key_path=cfg.ssh_key_path,
+                known_hosts_path=cfg.ssh_known_hosts_path,
+                ssh_user=ssh_user,
             )
-            if code != 0:
-                return f"Failed to read image from host: {output}"
-            try:
-                image_bytes = base64.b64decode(output.strip())
-            except Exception as e:
-                return f"Failed to decode image data: {e}"
+            if read_error:
+                return f"Failed to read image from host: {read_error}"
         else:
             return "Provide either 'url' or both 'host' and 'path'."
 

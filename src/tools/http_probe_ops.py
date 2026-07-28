@@ -178,8 +178,20 @@ def build_http_probe_command(params: dict) -> str:
     # Request body
     body = params.get("body")
     if body and method in ("POST", "PUT", "PATCH"):
-        if isinstance(body, str) and len(body) <= MAX_BODY_SIZE:
-            parts.append(f"-d {_sq(body)}")
+        # Rejected, not silently dropped. Skipping an oversized body turned a
+        # POST into a bodyless POST that could look superficially successful,
+        # hiding the caller's mistake — the same disease as the HEAD body case
+        # (adversarial review; the previous test pinned the silence).
+        if not isinstance(body, str):
+            raise ValueError("Request body must be a string")
+        # The public contract is bytes, not Python code points. A 30,000-char
+        # non-ASCII body can exceed 50KB once curl receives its UTF-8 encoding.
+        body_bytes = len(body.encode("utf-8"))
+        if body_bytes > MAX_BODY_SIZE:
+            raise ValueError(
+                f"Request body is {body_bytes} bytes, over the {MAX_BODY_SIZE}-byte limit"
+            )
+        parts.append(f"-d {_sq(body)}")
 
     # URL (always last)
     parts.append(_sq(url))

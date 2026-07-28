@@ -8,9 +8,10 @@ after each call. Falls back to a remote CDP URL if configured.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import re
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from ..odin_log import get_logger
 
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
     from playwright.async_api import Browser, Playwright
 
 log = get_logger("browser")
+
+_T = TypeVar("_T")
 
 ALLOWED_SCHEMES = ("http://", "https://")  # re-exported for tests
 _CONNECTION_ERROR_PATTERNS = (
@@ -34,6 +37,57 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+_HTTP_URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
+_WEBSOCKET_URL_PATTERN = re.compile(r"^wss?://", re.IGNORECASE)
+_REQUEST_HEADERS_TO_DROP = frozenset(
+    {"connection", "content-length", "host", "proxy-connection", "transfer-encoding", "upgrade"}
+)
+_RESPONSE_HEADERS_TO_DROP = frozenset(
+    {
+        "connection",
+        "content-encoding",
+        "content-length",
+        "proxy-connection",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+_ROUTE_ACTION_TIMEOUT_SECONDS = 2.0
+_CONTEXT_CLOSE_TIMEOUT_SECONDS = 5.0
+_BROWSER_CLOSE_TIMEOUT_SECONDS = 5.0
+_PLAYWRIGHT_STOP_TIMEOUT_SECONDS = 5.0
+
+
+def _consume_future_exception(future: asyncio.Future) -> None:
+    """Retrieve a detached future's exception without delaying its caller."""
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except (Exception, asyncio.CancelledError):
+        pass
+
+
+async def _await_bounded(awaitable: Awaitable[_T], timeout: float, operation: str) -> _T:
+    """Wait for a Playwright operation without trusting cancellation to settle.
+
+    ``asyncio.wait_for`` waits for a cancelled child to finish cancelling.  A
+    wedged Playwright route/context can therefore turn a nominal timeout into an
+    unbounded wait.  Observe the task for a fixed interval instead; on expiry,
+    request cancellation and detach it with exception retrieval.
+    """
+    future = asyncio.ensure_future(awaitable)
+    try:
+        done, _pending = await asyncio.wait({future}, timeout=timeout)
+    except BaseException:
+        future.cancel()
+        future.add_done_callback(_consume_future_exception)
+        raise
+    if future not in done:
+        future.cancel()
+        future.add_done_callback(_consume_future_exception)
+        raise TimeoutError(f"{operation} did not finish within {timeout:g}s")
+    return future.result()
 
 
 def _validate_url(url: str, allowed_urls: list[str] | None = None) -> None:
@@ -77,12 +131,17 @@ class BrowserManager:
     async def _force_reconnect(self) -> None:
         """Force-drop the current connection and reconnect."""
         async with self._lock:
-            try:
-                if self._browser:
-                    await self._browser.close()
-            except Exception:
-                pass
+            browser = self._browser
             self._browser = None
+            if browser:
+                try:
+                    await _await_bounded(
+                        browser.close(),
+                        _BROWSER_CLOSE_TIMEOUT_SECONDS,
+                        "closing browser before reconnect",
+                    )
+                except Exception as exc:
+                    log.warning("Browser close before reconnect did not complete: %s", exc)
         await self._ensure_connected()
 
     async def _ensure_connected(self) -> None:
@@ -131,24 +190,164 @@ class BrowserManager:
         context = await self._browser.new_context(  # type: ignore[union-attr]
             viewport=self._viewport,
             user_agent=DEFAULT_USER_AGENT,
+            # Service workers can issue requests outside normal page routing.
+            # Browser tools use disposable contexts, so blocking them costs no
+            # persistent functionality and closes that enforcement bypass.
+            service_workers="block",
         )
         context.set_default_timeout(timeout_ms or self._default_timeout_ms)
-        page = await context.new_page()
-        if not self._native:
+        try:
+            await self._install_request_guard(context)
+            page = await context.new_page()
+            if not self._native:
+                try:
+                    cdp = await page.context.new_cdp_session(page)
+                    await cdp.send(
+                        "Emulation.setDeviceMetricsOverride",
+                        {
+                            "width": self._viewport["width"],
+                            "height": self._viewport["height"],
+                            "deviceScaleFactor": 1,
+                            "mobile": False,
+                        },
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Device-metric emulation is best-effort for CDP mode.
+                    pass
+            return context, page
+        except BaseException:
             try:
-                cdp = await page.context.new_cdp_session(page)
-                await cdp.send(
-                    "Emulation.setDeviceMetricsOverride",
-                    {
-                        "width": self._viewport["width"],
-                        "height": self._viewport["height"],
-                        "deviceScaleFactor": 1,
-                        "mobile": False,
-                    },
+                await _await_bounded(
+                    context.close(),
+                    _CONTEXT_CLOSE_TIMEOUT_SECONDS,
+                    "closing browser context after page setup failure",
                 )
-            except Exception:
-                pass
-        return context, page
+            except BaseException as cleanup_exc:
+                log.warning(
+                    "Browser context cleanup after page setup failure did not complete: %s",
+                    cleanup_exc,
+                )
+            raise
+
+    async def _install_request_guard(self, context) -> None:
+        """Route every browser network request through the SSRF-safe transport.
+
+        Validating only ``page.goto()`` is insufficient: Chromium follows
+        redirects and loads scripts, images, frames, fetches, and form targets
+        on its own.  The safe transport validates each request URL and uses a
+        connect-time validating resolver, so DNS resolution is bound to the
+        socket rather than checked in a separate, raceable lookup.
+
+        Every callback must also settle its intercepted route.  An exception
+        escaping before ``fulfill``/``abort`` leaves Chromium waiting outside
+        Playwright's page timeout; context cleanup can then wait on that route
+        forever.  This boundary catches all ordinary callback failures, aborts
+        fail-closed, and gives both transport and Playwright actions hard
+        deadlines shorter than the page timeout.
+        """
+        from .safe_fetch import safe_fetch
+
+        page_timeout = max(1.0, self._default_timeout_ms / 1000)
+        route_timeout = max(0.5, page_timeout * 0.9)
+        fetch_timeout = max(0.25, page_timeout * 0.8)
+
+        async def _abort_route(route, url: str) -> None:
+            try:
+                await _await_bounded(
+                    route.abort("blockedbyclient"),
+                    min(_ROUTE_ACTION_TIMEOUT_SECONDS, route_timeout),
+                    f"aborting browser request {url}",
+                )
+            except Exception as abort_exc:
+                # The callback still returns.  In particular, do not let a
+                # failed/late abort recreate the original unbounded route task.
+                log.warning("Failed to abort browser request %s: %s", url, abort_exc)
+
+        async def _route_http(route) -> None:
+            url = "<unknown>"
+            try:
+                async with asyncio.timeout(route_timeout):
+                    request = route.request
+                    url = str(request.url)
+                    request_headers = {
+                        key: value
+                        for key, value in (await request.all_headers()).items()
+                        if key.lower() not in _REQUEST_HEADERS_TO_DROP
+                    }
+                    # Chromium normally follows redirects inside one routed
+                    # request and does not expose the redirect target as another
+                    # context.route callback. Follow the chain here instead: the
+                    # safe transport validates every hop and pins DNS at connect
+                    # time before we fulfill Chromium with only the final response.
+                    response = await _await_bounded(
+                        safe_fetch(
+                            request.url,
+                            method=request.method,
+                            headers=request_headers,
+                            data=request.post_data_buffer,
+                            follow_redirects=True,
+                            allowed_urls=self.allowed_urls,
+                            timeout=fetch_timeout,
+                            user_agent=None,
+                        ),
+                        fetch_timeout,
+                        f"fetching browser request {url}",
+                    )
+                    # aiohttp decodes compressed bodies. Let Playwright calculate
+                    # framing for the fulfilled bytes instead of forwarding stale
+                    # transport/content-encoding headers from the origin.
+                    response_headers = {
+                        key: value
+                        for key, value in response.headers.items()
+                        if key.lower() not in _RESPONSE_HEADERS_TO_DROP
+                    }
+                    await _await_bounded(
+                        route.fulfill(
+                            status=response.status,
+                            headers=response_headers,
+                            body=response.body,
+                        ),
+                        min(_ROUTE_ACTION_TIMEOUT_SECONDS, route_timeout),
+                        f"fulfilling browser request {url}",
+                    )
+            except asyncio.CancelledError:
+                await _abort_route(route, url)
+                raise
+            except Exception as exc:
+                # SafeFetchError/aiohttp failures are expected here, but this
+                # deliberately catches Playwright errors, malformed request
+                # metadata and future transport failures too.  No ordinary
+                # exception may escape while leaving an intercepted route open.
+                log.warning("Blocked or failed browser request %s: %s", url, exc)
+                await _abort_route(route, url)
+
+        await context.route(_HTTP_URL_PATTERN, _route_http)
+
+        # WebSocket routing was added after Playwright's original browser
+        # support. Refuse to create an unguarded context on an older runtime;
+        # silently falling back would leave a direct network path around the
+        # HTTP request guard.
+        route_web_socket = getattr(context, "route_web_socket", None)
+        if route_web_socket is None:
+            raise RuntimeError(
+                "Browser security requires Playwright with WebSocket routing support; "
+                "upgrade the browser extra"
+            )
+
+        async def _block_websocket(websocket) -> None:
+            log.warning("Blocked browser WebSocket request: %s", websocket.url)
+            try:
+                await _await_bounded(
+                    websocket.close(code=1008, reason="Browser network policy"),
+                    min(_ROUTE_ACTION_TIMEOUT_SECONDS, route_timeout),
+                    f"closing browser WebSocket {websocket.url}",
+                )
+            except Exception as exc:
+                log.warning("Failed to close browser WebSocket %s: %s", websocket.url, exc)
+
+        await route_web_socket(_WEBSOCKET_URL_PATTERN, _block_websocket)
 
     @asynccontextmanager
     async def new_page(self, timeout_ms: int | None = None) -> AsyncIterator:
@@ -172,24 +371,56 @@ class BrowserManager:
             yield page
         finally:
             try:
-                await context.close()
-            except Exception:
-                pass
+                await _await_bounded(
+                    context.close(),
+                    _CONTEXT_CLOSE_TIMEOUT_SECONDS,
+                    "closing browser context",
+                )
+            except Exception as exc:
+                # Cleanup must not turn a page timeout or cancelled tool into an
+                # immortal call.  The disposable context may leak until browser
+                # shutdown, but the caller regains control and the fault is visible.
+                log.warning("Browser context cleanup did not complete: %s", exc)
 
     async def shutdown(self) -> None:
-        """Clean shutdown of the browser."""
+        """Clean shutdown without trusting or abandoning driver teardown."""
+        browser = self._browser
+        playwright = self._playwright
+        cancellation: asyncio.CancelledError | None = None
         try:
-            if self._browser:
-                await self._browser.close()
-        except Exception:
-            pass
-        try:
-            if self._playwright:
-                await self._playwright.stop()
-        except Exception:
-            pass
-        self._browser = None
-        self._playwright = None
+            if browser:
+                try:
+                    await _await_bounded(
+                        browser.close(),
+                        _BROWSER_CLOSE_TIMEOUT_SECONDS,
+                        "closing browser during shutdown",
+                    )
+                except asyncio.CancelledError as exc:
+                    # Remember cancellation, but still give the Playwright
+                    # driver its bounded stop attempt before propagating it.
+                    cancellation = exc
+                except Exception as exc:
+                    log.warning("Browser shutdown did not complete: %s", exc)
+            if playwright:
+                try:
+                    await _await_bounded(
+                        playwright.stop(),
+                        _PLAYWRIGHT_STOP_TIMEOUT_SECONDS,
+                        "stopping Playwright",
+                    )
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
+                except Exception as exc:
+                    log.warning("Playwright shutdown did not complete: %s", exc)
+        finally:
+            # Clear only the generation this shutdown owned. A concurrent
+            # reconnect must not have its fresh pointers erased by old cleanup.
+            if self._browser is browser:
+                self._browser = None
+            if self._playwright is playwright:
+                self._playwright = None
+        if cancellation is not None:
+            raise cancellation
         log.info("Browser manager shut down")
 
 
@@ -214,10 +445,11 @@ async def handle_browser_screenshot(
             await page.wait_for_timeout(wait_seconds * 1000)
         screenshot_bytes = await page.screenshot(full_page=full_page, type="png")
         title = await page.title()
+        final_url = page.url
         status = response.status if response else "unknown"
 
     size_kb = len(screenshot_bytes) // 1024
-    text = f"Screenshot of **{title}** ({url}) — HTTP {status}, {size_kb} KB"
+    text = f"Screenshot of **{title}** ({final_url}) — HTTP {status}, {size_kb} KB"
     return text, screenshot_bytes
 
 
@@ -246,12 +478,13 @@ async def handle_browser_read_page(
         else:
             text = await page.inner_text("body")
         title = await page.title()
+        final_url = page.url
 
     text = text.strip()
     if len(text) > max_chars:
         text = text[:max_chars] + "\n\n... (content truncated)"
 
-    return f"**{title}** ({url})\n\n{text}"
+    return f"**{title}** ({final_url})\n\n{text}"
 
 
 async def handle_browser_read_table(

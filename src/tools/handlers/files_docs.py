@@ -28,8 +28,13 @@ class FilesDocsTools(HandlerBase):
         if not host:
             return "Error: 'host' is required for read_file."
         try:
-            lines = min(int(inp.get("lines", 200)), 1000)
-        except (TypeError, ValueError):
+            # Clamped to 1..1000, not just an upper bound. GNU head reads a
+            # NEGATIVE -n as "all but the last N", so lines=-2 silently
+            # returned the whole file minus two lines, and lines=0 returned
+            # nothing at all — neither is what a caller asking for N lines
+            # means (adversarial review).
+            lines = max(1, min(int(inp.get("lines", 200)), 1000))
+        except (TypeError, ValueError, OverflowError):
             lines = 200
         safe_path = shlex.quote(path)
         return await self._run_on_host(
@@ -37,7 +42,7 @@ class FilesDocsTools(HandlerBase):
             f"head -n {lines} {safe_path}",
         )
 
-    async def _handle_write_file(self, inp: dict) -> str:
+    async def _handle_write_file(self, inp: dict) -> str | tuple[str, int]:
         path = inp.get("path")
         content = inp.get("content")
         host = inp.get("host")
@@ -57,7 +62,8 @@ class FilesDocsTools(HandlerBase):
             return (
                 f"Error: write_file requires an absolute path, got {path!r}. "
                 "A relative path would resolve against Odin's working directory "
-                "rather than where you intend."
+                "rather than where you intend.",
+                1,
             )
         path = str(path)
         safe_path = shlex.quote(path)
@@ -105,7 +111,7 @@ class FilesDocsTools(HandlerBase):
             except ValueError:
                 return list(range(total))
 
-    async def _handle_analyze_pdf(self, inp: dict) -> str:
+    async def _handle_analyze_pdf(self, inp: dict) -> str | tuple[str, int]:
         url = inp.get("url")
         host = inp.get("host")
         path = inp.get("path")
@@ -113,7 +119,7 @@ class FilesDocsTools(HandlerBase):
 
         # Validate URL scheme early (before heavy imports) to prevent SSRF
         if url and not url.startswith(("http://", "https://")):
-            return "Only http:// and https:// URLs are supported."
+            return "Only http:// and https:// URLs are supported.", 1
         # Pre-flight block check before the heavy import so a blocked URL returns
         # the block message even on a host without PyMuPDF (safe_fetch below
         # re-validates every hop; this only preserves the original error order).
@@ -121,7 +127,7 @@ class FilesDocsTools(HandlerBase):
             from ..url_safety import is_url_blocked
 
             if is_url_blocked(url):
-                return "Error: blocked URL (localhost / private IP / cloud-metadata address)."
+                return "Error: blocked URL (localhost / private IP / cloud-metadata address).", 1
 
         # Structural gating hides this tool when PyMuPDF is missing, but the
         # handler must still degrade cleanly: find_spec proves the module is
@@ -133,7 +139,8 @@ class FilesDocsTools(HandlerBase):
             return (
                 "PDF support unavailable: PyMuPDF could not be loaded "
                 f"({type(exc).__name__}: {exc}). Install the 'pdf' extra "
-                "(pip install '.[pdf]') and restart Odin."
+                "(pip install '.[pdf]') and restart Odin.",
+                1,
             )
 
         pdf_bytes: bytes | None = None
@@ -148,39 +155,42 @@ class FilesDocsTools(HandlerBase):
             try:
                 resp = await safe_fetch(url, max_bytes=_ANALYZE_PDF_MAX_BYTES, timeout=30.0)
             except BlockedAddressError:
-                return "Error: blocked URL (localhost / private IP / cloud-metadata address)."
+                return "Error: blocked URL (localhost / private IP / cloud-metadata address).", 1
             except ResponseTooLargeError:
-                return f"PDF too large (max {_ANALYZE_PDF_MAX_BYTES} bytes)."
+                return f"PDF too large (max {_ANALYZE_PDF_MAX_BYTES} bytes).", 1
             except Exception as e:
-                return f"Failed to fetch PDF from URL: {e}"
+                return f"Failed to fetch PDF from URL: {e}", 1
             if resp.status != 200:
-                return f"Failed to fetch PDF from URL (HTTP {resp.status})"
+                return f"Failed to fetch PDF from URL (HTTP {resp.status})", 1
             pdf_bytes = resp.body
         elif host and path:
-            # Fetch from host via base64
+            # Fetch from host as bounded raw bytes
             resolved = self._resolve_host(host)
             if not resolved:
-                return f"Unknown or disallowed host: {host}"
+                return f"Unknown or disallowed host: {host}", 1
             address, ssh_user, _os = resolved
-            safe_path = shlex.quote(path)
-            code, output = await self._exec_command(
+            # Binary payloads do NOT travel the text pipeline: base64 over
+            # stdout was truncated at MAX_OUTPUT_CHARS, so any PDF over roughly
+            # 12KB arrived corrupt and failed to decode (adversarial review).
+            from ..ssh import read_binary_file
+
+            pdf_bytes, read_error = await read_binary_file(
                 address,
-                f"base64 -w0 {safe_path}",
-                ssh_user,
+                path,
+                max_bytes=_ANALYZE_PDF_MAX_BYTES,
+                ssh_key_path=self.config.ssh_key_path,
+                known_hosts_path=self.config.ssh_known_hosts_path,
+                ssh_user=ssh_user,
             )
-            if code != 0:
-                return f"Failed to read PDF from host: {output}"
-            try:
-                pdf_bytes = base64.b64decode(output.strip())
-            except Exception as e:
-                return f"Failed to decode PDF data: {e}"
+            if read_error:
+                return f"Failed to read PDF from host: {read_error}", 1
         else:
-            return "Provide either 'url' or both 'host' and 'path'."
+            return "Provide either 'url' or both 'host' and 'path'.", 1
 
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         except Exception as e:
-            return f"Failed to open PDF: {e}"
+            return f"Failed to open PDF: {e}", 1
 
         try:
             total = doc.page_count
