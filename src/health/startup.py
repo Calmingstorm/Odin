@@ -473,15 +473,20 @@ def check_local_workspace(config: Any) -> DiagnosticResult:
 
     fallback = startup_fallback()
     if fallback is not None and str(workspace) == fallback[0]:
+        _active, intended, reason = fallback
         return DiagnosticResult(
             name="local_workspace",
             passed=True,
             detail=(
                 f"Local command workspace ready at FALLBACK {workspace} — the "
-                f"configured default could not be provisioned ({fallback[1]})"
+                f"configured default {intended!r} could not be provisioned ({reason})"
             ),
-            recommendation=provisioning_hint(configured),
-            metadata={"path": str(workspace), "fallback": True},
+            recommendation=provisioning_hint(intended),
+            metadata={
+                "path": str(workspace),
+                "configured": intended,
+                "fallback": True,
+            },
         )
     return DiagnosticResult(
         name="local_workspace",

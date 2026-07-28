@@ -2802,19 +2802,24 @@ def test_legacy_fallback_is_visible_not_silent(
     object.__setattr__(legacy, "local_working_dir", str(_unprovisionable(tmp_path)))
     legacy.model_fields_set.discard("local_working_dir")
 
-    seen: list[tuple[Path, str]] = []
+    intended = str(_unprovisionable(tmp_path))
+    seen: list[tuple[Path, str, str]] = []
     workspace = provision_startup_workspace(
         legacy,
         protected_roots=[str(tmp_path / "install")],
-        on_fallback=lambda path, reason: seen.append((path, str(reason))),
+        on_fallback=lambda path, configured, reason: seen.append(
+            (path, configured, str(reason))
+        ),
     )
 
     assert workspace == (home / ".odin-workspace").resolve()
     assert seen, "the caller must be told a fallback happened"
-    assert "could not be created" in seen[0][1], "the reason must be carried"
+    assert seen[0][1] == intended
+    assert "could not be created" in seen[0][2], "the reason must be carried"
 
     recorded = workspace_module.startup_fallback()
     assert recorded is not None and recorded[0] == str(workspace)
+    assert recorded[1] == intended
 
 
 def test_startup_diagnostic_announces_a_fallback_workspace(
@@ -2831,7 +2836,7 @@ def test_startup_diagnostic_announces_a_fallback_workspace(
     monkeypatch.setattr(
         workspace_module,
         "_STARTUP_FALLBACK",
-        (str(active.resolve()), "'/var/lib/odin-workspace' unusable: permission denied"),
+        (str(active.resolve()), "/var/lib/odin-workspace", "permission denied"),
     )
 
     result = check_local_workspace(ToolsConfig(local_working_dir=str(active)))
@@ -2839,7 +2844,11 @@ def test_startup_diagnostic_announces_a_fallback_workspace(
     assert "FALLBACK" in result.detail
     assert "permission denied" in result.detail
     assert result.metadata.get("fallback") is True
-    assert result.recommendation, "must name how to restore the intended default"
+    assert result.metadata.get("configured") == "/var/lib/odin-workspace"
+    assert "/var/lib/odin-workspace" in result.recommendation
+    assert str(active) not in result.recommendation, (
+        "remediation must repair the failed default, not the working fallback"
+    )
 
 
 def test_explicit_workspace_is_never_replaced_by_the_fallback(

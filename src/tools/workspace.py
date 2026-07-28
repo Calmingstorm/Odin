@@ -54,11 +54,14 @@ DEFAULT_MEMORY_PATH = "./data/memory.json"
 # Set once at startup when the legacy-config fallback engages. Process-wide
 # startup state, like the active config path — read by the startup diagnostic
 # so a fallback is VISIBLE rather than indistinguishable from normal operation.
-_STARTUP_FALLBACK: tuple[str, str] | None = None
+# Keep the failed configured path as well as the active fallback: startup
+# mutates ToolsConfig to the fallback so every runtime consumer agrees, and
+# without this copy later remediation would point at the already-working path.
+_STARTUP_FALLBACK: tuple[str, str, str] | None = None
 
 
-def startup_fallback() -> tuple[str, str] | None:
-    """``(active_workspace, reason)`` if this process fell back, else None."""
+def startup_fallback() -> tuple[str, str, str] | None:
+    """``(active_workspace, configured_workspace, reason)`` after fallback."""
     return _STARTUP_FALLBACK
 
 
@@ -421,7 +424,7 @@ def provision_startup_workspace(
     *,
     protected_roots: Sequence[str | os.PathLike[str]] | None = None,
     owner_uid: int | None = None,
-    on_fallback: Callable[[Path, WorkspaceError], None] | None = None,
+    on_fallback: Callable[[Path, str, WorkspaceError], None] | None = None,
 ) -> Path:
     """Provision the workspace used by the incoming process at startup.
 
@@ -477,9 +480,9 @@ def provision_startup_workspace(
             raise default_error
         setattr(tools_config, "local_working_dir", str(workspace))
         global _STARTUP_FALLBACK
-        _STARTUP_FALLBACK = (str(workspace), f"{configured!r} unusable: {default_error}")
+        _STARTUP_FALLBACK = (str(workspace), configured, str(default_error))
         if on_fallback is not None:
-            on_fallback(workspace, default_error)
+            on_fallback(workspace, configured, default_error)
         return workspace
 
 

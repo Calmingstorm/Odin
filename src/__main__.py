@@ -135,7 +135,7 @@ def main() -> None:
             provisioning_hint,
         )
 
-        def _warn_fallback(path, reason) -> None:
+        def _warn_fallback(path, configured, reason) -> None:
             # A fallback is not a failure, but it must never look like normal
             # operation: on a packaged install it means the packaged default
             # could not be provisioned, which the operator needs to know
@@ -146,7 +146,7 @@ def main() -> None:
                 "but this indicates a packaging or permissions problem. %s",
                 path,
                 reason,
-                provisioning_hint(config.tools.local_working_dir),
+                provisioning_hint(configured),
             )
 
         workspace = provision_startup_workspace(
