@@ -8,6 +8,7 @@ after each call. Falls back to a remote CDP URL if configured.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -33,6 +34,21 @@ _CONNECTION_ERROR_PATTERNS = (
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+_HTTP_URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
+_WEBSOCKET_URL_PATTERN = re.compile(r"^wss?://", re.IGNORECASE)
+_REQUEST_HEADERS_TO_DROP = frozenset(
+    {"connection", "content-length", "host", "proxy-connection", "transfer-encoding", "upgrade"}
+)
+_RESPONSE_HEADERS_TO_DROP = frozenset(
+    {
+        "connection",
+        "content-encoding",
+        "content-length",
+        "proxy-connection",
+        "transfer-encoding",
+        "upgrade",
+    }
 )
 
 
@@ -131,9 +147,18 @@ class BrowserManager:
         context = await self._browser.new_context(  # type: ignore[union-attr]
             viewport=self._viewport,
             user_agent=DEFAULT_USER_AGENT,
+            # Service workers can issue requests outside normal page routing.
+            # Browser tools use disposable contexts, so blocking them costs no
+            # persistent functionality and closes that enforcement bypass.
+            service_workers="block",
         )
         context.set_default_timeout(timeout_ms or self._default_timeout_ms)
-        page = await context.new_page()
+        try:
+            await self._install_request_guard(context)
+            page = await context.new_page()
+        except Exception:
+            await context.close()
+            raise
         if not self._native:
             try:
                 cdp = await page.context.new_cdp_session(page)
@@ -149,6 +174,77 @@ class BrowserManager:
             except Exception:
                 pass
         return context, page
+
+
+    async def _install_request_guard(self, context) -> None:
+        """Route every browser network request through the SSRF-safe transport.
+
+        Validating only ``page.goto()`` is insufficient: Chromium follows
+        redirects and loads scripts, images, frames, fetches, and form targets
+        on its own.  The safe transport validates each request URL and uses a
+        connect-time validating resolver, so DNS resolution is bound to the
+        socket rather than checked in a separate, raceable lookup.
+        """
+        from .safe_fetch import SafeFetchError, safe_fetch
+
+        async def _route_http(route) -> None:
+            request = route.request
+            try:
+                request_headers = {
+                    key: value
+                    for key, value in (await request.all_headers()).items()
+                    if key.lower() not in _REQUEST_HEADERS_TO_DROP
+                }
+                # Chromium normally follows redirects inside one routed
+                # request and does not expose the redirect target as another
+                # context.route callback.  Follow the chain here instead: the
+                # safe transport validates every hop and pins DNS at connect
+                # time before we fulfill Chromium with only the final response.
+                response = await safe_fetch(
+                    request.url,
+                    method=request.method,
+                    headers=request_headers,
+                    data=request.post_data_buffer,
+                    follow_redirects=True,
+                    allowed_urls=self.allowed_urls,
+                    timeout=max(1.0, self._default_timeout_ms / 1000),
+                    user_agent=None,
+                )
+                # aiohttp decodes compressed bodies.  Let Playwright calculate
+                # framing for the fulfilled bytes instead of forwarding stale
+                # transport/content-encoding headers from the origin.
+                response_headers = {
+                    key: value
+                    for key, value in response.headers.items()
+                    if key.lower() not in _RESPONSE_HEADERS_TO_DROP
+                }
+                await route.fulfill(
+                    status=response.status,
+                    headers=response_headers,
+                    body=response.body,
+                )
+            except (SafeFetchError, OSError, TimeoutError) as exc:
+                log.warning("Blocked or failed browser request %s: %s", request.url, exc)
+                await route.abort("blockedbyclient")
+
+        await context.route(_HTTP_URL_PATTERN, _route_http)
+
+        # WebSocket routing was added after Playwright's original browser
+        # support.  Refuse to create an unguarded context on an older runtime;
+        # silently falling back would leave a direct network path around the
+        # HTTP request guard.
+        route_web_socket = getattr(context, "route_web_socket", None)
+        if route_web_socket is None:
+            raise RuntimeError(
+                "Browser security requires Playwright with WebSocket routing support; "
+                "upgrade the browser extra"
+            )
+
+        async def _block_websocket(websocket) -> None:
+            log.warning("Blocked browser WebSocket request: %s", websocket.url)
+            await websocket.close(code=1008, reason="Browser network policy")
+
+        await route_web_socket(_WEBSOCKET_URL_PATTERN, _block_websocket)
 
     @asynccontextmanager
     async def new_page(self, timeout_ms: int | None = None) -> AsyncIterator:
@@ -214,10 +310,11 @@ async def handle_browser_screenshot(
             await page.wait_for_timeout(wait_seconds * 1000)
         screenshot_bytes = await page.screenshot(full_page=full_page, type="png")
         title = await page.title()
+        final_url = page.url
         status = response.status if response else "unknown"
 
     size_kb = len(screenshot_bytes) // 1024
-    text = f"Screenshot of **{title}** ({url}) — HTTP {status}, {size_kb} KB"
+    text = f"Screenshot of **{title}** ({final_url}) — HTTP {status}, {size_kb} KB"
     return text, screenshot_bytes
 
 
@@ -246,12 +343,13 @@ async def handle_browser_read_page(
         else:
             text = await page.inner_text("body")
         title = await page.title()
+        final_url = page.url
 
     text = text.strip()
     if len(text) > max_chars:
         text = text[:max_chars] + "\n\n... (content truncated)"
 
-    return f"**{title}** ({url})\n\n{text}"
+    return f"**{title}** ({final_url})\n\n{text}"
 
 
 async def handle_browser_read_table(

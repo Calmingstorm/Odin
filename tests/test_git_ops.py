@@ -882,3 +882,36 @@ class TestEdgeCases:
         hosts = {"myserver": ToolHost(address="10.0.0.1")}
         config = ToolsConfig(hosts=hosts)
         return ToolExecutor(config=config)
+
+
+class TestOptionLikePositionalSafety:
+    """Shell quoting is not Git option-injection protection."""
+
+    @pytest.mark.parametrize(
+        ("action", "params", "field"),
+        [
+            ("clone", {"url": "https://example.invalid/r.git", "branch": "--help"}, "branch"),
+            ("diff", {"target": "--stat"}, "target"),
+            ("branch", {"name": "--help"}, "name"),
+            ("push", {"remote": "--help"}, "remote"),
+            ("push", {"branch": "--delete"}, "branch"),
+            ("log", {"branch": "--all"}, "branch"),
+            ("pull", {"remote": "--help"}, "remote"),
+            ("pull", {"branch": "--rebase"}, "branch"),
+            ("checkout", {"target": "--help"}, "target"),
+            ("fetch", {"remote": "--help"}, "remote"),
+        ],
+    )
+    def test_option_like_ref_or_remote_is_rejected(self, action, params, field):
+        with pytest.raises(ValueError, match=rf"{field} must not start"):
+            build_git_command(action, params)
+
+    def test_branch_and_add_use_option_terminators(self):
+        branch = shlex.split(build_git_command("branch", {"name": "safe"}))
+        add = shlex.split(build_git_command("commit", {"message": "m", "files": ["--help"]}))
+        assert branch[-2:] == ["--", "safe"]
+        assert add[3:6] == ["add", "--", "--help"]
+
+    def test_push_freshness_options_precede_remote_terminator(self):
+        freshness, _push = build_git_command("push", {"remote": "origin"})
+        assert "fetch --quiet -- origin" in freshness

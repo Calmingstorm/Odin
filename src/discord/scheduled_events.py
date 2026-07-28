@@ -65,25 +65,29 @@ class ScheduledEventHandlers:
         """Run the daily infrastructure digest and post results."""
         channel_id = schedule.get("channel_id")
         if not channel_id:
-            log.warning("Digest has no channel_id: %s", schedule["id"])
-            return
+            raise RuntimeError(f"Digest {schedule['id']} has no channel_id")
 
         channel = self._get_channel(int(channel_id))
         if not channel:
-            log.warning("Digest channel %s not found", channel_id)
-            return
+            raise RuntimeError(f"Digest channel {channel_id} not found")
 
         log.info("Running daily digest for channel %s", channel_id)
         try:
             raw = await self._format_digest_raw()
         except Exception as e:
             log.error("Digest data collection failed: %s", e)
-            await channel.send(
-                scrub_response_secrets(
-                    f"**Daily Infrastructure Digest**\n\nFailed to collect data: {e}"
+            try:
+                await channel.send(
+                    scrub_response_secrets(
+                        f"**Daily Infrastructure Digest**\n\nFailed to collect data: {e}"
+                    )
                 )
-            )
-            return
+            except Exception as send_error:
+                raise RuntimeError(
+                    f"Digest data collection failed ({e}); failure notice delivery failed: "
+                    f"{send_error}"
+                ) from send_error
+            raise RuntimeError(f"Digest data collection failed: {e}") from e
 
         # Summarize the digest — prefer Codex (free), fall back to raw truncation
         digest_messages = [
@@ -328,7 +332,7 @@ class ScheduledEventHandlers:
         try:
             await channel.send(scrub_response_secrets(text))
         except Exception as e:
-            log.error("Failed to post workflow results: %s", e)
+            raise RuntimeError(f"Failed to post workflow results: {e}") from e
 
         return workflow_ok
 
@@ -371,13 +375,11 @@ class ScheduledEventHandlers:
             pass
         channel_id = schedule.get("channel_id")
         if not channel_id:
-            log.warning("Scheduled task has no channel_id: %s", schedule["id"])
-            return
+            raise RuntimeError(f"Scheduled task {schedule['id']} has no channel_id")
 
         channel = self._get_channel(int(channel_id))
         if not channel:
-            log.warning("Scheduled task channel %s not found", channel_id)
-            return
+            raise RuntimeError(f"Scheduled task channel {channel_id} not found")
 
         if schedule["action"] == "digest":
             await self._on_scheduled_digest(schedule)
@@ -390,7 +392,7 @@ class ScheduledEventHandlers:
             try:
                 await channel.send(f"**Scheduled reminder:** {msg}")
             except Exception as e:
-                log.warning("Failed to send scheduled reminder: %s", e)
+                raise RuntimeError(f"Failed to send scheduled reminder: {e}") from e
 
         elif schedule["action"] == "check":
             tool_name = schedule.get("tool_name")
@@ -439,8 +441,7 @@ class ScheduledEventHandlers:
                 )
 
         else:
-            log.warning(
-                "Unknown scheduled action type: %s (schedule %s)",
-                schedule["action"],
-                schedule.get("id"),
+            raise RuntimeError(
+                f"Unknown scheduled action type: {schedule['action']} "
+                f"(schedule {schedule.get('id')})"
             )

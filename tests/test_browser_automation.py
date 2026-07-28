@@ -273,3 +273,133 @@ class TestForceReconnect:
             await mgr._force_reconnect()
         # Old browser should have been closed
         old_browser.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Per-request browser network guard
+# ---------------------------------------------------------------------------
+
+class TestBrowserRequestGuard:
+    @pytest.mark.asyncio
+    async def test_context_is_hardened_before_page_creation(self):
+        mgr = BrowserManager()
+        browser = MagicMock()
+        context = MagicMock()
+        context.route = AsyncMock()
+        context.route_web_socket = AsyncMock()
+        context.new_page = AsyncMock(return_value=MagicMock())
+        context.close = AsyncMock()
+        browser.new_context = AsyncMock(return_value=context)
+        mgr._browser = browser
+
+        await mgr._create_page()
+
+        assert browser.new_context.await_args.kwargs["service_workers"] == "block"
+        context.route.assert_awaited_once()
+        context.route_web_socket.assert_awaited_once()
+        context.new_page.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_http_route_uses_safe_fetch_and_never_direct_continue(self):
+        from src.tools.safe_fetch import SafeFetchResponse
+
+        mgr = BrowserManager(allow_private_targets=["http://internal.test/"])
+        context = MagicMock()
+        context.route = AsyncMock()
+        context.route_web_socket = AsyncMock()
+
+        request = MagicMock()
+        request.url = "https://example.com/page"
+        request.method = "POST"
+        request.post_data_buffer = b"payload"
+        request.all_headers = AsyncMock(
+            return_value={"cookie": "session=x", "content-length": "7", "host": "example.com"}
+        )
+        route = MagicMock(request=request)
+        route.fulfill = AsyncMock()
+        route.abort = AsyncMock()
+        route.continue_ = AsyncMock()
+        response = SafeFetchResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/plain",
+                "Content-Encoding": "gzip",
+                "Content-Length": "3",
+            },
+            body=b"ok",
+            content_type="text/plain",
+            url=request.url,
+        )
+
+        with patch("src.tools.safe_fetch.safe_fetch", AsyncMock(return_value=response)) as fetch:
+            await mgr._install_request_guard(context)
+            handler = context.route.await_args.args[1]
+            await handler(route)
+
+        assert fetch.await_args.kwargs["follow_redirects"] is True
+        assert fetch.await_args.kwargs["data"] == b"payload"
+        assert fetch.await_args.kwargs["headers"] == {"cookie": "session=x"}
+        assert fetch.await_args.kwargs["allowed_urls"] == ["http://internal.test/"]
+        route.continue_.assert_not_awaited()
+        route.abort.assert_not_awaited()
+        assert route.fulfill.await_args.kwargs == {
+            "status": 200,
+            "headers": {"Content-Type": "text/plain"},
+            "body": b"ok",
+        }
+
+    @pytest.mark.asyncio
+    async def test_blocked_subresource_is_aborted_before_chromium_connects(self):
+        from src.tools.safe_fetch import BlockedAddressError
+
+        mgr = BrowserManager()
+        context = MagicMock()
+        context.route = AsyncMock()
+        context.route_web_socket = AsyncMock()
+
+        request = MagicMock()
+        request.url = "http://127.0.0.1/secret"
+        request.method = "GET"
+        request.post_data_buffer = None
+        request.all_headers = AsyncMock(return_value={})
+        route = MagicMock(request=request)
+        route.fulfill = AsyncMock()
+        route.abort = AsyncMock()
+        route.continue_ = AsyncMock()
+
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            AsyncMock(side_effect=BlockedAddressError("private address")),
+        ):
+            await mgr._install_request_guard(context)
+            handler = context.route.await_args.args[1]
+            await handler(route)
+
+        route.abort.assert_awaited_once_with("blockedbyclient")
+        route.fulfill.assert_not_awaited()
+        route.continue_.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_websockets_are_blocked_without_connecting(self):
+        mgr = BrowserManager()
+        context = MagicMock()
+        context.route = AsyncMock()
+        context.route_web_socket = AsyncMock()
+        await mgr._install_request_guard(context)
+        handler = context.route_web_socket.await_args.args[1]
+        websocket = MagicMock(url="ws://127.0.0.1/secret")
+        websocket.close = AsyncMock()
+
+        await handler(websocket)
+
+        websocket.close.assert_awaited_once_with(
+            code=1008, reason="Browser network policy"
+        )
+
+    @pytest.mark.asyncio
+    async def test_old_playwright_is_rejected_instead_of_running_unguarded(self):
+        mgr = BrowserManager()
+        context = MagicMock(spec=["route"])
+        context.route = AsyncMock()
+        with pytest.raises(RuntimeError, match="WebSocket routing"):
+            await mgr._install_request_guard(context)

@@ -724,6 +724,16 @@ class Scheduler:
             result["error"] = schedule.get("last_error", "unknown error")
         if schedule.get("paused"):
             result["warning"] = "schedule is paused — this was a manual override"
+
+        # Persist callback outcome.  A successful manual recovery completes a
+        # one-time schedule; a failed one remains inert and recoverable.
+        async with self._lock:
+            if not failed and schedule.get("one_time"):
+                self._schedules = [s for s in self._schedules if s["id"] != schedule_id]
+            try:
+                await asyncio.to_thread(self._save)
+            except Exception as e:
+                log.error("Schedule save failed after manual execution: %s", e)
         return result
 
     async def delete(self, schedule_id: str) -> bool:
@@ -915,6 +925,8 @@ class Scheduler:
         """Reset failure tracking after a successful execution."""
         schedule["consecutive_failures"] = 0
         schedule["retry_count"] = 0
+        schedule["last_error"] = None
+        schedule["last_error_at"] = None
         schedule.pop("retry_at", None)
 
     async def _handle_failure(self, schedule: dict, error: Exception) -> None:
@@ -937,6 +949,10 @@ class Scheduler:
             )
         else:
             schedule.pop("retry_at", None)
+            # A terminally failed one-time schedule must remain available for
+            # manual recovery without firing again on every scheduler tick.
+            if schedule.get("one_time"):
+                schedule.pop("next_run", None)
             if max_retries > 0:
                 log.error(
                     "Schedule %s exhausted all %d retries: %s",
@@ -1009,16 +1025,24 @@ class Scheduler:
         for schedule in to_fire:
             await self._execute_and_record(schedule)
 
-        # Remove completed one-time schedules AFTER callbacks have run
-        # (callbacks may set retry_at on failure, deferring removal).
+        # Remove a one-time schedule only after confirmed success.  A failed
+        # delivery remains persisted even when automatic retries are disabled,
+        # so an operator can run it again instead of losing the reminder.
         one_time_done = [
             s["id"] for s in to_fire
-            if s.get("one_time") and not s.get("retry_at")
+            if s.get("one_time")
+            and not s.get("retry_at")
+            and not s.get("last_error")
         ]
-        if one_time_done:
+        if to_fire:
             async with self._lock:
-                self._schedules = [s for s in self._schedules if s["id"] not in one_time_done]
+                if one_time_done:
+                    self._schedules = [
+                        s for s in self._schedules if s["id"] not in one_time_done
+                    ]
                 try:
+                    # Persist retries, terminal failure state, and successful
+                    # counter resets even when no one-time item was removed.
                     await asyncio.to_thread(self._save)
                 except Exception as e:
-                    log.error("Schedule save failed after one-time cleanup: %s", e)
+                    log.error("Schedule save failed after execution: %s", e)

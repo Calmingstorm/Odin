@@ -57,11 +57,13 @@ def _handlers(**ov):
 class TestDigest:
     async def test_no_channel_id(self):
         h = _handlers()
-        await h._on_scheduled_digest({"id": "S1"})  # no channel_id → warn, no raise
+        with pytest.raises(RuntimeError, match="has no channel_id"):
+            await h._on_scheduled_digest({"id": "S1"})
 
     async def test_channel_not_found(self):
         h = _handlers(get_channel=lambda cid: None)
-        await h._on_scheduled_digest({"id": "S1", "channel_id": "1"})
+        with pytest.raises(RuntimeError, match="channel 1 not found"):
+            await h._on_scheduled_digest({"id": "S1", "channel_id": "1"})
 
     async def test_success_with_llm(self):
         ch = _channel()
@@ -94,8 +96,19 @@ class TestDigest:
         # force the raw collection itself to raise by breaking get_config
         h = _handlers(get_channel=lambda cid: ch,
                       get_config=MagicMock(side_effect=RuntimeError("cfg gone")))
-        await h._on_scheduled_digest({"id": "S1", "channel_id": "1"})
+        with pytest.raises(RuntimeError, match="Digest data collection failed"):
+            await h._on_scheduled_digest({"id": "S1", "channel_id": "1"})
         assert "Failed to collect data" in ch.send.await_args.args[0]
+
+    async def test_collect_failure_and_notice_delivery_failure_propagate(self):
+        ch = _channel()
+        ch.send = AsyncMock(side_effect=RuntimeError("discord down"))
+        h = _handlers(
+            get_channel=lambda cid: ch,
+            get_config=MagicMock(side_effect=RuntimeError("cfg gone")),
+        )
+        with pytest.raises(RuntimeError, match="failure notice delivery failed"):
+            await h._on_scheduled_digest({"id": "S1", "channel_id": "1"})
 
 
 class TestFormatDigestRaw:
@@ -235,13 +248,14 @@ class TestWorkflow:
             {"tool_name": "t1"}, {"tool_name": "t2"}, {"tool_name": "t3"}]})
         assert ok is True and "truncated" in ch.send.await_args.args[0]
 
-    async def test_workflow_send_error_swallowed(self):
+    async def test_workflow_send_error_propagates(self):
         ch = _channel()
         ch.send = AsyncMock(side_effect=RuntimeError("post failed"))
         h = _handlers()
-        ok = await h._run_scheduled_workflow(ch, {"description": "wf",
-                                                  "steps": [{"tool_name": "t"}]})
-        assert ok is True  # send failure swallowed
+        with pytest.raises(RuntimeError, match="Failed to post workflow results"):
+            await h._run_scheduled_workflow(
+                ch, {"description": "wf", "steps": [{"tool_name": "t"}]}
+            )
 
 
 class TestScheduleFailureAndTask:
@@ -276,7 +290,10 @@ class TestScheduleFailureAndTask:
 
     async def test_task_channel_not_found(self):
         h = _handlers(get_channel=lambda cid: None)
-        await h._on_scheduled_task({"id": "S1", "channel_id": "1", "action": "reminder"})
+        with pytest.raises(RuntimeError, match="channel 1 not found"):
+            await h._on_scheduled_task(
+                {"id": "S1", "channel_id": "1", "action": "reminder"}
+            )
 
     async def test_task_digest_dispatch(self):
         ch = _channel()
@@ -288,9 +305,11 @@ class TestScheduleFailureAndTask:
         ch = _channel()
         ch.send = AsyncMock(side_effect=RuntimeError("net"))
         h = _handlers(get_channel=lambda cid: ch)
-        await h._on_scheduled_task(
-            {"id": "S1", "channel_id": "1", "action": "reminder",
-             "message": "m", "description": "d"})  # swallowed
+        with pytest.raises(RuntimeError, match="Failed to send scheduled reminder"):
+            await h._on_scheduled_task(
+                {"id": "S1", "channel_id": "1", "action": "reminder",
+                 "message": "m", "description": "d"}
+            )
 
     async def test_task_check_fail_send_exception(self):
         # failing check tries to post the failure text; if that send raises it's
@@ -329,7 +348,8 @@ class TestScheduleFailureAndTask:
 
     async def test_task_no_channel_id(self):
         h = _handlers()
-        await h._on_scheduled_task({"id": "S1", "action": "reminder"})  # no channel_id
+        with pytest.raises(RuntimeError, match="has no channel_id"):
+            await h._on_scheduled_task({"id": "S1", "action": "reminder"})
 
     async def test_task_reminder(self):
         ch = _channel()
@@ -361,6 +381,8 @@ class TestScheduleFailureAndTask:
         await h._on_scheduled_task(
             {"id": "S1", "channel_id": "1", "action": "workflow", "description": "wf",
              "steps": [{"tool_name": "t1"}]})
-        # unknown action → warn, no send
         h2 = _handlers(get_channel=lambda cid: ch)
-        await h2._on_scheduled_task({"id": "S1", "channel_id": "1", "action": "mystery"})
+        with pytest.raises(RuntimeError, match="Unknown scheduled action"):
+            await h2._on_scheduled_task(
+                {"id": "S1", "channel_id": "1", "action": "mystery"}
+            )

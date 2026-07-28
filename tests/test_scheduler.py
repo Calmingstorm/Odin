@@ -513,9 +513,10 @@ class TestSchedulerRetry:
 
         await s._tick()
 
-        # Schedule was one-time with no retries, so it's removed
-        # But let's test with cron to see state
-        s2 = _make_scheduler(tmp_path)
+        # Use an independent persistence file for the recurring case.
+        recurring_path = tmp_path / "recurring"
+        recurring_path.mkdir()
+        s2 = _make_scheduler(recurring_path)
         s2._callback = AsyncMock(side_effect=RuntimeError("disk full"))
         await s2.add("cron fail", "reminder", "chan1", cron="*/5 * * * *")
 
@@ -1242,3 +1243,44 @@ class TestSchedulerRunNow:
         entries = await s.history.query(sched["id"])
         assert len(entries) == 1
         assert entries[0]["status"] == "failure"
+
+
+class TestOneTimeDeliveryCorrectness:
+    async def test_failed_one_time_without_retries_survives_and_is_persisted(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock(side_effect=RuntimeError("discord unavailable"))
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        sched = await s.add("keep me", "reminder", "chan1", run_at=past)
+
+        await s._tick()
+
+        remaining = s.list_all()
+        assert [item["id"] for item in remaining] == [sched["id"]]
+        assert remaining[0]["consecutive_failures"] == 1
+        assert remaining[0]["last_error"] == "discord unavailable"
+        assert "next_run" not in remaining[0]
+        reloaded = _make_scheduler(tmp_path)
+        assert [item["id"] for item in reloaded.list_all()] == [sched["id"]]
+        assert reloaded.list_all()[0]["last_error"] == "discord unavailable"
+        assert "next_run" not in reloaded.list_all()[0]
+        history = await s.history.query(sched["id"])
+        assert history[-1]["status"] == "failure"
+
+    async def test_failed_one_time_is_removed_after_later_success(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        callback = AsyncMock(side_effect=[RuntimeError("offline"), None])
+        s._callback = callback
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        sched = await s.add("eventually", "reminder", "chan1", run_at=past)
+
+        await s._tick()
+        assert s.list_all()[0]["last_error"] == "offline"
+        assert "next_run" not in s.list_all()[0]
+        await s._tick()
+        assert callback.await_count == 1
+
+        result = await s.run_now(sched["id"])
+        assert result["status"] == "success"
+        assert s.list_all() == []
+        history = await s.history.query(sched["id"])
+        assert [entry["status"] for entry in reversed(history)] == ["failure", "success"]
