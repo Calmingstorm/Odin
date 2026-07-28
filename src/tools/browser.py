@@ -185,6 +185,8 @@ class BrowserManager:
         connect-time validating resolver, so DNS resolution is bound to the
         socket rather than checked in a separate, raceable lookup.
         """
+        import aiohttp
+
         from .safe_fetch import SafeFetchError, safe_fetch
 
         async def _route_http(route) -> None:
@@ -223,7 +225,7 @@ class BrowserManager:
                     headers=response_headers,
                     body=response.body,
                 )
-            except (SafeFetchError, OSError, TimeoutError) as exc:
+            except (SafeFetchError, aiohttp.ClientError, OSError, TimeoutError) as exc:
                 log.warning("Blocked or failed browser request %s: %s", request.url, exc)
                 await route.abort("blockedbyclient")
 

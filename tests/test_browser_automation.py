@@ -403,3 +403,83 @@ class TestBrowserRequestGuard:
         context.route = AsyncMock()
         with pytest.raises(RuntimeError, match="WebSocket routing"):
             await mgr._install_request_guard(context)
+
+
+@pytest.mark.asyncio
+async def test_real_browser_blocks_redirects_and_subresources_to_private_loopback():
+    """Exercise the original F1 bypass through a real disposable Chromium context."""
+    try:
+        from aiohttp import web
+        from playwright.async_api import async_playwright
+    except ImportError:
+        pytest.skip("Playwright browser test dependencies are not installed")
+
+    private_hits: list[str] = []
+
+    async def private_handler(request):
+        private_hits.append(request.path)
+        return web.Response(text="PRIVATE_SENTINEL")
+
+    private_app = web.Application()
+    private_app.router.add_get("/{tail:.*}", private_handler)
+    private_runner = web.AppRunner(private_app)
+    await private_runner.setup()
+    private_site = web.TCPSite(private_runner, "127.0.0.1", 0)
+    await private_site.start()
+    private_port = private_site._server.sockets[0].getsockname()[1]
+
+    async def public_page(_request):
+        return web.Response(
+            text=(
+                "<body>PUBLIC_SENTINEL"
+                f'<img src="http://127.0.0.1:{private_port}/image">'
+                f'<script>fetch("http://127.0.0.1:{private_port}/fetch")</script>'
+                "</body>"
+            ),
+            content_type="text/html",
+        )
+
+    async def public_redirect(_request):
+        raise web.HTTPFound(f"http://127.0.0.1:{private_port}/redirect")
+
+    public_app = web.Application()
+    public_app.router.add_get("/page", public_page)
+    public_app.router.add_get("/redirect", public_redirect)
+    public_runner = web.AppRunner(public_app)
+    await public_runner.setup()
+    public_site = web.TCPSite(public_runner, "127.0.0.1", 0)
+    await public_site.start()
+    public_port = public_site._server.sockets[0].getsockname()[1]
+
+    manager = BrowserManager(
+        allow_private_targets=[f"http://127.0.0.1:{public_port}/"],
+    )
+    try:
+        async with async_playwright() as playwright:
+            try:
+                manager._playwright = playwright
+                manager._browser = await playwright.chromium.launch(
+                    headless=True, args=["--no-sandbox"]
+                )
+            except Exception as exc:
+                pytest.skip(f"Chromium is not installed for Playwright: {exc}")
+
+            async with manager.new_page() as page:
+                await page.goto(
+                    f"http://127.0.0.1:{public_port}/page",
+                    wait_until="networkidle",
+                )
+                assert "PUBLIC_SENTINEL" in await page.inner_text("body")
+
+            async with manager.new_page() as page:
+                with pytest.raises(Exception, match="ERR_(FAILED|BLOCKED_BY_CLIENT)"):
+                    await page.goto(
+                        f"http://127.0.0.1:{public_port}/redirect",
+                        wait_until="domcontentloaded",
+                    )
+    finally:
+        await manager.shutdown()
+        await public_runner.cleanup()
+        await private_runner.cleanup()
+
+    assert private_hits == []
