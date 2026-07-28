@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import os
 import stat
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,6 +50,16 @@ REQUIRED_MODE = 0o700
 # the updater creating a workspace beside live memory.json and reporting
 # success, then handing over to an executor that refused every command.
 DEFAULT_MEMORY_PATH = "./data/memory.json"
+
+# Set once at startup when the legacy-config fallback engages. Process-wide
+# startup state, like the active config path — read by the startup diagnostic
+# so a fallback is VISIBLE rather than indistinguishable from normal operation.
+_STARTUP_FALLBACK: tuple[str, str] | None = None
+
+
+def startup_fallback() -> tuple[str, str] | None:
+    """``(active_workspace, reason)`` if this process fell back, else None."""
+    return _STARTUP_FALLBACK
 
 
 class WorkspaceError(RuntimeError):
@@ -411,6 +421,7 @@ def provision_startup_workspace(
     *,
     protected_roots: Sequence[str | os.PathLike[str]] | None = None,
     owner_uid: int | None = None,
+    on_fallback: Callable[[Path, WorkspaceError], None] | None = None,
 ) -> Path:
     """Provision the workspace used by the incoming process at startup.
 
@@ -444,9 +455,16 @@ def provision_startup_workspace(
 
         # A direct child of HOME needs no recursive parent creation, remains
         # stable across commands/restarts, and is outside a normal source
-        # checkout. Packaged Odin declares HOME=/opt/odin, so a broken packaged
-        # default still rejects on protected-root overlap rather than hiding a
-        # packaging failure inside the install.
+        # checkout.
+        #
+        # It is NOT a safety boundary for packaged installs. The packaged unit
+        # sets User= but no Environment=HOME, so HOME comes from the account
+        # record and is typically OUTSIDE the install (verified: /home/odin on
+        # a real deployment) — a broken packaged default therefore falls back
+        # here instead of rejecting. That is deliberate, because losing every
+        # local command is worse; it is made VISIBLE instead, via the warning
+        # below and the startup diagnostic, so a packaging failure is reported
+        # rather than hidden (cross-review of PR #239 round 13).
         fallback = Path.home() / ".odin-workspace"
         try:
             workspace = provision_workspace(
@@ -458,6 +476,10 @@ def provision_startup_workspace(
         except WorkspaceError:
             raise default_error
         setattr(tools_config, "local_working_dir", str(workspace))
+        global _STARTUP_FALLBACK
+        _STARTUP_FALLBACK = (str(workspace), f"{configured!r} unusable: {default_error}")
+        if on_fallback is not None:
+            on_fallback(workspace, default_error)
         return workspace
 
 

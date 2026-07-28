@@ -135,9 +135,24 @@ def main() -> None:
             provisioning_hint,
         )
 
+        def _warn_fallback(path, reason) -> None:
+            # A fallback is not a failure, but it must never look like normal
+            # operation: on a packaged install it means the packaged default
+            # could not be provisioned, which the operator needs to know
+            # (cross-review of PR #239 round 13).
+            log.warning(
+                "Local command workspace fell back to %s — the configured "
+                "default could not be provisioned (%s). Local commands work, "
+                "but this indicates a packaging or permissions problem. %s",
+                path,
+                reason,
+                provisioning_hint(config.tools.local_working_dir),
+            )
+
         workspace = provision_startup_workspace(
             config.tools,
             protected_roots=_command_protected_roots(config),
+            on_fallback=_warn_fallback,
         )
         log.info("Local command workspace ready: %s", workspace)
     except WorkspaceError as exc:

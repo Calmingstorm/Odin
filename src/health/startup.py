@@ -466,6 +466,23 @@ def check_local_workspace(config: Any) -> DiagnosticResult:
             recommendation=provisioning_hint(configured),
             metadata={"configured": configured},
         )
+    # A legacy-config fallback is usable, so this still passes — but it must
+    # be visible in the report an operator reads, not buried as a path they
+    # would have to notice (cross-review of PR #239 round 13).
+    from ..tools.workspace import startup_fallback
+
+    fallback = startup_fallback()
+    if fallback is not None and str(workspace) == fallback[0]:
+        return DiagnosticResult(
+            name="local_workspace",
+            passed=True,
+            detail=(
+                f"Local command workspace ready at FALLBACK {workspace} — the "
+                f"configured default could not be provisioned ({fallback[1]})"
+            ),
+            recommendation=provisioning_hint(configured),
+            metadata={"path": str(workspace), "fallback": True},
+        )
     return DiagnosticResult(
         name="local_workspace",
         passed=True,

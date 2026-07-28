@@ -2756,3 +2756,91 @@ def test_usage_cache_and_flag_are_published_atomically(
     # Whenever the flag is clear, a cache is present — never the gap.
     assert executor._workspace_usage_refreshing is False
     assert executor._workspace_usage_cache is not None
+
+
+def test_legacy_fallback_is_visible_not_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cross-review of Odin's round-13 legacy fallback.
+
+    The fallback itself is right — losing every local command on a first
+    upgrade is worse than using a private HOME directory. But its stated safety
+    property does not hold: the packaged unit sets User= and no
+    Environment=HOME, so HOME comes from the account record and is typically
+    OUTSIDE the install (/home/odin on a real deployment). A broken PACKAGED
+    default therefore falls back rather than rejecting, and with only an
+    INFO log naming the path, that is indistinguishable from normal operation —
+    an operator would never learn their packaging is broken.
+
+    So the fallback must announce itself: a callback for the caller to warn on,
+    and process state the startup diagnostic reports.
+    """
+    import src.tools.workspace as workspace_module
+    from src.config.schema import ToolsConfig
+    from src.tools.workspace import provision_startup_workspace
+
+    monkeypatch.setattr(workspace_module, "_STARTUP_FALLBACK", None)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    legacy = ToolsConfig()
+    object.__setattr__(legacy, "local_working_dir", str(tmp_path / "no-parent" / "ws"))
+    legacy.model_fields_set.discard("local_working_dir")
+
+    seen: list[tuple[Path, str]] = []
+    workspace = provision_startup_workspace(
+        legacy,
+        protected_roots=[str(tmp_path / "install")],
+        on_fallback=lambda path, reason: seen.append((path, str(reason))),
+    )
+
+    assert workspace == (home / ".odin-workspace").resolve()
+    assert seen, "the caller must be told a fallback happened"
+    assert "could not be created" in seen[0][1], "the reason must be carried"
+
+    recorded = workspace_module.startup_fallback()
+    assert recorded is not None and recorded[0] == str(workspace)
+
+
+def test_startup_diagnostic_announces_a_fallback_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report an operator actually reads must say FALLBACK, not just show
+    a path they would have to recognise as unusual."""
+    import src.tools.workspace as workspace_module
+    from src.config.schema import ToolsConfig
+    from src.health.startup import check_local_workspace
+
+    active = tmp_path / "fallback-ws"
+    active.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        workspace_module,
+        "_STARTUP_FALLBACK",
+        (str(active.resolve()), "'/var/lib/odin-workspace' unusable: permission denied"),
+    )
+
+    result = check_local_workspace(ToolsConfig(local_working_dir=str(active)))
+    assert result.passed is True, "a usable fallback is not a failure"
+    assert "FALLBACK" in result.detail
+    assert "permission denied" in result.detail
+    assert result.metadata.get("fallback") is True
+    assert result.recommendation, "must name how to restore the intended default"
+
+
+def test_explicit_workspace_is_never_replaced_by_the_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Odin's property, re-verified independently: an operator who set the
+    path gets a hard error, never a silent substitution."""
+    from src.config.schema import ToolsConfig
+    from src.tools.workspace import provision_startup_workspace
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    explicit = ToolsConfig(local_working_dir=str(tmp_path / "no-parent" / "ws"))
+    with pytest.raises(WorkspaceError):
+        provision_startup_workspace(explicit, protected_roots=[str(tmp_path / "install")])
+    assert not (home / ".odin-workspace").exists(), "nothing may be provisioned"
