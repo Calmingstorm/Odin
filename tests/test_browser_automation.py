@@ -18,6 +18,7 @@ from src.tools.browser import (
     ALLOWED_SCHEMES,
     DEFAULT_USER_AGENT,
     BrowserManager,
+    _await_bounded,
     _validate_url,
 )
 
@@ -89,6 +90,45 @@ class TestConstants:
     def test_connection_error_patterns(self):
         assert "connection closed" in _CONNECTION_ERROR_PATTERNS
         assert "browser has been closed" in _CONNECTION_ERROR_PATTERNS
+
+
+# ---------------------------------------------------------------------------
+# _await_bounded
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_await_bounded_does_not_wait_for_cancel_suppressing_awaitable():
+    """A timed-out child must not extend the helper's own deadline."""
+    cancellation_seen = asyncio.Event()
+    release_child = asyncio.Event()
+
+    async def suppress_cancellation() -> None:
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_child.wait()
+
+    async def safety_release() -> None:
+        # Prevent a regressed implementation from hanging the suite forever.
+        await asyncio.sleep(1.0)
+        release_child.set()
+
+    child_task = asyncio.create_task(suppress_cancellation())
+    safety_task = asyncio.create_task(safety_release())
+    started = asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(TimeoutError, match="stuck operation did not finish within"):
+            await _await_bounded(child_task, 0.05, "stuck operation")
+        elapsed = asyncio.get_running_loop().time() - started
+        assert elapsed < 0.5
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.5)
+        assert not child_task.done()
+    finally:
+        release_child.set()
+        safety_task.cancel()
+        await asyncio.gather(child_task, safety_task, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------
