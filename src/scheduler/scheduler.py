@@ -180,11 +180,7 @@ class Scheduler:
                 raise ValueError("'webhook_config' (dict) is required for 'webhook' actions")
             self._validate_webhook_config(webhook_config)
         elif action == "workflow":
-            if not steps or not isinstance(steps, list):
-                raise ValueError("'steps' (list) is required for 'workflow' actions")
-            for i, step in enumerate(steps):
-                if not isinstance(step, dict) or "tool_name" not in step:
-                    raise ValueError(f"Step {i}: must be a dict with 'tool_name'")
+            self._validate_workflow_steps(steps)
 
         if trigger is not None:
             self._validate_trigger(trigger)
@@ -275,6 +271,42 @@ class Scheduler:
             ZoneInfo(tz_name)
         except (ZoneInfoNotFoundError, ValueError) as e:
             raise ValueError(f"Invalid timezone {tz_name!r}: {e}") from e
+
+    # Required inputs for the command-executing tools. A workflow step naming
+    # run_command with no command is not a workflow step, it is a silent no-op
+    # that reports success — and update used to accept it (adversarial review).
+    _STEP_REQUIRED_INPUTS = {
+        "run_command": "command",
+        "run_script": "script",
+        "run_command_multi": "command",
+    }
+
+    @classmethod
+    def _validate_workflow_steps(cls, steps: Any) -> None:
+        """THE workflow-steps contract, shared by add() and update().
+
+        Creation enforced this and update did not, so an existing workflow
+        could be updated to an empty list, or to steps missing the input their
+        tool requires, and the invalid version was persisted (adversarial
+        review of v3.65.1, reproduced with [], [{"tool_name": "run_command",
+        "tool_input": {}}] and [{"tool_name": "run_command"}]).
+        """
+        if not steps or not isinstance(steps, list):
+            raise ValueError("'steps' (list) is required for 'workflow' actions")
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict) or "tool_name" not in step:
+                raise ValueError(f"Step {i}: must be a dict with 'tool_name'")
+            tool_name = step.get("tool_name")
+            required = cls._STEP_REQUIRED_INPUTS.get(str(tool_name))
+            if required:
+                tool_input = step.get("tool_input")
+                if not isinstance(tool_input, dict) or not str(
+                    tool_input.get(required, "")
+                ).strip():
+                    raise ValueError(
+                        f"Step {i}: {tool_name} requires "
+                        f"'tool_input.{required}'"
+                    )
 
     @staticmethod
     def _validate_trigger(trigger: dict) -> None:
@@ -599,9 +631,7 @@ class Scheduler:
                 target["tool_input"] = tool_input
             if steps is not None:
                 if action == "workflow":
-                    for i, step in enumerate(steps):
-                        if not isinstance(step, dict) or "tool_name" not in step:
-                            raise ValueError(f"Step {i}: must be a dict with 'tool_name'")
+                    self._validate_workflow_steps(steps)
                 target["steps"] = steps
             if webhook_config is not None:
                 self._validate_webhook_config(webhook_config)

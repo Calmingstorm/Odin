@@ -178,7 +178,15 @@ def build_http_probe_command(params: dict) -> str:
     # Request body
     body = params.get("body")
     if body and method in ("POST", "PUT", "PATCH"):
-        if isinstance(body, str) and len(body) <= MAX_BODY_SIZE:
+        # Rejected, not silently dropped. Skipping an oversized body turned a
+        # POST into a bodyless POST that could look superficially successful,
+        # hiding the caller's mistake — the same disease as the HEAD body case
+        # (adversarial review; the previous test pinned the silence).
+        if isinstance(body, str) and len(body) > MAX_BODY_SIZE:
+            raise ValueError(
+                f"Request body is {len(body)} bytes, over the {MAX_BODY_SIZE}-byte limit"
+            )
+        if isinstance(body, str):
             parts.append(f"-d {_sq(body)}")
 
     # URL (always last)

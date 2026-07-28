@@ -18,7 +18,11 @@ class DevOpsTools(HandlerBase):
 
         action = inp.get("action", "")
         if action not in ALLOWED_ACTIONS:
-            return f"Unknown git action: {action}. Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}"
+            return (
+                f"Unknown git action: {action}. "
+                f"Allowed: {', '.join(sorted(ALLOWED_ACTIONS))}",
+                1,
+            )
 
         host = inp.get("host", "")
         resolved = self._resolve_host(host)

@@ -28,7 +28,12 @@ class FilesDocsTools(HandlerBase):
         if not host:
             return "Error: 'host' is required for read_file."
         try:
-            lines = min(int(inp.get("lines", 200)), 1000)
+            # Clamped to 1..1000, not just an upper bound. GNU head reads a
+            # NEGATIVE -n as "all but the last N", so lines=-2 silently
+            # returned the whole file minus two lines, and lines=0 returned
+            # nothing at all — neither is what a caller asking for N lines
+            # means (adversarial review).
+            lines = max(1, min(int(inp.get("lines", 200)), 1000))
         except (TypeError, ValueError):
             lines = 200
         safe_path = shlex.quote(path)
@@ -37,7 +42,7 @@ class FilesDocsTools(HandlerBase):
             f"head -n {lines} {safe_path}",
         )
 
-    async def _handle_write_file(self, inp: dict) -> str:
+    async def _handle_write_file(self, inp: dict) -> str | tuple[str, int]:
         path = inp.get("path")
         content = inp.get("content")
         host = inp.get("host")
@@ -57,7 +62,8 @@ class FilesDocsTools(HandlerBase):
             return (
                 f"Error: write_file requires an absolute path, got {path!r}. "
                 "A relative path would resolve against Odin's working directory "
-                "rather than where you intend."
+                "rather than where you intend.",
+                1,
             )
         path = str(path)
         safe_path = shlex.quote(path)
@@ -105,7 +111,7 @@ class FilesDocsTools(HandlerBase):
             except ValueError:
                 return list(range(total))
 
-    async def _handle_analyze_pdf(self, inp: dict) -> str:
+    async def _handle_analyze_pdf(self, inp: dict) -> str | tuple[str, int]:
         url = inp.get("url")
         host = inp.get("host")
         path = inp.get("path")
@@ -133,7 +139,8 @@ class FilesDocsTools(HandlerBase):
             return (
                 "PDF support unavailable: PyMuPDF could not be loaded "
                 f"({type(exc).__name__}: {exc}). Install the 'pdf' extra "
-                "(pip install '.[pdf]') and restart Odin."
+                "(pip install '.[pdf]') and restart Odin.",
+                1,
             )
 
         pdf_bytes: bytes | None = None
@@ -152,9 +159,9 @@ class FilesDocsTools(HandlerBase):
             except ResponseTooLargeError:
                 return f"PDF too large (max {_ANALYZE_PDF_MAX_BYTES} bytes)."
             except Exception as e:
-                return f"Failed to fetch PDF from URL: {e}"
+                return f"Failed to fetch PDF from URL: {e}", 1
             if resp.status != 200:
-                return f"Failed to fetch PDF from URL (HTTP {resp.status})"
+                return f"Failed to fetch PDF from URL (HTTP {resp.status})", 1
             pdf_bytes = resp.body
         elif host and path:
             # Fetch from host via base64
@@ -169,18 +176,18 @@ class FilesDocsTools(HandlerBase):
                 ssh_user,
             )
             if code != 0:
-                return f"Failed to read PDF from host: {output}"
+                return f"Failed to read PDF from host: {output}", 1
             try:
                 pdf_bytes = base64.b64decode(output.strip())
             except Exception as e:
-                return f"Failed to decode PDF data: {e}"
+                return f"Failed to decode PDF data: {e}", 1
         else:
             return "Provide either 'url' or both 'host' and 'path'."
 
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         except Exception as e:
-            return f"Failed to open PDF: {e}"
+            return f"Failed to open PDF: {e}", 1
 
         try:
             total = doc.page_count

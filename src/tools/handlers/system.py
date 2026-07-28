@@ -233,7 +233,7 @@ class SystemTools(HandlerBase):
 
     # --- Process management ---
 
-    async def _handle_manage_process(self, inp: dict) -> str:
+    async def _handle_manage_process(self, inp: dict) -> str | tuple[str, int]:
         action = inp.get("action", "list")
         registry = self._process_registry()
 
@@ -285,4 +285,4 @@ class SystemTools(HandlerBase):
         elif action == "list":
             return registry.list_all()
 
-        return f"Unknown action: {action}"
+        return f"Unknown action: {action}", 1

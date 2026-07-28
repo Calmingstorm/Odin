@@ -13,6 +13,10 @@ from ..bulkhead import BulkheadFullError
 from ..tool_text import _truncate_lines
 from .deps import HandlerBase
 
+_BROWSER_DISABLED = (
+    "Browser automation is not enabled. Set browser.enabled=true in config."
+)
+
 
 class BrowserWebTools(HandlerBase):
     async def _browser_with_bulkhead(self, coro):
@@ -26,41 +30,41 @@ class BrowserWebTools(HandlerBase):
                 return "Error: browser bulkhead full — too many concurrent browser operations"
         return await coro
 
-    async def _handle_browser_read_page(self, inp: dict) -> str:
+    async def _handle_browser_read_page(self, inp: dict) -> str | tuple[str, int]:
         if not self._browser_manager:
-            return "Browser automation is not enabled. Set browser.enabled=true in config."
+            return _BROWSER_DISABLED, 1
         from ..browser import handle_browser_read_page
 
         return await self._browser_with_bulkhead(
             handle_browser_read_page(self._browser_manager, inp)
         )
 
-    async def _handle_browser_read_table(self, inp: dict) -> str:
+    async def _handle_browser_read_table(self, inp: dict) -> str | tuple[str, int]:
         if not self._browser_manager:
-            return "Browser automation is not enabled. Set browser.enabled=true in config."
+            return _BROWSER_DISABLED, 1
         from ..browser import handle_browser_read_table
 
         return await self._browser_with_bulkhead(
             handle_browser_read_table(self._browser_manager, inp)
         )
 
-    async def _handle_browser_click(self, inp: dict) -> str:
+    async def _handle_browser_click(self, inp: dict) -> str | tuple[str, int]:
         if not self._browser_manager:
-            return "Browser automation is not enabled. Set browser.enabled=true in config."
+            return _BROWSER_DISABLED, 1
         from ..browser import handle_browser_click
 
         return await self._browser_with_bulkhead(handle_browser_click(self._browser_manager, inp))
 
-    async def _handle_browser_fill(self, inp: dict) -> str:
+    async def _handle_browser_fill(self, inp: dict) -> str | tuple[str, int]:
         if not self._browser_manager:
-            return "Browser automation is not enabled. Set browser.enabled=true in config."
+            return _BROWSER_DISABLED, 1
         from ..browser import handle_browser_fill
 
         return await self._browser_with_bulkhead(handle_browser_fill(self._browser_manager, inp))
 
-    async def _handle_browser_evaluate(self, inp: dict) -> str:
+    async def _handle_browser_evaluate(self, inp: dict) -> str | tuple[str, int]:
         if not self._browser_manager:
-            return "Browser automation is not enabled. Set browser.enabled=true in config."
+            return _BROWSER_DISABLED, 1
         from ..browser import handle_browser_evaluate
 
         return await self._browser_with_bulkhead(
@@ -80,7 +84,7 @@ class BrowserWebTools(HandlerBase):
 
         return await fetch_url(inp["url"])
 
-    async def _handle_http_probe(self, inp: dict) -> str:
+    async def _handle_http_probe(self, inp: dict) -> str | tuple[str, int]:
         from ..http_probe_ops import build_http_probe_command
 
         host = inp.get("host", "")
@@ -99,6 +103,14 @@ class BrowserWebTools(HandlerBase):
             return f"http_probe error: {e}"
 
         code, output = await self._exec_command(address, cmd, ssh_user)
+        # curl's exit code is the ground truth and was being discarded: a
+        # connection failure (exit 7, status_code 000) returned prose that
+        # matched no error prefix, so the executor classified the probe as a
+        # SUCCESS and the audit log recorded it approved with no error
+        # (adversarial review, reproduced). Structured returns make the status
+        # a fact rather than an inference.
         if code != 0 and not output.strip():
-            return f"http_probe failed (exit {code}): curl returned no output"
-        return _truncate_lines(output) if output.strip() else "http_probe: no response received"
+            return f"http_probe failed (exit {code}): curl returned no output", code
+        if not output.strip():
+            return "http_probe: no response received", 1
+        return _truncate_lines(output), code

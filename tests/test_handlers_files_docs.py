@@ -164,11 +164,11 @@ class TestAnalyzePdf:
                 out = await _tools()._handle_analyze_pdf({"url": "http://ok/doc.pdf"})
                 assert "Page 1" in out and "hello pdf" in out
             with patch("src.tools.safe_fetch.safe_fetch", _ff(404)):
-                assert "HTTP 404" in await _tools()._handle_analyze_pdf(
-                    {"url": "http://ok/doc.pdf"})
+                assert _failed(await _tools()._handle_analyze_pdf(
+                    {"url": "http://ok/doc.pdf"}), "HTTP 404")
             with patch("src.tools.safe_fetch.safe_fetch", _raise):
-                assert "Failed to fetch PDF" in await _tools()._handle_analyze_pdf(
-                    {"url": "http://ok/doc.pdf"})
+                assert _failed(await _tools()._handle_analyze_pdf(
+                    {"url": "http://ok/doc.pdf"}), "Failed to fetch PDF")
 
             from src.tools.safe_fetch import ResponseTooLargeError
 
@@ -190,11 +190,13 @@ class TestAnalyzePdf:
         with patch.dict(sys.modules, {"fitz": _fake_fitz()}):
             assert "Unknown or disallowed host" in await _tools(
                 resolve=None)._handle_analyze_pdf({"host": "h", "path": "/p"})
-            assert "Failed to read PDF from host" in await _tools(
-                exec_ret=(1, "denied"))._handle_analyze_pdf({"host": "s", "path": "/p"})
+            assert _failed(await _tools(
+                exec_ret=(1, "denied"))._handle_analyze_pdf({"host": "s", "path": "/p"}),
+                "Failed to read PDF from host")
             # malformed base64 (wrong padding) → decode raises → handled
-            assert "Failed to decode PDF" in await _tools(
-                exec_ret=(0, "YQ"))._handle_analyze_pdf({"host": "s", "path": "/p"})
+            assert _failed(await _tools(
+                exec_ret=(0, "YQ"))._handle_analyze_pdf({"host": "s", "path": "/p"}),
+                "Failed to decode PDF")
 
     async def test_neither_source(self):
         with patch.dict(sys.modules, {"fitz": _fake_fitz()}):
@@ -203,8 +205,9 @@ class TestAnalyzePdf:
     async def test_open_failure(self):
         b64 = base64.b64encode(b"garbage").decode()
         with patch.dict(sys.modules, {"fitz": _fake_fitz(error=RuntimeError("bad pdf"))}):
-            assert "Failed to open PDF" in await _tools(
-                exec_ret=(0, b64))._handle_analyze_pdf({"host": "s", "path": "/p"})
+            assert _failed(await _tools(
+                exec_ret=(0, b64))._handle_analyze_pdf({"host": "s", "path": "/p"}),
+                "Failed to open PDF")
 
     async def test_page_selection_and_empty(self):
         b64 = base64.b64encode(b"x").decode()
@@ -226,6 +229,20 @@ class TestAnalyzePdf:
             assert "truncated" in out
 
 
+def _failed(result, needle: str) -> bool:
+    """A structured failure return: (message, nonzero_exit).
+
+    analyze_pdf's failures used to be bare strings whose text matched none of
+    the executor's error prefixes, so real failures were classified ok=True and
+    audited as approved (adversarial review). Asserting the STATUS as well as
+    the text is what pins that.
+    """
+    assert isinstance(result, tuple), f"expected a structured failure, got {result!r}"
+    message, code = result
+    assert code != 0, f"failure must carry a nonzero exit, got {code}"
+    return needle in message
+
+
 async def test_analyze_pdf_degrades_cleanly_without_pymupdf(monkeypatch):
     """find_spec proves the module is importable, not that its native library
     loads — and a direct call can reach the handler on an install whose catalog
@@ -245,5 +262,6 @@ async def test_analyze_pdf_degrades_cleanly_without_pymupdf(monkeypatch):
 
     tools = _tools()
     result = await tools._handle_analyze_pdf({"host": "localhost", "path": "/tmp/x.pdf"})
-    assert "PDF support unavailable" in result
-    assert "pdf" in result and "install" in result.lower(), "must name the remedy"
+    assert _failed(result, "PDF support unavailable")
+    message = result[0]
+    assert "pdf" in message and "install" in message.lower(), "must name the remedy"
