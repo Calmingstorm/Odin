@@ -107,7 +107,8 @@ done
 # Install Python dependencies
 echo "Installing Python dependencies..."
 incus exec "$INSTANCE" -- bash -c "
-    cd /app && pip install --no-cache-dir --break-system-packages . > /dev/null 2>&1
+    # .[pdf] — see packaging/postinstall.sh: analyze_pdf needs PyMuPDF.
+    cd /app && pip install --no-cache-dir --break-system-packages '.[pdf]' > /dev/null 2>&1
 "
 
 # Set ownership

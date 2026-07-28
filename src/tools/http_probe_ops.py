@@ -108,17 +108,37 @@ def build_http_probe_command(params: dict) -> str:
             f"Invalid HTTP method: {method}. Allowed: {', '.join(sorted(ALLOWED_METHODS))}"
         )
 
+    # HEAD needs curl's native no-body mode, not a method override. `-X HEAD`
+    # sends the HEAD token but leaves libcurl expecting a response body, so it
+    # blocks until the timeout and exits 18 ("transfer closed with N bytes
+    # remaining"): measured 5.1s/exit-18 versus 0.065s/exit-0 for `-I` against
+    # a healthy server. HEAD is the ONLY affected method — POST/PUT/PATCH/
+    # DELETE/OPTIONS may legitimately return zero-length bodies and curl frames
+    # those normally (verified: `-X OPTIONS` exits 0 in 0.067s).
+    is_head = method == "HEAD"
+
+    # A request body on HEAD is rejected rather than silently dropped: data
+    # flags combined with -I make curl's method selection ambiguous, and HEAD
+    # request-body semantics are not worth preserving here.
+    if is_head and params.get("body"):
+        raise ValueError("HTTP method HEAD does not accept a request body")
+
     parts = ["curl", "-sS"]
 
     # Timing output format
     parts.append(f"-w {_sq(_TIMING_FORMAT)}")
 
-    # Include response headers in output
-    parts.append("-i")
-
-    # HTTP method
-    if method != "GET":
-        parts.append(f"-X {method}")
+    if is_head:
+        # -I already routes response headers to output; adding -i as well is
+        # redundant and makes the output contract depend on how a given curl
+        # version coalesces the two.
+        parts.append("-I")
+    else:
+        # Include response headers in output
+        parts.append("-i")
+        # HTTP method
+        if method != "GET":
+            parts.append(f"-X {method}")
 
     # Timeout
     timeout = _clamp_int(params.get("timeout"), DEFAULT_TIMEOUT, 1, MAX_TIMEOUT)

@@ -4,7 +4,9 @@ WORKDIR /app
 
 # Install dependencies first for better layer caching
 COPY pyproject.toml .
-RUN pip install --no-cache-dir .
+# .[pdf] — analyze_pdf needs PyMuPDF; without it the catalog gate hides the
+# tool, so an official image would ship without a capability it advertises.
+RUN pip install --no-cache-dir ".[pdf]"
 
 # Copy application source
 COPY src/ src/

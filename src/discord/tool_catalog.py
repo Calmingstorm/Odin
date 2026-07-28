@@ -12,9 +12,13 @@ the live object.
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Callable
 
+from ..odin_log import get_logger
 from ..tools import get_tool_definitions
+
+log = get_logger("tools")
 
 
 class ToolCatalog:
@@ -54,6 +58,20 @@ class ToolCatalog:
 
         if not image_tool_available(config):
             builtin = [t for t in builtin if t["name"] != "generate_image"]
+        # analyze_pdf: PyMuPDF lives in the optional `pdf` extra, and no
+        # install path used to install extras — so the tool was advertised on
+        # every install while its dependency was present on none of them, and
+        # calls died with "No module named 'fitz'". Structural availability
+        # only; the handler still converts a load failure into a clean result,
+        # because find_spec proves the module is importable, not that the
+        # native library loads.
+        if importlib.util.find_spec("fitz") is None:
+            builtin = [t for t in builtin if t["name"] != "analyze_pdf"]
+            log.info(
+                "analyze_pdf hidden from the tool catalog: PyMuPDF is not "
+                "installed. Install the 'pdf' extra to enable it "
+                "(pip install '.[pdf]')."
+            )
         # Per-spawn agent model/effort catalogue: expose each axis's field +
         # clause on spawn_agent/spawn_loop_agents only when that agent config
         # axis is "auto" (operates on clones — never mutates the shared defs).
