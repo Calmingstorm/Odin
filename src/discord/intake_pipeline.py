@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from .prompts import PromptBuilder
     from .tool_loop import ToolLoopRunner
     from .turn_recorder import TurnRecorder
+    from .turn_resume import TurnResumeManager
 
 log = get_logger("discord")
 
@@ -408,7 +409,7 @@ class MessagePipelineDeps:
     housekeeping: Housekeeping  # post-turn cache maintenance
     # Suspended-turn resume manager (None = feature off). Default keeps every
     # existing construction working; wiring passes the real manager.
-    turn_resume: object | None = None
+    turn_resume: TurnResumeManager | None = None
 
 
 class MessagePipeline:

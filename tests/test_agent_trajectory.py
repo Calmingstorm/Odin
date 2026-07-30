@@ -698,7 +698,12 @@ class TestRunAgentTrajectory:
             )
         assert agent.state == AgentState.COMPLETED
 
-    async def test_trajectory_recovery_attempts(self, tmp_path):
+    async def test_trajectory_recovery_attempts_field_stays_zero(self, tmp_path):
+        # Deliberate amendment (2026-07-30): the manager retry ladder is
+        # gone — transient recovery lives inside the iteration callback
+        # (src/llm/recovery.py). The trajectory keeps the field for shape
+        # compatibility; a failure escaping the callback FAILS the agent
+        # and recovery_attempts stays 0.
         saver = AgentTrajectorySaver(directory=str(tmp_path))
         agent = AgentInfo(
             id="t12", label="recovery", goal="test recovery tracking",
@@ -711,7 +716,7 @@ class TestRunAgentTrajectory:
             call_count += 1
             if call_count == 1:
                 raise TimeoutError("LLM timeout")
-            return {"text": "recovered", "tool_calls": []}
+            return {"text": "would recover", "tool_calls": []}
 
         await _run_agent(
             agent=agent, system_prompt="s", tools=[],
@@ -720,9 +725,11 @@ class TestRunAgentTrajectory:
             trajectory_saver=saver,
         )
 
+        assert call_count == 1  # no manager-level second call
+        assert agent.state == AgentState.FAILED
         entry = await saver.find_by_agent_id("t12")
         assert entry is not None
-        assert entry["recovery_attempts"] >= 1
+        assert entry["recovery_attempts"] == 0
 
     async def test_trajectory_tool_error_recorded(self, tmp_path):
         saver = AgentTrajectorySaver(directory=str(tmp_path))

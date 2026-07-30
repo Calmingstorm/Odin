@@ -303,3 +303,28 @@ class TestChatAndHealth:
         c._session = session
         await c.close()
         assert session.closed and c._session is None
+
+
+class TestRateLimitExhaustionTyped:
+    """429-exhausted raises LLMRateLimitError carrying the parsed Retry-After
+    (typed-error work, 2026-07-30). Quota rotation semantics unchanged."""
+
+    async def test_numeric_retry_after_header_is_carried(self):
+        from src.llm.errors import LLMRateLimitError
+
+        c = _client(max_retries=0)  # single attempt → immediate exhaustion
+        _with_session(c, _Resp(429, text="slow down", headers={"Retry-After": "7"}))
+        with pytest.raises(LLMRateLimitError) as exc_info:
+            await c._request_with_retry({"messages": []})
+        assert exc_info.value.retry_after == 7.0
+        assert exc_info.value.provider == "kimi"
+        assert "rate limited after 1 attempts" in str(exc_info.value)
+
+    async def test_unparseable_retry_after_header_is_none(self):
+        from src.llm.errors import LLMRateLimitError
+
+        c = _client(max_retries=0)
+        _with_session(c, _Resp(429, text="slow down", headers={"Retry-After": "soon"}))
+        with pytest.raises(LLMRateLimitError) as exc_info:
+            await c._request_with_retry({"messages": []})
+        assert exc_info.value.retry_after is None

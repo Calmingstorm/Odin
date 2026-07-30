@@ -263,3 +263,201 @@ class TestFailClosed:
             await run_loop(bot, FakeMessage("go"))
         # The second batch never started: fail closed, not fail quiet.
         assert executed == ["one"]
+
+
+class TestCancellationBranches:
+    async def test_stop_before_first_iteration_is_terminal_cancelled(self, tmp_path):
+        import asyncio
+
+        bot, fake, store = build_with_store([text_response("never")], tmp_path)
+        msg = FakeMessage("go")
+        evt = bot.channel_state.cancel_events.setdefault(
+            str(msg.channel.id), asyncio.Event()
+        )
+        evt.set()
+        text, *_ = await run_loop(bot, msg)
+        assert text.startswith("Task stopped by user.")
+        (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_CANCELLED
+
+    async def test_stop_during_recovery_wait_is_graceful(self, tmp_path):
+        import asyncio
+
+        bot, fake, store = build_with_store([], tmp_path)
+        msg = FakeMessage("go")
+        evt = bot.channel_state.cancel_events.setdefault(
+            str(msg.channel.id), asyncio.Event()
+        )
+
+        def capacity_and_stop():
+            evt.set()  # /stop lands while the recovery wait begins
+            raise LLMCapacityError("overloaded", retry_after=5.0)
+
+        fake.responses.append(capacity_and_stop)
+        text, _, is_error, *_ = await run_loop(bot, msg)
+        assert text.startswith("Task stopped by user.")
+        assert is_error is False
+        (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_CANCELLED
+
+    async def test_task_cancel_with_failing_settle_still_propagates(self, tmp_path):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from src.turn_state.durability import TurnDurability
+
+        bot, fake, store = build_with_store(
+            [tool_call_response(("run_command", {"command": "x"}))], tmp_path
+        )
+        started = asyncio.Event()
+
+        async def blocking_tool(tool_name, tool_input, *, user_id=None):
+            started.set()
+            await asyncio.sleep(3600)
+
+        bot.tool_executor.execute = blocking_tool
+        with patch.object(
+            TurnDurability,
+            "settle_terminal",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        ):
+            task = asyncio.get_running_loop().create_task(
+                run_loop(bot, FakeMessage("go"))
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    async def test_escape_settle_failure_keeps_original_error(self, tmp_path):
+        from unittest.mock import AsyncMock, patch
+
+        from src.tools.result_validator import ToolResult
+        from src.turn_state.durability import TurnDurability
+
+        bot, fake, store = build_with_store(
+            [
+                tool_call_response(("run_command", {"command": "one"})),
+                text_response("never"),
+            ],
+            tmp_path,
+        )
+
+        async def kill_durability(tool_name, tool_input, *, user_id=None):
+            store._conn.close()
+            return ToolResult(output="ok", tool_name=tool_name)
+
+        bot.tool_executor.execute = kill_durability
+        with patch.object(
+            TurnDurability,
+            "settle_terminal",
+            AsyncMock(side_effect=RuntimeError("settle also broken")),
+        ):
+            # The ORIGINAL fail-closed error must surface, never the
+            # settle-bookkeeping failure.
+            with pytest.raises(TurnStateUnavailableError):
+                await run_loop(bot, FakeMessage("go"))
+
+
+class TestSuspendFallback:
+    async def test_failed_suspension_reports_plain_error_never_false_claims(
+        self, tmp_path
+    ):
+        from unittest.mock import AsyncMock, patch
+
+        from src.turn_state.durability import TurnDurability
+
+        bot, fake, store = build_with_store([], tmp_path)
+        fake.responses.append(capacity_forever(fake))
+        with patch.object(
+            TurnDurability, "suspend", AsyncMock(return_value=False)
+        ):
+            text, _, is_error, *_ = await run_loop(bot, FakeMessage("go"))
+        assert is_error is True
+        assert text.startswith("LLM API error:")
+        assert "preserved" not in text  # no false preservation claims
+        (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_FAILED
+
+
+class TestMalformedBatch:
+    async def test_duplicate_call_ids_bounce_without_execution(self, tmp_path):
+        from unittest.mock import AsyncMock
+
+        from src.llm.types import LLMResponse, ToolCall
+
+        dup_batch = LLMResponse(
+            text="",
+            tool_calls=[
+                ToolCall(id="dup", name="run_command", input={"command": "a"}),
+                ToolCall(id="dup", name="run_command", input={"command": "b"}),
+            ],
+            stop_reason="tool_use",
+        )
+        bot, fake, store = build_with_store(
+            [dup_batch, text_response("recovered with fresh ids")], tmp_path
+        )
+        bot.tool_executor.execute = AsyncMock()
+        text, *_ = await run_loop(bot, FakeMessage("go"))
+        assert text == "recovered with fresh ids"
+        bot.tool_executor.execute.assert_not_awaited()  # failed BEFORE execution
+        bounce = [
+            b
+            for m in fake.calls[-1]["messages"]
+            if isinstance(m.get("content"), list)
+            for b in m["content"]
+            if isinstance(b, dict) and b.get("type") == "tool_result"
+        ]
+        assert bounce and all("NOT executed" in b["content"] for b in bounce)
+
+
+class TestHousekeepingSweep:
+    def test_ttl_sweep_runs_and_swallows_failures(self, tmp_path):
+        import time as _time
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from src.discord.housekeeping import Housekeeping
+        from src.turn_state import TurnKey
+
+        store = TurnStateStore(tmp_path / "hk" / "turns.sqlite3")
+        lease = store.admit_turn_sync(
+            TurnKey("discord", "c1", "m1"),
+            guild_id=None, user_id="u", content_digest="d", code_version="t",
+            prompt_policy_hash="p", tool_catalog_hash="t",
+            session_snapshot=None,
+        )
+        store.suspend_sync(lease, {"p": 1})
+        store._conn.execute(
+            "UPDATE turns SET last_progress_at=?", [_time.time() - 25 * 3600]
+        )
+        store._conn.commit()
+
+        cfg = SimpleNamespace(
+            turn_state=SimpleNamespace(
+                resume_ttl_hours=24.0,
+                payload_retention_days=7.0,
+                ledger_retention_days=90.0,
+            ),
+            attachments=None,
+        )
+        hk = Housekeeping(
+            get_config=lambda: cfg,
+            sessions=MagicMock(ids=lambda: []),
+            channel_state=MagicMock(),
+            prompt_builder=MagicMock(),
+            agent_manager=None,
+            loop_manager=MagicMock(),
+            loop_agent_bridge=None,
+            channel_logger=None,
+            fts_index=None,
+            turn_store=store,
+        )
+        hk.cleanup_stale()
+        row = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert row[0] == TurnStatus.TERMINAL_EXPIRED
+
+        # A raising store must never break housekeeping.
+        store.ttl_sweep_sync = MagicMock(side_effect=RuntimeError("boom"))
+        hk.cleanup_stale()
+        store.close()

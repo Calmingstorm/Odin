@@ -300,16 +300,17 @@ class TurnDurability:
         except Exception:
             pass
         try:
-            assert self._store is not None and self._lease is not None
+            store, lease = self._store, self._lease
+            assert store is not None and lease is not None
             payload = await asyncio.to_thread(
                 lambda: snapshot_chat_turn(
                     st,
-                    store_blob=self._store.store_blob_sync,
+                    store_blob=store.store_blob_sync,
                     generation_seq=self.generation_seq,
                     extra=extra,
                 )
             )
-            await asyncio.to_thread(self._store.suspend_sync, self._lease, payload)
+            await asyncio.to_thread(store.suspend_sync, lease, payload)
         except Exception:
             log.exception("Turn suspension failed — work NOT preserved")
             return False

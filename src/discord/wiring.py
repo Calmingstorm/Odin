@@ -37,6 +37,8 @@ from ..learning.loop_reflection import LoopReflectionGate
 from ..llm import CodexChatClient, KimiClient, OllamaClient
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.cost_tracker import CostTracker
+from ..llm.model_breaker import ModelBreakerRegistry
+from ..llm.recovery import RecoveryPolicy
 from ..odin_log import get_logger
 from ..permissions import PermissionManager
 from ..permissions.host_access import HostAccessManager
@@ -48,6 +50,7 @@ from ..tools import SkillManager, ToolExecutor
 from ..tools.autonomous_loop import LoopManager
 from ..tools.workspace import DEFAULT_MEMORY_PATH
 from ..trajectories.saver import TrajectorySaver
+from ..turn_state import TurnStateStore
 from .channel_config import ChannelConfigManager
 from .channel_logger import ChannelLogger
 from .channel_state import ChannelStateRegistry
@@ -122,9 +125,9 @@ class BotServices:
     # Turn durability (2026-07-30): the checkpoint/ledger store (None =
     # disabled) and the model-scoped capacity-breaker registry. Both live
     # HERE so client rebuilds and live reloads never reset their state.
-    turn_store: object | None = None
-    model_breakers: object | None = None
-    recovery_policy_source: Callable | None = None
+    turn_store: TurnStateStore | None = None
+    model_breakers: ModelBreakerRegistry | None = None
+    recovery_policy_source: Callable[[], RecoveryPolicy] | None = None
 
 
 def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear composition root
@@ -404,9 +407,6 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
     # Turn durability (2026-07-30): checkpoint/ledger store + the model-
     # scoped capacity breakers + the recovery policy source. Services-owned
     # so provider-client rebuilds and live reloads never reset their state.
-    from ..llm.model_breaker import ModelBreakerRegistry
-    from ..llm.recovery import RecoveryPolicy
-
     _lr = config.llm_recovery
     model_breakers = ModelBreakerRegistry(
         generation_threshold=_lr.breaker_generation_threshold,
@@ -423,8 +423,6 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
 
     turn_store = None
     if config.turn_state.enabled:
-        from ..turn_state import TurnStateStore
-
         turn_store = TurnStateStore(config.turn_state.db_path)
         if not turn_store.available:
             turn_store = None  # init failed — feature off, logged loudly

@@ -118,6 +118,12 @@ class TestTransientDegraded:
         guard.mark_degraded_transient("llm_codex", "capacity")
         assert guard.get_state("llm_codex") == SubsystemState.UNAVAILABLE
 
+    def test_unregistered_names_are_noops(self):
+        guard = _guard()
+        guard.mark_degraded_transient("ghost", "capacity")
+        guard.mark_degraded("ghost", "manual")
+        assert guard.get_state("ghost") is None
+
     def test_transient_never_converts_counter_degraded(self, monkeypatch):
         clock = {"now": 1000.0}
         monkeypatch.setattr(

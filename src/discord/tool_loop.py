@@ -493,10 +493,12 @@ class ToolLoopRunner:
             # Fail-closed epilogue: a durability failure (or any escape)
             # marks the turn FAILED so a half-written checkpoint can never
             # present itself as resumable. Best-effort — a fence loss here
-            # just means someone else owns the row now.
+            # just means someone else owns the row now, and even a
+            # cancellation delivered inside the settle must not replace the
+            # original escaping error.
             try:
                 await st.durability.settle_terminal(cancelled=False, is_error=True)
-            except Exception:
+            except BaseException:  # noqa: BLE001 — the original error must win
                 log.warning("Durable failure mark failed (non-fatal)")
             raise
 
