@@ -311,6 +311,17 @@ class _LoopIterClient:
         self.llm_client = SimpleNamespace(chat_with_tools=_chat_with_tools)
         self.audit = SimpleNamespace(log_execution=_log_execution)
 
+        from src.llm.model_breaker import ModelBreakerRegistry
+        from src.llm.recovery import RecoveryPolicy
+
+        _registry = ModelBreakerRegistry()
+        self._fake_gateway = SimpleNamespace(
+            active_client=self.llm_client,
+            capacity_breaker_for=lambda model=None: _registry.for_model("codex", "m"),
+            recovery_policy=RecoveryPolicy,
+            notify_generation_success=lambda provider: None,
+        )
+
         # P4 migration: the runner takes narrow deps now. The recorder is the
         # REAL one; its save/reflect hooks are shadowed with this fake's
         # capture methods so assertions keep observing the loop body.
@@ -323,7 +334,7 @@ class _LoopIterClient:
                 get_config=lambda: self.config,
                 get_default_system_prompt=lambda: "sys",
                 get_context_compressor=lambda: None,
-                llm_gateway=SimpleNamespace(active_client=self.llm_client),
+                llm_gateway=self._fake_gateway,
                 prompt_builder=SimpleNamespace(build_full_prompt=lambda **kw: "sys"),
                 tool_catalog=SimpleNamespace(
                     merged_definitions=lambda: [{"name": "run_command"}]
