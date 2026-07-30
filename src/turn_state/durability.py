@@ -68,6 +68,8 @@ class TurnDurability:
         # cancel EVENT before terminal settlement can read it, so the fact
         # must be carried here (a cancelled turn is terminal by design).
         self.cancelled = False
+        # One-shot remaining budget for a resumed generation (see resumed()).
+        self._resume_budget: float | None = None
 
     # -- construction --------------------------------------------------
 
@@ -117,11 +119,31 @@ class TurnDurability:
 
     @classmethod
     def resumed(
-        cls, store: TurnStateStore, lease: TurnLease, generation_seq: int
+        cls,
+        store: TurnStateStore,
+        lease: TurnLease,
+        generation_seq: int,
+        *,
+        first_generation_budget: float | None = None,
     ) -> TurnDurability:
+        """Handle for a resumed turn.
+
+        ``first_generation_budget`` is the REMAINING recovery budget of the
+        interrupted generation (from the persisted UTC deadline) — usually
+        ~0, which means one attempt then re-suspend. A restart never grants
+        a fresh five minutes to the generation that already spent its
+        budget; later generations budget normally.
+        """
         handle = cls(store, lease)
         handle.generation_seq = int(generation_seq)
+        handle._resume_budget = first_generation_budget
         return handle
+
+    def pop_resume_budget(self) -> float | None:
+        """One-shot: the restored generation's remaining budget, then None."""
+        budget = self._resume_budget
+        self._resume_budget = None
+        return budget
 
     # -- state ---------------------------------------------------------
 

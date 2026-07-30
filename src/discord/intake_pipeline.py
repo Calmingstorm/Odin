@@ -406,6 +406,9 @@ class MessagePipelineDeps:
     tool_loop: ToolLoopRunner  # the tools route
     delivery: ResponseDelivery  # status, retries, chunked sends
     housekeeping: Housekeeping  # post-turn cache maintenance
+    # Suspended-turn resume manager (None = feature off). Default keeps every
+    # existing construction working; wiring passes the real manager.
+    turn_resume: object | None = None
 
 
 class MessagePipeline:
@@ -419,6 +422,7 @@ class MessagePipeline:
         self._tool_loop = deps.tool_loop
         self._delivery = deps.delivery
         self._housekeeping = deps.housekeeping
+        self._turn_resume = deps.turn_resume
 
     async def run(
         self,
@@ -603,18 +607,35 @@ class MessagePipeline:
                     }
                     log.info("Attached %d image(s) to message for Claude vision", len(image_blocks))
                 try:
-                    (
-                        response,
-                        already_sent,
-                        is_error,
-                        tools_used,
-                        handoff,
-                    ) = await self._tool_loop.run(
-                        message,
-                        task_history,
-                        system_prompt_override=_sp,
-                        trace=_trace,
-                    )
+                    # A bare `resume`/`continue` with preserved work in this
+                    # channel resumes the suspended turn instead of starting
+                    # a fresh one — the trigger is consumed as a command and
+                    # never enters the frozen transcript. Inherits this
+                    # pipeline's lock/delivery/session plumbing wholesale.
+                    _resumed = None
+                    if self._turn_resume is not None:
+                        _resumed = await self._turn_resume.try_explicit_resume(message)
+                    if _resumed is not None:
+                        (
+                            response,
+                            already_sent,
+                            is_error,
+                            tools_used,
+                            handoff,
+                        ) = _resumed
+                    else:
+                        (
+                            response,
+                            already_sent,
+                            is_error,
+                            tools_used,
+                            handoff,
+                        ) = await self._tool_loop.run(
+                            message,
+                            task_history,
+                            system_prompt_override=_sp,
+                            trace=_trace,
+                        )
                 except TimeoutError as codex_err:
                     _err = format_user_facing_error(codex_err)
                     log.warning("Codex tool loop timed out: %s", _err)
@@ -736,7 +757,27 @@ class MessagePipeline:
             # Save a sanitized error marker instead of the full error response.
             # The user sees the full error on Discord, but raw refusals and
             # fabrications are NOT persisted to prevent context poisoning.
-            if tools_used:
+            _preserved = False
+            if self._turn_resume is not None:
+                try:
+                    _preserved = await self._turn_resume.is_suspended(
+                        channel_id, str(message.id)
+                    )
+                except Exception:
+                    _preserved = False
+            if _preserved:
+                _tools_note = (
+                    f" after using tools ({', '.join(tools_used[:5])})"
+                    if tools_used
+                    else ""
+                )
+                sanitized = (
+                    "[Previous request was interrupted by a model-capacity "
+                    f"outage{_tools_note}. Its work is PRESERVED and resumable — "
+                    "it auto-resumes when capacity returns, or the user can "
+                    "say 'resume'.]"
+                )
+            elif tools_used:
                 sanitized = (
                     f"[Previous request used tools ({', '.join(tools_used[:5])}) "
                     f"but encountered an error. The user may ask to retry.]"

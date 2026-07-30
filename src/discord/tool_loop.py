@@ -434,7 +434,25 @@ class ToolLoopRunner:
         st = await self._prepare_chat_turn(
             message, history, system_prompt_override, trace, policy
         )
+        return await self._run_with_guards(st)
 
+    async def run_resumed(self, st: _ChatTurn) -> tuple[str, bool, bool, list[str], bool]:
+        """Continue a restored turn (built by TurnResumeManager) through the
+        same guard envelope as a fresh one. The iteration loop starts from
+        ``st.iteration`` — the restored transcript already contains every
+        earlier generation."""
+        self._channel_state.set_active_request(st._ch_id, st._req_id)
+        set_turn(
+            turn_id=st._trajectory.message_id or None,
+            source=st._trajectory.source,
+            channel_id=st._trajectory.channel_id,
+        )
+        await self._delivery.set_status("Resuming preserved work...", task_start=True)
+        return await self._run_with_guards(st)
+
+    async def _run_with_guards(
+        self, st: _ChatTurn
+    ) -> tuple[str, bool, bool, list[str], bool]:
         try:
             result = await self._run_chat_iterations(st)
             # Terminal bookkeeping (best-effort; a suspension already settled
@@ -486,8 +504,12 @@ class ToolLoopRunner:
         self, st: _ChatTurn
     ) -> tuple[str, bool, bool, list[str], bool]:
         """The chat iteration loop — every phase-method exit returns through
-        here; unexpected escapes are handled by run()'s guard above."""
-        for iteration in range(st.chat_cap):
+        here; unexpected escapes are handled by run()'s guard above.
+
+        Starts from ``st.iteration``: 0 for a fresh turn (unchanged), the
+        interrupted generation's index for a resumed one — the restored
+        transcript already carries everything before it."""
+        for iteration in range(st.iteration, st.chat_cap):
             st.iteration = iteration
             if st._cancel.is_set():
                 return self._stopped(st, "iteration_start")
@@ -803,10 +825,19 @@ class ToolLoopRunner:
                 tools_used=st.tools_used_in_loop,
             )
 
+        # A resumed generation carries only its REMAINING budget (persisted
+        # UTC deadline): the generation that already spent its five minutes
+        # gets one attempt, not a fresh window. Later generations budget
+        # normally.
+        resume_budget = st.durability.pop_resume_budget()
+        deadline_seconds = (
+            policy.deadline_seconds if resume_budget is None else resume_budget
+        )
+
         # Persist the absolute recovery deadline BEFORE the call: a restart
         # mid-recovery reconstructs only the remaining budget, never a fresh
         # five minutes.
-        await st.durability.on_generation_start(st, policy.deadline_seconds)
+        await st.durability.on_generation_start(st, deadline_seconds)
 
         # Typing is best-effort (shared helper): a typing failure — setup or
         # cleanup — must never fail the call or misclassify provider errors.
@@ -816,6 +847,7 @@ class ToolLoopRunner:
                     _attempt,
                     policy=policy,
                     breaker=breaker,
+                    deadline_seconds=deadline_seconds,
                     cancel_event=st._cancel,
                     on_wait=_on_wait,
                 )
