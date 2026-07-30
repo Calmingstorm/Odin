@@ -156,14 +156,16 @@ class TurnResumeManager:
             admission = breaker.acquire_attempt()
             if not isinstance(admission, float):
                 breaker.abandon(admission)  # the resume re-acquires for real
-                current = self._session_len(key.channel_id)
-                if current not in allowed:
+                if self._session_len(key.channel_id) not in allowed:
                     log.info(
                         "Auto-resume for %s stands down: session advanced or "
                         "unreadable (explicit resume still available)", key,
                     )
                     return
-                await self._run_auto_resume(key, row)
+                # The authoritative re-check happens UNDER the channel lock
+                # inside _run_auto_resume — this pre-check just avoids
+                # queueing on a busy channel for nothing.
+                await self._run_auto_resume(key, row, allowed)
                 return
         log.info("Auto-resume waiter for %s expired", key)
 
@@ -181,7 +183,9 @@ class TurnResumeManager:
         except Exception:
             return -1
 
-    async def _run_auto_resume(self, key: TurnKey, row: dict) -> None:
+    async def _run_auto_resume(
+        self, key: TurnKey, row: dict, allowed: set[int]
+    ) -> None:
         if self._unresolved_ops(row):
             # Never auto-continue over ambiguous external effects — a human
             # must look at this (explicit resume delivers the details).
@@ -193,6 +197,16 @@ class TurnResumeManager:
         async with self._channel_lock(key.channel_id):
             if self._channel_state.active_requests.get(key.channel_id):
                 log.info("Auto-resume for %s stands down: channel busy", key)
+                return
+            # Authoritative session re-check UNDER the lock (round-3
+            # deviation #3, PR #242): a message that advanced the session
+            # while we queued for this lock must stand auto-resume down —
+            # the pre-lock check alone was a TOCTOU window.
+            if self._session_len(key.channel_id) not in allowed:
+                log.info(
+                    "Auto-resume for %s stands down: session advanced while "
+                    "waiting for the channel lock", key,
+                )
                 return
             st, message, reason = await self._validate_and_rebuild(key, row)
             if st is None:

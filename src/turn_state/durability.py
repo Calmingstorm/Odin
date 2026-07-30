@@ -115,8 +115,17 @@ class TurnDurability:
         back with ``blocked`` set and the loop must refuse fresh execution —
         a redelivered message must never re-run its effects unledgered.
         """
-        if store is None or not store.available:
+        if store is None:
+            # Durability was off (or failed) at wiring — legacy run is the
+            # designed behavior; no ledger can exist to contradict it.
             return cls.disabled()
+        if not store.available:
+            # The store WAS wired available (wiring nulls out failed inits)
+            # and has since died: this identity cannot be checked — refuse
+            # (round-3 deviation #2, PR #242).
+            handle = cls.disabled()
+            handle.blocked = "admission_error"
+            return handle
         try:
             key = TurnKey(
                 source="discord",

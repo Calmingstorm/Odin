@@ -133,6 +133,28 @@ def scrub_stored_tool_input(tool_name: str, tool_input: Any) -> Any:
     return _deep_scrub_strings(tool_input)
 
 
+def _scrub_op_details(details: list) -> list:
+    """The storage scrub for the op-details copy (round-3 deviation #4,
+    PR #242): the loop applies the tool-aware redaction when building
+    `_op_tool_details`, but persistence must ALSO compose the recursive
+    secret scrub so nested values match the transcript/trajectory copies."""
+    out = []
+    for detail in details:
+        if isinstance(detail, dict):
+            row = dict(detail)
+            if "input" in row:
+                row["input"] = scrub_stored_tool_input(
+                    str(row.get("tool") or ""), row.get("input")
+                )
+            for key in ("result", "error"):
+                if isinstance(row.get(key), str):
+                    row[key] = scrub_output_secrets(row[key])
+            out.append(row)
+        else:
+            out.append(detail)
+    return out
+
+
 def _scrub_tool_use_inputs(obj: Any) -> Any:
     """Apply the storage scrub to assistant ``tool_use`` blocks in the
     transcript (name-aware — the block carries the tool name)."""
@@ -343,7 +365,7 @@ def snapshot_chat_turn(st, *, store_blob, generation_seq: int, extra: dict | Non
             "pending_image_blocks": _externalize_blocks(
                 list(st.pending_image_blocks), store_blob
             ),
-            "_op_tool_details": list(st._op_tool_details),
+            "_op_tool_details": _scrub_op_details(list(st._op_tool_details)),
             "_pending_validations": list(st._pending_validations),
             "_validation_required": st._validation_required,
             "_validation_retries": st._validation_retries,
@@ -360,13 +382,65 @@ def snapshot_chat_turn(st, *, store_blob, generation_seq: int, extra: dict | Non
     return payload
 
 
+class CheckpointInvalidError(ValueError):
+    """The payload is structurally unusable — terminally reject, never
+    retry (round-3 deviation #5, PR #242)."""
+
+
+# Fields whose restored TYPE the codec asserts before any lease exists —
+# construction failures after acquisition used to bounce the row back to
+# SUSPENDED forever.
+_REQUIRED_FIELD_TYPES: dict[str, type | tuple[type, ...]] = {
+    "system_prompt": str,
+    "messages": list,
+    "user_id": str,
+    "chat_cap": int,
+    "iteration": int,
+    "stuck_tracker": dict,
+    "_trajectory": dict,
+    "_ch_id": str,
+    "_req_id": str,
+}
+
+
+def validate_payload(payload: Any) -> None:
+    """Structural schema validation, run BEFORE lease acquisition.
+
+    Raises :class:`CheckpointInvalidError` on any deviation — codec
+    version, policy name, the fields envelope, presence of every persisted
+    field, and the basic types construction depends on.
+    """
+    if not isinstance(payload, dict):
+        raise CheckpointInvalidError("payload is not an object")
+    version = payload.get("codec_version")
+    if not isinstance(version, int) or version > CODEC_VERSION or version < 1:
+        raise CheckpointInvalidError(f"unsupported codec_version: {version!r}")
+    if payload.get("policy") != "chat":
+        raise CheckpointInvalidError(f"unsupported policy: {payload.get('policy')!r}")
+    fields = payload.get("fields")
+    if not isinstance(fields, dict):
+        raise CheckpointInvalidError("missing fields envelope")
+    missing = PERSISTED_FIELDS - fields.keys()
+    if missing:
+        raise CheckpointInvalidError(f"missing persisted fields: {sorted(missing)}")
+    for name, expected in _REQUIRED_FIELD_TYPES.items():
+        if not isinstance(fields.get(name), expected):
+            raise CheckpointInvalidError(
+                f"field {name!r} has invalid type {type(fields.get(name)).__name__}"
+            )
+
+
 def restore_field_values(payload: dict, *, load_blob, stuck_tracker_cls) -> dict:
     """Persisted-field constructor kwargs for `_ChatTurn`.
 
-    The resume flow combines these with its RECONSTRUCTED fields (live
-    message, fresh cancel event, current-policy tools, fresh trace, policy
-    object) — see the classification at the top of this module.
+    Validates the payload structurally first (CheckpointInvalidError on
+    deviation — the resume flow terminally rejects BEFORE acquiring any
+    lease). The resume flow combines the result with its RECONSTRUCTED
+    fields (live message, fresh cancel event, current-policy tools, fresh
+    trace, policy object) — see the classification at the top of this
+    module.
     """
+    validate_payload(payload)
     fields = dict(payload.get("fields") or {})
     fields["messages"] = _inline_blocks(fields.get("messages") or [], load_blob)
     fields["pending_image_blocks"] = _inline_blocks(

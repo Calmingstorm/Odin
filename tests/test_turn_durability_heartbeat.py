@@ -89,3 +89,42 @@ async def test_mark_ops_manual_swallows_store_death(tmp_path):
     await admit(store)
     store._conn.close()
     assert store.mark_ops_manual_sync(TurnKey("discord", "c1", "m1"), "g") == 0
+
+
+async def test_concurrent_checkpoints_and_heartbeats_never_false_stale(tmp_path):
+    """Round-3 deviation #1 (PR #242): the in-memory revision advances under
+    the same lock as the DB mutation, so a heartbeat interleaved with
+    checkpoints can never read a stale revision and falsely lose the lease."""
+    import json
+
+    store = make_store(tmp_path, ttl=30.0)
+    handle = await admit(store)
+    handle._stop_heartbeats()  # drive beats manually, interleaved
+    lease = handle.lease
+
+    async def checkpoints():
+        for i in range(40):
+            await asyncio.to_thread(
+                store.checkpoint_sync, lease, {"n": i}, progressed=False
+            )
+
+    async def heartbeats():
+        for _ in range(40):
+            await asyncio.to_thread(store.heartbeat_sync, lease)
+
+    await asyncio.gather(checkpoints(), heartbeats())  # no StaleTurnError
+    (payload,) = store._conn.execute("SELECT payload FROM turns").fetchone()
+    assert json.loads(payload)["n"] == 39
+    store.close()
+
+
+async def test_wired_store_that_died_refuses_admission(tmp_path):
+    """Round-3 deviation #2 (PR #242): a store that WAS wired available but
+    has since died must refuse execution, not run legacy."""
+    store = make_store(tmp_path)
+    store.close()  # available -> False after successful wiring
+    handle = await TurnDurability.admit(
+        store, message=FakeMsg(), system_prompt="s", tools=[], session_snapshot=None
+    )
+    assert handle.enabled is False
+    assert handle.blocked == "admission_error"

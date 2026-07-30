@@ -287,6 +287,14 @@ class TurnStateStore:
                      lease.token, TurnStatus.ACTIVE, time.time()],
                 )
                 conn.commit()
+                if cur.rowcount == 1:
+                    # The in-memory revision must advance under the SAME
+                    # lock as the database mutation (round-3 deviation #1,
+                    # PR #242): a concurrent heartbeat sneaking between
+                    # commit and this assignment read the stale revision,
+                    # got StaleTurnError, and stopped beating a lease the
+                    # turn still owned.
+                    lease.revision = new_revision
         except sqlite3.Error as exc:
             raise TurnStateUnavailableError(f"turn-state write failed: {exc}") from exc
         if cur.rowcount != 1:
@@ -294,7 +302,6 @@ class TurnStateStore:
                 f"turn {lease.key} generation {lease.generation[:8]} "
                 f"rev {lease.revision}: fence lost"
             )
-        lease.revision = new_revision
 
     def _op_where(self, lease: TurnLease) -> tuple[str, list]:
         return (

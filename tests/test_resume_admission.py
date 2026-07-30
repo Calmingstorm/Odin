@@ -457,3 +457,112 @@ class TestProductionPipelinePath:
         )
         for task in list(h2.manager._waiters.values()):
             task.cancel()
+
+
+class TestSessionRecheckUnderLock:
+    async def test_advance_while_waiting_for_the_lock_stands_down(self, tmp_path):
+        """Round-3 deviation #3 (PR #242): the authoritative session check
+        runs UNDER the channel lock — a message advancing the session while
+        auto-resume queues for the lock must stand it down."""
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("stale reply that must never send"))
+        rows = h.store.list_suspended_sync("discord")
+        row = h.store.load_resumable_sync(
+            __import__("src.turn_state", fromlist=["TurnKey"]).TurnKey(
+                "discord", rows[0]["channel_id"], rows[0]["message_id"]
+            )
+        )
+        from src.turn_state import TurnKey
+
+        key = TurnKey("discord", rows[0]["channel_id"], rows[0]["message_id"])
+        ch_id = key.channel_id
+        baseline = h.manager._session_len(ch_id)
+        allowed = {baseline, baseline + 1}
+
+        lock = h.manager._channel_lock(ch_id)
+        await lock.acquire()  # another turn holds the channel
+        resume_task = asyncio.get_running_loop().create_task(
+            h.manager._run_auto_resume(key, row, allowed)
+        )
+        await asyncio.sleep(0.05)  # auto-resume is now queued on the lock
+        # The session advances by a full turn while auto-resume waits.
+        h.bot.sessions.add_message(ch_id, "user", "new topic")
+        h.bot.sessions.add_message(ch_id, "assistant", "answered")
+        lock.release()
+        await asyncio.wait_for(resume_task, timeout=5)
+        assert h.row()[0] == TurnStatus.SUSPENDED  # stood down under the lock
+
+
+class TestStructuralPayloadValidation:
+    async def test_empty_object_payload_terminally_rejects(self, tmp_path):
+        """Round-3 deviation #5 (PR #242): a syntactically-valid but
+        structurally-invalid payload rejects BEFORE any lease exists —
+        never bounced back to SUSPENDED for an infinite retry loop."""
+        h, original = await suspend_turn(tmp_path)
+        h.store._conn.execute("UPDATE turns SET payload='{}'")
+        h.store._conn.commit()
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        assert "could not be restored" in result[0]
+        (status,) = h.store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_REJECTED
+
+    def test_validate_payload_rejects_each_structural_deviation(self):
+        import pytest as _pytest
+
+        from src.turn_state.codec import (
+            CODEC_VERSION,
+            CheckpointInvalidError,
+            validate_payload,
+        )
+
+        good_fields = {name: None for name in __import__(
+            "src.turn_state.codec", fromlist=["PERSISTED_FIELDS"]
+        ).PERSISTED_FIELDS}
+        good_fields.update({
+            "system_prompt": "s", "messages": [], "user_id": "u",
+            "chat_cap": 1, "iteration": 0, "stuck_tracker": {},
+            "_trajectory": {}, "_ch_id": "c", "_req_id": "r",
+        })
+        base = {"codec_version": CODEC_VERSION, "policy": "chat",
+                "generation_seq": 0, "fields": good_fields}
+        validate_payload(base)  # sane baseline passes
+
+        for broken in (
+            {},  # everything missing
+            "not-an-object",  # payload must be a dict
+            {**base, "codec_version": CODEC_VERSION + 1},  # future codec
+            {**base, "policy": "loop"},  # wrong policy
+            {**base, "fields": "nope"},  # fields envelope must be a dict
+            {**base, "fields": {}},  # missing persisted fields
+            {**base, "fields": {**good_fields, "messages": "not-a-list"}},
+        ):
+            with _pytest.raises(CheckpointInvalidError):
+                validate_payload(broken)
+
+
+class TestExplicitResumeOrdering:
+    async def test_resume_trigger_skips_history_compaction(self, tmp_path):
+        """Round-3 deviation #6 (PR #242): the explicit-resume check runs
+        BEFORE prompt/history assembly — get_task_history (which can invoke
+        the compaction LLM) must never be called for a resume trigger."""
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("Resumed through the pipeline."))
+        h.bot.pipeline._turn_resume = h.manager
+
+        calls = []
+        real_gth = h.bot.sessions.get_task_history
+
+        async def recording_gth(*a, **k):
+            calls.append(a)
+            return await real_gth(*a, **k)
+
+        h.bot.sessions.get_task_history = recording_gth
+        trigger = resume_msg(original)
+        await h.bot.pipeline.run(trigger, trigger.content)
+        assert calls == []  # resume never touched history assembly
+        assert h.row()[0] == TurnStatus.TERMINAL_COMPLETED
+        assert any(
+            "Resumed through the pipeline." in (r["content"] or "")
+            for r in trigger.replies
+        )

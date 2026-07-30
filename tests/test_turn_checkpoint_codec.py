@@ -333,3 +333,19 @@ class TestStorageRedactionAllCopies:
             "run_command", {"count": 3, "flag": True, "ratio": 1.5, "none": None}
         )
         assert out == {"count": 3, "flag": True, "ratio": 1.5, "none": None}
+
+    def test_op_details_copy_is_scrubbed_too(self):
+        """Round-3 deviation #4 (PR #242): the _op_tool_details copy gets
+        the same tool-aware + recursive scrub as every other copy."""
+        blobs, store, load = _blob_dict()
+        st = _full_turn()
+        secret = "sk-" + "c" * 24
+        st._op_tool_details.append({
+            "tool": "http_post",
+            "input": {"headers": {"Authorization": f"token={secret}"}},
+            "result": f"posted with api_key={secret}",
+            "error": False,
+        })
+        st._op_tool_details.append("legacy-non-dict-entry")  # passthrough arm
+        payload = snapshot_chat_turn(st, store_blob=store, generation_seq=3)
+        assert secret not in json.dumps(payload)
