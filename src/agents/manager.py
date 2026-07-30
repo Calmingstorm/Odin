@@ -31,7 +31,10 @@ WAIT_DEFAULT_TIMEOUT = 300       # default timeout for wait_for_agents
 WAIT_POLL_INTERVAL = 2           # poll interval for wait_for_agents
 ITERATION_CB_TIMEOUT = 120       # 2 min timeout per LLM call
 TOOL_EXEC_TIMEOUT = 300          # 5 min timeout per tool execution
-MAX_RECOVERY_ATTEMPTS = 1        # retries before transitioning to FAILED
+# (The manager-level MAX_RECOVERY_ATTEMPTS retry ladder was removed
+# 2026-07-30: transient-failure recovery now lives inside the iteration
+# callback via src/llm/recovery.py. AgentInfo.recovery_attempts remains for
+# API/trajectory shape compatibility and stays 0.)
 MAX_NESTING_DEPTH = 2            # default max sub-agent depth (root=0)
 MAX_CHILDREN_PER_AGENT = 3       # max direct children one agent can spawn
 
@@ -922,7 +925,6 @@ async def _run_agent(
             agent.transition(AgentState.EXECUTING, f"iteration {iteration + 1}")
             agent.last_activity = time.time()
             agent.iteration_count = iteration + 1
-            agent.recovery_attempts = 0  # per-iteration recovery budget
             iter_start = time.time()
 
             # Call LLM with recovery support
@@ -1118,15 +1120,16 @@ async def _call_llm_with_recovery(
     system_prompt: str,
     tools: list[dict],
 ) -> dict | None:
-    """Call LLM with single-retry recovery on transient errors.
+    """Call the LLM for one agent iteration.
 
-    Each wait is bounded by the agent's snapshotted iteration_timeout, capped
-    at the remaining lifetime — the hard deadline must hold even during a
-    long LLM await (the between-iteration lifetime check alone would let a
-    quiet agent overrun it).
+    Transient-failure recovery (capacity/transport/breaker waits) lives
+    INSIDE the iteration callback via the shared deadline-based policy
+    (``src/llm/recovery.py``) — the old manager-level bare-``except`` single
+    retry ladder retried programming defects and is deliberately gone
+    (design settled with Odin, 2026-07-30). What remains here is the wall:
+    the agent's snapshotted iteration_timeout capped at remaining lifetime
+    hard-bounds the callback INCLUDING any recovery waits.
 
-    On first failure: EXECUTING → RECOVERING → EXECUTING (retry).
-    On second failure: EXECUTING → FAILED.
     Returns the LLM response dict, or None if agent reached terminal state.
     """
     remaining = _remaining_lifetime(agent)
@@ -1139,71 +1142,36 @@ async def _call_llm_with_recovery(
             iteration_callback(agent.messages, system_prompt, tools),
             timeout=call_timeout,
         )
-    except (TimeoutError, Exception) as first_err:
-        is_timeout = isinstance(first_err, asyncio.TimeoutError)
-        if is_timeout and _remaining_lifetime(agent) <= 0:
+    except TimeoutError:
+        if _remaining_lifetime(agent) <= 0:
             # The wait was lifetime-capped and the deadline has passed:
             # this is lifetime exhaustion, not a stuck LLM call.
             _lifetime_timeout(agent)
             return None
-        err_desc = (f"LLM timeout after {int(call_timeout)}s" if is_timeout
-                    else f"LLM error: {first_err}")
-
-        if agent.recovery_attempts < MAX_RECOVERY_ATTEMPTS:
-            agent.recovery_attempts += 1
-            agent.transition(AgentState.RECOVERING, err_desc)
-            log.warning(
-                "Agent %s recovering (attempt %d): %s",
-                agent.id,
-                agent.recovery_attempts,
-                err_desc,
-            )
-
-            retry_delay = 1
-            if hasattr(first_err, "retry_after"):
-                retry_delay = min(first_err.retry_after, 90.0)
-                log.info("Agent %s: circuit breaker wait %.0fs", agent.id, retry_delay)
-            # The recovery sleep must not outlive the deadline either — a
-            # 90s breaker wait with 5s of lifetime left sleeps 5s, and the
-            # retry-entry check below then settles it.
-            remaining = _remaining_lifetime(agent)
-            if remaining <= 0:
-                _lifetime_timeout(agent)
-                return None
-            await asyncio.sleep(min(retry_delay, remaining))
-
-            agent.transition(AgentState.EXECUTING, "retry after recovery")
-
-            remaining = _remaining_lifetime(agent)
-            if remaining <= 0:
-                _lifetime_timeout(agent)
-                return None
-            retry_timeout = min(agent.iteration_timeout, remaining)
-            try:
-                return await asyncio.wait_for(
-                    iteration_callback(agent.messages, system_prompt, tools),
-                    timeout=retry_timeout,
-                )
-            except (TimeoutError, Exception) as retry_err:
-                retry_is_timeout = isinstance(retry_err, asyncio.TimeoutError)
-                if retry_is_timeout and _remaining_lifetime(agent) <= 0:
-                    _lifetime_timeout(agent)
-                    return None
-                # str(asyncio.TimeoutError()) is EMPTY — always store the
-                # formatted description, never the bare exception string.
-                retry_desc = (f"retry timed out after {int(retry_timeout)}s"
-                              if retry_is_timeout else f"retry failed: {retry_err}")
-                log.error("Agent %s recovery failed: %s", agent.id, retry_desc)
-                agent.transition(AgentState.FAILED, retry_desc)
-                agent.error = retry_desc
-                agent.ended_at = time.time()
-                return None
-        else:
-            log.error("Agent %s LLM call failed (no retries left): %s", agent.id, err_desc)
-            agent.transition(AgentState.FAILED, err_desc)
-            agent.error = err_desc
-            agent.ended_at = time.time()
+        # str(asyncio.TimeoutError()) is EMPTY — always store the formatted
+        # description, never the bare exception string.
+        err_desc = f"LLM timeout after {int(call_timeout)}s"
+        log.error("Agent %s LLM call failed: %s", agent.id, err_desc)
+        agent.transition(AgentState.FAILED, err_desc)
+        agent.error = err_desc
+        agent.ended_at = time.time()
+        return None
+    except Exception as exc:
+        if _remaining_lifetime(agent) <= 0:
+            # Lifetime exhaustion wins over failure classification (the
+            # v3.59.0 rule: exhaustion is TIMEOUT, never FAILED).
+            _lifetime_timeout(agent)
             return None
+        # Typed fast-fail (auth / malformed request / quota-exhausted after
+        # rotation) or a programming defect: neither earns a manager-level
+        # retry — transient classes were already retried inside the callback
+        # for up to the generation deadline.
+        err_desc = f"LLM error: {exc}" if str(exc) else f"LLM error: {type(exc).__name__}"
+        log.error("Agent %s LLM call failed (no retry): %s", agent.id, err_desc)
+        agent.transition(AgentState.FAILED, err_desc)
+        agent.error = err_desc
+        agent.ended_at = time.time()
+        return None
 
 
 def _get_last_progress(agent: AgentInfo) -> str:

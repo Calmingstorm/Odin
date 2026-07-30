@@ -26,7 +26,11 @@ import asyncio
 from collections.abc import Callable
 
 from ..llm import CodexChatClient, KimiClient, OllamaClient
+from ..llm.circuit_breaker import CircuitOpenError
 from ..llm.codex_auth import CodexAuthPool
+from ..llm.errors import LLMCapacityError
+from ..llm.model_breaker import ModelBreakerRegistry, ModelCapacityBreaker
+from ..llm.recovery import RecoveryPolicy
 from ..odin_log import get_logger
 
 log = get_logger("discord")
@@ -45,6 +49,8 @@ class LLMGateway:
         cost_tracker,
         sessions,
         reflector,
+        model_breakers: ModelBreakerRegistry | None = None,
+        recovery_policy_source: Callable[[], RecoveryPolicy] | None = None,
     ) -> None:
         self.get_config = get_config
         self.codex_client = codex_client
@@ -55,6 +61,11 @@ class LLMGateway:
         self.cost_tracker = cost_tracker
         self.sessions = sessions
         self.reflector = reflector
+        # Capacity-breaker registry: BotServices-owned in production so state
+        # survives client rebuilds/live reloads; a private default keeps
+        # existing constructions (tests) working.
+        self.model_breakers = model_breakers or ModelBreakerRegistry()
+        self._recovery_policy_source = recovery_policy_source or RecoveryPolicy
         self.provider_lock = asyncio.Lock()
         # Auxiliary live-reload state: a monotonic generation guards against a
         # candidate built under a config a concurrent reload has since
@@ -80,6 +91,40 @@ class LLMGateway:
         if active == "kimi" and self.kimi_client is not None:
             return self.kimi_client
         return self.codex_client
+
+    def recovery_policy(self) -> RecoveryPolicy:
+        """The live recovery policy (config-backed via wiring)."""
+        return self._recovery_policy_source()
+
+    def capacity_breaker_for(self, model: str | None = None) -> ModelCapacityBreaker:
+        """Model-scoped capacity breaker for the active provider.
+
+        ``model`` must be the EFFECTIVE model of the request when the caller
+        overrides it (agents); defaults to the active client's model.
+        """
+        provider_cfg = getattr(self.get_config(), "llm_provider", None)
+        active = provider_cfg.active_provider if provider_cfg else "codex"
+        effective = model
+        if not effective:
+            client = self.active_client
+            effective = getattr(client, "model", None) if client is not None else None
+        return self.model_breakers.for_model(active, str(effective or "unknown"))
+
+    def notify_generation_success(self, provider: str | None) -> None:
+        """Success signal from a path that bypasses ``call_with_tools``
+        (agents, autonomous loops).
+
+        This is the production ``mark_available`` wiring: a latched
+        ``llm_*`` guard key can never see a gateway success (check() blocks
+        the call), but bypass-path successes prove the subsystem is fine.
+
+        ``provider`` MUST come from the response's immutable provenance
+        (``provenance_provider``) — never from whichever provider is active
+        after the await. Missing provenance is a no-op, never a guess.
+        """
+        if self.subsystem_guard is None or not provider:
+            return
+        self.subsystem_guard.record_success(f"llm_{provider}")
 
     def wire_callbacks(self) -> None:
         """Attach LLM-backed compaction and reflection callbacks using the active provider."""
@@ -628,7 +673,18 @@ class LLMGateway:
                 )
             except Exception as exc:
                 if self.subsystem_guard is not None:
-                    self.subsystem_guard.record_failure(guard_key, str(exc))
+                    if isinstance(exc, (LLMCapacityError, CircuitOpenError)):
+                        # Capacity (and the client breaker's echoes of it)
+                        # never feeds the sticky failure counter — the
+                        # model-scoped breaker owns capacity admission, and
+                        # counting both was the double penalty that let an
+                        # outage latch the guard UNAVAILABLE until restart.
+                        # Visibility only: transient DEGRADED, self-expiring.
+                        self.subsystem_guard.mark_degraded_transient(
+                            guard_key, str(exc)[:200], expires_in=120.0
+                        )
+                    else:
+                        self.subsystem_guard.record_failure(guard_key, str(exc))
                 raise
             if self.subsystem_guard is not None:
                 self.subsystem_guard.record_success(guard_key)

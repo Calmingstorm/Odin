@@ -45,6 +45,11 @@ class SubsystemInfo:
     last_failure_at: float = 0.0
     last_success_at: float = 0.0
     registered_at: float = field(default_factory=time.monotonic)
+    # Set only by mark_degraded_transient: a monotonic expiry after which a
+    # visibility-only DEGRADED lapses back to AVAILABLE on the next read.
+    # None means any DEGRADED state is counter-driven and recovers only via
+    # record_success/mark_available.
+    transient_until: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -60,6 +65,8 @@ class SubsystemInfo:
             d["last_failure_at"] = self.last_failure_at
         if self.last_success_at:
             d["last_success_at"] = self.last_success_at
+        if self.transient_until is not None:
+            d["transient"] = True
         return d
 
 
@@ -205,21 +212,44 @@ class SubsystemGuard:
 
     # ── State queries ────────────────────────────────────────────────
 
+    def _resolve(self, name: str) -> SubsystemInfo | None:
+        """Look up *name*, lapsing an expired transient DEGRADED first.
+
+        Transient degradation is visibility-only (capacity storms); it must
+        never require an explicit success to clear, so expiry is applied
+        lazily on every read path.
+        """
+        info = self._subsystems.get(name)
+        if (
+            info is not None
+            and info.state == SubsystemState.DEGRADED
+            and info.transient_until is not None
+            and time.monotonic() >= info.transient_until
+        ):
+            info.state = SubsystemState.AVAILABLE
+            info.transient_until = None
+            self.stats.record_transition(
+                name, SubsystemState.DEGRADED, SubsystemState.AVAILABLE,
+                "transient degradation expired",
+            )
+            log.info("Subsystem %r transient degradation expired — AVAILABLE", name)
+        return info
+
     def get_state(self, name: str) -> SubsystemState | None:
         """Return the current state of *name*, or None if unregistered."""
-        info = self._subsystems.get(name)
+        info = self._resolve(name)
         return info.state if info else None
 
     def is_available(self, name: str) -> bool:
         """True only when the subsystem is fully AVAILABLE."""
-        info = self._subsystems.get(name)
+        info = self._resolve(name)
         if info is None:
             return True  # unregistered = not tracked = assume available
         return info.state == SubsystemState.AVAILABLE
 
     def is_usable(self, name: str) -> bool:
         """True when AVAILABLE or DEGRADED (partial functionality OK)."""
-        info = self._subsystems.get(name)
+        info = self._resolve(name)
         if info is None:
             return True
         return info.state != SubsystemState.UNAVAILABLE
@@ -233,7 +263,7 @@ class SubsystemGuard:
             if err:
                 return err
         """
-        info = self._subsystems.get(name)
+        info = self._resolve(name)
         if info is None:
             self.stats.record_check(blocked=False)
             return None
@@ -253,6 +283,7 @@ class SubsystemGuard:
             return
         old = info.state
         info.consecutive_failures = 0
+        info.transient_until = None
         if old == SubsystemState.AVAILABLE:
             return
         info.state = SubsystemState.AVAILABLE
@@ -265,6 +296,9 @@ class SubsystemGuard:
         if info is None:
             return
         old = info.state
+        # An explicit mark supersedes a transient one: from here only a
+        # success/mark_available clears it, never expiry.
+        info.transient_until = None
         if old == SubsystemState.DEGRADED:
             return
         info.state = SubsystemState.DEGRADED
@@ -282,10 +316,46 @@ class SubsystemGuard:
         if old == SubsystemState.UNAVAILABLE:
             return
         info.state = SubsystemState.UNAVAILABLE
+        info.transient_until = None
         if reason:
             info.last_failure_reason = reason
         self.stats.record_transition(name, old, SubsystemState.UNAVAILABLE, reason or "manual")
         log.warning("Subsystem %r marked UNAVAILABLE: %s", name, reason or "manual")
+
+    def mark_degraded_transient(
+        self, name: str, reason: str = "", *, expires_in: float = 120.0
+    ) -> None:
+        """Visibility-only DEGRADED that lapses on its own after *expires_in*.
+
+        Used for model-capacity storms: capacity is excluded from the sticky
+        failure counter entirely (the model breaker owns capacity admission),
+        but the status API should still show the provider as degraded while
+        the storm lasts. Repeated calls refresh the expiry.
+
+        Never downgrades UNAVAILABLE, and never converts a counter-driven
+        DEGRADED into a self-clearing one — real degradation still requires
+        a real success to clear.
+        """
+        info = self._subsystems.get(name)
+        if info is None:
+            return
+        if info.state == SubsystemState.UNAVAILABLE:
+            return
+        if info.state == SubsystemState.DEGRADED and info.transient_until is None:
+            return
+        old = info.state
+        info.transient_until = time.monotonic() + max(1.0, expires_in)
+        if reason:
+            info.last_failure_reason = reason
+        if old != SubsystemState.DEGRADED:
+            info.state = SubsystemState.DEGRADED
+            self.stats.record_transition(
+                name, old, SubsystemState.DEGRADED, reason or "transient degradation"
+            )
+            log.info(
+                "Subsystem %r transiently DEGRADED for %.0fs: %s",
+                name, expires_in, reason or "capacity",
+            )
 
     # ── Automatic threshold-based transitions ────────────────────────
 
@@ -302,6 +372,9 @@ class SubsystemGuard:
         info.consecutive_failures += 1
         info.total_failures += 1
         info.last_failure_at = time.monotonic()
+        # A real failure supersedes any transient marker: from here the
+        # counter owns the state and only a success clears it.
+        info.transient_until = None
         if reason:
             info.last_failure_reason = reason
 
@@ -342,6 +415,7 @@ class SubsystemGuard:
         info.consecutive_failures = 0
         info.total_successes += 1
         info.last_success_at = time.monotonic()
+        info.transient_until = None
 
         old = info.state
         if old != SubsystemState.AVAILABLE:
@@ -359,10 +433,12 @@ class SubsystemGuard:
     # ── Observability ────────────────────────────────────────────────
 
     def get_subsystem(self, name: str) -> SubsystemInfo | None:
-        return self._subsystems.get(name)
+        return self._resolve(name)
 
     def get_status(self) -> dict[str, Any]:
         """Full status snapshot for the REST API."""
+        for name in list(self._subsystems):
+            self._resolve(name)  # lapse expired transient degradations
         subsystems = [info.to_dict() for info in self._subsystems.values()]
         available_count = sum(1 for i in self._subsystems.values()
             if i.state == SubsystemState.AVAILABLE)

@@ -115,6 +115,7 @@ async def generate_with_recovery(
     deadline_seconds: float | None = None,
     cancel_event: asyncio.Event | None = None,
     on_wait: Callable[[float, float, BaseException], None] | None = None,
+    retry_circuit_open: bool = True,
 ) -> T:
     """Run one logical LLM generation with deadline-based recovery.
 
@@ -122,6 +123,11 @@ async def generate_with_recovery(
     error escapes, cancellation fires, or the budget is exhausted — in which
     case the last error is re-raised (after counting one generation failure
     on the model breaker when that error is capacity-class).
+
+    ``retry_circuit_open=False`` makes ``CircuitOpenError`` fast-fail
+    instead of being waited through — the autonomous-loop path re-raises it
+    to the loop manager, which owns pacing between iterations (pinned
+    policy asymmetry).
     """
     budget = policy.deadline_seconds if deadline_seconds is None else deadline_seconds
     deadline = time.monotonic() + max(0.0, budget)
@@ -180,7 +186,13 @@ async def generate_with_recovery(
             if breaker is not None and token is not None:
                 breaker.abandon(token)
             raise
-        except (LLMTransportError, CircuitOpenError) as exc:
+        except CircuitOpenError as exc:
+            if breaker is not None and token is not None:
+                breaker.abandon(token)
+            if not retry_circuit_open:
+                raise
+            last_error = exc
+        except LLMTransportError as exc:
             if breaker is not None and token is not None:
                 breaker.abandon(token)
             last_error = exc

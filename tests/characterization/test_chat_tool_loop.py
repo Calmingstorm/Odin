@@ -257,7 +257,10 @@ class TestToolFailurePaths:
         assert is_error is True
         assert text == "LLM API error: boom"
 
-    async def test_circuit_open_waits_and_retries_once(self):
+    async def test_circuit_open_waits_and_retries(self):
+        # Amended 2026-07-30: the single hardcoded breaker retry became the
+        # shared deadline recovery — an open client breaker is waited
+        # through, then retried; the recovered response is not an error.
         bot, fake = build(
             [
                 CircuitOpenError("codex", 0.0),
@@ -269,7 +272,11 @@ class TestToolFailurePaths:
         assert text == "recovered"
         assert len(fake.calls) == 2
 
-    async def test_circuit_open_retry_failure_is_error(self):
+    async def test_unclassified_error_after_breaker_retry_is_error(self):
+        # Amended 2026-07-30: a breaker-open retry that then hits an
+        # UNCLASSIFIED exception fast-fails through the shared recovery —
+        # the old "(circuit breaker recovery failed)" wording is gone; the
+        # plain terminal error shape is the contract now.
         bot, fake = build(
             [
                 CircuitOpenError("codex", 0.0),
@@ -278,7 +285,7 @@ class TestToolFailurePaths:
         )
         text, _, is_error, _, _ = await run_loop(bot, FakeMessage("go"))
         assert is_error is True
-        assert text.startswith("LLM API error (circuit breaker recovery failed):")
+        assert text == "LLM API error: still down"
 
 
 # ---------------------------------------------------------------------------

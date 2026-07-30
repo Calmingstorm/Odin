@@ -22,6 +22,7 @@ import discord
 
 from ...agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ...async_utils import fire_and_forget
+from ...llm.recovery import generate_with_recovery
 from ...odin_log import get_logger
 from ..background_task import (
     MAX_STEPS,
@@ -463,6 +464,46 @@ class AgentTaskTools:
 
     # --- Agent tool handlers ---
 
+    async def _agent_generate(
+        self,
+        client,
+        *,
+        messages: list[dict],
+        sys_prompt: str,
+        tool_defs: list[dict],
+        agent_effort,
+        resolved_model,
+    ):
+        """One agent LLM generation through the shared recovery policy.
+
+        Replaces the old manager-level bare-``except`` single retry: transient
+        classes (capacity/transport/open breaker) recover here for up to the
+        generation deadline; auth/malformed/quota-exhausted fail fast. The
+        model-scoped breaker is keyed on the agent's EFFECTIVE model, so a
+        fleet mixing models coordinates capacity per model. The manager's
+        iteration wall (wait_for) hard-bounds this call INCLUDING recovery
+        waits; cancellation propagates and releases any held probe.
+        """
+        breaker = self._llm_gateway.capacity_breaker_for(resolved_model)
+        policy = self._llm_gateway.recovery_policy()
+
+        async def _attempt():
+            return await client.chat_with_tools(
+                messages=messages,
+                system=sys_prompt,
+                tools=tool_defs,
+                reasoning_effort=agent_effort,
+                model=resolved_model,
+            )
+
+        resp = await generate_with_recovery(_attempt, policy=policy, breaker=breaker)
+        # Bypass-path success clears a latched llm_* guard key — provenance
+        # only, never the post-await active provider.
+        self._llm_gateway.notify_generation_success(
+            getattr(resp, "provenance_provider", None)
+        )
+        return resp
+
     async def _handle_spawn_agent(self, message: object, inp: dict) -> str:
         """Spawn an autonomous agent for a sub-task.
 
@@ -530,12 +571,13 @@ class AgentTaskTools:
                 self._get_config(), client,
                 model_override=model_override, effort_override=effort_override,
             )
-            resp = await client.chat_with_tools(
+            resp = await self._agent_generate(
+                client,
                 messages=messages,
-                system=sys_prompt,
-                tools=tool_defs,
-                reasoning_effort=agent_effort,
-                model=resolved_model,
+                sys_prompt=sys_prompt,
+                tool_defs=tool_defs,
+                agent_effort=agent_effort,
+                resolved_model=resolved_model,
             )
             return {
                 "text": resp.text,
@@ -842,12 +884,13 @@ class AgentTaskTools:
                     self._get_config(), client,
                     model_override=model_override, effort_override=effort_override,
                 )
-                resp = await client.chat_with_tools(
+                resp = await self._agent_generate(
+                    client,
                     messages=messages,
-                    system=sys,
-                    tools=tool_defs,
-                    reasoning_effort=agent_effort,
-                    model=resolved_model,
+                    sys_prompt=sys,
+                    tool_defs=tool_defs,
+                    agent_effort=agent_effort,
+                    resolved_model=resolved_model,
                 )
                 return {
                     "text": resp.text or "",

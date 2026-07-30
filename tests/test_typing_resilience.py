@@ -361,7 +361,15 @@ class TestCallSitesSurviveTypingFailure:
         async def _cwt(**kwargs):
             return resp
 
-        runner._llm_gateway = SimpleNamespace(call_with_tools=_cwt)
+        from src.llm.model_breaker import ModelBreakerRegistry
+        from src.llm.recovery import RecoveryPolicy
+
+        registry = ModelBreakerRegistry()
+        runner._llm_gateway = SimpleNamespace(
+            call_with_tools=_cwt,
+            capacity_breaker_for=lambda model=None: registry.for_model("codex", "m"),
+            recovery_policy=RecoveryPolicy,
+        )
         kind, val = await runner._call_llm(st)
         assert (kind, val) == ("ok", resp)
         assert ch.typing_calls == 1

@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Literal
 import discord
 
 from ..llm import CircuitOpenError
+from ..llm.recovery import generate_with_recovery
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
@@ -701,55 +702,56 @@ class ToolLoopRunner:
                 )
 
     async def _call_llm(self, st: _ChatTurn):
-        """Guarded LLM call with typing indicator and circuit-breaker recovery.
+        """Guarded LLM call with typing indicator and deadline-based recovery.
 
         Returns ("ok", llm_resp) or ("done", <run() return tuple>).
+
+        Transient failures — capacity (SSE overload inside a 200), transport,
+        and an open client breaker — are retried by the shared recovery
+        policy for up to the configured generation deadline (default 5 min),
+        waiting through breakers and honouring retry_after. Auth failures,
+        malformed requests, and quota exhaustion (429 after the client's own
+        account rotation) still fail fast, exactly as before. /stop
+        interrupts any recovery wait immediately.
         """
         _channel_id = str(st.message.channel.id)
+        breaker = self._llm_gateway.capacity_breaker_for()
+        policy = self._llm_gateway.recovery_policy()
+
+        def _on_wait(wait: float, remaining: float, error: BaseException) -> None:
+            log.info(
+                "LLM recovery (%s): waiting %.1fs, %.0fs of generation budget left",
+                type(error).__name__, wait, remaining,
+            )
+
+        async def _attempt():
+            return await self._llm_gateway.call_with_tools(
+                messages=st.messages,
+                system=st.system_prompt,
+                tools=st.tools or [],
+                user_id=st.user_id,
+                channel_id=_channel_id,
+                tools_used=st.tools_used_in_loop,
+            )
+
         # Typing is best-effort (shared helper): a typing failure — setup or
         # cleanup — must never fail the call or misclassify provider errors.
         async with _best_effort_typing(st.message.channel):
             try:
-                llm_resp = await self._llm_gateway.call_with_tools(
-                    messages=st.messages,
-                    system=st.system_prompt,
-                    tools=st.tools or [],
-                    user_id=st.user_id,
-                    channel_id=_channel_id,
-                    tools_used=st.tools_used_in_loop,
+                llm_resp = await generate_with_recovery(
+                    _attempt,
+                    policy=policy,
+                    breaker=breaker,
+                    cancel_event=st._cancel,
+                    on_wait=_on_wait,
                 )
-            except CircuitOpenError as coe:
-                wait_secs = min(coe.retry_after, 90.0)
-                log.info(
-                    "Circuit breaker open for %s, waiting %.0fs for recovery",
-                    coe.provider,
-                    wait_secs,
-                )
-                await asyncio.sleep(wait_secs)
-                try:
-                    llm_resp = await self._llm_gateway.call_with_tools(
-                        messages=st.messages,
-                        system=st.system_prompt,
-                        tools=st.tools or [],
-                        user_id=st.user_id,
-                        channel_id=_channel_id,
-                        tools_used=st.tools_used_in_loop,
-                    )
-                except Exception as retry_err:
-                    await self._turn_recorder._save_turn_trajectory(
-                        st._trajectory, error=str(retry_err), trace=st.trace
-                    )
-                    self._clear_active(st)
-                    return (
-                        "done",
-                        (
-                            f"LLM API error (circuit breaker recovery failed): {retry_err}",
-                            False,
-                            True,
-                            st.tools_used_in_loop,
-                            False,
-                        ),
-                    )
+            except asyncio.CancelledError:
+                if st._cancel.is_set():
+                    # /stop fired during a recovery wait — the graceful stop
+                    # path, not an error turn (same contract as the
+                    # loop-head cancel checks).
+                    return ("done", self._stopped(st, "llm_recovery"))
+                raise
             except Exception as api_err:
                 err_msg = str(api_err) or f"{type(api_err).__name__} (no message)"
                 log.error("LLM API call failed: %s", err_msg, exc_info=True)
@@ -1491,16 +1493,31 @@ class ToolLoopRunner:
         return outcome_text
 
     async def _call_loop_llm(self, st: _LoopTurn):
-        """LLM call for one loop iteration. CircuitOpenError re-raises to the
-        loop manager (policy asymmetry — the manager owns backoff).
+        """LLM call for one loop iteration with deadline-based recovery.
+
+        Typed capacity/transport failures are retried in-iteration by the
+        shared recovery policy; CircuitOpenError still re-raises to the loop
+        manager (policy asymmetry — the manager owns backoff between
+        iterations). The gateway bypass itself is unchanged (RFC-001 §4.3).
 
         Returns ("ok", response) or ("done", <run_autonomous() return str>).
         """
-        try:
-            response = await self._llm_gateway.active_client.chat_with_tools(
+        breaker = self._llm_gateway.capacity_breaker_for()
+        policy = self._llm_gateway.recovery_policy()
+
+        async def _attempt():
+            return await self._llm_gateway.active_client.chat_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
                 tools=st.tools or [],
+            )
+
+        try:
+            response = await generate_with_recovery(
+                _attempt,
+                policy=policy,
+                breaker=breaker,
+                retry_circuit_open=False,
             )
         except CircuitOpenError:
             raise
@@ -1516,6 +1533,12 @@ class ToolLoopRunner:
                     error_text=str(e),
                 ),
             )
+        # Bypass-path success: clear a latched llm_* guard key using the
+        # response's immutable provenance (never the post-await active
+        # provider) — the production mark_available wiring.
+        self._llm_gateway.notify_generation_success(
+            getattr(response, "provenance_provider", None)
+        )
         return ("ok", response)
 
     def _record_loop_iteration(self, st: _LoopTurn, response, _iteration: int) -> bool:
