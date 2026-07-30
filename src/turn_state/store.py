@@ -265,13 +265,18 @@ class TurnStateStore:
     def _fenced_update(
         self, lease: TurnLease, set_sql: str, params: list, *, bump_revision: bool = True
     ) -> None:
-        """Run one UPDATE fenced on (generation, revision, lease token)."""
+        """Run one UPDATE under the COMPLETE live fence: generation,
+        expected revision, lease token, ACTIVE status, and unexpired lease
+        (round-2 blocker #1, PR #242 — an expired-lease owner must never
+        renew itself through a checkpoint; the fence is identical for turn
+        and ledger writes)."""
         conn = self._require()
         new_revision = lease.revision + 1 if bump_revision else lease.revision
         sql = (
             f"UPDATE turns SET {set_sql}, revision=? "
             "WHERE source=? AND channel_id=? AND message_id=? "
-            "AND turn_generation=? AND revision=? AND lease_token=?"
+            "AND turn_generation=? AND revision=? AND lease_token=? "
+            "AND status=? AND lease_expires_at > ?"
         )
         try:
             with self._write_lock:
@@ -279,7 +284,7 @@ class TurnStateStore:
                     sql,
                     [*params, new_revision, lease.key.source, lease.key.channel_id,
                      lease.key.message_id, lease.generation, lease.revision,
-                     lease.token],
+                     lease.token, TurnStatus.ACTIVE, time.time()],
                 )
                 conn.commit()
         except sqlite3.Error as exc:
@@ -366,7 +371,10 @@ class TurnStateStore:
                 except sqlite3.IntegrityError:
                     return None, self._classify_existing_row(key, now)
         except sqlite3.Error:
-            log.exception("Turn admission failed — running without durability")
+            log.exception(
+                "Turn admission I/O failure — identity unverifiable "
+                "(caller fail-closes when the store was wired available)"
+            )
             return None, "store_unavailable"
         return (
             TurnLease(key=key, generation=generation, token=token, revision=0),
@@ -720,6 +728,28 @@ class TurnStateStore:
             log.info("Resumable turn %s rejected: %s", key, reason)
         except sqlite3.Error:
             log.exception("reject_resumable failed (non-fatal)")
+
+    def mark_ops_manual_sync(self, key: TurnKey, generation: str) -> int:
+        """OUTCOME_UNKNOWN → MANUAL_RESOLUTION_REQUIRED for a turn whose
+        continuation is being halted (round-2 blocker #6, PR #242). Both
+        states are in the never-auto-expire set; this transition records
+        that a human was told and owns the reconciliation now."""
+        conn = self._require()
+        try:
+            with self._write_lock:
+                cur = conn.execute(
+                    "UPDATE operations SET state=?, updated_at=? "
+                    "WHERE source=? AND channel_id=? AND message_id=? "
+                    "AND turn_generation=? AND state=?",
+                    [OpState.MANUAL_RESOLUTION_REQUIRED, time.time(),
+                     key.source, key.channel_id, key.message_id, generation,
+                     OpState.OUTCOME_UNKNOWN],
+                )
+                conn.commit()
+            return cur.rowcount
+        except sqlite3.Error:
+            log.exception("mark_ops_manual failed (non-fatal)")
+            return 0
 
     def release_acquired_sync(
         self, lease: TurnLease, *, terminal_reason: str | None = None

@@ -278,3 +278,58 @@ class TestStorageRedaction:
         assert secret not in encoded
         # Innocent arguments are untouched.
         assert "https://x" in encoded
+
+
+class TestStorageRedactionAllCopies:
+    """Round-2 blocker #5 (PR #242): the storage scrub covers EVERY
+    persisted copy of tool arguments, nested values, and tool-aware
+    privacy fields."""
+
+    def _payload_with(self, tool_name, tool_input):
+        blobs, store, load = _blob_dict()
+        st = _full_turn()
+        st.messages.append({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use", "id": "call_9", "name": tool_name,
+                "input": tool_input,
+            }],
+        })
+        st._trajectory.iterations.append(
+            ToolIteration(
+                iteration=1,
+                tool_calls=[{"id": "call_9", "name": tool_name,
+                             "input": tool_input}],
+                tool_results=[], llm_text="", input_tokens=0, output_tokens=0,
+                duration_ms=0, provider="codex", model="m",
+                reasoning_effort=None,
+            )
+        )
+        return json.dumps(snapshot_chat_turn(st, store_blob=store, generation_seq=2))
+
+    def test_nested_secret_values_are_scrubbed_everywhere(self):
+        secret = "sk-" + "b" * 24
+        encoded = self._payload_with(
+            "http_post",
+            {"url": "https://x", "headers": {"Authorization": f"token={secret}"},
+             "variants": [{"auth": f"api_key={secret}"}]},
+        )
+        assert secret not in encoded  # transcript AND trajectory copies
+        assert "https://x" in encoded
+
+    def test_email_body_privacy_redaction_applies(self):
+        encoded = self._payload_with(
+            "email_send",
+            {"to": "a@b.c", "subject": "hi",
+             "body": "Deeply personal contents that are not token-shaped."},
+        )
+        assert "Deeply personal contents" not in encoded
+        assert "redacted email body" in encoded
+
+    def test_non_string_scalars_pass_through_the_scrub(self):
+        from src.turn_state.codec import scrub_stored_tool_input
+
+        out = scrub_stored_tool_input(
+            "run_command", {"count": 3, "flag": True, "ratio": 1.5, "none": None}
+        )
+        assert out == {"count": 3, "flag": True, "ratio": 1.5, "none": None}

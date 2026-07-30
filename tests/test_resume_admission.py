@@ -252,9 +252,9 @@ class TestAutoResume:
 
         key = TurnKey("discord", rows[0]["channel_id"], rows[0]["message_id"])
         h.manager.on_turn_suspended(key, rows[0]["generation"])
-        for _ in range(200):
+        for _ in range(600):
             await asyncio.sleep(0.02)
-            if h.row()[0] != TurnStatus.SUSPENDED:
+            if h.row()[0] in TurnStatus.TERMINAL:
                 break
         assert h.row()[0] == TurnStatus.TERMINAL_COMPLETED
         # The reply landed against the ORIGINAL message.
@@ -274,8 +274,11 @@ class TestAutoResume:
 
         key = TurnKey("discord", rows[0]["channel_id"], rows[0]["message_id"])
         h.manager.on_turn_suspended(key, rows[0]["generation"])
-        await asyncio.sleep(0.06)  # baseline sampled while the breaker paces
+        await asyncio.sleep(0.06)  # waiter parked while the breaker paces
+        # A real intervening turn appends user + assistant (+2) — beyond the
+        # single preservation-marker growth (+1) the waiter tolerates.
         h.bot.sessions.add_message(str(original.channel.id), "user", "new topic")
+        h.bot.sessions.add_message(str(original.channel.id), "assistant", "answered")
         await asyncio.sleep(0.02)
         make_breaker_probe_ready(h)  # capacity "returns" AFTER the advance
         await asyncio.sleep(0.3)
@@ -369,3 +372,88 @@ class TestWaiterRegistry:
         assert h.manager._waiters.get(key) is second  # successor survives
         second.cancel()
         await asyncio.sleep(0)
+
+
+class TestUnknownOutcomeHaltsContinuation:
+    """Round-2 blocker #6 (PR #242): unresolved OUTCOME_UNKNOWN operations
+    HALT continuation — enforcement, not model-facing advice."""
+
+    async def _suspend_with_unknown(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        h.store._conn.execute(
+            "UPDATE operations SET state=?", [OpState.OUTCOME_UNKNOWN]
+        )
+        h.store._conn.commit()
+        return h, original
+
+    async def test_explicit_resume_halts_and_hands_to_human(self, tmp_path):
+        h, original = await self._suspend_with_unknown(tmp_path)
+        heal_capacity(h, text_response("must never generate"))
+        calls_before = len(h.fake.calls)
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        assert "UNKNOWN outcomes" in result[0]
+        assert "parse_time" in result[0]
+        assert len(h.fake.calls) == calls_before  # NO generation happened
+        status = h.store._conn.execute("SELECT status FROM turns").fetchone()[0]
+        assert status == TurnStatus.TERMINAL_REJECTED
+        op_state = h.store._conn.execute(
+            "SELECT state FROM operations"
+        ).fetchone()[0]
+        assert op_state == OpState.MANUAL_RESOLUTION_REQUIRED
+
+    async def test_auto_resume_stands_down_on_unknowns(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tr, "_AUTO_POLL_SECONDS", 0.02)
+        h, original = await self._suspend_with_unknown(tmp_path)
+        heal_capacity(h, text_response("must never generate"))
+        rows = h.store.list_suspended_sync("discord")
+        from src.turn_state import TurnKey
+
+        key = TurnKey("discord", rows[0]["channel_id"], rows[0]["message_id"])
+        h.manager.on_turn_suspended(key, rows[0]["generation"])
+        await asyncio.sleep(0.3)
+        status = h.store._conn.execute("SELECT status FROM turns").fetchone()[0]
+        assert status == TurnStatus.SUSPENDED  # untouched, awaiting a human
+        for task in list(h.manager._waiters.values()):
+            task.cancel()
+
+
+class TestProductionPipelinePath:
+    async def test_suspension_bookkeeping_is_plus_one_and_auto_resume_admits(
+        self, tmp_path, monkeypatch
+    ):
+        """Round-2 blocker #3 (PR #242): drive the REAL MessagePipeline
+        (user message appended BEFORE the turn, preservation marker after
+        → +1), then prove the waiter's arithmetic admits auto-resume."""
+        monkeypatch.setattr(tr, "_AUTO_POLL_SECONDS", 0.05)
+        h2 = Harness([tool_call_response(("parse_time", {"text": "x"}))], tmp_path)
+        h2.fake.responses.append(capacity_forever(h2.fake))
+        h2.bot.pipeline._turn_resume = h2.manager
+        original = FakeMessage("please do the long thing")
+        h2.register(original)
+        await h2.bot.pipeline.run(original, original.content)
+
+        ch_id = str(original.channel.id)
+        session = h2.bot.sessions._sessions.get(ch_id)
+        assert session is not None
+        # +1 bookkeeping: the suspension callback captured a length that
+        # already included the user message; only the marker follows.
+        marker = session.messages[-1].content
+        assert "PRESERVED" in marker
+        assert h2.row()[0] == TurnStatus.SUSPENDED
+
+        heal_capacity(h2, text_response("Pipeline auto-finish."))
+        # Wait for a TERMINAL status — the row passes through ACTIVE while
+        # the auto-resume runs (breaking on first non-SUSPENDED raced the
+        # in-flight resume under coverage instrumentation).
+        for _ in range(600):
+            await asyncio.sleep(0.05)
+            if h2.row()[0] in TurnStatus.TERMINAL:
+                break
+        assert h2.row()[0] == TurnStatus.TERMINAL_COMPLETED
+        assert any(
+            "Pipeline auto-finish." in (r["content"] or "")
+            for r in original.replies
+        )
+        for task in list(h2.manager._waiters.values()):
+            task.cancel()

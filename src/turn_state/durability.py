@@ -41,13 +41,25 @@ from typing import Any
 
 from ..odin_log import get_logger
 from .codec import compute_content_digest, snapshot_chat_turn
-from .store import OpState, TurnKey, TurnLease, TurnStateStore, TurnStatus
+from .store import (
+    OpState,
+    StaleTurnError,
+    TurnKey,
+    TurnLease,
+    TurnStateStore,
+    TurnStateUnavailableError,
+    TurnStatus,
+)
 
 log = get_logger("turn_state")
 
 # Bound stored per-op result text (the model-visible copy already rides the
 # transcript; the ledger copy is for replay/reconciliation).
 _OP_RESULT_CAP = 4000
+
+# Heartbeat cadence floor — the interval is lease_ttl/3 but never busier
+# than this (module-level so tests can drive real beats fast).
+_HEARTBEAT_FLOOR_SECONDS = 5.0
 
 
 def _hash_text(text: str) -> str:
@@ -71,9 +83,14 @@ class TurnDurability:
         # One-shot remaining budget for a resumed generation (see resumed()).
         self._resume_budget: float | None = None
         # Admission refusal disposition (review blocker #2, PR #242):
-        # "already_processed" / "in_progress" / "resumable" — the loop must
-        # REFUSE fresh execution, never run unledgered. None = no refusal.
+        # "already_processed" / "in_progress" / "resumable" /
+        # "admission_error" — the loop must REFUSE fresh execution, never
+        # run unledgered. None = no refusal.
         self.blocked: str | None = None
+        # Lease maintenance (round-2 blocker #1): tools run up to 3660s and
+        # generations up to 3600s against a 120s lease — the owner beats it
+        # alive for the turn's whole life.
+        self._heartbeat_task: asyncio.Task | None = None
 
     # -- construction --------------------------------------------------
 
@@ -121,12 +138,25 @@ class TurnDurability:
                 session_snapshot=session_snapshot,
             )
         except Exception:
-            log.exception("Turn admission failed — running without durability")
-            return cls.disabled()
+            # The store was wired available; an admission failure here means
+            # the identity could not be checked — refuse (round-2 blocker #2).
+            log.exception("Turn admission raised — refusing execution (fail closed)")
+            handle = cls.disabled()
+            handle.blocked = "admission_error"
+            return handle
         if lease is not None:
-            return cls(store, lease)
+            handle = cls(store, lease)
+            handle._start_heartbeats()
+            return handle
         if disposition == "store_unavailable":
-            return cls.disabled()
+            # The store was wired available but an admission I/O failure
+            # means this message's identity COULD NOT be checked — refusing
+            # is the only safe answer (round-2 blocker #2, PR #242). Legacy
+            # execution is reserved for durability being off/failed at
+            # wiring, where no ledger can exist to contradict.
+            handle = cls.disabled()
+            handle.blocked = "admission_error"
+            return handle
         handle = cls.disabled()
         handle.blocked = disposition
         return handle
@@ -151,6 +181,7 @@ class TurnDurability:
         handle = cls(store, lease)
         handle.generation_seq = int(generation_seq)
         handle._resume_budget = first_generation_budget
+        handle._start_heartbeats()
         return handle
 
     def pop_resume_budget(self) -> float | None:
@@ -173,6 +204,44 @@ class TurnDurability:
     @property
     def lease(self) -> TurnLease | None:
         return self._lease
+
+    # -- lease maintenance ---------------------------------------------
+
+    def _start_heartbeats(self) -> None:
+        if self._store is None or self._lease is None:
+            return
+        interval = max(_HEARTBEAT_FLOOR_SECONDS, float(self._store.lease_ttl) / 3.0)
+        store, lease = self._store, self._lease
+
+        async def _beat() -> None:
+            while True:
+                await asyncio.sleep(interval)
+                if not self.enabled:
+                    return
+                try:
+                    await asyncio.to_thread(store.heartbeat_sync, lease)
+                except StaleTurnError:
+                    log.warning(
+                        "Turn %s lost its lease during heartbeat — another "
+                        "owner or a sweep took it; the next fenced write "
+                        "fail-closes this turn", lease.key,
+                    )
+                    return
+                except TurnStateUnavailableError:
+                    log.warning(
+                        "Turn heartbeat write failed for %s (store trouble); "
+                        "the next fenced write fail-closes the turn", lease.key,
+                    )
+                    return
+
+        self._heartbeat_task = asyncio.get_running_loop().create_task(
+            _beat(), name=f"turn-heartbeat:{lease.key.channel_id}:{lease.key.message_id}"
+        )
+
+    def _stop_heartbeats(self) -> None:
+        task, self._heartbeat_task = self._heartbeat_task, None
+        if task is not None:
+            task.cancel()
 
     # -- snapshot plumbing (runs in a worker thread: blob writes + sqlite) --
 
@@ -307,6 +376,10 @@ class TurnDurability:
         preserved checkpoint that does not exist)."""
         if not self.enabled:
             return False
+        # Beats stop first; the suspension write still lands inside the
+        # last-beat + TTL window, and a failed suspension falls through to
+        # settle_terminal which needs no live beats either.
+        self._stop_heartbeats()
         extra: dict = {"suspend_reason": reason}
         try:
             if st.trace is not None:
@@ -340,6 +413,7 @@ class TurnDurability:
         No further external effect follows, so a failure here must not
         destroy an already-computed reply — log and move on.
         """
+        self._stop_heartbeats()  # unconditionally — every turn exit lands here
         if not self.enabled:
             return
         if cancelled or self.cancelled:

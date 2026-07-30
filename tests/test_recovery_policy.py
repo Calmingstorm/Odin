@@ -260,3 +260,35 @@ async def test_probe_released_when_cancel_interrupts_attempt():
     await canceller
     # The held probe slot was released — the next caller can probe.
     assert breaker.state != "probing"
+
+
+async def test_parent_cancellation_unwinds_the_attempt():
+    """Round-2 blocker #4 (PR #242): cancelling the RECOVERY OWNER task must
+    cancel and await the in-flight attempt too — an orphaned provider
+    request must not outlive its abandoned breaker probe."""
+    cancel = asyncio.Event()  # never fires; parent cancellation is the test
+    attempt_cancelled = asyncio.Event()
+    attempt_started = asyncio.Event()
+
+    async def slow_attempt():
+        attempt_started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            attempt_cancelled.set()
+            raise
+        return "never"
+
+    owner = asyncio.create_task(
+        generate_with_recovery(
+            slow_attempt,
+            policy=RecoveryPolicy(deadline_seconds=60.0),
+            cancel_event=cancel,
+        )
+    )
+    await asyncio.wait_for(attempt_started.wait(), timeout=5)
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    # The attempt was unwound BEFORE the owner finished — not orphaned.
+    assert attempt_cancelled.is_set()

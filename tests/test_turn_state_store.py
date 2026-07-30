@@ -554,3 +554,74 @@ class TestStoragePermissions:
         assert blob_dir_mode == 0o700
         assert blob_mode == 0o600
         s.close()
+
+
+class TestFullFenceOnTurnWrites:
+    """Round-2 blocker #1 (PR #242): every turn write honors the complete
+    live fence — an expired-lease owner can neither checkpoint (which used
+    to silently RENEW the lease) nor settle."""
+
+    def _expire(self, store):
+        import time as _time
+
+        store._conn.execute("UPDATE turns SET lease_expires_at=?", [_time.time() - 5])
+        store._conn.commit()
+
+    def test_expired_lease_checkpoint_is_rejected(self, store):
+        lease = _admit(store)
+        self._expire(store)
+        with pytest.raises(StaleTurnError):
+            store.checkpoint_sync(lease, {"continued": True}, progressed=True)
+        # And crucially it did NOT renew the lease.
+        (expires,) = store._conn.execute(
+            "SELECT lease_expires_at FROM turns"
+        ).fetchone()
+        import time as _time
+
+        assert expires < _time.time()
+
+    def test_expired_lease_settle_is_rejected(self, store):
+        lease = _admit(store)
+        store.record_intents_sync(
+            lease, 0, [{"tool_call_id": "c1", "tool_name": "t", "tool_input": {}}]
+        )
+        store.mark_running_sync(lease, 0, "c1")
+        self._expire(store)
+        with pytest.raises(StaleTurnError):
+            store.settle_op_sync(lease, 0, "c1", state=OpState.APPLIED,
+                                 result_text="ok")
+
+    def test_heartbeat_extends_across_the_ttl(self, tmp_path):
+        import time as _time
+
+        s = TurnStateStore(tmp_path / "hb.sqlite3", blob_dir=tmp_path / "b",
+                           lease_ttl=0.5)
+        lease = _admit(s)
+        _time.sleep(0.3)
+        s.heartbeat_sync(lease)
+        _time.sleep(0.3)  # past the original expiry, inside the beaten one
+        s.checkpoint_sync(lease, {"alive": True}, progressed=True)  # no raise
+        s.close()
+
+
+class TestMarkOpsManual:
+    def test_unknowns_move_to_manual(self, store):
+        lease = _admit(store)
+        store.record_intents_sync(
+            lease, 0,
+            [{"tool_call_id": "a", "tool_name": "t", "tool_input": {}},
+             {"tool_call_id": "b", "tool_name": "t", "tool_input": {}}],
+        )
+        store.settle_op_sync(lease, 0, "a", state=OpState.APPLIED, result_text="r")
+        store._conn.execute(
+            "UPDATE operations SET state=? WHERE tool_call_id='b'",
+            [OpState.OUTCOME_UNKNOWN],
+        )
+        store._conn.commit()
+        moved = store.mark_ops_manual_sync(KEY, lease.generation)
+        assert moved == 1
+        states = dict(store._conn.execute(
+            "SELECT tool_call_id, state FROM operations"
+        ).fetchall())
+        assert states["a"] == OpState.APPLIED  # settled rows untouched
+        assert states["b"] == OpState.MANUAL_RESOLUTION_REQUIRED

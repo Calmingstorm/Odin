@@ -452,6 +452,11 @@ class ToolLoopRunner:
                     "This request has preserved, resumable work — say "
                     "`resume` to continue it instead of starting over."
                 ),
+                "admission_error": (
+                    "The durability ledger is unreachable, so I can't verify "
+                    "whether this exact request already ran. Refusing to "
+                    "execute it blind — try again shortly."
+                ),
             }
             text = notices.get(
                 st.durability.blocked, "This request cannot be re-run."

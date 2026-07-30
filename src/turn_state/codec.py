@@ -100,28 +100,52 @@ def compute_content_digest(text: str) -> str:
 # ── storage redaction ────────────────────────────────────────────────
 
 
-def _scrub_tool_use_inputs(obj: Any) -> Any:
-    """Secret-scrub string values inside assistant ``tool_use`` inputs
-    before they hit durable storage (review blocker #8, PR #242) — the
-    parity move with audit storage, which deliberately scrubs tool inputs.
+def _deep_scrub_strings(value: Any) -> Any:
+    """Recursive secret-pattern scrub over EVERY nested string value."""
+    if isinstance(value, str):
+        return scrub_output_secrets(value)
+    if isinstance(value, list):
+        return [_deep_scrub_strings(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _deep_scrub_strings(v) for k, v in value.items()}
+    return value
+
+
+def scrub_stored_tool_input(tool_name: str, tool_input: Any) -> Any:
+    """The storage scrub for tool arguments (round-2 blocker #5, PR #242):
+    the SAME tool-aware privacy redaction audit storage uses
+    (`_scrub_tool_input_for_storage` — e.g. email bodies, which are not
+    token-shaped), composed with a recursive secret-pattern scrub so nested
+    values (auth headers, embedded dicts/lists) are covered too. Applied to
+    EVERY persisted representation of the arguments.
 
     Tool RESULTS are already scrubbed at source (`_run_one_tool` runs
     scrub_output_secrets before building the result block), and
     credential-bearing USER messages are deleted by the intake secret gate
-    before a turn ever starts — tool arguments were the remaining
-    unscrubbed surface. The scrub applies at SNAPSHOT time only, so a
-    resumed transcript shows the model its own arguments with any embedded
-    secrets masked; the executed effect already happened and is unaffected.
+    before a turn ever starts. The scrub applies at SNAPSHOT time only, so
+    a resumed transcript shows the model its own arguments with secrets
+    masked; the executed effect already happened and is unaffected.
     """
+    from ..discord.tool_loop_helpers import _scrub_tool_input_for_storage
+
+    if isinstance(tool_input, dict):
+        tool_input = _scrub_tool_input_for_storage(tool_name or "", tool_input)
+    return _deep_scrub_strings(tool_input)
+
+
+def _scrub_tool_use_inputs(obj: Any) -> Any:
+    """Apply the storage scrub to assistant ``tool_use`` blocks in the
+    transcript (name-aware — the block carries the tool name)."""
     if isinstance(obj, list):
         return [_scrub_tool_use_inputs(x) for x in obj]
     if isinstance(obj, dict):
         if obj.get("type") == "tool_use" and isinstance(obj.get("input"), dict):
-            scrubbed = {
-                k: scrub_output_secrets(v) if isinstance(v, str) else v
-                for k, v in obj["input"].items()
+            return {
+                **obj,
+                "input": scrub_stored_tool_input(
+                    str(obj.get("name") or ""), obj["input"]
+                ),
             }
-            return {**obj, "input": scrubbed}
         return {k: _scrub_tool_use_inputs(v) for k, v in obj.items()}
     return obj
 
@@ -202,9 +226,30 @@ def import_stuck_tracker(state: dict, tracker_cls):
 
 def _trajectory_to_payload(trajectory) -> dict:
     """FULL trajectory state (unlike TrajectoryTurn.to_dict, which is lossy
-    by design for the JSONL files). Iterations ride as asdict() rows; the
-    saved iteration count is the anti-double-append revision (Odin round-2:
-    "resumption cannot append the same iteration twice")."""
+    by design for the JSONL files). Iterations ride as asdict() rows with
+    their tool-call ARGUMENTS passed through the storage scrub — this copy
+    persists the same raw inputs the transcript does and must get the same
+    redaction (round-2 blocker #5, PR #242). The saved iteration count is
+    the anti-double-append revision (Odin round-2: "resumption cannot
+    append the same iteration twice")."""
+
+    def _scrubbed_iteration(it) -> dict:
+        row = asdict(it)
+        calls = row.get("tool_calls")
+        if isinstance(calls, list):
+            row["tool_calls"] = [
+                {
+                    **tc,
+                    "input": scrub_stored_tool_input(
+                        str(tc.get("name") or ""), tc.get("input")
+                    ),
+                }
+                if isinstance(tc, dict)
+                else tc
+                for tc in calls
+            ]
+        return row
+
     return {
         "message_id": trajectory.message_id,
         "channel_id": trajectory.channel_id,
@@ -215,7 +260,7 @@ def _trajectory_to_payload(trajectory) -> dict:
         "user_content": trajectory.user_content,
         "system_prompt": trajectory.system_prompt,
         "history": list(trajectory.history or []),
-        "iterations": [asdict(it) for it in trajectory.iterations],
+        "iterations": [_scrubbed_iteration(it) for it in trajectory.iterations],
         "final_response": trajectory.final_response,
         "tools_used": list(trajectory.tools_used or []),
         "is_error": trajectory.is_error,

@@ -525,3 +525,97 @@ class TestRedeliveryRefusal:
         bot.tool_executor.execute.assert_not_awaited()
         (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
         assert status == TurnStatus.SUSPENDED  # untouched
+
+
+class TestLeaseHeartbeats:
+    async def test_long_tool_outlives_the_lease_ttl(self, tmp_path):
+        """Round-2 blocker #1 (PR #242): the owner beats the lease alive, so
+        a tool longer than the TTL settles fine and the turn completes."""
+        import asyncio
+
+        from src.tools.result_validator import ToolResult
+
+        bot, fake, store = build_with_store(
+            [
+                tool_call_response(("run_command", {"command": "slow"})),
+                text_response("survived the long tool"),
+            ],
+            tmp_path,
+        )
+        store.lease_ttl = 0.4  # heartbeat interval becomes ~5s floor... force lower
+        # The durability heartbeat floors at 5s; drop the floor via the
+        # store's ttl AND patch the interval floor for the test.
+        import src.turn_state.durability as dur_mod
+
+        original_start = dur_mod.TurnDurability._start_heartbeats
+
+        def fast_start(self):
+            if self._store is None or self._lease is None:
+                return
+            store_, lease_ = self._store, self._lease
+
+            async def _beat():
+                while True:
+                    await asyncio.sleep(0.1)
+                    if not self.enabled:
+                        return
+                    try:
+                        await asyncio.to_thread(store_.heartbeat_sync, lease_)
+                    except Exception:
+                        return
+
+            self._heartbeat_task = asyncio.get_running_loop().create_task(_beat())
+
+        dur_mod.TurnDurability._start_heartbeats = fast_start
+        try:
+            async def slow_tool(tool_name, tool_input, *, user_id=None):
+                await asyncio.sleep(1.0)  # 2.5x the lease TTL
+                return ToolResult(output="done slowly", tool_name=tool_name)
+
+            bot.tool_executor.execute = slow_tool
+            text, _, is_error, *_ = await run_loop(bot, FakeMessage("go"))
+            assert text == "survived the long tool"
+            assert is_error is False
+            (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+            assert status == TurnStatus.TERMINAL_COMPLETED
+        finally:
+            dur_mod.TurnDurability._start_heartbeats = original_start
+
+
+class TestAdmissionFailClosed:
+    async def test_runtime_admission_failure_refuses_execution(self, tmp_path):
+        """Round-2 blocker #2 (PR #242): once the store was wired available,
+        an admission I/O failure refuses execution — never a fresh-identity
+        guess."""
+        import sqlite3 as _sqlite3
+        from unittest.mock import AsyncMock
+
+        bot, fake, store = build_with_store([text_response("never")], tmp_path)
+
+        def raising_admit(*a, **k):
+            raise _sqlite3.OperationalError("disk I/O error")
+
+        store.admit_turn_sync = raising_admit
+        bot.tool_executor.execute = AsyncMock()
+        text, _, is_error, tools, _ = await run_loop(bot, FakeMessage("go"))
+        assert "can't verify" in text
+        assert tools == []
+        bot.tool_executor.execute.assert_not_awaited()
+        assert len(fake.calls) == 0  # no generation either
+
+    async def test_store_unavailable_disposition_also_refuses(self, tmp_path):
+        from unittest.mock import AsyncMock
+
+        bot, fake, store = build_with_store([text_response("never")], tmp_path)
+        store.admit_turn_sync = lambda *a, **k: (None, "store_unavailable")
+        bot.tool_executor.execute = AsyncMock()
+        text, *_ = await run_loop(bot, FakeMessage("go"))
+        assert "can't verify" in text
+        assert len(fake.calls) == 0
+
+    async def test_feature_off_still_runs_legacy(self, tmp_path):
+        bot, fake, store = build_with_store([text_response("legacy ok")], tmp_path)
+        bot.tool_loop._turn_store = None  # durability off at wiring
+        text, _, is_error, *_ = await run_loop(bot, FakeMessage("go"))
+        assert text == "legacy ok"
+        assert is_error is False

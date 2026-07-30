@@ -128,12 +128,14 @@ class TurnResumeManager:
         """Wait for capacity, then resume IF nothing else happened.
 
         The advance check anchors on the session length captured AT
-        SUSPENSION (``suspend_len``): the only legitimate growth afterwards
-        is the suspending turn's own intake bookkeeping (exactly +2: the
-        user message and the preserved-marker; a directly-driven turn adds
-        0). Anything else — or an unreadable session — stands auto-resume
-        down fail-safe; explicit resume stays available. No sampling window
-        exists for a stranger message to sneak into the baseline.
+        SUSPENSION (``suspend_len``). Production ordering (round-2 blocker
+        #3, PR #242): intake appends the USER message BEFORE the turn runs,
+        so the suspension capture already includes it, and the only
+        legitimate growth afterwards is the assistant preservation marker —
+        exactly +1 (a directly-driven turn adds 0). Anything else — or an
+        unreadable session — stands auto-resume down fail-safe; explicit
+        resume stays available. No sampling window exists for a stranger
+        message to sneak into the baseline.
 
         Capacity detection is ACTIVE: a quiet breaker is never probed by
         anyone, so the waiter claims the probe slot itself when the cooldown
@@ -145,7 +147,7 @@ class TurnResumeManager:
         """
         give_up_at = time.monotonic() + self._resume_ttl_hours * 3600.0
         breaker = self._llm_gateway.capacity_breaker_for()
-        allowed = {suspend_len, suspend_len + 2} if suspend_len >= 0 else set()
+        allowed = {suspend_len, suspend_len + 1} if suspend_len >= 0 else set()
         while time.monotonic() < give_up_at:
             await asyncio.sleep(_AUTO_POLL_SECONDS)
             row = await asyncio.to_thread(self._store.load_resumable_sync, key)
@@ -180,6 +182,14 @@ class TurnResumeManager:
             return -1
 
     async def _run_auto_resume(self, key: TurnKey, row: dict) -> None:
+        if self._unresolved_ops(row):
+            # Never auto-continue over ambiguous external effects — a human
+            # must look at this (explicit resume delivers the details).
+            log.warning(
+                "Auto-resume for %s stands down permanently: unresolved "
+                "operations require manual resolution", key,
+            )
+            return
         async with self._channel_lock(key.channel_id):
             if self._channel_state.active_requests.get(key.channel_id):
                 log.info("Auto-resume for %s stands down: channel busy", key)
@@ -227,6 +237,22 @@ class TurnResumeManager:
     def is_resume_trigger(content: str) -> bool:
         return (content or "").strip().lower().rstrip("!.") in RESUME_TRIGGERS
 
+    @staticmethod
+    def _unresolved_ops(row: dict) -> list[dict]:
+        """Operations whose external outcome is not settled. Their presence
+        HALTS continuation (round-2 blocker #6, PR #242): 'never auto-rerun'
+        is enforced by not generating, not by asking the model nicely."""
+        blocked_states = {
+            OpState.OUTCOME_UNKNOWN,
+            OpState.MANUAL_RESOLUTION_REQUIRED,
+            OpState.PREPARED,
+            OpState.RUNNING,
+        }
+        return [
+            op for op in (row.get("operations") or [])
+            if op.get("state") in blocked_states
+        ]
+
     async def try_explicit_resume(self, message: Any):
         """Resume the channel's suspended turn when *message* is a trigger.
 
@@ -260,6 +286,33 @@ class TurnResumeManager:
         waiter = self._waiters.pop(key, None)
         if waiter is not None:
             waiter.cancel()
+        unresolved = self._unresolved_ops(row)
+        if unresolved:
+            # Halt: continuation would let a later generation re-issue the
+            # same effect under a fresh call id. Hand the ambiguity to the
+            # human and close the turn out.
+            names = ", ".join(
+                sorted({str(op.get("tool_name") or "unknown") for op in unresolved})
+            )
+            moved = await asyncio.to_thread(
+                self._store.mark_ops_manual_sync, key, row["generation"]
+            )
+            await asyncio.to_thread(
+                self._store.reject_resumable_sync, key,
+                f"{len(unresolved)} unresolved operation(s) — manual resolution",
+            )
+            log.warning(
+                "Resume of %s halted: %d unresolved op(s) (%d moved to manual)",
+                key, len(unresolved), moved,
+            )
+            return (
+                f"I can't safely continue that work: {len(unresolved)} "
+                f"interrupted operation(s) ({names}) have UNKNOWN outcomes — "
+                "they may or may not have applied, and I will not re-run "
+                "them automatically. Verify their current state, then ask "
+                "fresh for whatever is still needed.",
+                False, False, [], False,
+            )
         st, _original, reason = await self._validate_and_rebuild(key, row)
         if st is None:
             return (

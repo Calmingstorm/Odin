@@ -122,14 +122,18 @@ async def _attempt_cancellable(
         )
         if attempt_task in done:
             return attempt_task.result()
-        attempt_task.cancel()
-        with contextlib.suppress(BaseException):
-            await attempt_task
         raise asyncio.CancelledError("cancelled during LLM attempt")
     finally:
-        cancel_task.cancel()
-        with contextlib.suppress(BaseException):
-            await cancel_task
+        # Cancellation of the RECOVERY OWNER task lands here too (round-2
+        # blocker #4, PR #242): both helper tasks — including a still-live
+        # provider attempt — must be cancelled AND awaited before control
+        # leaves, so shutdown/task-cancellation never orphans an in-flight
+        # request while the caller releases its breaker probe.
+        for helper in (attempt_task, cancel_task):
+            if not helper.done():
+                helper.cancel()
+            with contextlib.suppress(BaseException):
+                await helper
 
 
 def _notify_wait(
