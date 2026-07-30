@@ -106,6 +106,17 @@ def resume_msg(original, content="resume", author=None):
     return FakeMessage(content, author=author or original.author, channel=original.channel)
 
 
+def rewrite_payload_with_valid_digest(store, payload_text: str) -> None:
+    """Bypass payload-integrity only when a test targets codec validation."""
+    import hashlib
+
+    digest = hashlib.sha256(payload_text.encode()).hexdigest()
+    store._conn.execute(
+        "UPDATE turns SET payload=?, payload_digest=?", [payload_text, digest]
+    )
+    store._conn.commit()
+
+
 def make_breaker_probe_ready(h):
     """Model the production timeline where the breaker cooldown has elapsed
     by the time a resume happens (suspension→resume is minutes, cooldown is
@@ -332,8 +343,7 @@ class TestPostAcquireSafety:
         TERMINAL_REJECTED — never a stranded ACTIVE row invisible to
         resumable queries."""
         h, original = await suspend_turn(tmp_path)
-        h.store._conn.execute("UPDATE turns SET payload='{\"broken\": '")
-        h.store._conn.commit()
+        rewrite_payload_with_valid_digest(h.store, '{"broken": ')
         result = await h.manager.try_explicit_resume(resume_msg(original))
         # Malformed JSON self-heals inside load_resumable (rejected
         # terminally). Round-5 blocker #1: once row_summary established
@@ -345,10 +355,9 @@ class TestPostAcquireSafety:
         assert status == TurnStatus.TERMINAL_REJECTED
         # A structurally-valid-but-unrestorable payload rejects explicitly:
         h2, original2 = await suspend_turn(tmp_path / "second")
-        h2.store._conn.execute(
-            "UPDATE turns SET payload='{\"fields\": {\"stuck_tracker\": 42}}'"
+        rewrite_payload_with_valid_digest(
+            h2.store, '{"fields": {"stuck_tracker": 42}}'
         )
-        h2.store._conn.commit()
         result2 = await h2.manager.try_explicit_resume(resume_msg(original2))
         assert result2 is not None
         assert "could not be restored" in result2[0]
@@ -502,8 +511,7 @@ class TestStructuralPayloadValidation:
         structurally-invalid payload rejects BEFORE any lease exists —
         never bounced back to SUSPENDED for an infinite retry loop."""
         h, original = await suspend_turn(tmp_path)
-        h.store._conn.execute("UPDATE turns SET payload='{}'")
-        h.store._conn.commit()
+        rewrite_payload_with_valid_digest(h.store, "{}")
         result = await h.manager.try_explicit_resume(resume_msg(original))
         assert result is not None
         assert "could not be restored" in result[0]
@@ -718,10 +726,7 @@ class TestRecognizedResumeNeverFallsThrough:
         ).fetchone()
         payload = _json.loads(payload_text)
         payload["generation_seq"] = "bad"
-        h.store._conn.execute(
-            "UPDATE turns SET payload=?", [_json.dumps(payload)]
-        )
-        h.store._conn.commit()
+        rewrite_payload_with_valid_digest(h.store, _json.dumps(payload))
         result = await h.manager.try_explicit_resume(resume_msg(original))
         assert result is not None
         assert "could not be restored" in result[0]
@@ -741,10 +746,7 @@ class TestRecognizedResumeNeverFallsThrough:
         ).fetchone()
         payload = _json.loads(payload_text)
         payload["fields"]["messages"] = [None]
-        h.store._conn.execute(
-            "UPDATE turns SET payload=?", [_json.dumps(payload)]
-        )
-        h.store._conn.commit()
+        rewrite_payload_with_valid_digest(h.store, _json.dumps(payload))
         calls_before = len(h.fake.calls)
         result = await h.manager.try_explicit_resume(resume_msg(original))
         assert result is not None
@@ -772,8 +774,7 @@ class TestGuardRearmImpossible:
         payload = _json.loads(payload_text)
         assert payload["fields"]["hedging_retried"] is True  # consumed
         payload["fields"]["hedging_retried"] = 0  # the tamper
-        h.store._conn.execute("UPDATE turns SET payload=?", [_json.dumps(payload)])
-        h.store._conn.commit()
+        rewrite_payload_with_valid_digest(h.store, _json.dumps(payload))
 
         calls_before = len(h.fake.calls)
         result = await h.manager.try_explicit_resume(resume_msg(original))
@@ -782,3 +783,67 @@ class TestGuardRearmImpossible:
         assert len(h.fake.calls) == calls_before  # ZERO fresh generation
         (status,) = h.store._conn.execute("SELECT status FROM turns").fetchone()
         assert status == TurnStatus.TERMINAL_REJECTED
+
+class TestCheckpointIntegrityRejectsSameTypeTampering:
+    @staticmethod
+    def _tamper_payload(h, mutate):
+        (payload_text,) = h.store._conn.execute(
+            "SELECT payload FROM turns"
+        ).fetchone()
+        payload = json.loads(payload_text)
+        mutate(payload["fields"])
+        # Deliberately bypass the store write API: the stored digest remains
+        # bound to the original bytes, as it would under external corruption.
+        h.store._conn.execute(
+            "UPDATE turns SET payload=?", [json.dumps(payload, sort_keys=True)]
+        )
+        h.store._conn.commit()
+
+    async def test_consumed_true_guard_flipped_false_halts_zero_generation(
+        self, tmp_path
+    ):
+        """Round-6 task 2: same-type True→False cannot re-arm a guard."""
+        h, original = await suspend_turn(
+            tmp_path,
+            script=[text_response("Shall I proceed with the deployment now?")],
+        )
+        heal_capacity(h, text_response("must never generate"))
+        calls_before = len(h.fake.calls)
+        self._tamper_payload(
+            h, lambda fields: fields.__setitem__("hedging_retried", False)
+        )
+
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+
+        assert result is not None
+        assert "no longer resumable" in result[0]
+        assert len(h.fake.calls) == calls_before
+        assert h.row()[0] == TurnStatus.TERMINAL_REJECTED
+
+    @pytest.mark.parametrize(
+        ("cap_name", "expected"),
+        [
+            ("max_continuations", 3),
+            ("_max_validation_retries", 2),
+            ("chat_cap", 500),
+        ],
+    )
+    async def test_same_type_cap_inflation_halts_zero_generation(
+        self, tmp_path, cap_name, expected
+    ):
+        """Continuation, validation, and iteration caps are digest-bound."""
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("must never generate"))
+        calls_before = len(h.fake.calls)
+
+        def inflate(fields):
+            assert fields[cap_name] == expected
+            fields[cap_name] = expected + 1
+
+        self._tamper_payload(h, inflate)
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+
+        assert result is not None
+        assert "no longer resumable" in result[0]
+        assert len(h.fake.calls) == calls_before
+        assert h.row()[0] == TurnStatus.TERMINAL_REJECTED

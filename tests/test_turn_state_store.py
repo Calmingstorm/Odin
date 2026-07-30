@@ -676,3 +676,99 @@ class TestMonotonicLeaseExpiry:
         # And a false expiry sweep cannot touch the still-live owner.
         assert s.sweep_expired_active_sync() == {"turns": 0, "ops": 0}
         s.close()
+
+class TestCheckpointPayloadIntegrity:
+    def test_payload_and_digest_advance_atomically_under_the_fence(self, store):
+        import hashlib
+
+        lease = _admit(store)
+        store.checkpoint_sync(lease, {"iteration": 1}, progressed=True)
+        payload, digest = _row(store, cols="payload, payload_digest")
+        assert digest == hashlib.sha256(payload.encode()).hexdigest()
+
+        store.suspend_sync(lease, {"iteration": 2})
+        payload, digest = _row(store, cols="payload, payload_digest")
+        assert digest == hashlib.sha256(payload.encode()).hexdigest()
+
+    def test_pre_integrity_schema_migrates_existing_payload(self, tmp_path):
+        import hashlib
+        import sqlite3
+
+        db_dir = tmp_path / "legacy"
+        db_dir.mkdir()
+        db_path = db_dir / "turns.sqlite3"
+        conn = sqlite3.connect(db_path)
+        legacy_ddl = _legacy_turns_ddl_without_payload_digest()
+        conn.executescript(legacy_ddl)
+        payload = '{"fields": {"hedging_retried": true}}'
+        conn.execute(
+            "INSERT INTO turns (source, channel_id, message_id, turn_generation, "
+            "revision, status, last_progress_at, created_at, schema_version, payload) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ["discord", "c", "m", "g", 0, TurnStatus.SUSPENDED, 1.0, 1.0, 1,
+             payload],
+        )
+        conn.commit()
+        conn.close()
+
+        migrated = TurnStateStore(db_path, blob_dir=db_dir / "blobs")
+        try:
+            columns = {
+                row[1]
+                for row in migrated._conn.execute("PRAGMA table_info(turns)")
+            }
+            assert "payload_digest" in columns
+            stored_payload, digest = migrated._conn.execute(
+                "SELECT payload, payload_digest FROM turns"
+            ).fetchone()
+            assert stored_payload == payload
+            assert digest == hashlib.sha256(payload.encode()).hexdigest()
+        finally:
+            migrated.close()
+
+
+def _legacy_turns_ddl_without_payload_digest() -> str:
+    """Minimal pre-round-6 schema used to pin the additive migration."""
+    return """
+    CREATE TABLE turns (
+        source TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        turn_generation TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0,
+        lease_token TEXT,
+        lease_expires_at REAL,
+        status TEXT NOT NULL,
+        recovery_deadline_utc REAL,
+        last_progress_at REAL NOT NULL,
+        created_at REAL NOT NULL,
+        suspended_at REAL,
+        guild_id TEXT,
+        user_id TEXT,
+        content_digest TEXT,
+        code_version TEXT,
+        schema_version INTEGER NOT NULL,
+        prompt_policy_hash TEXT,
+        tool_catalog_hash TEXT,
+        session_snapshot TEXT,
+        payload TEXT,
+        PRIMARY KEY (source, channel_id, message_id)
+    );
+    CREATE TABLE operations (
+        source TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        turn_generation TEXT NOT NULL,
+        generation_seq INTEGER NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        iteration INTEGER,
+        effect_fingerprint TEXT,
+        result TEXT,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY (source, channel_id, message_id, turn_generation,
+                     generation_seq, tool_call_id)
+    );
+    """

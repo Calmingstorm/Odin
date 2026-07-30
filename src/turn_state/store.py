@@ -121,6 +121,22 @@ class TurnLease:
     revision: int
 
 
+def _encode_payload(payload: dict) -> str:
+    """Stable JSON text used for both storage and integrity hashing."""
+    return json.dumps(payload, sort_keys=True)
+
+
+def _payload_digest(payload_text: str) -> str:
+    """Tamper-evident SHA-256 for the exact persisted payload bytes.
+
+    This is deliberately a digest rather than a second mutable safety-state
+    copy: one atomic fenced write binds the full field census, transcript,
+    consumed guard flags, and all caps. It detects out-of-band payload edits
+    without creating another schema that can drift from the checkpoint codec.
+    """
+    return hashlib.sha256(payload_text.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 def effect_fingerprint(tool_name: str, tool_input: dict) -> str:
     """Handler-derived effect fingerprint (secondary reconciliation evidence,
     NEVER the primary dedup key — deliberate identical invocations are
@@ -158,6 +174,7 @@ CREATE TABLE IF NOT EXISTS turns (
     tool_catalog_hash TEXT,
     session_snapshot TEXT,
     payload TEXT,
+    payload_digest TEXT,
     PRIMARY KEY (source, channel_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_turns_status ON turns(status);
@@ -215,6 +232,7 @@ class TurnStateStore:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=30000")
             conn.executescript(_DDL)
+            self._migrate_schema_sync(conn)
             conn.commit()
             self._restrict_db_modes()
             self._conn = conn
@@ -231,6 +249,35 @@ class TurnStateStore:
                 "for this process (turns run legacy, work is not preserved)"
             )
             self._conn = None
+
+    @staticmethod
+    def _migrate_schema_sync(conn: sqlite3.Connection) -> None:
+        """Add integrity metadata to stores created before round 6.
+
+        Existing payloads are checksummed once at the migration boundary.
+        Every subsequent payload write updates payload + digest in the same
+        fenced SQL statement, so out-of-band same-type mutation cannot re-arm
+        consumed guards or inflate retry/iteration caps undetected.
+        """
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(turns)")}
+        if "payload_digest" not in columns:
+            conn.execute("ALTER TABLE turns ADD COLUMN payload_digest TEXT")
+        rows = conn.execute(
+            "SELECT source, channel_id, message_id, payload FROM turns "
+            "WHERE payload IS NOT NULL AND payload_digest IS NULL"
+        ).fetchall()
+        for source, channel_id, message_id, payload_text in rows:
+            conn.execute(
+                "UPDATE turns SET payload_digest=? WHERE source=? AND channel_id=? "
+                "AND message_id=? AND payload=? AND payload_digest IS NULL",
+                [
+                    _payload_digest(payload_text),
+                    source,
+                    channel_id,
+                    message_id,
+                    payload_text,
+                ],
+            )
 
     def _restrict_db_modes(self) -> None:
         """0600 on the database and its WAL/SHM sidecars (best-effort — the
@@ -441,8 +488,17 @@ class TurnStateStore:
         # after a newer one — both pass the fence (same generation/token/
         # revision lineage) — and must never move the expiry BACKWARD, or
         # the expiry sweep falsely suspends a healthy owner.
-        sets = ["payload=?", "lease_expires_at=MAX(lease_expires_at, ?)"]
-        params: list = [json.dumps(payload), time.time() + self.lease_ttl]
+        payload_text = _encode_payload(payload)
+        sets = [
+            "payload=?",
+            "payload_digest=?",
+            "lease_expires_at=MAX(lease_expires_at, ?)",
+        ]
+        params: list = [
+            payload_text,
+            _payload_digest(payload_text),
+            time.time() + self.lease_ttl,
+        ]
         if progressed:
             sets.append("last_progress_at=?")
             params.append(time.time())
@@ -463,11 +519,17 @@ class TurnStateStore:
 
     def suspend_sync(self, lease: TurnLease, payload: dict) -> None:
         now = time.time()
+        payload_text = _encode_payload(payload)
         self._fenced_update(
             lease,
-            "payload=?, status=?, suspended_at=?, lease_token=NULL, "
-            "lease_expires_at=NULL",
-            [json.dumps(payload), TurnStatus.SUSPENDED, now],
+            "payload=?, payload_digest=?, status=?, suspended_at=?, "
+            "lease_token=NULL, lease_expires_at=NULL",
+            [
+                payload_text,
+                _payload_digest(payload_text),
+                TurnStatus.SUSPENDED,
+                now,
+            ],
         )
 
     def finish_sync(self, lease: TurnLease, status: str = TurnStatus.TERMINAL_COMPLETED) -> None:
@@ -477,7 +539,8 @@ class TurnStateStore:
             raise ValueError(f"finish_sync requires a terminal status, got {status}")
         self._fenced_update(
             lease,
-            "status=?, payload=NULL, lease_token=NULL, lease_expires_at=NULL",
+            "status=?, payload=NULL, payload_digest=NULL, lease_token=NULL, "
+            "lease_expires_at=NULL",
             [status],
         )
 
@@ -647,18 +710,33 @@ class TurnStateStore:
         if self._conn is None:
             return None
         row = self._conn.execute(
-            "SELECT turn_generation, revision, payload, guild_id, user_id, "
-            "content_digest, code_version, schema_version, prompt_policy_hash, "
-            "tool_catalog_hash, session_snapshot, recovery_deadline_utc, "
-            "last_progress_at, suspended_at FROM turns "
+            "SELECT turn_generation, revision, payload, payload_digest, guild_id, "
+            "user_id, content_digest, code_version, schema_version, "
+            "prompt_policy_hash, tool_catalog_hash, session_snapshot, "
+            "recovery_deadline_utc, last_progress_at, suspended_at FROM turns "
             "WHERE source=? AND channel_id=? AND message_id=? AND status=?",
             [key.source, key.channel_id, key.message_id, TurnStatus.SUSPENDED],
         ).fetchone()
         if row is None or row[2] is None:
             return None
+        payload_text, stored_digest = row[2], row[3]
+        if (
+            not isinstance(payload_text, str)
+            or not isinstance(stored_digest, str)
+            or not secrets.compare_digest(
+                stored_digest, _payload_digest(payload_text)
+            )
+        ):
+            # Exact-type schema validation cannot detect same-type safety
+            # regressions (True→False guard flips or cap inflation). Every
+            # fenced payload write atomically replaces this digest, so a
+            # mismatch is terminal before reconstruction or generation.
+            log.error("Checkpoint payload integrity mismatch for %s — rejecting", key)
+            self.reject_resumable_sync(key, "checkpoint payload integrity mismatch")
+            return None
         try:
-            payload = json.loads(row[2])
-            snapshot = json.loads(row[10] or "{}")
+            payload = json.loads(payload_text)
+            snapshot = json.loads(row[11] or "{}")
         except (json.JSONDecodeError, TypeError):
             # An unreadable checkpoint can never be resumed — reject it
             # terminally instead of raising into every caller.
@@ -675,17 +753,17 @@ class TurnStateStore:
             "generation": row[0],
             "revision": row[1],
             "payload": payload,
-            "guild_id": row[3],
-            "user_id": row[4],
-            "content_digest": row[5],
-            "code_version": row[6],
-            "schema_version": row[7],
-            "prompt_policy_hash": row[8],
-            "tool_catalog_hash": row[9],
+            "guild_id": row[4],
+            "user_id": row[5],
+            "content_digest": row[6],
+            "code_version": row[7],
+            "schema_version": row[8],
+            "prompt_policy_hash": row[9],
+            "tool_catalog_hash": row[10],
             "session_snapshot": snapshot,
-            "recovery_deadline_utc": row[11],
-            "last_progress_at": row[12],
-            "suspended_at": row[13],
+            "recovery_deadline_utc": row[12],
+            "last_progress_at": row[13],
+            "suspended_at": row[14],
             "operations": [
                 {"generation_seq": o[0], "tool_call_id": o[1], "state": o[2],
                  "tool_name": o[3], "result": o[4]}
@@ -733,8 +811,9 @@ class TurnStateStore:
         try:
             with self._write_lock:
                 self._conn.execute(
-                    "UPDATE turns SET status=?, payload=NULL, lease_token=NULL, "
-                    "lease_expires_at=NULL WHERE source=? AND channel_id=? "
+                    "UPDATE turns SET status=?, payload=NULL, payload_digest=NULL, "
+                    "lease_token=NULL, lease_expires_at=NULL WHERE source=? "
+                    "AND channel_id=? "
                     "AND message_id=? AND status=?",
                     [TurnStatus.TERMINAL_REJECTED, key.source, key.channel_id,
                      key.message_id, TurnStatus.SUSPENDED],
@@ -777,7 +856,10 @@ class TurnStateStore:
         Fenced on the lease so only the acquiring owner can abort."""
         conn = self._require()
         if terminal_reason is not None:
-            set_sql = "status=?, payload=NULL, lease_token=NULL, lease_expires_at=NULL"
+            set_sql = (
+                "status=?, payload=NULL, payload_digest=NULL, lease_token=NULL, "
+                "lease_expires_at=NULL"
+            )
             first_param: list = [TurnStatus.TERMINAL_REJECTED]
         else:
             set_sql = "status=?, lease_token=NULL, lease_expires_at=NULL"
@@ -898,7 +980,8 @@ class TurnStateStore:
                 expired = cur.rowcount
                 # Clock 2: diagnostic payload retention — 7d, then tombstone.
                 cur = conn.execute(
-                    "UPDATE turns SET payload=NULL WHERE payload IS NOT NULL "
+                    "UPDATE turns SET payload=NULL, payload_digest=NULL "
+                    "WHERE payload IS NOT NULL "
                     "AND status IN (?, ?, ?, ?, ?) AND last_progress_at < ?",
                     [*sorted(TurnStatus.TERMINAL),
                      now - payload_retention_days * 86400.0],
