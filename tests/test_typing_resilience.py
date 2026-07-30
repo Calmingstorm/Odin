@@ -241,6 +241,8 @@ def _make_runner(recorder_save=None):
 
 
 def _stub_state(channel=None):
+    from src.turn_state.durability import TurnDurability
+
     return SimpleNamespace(
         chat_cap=3,
         iteration=0,
@@ -255,6 +257,7 @@ def _stub_state(channel=None):
         system_prompt="sys",
         tools=[],
         user_id="u1",
+        durability=TurnDurability.disabled(),
     )
 
 

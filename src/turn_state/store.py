@@ -284,11 +284,14 @@ class TurnStateStore:
         """Ops-table writes are fenced indirectly: verify the turns row still
         carries this lease before touching operations."""
         conn = self._require()
-        row = conn.execute(
-            "SELECT lease_token, turn_generation FROM turns "
-            "WHERE source=? AND channel_id=? AND message_id=?",
-            [lease.key.source, lease.key.channel_id, lease.key.message_id],
-        ).fetchone()
+        try:
+            row = conn.execute(
+                "SELECT lease_token, turn_generation FROM turns "
+                "WHERE source=? AND channel_id=? AND message_id=?",
+                [lease.key.source, lease.key.channel_id, lease.key.message_id],
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise TurnStateUnavailableError(f"turn-state read failed: {exc}") from exc
         if row is None or row[0] != lease.token or row[1] != lease.generation:
             raise StaleTurnError(f"turn {lease.key}: lease no longer held")
 
@@ -444,9 +447,43 @@ class TurnStateStore:
         state: str,
         result_text: str | None,
     ) -> None:
-        if state not in (OpState.APPLIED, OpState.DEFINITELY_FAILED):
+        # OUTCOME_UNKNOWN is a legitimate settlement: a timed-out or
+        # interrupted execution may have applied its external effect — the
+        # ledger must never claim DEFINITELY_FAILED for it (round-2 replay
+        # rule: ambiguous outcomes stop, never rerun).
+        if state not in (OpState.APPLIED, OpState.DEFINITELY_FAILED, OpState.OUTCOME_UNKNOWN):
             raise ValueError(f"settle_op_sync: invalid terminal state {state}")
         self._set_op_state(lease, generation_seq, tool_call_id, state, result_text)
+
+    def settle_interrupted_sync(
+        self,
+        lease: TurnLease,
+        generation_seq: int,
+        tool_call_id: str,
+        *,
+        result_text: str | None,
+    ) -> None:
+        """OUTCOME_UNKNOWN settle for an interrupted execution.
+
+        Guarded so it can race the tool's own settle at a cancellation
+        boundary: it never downgrades an already-settled row, and a missing
+        row (e.g. a parse-error call that had no intent) is tolerated.
+        """
+        conn = self._require()
+        self._verify_lease(lease)
+        where, params = self._op_where(lease)
+        try:
+            with self._write_lock:
+                conn.execute(
+                    f"UPDATE operations SET state=?, result=?, updated_at=? "
+                    f"WHERE {where} AND generation_seq=? AND tool_call_id=? "
+                    "AND state IN (?, ?)",
+                    [OpState.OUTCOME_UNKNOWN, result_text, time.time(), *params,
+                     generation_seq, tool_call_id, OpState.PREPARED, OpState.RUNNING],
+                )
+                conn.commit()
+        except sqlite3.Error as exc:
+            raise TurnStateUnavailableError(f"ledger write failed: {exc}") from exc
 
     def _set_op_state(
         self,

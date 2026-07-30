@@ -77,12 +77,16 @@ PERSISTED_FIELDS: frozenset[str] = frozenset({
 #: - trace:    ContextTraceCollector.finalize() is one-way; the old segment
 #:   is closed into the payload for diagnostics and a fresh linked resume
 #:   segment starts (Odin round-2).
+#: - durability: the write-invariant driver — always process-local; a
+#:   resumed turn gets a fresh handle bound to the RESUME lease (restoring
+#:   the old one would carry a fenced-out lease token).
 RECONSTRUCTED_FIELDS: frozenset[str] = frozenset({
     "message",
     "_cancel",
     "tools",
     "policy",
     "trace",
+    "durability",
 })
 
 
