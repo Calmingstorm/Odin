@@ -15,6 +15,7 @@ import aiohttp
 from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
+from .errors import LLMRateLimitError, LLMRequestError, LLMTransportError
 from .provider import LLMProvider
 from .types import LLMResponse, ToolCall
 
@@ -232,8 +233,18 @@ class KimiClient(LLMProvider):
                     if resp.status == 429:
                         if attempt >= self.max_retries:
                             self.breaker.record_failure()
-                            raise RuntimeError(f"Kimi rate limited after {self.max_retries + 1} "
-                                               f"attempts: {text[:300]}")
+                            hdr = resp.headers.get("Retry-After")
+                            try:
+                                hdr_delay = float(hdr) if hdr else None
+                            except (ValueError, TypeError):
+                                hdr_delay = None
+                            raise LLMRateLimitError(
+                                f"Kimi rate limited after {self.max_retries + 1} "
+                                f"attempts: {text[:300]}",
+                                provider="kimi",
+                                model=self.model,
+                                retry_after=hdr_delay,
+                            )
                         retry_after = resp.headers.get("Retry-After")
                         try:
                             delay = (
@@ -267,7 +278,16 @@ class KimiClient(LLMProvider):
                         continue
 
                     self.breaker.record_failure()
-                    raise RuntimeError(f"Kimi {resp.status}: {text[:500]}")
+                    exc_cls = (
+                        LLMTransportError
+                        if resp.status in (500, 502, 503, 504)
+                        else LLMRequestError
+                    )
+                    raise exc_cls(
+                        f"Kimi {resp.status}: {text[:500]}",
+                        provider="kimi",
+                        model=self.model,
+                    )
             except (TimeoutError, aiohttp.ClientError) as e:
                 last_error = e
                 self.breaker.record_failure()
@@ -277,8 +297,11 @@ class KimiClient(LLMProvider):
                                 attempt + 1, self.max_retries + 1, e, delay)
                     await asyncio.sleep(delay)
                     continue
-                raise RuntimeError(f"Kimi connection error after {self.max_retries + 1} attempts: "
-                                   f"{e}") from e
+                raise LLMTransportError(
+                    f"Kimi connection error after {self.max_retries + 1} attempts: {e}",
+                    provider="kimi",
+                    model=self.model,
+                ) from e
 
         raise RuntimeError(f"Kimi request failed after {self.max_retries + 1} attempts: "
                            f"{last_error}")
