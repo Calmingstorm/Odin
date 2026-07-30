@@ -416,19 +416,33 @@ class CheckpointInvalidError(ValueError):
     retry (round-3 deviation #5, PR #242)."""
 
 
-# Fields whose restored TYPE the codec asserts before any lease exists —
-# construction failures after acquisition used to bounce the row back to
-# SUSPENDED forever.
-_REQUIRED_FIELD_TYPES: dict[str, type | tuple[type, ...]] = {
-    "system_prompt": str,
-    "messages": list,
-    "user_id": str,
-    "chat_cap": int,
-    "iteration": int,
-    "stuck_tracker": dict,
-    "_trajectory": dict,
-    "_ch_id": str,
-    "_req_id": str,
+# The COMPLETE persisted-field schema, validated before any lease exists
+# (round-5 blocker #2, PR #242): partial validation let a tampered/corrupt
+# `hedging_retried=0` pass, resume, and re-arm a consumed guard budget —
+# the hard rule the census exists to protect. Every field gets an exact
+# type (bools via `type(v) is bool`, ints excluding bools), bounds, and
+# container-element checks; the field SET is exact (extras reject too —
+# an unknown field used to reach `_ChatTurn(**fields)` after acquisition).
+_GUARD_FLAG_FIELDS = (
+    "fabrication_retried", "promise_retried", "unavail_retried",
+    "hedging_retried", "code_hedging_retried", "premature_failure_retried",
+    "_validation_required",
+)
+_NON_NEGATIVE_INT_FIELDS = (
+    "iteration", "continuation_count", "max_continuations",
+    "_validation_retries", "_max_validation_retries",
+)
+_POSITIVE_INT_FIELDS = ("chat_cap", "_result_store_cap")
+_STRING_FIELDS = ("system_prompt", "user_id", "_ch_id", "_req_id")
+_STR_LIST_FIELDS = ("tools_used_in_loop", "_pending_validations")
+_DICT_LIST_FIELDS = ("pending_image_blocks", "_op_tool_details")
+_STUCK_TRACKER_SCHEMA: dict[str, str] = {
+    "fingerprints": "str_list",
+    "window_size": "positive_int",
+    "min_repeats": "positive_int",
+    "max_cycle_length": "positive_int",
+    "names_only": "bool",
+    "warned": "bool",
 }
 
 
@@ -470,18 +484,78 @@ def validate_payload(payload: Any) -> None:
     missing = PERSISTED_FIELDS - fields.keys()
     if missing:
         raise CheckpointInvalidError(f"missing persisted fields: {sorted(missing)}")
-    for name, expected in _REQUIRED_FIELD_TYPES.items():
-        value = fields.get(name)
-        if expected is int:
-            if not _exact_int(value):
-                raise CheckpointInvalidError(f"field {name!r} is not an integer")
-        elif not isinstance(value, expected):
-            raise CheckpointInvalidError(
-                f"field {name!r} has invalid type {type(value).__name__}"
-            )
+    extras = fields.keys() - PERSISTED_FIELDS
+    if extras:
+        raise CheckpointInvalidError(f"unknown persisted fields: {sorted(extras)}")
+
+    def _fail(name: str, why: str) -> None:
+        raise CheckpointInvalidError(f"field {name!r} {why}")
+
+    # One-shot guard flags and validation-required: EXACTLY bool. Anything
+    # else (0, "", None) would restore falsy and RE-ARM a consumed budget.
+    for name in _GUARD_FLAG_FIELDS:
+        if type(fields[name]) is not bool:
+            _fail(name, "must be exactly a bool")
+    for name in _NON_NEGATIVE_INT_FIELDS:
+        value = fields[name]
+        if not _exact_int(value) or value < 0:
+            _fail(name, "must be a non-negative integer")
+    for name in _POSITIVE_INT_FIELDS:
+        value = fields[name]
+        if not _exact_int(value) or value < 1:
+            _fail(name, "must be a positive integer")
+    for name in _STRING_FIELDS:
+        if not isinstance(fields[name], str):
+            _fail(name, "must be a string")
+    for name in _STR_LIST_FIELDS:
+        value = fields[name]
+        if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+            _fail(name, "must be a list of strings")
+    for name in _DICT_LIST_FIELDS:
+        value = fields[name]
+        if not isinstance(value, list) or not all(isinstance(x, dict) for x in value):
+            _fail(name, "must be a list of objects")
+    # Budget invariants — a consumed counter above its cap is corrupt.
+    if fields["continuation_count"] > fields["max_continuations"]:
+        _fail("continuation_count", "exceeds max_continuations")
+    if fields["_validation_retries"] > fields["_max_validation_retries"]:
+        _fail("_validation_retries", "exceeds _max_validation_retries")
+    if fields["iteration"] > fields["chat_cap"]:
+        _fail("iteration", "exceeds chat_cap")
+    # Stuck-tracker export shape (exact keys, exact types).
+    tracker = fields["stuck_tracker"]
+    if not isinstance(tracker, dict) or set(tracker) != set(_STUCK_TRACKER_SCHEMA):
+        _fail("stuck_tracker", "has an invalid key set")
+    for key, kind in _STUCK_TRACKER_SCHEMA.items():
+        value = tracker[key]
+        if kind == "bool" and type(value) is not bool:
+            _fail("stuck_tracker", f"key {key!r} must be exactly a bool")
+        elif kind == "positive_int" and (not _exact_int(value) or value < 1):
+            _fail("stuck_tracker", f"key {key!r} must be a positive integer")
+        elif kind == "str_list" and (
+            not isinstance(value, list)
+            or not all(isinstance(x, str) for x in value)
+        ):
+            _fail("stuck_tracker", f"key {key!r} must be a list of strings")
+    # Trajectory envelope: the pieces its reconstruction touches.
+    trajectory = fields["_trajectory"]
+    if not isinstance(trajectory, dict):
+        _fail("_trajectory", "must be an object")
+    traj_iters = trajectory.get("iterations")
+    if not isinstance(traj_iters, list) or not all(
+        isinstance(x, dict) for x in traj_iters
+    ):
+        _fail("_trajectory", "iterations must be a list of objects")
+    traj_rev = trajectory.get("iteration_revision")
+    if not _exact_int(traj_rev) or traj_rev < 0:
+        _fail("_trajectory", "iteration_revision must be a non-negative integer")
+    if not isinstance(trajectory.get("history", []), list):
+        _fail("_trajectory", "history must be a list")
     # Transcript shape: every entry is a message dict; content is a string
     # or a list of block dicts (round-4 blocker #2 — a [None] entry used to
     # explode later in transcript repair, outside the rejection boundary).
+    if not isinstance(fields["messages"], list):
+        _fail("messages", "must be a list")
     for i, msg in enumerate(fields["messages"]):
         if not isinstance(msg, dict) or not isinstance(msg.get("role"), str):
             raise CheckpointInvalidError(f"messages[{i}] is not a message object")

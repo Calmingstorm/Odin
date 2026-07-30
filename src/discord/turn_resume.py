@@ -310,7 +310,18 @@ class TurnResumeManager:
         )
         row = await asyncio.to_thread(self._store.load_resumable_sync, key)
         if row is None:
-            return None
+            # row_summary established preserved work moments ago; the
+            # detailed load coming back empty means it just became
+            # unresumable (corrupt payload self-healed to rejected, another
+            # resumer won, TTL expiry). A recognized resume must NEVER fall
+            # through into a fresh tool-capable turn (round-5 blocker #1,
+            # PR #242) — report what happened instead.
+            return (
+                "That preserved work is no longer resumable (it was just "
+                "rejected as unreadable, claimed by another resume, or "
+                "expired). Nothing was resumed — ask fresh for what you need.",
+                False, False, [], False,
+            )
         # Only the original requester may resume their turn.
         if str(message.author.id) != str(row.get("user_id") or ""):
             return (

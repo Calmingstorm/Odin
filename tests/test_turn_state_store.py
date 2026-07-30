@@ -648,3 +648,31 @@ class TestRevisionAbaClosed:
         store.checkpoint_sync(lease, {"n": 2}, progressed=True)
         (revision,) = store._conn.execute("SELECT revision FROM turns").fetchone()
         assert revision == 2
+
+
+class TestMonotonicLeaseExpiry:
+    def test_delayed_smaller_renewal_never_regresses_expiry(self, tmp_path):
+        """Round-5 blocker #3 (PR #242): renewals are monotonic in SQL —
+        a delayed same-owner renewal carrying an EARLIER expiry (both pass
+        the fence: same generation/token/revision lineage) must never move
+        the expiry backward and expose the turn to a false expiry sweep."""
+        s = TurnStateStore(tmp_path / "mono.sqlite3", blob_dir=tmp_path / "b",
+                           lease_ttl=100.0)
+        lease = _admit(s)
+        s.heartbeat_sync(lease)  # newer renewal: now + 100
+        (newer,) = s._conn.execute("SELECT lease_expires_at FROM turns").fetchone()
+        # The delayed renewal computed from a smaller ttl models an earlier
+        # time.time() capture committing late.
+        s.lease_ttl = 1.0
+        s.heartbeat_sync(lease)
+        (after,) = s._conn.execute("SELECT lease_expires_at FROM turns").fetchone()
+        assert after >= newer  # never regressed
+        # The same monotonicity holds through the checkpoint renewal path.
+        s.checkpoint_sync(lease, {"n": 1}, progressed=True)
+        (after_ckpt,) = s._conn.execute(
+            "SELECT lease_expires_at FROM turns"
+        ).fetchone()
+        assert after_ckpt >= newer
+        # And a false expiry sweep cannot touch the still-live owner.
+        assert s.sweep_expired_active_sync() == {"turns": 0, "ops": 0}
+        s.close()

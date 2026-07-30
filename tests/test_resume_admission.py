@@ -335,9 +335,12 @@ class TestPostAcquireSafety:
         h.store._conn.execute("UPDATE turns SET payload='{\"broken\": '")
         h.store._conn.commit()
         result = await h.manager.try_explicit_resume(resume_msg(original))
-        # Malformed JSON self-heals inside load_resumable: rejected
-        # terminally, and the trigger falls through as a normal message.
-        assert result is None
+        # Malformed JSON self-heals inside load_resumable (rejected
+        # terminally). Round-5 blocker #1: once row_summary established
+        # preserved work, the trigger must get a NOTICE — never fall
+        # through into a fresh tool-capable turn.
+        assert result is not None
+        assert "no longer resumable" in result[0]
         (status,) = h.store._conn.execute("SELECT status FROM turns").fetchone()
         assert status == TurnStatus.TERMINAL_REJECTED
         # A structurally-valid-but-unrestorable payload rejects explicitly:
@@ -513,19 +516,18 @@ class TestStructuralPayloadValidation:
         from src.turn_state.codec import (
             CODEC_VERSION,
             CheckpointInvalidError,
+            snapshot_chat_turn,
             validate_payload,
         )
+        from tests.test_turn_checkpoint_codec import _blob_dict, _full_turn
 
-        good_fields = {name: None for name in __import__(
-            "src.turn_state.codec", fromlist=["PERSISTED_FIELDS"]
-        ).PERSISTED_FIELDS}
-        good_fields.update({
-            "system_prompt": "s", "messages": [], "user_id": "u",
-            "chat_cap": 1, "iteration": 0, "stuck_tracker": {},
-            "_trajectory": {}, "_ch_id": "c", "_req_id": "r",
-        })
-        base = {"codec_version": CODEC_VERSION, "policy": "chat",
-                "generation_seq": 0, "fields": good_fields}
+        # The baseline is a REAL snapshot — the exhaustive round-5 schema
+        # validates every persisted field, so a hand-built skeleton cannot
+        # stay in sync.
+        _, store_blob, _ = _blob_dict()
+        base = snapshot_chat_turn(_full_turn(), store_blob=store_blob,
+                                  generation_seq=0)
+        good_fields = base["fields"]
         validate_payload(base)  # sane baseline passes
 
         for broken in (
@@ -545,6 +547,42 @@ class TestStructuralPayloadValidation:
             {**base, "fields": {**good_fields,
                                 "messages": [{"role": "user", "content": [42]}]}},
             {**base, "fields": {**good_fields, "chat_cap": True}},
+            # Round-5: exact bool for guard flags (0 would re-arm a
+            # consumed budget), no unknown fields, invariants hold.
+            {**base, "fields": {**good_fields, "hedging_retried": 0}},
+            {**base, "fields": {**good_fields, "fabrication_retried": None}},
+            {**base, "fields": {**good_fields, "continuation_count": -1}},
+            {**base, "fields": {**good_fields, "continuation_count": 99,
+                                "max_continuations": 3}},
+            {**base, "fields": {**good_fields, "field_from_nowhere": 1}},
+            {**base, "fields": {**good_fields, "tools_used_in_loop": [1]}},
+            {**base, "fields": {**good_fields,
+                                "stuck_tracker": {"warned": True}}},
+            {**base, "fields": {**good_fields,
+                                "stuck_tracker": {**good_fields["stuck_tracker"],
+                                                  "warned": 1}}},
+            {**base, "fields": {**good_fields,
+                                "_trajectory": {**good_fields["_trajectory"],
+                                                "iteration_revision": True}}},
+            {**base, "fields": {**good_fields, "system_prompt": 42}},
+            {**base, "fields": {**good_fields, "_trajectory": "not-a-dict"}},
+            {**base, "fields": {**good_fields, "pending_image_blocks": [1]}},
+            {**base, "fields": {**good_fields, "_validation_retries": 5,
+                                "_max_validation_retries": 2}},
+            {**base, "fields": {**good_fields, "iteration": 501,
+                                "chat_cap": 500}},
+            {**base, "fields": {**good_fields,
+                                "stuck_tracker": {**good_fields["stuck_tracker"],
+                                                  "window_size": 0}}},
+            {**base, "fields": {**good_fields,
+                                "stuck_tracker": {**good_fields["stuck_tracker"],
+                                                  "fingerprints": [1]}}},
+            {**base, "fields": {**good_fields,
+                                "_trajectory": {**good_fields["_trajectory"],
+                                                "iterations": [1]}}},
+            {**base, "fields": {**good_fields,
+                                "_trajectory": {**good_fields["_trajectory"],
+                                                "history": "not-a-list"}}},
         ):
             with _pytest.raises(CheckpointInvalidError):
                 validate_payload(broken)
@@ -679,5 +717,35 @@ class TestRecognizedResumeNeverFallsThrough:
         assert result is not None
         assert "could not be restored" in result[0]
         assert len(h.fake.calls) == calls_before  # no fresh LLM response
+        (status,) = h.store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_REJECTED
+
+
+class TestGuardRearmImpossible:
+    async def test_tampered_guard_flag_rejects_instead_of_rearming(self, tmp_path):
+        """Odin's round-5 repro: hedging_retried changed to integer 0 used
+        to pass validation, resume, RE-ARM the consumed guard, and make two
+        LLM calls. Exact-bool validation now rejects it terminally with
+        zero generation — the hard rule holds."""
+        import json as _json
+
+        h, original = await suspend_turn(
+            tmp_path, script=[text_response("Shall I proceed with the deployment now?")]
+        )
+        heal_capacity(h, text_response("must never generate"))
+        (payload_text,) = h.store._conn.execute(
+            "SELECT payload FROM turns"
+        ).fetchone()
+        payload = _json.loads(payload_text)
+        assert payload["fields"]["hedging_retried"] is True  # consumed
+        payload["fields"]["hedging_retried"] = 0  # the tamper
+        h.store._conn.execute("UPDATE turns SET payload=?", [_json.dumps(payload)])
+        h.store._conn.commit()
+
+        calls_before = len(h.fake.calls)
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        assert "could not be restored" in result[0]
+        assert len(h.fake.calls) == calls_before  # ZERO fresh generation
         (status,) = h.store._conn.execute("SELECT status FROM turns").fetchone()
         assert status == TurnStatus.TERMINAL_REJECTED

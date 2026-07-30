@@ -436,7 +436,12 @@ class TurnStateStore:
     ) -> None:
         """Persist the turn payload (fenced). ``progressed`` advances
         ``last_progress_at``; recovery waits and rewrites must pass False."""
-        sets = ["payload=?", "lease_expires_at=?"]
+        # MAX() makes the renewal MONOTONIC in SQL (round-5 blocker #3,
+        # PR #242): a delayed same-owner renewal computed earlier can commit
+        # after a newer one — both pass the fence (same generation/token/
+        # revision lineage) — and must never move the expiry BACKWARD, or
+        # the expiry sweep falsely suspends a healthy owner.
+        sets = ["payload=?", "lease_expires_at=MAX(lease_expires_at, ?)"]
         params: list = [json.dumps(payload), time.time() + self.lease_ttl]
         if progressed:
             sets.append("last_progress_at=?")
@@ -450,7 +455,9 @@ class TurnStateStore:
         """Extend the lease. Never advances last_progress_at, never bumps the
         revision (a heartbeat is not a state change)."""
         self._fenced_update(
-            lease, "lease_expires_at=?", [time.time() + self.lease_ttl],
+            lease,
+            "lease_expires_at=MAX(lease_expires_at, ?)",  # monotonic renewal
+            [time.time() + self.lease_ttl],
             bump_revision=False,
         )
 
