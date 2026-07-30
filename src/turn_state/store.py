@@ -1030,6 +1030,13 @@ class TurnStateStore:
         digest = ref.split(":", 1)[1] if ref.startswith("blob:") else ref
         path = self._blob_dir / digest
         try:
-            return path.read_bytes()
+            data = path.read_bytes()
         except OSError as exc:
             raise TurnStateUnavailableError(f"blob read failed: {ref}") from exc
+        # The checkpoint payload digest binds the blob reference, not the
+        # externalized bytes. Treat the content-addressed filename as the
+        # expected digest so an out-of-band blob edit cannot substitute
+        # transcript content during resume.
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise TurnStateUnavailableError(f"blob digest mismatch: {ref}")
+        return data

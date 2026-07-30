@@ -784,6 +784,50 @@ class TestGuardRearmImpossible:
         (status,) = h.store._conn.execute("SELECT status FROM turns").fetchone()
         assert status == TurnStatus.TERMINAL_REJECTED
 
+
+class TestExternalizedBlobIntegrity:
+    async def test_tampered_externalized_blob_halts_zero_generation(self, tmp_path):
+        """Externalized transcript bytes remain bound to their blob ref.
+
+        The inline payload digest covers the content-addressed ref. If the
+        referenced file is edited out of band, reconstruction must reject
+        before lease acquisition rather than show substituted content to the
+        model.
+        """
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("must never generate"))
+
+        image_data = b"aGVsbG8="
+        ref = h.store.store_blob_sync(image_data)
+        (payload_text,) = h.store._conn.execute(
+            "SELECT payload FROM turns"
+        ).fetchone()
+        payload = json.loads(payload_text)
+        payload["fields"]["messages"].append({
+            "role": "user",
+            "content": [{
+                "type": "image",
+                "source": {
+                    "type": "blob_ref",
+                    "media_type": "image/png",
+                    "ref": ref,
+                },
+            }],
+        })
+        rewrite_payload_with_valid_digest(h.store, json.dumps(payload))
+
+        digest = ref.split(":", 1)[1]
+        (h.store._blob_dir / digest).write_bytes(b"dGFtcGVyZWQ=")
+        calls_before = len(h.fake.calls)
+
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+
+        assert result is not None
+        assert "could not be restored" in result[0]
+        assert len(h.fake.calls) == calls_before
+        assert h.row()[0] == TurnStatus.TERMINAL_REJECTED
+
+
 class TestCheckpointIntegrityRejectsSameTypeTampering:
     @staticmethod
     def _tamper_payload(h, mutate):
