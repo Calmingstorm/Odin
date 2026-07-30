@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,9 +29,6 @@ def make_store(tmp_path, ttl=0.4):
         tmp_path / "hb" / "turns.sqlite3", blob_dir=tmp_path / "hb" / "b",
         lease_ttl=ttl,
     )
-
-
-from types import SimpleNamespace
 
 
 def FakeMsg():  # noqa: N802 — message-shaped factory
