@@ -625,3 +625,26 @@ class TestMarkOpsManual:
         ).fetchall())
         assert states["a"] == OpState.APPLIED  # settled rows untouched
         assert states["b"] == OpState.MANUAL_RESOLUTION_REQUIRED
+
+
+class TestRevisionAbaClosed:
+    def test_stale_copy_cannot_regress_the_revision(self, store):
+        """Round-4 blocker #1 (PR #242): every revision value (expected
+        WHERE, new SET, shared publish) derives from one read under the
+        write lock — a stale actor can never pair a fresh WHERE with a
+        stale SET and regress the row."""
+        import dataclasses
+
+        lease = _admit(store)
+        stale = dataclasses.replace(lease)  # captured before the checkpoint
+        store.checkpoint_sync(lease, {"n": 1}, progressed=True)  # rev 0 -> 1
+        with pytest.raises(StaleTurnError):
+            store.heartbeat_sync(stale)  # stale revision fenced out entirely
+        (revision,) = store._conn.execute("SELECT revision FROM turns").fetchone()
+        assert revision == 1  # never regressed
+        assert lease.revision == 1
+        # The live owner keeps working.
+        store.heartbeat_sync(lease)
+        store.checkpoint_sync(lease, {"n": 2}, progressed=True)
+        (revision,) = store._conn.execute("SELECT revision FROM turns").fetchone()
+        assert revision == 2

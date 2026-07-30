@@ -385,6 +385,12 @@ class SessionManager:
         self._continuity_source: dict[str, str] = {}
         self._sessions: dict[str, Session] = {}
         self._dirty: set[str] = set()
+        # Monotonic per-channel mutation watermark (PR #242, round-4
+        # blocker #3): bumped on EVERY semantic history mutation (append,
+        # removal, compaction, secret scrub, tombstone) — unlike message
+        # count, it can never ABA back to a previous value. Process-local
+        # by design: its only consumer (auto-resume) is in-process only.
+        self._mutation_revisions: dict[str, int] = {}
         self._reflector = reflector
         self._reflection_tasks: set[asyncio.Task] = set()
         self._vector_store = vector_store
@@ -464,6 +470,15 @@ class SessionManager:
         log.error("All %d archive(s) for channel %s were unreadable", len(candidates), channel_id)
         return None
 
+    def _bump_mutation_revision(self, channel_id: str) -> None:
+        self._mutation_revisions[channel_id] = (
+            self._mutation_revisions.get(channel_id, 0) + 1
+        )
+
+    def mutation_revision(self, channel_id: str) -> int:
+        """Monotonic watermark of semantic history mutations (never ABAs)."""
+        return self._mutation_revisions.get(channel_id, 0)
+
     def add_message(
         self, channel_id: str, role: str, content: str,
         *, user_id: str | None = None,
@@ -476,6 +491,7 @@ class SessionManager:
         if role == "user" and user_id:
             session.last_user_id = user_id
         self._dirty.add(channel_id)
+        self._bump_mutation_revision(channel_id)
 
     def remove_last_message(self, channel_id: str, role: str) -> bool:
         """Remove the most recent message if it matches *role*.
@@ -490,6 +506,7 @@ class SessionManager:
         if session.messages[-1].role == role:
             session.messages.pop()
             self._dirty.add(channel_id)
+            self._bump_mutation_revision(channel_id)
             return True
         return False
 
@@ -989,6 +1006,7 @@ class SessionManager:
             discarded = list(to_summarize)
             session.messages = to_keep
             self._dirty.add(session.channel_id)
+            self._bump_mutation_revision(session.channel_id)
             log.info(
                 "Compacted %d messages into segment %s for channel %s (%d segments total)",
                 len(discarded), segment["id"], session.channel_id,
@@ -1024,6 +1042,7 @@ class SessionManager:
             return
         discarded = session.messages[:-keep]
         session.messages = session.messages[-keep:]
+        self._bump_mutation_revision(session.channel_id)
 
         # Build a deterministic summary from discarded messages
         user_ids = set()
@@ -1084,6 +1103,7 @@ class SessionManager:
     def _tombstone(self, channel_id: str) -> None:
         """Drop the live session AND block archive restoration up to now."""
         self._sessions.pop(channel_id, None)
+        self._bump_mutation_revision(channel_id)
         session_file = self.persist_dir / f"{channel_id}.json"
         try:
             session_file.unlink(missing_ok=True)
@@ -1470,6 +1490,7 @@ class SessionManager:
         if removed:
             session.messages = filtered
             self._dirty.add(channel_id)
+            self._bump_mutation_revision(channel_id)
             log.warning(
                 "Scrubbed %d message(s) containing secrets from channel %s",
                 removed,

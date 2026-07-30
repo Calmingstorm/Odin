@@ -349,3 +349,30 @@ class TestStorageRedactionAllCopies:
         st._op_tool_details.append("legacy-non-dict-entry")  # passthrough arm
         payload = snapshot_chat_turn(st, store_blob=store, generation_seq=3)
         assert secret not in json.dumps(payload)
+
+    def test_opaque_credentials_under_sensitive_keys_are_redacted(self):
+        """Round-4 blocker #4 (PR #242): key-aware redaction — opaque values
+        with no token-shaped signature must not survive under credential
+        keys, in ANY persisted copy, at any nesting depth."""
+        opaque = "not-pattern-shaped-but-sensitive-7f4d"
+        encoded = self._payload_with(
+            "http_post",
+            {
+                "url": "https://x",
+                "headers": {"Authorization": f"Bearer {opaque}"},
+                "password": opaque,
+                "nested": {"config": {"api-key": opaque}},
+            },
+        )
+        assert opaque not in encoded
+        assert "https://x" in encoded  # innocent values untouched
+
+    def test_sensitive_key_matching_is_exact_not_substring(self):
+        from src.turn_state.codec import _is_sensitive_key
+
+        assert _is_sensitive_key("Authorization")
+        assert _is_sensitive_key("API-Key")
+        assert _is_sensitive_key("refresh_token")
+        assert not _is_sensitive_key("author")  # "auth" must not substring-match
+        assert not _is_sensitive_key("tokenizer")
+        assert not _is_sensitive_key(42)

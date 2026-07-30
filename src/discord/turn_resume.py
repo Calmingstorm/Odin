@@ -101,15 +101,15 @@ class TurnResumeManager:
         """Called by the tool loop when a turn suspends. In-process only."""
         if not self._auto_resume_enabled:
             return
-        # Session length AT SUSPENSION, captured synchronously inside the
-        # suspending turn (which still holds the channel lock) — the
-        # advance-check anchor (review blocker #6a, PR #242).
-        suspend_len = self._session_len(key.channel_id)
+        # Mutation revision AT SUSPENSION, captured synchronously inside
+        # the suspending turn (which still holds the channel lock) — the
+        # monotonic advance-check anchor (round-4 blocker #3, PR #242).
+        suspend_rev = self._session_revision(key.channel_id)
         existing = self._waiters.pop(key, None)
         if existing is not None:
             existing.cancel()
         task = asyncio.get_running_loop().create_task(
-            self._auto_resume_waiter(key, generation, suspend_len),
+            self._auto_resume_waiter(key, generation, suspend_rev),
             name=f"turn-resume:{key.channel_id}:{key.message_id}",
         )
         self._waiters[key] = task
@@ -123,19 +123,19 @@ class TurnResumeManager:
         task.add_done_callback(_cleanup)
 
     async def _auto_resume_waiter(
-        self, key: TurnKey, generation: str, suspend_len: int
+        self, key: TurnKey, generation: str, suspend_rev: int
     ) -> None:
         """Wait for capacity, then resume IF nothing else happened.
 
-        The advance check anchors on the session length captured AT
-        SUSPENSION (``suspend_len``). Production ordering (round-2 blocker
-        #3, PR #242): intake appends the USER message BEFORE the turn runs,
-        so the suspension capture already includes it, and the only
-        legitimate growth afterwards is the assistant preservation marker —
-        exactly +1 (a directly-driven turn adds 0). Anything else — or an
-        unreadable session — stands auto-resume down fail-safe; explicit
-        resume stays available. No sampling window exists for a stranger
-        message to sneak into the baseline.
+        The advance check anchors on the MONOTONIC session mutation
+        revision captured AT SUSPENSION (``suspend_rev``) — message count
+        can ABA back to an allowed value via removal or compaction; the
+        revision only grows (round-4 blocker #3, PR #242). Production
+        ordering: intake appends the USER message BEFORE the turn runs, so
+        the capture already includes it and the only legitimate growth is
+        the assistant preservation marker — exactly +1 (a directly-driven
+        turn adds 0). Anything else — or an unreadable session — stands
+        auto-resume down fail-safe; explicit resume stays available.
 
         Capacity detection is ACTIVE: a quiet breaker is never probed by
         anyone, so the waiter claims the probe slot itself when the cooldown
@@ -147,7 +147,7 @@ class TurnResumeManager:
         """
         give_up_at = time.monotonic() + self._resume_ttl_hours * 3600.0
         breaker = self._llm_gateway.capacity_breaker_for()
-        allowed = {suspend_len, suspend_len + 1} if suspend_len >= 0 else set()
+        allowed = {suspend_rev, suspend_rev + 1} if suspend_rev >= 0 else set()
         while time.monotonic() < give_up_at:
             await asyncio.sleep(_AUTO_POLL_SECONDS)
             row = await asyncio.to_thread(self._store.load_resumable_sync, key)
@@ -156,7 +156,7 @@ class TurnResumeManager:
             admission = breaker.acquire_attempt()
             if not isinstance(admission, float):
                 breaker.abandon(admission)  # the resume re-acquires for real
-                if self._session_len(key.channel_id) not in allowed:
+                if self._session_revision(key.channel_id) not in allowed:
                     log.info(
                         "Auto-resume for %s stands down: session advanced or "
                         "unreadable (explicit resume still available)", key,
@@ -172,14 +172,17 @@ class TurnResumeManager:
     def _channel_lock(self, channel_id: str) -> asyncio.Lock:
         return self._channel_state.channel_locks.setdefault(channel_id, asyncio.Lock())
 
-    def _session_len(self, channel_id: str) -> int:
-        """Peek the channel's session length WITHOUT get_or_create (which
-        bumps last_active on pure reads). SessionManager keeps its dict at
-        `_sessions`; a lookup failure returns -1 so a broken peek can never
-        satisfy the baseline-equality check and wrongly auto-resume."""
+    def _session_revision(self, channel_id: str) -> int:
+        """The channel's MONOTONIC mutation watermark (round-4 blocker #3,
+        PR #242): message COUNT can ABA back to an allowed value via
+        removal/compaction; the revision only ever grows. A lookup failure
+        returns -1 so a broken peek can never satisfy the baseline check
+        and wrongly auto-resume."""
         try:
-            session = getattr(self._sessions, "_sessions", {}).get(channel_id)
-            return len(session.messages) if session is not None else 0
+            fn = getattr(self._sessions, "mutation_revision", None)
+            if not callable(fn):
+                return -1
+            return int(fn(channel_id))
         except Exception:
             return -1
 
@@ -202,7 +205,7 @@ class TurnResumeManager:
             # deviation #3, PR #242): a message that advanced the session
             # while we queued for this lock must stand auto-resume down —
             # the pre-lock check alone was a TOCTOU window.
-            if self._session_len(key.channel_id) not in allowed:
+            if self._session_revision(key.channel_id) not in allowed:
                 log.info(
                     "Auto-resume for %s stands down: session advanced while "
                     "waiting for the channel lock", key,
@@ -273,6 +276,12 @@ class TurnResumeManager:
         Returns the run() result tuple, a notice tuple when resume was
         attempted but rejected, or None when this message is not a resume
         trigger (normal processing continues).
+
+        Contract (round-4 blocker #2, PR #242): once a trigger IS
+        recognized against preserved work, this NEVER raises and NEVER
+        returns None — an internal failure returns a notice tuple, so a
+        recognized resume command can never fall through into a fresh
+        normal turn.
         """
         content = getattr(message, "content", "") or ""
         if not self.is_resume_trigger(content):
@@ -281,6 +290,19 @@ class TurnResumeManager:
         row_summary = await self._latest_suspended_for_channel(channel_id)
         if row_summary is None:
             return None  # nothing to resume — treat as a normal message
+        try:
+            return await self._explicit_resume_recognized(message, row_summary)
+        except Exception:
+            log.exception("Explicit resume failed internally")
+            return (
+                "I recognized the resume command, but resuming failed "
+                "internally. The preserved work is untouched — try `resume` "
+                "again, or ask fresh.",
+                False, True, [], False,
+            )
+
+    async def _explicit_resume_recognized(self, message: Any, row_summary: dict):
+        channel_id = str(message.channel.id)
         key = TurnKey(
             source="discord",
             channel_id=channel_id,
@@ -369,6 +391,11 @@ class TurnResumeManager:
         # repair, cancellation check — runs while the row is still
         # SUSPENDED, so a failure rejects/aborts cleanly instead of
         # stranding an ACTIVE row invisible to resumable queries.
+        # EVERY fallible reconstruction step lives inside this one
+        # pre-acquisition rejection boundary (round-4 blocker #2, PR #242):
+        # schema validation + restore, current-policy tool derivation, and
+        # transcript repair. A failure here rejects terminally — never a
+        # SUSPENDED bounce loop, never an escape past the resume flow.
         payload = row["payload"]
         try:
             fields = restore_field_values(
@@ -376,21 +403,21 @@ class TurnResumeManager:
                 load_blob=self._store.load_blob_sync,
                 stuck_tracker_cls=self._tool_loop._stuck_loop_tracker_cls,
             )
+            # Current security policy wins: tools re-derived from the live
+            # catalog + permission filter, never the persisted definitions.
+            tools = None
+            if self._get_config().tools.enabled:
+                tools = self._tool_catalog.merged_definitions()
+                tools = self._permissions.filter_tools(str(original.author.id), tools)
+            self._repair_unmatched_tool_use(
+                fields["messages"], row.get("operations") or []
+            )
         except Exception:
-            log.exception("Checkpoint restore failed — rejecting")
+            log.exception("Checkpoint reconstruction failed — rejecting")
             await asyncio.to_thread(
                 self._store.reject_resumable_sync, key, "checkpoint unreadable"
             )
             return None, None, "the checkpoint could not be restored"
-
-        # Current security policy wins: tools re-derived from the live
-        # catalog + permission filter, never the persisted definitions.
-        tools = None
-        if self._get_config().tools.enabled:
-            tools = self._tool_catalog.merged_definitions()
-            tools = self._permissions.filter_tools(str(original.author.id), tools)
-
-        self._repair_unmatched_tool_use(fields["messages"], row.get("operations") or [])
 
         cancel = self._channel_state.cancel_events.setdefault(
             key.channel_id, asyncio.Event()

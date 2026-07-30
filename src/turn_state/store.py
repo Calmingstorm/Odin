@@ -271,7 +271,6 @@ class TurnStateStore:
         renew itself through a checkpoint; the fence is identical for turn
         and ledger writes)."""
         conn = self._require()
-        new_revision = lease.revision + 1 if bump_revision else lease.revision
         sql = (
             f"UPDATE turns SET {set_sql}, revision=? "
             "WHERE source=? AND channel_id=? AND message_id=? "
@@ -280,20 +279,22 @@ class TurnStateStore:
         )
         try:
             with self._write_lock:
+                # EVERY revision value — the expected WHERE revision, the
+                # new SET revision, and the shared lease publish — derives
+                # from ONE read taken under this lock (round-4 blocker #1,
+                # PR #242): a pre-lock capture let a delayed heartbeat pair
+                # a fresh WHERE revision with a stale SET revision and
+                # REGRESS both the row and the lease.
+                expected_revision = lease.revision
+                new_revision = expected_revision + 1 if bump_revision else expected_revision
                 cur = conn.execute(
                     sql,
                     [*params, new_revision, lease.key.source, lease.key.channel_id,
-                     lease.key.message_id, lease.generation, lease.revision,
+                     lease.key.message_id, lease.generation, expected_revision,
                      lease.token, TurnStatus.ACTIVE, time.time()],
                 )
                 conn.commit()
                 if cur.rowcount == 1:
-                    # The in-memory revision must advance under the SAME
-                    # lock as the database mutation (round-3 deviation #1,
-                    # PR #242): a concurrent heartbeat sneaking between
-                    # commit and this assignment read the stale revision,
-                    # got StaleTurnError, and stopped beating a lease the
-                    # turn still owned.
                     lease.revision = new_revision
         except sqlite3.Error as exc:
             raise TurnStateUnavailableError(f"turn-state write failed: {exc}") from exc

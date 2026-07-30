@@ -100,14 +100,43 @@ def compute_content_digest(text: str) -> str:
 # ── storage redaction ────────────────────────────────────────────────
 
 
+# Case-insensitive sensitive-KEY redaction (round-4 blocker #4, PR #242):
+# opaque credentials carry no `sk-`/`token=` signature for the pattern
+# scrub, so any value stored under a credential-shaped key is redacted
+# wholesale. Keys are normalized (lowercased, `-`/`_` stripped) and matched
+# EXACTLY — "auth" redacts, "author" does not.
+_SENSITIVE_KEYS = frozenset({
+    "password", "passwd", "pwd", "passphrase",
+    "secret", "clientsecret", "secretkey",
+    "token", "apitoken", "accesstoken", "refreshtoken", "sessiontoken",
+    "idtoken", "bearertoken", "authtoken",
+    "apikey", "authorization", "auth", "bearer",
+    "credential", "credentials", "privatekey", "accesskey", "secretaccesskey",
+    "cookie", "setcookie", "sessionid", "csrftoken",
+})
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    if not isinstance(key, str):
+        return False
+    return key.lower().replace("-", "").replace("_", "") in _SENSITIVE_KEYS
+
+
 def _deep_scrub_strings(value: Any) -> Any:
-    """Recursive secret-pattern scrub over EVERY nested string value."""
+    """Recursive storage redaction: secret-PATTERN scrub over every nested
+    string value, plus KEY-aware wholesale redaction — a value (of any
+    shape, including nested containers) stored under a sensitive key is
+    replaced entirely, because opaque credentials defeat pattern matching."""
     if isinstance(value, str):
         return scrub_output_secrets(value)
     if isinstance(value, list):
         return [_deep_scrub_strings(v) for v in value]
     if isinstance(value, dict):
-        return {k: _deep_scrub_strings(v) for k, v in value.items()}
+        return {
+            k: ("[redacted:sensitive-key]" if _is_sensitive_key(k)
+                else _deep_scrub_strings(v))
+            for k, v in value.items()
+        }
     return value
 
 
@@ -412,11 +441,29 @@ def validate_payload(payload: Any) -> None:
     """
     if not isinstance(payload, dict):
         raise CheckpointInvalidError("payload is not an object")
+    # bool subclasses int; a checkpoint carrying True where an ordinal
+    # belongs is corrupt, not truthy — the isinstance pairs are inlined so
+    # mypy narrows the comparisons.
     version = payload.get("codec_version")
-    if not isinstance(version, int) or version > CODEC_VERSION or version < 1:
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version > CODEC_VERSION
+        or version < 1
+    ):
         raise CheckpointInvalidError(f"unsupported codec_version: {version!r}")
     if payload.get("policy") != "chat":
         raise CheckpointInvalidError(f"unsupported policy: {payload.get('policy')!r}")
+    generation_seq = payload.get("generation_seq")
+    if (
+        not isinstance(generation_seq, int)
+        or isinstance(generation_seq, bool)
+        or generation_seq < 0
+    ):
+        raise CheckpointInvalidError(f"invalid generation_seq: {generation_seq!r}")
+
+    def _exact_int(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
     fields = payload.get("fields")
     if not isinstance(fields, dict):
         raise CheckpointInvalidError("missing fields envelope")
@@ -424,9 +471,29 @@ def validate_payload(payload: Any) -> None:
     if missing:
         raise CheckpointInvalidError(f"missing persisted fields: {sorted(missing)}")
     for name, expected in _REQUIRED_FIELD_TYPES.items():
-        if not isinstance(fields.get(name), expected):
+        value = fields.get(name)
+        if expected is int:
+            if not _exact_int(value):
+                raise CheckpointInvalidError(f"field {name!r} is not an integer")
+        elif not isinstance(value, expected):
             raise CheckpointInvalidError(
-                f"field {name!r} has invalid type {type(fields.get(name)).__name__}"
+                f"field {name!r} has invalid type {type(value).__name__}"
+            )
+    # Transcript shape: every entry is a message dict; content is a string
+    # or a list of block dicts (round-4 blocker #2 — a [None] entry used to
+    # explode later in transcript repair, outside the rejection boundary).
+    for i, msg in enumerate(fields["messages"]):
+        if not isinstance(msg, dict) or not isinstance(msg.get("role"), str):
+            raise CheckpointInvalidError(f"messages[{i}] is not a message object")
+        content = msg.get("content")
+        if isinstance(content, list):
+            if not all(isinstance(block, dict) for block in content):
+                raise CheckpointInvalidError(
+                    f"messages[{i}] has a non-object content block"
+                )
+        elif not isinstance(content, str):
+            raise CheckpointInvalidError(
+                f"messages[{i}] content has invalid type {type(content).__name__}"
             )
 
 

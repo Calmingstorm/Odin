@@ -476,7 +476,7 @@ class TestSessionRecheckUnderLock:
 
         key = TurnKey("discord", rows[0]["channel_id"], rows[0]["message_id"])
         ch_id = key.channel_id
-        baseline = h.manager._session_len(ch_id)
+        baseline = h.manager._session_revision(ch_id)
         allowed = {baseline, baseline + 1}
 
         lock = h.manager._channel_lock(ch_id)
@@ -533,9 +533,18 @@ class TestStructuralPayloadValidation:
             "not-an-object",  # payload must be a dict
             {**base, "codec_version": CODEC_VERSION + 1},  # future codec
             {**base, "policy": "loop"},  # wrong policy
+            {**base, "generation_seq": "bad"},  # round-4: exact int required
+            {**base, "generation_seq": True},  # round-4: bools excluded
+            {**base, "generation_seq": -1},
             {**base, "fields": "nope"},  # fields envelope must be a dict
             {**base, "fields": {}},  # missing persisted fields
             {**base, "fields": {**good_fields, "messages": "not-a-list"}},
+            {**base, "fields": {**good_fields, "messages": [None]}},  # round-4
+            {**base, "fields": {**good_fields,
+                                "messages": [{"role": "user", "content": 42}]}},
+            {**base, "fields": {**good_fields,
+                                "messages": [{"role": "user", "content": [42]}]}},
+            {**base, "fields": {**good_fields, "chat_cap": True}},
         ):
             with _pytest.raises(CheckpointInvalidError):
                 validate_payload(broken)
@@ -566,3 +575,109 @@ class TestExplicitResumeOrdering:
             "Resumed through the pipeline." in (r["content"] or "")
             for r in trigger.replies
         )
+
+
+class TestMonotonicSessionFence:
+    async def test_add_then_remove_aba_still_stands_down(self, tmp_path):
+        """Round-4 blocker #3 (PR #242): an add+remove pair returns the
+        MESSAGE COUNT to an allowed value, but the mutation revision only
+        grows — the ABA collision must stand auto-resume down."""
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("stale reply that must never send"))
+        rows = h.store.list_suspended_sync("discord")
+        from src.turn_state import TurnKey
+
+        key = TurnKey("discord", rows[0]["channel_id"], rows[0]["message_id"])
+        row = h.store.load_resumable_sync(key)
+        ch_id = key.channel_id
+        baseline = h.manager._session_revision(ch_id)
+        allowed = {baseline, baseline + 1}
+
+        lock = h.manager._channel_lock(ch_id)
+        await lock.acquire()
+        resume_task = asyncio.get_running_loop().create_task(
+            h.manager._run_auto_resume(key, row, allowed)
+        )
+        await asyncio.sleep(0.05)
+        # ABA: append a message, then remove it — count restored, revision +2.
+        h.bot.sessions.add_message(ch_id, "user", "intervening")
+        h.bot.sessions.remove_last_message(ch_id, "user")
+        lock.release()
+        await asyncio.wait_for(resume_task, timeout=5)
+        assert h.row()[0] == TurnStatus.SUSPENDED  # stood down on the revision
+
+    def test_mutation_revision_is_monotonic_across_mutations(self, tmp_path):
+        h = Harness([text_response("x")], tmp_path)
+        sess = h.bot.sessions
+        assert sess.mutation_revision("chX") == 0
+        sess.add_message("chX", "user", "a")
+        sess.add_message("chX", "assistant", "b")
+        assert sess.mutation_revision("chX") == 2
+        sess.remove_last_message("chX", "assistant")
+        assert sess.mutation_revision("chX") == 3  # removal GROWS the watermark
+
+
+class TestRecognizedResumeNeverFallsThrough:
+    async def test_internal_failure_returns_notice_not_fresh_turn(self, tmp_path):
+        """Round-4 blocker #2 (PR #242): once the resume trigger is
+        recognized against preserved work, an internal failure yields a
+        notice — NEVER None (which would run a fresh normal turn)."""
+        h, original = await suspend_turn(tmp_path)
+
+        async def boom(message, row_summary):
+            raise RuntimeError("internal resume machinery exploded")
+
+        h.manager._explicit_resume_recognized = boom
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        assert "resuming failed internally" in result[0]
+        assert result[2] is True  # surfaced as an error, not silence
+        # The preserved work is untouched and still resumable.
+        assert h.row()[0] == TurnStatus.SUSPENDED
+
+    async def test_bad_generation_seq_rejects_terminally_not_loop(self, tmp_path):
+        """Odin's round-4 repro: generation_seq="bad" used to pass
+        validation, fail post-acquisition, and bounce back to SUSPENDED
+        forever. Now it rejects terminally on the FIRST attempt."""
+        import json as _json
+
+        h, original = await suspend_turn(tmp_path)
+        (payload_text,) = h.store._conn.execute(
+            "SELECT payload FROM turns"
+        ).fetchone()
+        payload = _json.loads(payload_text)
+        payload["generation_seq"] = "bad"
+        h.store._conn.execute(
+            "UPDATE turns SET payload=?", [_json.dumps(payload)]
+        )
+        h.store._conn.commit()
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        assert "could not be restored" in result[0]
+        (status,) = h.store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_REJECTED  # no SUSPENDED loop
+
+    async def test_none_message_entry_rejects_inside_the_boundary(self, tmp_path):
+        """Odin's round-4 repro: messages=[None] used to explode in
+        transcript repair OUTSIDE the rejection boundary and fall through
+        to a fresh turn. Now it rejects terminally, zero fresh generation."""
+        import json as _json
+
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("fresh turn that must never run"))
+        (payload_text,) = h.store._conn.execute(
+            "SELECT payload FROM turns"
+        ).fetchone()
+        payload = _json.loads(payload_text)
+        payload["fields"]["messages"] = [None]
+        h.store._conn.execute(
+            "UPDATE turns SET payload=?", [_json.dumps(payload)]
+        )
+        h.store._conn.commit()
+        calls_before = len(h.fake.calls)
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        assert "could not be restored" in result[0]
+        assert len(h.fake.calls) == calls_before  # no fresh LLM response
+        (status,) = h.store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_REJECTED
