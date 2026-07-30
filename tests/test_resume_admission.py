@@ -655,6 +655,39 @@ class TestMonotonicSessionFence:
         assert sess.mutation_revision("chX") == 3  # removal GROWS the watermark
 
 
+class TestResumeLookupFailureFailClosed:
+    async def test_first_store_read_failure_refuses_before_fresh_generation(
+        self, tmp_path
+    ):
+        """Round-6 task 1: the first store read after recognizing `resume`
+        is inside the no-raise boundary. An unverifiable identity produces a
+        bounded refusal through the real pipeline, never a fresh LLM turn."""
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("fresh turn that must never run"))
+        h.bot.pipeline._turn_resume = h.manager
+        calls_before = len(h.fake.calls)
+
+        real_list = h.store.list_suspended_sync
+        failed = False
+
+        def fail_once(source=None):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError("forced one-read failure")
+            return real_list(source)
+
+        h.store.list_suspended_sync = fail_once
+        trigger = resume_msg(original)
+        await h.bot.pipeline.run(trigger, trigger.content)
+
+        assert failed is True
+        assert len(h.fake.calls) == calls_before  # ZERO fresh generation
+        assert h.row()[0] == TurnStatus.SUSPENDED
+        delivered = "\n".join(trigger.all_delivered_texts())
+        assert "Nothing was resumed or started fresh" in delivered
+
+
 class TestRecognizedResumeNeverFallsThrough:
     async def test_internal_failure_returns_notice_not_fresh_turn(self, tmp_path):
         """Round-4 blocker #2 (PR #242): once the resume trigger is

@@ -286,18 +286,24 @@ class TurnResumeManager:
         content = getattr(message, "content", "") or ""
         if not self.is_resume_trigger(content):
             return None
-        channel_id = str(message.channel.id)
-        row_summary = await self._latest_suspended_for_channel(channel_id)
-        if row_summary is None:
-            return None  # nothing to resume — treat as a normal message
+        # From lexical trigger recognition onward, every store read lives
+        # inside this no-raise boundary. In particular, failure of the
+        # initial suspended-row lookup must refuse this command rather than
+        # returning None and letting intake start a fresh, tool-capable turn.
+        # We cannot prove that no preserved work exists when identity lookup
+        # failed, so fail closed with a bounded notice (round-6 task 1).
         try:
+            channel_id = str(message.channel.id)
+            row_summary = await self._latest_suspended_for_channel(channel_id)
+            if row_summary is None:
+                return None  # lookup succeeded: genuinely nothing to resume
             return await self._explicit_resume_recognized(message, row_summary)
         except Exception:
             log.exception("Explicit resume failed internally")
             return (
-                "I recognized the resume command, but resuming failed "
-                "internally. The preserved work is untouched — try `resume` "
-                "again, or ask fresh.",
+                "I recognized the resume command, but resuming failed internally "
+                "while safely checking the preserved work. Nothing was resumed or "
+                "started fresh — try `resume` again later.",
                 False, True, [], False,
             )
 
