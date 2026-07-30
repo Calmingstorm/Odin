@@ -11,6 +11,13 @@ Design rules (settled with Odin, 2026-07-30):
   logical generation. Callers resuming a persisted turn pass the remaining
   budget (computed from the checkpoint's UTC deadline) via
   ``deadline_seconds`` — a restart must not grant a fresh five minutes.
+  The budget bounds WAITING between attempts, deliberately NOT an in-flight
+  attempt: healthy xhigh generations legitimately stream >10 minutes, and
+  killing them at a recovery wall is exactly the v3.58.2 disease
+  (hardcoded 600s total killing healthy generations). In-flight attempts
+  are bounded by the client's own transport limits (request_timeout /
+  stream_stall_timeout) and are cancellable via ``cancel_event`` at any
+  moment (/stop interrupts the await itself, not just the sleeps).
 - **Retryable**: ``LLMCapacityError``, ``LLMTransportError``, and
   ``CircuitOpenError`` (the client breaker — recovery waits THROUGH it
   rather than treating it as terminal). Full-jitter backoff capped at
@@ -35,6 +42,7 @@ Design rules (settled with Odin, 2026-07-30):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -91,6 +99,37 @@ async def _sleep_cancellable(seconds: float, cancel_event: asyncio.Event | None)
     except TimeoutError:
         return
     raise asyncio.CancelledError("cancelled during LLM recovery wait")
+
+
+async def _attempt_cancellable(
+    attempt: Callable[[], Awaitable[T]], cancel_event: asyncio.Event | None
+) -> T:
+    """Run one attempt racing the caller's cancel event.
+
+    /stop must interrupt an IN-FLIGHT provider await, not only the waits
+    between attempts (review blocker #3, PR #242). On cancellation the
+    attempt task is cancelled and awaited — aiohttp unwinds its transport
+    cleanly — before CancelledError propagates to the caller (which
+    releases any held breaker probe).
+    """
+    if cancel_event is None:
+        return await attempt()
+    attempt_task = asyncio.ensure_future(attempt())
+    cancel_task = asyncio.ensure_future(cancel_event.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {attempt_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if attempt_task in done:
+            return attempt_task.result()
+        attempt_task.cancel()
+        with contextlib.suppress(BaseException):
+            await attempt_task
+        raise asyncio.CancelledError("cancelled during LLM attempt")
+    finally:
+        cancel_task.cancel()
+        with contextlib.suppress(BaseException):
+            await cancel_task
 
 
 def _notify_wait(
@@ -171,9 +210,9 @@ async def generate_with_recovery(
                 admission = breaker.acquire_attempt()
             token = admission
 
-        # -- one attempt ---------------------------------------------
+        # -- one attempt (raced against /stop) ------------------------
         try:
-            result = await attempt()
+            result = await _attempt_cancellable(attempt, cancel_event)
         except asyncio.CancelledError:
             if breaker is not None and token is not None:
                 breaker.abandon(token)

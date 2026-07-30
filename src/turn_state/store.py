@@ -203,13 +203,20 @@ class TurnStateStore:
         self._write_lock = threading.Lock()
         self._conn: sqlite3.Connection | None = None
         try:
+            # Checkpoints carry the model transcript (user content, tool
+            # arguments) — secret-adjacent material. Everything here is
+            # owner-only: directories 0700, DB + WAL/SHM + blobs 0600
+            # (review blocker #8, PR #242).
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
             self._blob_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(Path(self.db_path).parent, 0o700)
+            os.chmod(self._blob_dir, 0o700)
             conn = sqlite3.connect(self.db_path, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=30000")
             conn.executescript(_DDL)
             conn.commit()
+            self._restrict_db_modes()
             self._conn = conn
             swept = self._boot_sweep_sync()
             if swept["turns"] or swept["ops"]:
@@ -224,6 +231,17 @@ class TurnStateStore:
                 "for this process (turns run legacy, work is not preserved)"
             )
             self._conn = None
+
+    def _restrict_db_modes(self) -> None:
+        """0600 on the database and its WAL/SHM sidecars (best-effort — the
+        sidecars appear lazily; called again from the TTL sweep)."""
+        for suffix in ("", "-wal", "-shm"):
+            path = Path(self.db_path + suffix)
+            try:
+                if path.exists():
+                    os.chmod(path, 0o600)
+            except OSError:
+                pass
 
     @property
     def available(self) -> bool:
@@ -280,20 +298,24 @@ class TurnStateStore:
              lease.generation],
         )
 
-    def _verify_lease(self, lease: TurnLease) -> None:
-        """Ops-table writes are fenced indirectly: verify the turns row still
-        carries this lease before touching operations."""
-        conn = self._require()
-        try:
-            row = conn.execute(
-                "SELECT lease_token, turn_generation FROM turns "
-                "WHERE source=? AND channel_id=? AND message_id=?",
-                [lease.key.source, lease.key.channel_id, lease.key.message_id],
-            ).fetchone()
-        except sqlite3.Error as exc:
-            raise TurnStateUnavailableError(f"turn-state read failed: {exc}") from exc
-        if row is None or row[0] != lease.token or row[1] != lease.generation:
-            raise StaleTurnError(f"turn {lease.key}: lease no longer held")
+    # The full turn fence as a server-side predicate: every ledger write is
+    # ONE statement conditional on the turn's generation, EXPECTED REVISION,
+    # current lease token, ACTIVE status, and a live lease — plus a legal
+    # prior operation state on the row itself. No read-then-write TOCTOU;
+    # a stale-revision or fenced-out owner mutates nothing (review blocker
+    # #1, PR #242).
+    _TURN_FENCE = (
+        "EXISTS (SELECT 1 FROM turns WHERE turns.source=? AND turns.channel_id=? "
+        "AND turns.message_id=? AND turns.turn_generation=? AND turns.revision=? "
+        "AND turns.lease_token=? AND turns.status=? AND turns.lease_expires_at > ?)"
+    )
+
+    def _fence_params(self, lease: TurnLease) -> list:
+        return [
+            lease.key.source, lease.key.channel_id, lease.key.message_id,
+            lease.generation, lease.revision, lease.token, TurnStatus.ACTIVE,
+            time.time(),
+        ]
 
     # ── admission / lifecycle (sync bodies) ──────────────────────────
 
@@ -308,12 +330,19 @@ class TurnStateStore:
         prompt_policy_hash: str | None,
         tool_catalog_hash: str | None,
         session_snapshot: dict | None,
-    ) -> TurnLease | None:
-        """Admit a fresh turn. Returns a lease, or None when this message
-        already has a row (redelivery/crash artifact — caller runs legacy,
-        loudly) or when the store is unavailable (caller runs legacy)."""
+    ) -> tuple[TurnLease | None, str]:
+        """Admit a fresh turn. Returns (lease, disposition).
+
+        Dispositions: ``admitted`` (lease non-None); ``already_processed``
+        (a terminal row exists — a redelivered message must REFUSE fresh
+        execution, never run unledgered — review blocker #2, PR #242);
+        ``in_progress`` (an ACTIVE row with a live lease — another owner);
+        ``resumable`` (a SUSPENDED row, or an expired-lease ACTIVE row
+        swept to SUSPENDED here — the resume path owns it);
+        ``store_unavailable`` (feature off / I/O failure — legacy run).
+        """
         if self._conn is None:
-            return None
+            return None, "store_unavailable"
         now = time.time()
         generation = secrets.token_hex(16)
         token = secrets.token_hex(16)
@@ -335,15 +364,51 @@ class TurnStateStore:
                     )
                     self._conn.commit()
                 except sqlite3.IntegrityError:
-                    log.warning(
-                        "Turn %s already has a state row — running without "
-                        "durability for this turn", key,
-                    )
-                    return None
+                    return None, self._classify_existing_row(key, now)
         except sqlite3.Error:
             log.exception("Turn admission failed — running without durability")
-            return None
-        return TurnLease(key=key, generation=generation, token=token, revision=0)
+            return None, "store_unavailable"
+        return (
+            TurnLease(key=key, generation=generation, token=token, revision=0),
+            "admitted",
+        )
+
+    def _classify_existing_row(self, key: TurnKey, now: float) -> str:
+        """Disposition for a message whose identity already has a row.
+        Lock held by caller."""
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT status, lease_expires_at FROM turns "
+            "WHERE source=? AND channel_id=? AND message_id=?",
+            [key.source, key.channel_id, key.message_id],
+        ).fetchone()
+        if row is None:  # deleted between INSERT failure and here — treat as busy
+            return "in_progress"
+        status, lease_expires_at = row
+        if status in TurnStatus.TERMINAL:
+            log.warning("Turn %s was already processed — refusing re-execution", key)
+            return "already_processed"
+        if status == TurnStatus.SUSPENDED:
+            return "resumable"
+        # ACTIVE: a live lease means another owner; an expired lease is a
+        # crash artifact — suspend it here so the resume path owns it.
+        if lease_expires_at is not None and lease_expires_at > now:
+            return "in_progress"
+        self._conn.execute(
+            "UPDATE turns SET status=?, suspended_at=?, lease_token=NULL, "
+            "lease_expires_at=NULL WHERE source=? AND channel_id=? AND message_id=? "
+            "AND status=?",
+            [TurnStatus.SUSPENDED, now, key.source, key.channel_id,
+             key.message_id, TurnStatus.ACTIVE],
+        )
+        self._conn.execute(
+            "UPDATE operations SET state=?, updated_at=? "
+            "WHERE source=? AND channel_id=? AND message_id=? AND state IN (?, ?)",
+            [OpState.OUTCOME_UNKNOWN, now, key.source, key.channel_id,
+             key.message_id, OpState.PREPARED, OpState.RUNNING],
+        )
+        self._conn.commit()
+        return "resumable"
 
     def checkpoint_sync(
         self,
@@ -405,8 +470,12 @@ class TurnStateStore:
     ) -> None:
         """Persist PREPARED rows for one generation's tool calls.
 
-        Validates Odin's rule up front: tool-call ids nonempty and unique
-        within the generation — malformed duplicates fail BEFORE execution.
+        Tool-call ids must be nonempty and unique within the generation —
+        malformed duplicates fail BEFORE execution. Plain INSERTs (never
+        OR REPLACE — an existing row, e.g. a settled op from a replayed id,
+        must never be reset to PREPARED); each insert is fenced on the turn
+        row via INSERT..SELECT..WHERE EXISTS, so a fenced-out owner inserts
+        nothing. All rows land in one transaction or none do.
         """
         ids = [str(i.get("tool_call_id") or "") for i in intents]
         if any(not i for i in ids):
@@ -414,29 +483,50 @@ class TurnStateStore:
         if len(set(ids)) != len(ids):
             raise LedgerIntentError("duplicate tool_call_id in generation")
         conn = self._require()
-        self._verify_lease(lease)
         now = time.time()
-        rows = [
-            (lease.key.source, lease.key.channel_id, lease.key.message_id,
-             lease.generation, generation_seq, str(i["tool_call_id"]),
-             OpState.PREPARED, str(i.get("tool_name") or "unknown"), iteration,
-             effect_fingerprint(str(i.get("tool_name") or ""), i.get("tool_input") or {}),
-             None, now, now)
-            for i in intents
-        ]
         try:
             with self._write_lock:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO operations VALUES "
-                    "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    rows,
-                )
-                conn.commit()
+                try:
+                    for intent in intents:
+                        cur = conn.execute(
+                            "INSERT INTO operations "
+                            "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? "
+                            f"WHERE {self._TURN_FENCE}",
+                            [lease.key.source, lease.key.channel_id,
+                             lease.key.message_id, lease.generation,
+                             generation_seq, str(intent["tool_call_id"]),
+                             OpState.PREPARED,
+                             str(intent.get("tool_name") or "unknown"), iteration,
+                             effect_fingerprint(
+                                 str(intent.get("tool_name") or ""),
+                                 intent.get("tool_input") or {},
+                             ),
+                             None, now, now,
+                             *self._fence_params(lease)],
+                        )
+                        if cur.rowcount != 1:
+                            raise StaleTurnError(
+                                f"turn {lease.key}: fence lost recording intents"
+                            )
+                    conn.commit()
+                except BaseException:
+                    conn.rollback()
+                    raise
+        except sqlite3.IntegrityError as exc:
+            raise LedgerIntentError(
+                f"intent already recorded for this generation: {exc}"
+            ) from exc
+        except StaleTurnError:
+            raise
         except sqlite3.Error as exc:
             raise TurnStateUnavailableError(f"ledger intent write failed: {exc}") from exc
 
     def mark_running_sync(self, lease: TurnLease, generation_seq: int, tool_call_id: str) -> None:
-        self._set_op_state(lease, generation_seq, tool_call_id, OpState.RUNNING, None)
+        # Legal source: PREPARED only — a settled op can never re-enter RUNNING.
+        self._set_op_state(
+            lease, generation_seq, tool_call_id, OpState.RUNNING, None,
+            legal_sources=(OpState.PREPARED,),
+        )
 
     def settle_op_sync(
         self,
@@ -453,7 +543,10 @@ class TurnStateStore:
         # rule: ambiguous outcomes stop, never rerun).
         if state not in (OpState.APPLIED, OpState.DEFINITELY_FAILED, OpState.OUTCOME_UNKNOWN):
             raise ValueError(f"settle_op_sync: invalid terminal state {state}")
-        self._set_op_state(lease, generation_seq, tool_call_id, state, result_text)
+        self._set_op_state(
+            lease, generation_seq, tool_call_id, state, result_text,
+            legal_sources=(OpState.PREPARED, OpState.RUNNING),
+        )
 
     def settle_interrupted_sync(
         self,
@@ -469,21 +562,12 @@ class TurnStateStore:
         boundary: it never downgrades an already-settled row, and a missing
         row (e.g. a parse-error call that had no intent) is tolerated.
         """
-        conn = self._require()
-        self._verify_lease(lease)
-        where, params = self._op_where(lease)
-        try:
-            with self._write_lock:
-                conn.execute(
-                    f"UPDATE operations SET state=?, result=?, updated_at=? "
-                    f"WHERE {where} AND generation_seq=? AND tool_call_id=? "
-                    "AND state IN (?, ?)",
-                    [OpState.OUTCOME_UNKNOWN, result_text, time.time(), *params,
-                     generation_seq, tool_call_id, OpState.PREPARED, OpState.RUNNING],
-                )
-                conn.commit()
-        except sqlite3.Error as exc:
-            raise TurnStateUnavailableError(f"ledger write failed: {exc}") from exc
+        self._set_op_state(
+            lease, generation_seq, tool_call_id, OpState.OUTCOME_UNKNOWN,
+            result_text,
+            legal_sources=(OpState.PREPARED, OpState.RUNNING),
+            tolerate_missing=True,
+        )
 
     def _set_op_state(
         self,
@@ -492,31 +576,45 @@ class TurnStateStore:
         tool_call_id: str,
         state: str,
         result_text: str | None,
+        *,
+        legal_sources: tuple[str, ...],
+        tolerate_missing: bool = False,
     ) -> None:
+        """One atomic, fully-fenced operation transition.
+
+        A single UPDATE conditional on the op's legal prior state AND the
+        turn fence (generation, expected revision, lease token, ACTIVE
+        status, live lease) — no separate verify step, no TOCTOU window,
+        and an illegal transition (e.g. APPLIED→RUNNING) matches nothing.
+        """
         conn = self._require()
-        self._verify_lease(lease)
         where, params = self._op_where(lease)
+        placeholders = ", ".join("?" for _ in legal_sources)
         try:
             with self._write_lock:
                 if result_text is None:
                     cur = conn.execute(
                         f"UPDATE operations SET state=?, updated_at=? WHERE {where} "
-                        "AND generation_seq=? AND tool_call_id=?",
-                        [state, time.time(), *params, generation_seq, tool_call_id],
+                        f"AND generation_seq=? AND tool_call_id=? "
+                        f"AND state IN ({placeholders}) AND {self._TURN_FENCE}",
+                        [state, time.time(), *params, generation_seq, tool_call_id,
+                         *legal_sources, *self._fence_params(lease)],
                     )
                 else:
                     cur = conn.execute(
                         f"UPDATE operations SET state=?, result=?, updated_at=? "
-                        f"WHERE {where} AND generation_seq=? AND tool_call_id=?",
+                        f"WHERE {where} AND generation_seq=? AND tool_call_id=? "
+                        f"AND state IN ({placeholders}) AND {self._TURN_FENCE}",
                         [state, result_text, time.time(), *params, generation_seq,
-                         tool_call_id],
+                         tool_call_id, *legal_sources, *self._fence_params(lease)],
                     )
                 conn.commit()
         except sqlite3.Error as exc:
             raise TurnStateUnavailableError(f"ledger write failed: {exc}") from exc
-        if cur.rowcount != 1:
+        if cur.rowcount != 1 and not tolerate_missing:
             raise StaleTurnError(
-                f"op {tool_call_id} gen_seq {generation_seq}: no PREPARED row to update"
+                f"op {tool_call_id} gen_seq {generation_seq}: no legally-"
+                f"transitionable row under the current fence"
             )
 
     # ── resume (sync bodies) ─────────────────────────────────────────
@@ -535,6 +633,15 @@ class TurnStateStore:
         ).fetchone()
         if row is None or row[2] is None:
             return None
+        try:
+            payload = json.loads(row[2])
+            snapshot = json.loads(row[10] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            # An unreadable checkpoint can never be resumed — reject it
+            # terminally instead of raising into every caller.
+            log.exception("Corrupt checkpoint payload for %s — rejecting", key)
+            self.reject_resumable_sync(key, "checkpoint payload unreadable")
+            return None
         ops = self._conn.execute(
             "SELECT generation_seq, tool_call_id, state, tool_name, result "
             "FROM operations WHERE source=? AND channel_id=? AND message_id=? "
@@ -544,7 +651,7 @@ class TurnStateStore:
         return {
             "generation": row[0],
             "revision": row[1],
-            "payload": json.loads(row[2]),
+            "payload": payload,
             "guild_id": row[3],
             "user_id": row[4],
             "content_digest": row[5],
@@ -552,7 +659,7 @@ class TurnStateStore:
             "schema_version": row[7],
             "prompt_policy_hash": row[8],
             "tool_catalog_hash": row[9],
-            "session_snapshot": json.loads(row[10] or "{}"),
+            "session_snapshot": snapshot,
             "recovery_deadline_utc": row[11],
             "last_progress_at": row[12],
             "suspended_at": row[13],
@@ -614,6 +721,38 @@ class TurnStateStore:
         except sqlite3.Error:
             log.exception("reject_resumable failed (non-fatal)")
 
+    def release_acquired_sync(
+        self, lease: TurnLease, *, terminal_reason: str | None = None
+    ) -> None:
+        """Fenced abort for a lease acquired but never run (post-acquire
+        reconstruction failure — review blocker #5, PR #242).
+
+        With ``terminal_reason`` the turn becomes TERMINAL_REJECTED (payload
+        compacted); without, it returns to SUSPENDED for a later attempt.
+        Fenced on the lease so only the acquiring owner can abort."""
+        conn = self._require()
+        if terminal_reason is not None:
+            set_sql = "status=?, payload=NULL, lease_token=NULL, lease_expires_at=NULL"
+            first_param: list = [TurnStatus.TERMINAL_REJECTED]
+        else:
+            set_sql = "status=?, lease_token=NULL, lease_expires_at=NULL"
+            first_param = [TurnStatus.SUSPENDED]
+        try:
+            with self._write_lock:
+                cur = conn.execute(
+                    f"UPDATE turns SET {set_sql} "
+                    "WHERE source=? AND channel_id=? AND message_id=? "
+                    "AND turn_generation=? AND lease_token=? AND status=?",
+                    [*first_param, lease.key.source, lease.key.channel_id,
+                     lease.key.message_id, lease.generation, lease.token,
+                     TurnStatus.ACTIVE],
+                )
+                conn.commit()
+            if cur.rowcount == 1 and terminal_reason:
+                log.info("Acquired turn %s rejected: %s", lease.key, terminal_reason)
+        except sqlite3.Error:
+            log.exception("release_acquired failed (non-fatal)")
+
     def list_suspended_sync(self, source: str | None = None) -> list[dict]:
         if self._conn is None:
             return []
@@ -635,16 +774,40 @@ class TurnStateStore:
     # ── sweeps ───────────────────────────────────────────────────────
 
     def _boot_sweep_sync(self) -> dict:
-        """Crash recovery at construction: expired-lease ACTIVE turns become
-        SUSPENDED; their PREPARED/RUNNING ops become OUTCOME_UNKNOWN (we
-        cannot know whether the external effect happened — never rerun)."""
+        """Crash recovery at construction: ALL ACTIVE turns become SUSPENDED
+        — this store serves a single process, so at construction no turn can
+        legitimately be in flight, lease expiry notwithstanding (a fast
+        restart inside the lease TTL used to strand rows ACTIVE forever —
+        review blocker #4, PR #242). Their PREPARED/RUNNING ops become
+        OUTCOME_UNKNOWN (we cannot know whether the external effect
+        happened — never rerun)."""
+        return self._sweep_active_sync(only_expired=False)
+
+    def sweep_expired_active_sync(self) -> dict:
+        """Defense-in-depth periodic sweep (housekeeping): any ACTIVE row
+        whose lease expired belongs to a dead owner — suspend it so the
+        resume path can see it."""
+        if self._conn is None:
+            return {}
+        try:
+            return self._sweep_active_sync(only_expired=True)
+        except Exception:
+            log.exception("expired-active sweep failed (non-fatal)")
+            return {}
+
+    def _sweep_active_sync(self, *, only_expired: bool) -> dict:
         conn = self._require()
         now = time.time()
+        where = "status=?"
+        params: list = [TurnStatus.ACTIVE]
+        if only_expired:
+            where += " AND (lease_expires_at IS NULL OR lease_expires_at < ?)"
+            params.append(now)
         with self._write_lock:
             stale = conn.execute(
-                "SELECT source, channel_id, message_id, turn_generation FROM turns "
-                "WHERE status=? AND (lease_expires_at IS NULL OR lease_expires_at < ?)",
-                [TurnStatus.ACTIVE, now],
+                f"SELECT source, channel_id, message_id, turn_generation FROM turns "
+                f"WHERE {where}",
+                params,
             ).fetchall()
             ops = 0
             for source, channel_id, message_id, generation in stale:
@@ -678,6 +841,7 @@ class TurnStateStore:
         conn = self._conn
         now = time.time()
         expired = payloads = ledger = 0
+        self._restrict_db_modes()  # WAL/SHM sidecars appear lazily
         try:
             with self._write_lock:
                 # Clock 1: resumable window — 24h from last REAL progress.
@@ -716,13 +880,19 @@ class TurnStateStore:
     # ── blobs ────────────────────────────────────────────────────────
 
     def store_blob_sync(self, data: bytes) -> str:
-        """Content-addressed blob write (tmp+rename). Returns 'blob:<sha256>'."""
+        """Content-addressed blob write (tmp+rename, 0600 — the codex_auth
+        secure-write discipline). Returns 'blob:<sha256>'."""
         digest = hashlib.sha256(data).hexdigest()
         path = self._blob_dir / digest
         if not path.exists():
             tmp = path.with_suffix(".tmp")
             try:
-                tmp.write_bytes(data)
+                fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                try:
+                    os.write(fd, data)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
                 os.replace(tmp, path)
             except OSError as exc:
                 raise TurnStateUnavailableError(f"blob write failed: {exc}") from exc

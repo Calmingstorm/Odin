@@ -320,3 +320,52 @@ class TestUnmatchedBlockRepair:
         before = json.loads(json.dumps(messages))
         TurnResumeManager._repair_unmatched_tool_use(messages, [])
         assert messages == before
+
+
+class TestPostAcquireSafety:
+    async def test_corrupt_checkpoint_rejects_before_acquiring(self, tmp_path):
+        """Review blocker #5 (PR #242): reconstruction runs BEFORE the
+        execution lease is acquired, so a corrupt checkpoint becomes
+        TERMINAL_REJECTED — never a stranded ACTIVE row invisible to
+        resumable queries."""
+        h, original = await suspend_turn(tmp_path)
+        h.store._conn.execute("UPDATE turns SET payload='{\"broken\": '")
+        h.store._conn.commit()
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        # Malformed JSON self-heals inside load_resumable: rejected
+        # terminally, and the trigger falls through as a normal message.
+        assert result is None
+        (status,) = h.store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_REJECTED
+        # A structurally-valid-but-unrestorable payload rejects explicitly:
+        h2, original2 = await suspend_turn(tmp_path / "second")
+        h2.store._conn.execute(
+            "UPDATE turns SET payload='{\"fields\": {\"stuck_tracker\": 42}}'"
+        )
+        h2.store._conn.commit()
+        result2 = await h2.manager.try_explicit_resume(resume_msg(original2))
+        assert result2 is not None
+        assert "could not be restored" in result2[0]
+        (status,) = h2.store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_REJECTED  # not stranded ACTIVE
+
+
+class TestWaiterRegistry:
+    async def test_replaced_waiter_cannot_orphan_successor(self, tmp_path, monkeypatch):
+        """Review blocker #6b (PR #242): a cancelled predecessor's done
+        callback must not pop its successor's registry entry."""
+        monkeypatch.setattr(tr, "_AUTO_POLL_SECONDS", 5.0)  # keep waiters parked
+        h, original = await suspend_turn(tmp_path)
+        rows = h.store.list_suspended_sync("discord")
+        from src.turn_state import TurnKey
+
+        key = TurnKey("discord", rows[0]["channel_id"], rows[0]["message_id"])
+        h.manager.on_turn_suspended(key, rows[0]["generation"])
+        first = h.manager._waiters[key]
+        h.manager.on_turn_suspended(key, rows[0]["generation"])  # replaces
+        second = h.manager._waiters[key]
+        assert second is not first
+        await asyncio.sleep(0.05)  # predecessor's done callback has run
+        assert h.manager._waiters.get(key) is second  # successor survives
+        second.cancel()
+        await asyncio.sleep(0)

@@ -421,12 +421,13 @@ class TestHousekeepingSweep:
         from src.turn_state import TurnKey
 
         store = TurnStateStore(tmp_path / "hk" / "turns.sqlite3")
-        lease = store.admit_turn_sync(
+        lease, disposition = store.admit_turn_sync(
             TurnKey("discord", "c1", "m1"),
             guild_id=None, user_id="u", content_digest="d", code_version="t",
             prompt_policy_hash="p", tool_catalog_hash="t",
             session_snapshot=None,
         )
+        assert disposition == "admitted"
         store.suspend_sync(lease, {"p": 1})
         store._conn.execute(
             "UPDATE turns SET last_progress_at=?", [_time.time() - 25 * 3600]
@@ -457,7 +458,70 @@ class TestHousekeepingSweep:
         row = store._conn.execute("SELECT status FROM turns").fetchone()
         assert row[0] == TurnStatus.TERMINAL_EXPIRED
 
-        # A raising store must never break housekeeping.
+        # The expired-active defense sweep runs too: park a dead-owner
+        # ACTIVE row and let housekeeping suspend it (log-line branch).
+        lease2, disposition2 = store.admit_turn_sync(
+            TurnKey("discord", "c2", "m2"),
+            guild_id=None, user_id="u", content_digest="d", code_version="t",
+            prompt_policy_hash="p", tool_catalog_hash="t",
+            session_snapshot=None,
+        )
+        assert disposition2 == "admitted"
+        store._conn.execute(
+            "UPDATE turns SET lease_expires_at=? WHERE message_id='m2'",
+            [_time.time() - 5],
+        )
+        store._conn.commit()
+        hk.cleanup_stale()
+        row2 = store._conn.execute(
+            "SELECT status FROM turns WHERE message_id='m2'"
+        ).fetchone()
+        assert row2[0] == TurnStatus.SUSPENDED
+
+        # A raising store must never break housekeeping — both sweep steps.
+        store.sweep_expired_active_sync = MagicMock(side_effect=RuntimeError("boom"))
         store.ttl_sweep_sync = MagicMock(side_effect=RuntimeError("boom"))
         hk.cleanup_stale()
         store.close()
+
+
+class TestRedeliveryRefusal:
+    async def test_redelivered_message_never_reruns_effects(self, tmp_path):
+        """Review blocker #2 (PR #242): after a restart wipes the in-memory
+        dedup cache, a redelivered message with a terminal ledger row must
+        REFUSE fresh execution — never run unledgered."""
+        from unittest.mock import AsyncMock
+
+        bot, fake, store = build_with_store(
+            [
+                tool_call_response(("run_command", {"command": "deploy"})),
+                text_response("done"),
+            ],
+            tmp_path,
+        )
+        msg = FakeMessage("deploy the thing")
+        text, *_ = await run_loop(bot, msg)
+        assert text == "done"
+
+        # Same message identity arrives again (Discord redelivery).
+        fake.responses.extend([text_response("must never be produced")])
+        bot.tool_executor.execute = AsyncMock()
+        text2, _, is_error2, tools2, _ = await run_loop(bot, msg)
+        assert "already processed" in text2
+        assert is_error2 is False
+        assert tools2 == []
+        bot.tool_executor.execute.assert_not_awaited()
+
+    async def test_suspended_identity_redelivery_points_at_resume(self, tmp_path):
+        from unittest.mock import AsyncMock
+
+        bot, fake, store = build_with_store([], tmp_path)
+        fake.responses.append(capacity_forever(fake))
+        msg = FakeMessage("long job")
+        await run_loop(bot, msg)  # suspends
+        bot.tool_executor.execute = AsyncMock()
+        text2, *_ = await run_loop(bot, msg)  # redelivery of the SAME id
+        assert "resume" in text2
+        bot.tool_executor.execute.assert_not_awaited()
+        (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.SUSPENDED  # untouched

@@ -101,23 +101,39 @@ class TurnResumeManager:
         """Called by the tool loop when a turn suspends. In-process only."""
         if not self._auto_resume_enabled:
             return
+        # Session length AT SUSPENSION, captured synchronously inside the
+        # suspending turn (which still holds the channel lock) — the
+        # advance-check anchor (review blocker #6a, PR #242).
+        suspend_len = self._session_len(key.channel_id)
         existing = self._waiters.pop(key, None)
         if existing is not None:
             existing.cancel()
         task = asyncio.get_running_loop().create_task(
-            self._auto_resume_waiter(key, generation),
+            self._auto_resume_waiter(key, generation, suspend_len),
             name=f"turn-resume:{key.channel_id}:{key.message_id}",
         )
         self._waiters[key] = task
-        task.add_done_callback(lambda _t: self._waiters.pop(key, None))
 
-    async def _auto_resume_waiter(self, key: TurnKey, generation: str) -> None:
+        def _cleanup(t: asyncio.Task, *, _key=key) -> None:
+            # Ownership-sensitive: a cancelled predecessor must never pop
+            # its successor's registry entry (review blocker #6b, PR #242).
+            if self._waiters.get(_key) is t:
+                self._waiters.pop(_key, None)
+
+        task.add_done_callback(_cleanup)
+
+    async def _auto_resume_waiter(
+        self, key: TurnKey, generation: str, suspend_len: int
+    ) -> None:
         """Wait for capacity, then resume IF nothing else happened.
 
-        The session baseline is sampled at the FIRST poll (after the
-        suspending turn's intake bookkeeping settled — the channel lock
-        serializes us behind it); any later growth means the session
-        advanced and auto-resume stands down (explicit-only from there).
+        The advance check anchors on the session length captured AT
+        SUSPENSION (``suspend_len``): the only legitimate growth afterwards
+        is the suspending turn's own intake bookkeeping (exactly +2: the
+        user message and the preserved-marker; a directly-driven turn adds
+        0). Anything else — or an unreadable session — stands auto-resume
+        down fail-safe; explicit resume stays available. No sampling window
+        exists for a stranger message to sneak into the baseline.
 
         Capacity detection is ACTIVE: a quiet breaker is never probed by
         anyone, so the waiter claims the probe slot itself when the cooldown
@@ -129,10 +145,9 @@ class TurnResumeManager:
         """
         give_up_at = time.monotonic() + self._resume_ttl_hours * 3600.0
         breaker = self._llm_gateway.capacity_breaker_for()
-        await asyncio.sleep(_AUTO_POLL_SECONDS)
-        async with self._channel_lock(key.channel_id):
-            baseline = self._session_len(key.channel_id)
+        allowed = {suspend_len, suspend_len + 2} if suspend_len >= 0 else set()
         while time.monotonic() < give_up_at:
+            await asyncio.sleep(_AUTO_POLL_SECONDS)
             row = await asyncio.to_thread(self._store.load_resumable_sync, key)
             if row is None or row["generation"] != generation:
                 return  # resumed elsewhere / rejected / expired
@@ -140,9 +155,7 @@ class TurnResumeManager:
             if not isinstance(admission, float):
                 breaker.abandon(admission)  # the resume re-acquires for real
                 current = self._session_len(key.channel_id)
-                if baseline < 0 or current < 0 or current != baseline:
-                    # Advanced OR unreadable — either way auto-resume must
-                    # stand down (fail-safe); explicit resume stays available.
+                if current not in allowed:
                     log.info(
                         "Auto-resume for %s stands down: session advanced or "
                         "unreadable (explicit resume still available)", key,
@@ -150,7 +163,6 @@ class TurnResumeManager:
                     return
                 await self._run_auto_resume(key, row)
                 return
-            await asyncio.sleep(min(_AUTO_POLL_SECONDS, float(admission)))
         log.info("Auto-resume waiter for %s expired", key)
 
     def _channel_lock(self, channel_id: str) -> asyncio.Lock:
@@ -285,12 +297,11 @@ class TurnResumeManager:
             )
             return None, None, "the original message was edited"
 
-        lease = await asyncio.to_thread(
-            self._store.acquire_resume_lease_sync, key, row["generation"]
-        )
-        if lease is None:
-            return None, None, "someone else is already resuming it"
-
+        # RECONSTRUCT BEFORE ACQUIRING (review blocker #5, PR #242): every
+        # fallible step — payload restore, tool derivation, transcript
+        # repair, cancellation check — runs while the row is still
+        # SUSPENDED, so a failure rejects/aborts cleanly instead of
+        # stranding an ACTIVE row invisible to resumable queries.
         payload = row["payload"]
         try:
             fields = restore_field_values(
@@ -325,21 +336,36 @@ class TurnResumeManager:
         if deadline_utc:
             remaining_budget = max(0.0, float(deadline_utc) - time.time())
 
-        durability = TurnDurability.resumed(
-            self._store,
-            lease,
-            payload.get("generation_seq", 0),
-            first_generation_budget=remaining_budget,
+        # Acquire LAST — the single-winner transition happens only once
+        # everything else is ready to run.
+        lease = await asyncio.to_thread(
+            self._store.acquire_resume_lease_sync, key, row["generation"]
         )
-        st = _ChatTurn(
-            message=original,
-            policy=CHAT_POLICY,
-            trace=None,  # the old segment was closed into the payload
-            tools=tools,
-            _cancel=cancel,
-            durability=durability,
-            **fields,
-        )
+        if lease is None:
+            return None, None, "someone else is already resuming it"
+
+        try:
+            durability = TurnDurability.resumed(
+                self._store,
+                lease,
+                payload.get("generation_seq", 0),
+                first_generation_budget=remaining_budget,
+            )
+            st = _ChatTurn(
+                message=original,
+                policy=CHAT_POLICY,
+                trace=None,  # the old segment was closed into the payload
+                tools=tools,
+                _cancel=cancel,
+                durability=durability,
+                **fields,
+            )
+        except Exception:
+            # Residual post-acquire window: release the fenced lease back to
+            # SUSPENDED so the turn never strands ACTIVE.
+            log.exception("Post-acquire turn construction failed — releasing")
+            await asyncio.to_thread(self._store.release_acquired_sync, lease)
+            return None, None, "the turn could not be reconstructed"
         return st, original, None
 
     @staticmethod

@@ -97,8 +97,19 @@ class Housekeeping:
                 pass
 
         # Turn-state retention: the three clocks (resumable TTL, diagnostic
-        # payload compaction, ledger expiry — OUTCOME_UNKNOWN never expires).
+        # payload compaction, ledger expiry — OUTCOME_UNKNOWN never expires)
+        # plus the expired-ACTIVE defense sweep (a dead owner's turn must
+        # become visible to the resume path even if the boot sweep missed it).
         if self._turn_store is not None:
+            try:
+                swept_active = self._turn_store.sweep_expired_active_sync()
+                if any(swept_active.values()):
+                    log.warning(
+                        "Expired-active turn sweep: %s (dead-owner turns "
+                        "suspended)", swept_active,
+                    )
+            except Exception:
+                pass
             try:
                 config = self._get_config()
                 ts = getattr(config, "turn_state", None)

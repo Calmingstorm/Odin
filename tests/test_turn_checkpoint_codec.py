@@ -257,3 +257,24 @@ def test_content_digest_is_full_sha256():
     assert len(digest) == 64
     assert digest != compute_content_digest("hello ")
     assert compute_content_digest("") == compute_content_digest(None or "")
+
+
+class TestStorageRedaction:
+    def test_tool_use_inputs_are_secret_scrubbed_at_snapshot(self):
+        """Review blocker #8 (PR #242): tool arguments hit durable storage
+        secret-scrubbed (audit-storage parity). Non-secret args unchanged."""
+        blobs, store, load = _blob_dict()
+        st = _full_turn()
+        secret = "sk-" + "a" * 24
+        st.messages.append({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use", "id": "call_9", "name": "http_post",
+                "input": {"url": "https://x", "auth": f"api_key={secret}"},
+            }],
+        })
+        payload = snapshot_chat_turn(st, store_blob=store, generation_seq=2)
+        encoded = json.dumps(payload)
+        assert secret not in encoded
+        # Innocent arguments are untouched.
+        assert "https://x" in encoded

@@ -24,6 +24,7 @@ import hashlib
 from dataclasses import asdict
 from typing import Any
 
+from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 
 log = get_logger("turn_state")
@@ -94,6 +95,35 @@ def compute_content_digest(text: str) -> str:
     """Full sha256 of the request content — the admission validation digest
     (NOT identity; identity is source+channel+message id)."""
     return hashlib.sha256((text or "").encode("utf-8", "replace")).hexdigest()
+
+
+# ── storage redaction ────────────────────────────────────────────────
+
+
+def _scrub_tool_use_inputs(obj: Any) -> Any:
+    """Secret-scrub string values inside assistant ``tool_use`` inputs
+    before they hit durable storage (review blocker #8, PR #242) — the
+    parity move with audit storage, which deliberately scrubs tool inputs.
+
+    Tool RESULTS are already scrubbed at source (`_run_one_tool` runs
+    scrub_output_secrets before building the result block), and
+    credential-bearing USER messages are deleted by the intake secret gate
+    before a turn ever starts — tool arguments were the remaining
+    unscrubbed surface. The scrub applies at SNAPSHOT time only, so a
+    resumed transcript shows the model its own arguments with any embedded
+    secrets masked; the executed effect already happened and is unaffected.
+    """
+    if isinstance(obj, list):
+        return [_scrub_tool_use_inputs(x) for x in obj]
+    if isinstance(obj, dict):
+        if obj.get("type") == "tool_use" and isinstance(obj.get("input"), dict):
+            scrubbed = {
+                k: scrub_output_secrets(v) if isinstance(v, str) else v
+                for k, v in obj["input"].items()
+            }
+            return {**obj, "input": scrubbed}
+        return {k: _scrub_tool_use_inputs(v) for k, v in obj.items()}
+    return obj
 
 
 # ── image-block externalization ──────────────────────────────────────
@@ -250,7 +280,9 @@ def snapshot_chat_turn(st, *, store_blob, generation_seq: int, extra: dict | Non
         "generation_seq": generation_seq,
         "fields": {
             "system_prompt": st.system_prompt,
-            "messages": _externalize_blocks(st.messages, store_blob),
+            "messages": _scrub_tool_use_inputs(
+                _externalize_blocks(st.messages, store_blob)
+            ),
             "user_id": st.user_id,
             "chat_cap": st.chat_cap,
             "iteration": st.iteration,

@@ -37,7 +37,7 @@ def store(tmp_path):
 
 
 def _admit(store, key=KEY):
-    lease = store.admit_turn_sync(
+    lease, disposition = store.admit_turn_sync(
         key,
         guild_id="g1",
         user_id="u1",
@@ -47,6 +47,7 @@ def _admit(store, key=KEY):
         tool_catalog_hash="tc",
         session_snapshot={"messages": 3},
     )
+    assert disposition == "admitted"
     assert lease is not None
     return lease
 
@@ -71,14 +72,43 @@ class TestAdmissionAndCheckpoint:
         assert revision == 2
         assert '"iteration": 2' in payload
 
-    def test_double_admission_returns_none(self, store):
-        _admit(store)
-        again = store.admit_turn_sync(
+    def _readmit(self, store):
+        return store.admit_turn_sync(
             KEY, guild_id=None, user_id=None, content_digest=None,
             code_version=None, prompt_policy_hash=None, tool_catalog_hash=None,
             session_snapshot=None,
         )
-        assert again is None
+
+    def test_existing_identity_dispositions(self, store):
+        # Review blocker #2 (PR #242): an existing identity must REFUSE
+        # fresh execution — it must never mean "run without durability".
+        lease = _admit(store)
+        assert self._readmit(store) == (None, "in_progress")  # live lease
+
+        store.suspend_sync(lease, {"p": 1})
+        assert self._readmit(store) == (None, "resumable")
+
+        new_lease = store.acquire_resume_lease_sync(KEY, lease.generation)
+        store.finish_sync(new_lease)
+        assert self._readmit(store) == (None, "already_processed")
+
+    def test_expired_active_readmission_sweeps_to_resumable(self, store):
+        import time as _time
+
+        lease = _admit(store)
+        store.record_intents_sync(
+            lease, 0, [{"tool_call_id": "c1", "tool_name": "t", "tool_input": {}}]
+        )
+        store.mark_running_sync(lease, 0, "c1")
+        store._conn.execute(
+            "UPDATE turns SET lease_expires_at=?", [_time.time() - 10]
+        )
+        store._conn.commit()
+        assert self._readmit(store) == (None, "resumable")
+        row = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert row[0] == TurnStatus.SUSPENDED
+        op = store._conn.execute("SELECT state FROM operations").fetchone()
+        assert op[0] == OpState.OUTCOME_UNKNOWN
 
     def test_unavailable_store_admits_none(self, tmp_path):
         # A file where the DB directory should be → init fails → degraded.
@@ -90,7 +120,7 @@ class TestAdmissionAndCheckpoint:
             KEY, guild_id=None, user_id=None, content_digest=None,
             code_version=None, prompt_policy_hash=None, tool_catalog_hash=None,
             session_snapshot=None,
-        ) is None
+        ) == (None, "store_unavailable")
 
     def test_recovery_deadline_persisted_utc(self, store):
         lease = _admit(store)
@@ -302,17 +332,34 @@ class TestBootSweep:
         assert states == {OpState.OUTCOME_UNKNOWN}
         reopened.close()
 
-    def test_live_lease_survives_reopen(self, tmp_path):
+    def test_fast_restart_inside_lease_ttl_still_suspends(self, tmp_path):
+        # Deliberate amendment (review blocker #4, PR #242): the store is
+        # single-process, so at construction NO turn can legitimately be
+        # in flight — the boot sweep suspends ALL ACTIVE rows, lease expiry
+        # notwithstanding (a fast restart used to strand them ACTIVE forever).
         db = tmp_path / "turns.sqlite3"
         s = TurnStateStore(db, blob_dir=tmp_path / "blobs")
         _admit(s)
         s.close()
-        # Lease still in the future → NOT swept (a concurrent healthy owner
-        # in another process must not be hijacked).
         reopened = TurnStateStore(db, blob_dir=tmp_path / "blobs")
         row = reopened._conn.execute("SELECT status FROM turns").fetchone()
-        assert row[0] == TurnStatus.ACTIVE
+        assert row[0] == TurnStatus.SUSPENDED
         reopened.close()
+
+    def test_periodic_expired_active_sweep(self, tmp_path):
+        import time as _time
+
+        s = TurnStateStore(tmp_path / "t.sqlite3", blob_dir=tmp_path / "blobs")
+        _admit(s)
+        # Live lease: the periodic sweep must NOT touch a healthy owner.
+        assert s.sweep_expired_active_sync() == {"turns": 0, "ops": 0}
+        s._conn.execute("UPDATE turns SET lease_expires_at=?", [_time.time() - 5])
+        s._conn.commit()
+        out = s.sweep_expired_active_sync()
+        assert out["turns"] == 1
+        row = s._conn.execute("SELECT status FROM turns").fetchone()
+        assert row[0] == TurnStatus.SUSPENDED
+        s.close()
 
 
 class TestTtlSweep:
@@ -393,3 +440,117 @@ def test_effect_fingerprint_is_deterministic_and_sensitive():
     c = effect_fingerprint("run_command", {"command": "rm", "host": "web"})
     assert a == b  # key order irrelevant
     assert a != c
+
+
+class TestLedgerFencing:
+    """Review blocker #1 (PR #242): operation transitions are single
+    atomic statements fenced on generation + expected revision + lease
+    token + ACTIVE status + live lease + legal prior op state."""
+
+    def test_settled_op_cannot_reenter_running(self, store):
+        lease = _admit(store)
+        store.record_intents_sync(
+            lease, 0, [{"tool_call_id": "c1", "tool_name": "t", "tool_input": {}}]
+        )
+        store.mark_running_sync(lease, 0, "c1")
+        store.settle_op_sync(lease, 0, "c1", state=OpState.APPLIED, result_text="ok")
+        with pytest.raises(StaleTurnError):
+            store.mark_running_sync(lease, 0, "c1")  # APPLIED→RUNNING illegal
+        row = store._conn.execute(
+            "SELECT state, result FROM operations WHERE tool_call_id='c1'"
+        ).fetchone()
+        assert row == (OpState.APPLIED, "ok")  # untouched
+
+    def test_reinsert_never_resets_a_settled_op(self, store):
+        lease = _admit(store)
+        store.record_intents_sync(
+            lease, 0, [{"tool_call_id": "c1", "tool_name": "t", "tool_input": {}}]
+        )
+        store.settle_op_sync(lease, 0, "c1", state=OpState.APPLIED, result_text="ok")
+        with pytest.raises(LedgerIntentError):
+            store.record_intents_sync(
+                lease, 0,
+                [{"tool_call_id": "c1", "tool_name": "t", "tool_input": {}}],
+            )
+        row = store._conn.execute(
+            "SELECT state FROM operations WHERE tool_call_id='c1'"
+        ).fetchone()
+        assert row[0] == OpState.APPLIED  # never reset to PREPARED
+
+    def test_stale_revision_owner_cannot_mutate_ledger(self, store):
+        import dataclasses
+
+        lease = _admit(store)
+        store.record_intents_sync(
+            lease, 0, [{"tool_call_id": "c1", "tool_name": "t", "tool_input": {}}]
+        )
+        stale = dataclasses.replace(lease)
+        store.checkpoint_sync(lease, {"n": 1}, progressed=True)  # revision advances
+        with pytest.raises(StaleTurnError):
+            store.mark_running_sync(stale, 0, "c1")  # stale revision fenced out
+        # The current owner still can.
+        store.mark_running_sync(lease, 0, "c1")
+
+    def test_released_lease_cannot_record_intents(self, store):
+        lease = _admit(store)
+        store.suspend_sync(lease, {})
+        with pytest.raises(StaleTurnError):
+            store.record_intents_sync(
+                lease, 0, [{"tool_call_id": "c1", "tool_name": "t", "tool_input": {}}]
+            )
+
+
+class TestReleaseAcquired:
+    def test_release_returns_to_suspended(self, store):
+        lease = _admit(store)
+        store.suspend_sync(lease, {"p": 1})
+        acquired = store.acquire_resume_lease_sync(KEY, lease.generation)
+        store.release_acquired_sync(acquired)
+        (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.SUSPENDED
+        # Resumable again — a later attempt can win it.
+        assert store.acquire_resume_lease_sync(KEY, lease.generation) is not None
+
+    def test_release_with_reason_is_terminal(self, store):
+        lease = _admit(store)
+        store.suspend_sync(lease, {"p": 1})
+        acquired = store.acquire_resume_lease_sync(KEY, lease.generation)
+        store.release_acquired_sync(acquired, terminal_reason="checkpoint corrupt")
+        status, payload = store._conn.execute(
+            "SELECT status, payload FROM turns"
+        ).fetchone()
+        assert status == TurnStatus.TERMINAL_REJECTED
+        assert payload is None
+
+    def test_release_is_fenced(self, store):
+        import dataclasses
+
+        lease = _admit(store)
+        store.suspend_sync(lease, {"p": 1})
+        acquired = store.acquire_resume_lease_sync(KEY, lease.generation)
+        thief = dataclasses.replace(acquired)
+        thief.token = "not-yours"
+        store.release_acquired_sync(thief)  # fenced out — no-op
+        (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.ACTIVE
+
+
+class TestStoragePermissions:
+    def test_db_dir_and_blobs_are_owner_only(self, tmp_path):
+        import os
+        import stat
+
+        s = TurnStateStore(tmp_path / "sec" / "turns.sqlite3",
+                           blob_dir=tmp_path / "sec" / "blobs")
+        ref = s.store_blob_sync(b"sensitive")
+        db_mode = stat.S_IMODE(os.stat(s.db_path).st_mode)
+        dir_mode = stat.S_IMODE(os.stat(tmp_path / "sec").st_mode)
+        blob_dir_mode = stat.S_IMODE(os.stat(tmp_path / "sec" / "blobs").st_mode)
+        blob_mode = stat.S_IMODE(
+            os.stat(tmp_path / "sec" / "blobs" / ref.split(":", 1)[1]).st_mode
+        )
+        assert db_mode == 0o600
+        assert dir_mode == 0o700
+        assert blob_dir_mode == 0o700
+        assert blob_mode == 0o600
+        s.close()

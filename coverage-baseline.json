@@ -942,9 +942,9 @@
   "statements": 231
  },
  "src/tools/executor.py": {
-  "covered": 402,
-  "missing": 25,
-  "percent": 94.15,
+  "covered": 400,
+  "missing": 27,
+  "percent": 93.68,
   "statements": 427
  },
  "src/tools/git_ops.py": {

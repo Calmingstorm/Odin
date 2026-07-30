@@ -70,6 +70,10 @@ class TurnDurability:
         self.cancelled = False
         # One-shot remaining budget for a resumed generation (see resumed()).
         self._resume_budget: float | None = None
+        # Admission refusal disposition (review blocker #2, PR #242):
+        # "already_processed" / "in_progress" / "resumable" — the loop must
+        # REFUSE fresh execution, never run unledgered. None = no refusal.
+        self.blocked: str | None = None
 
     # -- construction --------------------------------------------------
 
@@ -87,7 +91,13 @@ class TurnDurability:
         tools: list | None,
         session_snapshot: dict | None,
     ) -> TurnDurability:
-        """Admit a fresh Discord chat turn; any refusal → disabled handle."""
+        """Admit a fresh Discord chat turn.
+
+        Store-unavailable (feature off / I/O failure) → a disabled handle
+        (legacy run). An EXISTING identity is different: the handle comes
+        back with ``blocked`` set and the loop must refuse fresh execution —
+        a redelivered message must never re-run its effects unledgered.
+        """
         if store is None or not store.available:
             return cls.disabled()
         try:
@@ -97,7 +107,7 @@ class TurnDurability:
                 message_id=str(message.id),
             )
             tool_names = sorted(t.get("name", "") for t in (tools or []))
-            lease = await asyncio.to_thread(
+            lease, disposition = await asyncio.to_thread(
                 store.admit_turn_sync,
                 key,
                 guild_id=str(getattr(getattr(message, "guild", None), "id", "") or ""),
@@ -113,9 +123,13 @@ class TurnDurability:
         except Exception:
             log.exception("Turn admission failed — running without durability")
             return cls.disabled()
-        if lease is None:
+        if lease is not None:
+            return cls(store, lease)
+        if disposition == "store_unavailable":
             return cls.disabled()
-        return cls(store, lease)
+        handle = cls.disabled()
+        handle.blocked = disposition
+        return handle
 
     @classmethod
     def resumed(

@@ -201,3 +201,62 @@ async def test_on_wait_hook_is_called_and_fault_tolerant():
     result = await generate_with_recovery(attempt, policy=FAST, on_wait=hook)
     assert result == "ok"
     assert seen and seen[0][2] == "LLMCapacityError"
+
+
+async def test_cancel_interrupts_an_in_flight_attempt():
+    """Review blocker #3 (PR #242): /stop must interrupt the provider await
+    itself, not just the waits between attempts. The in-flight attempt task
+    is cancelled and awaited before CancelledError propagates."""
+    cancel = asyncio.Event()
+    attempt_cancelled = asyncio.Event()
+
+    async def slow_attempt():
+        try:
+            await asyncio.sleep(30)  # a long healthy stream
+        except asyncio.CancelledError:
+            attempt_cancelled.set()
+            raise
+        return "never"
+
+    async def fire_cancel():
+        await asyncio.sleep(0.05)
+        cancel.set()
+
+    started = time.monotonic()
+    canceller = asyncio.create_task(fire_cancel())
+    with pytest.raises(asyncio.CancelledError):
+        await generate_with_recovery(
+            slow_attempt,
+            policy=RecoveryPolicy(deadline_seconds=60.0),
+            cancel_event=cancel,
+        )
+    await canceller
+    assert time.monotonic() - started < 1.0  # did not wait out the stream
+    assert attempt_cancelled.is_set()  # the attempt itself was unwound
+
+
+async def test_probe_released_when_cancel_interrupts_attempt():
+    registry = ModelBreakerRegistry(cooldown_base=0.01)
+    breaker = registry.for_model("codex", "gpt-5.6-sol")
+    breaker.record_generation_failure()  # open
+    await asyncio.sleep(0.02)
+    cancel = asyncio.Event()
+
+    async def hang_forever():
+        await asyncio.sleep(30)
+
+    async def fire_cancel():
+        await asyncio.sleep(0.05)
+        cancel.set()
+
+    canceller = asyncio.create_task(fire_cancel())
+    with pytest.raises(asyncio.CancelledError):
+        await generate_with_recovery(
+            hang_forever,
+            policy=RecoveryPolicy(deadline_seconds=60.0, backoff_base=0.01),
+            breaker=breaker,
+            cancel_event=cancel,
+        )
+    await canceller
+    # The held probe slot was released — the next caller can probe.
+    assert breaker.state != "probing"

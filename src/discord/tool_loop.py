@@ -434,6 +434,33 @@ class ToolLoopRunner:
         st = await self._prepare_chat_turn(
             message, history, system_prompt_override, trace, policy
         )
+        # Admission refusal: this message identity already has durable state
+        # (terminal / in-flight / suspended). A redelivered or duplicate
+        # message must never re-run its effects unledgered.
+        if st.durability.blocked is not None:
+            self._clear_active(st)
+            notices = {
+                "already_processed": (
+                    "This exact request was already processed — refusing to "
+                    "run it again. Send it as a new message if you want a "
+                    "fresh run."
+                ),
+                "in_progress": (
+                    "This exact request is already being processed elsewhere."
+                ),
+                "resumable": (
+                    "This request has preserved, resumable work — say "
+                    "`resume` to continue it instead of starting over."
+                ),
+            }
+            text = notices.get(
+                st.durability.blocked, "This request cannot be re-run."
+            )
+            log.warning(
+                "Turn admission refused (%s) for message %s in channel %s",
+                st.durability.blocked, st._trajectory.message_id, st._ch_id,
+            )
+            return (text, False, False, [], False)
         return await self._run_with_guards(st)
 
     async def run_resumed(self, st: _ChatTurn) -> tuple[str, bool, bool, list[str], bool]:

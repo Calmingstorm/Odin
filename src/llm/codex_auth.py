@@ -11,6 +11,7 @@ from pathlib import Path
 import aiohttp
 
 from ..odin_log import get_logger
+from .errors import LLMAuthError, LLMRateLimitError
 
 log = get_logger("codex_auth")
 
@@ -509,7 +510,7 @@ class CodexAuthPool:
     @property
     def current(self) -> CodexAuth:
         if not self._accounts:
-            raise RuntimeError("No Codex credentials configured.")
+            raise LLMAuthError("No Codex credentials configured.", provider="codex")
         return self._accounts[self._current_index]
 
     async def acquire(self) -> tuple[str, str | None, int]:
@@ -524,12 +525,12 @@ class CodexAuthPool:
         refresh-token reuse.
         """
         if not self._accounts:
-            raise RuntimeError("No Codex credentials configured.")
+            raise LLMAuthError("No Codex credentials configured.", provider="codex")
         errors: list[tuple[int, str]] = []
         for _ in range(len(self._accounts)):
             async with self._pool_lock:
                 if not self._accounts:
-                    raise RuntimeError("No Codex credentials configured.")
+                    raise LLMAuthError("No Codex credentials configured.", provider="codex")
                 self._current_index %= len(self._accounts)
                 idx = self._current_index
                 auth = self._accounts[idx]
@@ -551,14 +552,22 @@ class CodexAuthPool:
                         self._rotate()
                 continue
             return token, auth.get_account_id(), idx
+        # Pool exhaustion is part of the typed taxonomy (PR #242 review
+        # blocker #7): every rotation avenue is spent by the time these
+        # raise, so the shared recovery must FAST-FAIL them — never treat
+        # them as unclassified defects, and the subsystem guard must not
+        # count quota exhaustion as generic subsystem failure. Both types
+        # subclass RuntimeError, so legacy handlers are unaffected.
         if errors:
-            raise RuntimeError(
+            raise LLMAuthError(
                 f"All {len(self._accounts)} Codex accounts failed: "
-                + "; ".join(f"#{i}: {err}" for i, err in errors)
+                + "; ".join(f"#{i}: {err}" for i, err in errors),
+                provider="codex",
             )
-        raise RuntimeError(
+        raise LLMRateLimitError(
             f"All {len(self._accounts)} Codex accounts are rate-limited or "
-            "backing off; retry shortly."
+            "backing off; retry shortly.",
+            provider="codex",
         )
 
     async def get_access_token(self) -> str:
