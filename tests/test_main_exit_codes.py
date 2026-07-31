@@ -466,7 +466,10 @@ class TestFinalizeLoop:
         reaper.drain_at_teardown = explode  # type: ignore[method-assign]
         failure = _finalize_loop(loop, reaper, logging.getLogger("test"))
         assert failure is not None
-        assert "drain failed" in failure and "drain exploded" in failure
+        # The reason names the exception TYPE; the message is dropped on
+        # purpose — it is user-controlled data of user-controlled type
+        # (round-21).
+        assert "drain failed" in failure and "RuntimeError" in failure
         assert restart.reexec_blocked() is None
         assert not loop.is_closed()
         loop.close()
@@ -900,6 +903,137 @@ class TestUncleanBarrierExit:
         )
         assert failure is not None and "EvilReprError" in failure
         loop.close()
+
+    def test_blocking_repr_cannot_hang_the_emergency_path(self, monkeypatch):
+        """Round-21: reason construction must execute NO exception code
+        — a blocking __repr__ used to hang the main thread inside
+        _safe_repr itself, before os._exit was reachable."""
+        import logging
+        import threading
+        import time
+
+        import src.__main__ as entry
+        import src.tools.process_manager as pm
+        from src import restart
+
+        executed: list = []
+
+        class BlockingReprError(RuntimeError):
+            def __repr__(self):
+                executed.append(True)
+                threading.Event().wait()
+                return "never"
+
+        calls: list = []
+        monkeypatch.setattr(entry.os, "_exit", lambda code: calls.append(code))
+
+        def crash(*_a):
+            raise BlockingReprError("boom")
+
+        monkeypatch.setattr(entry, "_finalize_loop", crash)
+        loop = asyncio.new_event_loop()
+        start = time.monotonic()
+        entry._finalize_and_exit(
+            loop, pm.AdoptedZombieReaper(), logging.getLogger("t"), 0
+        )
+        assert time.monotonic() - start < 3.0
+        assert calls == [1]
+        assert executed == []  # the hostile __repr__ never ran at all
+        veto = restart.reexec_blocked()
+        assert veto is not None and "BlockingReprError" in veto
+        loop.close()
+
+    def test_hostile_format_cannot_escape_reason_construction(self, monkeypatch):
+        """Round-21: a __repr__ returning a str SUBCLASS with a hostile
+        __format__ escaped through the f-string that consumed the
+        reason. Reason construction now never touches exception code."""
+        import logging
+
+        import src.__main__ as entry
+        import src.tools.process_manager as pm
+        from src import restart
+
+        class Sneaky(str):
+            def __format__(self, _spec):
+                raise RuntimeError("format boom")
+
+        executed: list = []
+
+        class EvilFormatError(RuntimeError):
+            def __repr__(self):
+                executed.append(True)
+                return Sneaky("innocent")
+
+        calls: list = []
+        monkeypatch.setattr(entry.os, "_exit", lambda code: calls.append(code))
+
+        def crash(*_a):
+            raise EvilFormatError("boom")
+
+        monkeypatch.setattr(entry, "_finalize_loop", crash)
+        loop = asyncio.new_event_loop()
+        entry._finalize_and_exit(
+            loop, pm.AdoptedZombieReaper(), logging.getLogger("t"), 0
+        )
+        assert calls == [1]  # never escaped, exit reached
+        assert executed == []  # the hostile __repr__ never ran
+        veto = restart.reexec_blocked()
+        assert veto is not None and "EvilFormatError" in veto
+        loop.close()
+
+    def test_blocking_repr_process_level(self, tmp_path):
+        """Odin's round-21 repro shape: the hostile exception comes out
+        of the barrier machinery in a REAL process. The marker inside
+        __repr__ must never print — the code is not executed — and the
+        process exits promptly."""
+        import subprocess
+        import time
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        script = tmp_path / "blocking_repr.py"
+        script.write_text(
+            "import asyncio\n"
+            "import logging\n"
+            "import sys\n"
+            "import threading\n"
+            "\n"
+            "logging.basicConfig(level=logging.INFO)\n"
+            "from src.__main__ import _finalize_and_exit\n"
+            "from src.tools.process_manager import AdoptedZombieReaper\n"
+            "\n"
+            "class BlockingReprError(RuntimeError):\n"
+            "    def __repr__(self):\n"
+            "        print('BLOCKING_REPR_ENTER', file=sys.stderr, flush=True)\n"
+            "        threading.Event().wait()\n"
+            "        return 'never'\n"
+            "\n"
+            "loop = asyncio.new_event_loop()\n"
+            "\n"
+            "def explode(_coro):\n"
+            "    raise BlockingReprError('barrier blew up')\n"
+            "\n"
+            "loop.run_until_complete = explode\n"
+            "print('FINALIZE_ENTER', file=sys.stderr, flush=True)\n"
+            "_finalize_and_exit(\n"
+            "    loop, AdoptedZombieReaper(), logging.getLogger('repro'), 0\n"
+            ")\n"
+            "print('UNREACHABLE', file=sys.stderr, flush=True)\n"
+        )
+        start = time.monotonic()
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=repo_root,
+            capture_output=True,
+            timeout=15,
+        )
+        elapsed = time.monotonic() - start
+        assert proc.returncode == 1
+        assert elapsed < 10.0
+        assert b"FINALIZE_ENTER" in proc.stderr
+        assert b"BLOCKING_REPR_ENTER" not in proc.stderr  # never executed
+        assert b"UNREACHABLE" not in proc.stderr
+        assert b"BlockingReprError" in proc.stderr  # named by object.__repr__
 
     def test_thread_guard_catches_base_exceptions(self, monkeypatch):
         """os._exit is unconditional: even a BaseException out of the

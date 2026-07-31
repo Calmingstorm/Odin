@@ -133,20 +133,23 @@ _FINALIZE_STEP_TIMEOUT = 3.0
 
 
 def _safe_repr(exc: BaseException) -> str:
-    """repr() that cannot raise (round-20 #2).
+    """Identity of ``exc`` without executing ANY of its code (round-21).
 
-    A failure reason is built INSIDE exception handlers on the
-    emergency path — a hostile or broken ``__repr__`` raising there
-    would escape the very guard that exists to make ``os._exit``
-    unconditional.
+    ``repr()``/``str()``/f-string interpolation all re-enter
+    user-controlled methods: a blocking ``__repr__`` hung the main
+    thread on the emergency path, and a repr returning a ``str``
+    SUBCLASS smuggled a hostile ``__format__`` into the f-string that
+    consumed it. ``object.__repr__`` is C-level — it never calls back
+    into the exception, reads the type's name from the type dict
+    without the descriptor protocol, and returns an EXACT ``str`` that
+    concatenates and formats inertly. The message (``args``) is
+    deliberately dropped: it is user-controlled data of user-controlled
+    type.
     """
     try:
-        return repr(exc)
+        return object.__repr__(exc)
     except BaseException:
-        try:
-            return type(exc).__name__
-        except BaseException:
-            return "unrepresentable exception"
+        return "unrepresentable exception"
 
 
 def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
@@ -213,7 +216,7 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
             else:
                 owners_stopped = True
     except Exception as exc:
-        failure = f"exception during loop drain: {_safe_repr(exc)}"
+        failure = "exception during loop drain: " + _safe_repr(exc)
     if not owners_stopped:
         # UNPROVEN verdict. From here to os._exit there must be NO
         # synchronous I/O: a blocking logging handler would hang the
@@ -231,7 +234,7 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
         # synchronous logging, no veto record here — a blocking handler
         # would hang the main thread before the emergency exit is
         # reachable (round-20 #1). The reason travels to the scribe.
-        return f"final zombie drain failed: {_safe_repr(exc)}"
+        return "final zombie drain failed: " + _safe_repr(exc)
     if not verified:
         return "final zombie drain could not verify a clean process table"
     if drained:
@@ -265,7 +268,7 @@ def _finalize_and_exit(
         # interpreter shutdown and the round-17 hang with it. The repr
         # is guarded too: a broken __repr__ raising HERE would escape
         # this very handler (round-20 #2).
-        failure = f"finalize crashed: {_safe_repr(exc)}"
+        failure = "finalize crashed: " + _safe_repr(exc)
     if failure is None:
         return
     _emergency_exit(log, exit_code, failure)
