@@ -8,6 +8,7 @@ output lines (max 500) and is auto-killed after 1 hour.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import os
 import re
 import signal
@@ -21,6 +22,70 @@ from ..odin_log import get_logger
 from .workspace import WorkspaceError, workspace_env
 
 log = get_logger("process_manager")
+
+
+_PR_SET_CHILD_SUBREAPER = 36
+_PR_GET_CHILD_SUBREAPER = 37
+
+
+def child_subreaper_active() -> bool:
+    """Whether THIS process is already a child subreaper (read-only)."""
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        value = ctypes.c_int(0)
+        if libc.prctl(_PR_GET_CHILD_SUBREAPER, ctypes.byref(value), 0, 0, 0) != 0:
+            return False
+        return value.value == 1
+    except Exception:
+        return False
+
+
+def set_child_subreaper(enabled: bool = True) -> bool:
+    """Set (or clear) the child-subreaper flag; returns the verified state."""
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.prctl(_PR_SET_CHILD_SUBREAPER, 1 if enabled else 0, 0, 0, 0) != 0:
+            return child_subreaper_active()
+    except Exception:
+        log.exception("Could not change child-subreaper containment")
+        return child_subreaper_active()
+    return child_subreaper_active()
+
+
+def reap_adopted_zombies(known_own_children: frozenset[int] = frozenset()) -> int:
+    """Reap zombies WE adopted as subreaper. Returns the count reaped.
+
+    Adoption makes us the parent of escaped descendants, so once they die
+    they linger until someone waits on them. Only pids we did NOT
+    deliberately spawn are touched: asyncio's child watcher owns the
+    statuses of our own children, and stealing one would break it. Never
+    ``waitpid(-1)`` for the same reason.
+    """
+    reaped = 0
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return 0
+    mypid = os.getpid()
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid in known_own_children:
+            continue
+        try:
+            raw = Path(f"/proc/{pid}/stat").read_bytes()
+            rest = raw.rsplit(b")", 1)[1].split()
+            if rest[0] != b"Z" or int(rest[1]) != mypid:
+                continue
+        except (OSError, IndexError, ValueError):
+            continue
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0]:
+                reaped += 1
+        except (ChildProcessError, OSError):
+            pass
+    return reaped
 
 
 class ProcessCleanupError(RuntimeError):
@@ -92,6 +157,8 @@ def _proc_ids(pid: int) -> tuple[int, int] | None | str:
         return "unknown"  # EMFILE/EACCES/… — we do NOT know
     try:
         rest = raw.rsplit(b")", 1)[1].split()
+        if rest[0] == b"Z":
+            return None  # zombie: dead, awaiting reap — not a live member
         return int(rest[1]), int(rest[3])  # ppid, session
     except (IndexError, ValueError):
         return "unknown"  # malformed — never treated as absence
@@ -106,26 +173,34 @@ def _proc_session(pid: int) -> int | None | str:
 
 
 def _scan_owned_members(
-    sid: int, leader_pid: int | None = None
+    sid: int,
+    leader_pid: int | None = None,
+    *,
+    adopted_by: int | None = None,
+    known_own_children: frozenset[int] = frozenset(),
 ) -> tuple[list[tuple[int, int]], bool]:
     """Enumerate every process we own, each PINNED with a pidfd.
 
-    Ownership is the UNION of two relations, because neither alone is
-    sufficient:
+    Ownership is the union of THREE relations, because no one of them
+    covers every escape:
 
-    - **Session** ``session == sid``: our leader was spawned with
-      ``start_new_session`` (so ``sid == leader_pid``); descendants
-      inherit it and cannot be joined from outside.
-    - **Ancestry** (round-8 #1): a descendant that calls ``setsid()``
-      leaves the session, but while its parent chain still reaches our
-      leader it remains provably ours. The walk is bounded and
-      cycle-safe.
+    - **Session** ``session == sid`` — the default for descendants of a
+      leader spawned with ``start_new_session``.
+    - **Ancestry** — a descendant that called ``setsid()`` left the
+      session but is still ours while its parent chain reaches the
+      leader (round-8 #1).
+    - **Adoption** ``ppid == adopted_by`` — a descendant that ALSO
+      double-forked left the ancestry chain too; as a child subreaper we
+      adopt it instead of PID 1 (round-9 #1), so it is ours again. Our
+      own deliberate children (``known_own_children``) are excluded:
+      those belong to other subsystems, not to this session.
 
     The pin happens BEFORE membership is verified, so verification and
-    every later signal act on the exact process the fd names — pid reuse
-    between steps is structurally impossible. ``complete`` is False
-    whenever any candidate could not be inspected or pinned for a reason
-    other than provable disappearance. Caller owns the returned fds.
+    every later signal act on the exact process the fd names. ``complete``
+    is False whenever any candidate could not be inspected or pinned for
+    a reason other than provable disappearance, AND whenever an ancestry
+    walk exhausts its bound — uncertainty is never non-ownership
+    (round-9 #3). Caller owns the returned fds.
     """
     pinned: list[tuple[int, int]] = []
     try:
@@ -157,30 +232,59 @@ def _scan_owned_members(
             complete = False
         os.close(fd)
 
-    def _owned(pid: int) -> bool:
+    def _owned(pid: int) -> bool | None:
+        """True/False, or None when the walk could not decide."""
         seen: set[int] = set()
         cur = pid
         for _ in range(64):  # bounded: no unbounded walk, no cycles
-            if cur in seen or cur <= 1:
+            if cur in seen:
+                return False  # cycle — cannot be a chain to our leader
+            if cur <= 1:
                 return False
-            seen.add(cur)
             entry = ids.get(cur)
             if entry is None:
                 return False  # chain left our snapshot — not provably ours
+            seen.add(cur)
             ppid, session = entry
             if session == sid:
                 return True
             if leader_pid is not None and (cur == leader_pid or ppid == leader_pid):
                 return True
+            if (
+                adopted_by is not None
+                and ppid == adopted_by
+                and cur not in known_own_children
+            ):
+                return True  # orphan we adopted as subreaper
             cur = ppid
-        return False
+        return None  # bound exhausted — UNKNOWN, never "not ours"
 
     for pid, fd in candidates:
-        if _owned(pid):
+        verdict = _owned(pid)
+        if verdict:
             pinned.append((pid, fd))
-        else:
-            os.close(fd)
+            continue
+        if verdict is None:
+            complete = False
+        os.close(fd)
     return pinned, complete
+
+
+def _reap_adopted(pids: list[int], known_own_children: frozenset[int]) -> None:
+    """Non-blocking reap of orphans WE adopted as subreaper.
+
+    Adoption makes us the parent of escaped descendants, so once killed
+    they linger as zombies until someone waits on them. Only pids we did
+    NOT deliberately spawn are reaped here: asyncio's child watcher owns
+    the statuses of our own children, and stealing one would break it.
+    """
+    for pid in pids:
+        if pid in known_own_children:
+            continue
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass  # not our child, or already reaped
 
 
 def _signal_pinned(pinned: list[tuple[int, int]], sig: int) -> None:
@@ -218,6 +322,9 @@ async def _terminate_session_until_empty(
     term_first: bool = True,
     settle_scans: int = 2,
     settle_delay: float = 0.2,
+    adopted_by: int | None = None,
+    known_own_children: frozenset[int] = frozenset(),
+    containment: bool = True,
 ) -> bool:
     """Drive everything we own to provably empty.
 
@@ -234,17 +341,25 @@ async def _terminate_session_until_empty(
     any such child time to appear in /proc.
 
     Returns True only on that repeated affirmative observation — an
-    unreadable /proc, fd exhaustion, or a malformed stat returns False,
-    never a false success.
+    unreadable /proc, fd exhaustion, a malformed stat, or an exhausted
+    ancestry walk returns False, never a false success. ``containment``
+    False (child-subreaper unavailable) means a double-fork+setsid
+    escape would be undetectable, so emptiness is never claimed at all
+    (round-9 #1).
     """
     deadline = time.monotonic() + timeout
     termed: set[int] = set()
     escalate_at = time.monotonic() + grace if term_first else 0.0
     clean_scans = 0
     while True:
-        pinned, complete = _scan_owned_members(sid, leader_pid=sid)
+        pinned, complete = _scan_owned_members(
+            sid,
+            leader_pid=sid,
+            adopted_by=adopted_by,
+            known_own_children=known_own_children,
+        )
         try:
-            if complete and not pinned:
+            if complete and not pinned and containment:
                 clean_scans += 1
                 if clean_scans >= settle_scans:
                     return True
@@ -256,9 +371,19 @@ async def _terminate_session_until_empty(
                     termed.update(p for p, _fd in fresh)
                 else:
                     _signal_pinned(pinned, signal.SIGKILL)
+                    # Adopted orphans become zombies once killed — reap
+                    # them so a long-running process does not accumulate
+                    # entries (our own children stay with asyncio).
+                    _reap_adopted([p for p, _fd in pinned], known_own_children)
         finally:
             _close_pinned(pinned)
         if time.monotonic() >= deadline:
+            if not containment:
+                log.error(
+                    "Cannot prove session %d is empty: child-subreaper "
+                    "containment is unavailable, so an escaped descendant "
+                    "would be undetectable", sid,
+                )
             return False
         await asyncio.sleep(settle_delay if clean_scans else 0.1)
 
@@ -323,6 +448,21 @@ class ProcessRegistry:
         # round-3 review — a cached path accepted a directory later replaced
         # by a symlink into the install).
         self._workspace = workspace
+        # Kernel-backed containment for escaped descendants (round-9 #1):
+        # as a child subreaper the PROCESS adopts orphans instead of PID
+        # 1, so a double-fork+setsid escape stays attributable. Enabled
+        # once at application startup (``src/__main__``) — a library
+        # constructor must not flip process-wide state — and only READ
+        # here. Its absence makes the terminator refuse to claim
+        # emptiness rather than report a false success.
+        # Pids WE deliberately spawned here: an adopted orphan is any
+        # child of ours that is NOT one of these.
+        self._own_children: set[int] = set()
+
+    @property
+    def _containment(self) -> bool:
+        """Live read — containment is process state, not construction state."""
+        return child_subreaper_active()
 
     def _resolve_workspace(self) -> str | None:
         if callable(self._workspace):
@@ -381,6 +521,7 @@ class ProcessRegistry:
             process=proc,
         )
         self._processes[pid] = info
+        self._own_children.add(pid)
 
         # Drainage and terminal-state publication are SEPARATE tasks:
         # the reader drains stdout; the watcher publishes status at
@@ -617,6 +758,9 @@ class ProcessRegistry:
         ]
         for pid in to_remove:
             self._processes.pop(pid)
+        # Adopted orphans die as zombies (nothing else will wait on them);
+        # sweep them here so a long-running process cannot accumulate.
+        reap_adopted_zombies(frozenset(self._own_children))
         return len(to_remove)
 
     # ------------------------------------------------------------------
@@ -640,7 +784,12 @@ class ProcessRegistry:
         if proc is None:
             return True
         gone = await _terminate_session_until_empty(
-            proc.pid, timeout=timeout, term_first=False
+            proc.pid,
+            timeout=timeout,
+            term_first=False,
+            adopted_by=os.getpid(),
+            known_own_children=frozenset(self._own_children),
+            containment=self._containment,
         )
         info.session_confirmed_empty = gone
         if proc.returncode is None:
@@ -728,7 +877,12 @@ class ProcessRegistry:
         # verification: TERM, bounded grace, then KILL for survivors.
         try:
             info.session_confirmed_empty = await _terminate_session_until_empty(
-                info.process.pid, grace=2.0, timeout=10.0
+                info.process.pid,
+                grace=2.0,
+                timeout=10.0,
+                adopted_by=os.getpid(),
+                known_own_children=frozenset(self._own_children),
+                containment=self._containment,
             )
         except Exception:
             info.session_confirmed_empty = False

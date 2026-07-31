@@ -15,6 +15,7 @@ import asyncio
 import os
 import signal
 import time
+from pathlib import Path
 
 import pytest
 
@@ -22,12 +23,29 @@ from src.tools.process_manager import ProcessInfo, ProcessRegistry
 from src.tools.ssh import run_local_command, run_ssh_command, terminate_process_tree
 
 
+def _pid_dead(pid: int) -> bool:
+    """Dead means DEAD — including a zombie awaiting reap.
+
+    The process runs as a child subreaper (like production), so a killed
+    orphan reparents to us and lingers as a zombie until swept.
+    ``os.kill(pid, 0)`` still succeeds for it, so liveness is read from
+    /proc state instead.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes()
+        return raw.rsplit(b")", 1)[1].split()[0] == b"Z"
+    except (OSError, IndexError):
+        return True
+
+
 async def _assert_pid_gone(pid: int, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if _pid_dead(pid):
             return
         await asyncio.sleep(0.05)
     pytest.fail(f"PID {pid} is still alive")

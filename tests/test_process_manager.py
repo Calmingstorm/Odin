@@ -275,7 +275,6 @@ class TestPollWaitSeconds:
         leader exits immediately while the descendant holds stdout open.
         Terminal state must publish at LEADER exit, and the group reap
         (which is what closes the pipe) must not stall behind EOF."""
-        import os
 
         reg = ProcessRegistry()
         started = await reg.start("localhost", "sleep 20 & exit 0")
@@ -286,17 +285,20 @@ class TestPollWaitSeconds:
         assert elapsed < 10.0  # never waited on EOF or the full deadline
         assert "status=completed" in result
         assert "exit_code=0" in result
-        # The v3.59.1 contract: descendants are reaped at leader exit. Give
-        # the reap a moment, then probe group existence with signal 0 (a
-        # pure existence check, delivers nothing).
+        # The v3.59.1 contract: descendants are reaped at leader exit.
+        # Asserted through the ownership scan rather than killpg: an
+        # adopted orphan lingers as a ZOMBIE until reaped, which killpg
+        # still sees but which is dead by every meaningful measure.
+        from src.tools.process_manager import _close_pinned, _scan_owned_members
+
         for _ in range(40):
-            try:
-                os.killpg(pid, 0)
-            except ProcessLookupError:
+            pinned, complete = _scan_owned_members(pid, leader_pid=pid)
+            alive = len(pinned)
+            _close_pinned(pinned)
+            if complete and alive == 0:
                 break
             await asyncio.sleep(0.25)
-        with pytest.raises(ProcessLookupError):
-            os.killpg(pid, 0)
+        assert alive == 0
 
     async def test_wedged_reader_never_wedges_the_poll(self):
         """Process exits during the wait but the reader task hangs: the
@@ -714,7 +716,6 @@ class TestRound3Blockers:
         """PR #244 round-3 blocker #2: a wedged async reap must not strand
         the owned group across re-exec — shutdown hard-KILLs the group
         synchronously before cancelling the task."""
-        import os
 
         reg = ProcessRegistry()
         proc = await asyncio.create_subprocess_shell(
@@ -742,8 +743,15 @@ class TestRound3Blockers:
             # group provably dissolved.
             assert info._exit_task.done()
             assert proc.returncode is not None  # leader reaped, no zombie
-            with pytest.raises(ProcessLookupError):
-                os.killpg(proc.pid, 0)  # group gone BEFORE shutdown returned
+            # Ownership scan, not killpg: an adopted orphan lingers as a
+            # ZOMBIE until reaped, which killpg still reports as present
+            # though it is dead by every meaningful measure.
+            from src.tools.process_manager import _close_pinned, _scan_owned_members
+
+            pinned, complete = _scan_owned_members(proc.pid, leader_pid=proc.pid)
+            alive = len(pinned)
+            _close_pinned(pinned)
+            assert complete and alive == 0  # gone BEFORE shutdown returned
         finally:
             gate.set()
             if proc.returncode is None:
@@ -1294,7 +1302,7 @@ class TestSetsidEscapeAndSettleWindow:
 
         scans = {"n": 0}
 
-        def scan(_sid, leader_pid=None):
+        def scan(_sid, leader_pid=None, **_kw):
             scans["n"] += 1
             if scans["n"] == 1:
                 return [], True  # first snapshot looks empty…
@@ -1317,7 +1325,7 @@ class TestSetsidEscapeAndSettleWindow:
         seq = [([], True), ([(1, -1)], True), ([], True), ([], True)]
         calls = {"n": 0}
 
-        def scan(_sid, leader_pid=None):
+        def scan(_sid, leader_pid=None, **_kw):
             i = min(calls["n"], len(seq) - 1)
             calls["n"] += 1
             return seq[i]
@@ -1385,3 +1393,273 @@ class TestReexecVeto:
         pinned, complete = pm._scan_owned_members(7, leader_pid=7)
         assert pinned == []  # nothing claimed
         assert complete is True
+
+
+class TestSubreaperContainment:
+    """Round-9 #1: kernel-backed containment. A descendant that BOTH
+    double-forks and calls setsid() leaves session AND ancestry, but as a
+    child subreaper we ADOPT it — so it stays attributable and cleanup can
+    never report success while it lives."""
+
+    async def test_double_fork_setsid_escapee_is_adopted_and_killed(self):
+        from src.tools.process_manager import (
+            _close_pinned,
+            _scan_owned_members,
+            child_subreaper_active,
+            reap_adopted_zombies,
+            set_child_subreaper,
+        )
+
+        # Containment is PROCESS state set once at the app boundary; a
+        # library constructor must never flip it. Enable it explicitly
+        # here and restore it, so no other test inherits adoption.
+        previously = child_subreaper_active()
+        assert set_child_subreaper(True) is True
+        reg = ProcessRegistry()
+        assert reg._containment is True
+
+        # Double-fork + setsid: the grandchild orphans itself past our
+        # ancestry AND leaves our session, then ignores TERM.
+        # exec() so PYTHON interprets the newlines: passing them through
+        # the shell as literals is a SyntaxError, and the escapee would
+        # never start.
+        escape = (
+            "import os,signal,sys,time\n"
+            "if os.fork()==0:\n"
+            " os.setsid()\n"
+            " signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+            " time.sleep(60)\n"
+            " os._exit(0)\n"
+            "sys.exit(0)\n"
+        )
+        started = await reg.start(
+            "localhost", f'python3 -c "exec({escape!r})"'
+        )
+        pid = int(started.split("PID ")[1].split(")")[0])
+        try:
+            await asyncio.sleep(1.0)
+            # The escapee reparented to US (subreaper), so it is owned.
+            pinned, complete = _scan_owned_members(
+                pid, leader_pid=pid,
+                adopted_by=os.getpid(),
+                known_own_children=frozenset(reg._own_children),
+            )
+            adopted = len(pinned)
+            _close_pinned(pinned)
+            assert complete and adopted >= 1  # escapee visible
+
+            # Cleanup must actually remove it before claiming success.
+            assert await reg._kill_group_until_gone(
+                reg._processes[pid], timeout=12.0
+            ) is True
+            pinned, complete = _scan_owned_members(
+                pid, leader_pid=pid,
+                adopted_by=os.getpid(),
+                known_own_children=frozenset(reg._own_children),
+            )
+            left = len(pinned)
+            _close_pinned(pinned)
+            assert complete and left == 0
+        finally:
+            await reg.shutdown()
+            reap_adopted_zombies(frozenset(reg._own_children))
+            set_child_subreaper(previously)
+
+    def test_registry_does_not_flip_process_state(self):
+        """Constructing a registry must not enable containment as a side
+        effect — it reads what the application set."""
+        from src.tools.process_manager import child_subreaper_active
+
+        before = child_subreaper_active()
+        ProcessRegistry()
+        assert child_subreaper_active() is before
+
+    async def test_without_containment_emptiness_is_never_claimed(self):
+        """No subreaper ⇒ an escape would be undetectable ⇒ the terminator
+        refuses to claim emptiness at all (honest failure, not false
+        success)."""
+        from src.tools.process_manager import _terminate_session_until_empty
+
+        assert await _terminate_session_until_empty(
+            4_000_000, timeout=0.5, term_first=False, containment=False
+        ) is False
+
+
+class TestAncestryBoundIsUncertainty:
+    """Round-9 #3: walk exhaustion is UNKNOWN, never 'not ours'."""
+
+    def test_deep_chain_makes_the_scan_incomplete(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        # A 70-deep chain: pid N's parent is N-1, root pid 2 is unrelated.
+        depth = 70
+        pids = list(range(2, 2 + depth))
+        table = {p: (p - 1, 999) for p in pids}
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: [str(p) for p in pids])
+        monkeypatch.setattr(
+            pm.os, "pidfd_open", lambda _pid: os.open("/dev/null", os.O_RDONLY)
+        )
+        monkeypatch.setattr(pm, "_proc_ids", lambda pid: table.get(pid, "unknown"))
+        # Leader pid deliberately OUTSIDE the chain, so no walk short-
+        # circuits on it: the deepest members exhaust the bound.
+        pinned, complete = pm._scan_owned_members(500_000, leader_pid=500_000)
+        pm._close_pinned(pinned)
+        # Bound exhaustion → uncertainty → incomplete, so emptiness can
+        # never be affirmed from this scan.
+        assert complete is False
+
+
+class TestAnyTeardownFailureVetoesReexec:
+    """Round-9 #2: an unexpected verifier error is as unproven as an
+    explicit ProcessCleanupError."""
+
+    async def test_generic_registry_error_blocks_reexec(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from src import restart
+        from src.discord.wiring import shutdown_services
+
+        restart.reset()
+        registry = SimpleNamespace(
+            shutdown=AsyncMock(side_effect=RuntimeError("verifier exploded"))
+        )
+        bot = SimpleNamespace(
+            tool_executor=SimpleNamespace(_process_registry=registry)
+        )
+        try:
+            await shutdown_services(bot)
+            veto = restart.reexec_blocked()
+            assert veto is not None
+            assert "RuntimeError" in veto and "verifier exploded" in veto
+        finally:
+            restart.reset()
+
+
+class TestContainmentHelpers:
+    """The prctl wrappers and the adopted-zombie sweeper."""
+
+    def test_set_and_read_back(self):
+        from src.tools.process_manager import child_subreaper_active, set_child_subreaper
+
+        before = child_subreaper_active()
+        try:
+            assert set_child_subreaper(True) is True
+            assert child_subreaper_active() is True
+            assert set_child_subreaper(False) is False
+            assert child_subreaper_active() is False
+        finally:
+            set_child_subreaper(before)
+
+    def test_libc_failure_reads_as_inactive(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        def boom(*_a, **_k):
+            raise OSError("no libc")
+
+        monkeypatch.setattr(pm.ctypes, "CDLL", boom)
+        assert pm.child_subreaper_active() is False
+        assert pm.set_child_subreaper(True) is False
+
+    async def test_sweeper_reaps_adopted_zombie_only(self):
+        from src.tools.process_manager import (
+            child_subreaper_active,
+            reap_adopted_zombies,
+            set_child_subreaper,
+        )
+
+        before = child_subreaper_active()
+        set_child_subreaper(True)
+        try:
+            # A double-forked orphan: reparents to US, dies immediately,
+            # and lingers as a zombie nobody else will wait on.
+            src = (
+                "import os,sys\n"
+                "if os.fork()==0:\n"
+                " os._exit(0)\n"
+                "sys.exit(0)\n"
+            )
+            proc = await asyncio.create_subprocess_shell(
+                f'python3 -c "exec({src!r})"',
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            for _ in range(40):
+                if reap_adopted_zombies(frozenset({proc.pid})) >= 1:
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                pytest.fail("adopted zombie was never reaped")
+        finally:
+            set_child_subreaper(before)
+
+    def test_sweeper_never_touches_own_children(self, monkeypatch):
+        """Our deliberate children belong to asyncio's watcher — stealing
+        a status would break it, so they are skipped by pid."""
+        import src.tools.process_manager as pm
+
+        waited: list[int] = []
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["4242"])
+        monkeypatch.setattr(
+            pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
+        )
+        assert pm.reap_adopted_zombies(frozenset({4242})) == 0
+        assert waited == []
+
+    def test_sweeper_survives_unreadable_proc(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(
+            pm.os, "listdir", lambda _p: (_ for _ in ()).throw(OSError("nope"))
+        )
+        assert pm.reap_adopted_zombies() == 0
+
+    def test_prctl_nonzero_return_reads_state(self, monkeypatch):
+        """A failing prctl must not be reported as success — the value is
+        always read back from the kernel."""
+        import src.tools.process_manager as pm
+
+        class FakeLibc:
+            def prctl(self, op, *_a):
+                return -1  # every prctl fails
+
+        monkeypatch.setattr(pm.ctypes, "CDLL", lambda *_a, **_k: FakeLibc())
+        assert pm.child_subreaper_active() is False
+        assert pm.set_child_subreaper(True) is False
+
+    def test_sweeper_skips_unreadable_and_unwaitable_entries(self, monkeypatch):
+        """A vanished/unreadable /proc entry and a pid that is not our
+        child are both skipped, never raised."""
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["111", "222"])
+
+        class FakePath:
+            def __init__(self, path):
+                self.path = str(path)
+
+            def read_bytes(self):
+                if "111" in self.path:
+                    raise OSError("vanished")  # unreadable → skipped
+                return b"222 (x) Z " + str(os.getpid()).encode() + b" 0 0 " + b"0 " * 40
+
+        monkeypatch.setattr(pm, "Path", FakePath)
+
+        def not_our_child(_pid, _flags):
+            raise ChildProcessError("not ours")
+
+        monkeypatch.setattr(pm.os, "waitpid", not_our_child)
+        assert pm.reap_adopted_zombies() == 0  # neither raised, neither counted
+
+    def test_inline_reap_skips_own_children(self, monkeypatch):
+        """The in-loop reap after KILL uses the same asyncio-safety rule:
+        deliberate children are never waited on here."""
+        import src.tools.process_manager as pm
+
+        waited: list[int] = []
+        monkeypatch.setattr(
+            pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
+        )
+        pm._reap_adopted([100, 200], frozenset({100}))
+        assert waited == [200]  # 100 is ours → left to asyncio's watcher

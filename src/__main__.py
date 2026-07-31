@@ -79,6 +79,27 @@ def _wire_observability(health, bot, log) -> None:
     log.info("Observability wired: metric sources and component health checks registered")
 
 
+def _enable_process_containment(log) -> None:
+    """Become a child subreaper so escaped descendants stay ours.
+
+    Process-wide state, so it is set ONCE here at the application
+    boundary rather than by any library constructor. Without it, a
+    background descendant that double-forks and calls ``setsid()``
+    reparents to PID 1 and becomes unattributable — and the process
+    manager then refuses to claim its cleanup is complete (PR #244).
+    """
+    from .tools.process_manager import set_child_subreaper
+
+    if set_child_subreaper(True):
+        log.debug("Child-subreaper containment active")
+    else:
+        log.error(
+            "Could not become a child subreaper — escaped background "
+            "descendants would be unattributable; cleanup will refuse to "
+            "report success and in-place restarts will be blocked"
+        )
+
+
 def main() -> None:
     # ``--version`` short-circuit
     if "--version" in sys.argv or "-V" in sys.argv:
@@ -112,6 +133,7 @@ def main() -> None:
     )
     log = get_logger("main")
     log.info("Starting Odin")
+    _enable_process_containment(log)
 
     # STARTUP MIGRATION — must run after the real configuration is loaded and
     # before any command service begins.
