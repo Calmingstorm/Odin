@@ -16,7 +16,6 @@ from src.agents.manager import (
     ACTIVE_STATES,
     ITERATION_CB_TIMEOUT,
     MAX_AGENT_LIFETIME,
-    MAX_RECOVERY_ATTEMPTS,
     TERMINAL_STATES,
     VALID_TRANSITIONS,
     AgentInfo,
@@ -733,7 +732,14 @@ class TestLLMRecovery:
                 # wait_for is called with a coroutine, need a different approach
                 pass
 
-    async def test_recovery_retry_succeeds(self):
+    # Deliberate pin amendments (2026-07-30, design settled with Odin):
+    # transient-failure recovery moved INSIDE the iteration callback via the
+    # shared deadline policy (src/llm/recovery.py). The manager keeps only
+    # the wall; the old EXECUTING→RECOVERING→EXECUTING single-retry ladder —
+    # which retried programming defects via bare except — is gone. These
+    # tests pin its absence.
+
+    async def test_timeout_fails_without_manager_retry(self):
         agent = AgentInfo(
             id="r3", label="test", goal="test",
             channel_id="c1", requester_id="u1", requester_name="user",
@@ -742,92 +748,34 @@ class TestLLMRecovery:
         agent.transition(AgentState.EXECUTING)
 
         call_count = 0
-        original_wait_for = asyncio.wait_for
 
-        async def counting_wait_for(coro, *, timeout=None):
+        async def counting_timeout(coro, *, timeout=None):
             nonlocal call_count
             call_count += 1
-            if call_count == 1:
-                try:
-                    coro.close()
-                except:  # noqa: E722 — deliberate maximum-breadth catch; narrowing changes cancellation semantics
-                    pass
-                raise TimeoutError()
-            return await original_wait_for(coro, timeout=timeout)
-
-        iter_cb = AsyncMock(return_value={"text": "recovered", "tool_calls": []})
-
-        with patch("src.agents.manager.asyncio.wait_for", side_effect=counting_wait_for):
-            with patch("src.agents.manager.asyncio.sleep", new_callable=AsyncMock):
-                result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
-
-        assert result is not None
-        assert result["text"] == "recovered"
-        assert agent.recovery_attempts == 1
-        assert agent.state == AgentState.EXECUTING
-        # History should show EXECUTING → RECOVERING → EXECUTING
-        h = agent.state_history
-        states = [(t.from_state, t.to_state) for t in h]
-        assert (AgentState.EXECUTING, AgentState.RECOVERING) in states
-        assert (AgentState.RECOVERING, AgentState.EXECUTING) in states
-
-    async def test_recovery_retry_fails(self):
-        agent = AgentInfo(
-            id="r4", label="test", goal="test",
-            channel_id="c1", requester_id="u1", requester_name="user",
-        )
-        agent.transition(AgentState.READY)
-        agent.transition(AgentState.EXECUTING)
-
-        asyncio.wait_for
-
-        async def always_timeout(coro, *, timeout=None):
             try:
                 coro.close()
             except:  # noqa: E722 — deliberate maximum-breadth catch; narrowing changes cancellation semantics
                 pass
             raise TimeoutError()
 
-        iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
+        iter_cb = AsyncMock(return_value={"text": "never", "tool_calls": []})
 
-        with patch("src.agents.manager.asyncio.wait_for", side_effect=always_timeout):
-            with patch("src.agents.manager.asyncio.sleep", new_callable=AsyncMock):
-                result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
-
-        assert result is None
-        assert agent.state == AgentState.FAILED
-        assert agent.recovery_attempts == 1
-        assert agent.ended_at is not None
-
-    async def test_no_recovery_when_attempts_exhausted(self):
-        agent = AgentInfo(
-            id="r5", label="test", goal="test",
-            channel_id="c1", requester_id="u1", requester_name="user",
-        )
-        agent.transition(AgentState.READY)
-        agent.transition(AgentState.EXECUTING)
-        agent.recovery_attempts = MAX_RECOVERY_ATTEMPTS  # already used up
-
-        async def timeout_coro(coro, *, timeout=None):
-            try:
-                coro.close()
-            except:  # noqa: E722 — deliberate maximum-breadth catch; narrowing changes cancellation semantics
-                pass
-            raise TimeoutError()
-
-        iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
-
-        with patch("src.agents.manager.asyncio.wait_for", side_effect=timeout_coro):
+        with patch("src.agents.manager.asyncio.wait_for", side_effect=counting_timeout):
             result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
 
         assert result is None
+        assert call_count == 1  # exactly one call — no ladder
         assert agent.state == AgentState.FAILED
-        # No recovery transition in history (directly to FAILED)
-        h = agent.state_history
-        recovery_transitions = [t for t in h if t.to_state == AgentState.RECOVERING]
-        assert len(recovery_transitions) == 0
+        assert agent.recovery_attempts == 0
+        assert agent.ended_at is not None
+        recovery_transitions = [
+            t for t in agent.state_history if t.to_state == AgentState.RECOVERING
+        ]
+        assert recovery_transitions == []
 
-    async def test_exception_triggers_recovery(self):
+    async def test_exception_fails_fast_no_second_call(self):
+        # The old ladder would have made a second call and "recovered" —
+        # that second call must never happen now.
         agent = AgentInfo(
             id="r6", label="test", goal="test",
             channel_id="c1", requester_id="u1", requester_name="user",
@@ -852,11 +800,13 @@ class TestLLMRecovery:
         iter_cb = AsyncMock(return_value={"text": "ok", "tool_calls": []})
 
         with patch("src.agents.manager.asyncio.wait_for", side_effect=err_then_ok):
-            with patch("src.agents.manager.asyncio.sleep", new_callable=AsyncMock):
-                result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
+            result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
 
-        assert result is not None
-        assert agent.recovery_attempts == 1
+        assert result is None
+        assert call_count == 1
+        assert agent.state == AgentState.FAILED
+        assert agent.error == "LLM error: transient error"
+        assert agent.recovery_attempts == 0
 
 
 # ---------------------------------------------------------------------------
@@ -864,7 +814,10 @@ class TestLLMRecovery:
 # ---------------------------------------------------------------------------
 
 class TestRunAgentRecovery:
-    async def test_full_recovery_lifecycle(self):
+    async def test_llm_failure_fails_agent_without_manager_retry(self):
+        # Deliberate amendment (2026-07-30): the old ladder made this agent
+        # COMPLETE via a manager retry; recovery now lives inside the
+        # iteration callback, so a failure that escapes it fails the agent.
         agent = AgentInfo(
             id="fr1", label="test", goal="test",
             channel_id="c1", requester_id="u1", requester_name="user",
@@ -885,18 +838,17 @@ class TestRunAgentRecovery:
                 raise TimeoutError()
             return await original_wait_for(coro, timeout=timeout)
 
-        iter_cb = AsyncMock(return_value={"text": "recovered", "tool_calls": []})
+        iter_cb = AsyncMock(return_value={"text": "would recover", "tool_calls": []})
         tool_cb = AsyncMock()
 
         with patch("src.agents.manager.asyncio.wait_for", side_effect=first_timeout):
-            with patch("src.agents.manager.asyncio.sleep", new_callable=AsyncMock):
-                await _run_agent(agent, "sys", [], iter_cb, tool_cb)
+            await _run_agent(agent, "sys", [], iter_cb, tool_cb)
 
-        assert agent.state == AgentState.COMPLETED
-        assert agent.recovery_attempts == 1
-        h = agent.state_history
-        states = [t.to_state for t in h]
-        assert AgentState.RECOVERING in states
+        assert agent.state == AgentState.FAILED
+        assert call_count == 1
+        assert agent.recovery_attempts == 0
+        states = [t.to_state for t in agent.state_history]
+        assert AgentState.RECOVERING not in states
 
     async def test_failed_recovery_lifecycle(self):
         agent = AgentInfo(
@@ -1298,8 +1250,13 @@ class TestEdgeCases:
         for state in TERMINAL_STATES:
             assert state.value in _TERMINAL_STATUSES
 
-    def test_max_recovery_attempts_constant(self):
-        assert MAX_RECOVERY_ATTEMPTS == 1
+    def test_manager_retry_ladder_removed(self):
+        # Deliberate amendment (2026-07-30): transient recovery moved into
+        # the iteration callback (src/llm/recovery.py); the manager-level
+        # ladder and its constant must stay gone.
+        import src.agents.manager as manager_mod
+
+        assert not hasattr(manager_mod, "MAX_RECOVERY_ATTEMPTS")
 
     def test_state_enum_is_str(self):
         for state in AgentState:
@@ -1514,29 +1471,8 @@ class TestPerAgentTimeoutSnapshot:
         recoveries = [t for t in agent.state_history if t.to_state == AgentState.RECOVERING]
         assert recoveries == []
 
-    async def test_retry_timeout_stores_readable_error(self):
+    async def test_timeout_stores_readable_error(self):
         agent = _exec_agent(iteration_timeout=77.0, max_lifetime=100000.0)
-
-        async def always_timeout(coro, *, timeout=None):
-            try:
-                coro.close()
-            except Exception:
-                pass
-            raise TimeoutError()
-
-        iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
-        with patch("src.agents.manager.asyncio.wait_for", side_effect=always_timeout):
-            with patch("src.agents.manager.asyncio.sleep", new_callable=AsyncMock):
-                result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
-
-        assert result is None
-        assert agent.state == AgentState.FAILED
-        # str(asyncio.TimeoutError()) is "" — the stored error must never be empty
-        assert agent.error == "retry timed out after 77s"
-
-    async def test_exhausted_attempts_store_readable_error(self):
-        agent = _exec_agent(iteration_timeout=77.0, max_lifetime=100000.0)
-        agent.recovery_attempts = MAX_RECOVERY_ATTEMPTS
 
         async def always_timeout(coro, *, timeout=None):
             try:
@@ -1551,7 +1487,26 @@ class TestPerAgentTimeoutSnapshot:
 
         assert result is None
         assert agent.state == AgentState.FAILED
+        # str(asyncio.TimeoutError()) is "" — the stored error must never be empty
         assert agent.error == "LLM timeout after 77s"
+
+    async def test_empty_string_exception_stores_readable_error(self):
+        agent = _exec_agent(iteration_timeout=77.0, max_lifetime=100000.0)
+
+        async def raise_bare(coro, *, timeout=None):
+            try:
+                coro.close()
+            except Exception:
+                pass
+            raise ConnectionError()  # str() == ""
+
+        iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
+        with patch("src.agents.manager.asyncio.wait_for", side_effect=raise_bare):
+            result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
+
+        assert result is None
+        assert agent.state == AgentState.FAILED
+        assert agent.error == "LLM error: ConnectionError"
 
 
 class TestLifetimeEnforcement:
@@ -1686,65 +1641,36 @@ class TestTrajectoryStamps:
 
 
 class TestRetryPathDeadline:
-    async def test_lifetime_exhausted_at_retry_entry(self):
-        """First failure is transient, but the deadline passes during the
-        recovery sleep — the retry must not start; lifetime TIMEOUT wins."""
+    async def test_lifetime_exhaustion_wins_over_exception_class(self):
+        """A failing call that consumed the lifetime is lifetime exhaustion
+        (TIMEOUT), never FAILED — the v3.59.0 rule holds on the single-call
+        path now that the manager retry ladder is gone."""
         agent = _exec_agent(iteration_timeout=900.0, max_lifetime=100.0)
         agent.created_at = time.time() - 50
 
-        async def fail_first(coro, *, timeout=None):
+        async def fail_and_expire(coro, *, timeout=None):
             try:
                 coro.close()
             except Exception:
                 pass
+            agent.created_at -= 100  # the failed call ate the lifetime
             raise ConnectionError("transient")
 
-        async def sleep_past_deadline(_delay):
-            agent.created_at -= 100  # recovery sleep consumed the lifetime
-
         iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
-        with patch("src.agents.manager.asyncio.wait_for", side_effect=fail_first):
-            with patch("src.agents.manager.asyncio.sleep", side_effect=sleep_past_deadline):
-                result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
+        with patch("src.agents.manager.asyncio.wait_for", side_effect=fail_and_expire):
+            result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
 
         assert result is None
-        assert agent.state == AgentState.TIMEOUT
-        assert "lifetime exceeded" in agent.state_history[-1].reason
-
-    async def test_retry_timeout_at_deadline_is_lifetime(self):
-        """A retry that times out exactly at the deadline is lifetime
-        exhaustion (TIMEOUT), not a FAILED recovery."""
-        agent = _exec_agent(iteration_timeout=900.0, max_lifetime=100.0)
-        agent.created_at = time.time() - 50
-        calls = 0
-
-        async def error_then_deadline_timeout(coro, *, timeout=None):
-            nonlocal calls
-            calls += 1
-            try:
-                coro.close()
-            except Exception:
-                pass
-            if calls == 1:
-                raise ConnectionError("transient")
-            agent.created_at -= 100  # retry wait ran past the deadline
-            raise TimeoutError()
-
-        iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
-        with patch("src.agents.manager.asyncio.wait_for",
-                   side_effect=error_then_deadline_timeout):
-            with patch("src.agents.manager.asyncio.sleep", new_callable=AsyncMock):
-                result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
-
-        assert result is None
-        assert calls == 2
         assert agent.state == AgentState.TIMEOUT
         assert "lifetime exceeded" in agent.state_history[-1].reason
 
 
 class TestHardDeadlineDuringToolsAndSleep:
     """PR #226 review blockers: the deadline must hold BETWEEN tool calls
-    (no floored bonus budget per tool) and across the recovery sleep."""
+    (no floored bonus budget per tool). The recovery-sleep half of the
+    original class is gone with the manager retry ladder (2026-07-30) —
+    waits-bounded-by-remaining-budget now lives in src/llm/recovery.py and
+    is pinned in tests/test_recovery_policy.py."""
 
     async def test_expired_agent_stops_at_next_tool(self):
         """Odin's repro shape: tiny lifetime + three slow tools ran ~3s on
@@ -1788,64 +1714,27 @@ class TestHardDeadlineDuringToolsAndSleep:
         assert len(turn.iterations[0].tool_calls) == 1
         assert "timed out" in turn.iterations[0].tool_results[0]["result"]
 
-    async def test_recovery_sleep_capped_at_remaining(self):
-        """A 90s circuit-breaker wait with ~1s of lifetime left must sleep
-        the remainder, not the full 90s."""
-        agent = _exec_agent(iteration_timeout=900.0, max_lifetime=100.0)
-        agent.created_at = time.time() - 99  # ~1s remaining
-
-        class _BreakerError(Exception):
-            retry_after = 90.0
-
-        calls = 0
-
-        async def fail_then_ok(coro, *, timeout=None):
-            nonlocal calls
-            calls += 1
-            try:
-                coro.close()
-            except Exception:
-                pass
-            if calls == 1:
-                raise _BreakerError("breaker open")
-            return {"text": "recovered", "tool_calls": []}
-
-        slept: list[float] = []
-
-        async def capture_sleep(delay):
-            slept.append(delay)
-
-        iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
-        with patch("src.agents.manager.asyncio.wait_for", side_effect=fail_then_ok):
-            with patch("src.agents.manager.asyncio.sleep", side_effect=capture_sleep):
-                result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
-
-        assert result is not None and result["text"] == "recovered"
-        assert len(slept) == 1
-        assert slept[0] <= 1.01                # capped at the remainder, not 90
-
-    async def test_deadline_passed_before_recovery_sleep(self):
-        """If the first call consumed the lifetime, the agent times out
-        BEFORE the recovery sleep — no sleep at all."""
+    async def test_no_manager_sleep_exists_on_failure_path(self):
+        """The manager never sleeps anymore: a failure either times out the
+        lifetime or fails the agent immediately — no recovery sleep at all."""
         agent = _exec_agent(iteration_timeout=900.0, max_lifetime=100.0)
         agent.created_at = time.time() - 50
 
-        async def fail_and_expire(coro, *, timeout=None):
+        async def fail_once(coro, *, timeout=None):
             try:
                 coro.close()
             except Exception:
                 pass
-            agent.created_at -= 100  # the failed call ate the lifetime
             raise ConnectionError("transient")
 
         sleep_mock = AsyncMock()
         iter_cb = AsyncMock(return_value={"text": "x", "tool_calls": []})
-        with patch("src.agents.manager.asyncio.wait_for", side_effect=fail_and_expire):
+        with patch("src.agents.manager.asyncio.wait_for", side_effect=fail_once):
             with patch("src.agents.manager.asyncio.sleep", sleep_mock):
                 result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
 
         assert result is None
-        assert agent.state == AgentState.TIMEOUT
+        assert agent.state == AgentState.FAILED
         sleep_mock.assert_not_awaited()
 
     async def test_expiry_during_final_tool_of_final_iteration_is_timeout(self):

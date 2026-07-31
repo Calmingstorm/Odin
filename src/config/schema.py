@@ -581,6 +581,34 @@ class GracefulDegradationConfig(BaseModel):
     unavailable_threshold: int = 10  # consecutive failures before UNAVAILABLE
 
 
+class LLMRecoveryConfig(BaseModel):
+    """Deadline-based recovery for logical LLM generations (all three call
+    paths: chat, agents, autonomous loops) plus the model-scoped capacity
+    breaker. The deadline bounds WAITING between attempts, never the
+    attempt itself; capacity never rotates accounts (429 rotation is the
+    provider client's job and is untouched)."""
+
+    generation_deadline_seconds: float = Field(default=300.0, ge=10.0, le=3600.0)
+    backoff_cap_seconds: float = Field(default=45.0, ge=1.0, le=300.0)
+    breaker_generation_threshold: int = Field(default=1, ge=1, le=10)
+    breaker_cooldown_base_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
+    breaker_cooldown_cap_seconds: float = Field(default=300.0, ge=30.0, le=3600.0)
+
+
+class TurnStateConfig(BaseModel):
+    """Durable chat-turn checkpoints, side-effect ledger, and resume.
+
+    Discord chat turns only (v1). Disabled => turns run exactly as before
+    (capacity exhaustion discards work instead of suspending)."""
+
+    enabled: bool = True
+    db_path: str = "./data/turn_state/turns.sqlite3"
+    auto_resume: bool = True
+    resume_ttl_hours: float = Field(default=24.0, ge=1.0, le=24.0 * 14)
+    payload_retention_days: float = Field(default=7.0, ge=1.0, le=90.0)
+    ledger_retention_days: float = Field(default=90.0, ge=30.0, le=365.0)
+
+
 class AuditConfig(BaseModel):
     hmac_key: str = ""  # Empty = signing disabled
 
@@ -886,6 +914,8 @@ class Config(BaseModel):
     grafana_alerts: GrafanaAlertConfig = GrafanaAlertConfig()
     outbound_webhooks: OutboundWebhooksConfig = OutboundWebhooksConfig()
     graceful_degradation: GracefulDegradationConfig = GracefulDegradationConfig()
+    llm_recovery: LLMRecoveryConfig = LLMRecoveryConfig()
+    turn_state: TurnStateConfig = TurnStateConfig()
 
 
 def _substitute_env_vars(text: str) -> str:

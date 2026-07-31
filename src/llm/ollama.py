@@ -16,6 +16,7 @@ from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
 from .cost_tracker import estimate_tokens
+from .errors import LLMRequestError, LLMTransportError
 from .provider import LLMProvider
 from .types import LLMResponse, ToolCall
 
@@ -206,7 +207,16 @@ class OllamaClient(LLMProvider):
                         await asyncio.sleep(delay)
                         continue
                     self.breaker.record_failure()
-                    raise RuntimeError(f"Ollama {resp.status}: {text[:500]}")
+                    exc_cls = (
+                        LLMTransportError
+                        if resp.status in (500, 502, 503, 504)
+                        else LLMRequestError
+                    )
+                    raise exc_cls(
+                        f"Ollama {resp.status}: {text[:500]}",
+                        provider="ollama",
+                        model=self.model,
+                    )
             except (TimeoutError, aiohttp.ClientError) as e:
                 last_error = e
                 self.breaker.record_failure()
@@ -216,8 +226,11 @@ class OllamaClient(LLMProvider):
                                 attempt + 1, self.max_retries + 1, e, delay)
                     await asyncio.sleep(delay)
                     continue
-                raise RuntimeError(f"Ollama connection error after {self.max_retries + 1} "
-                                   f"attempts: {e}") from e
+                raise LLMTransportError(
+                    f"Ollama connection error after {self.max_retries + 1} attempts: {e}",
+                    provider="ollama",
+                    model=self.model,
+                ) from e
 
         raise RuntimeError(f"Ollama request failed after {self.max_retries + 1} attempts: "
                            f"{last_error}")

@@ -22,9 +22,12 @@ import time
 class CircuitOpenError(Exception):
     """Raised when a circuit breaker is open and requests should not be attempted."""
 
-    def __init__(self, provider: str, retry_after: float) -> None:
+    def __init__(self, provider: str, retry_after: float, model: str | None = None) -> None:
         self.provider = provider
         self.retry_after = retry_after
+        # Optional effective-model stamp for model-scoped diagnostics;
+        # existing two-arg raise sites are unchanged.
+        self.model = model
         super().__init__(
             f"{provider} is temporarily unavailable (retry in {retry_after:.0f}s)"
         )

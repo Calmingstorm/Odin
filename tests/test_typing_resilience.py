@@ -241,6 +241,8 @@ def _make_runner(recorder_save=None):
 
 
 def _stub_state(channel=None):
+    from src.turn_state.durability import TurnDurability
+
     return SimpleNamespace(
         chat_cap=3,
         iteration=0,
@@ -255,6 +257,7 @@ def _stub_state(channel=None):
         system_prompt="sys",
         tools=[],
         user_id="u1",
+        durability=TurnDurability.disabled(),
     )
 
 
@@ -361,7 +364,15 @@ class TestCallSitesSurviveTypingFailure:
         async def _cwt(**kwargs):
             return resp
 
-        runner._llm_gateway = SimpleNamespace(call_with_tools=_cwt)
+        from src.llm.model_breaker import ModelBreakerRegistry
+        from src.llm.recovery import RecoveryPolicy
+
+        registry = ModelBreakerRegistry()
+        runner._llm_gateway = SimpleNamespace(
+            call_with_tools=_cwt,
+            capacity_breaker_for=lambda model=None: registry.for_model("codex", "m"),
+            recovery_policy=RecoveryPolicy,
+        )
         kind, val = await runner._call_llm(st)
         assert (kind, val) == ("ok", resp)
         assert ch.typing_calls == 1

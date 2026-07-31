@@ -275,3 +275,45 @@ shutdown completes. Recovery therefore does not depend on the service
 unit's `Restart=` policy, Docker restart policy, or any supervisor at all.
 `Restart=always` (what the packaged unit ships) is still recommended so the
 service also recovers from crashes and reboots.
+
+## LLM Recovery (capacity outages)
+
+Model-capacity errors (e.g. `server_is_overloaded`, which arrives inside an
+HTTP 200 as an SSE error event) are retried with a deadline-based policy
+shared by chat, agents, and autonomous loops, coordinated by a per-model
+circuit breaker. Quota handling is unchanged: HTTP 429 still rotates
+accounts inside the provider client; capacity never does.
+
+```yaml
+llm_recovery:
+  generation_deadline_seconds: 300   # retry budget per LLM generation (waiting, not the attempt)
+  backoff_cap_seconds: 45            # full-jitter backoff ceiling between attempts
+  breaker_generation_threshold: 1    # failed generations before the model breaker opens
+  breaker_cooldown_base_seconds: 30  # first cooldown; doubles per failed probe
+  breaker_cooldown_cap_seconds: 300  # cooldown ceiling
+```
+
+All keys are optional (schema defaults shown); the section does not need to
+exist in `config.yml`.
+
+## Turn State (checkpoints and resume)
+
+Discord chat turns are checkpointed to a durable store so a capacity outage
+suspends the turn with its work preserved instead of discarding it. A
+suspended turn auto-resumes when capacity returns (if nothing else has
+happened in the channel), or the original requester can reply `resume`
+within the resumable window. Interrupted tool executions are recorded as
+outcome-unknown and are never re-run automatically.
+
+```yaml
+turn_state:
+  enabled: true
+  db_path: "./data/turn_state/turns.sqlite3"
+  auto_resume: true
+  resume_ttl_hours: 24        # resumable window from last real progress
+  payload_retention_days: 7   # diagnostic payloads, then compacted to tombstones
+  ledger_retention_days: 90   # side-effect ledger (outcome-unknown rows never expire)
+```
+
+All keys are optional; disabling `turn_state.enabled` restores the previous
+behavior (capacity exhaustion ends the turn with an error).

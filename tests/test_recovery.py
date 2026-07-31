@@ -689,7 +689,8 @@ class TestRecoveryConfig:
 class TestAgentPerIterationRecovery:
     @pytest.mark.asyncio
     async def test_recovery_attempts_reset_each_iteration(self):
-        """recovery_attempts is reset to 0 at the start of each iteration."""
+        """recovery_attempts stays 0 on healthy iterations (the field is
+        API-shape compatibility now; the manager ladder is gone)."""
         from src.agents.manager import AgentInfo, AgentState, _run_agent
 
         agent = AgentInfo(
@@ -722,13 +723,13 @@ class TestAgentPerIterationRecovery:
         assert all(v == 0 for v in recovery_values)
 
     @pytest.mark.asyncio
-    async def test_recovery_works_on_second_iteration_after_first_recovery(self):
-        """After recovery in iteration 1, iteration 2 can also recover."""
-        from src.agents.manager import (
-            AgentInfo,
-            AgentState,
-            _run_agent,
-        )
+    async def test_callback_failure_fails_agent_no_manager_ladder(self):
+        """Deliberate amendment (2026-07-30): the manager-level per-iteration
+        retry ladder is gone — transient recovery lives INSIDE the iteration
+        callback (src/llm/recovery.py). A failure that escapes the callback
+        fails the agent on the spot; the would-have-recovered second call
+        never happens."""
+        from src.agents.manager import AgentInfo, AgentState, _run_agent
 
         agent = AgentInfo(
             id="test2", label="test", goal="test goal",
@@ -740,44 +741,8 @@ class TestAgentPerIterationRecovery:
         async def mock_iteration_cb(messages, system_prompt, tools):
             nonlocal call_count
             call_count += 1
-            if call_count in (1, 3):
-                raise TimeoutError("LLM timeout")
-            if call_count in (2, 4):
-                return {"text": "working", "tool_calls": [{"name": "t1", "input": {}}]}
-            return {"text": "done", "tool_calls": []}
-
-        async def mock_tool_cb(name, inp):
-            return "ok"
-
-        await _run_agent(
-            agent=agent,
-            system_prompt="test",
-            tools=[],
-            iteration_callback=mock_iteration_cb,
-            tool_executor_callback=mock_tool_cb,
-        )
-        assert agent.state == AgentState.COMPLETED
-        assert call_count == 5
-
-    @pytest.mark.asyncio
-    async def test_old_behavior_recovery_exhausted_without_reset(self):
-        """Verify the reset actually matters by checking iteration-level budget."""
-        from src.agents.manager import AgentInfo, AgentState, _run_agent
-
-        agent = AgentInfo(
-            id="test3", label="test", goal="test goal",
-            channel_id="ch1", requester_id="u1", requester_name="user",
-        )
-
-        call_count = 0
-
-        async def mock_iteration_cb(messages, system_prompt, tools):
-            nonlocal call_count
-            call_count += 1
             if call_count == 1:
-                raise TimeoutError("timeout")
-            if call_count == 2:
-                return {"text": "working", "tool_calls": [{"name": "t1", "input": {}}]}
+                raise TimeoutError("LLM timeout")
             return {"text": "done", "tool_calls": []}
 
         async def mock_tool_cb(name, inp):
@@ -790,7 +755,9 @@ class TestAgentPerIterationRecovery:
             iteration_callback=mock_iteration_cb,
             tool_executor_callback=mock_tool_cb,
         )
-        assert agent.state == AgentState.COMPLETED
+        assert agent.state == AgentState.FAILED
+        assert call_count == 1
+        assert agent.recovery_attempts == 0
 
 
 # ====================================================================

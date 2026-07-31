@@ -1,1202 +1,1316 @@
 {
-  "src/__init__.py": {
-    "covered": 3,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 3
-  },
-  "src/agents/__init__.py": {
-    "covered": 5,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 5
-  },
-  "src/agents/loop_bridge.py": {
-    "covered": 87,
-    "missing": 1,
-    "percent": 98.86,
-    "statements": 88
-  },
-  "src/agents/manager.py": {
-    "covered": 470,
-    "missing": 62,
-    "percent": 88.35,
-    "statements": 532
-  },
-  "src/agents/trajectory.py": {
-    "covered": 129,
-    "missing": 16,
-    "percent": 88.97,
-    "statements": 145
-  },
-  "src/async_utils.py": {
-    "covered": 13,
-    "missing": 2,
-    "percent": 86.67,
-    "statements": 15
-  },
-  "src/audit/__init__.py": {
-    "covered": 3,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 3
-  },
-  "src/audit/diff_tracker.py": {
-    "covered": 60,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 60
-  },
-  "src/audit/logger.py": {
-    "covered": 274,
-    "missing": 27,
-    "percent": 91.03,
-    "statements": 301
-  },
-  "src/audit/signer.py": {
-    "covered": 71,
-    "missing": 2,
-    "percent": 97.26,
-    "statements": 73
-  },
-  "src/config/__init__.py": {
-    "covered": 30,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 30
-  },
-  "src/config/schema.py": {
-    "covered": 542,
-    "missing": 1,
-    "percent": 99.82,
-    "statements": 543
-  },
-  "src/constants.py": {
-    "covered": 17,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 17
-  },
-  "src/context/__init__.py": {
-    "covered": 2,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 2
-  },
-  "src/context/loader.py": {
-    "covered": 42,
-    "missing": 11,
-    "percent": 79.25,
-    "statements": 53
-  },
-  "src/database/__init__.py": {
-    "covered": 0,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 0
-  },
-  "src/database/repository.py": {
-    "covered": 31,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 31
-  },
-  "src/discord/__init__.py": {
-    "covered": 3,
-    "missing": 4,
-    "percent": 42.86,
-    "statements": 7
-  },
-  "src/discord/attachments.py": {
-    "covered": 315,
-    "missing": 14,
-    "percent": 95.74,
-    "statements": 329
-  },
-  "src/discord/background_task.py": {
-    "covered": 219,
-    "missing": 130,
-    "percent": 62.75,
-    "statements": 349
-  },
-  "src/discord/channel_config.py": {
-    "covered": 81,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 81
-  },
-  "src/discord/channel_logger.py": {
-    "covered": 104,
-    "missing": 9,
-    "percent": 92.04,
-    "statements": 113
-  },
-  "src/discord/channel_state.py": {
-    "covered": 77,
-    "missing": 16,
-    "percent": 82.8,
-    "statements": 93
-  },
-  "src/discord/client.py": {
-    "covered": 129,
-    "missing": 43,
-    "percent": 75.0,
-    "statements": 172
-  },
-  "src/discord/completion.py": {
-    "covered": 40,
-    "missing": 1,
-    "percent": 97.56,
-    "statements": 41
-  },
-  "src/discord/delivery.py": {
-    "covered": 99,
-    "missing": 3,
-    "percent": 97.06,
-    "statements": 102
-  },
-  "src/discord/helpers/__init__.py": {
-    "covered": 0,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 0
-  },
-  "src/discord/helpers/converters.py": {
-    "covered": 23,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 23
-  },
-  "src/discord/helpers/cooldowns.py": {
-    "covered": 25,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 25
-  },
-  "src/discord/helpers/embeds.py": {
-    "covered": 28,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 28
-  },
-  "src/discord/helpers/pagination.py": {
-    "covered": 21,
-    "missing": 20,
-    "percent": 51.22,
-    "statements": 41
-  },
-  "src/discord/helpers/permissions.py": {
-    "covered": 12,
-    "missing": 19,
-    "percent": 38.71,
-    "statements": 31
-  },
-  "src/discord/housekeeping.py": {
-    "covered": 39,
-    "missing": 11,
-    "percent": 78.0,
-    "statements": 50
-  },
-  "src/discord/intake_pipeline.py": {
-    "covered": 298,
-    "missing": 76,
-    "percent": 79.68,
-    "statements": 374
-  },
-  "src/discord/llm_gateway.py": {
-    "covered": 173,
-    "missing": 1,
-    "percent": 99.43,
-    "statements": 174
-  },
-  "src/discord/native_tools/__init__.py": {
-    "covered": 2,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 2
-  },
-  "src/discord/native_tools/agents_tasks.py": {
-    "covered": 304,
-    "missing": 17,
-    "percent": 94.7,
-    "statements": 321
-  },
-  "src/discord/native_tools/channel_ops.py": {
-    "covered": 113,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 113
-  },
-  "src/discord/native_tools/knowledge.py": {
-    "covered": 117,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 117
-  },
-  "src/discord/native_tools/media.py": {
-    "covered": 166,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 166
-  },
-  "src/discord/native_tools/registry.py": {
-    "covered": 83,
-    "missing": 6,
-    "percent": 93.26,
-    "statements": 89
-  },
-  "src/discord/native_tools/scheduling.py": {
-    "covered": 124,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 124
-  },
-  "src/discord/native_tools/skills_tools.py": {
-    "covered": 87,
-    "missing": 8,
-    "percent": 91.58,
-    "statements": 95
-  },
-  "src/discord/prompts.py": {
-    "covered": 82,
-    "missing": 28,
-    "percent": 74.55,
-    "statements": 110
-  },
-  "src/discord/response_guards.py": {
-    "covered": 154,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 154
-  },
-  "src/discord/scheduled_events.py": {
-    "covered": 226,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 226
-  },
-  "src/discord/slash_commands.py": {
-    "covered": 20,
-    "missing": 49,
-    "percent": 28.99,
-    "statements": 69
-  },
-  "src/discord/tool_catalog.py": {
-    "covered": 27,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 27
-  },
-  "src/discord/tool_loop.py": {
-    "covered": 568,
-    "missing": 60,
-    "percent": 90.45,
-    "statements": 628
-  },
-  "src/discord/tool_loop_helpers.py": {
-    "covered": 30,
-    "missing": 9,
-    "percent": 76.92,
-    "statements": 39
-  },
-  "src/discord/turn_recorder.py": {
-    "covered": 92,
-    "missing": 16,
-    "percent": 85.19,
-    "statements": 108
-  },
-  "src/discord/wiring.py": {
-    "covered": 284,
-    "missing": 78,
-    "percent": 78.45,
-    "statements": 362
-  },
-  "src/health/__init__.py": {
-    "covered": 3,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 3
-  },
-  "src/health/checker.py": {
-    "covered": 239,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 239
-  },
-  "src/health/grafana_alerts.py": {
-    "covered": 235,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 235
-  },
-  "src/health/metrics.py": {
-    "covered": 180,
-    "missing": 18,
-    "percent": 90.91,
-    "statements": 198
-  },
-  "src/health/server.py": {
-    "covered": 453,
-    "missing": 186,
-    "percent": 70.89,
-    "statements": 639
-  },
-  "src/health/startup.py": {
-    "covered": 231,
-    "missing": 11,
-    "percent": 95.45,
-    "statements": 242
-  },
-  "src/health/subsystem_guard.py": {
-    "covered": 178,
-    "missing": 1,
-    "percent": 99.44,
-    "statements": 179
-  },
-  "src/knowledge/__init__.py": {
-    "covered": 2,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 2
-  },
-  "src/knowledge/importer.py": {
-    "covered": 170,
-    "missing": 12,
-    "percent": 93.41,
-    "statements": 182
-  },
-  "src/knowledge/store.py": {
-    "covered": 322,
-    "missing": 95,
-    "percent": 77.22,
-    "statements": 417
-  },
-  "src/learning/__init__.py": {
-    "covered": 2,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 2
-  },
-  "src/learning/loop_reflection.py": {
-    "covered": 49,
-    "missing": 5,
-    "percent": 90.74,
-    "statements": 54
-  },
-  "src/learning/reflector.py": {
-    "covered": 501,
-    "missing": 66,
-    "percent": 88.36,
-    "statements": 567
-  },
-  "src/llm/__init__.py": {
-    "covered": 11,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 11
-  },
-  "src/llm/auxiliary.py": {
-    "covered": 72,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 72
-  },
-  "src/llm/backoff.py": {
-    "covered": 10,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 10
-  },
-  "src/llm/circuit_breaker.py": {
-    "covered": 42,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 42
-  },
-  "src/llm/codex_auth.py": {
-    "covered": 375,
-    "missing": 27,
-    "percent": 93.28,
-    "statements": 402
-  },
-  "src/llm/context_compressor.py": {
-    "covered": 165,
-    "missing": 18,
-    "percent": 90.16,
-    "statements": 183
-  },
-  "src/llm/cost_tracker.py": {
-    "covered": 86,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 86
-  },
-  "src/llm/kimi.py": {
-    "covered": 221,
-    "missing": 1,
-    "percent": 99.55,
-    "statements": 222
-  },
-  "src/llm/ollama.py": {
-    "covered": 172,
-    "missing": 5,
-    "percent": 97.18,
-    "statements": 177
-  },
-  "src/llm/openai_codex.py": {
-    "covered": 379,
-    "missing": 65,
-    "percent": 85.36,
-    "statements": 444
-  },
-  "src/llm/provider.py": {
-    "covered": 15,
-    "missing": 3,
-    "percent": 83.33,
-    "statements": 18
-  },
-  "src/llm/secret_scrubber.py": {
-    "covered": 7,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 7
-  },
-  "src/llm/system_prompt.py": {
-    "covered": 34,
-    "missing": 3,
-    "percent": 91.89,
-    "statements": 37
-  },
-  "src/llm/types.py": {
-    "covered": 18,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 18
-  },
-  "src/models/__init__.py": {
-    "covered": 5,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 5
-  },
-  "src/models/guild.py": {
-    "covered": 18,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 18
-  },
-  "src/models/infraction.py": {
-    "covered": 20,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 20
-  },
-  "src/models/reminder.py": {
-    "covered": 20,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 20
-  },
-  "src/models/user.py": {
-    "covered": 14,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 14
-  },
-  "src/monitoring/__init__.py": {
-    "covered": 2,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 2
-  },
-  "src/monitoring/resource_usage.py": {
-    "covered": 154,
-    "missing": 11,
-    "percent": 93.33,
-    "statements": 165
-  },
-  "src/notifications/__init__.py": {
-    "covered": 4,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 4
-  },
-  "src/notifications/issue_tracker.py": {
-    "covered": 261,
-    "missing": 22,
-    "percent": 92.23,
-    "statements": 283
-  },
-  "src/notifications/outbound_webhooks.py": {
-    "covered": 258,
-    "missing": 3,
-    "percent": 98.85,
-    "statements": 261
-  },
-  "src/notifications/slack.py": {
-    "covered": 128,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 128
-  },
-  "src/observability/__init__.py": {
-    "covered": 3,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 3
-  },
-  "src/observability/aggregates.py": {
-    "covered": 122,
-    "missing": 5,
-    "percent": 96.06,
-    "statements": 127
-  },
-  "src/observability/context_trace.py": {
-    "covered": 118,
-    "missing": 12,
-    "percent": 90.77,
-    "statements": 130
-  },
-  "src/observability/correlation.py": {
-    "covered": 11,
-    "missing": 2,
-    "percent": 84.62,
-    "statements": 13
-  },
-  "src/observability/failure_classes.py": {
-    "covered": 14,
-    "missing": 2,
-    "percent": 87.5,
-    "statements": 16
-  },
-  "src/odin/__init__.py": {
-    "covered": 7,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 7
-  },
-  "src/odin/cli.py": {
-    "covered": 46,
-    "missing": 13,
-    "percent": 77.97,
-    "statements": 59
-  },
-  "src/odin/context.py": {
-    "covered": 122,
-    "missing": 7,
-    "percent": 94.57,
-    "statements": 129
-  },
-  "src/odin/executor.py": {
-    "covered": 42,
-    "missing": 1,
-    "percent": 97.67,
-    "statements": 43
-  },
-  "src/odin/plan_loader.py": {
-    "covered": 29,
-    "missing": 8,
-    "percent": 78.38,
-    "statements": 37
-  },
-  "src/odin/planner.py": {
-    "covered": 95,
-    "missing": 3,
-    "percent": 96.94,
-    "statements": 98
-  },
-  "src/odin/registry.py": {
-    "covered": 27,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 27
-  },
-  "src/odin/reporter.py": {
-    "covered": 25,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 25
-  },
-  "src/odin/tools/__init__.py": {
-    "covered": 0,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 0
-  },
-  "src/odin/tools/base.py": {
-    "covered": 8,
-    "missing": 1,
-    "percent": 88.89,
-    "statements": 9
-  },
-  "src/odin/tools/file_ops.py": {
-    "covered": 30,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 30
-  },
-  "src/odin/tools/http.py": {
-    "covered": 8,
-    "missing": 13,
-    "percent": 38.1,
-    "statements": 21
-  },
-  "src/odin/tools/process.py": {
-    "covered": 27,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 27
-  },
-  "src/odin/tools/shell.py": {
-    "covered": 19,
-    "missing": 1,
-    "percent": 95.0,
-    "statements": 20
-  },
-  "src/odin/types.py": {
-    "covered": 37,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 37
-  },
-  "src/odin_log/__init__.py": {
-    "covered": 2,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 2
-  },
-  "src/odin_log/logger.py": {
-    "covered": 8,
-    "missing": 11,
-    "percent": 42.11,
-    "statements": 19
-  },
-  "src/packaging/__init__.py": {
-    "covered": 0,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 0
-  },
-  "src/permissions/__init__.py": {
-    "covered": 3,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 3
-  },
-  "src/permissions/host_access.py": {
-    "covered": 154,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 154
-  },
-  "src/permissions/manager.py": {
-    "covered": 78,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 78
-  },
-  "src/permissions/token_manager.py": {
-    "covered": 132,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 132
-  },
-  "src/planning/__init__.py": {
-    "covered": 2,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 2
-  },
-  "src/planning/store.py": {
-    "covered": 101,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 101
-  },
-  "src/relevance.py": {
-    "covered": 21,
-    "missing": 1,
-    "percent": 95.45,
-    "statements": 22
-  },
-  "src/scheduler/__init__.py": {
-    "covered": 3,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 3
-  },
-  "src/scheduler/history.py": {
-    "covered": 102,
-    "missing": 9,
-    "percent": 91.89,
-    "statements": 111
-  },
-  "src/scheduler/scheduler.py": {
-    "covered": 566,
-    "missing": 67,
-    "percent": 89.42,
-    "statements": 633
-  },
-  "src/search/__init__.py": {
-    "covered": 5,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 5
-  },
-  "src/search/embedder.py": {
-    "covered": 15,
-    "missing": 14,
-    "percent": 51.72,
-    "statements": 29
-  },
-  "src/search/fts.py": {
-    "covered": 151,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 151
-  },
-  "src/search/hybrid.py": {
-    "covered": 18,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 18
-  },
-  "src/search/sqlite_vec.py": {
-    "covered": 14,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 14
-  },
-  "src/search/vectorstore.py": {
-    "covered": 52,
-    "missing": 102,
-    "percent": 33.77,
-    "statements": 154
-  },
-  "src/sessions/__init__.py": {
-    "covered": 2,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 2
-  },
-  "src/sessions/manager.py": {
-    "covered": 775,
-    "missing": 70,
-    "percent": 91.72,
-    "statements": 845
-  },
-  "src/setup_wizard.py": {
-    "covered": 51,
-    "missing": 8,
-    "percent": 86.44,
-    "statements": 59
-  },
-  "src/tools/__init__.py": {
-    "covered": 7,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 7
-  },
-  "src/tools/affordances.py": {
-    "covered": 56,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 56
-  },
-  "src/tools/autonomous_loop.py": {
-    "covered": 155,
-    "missing": 83,
-    "percent": 65.13,
-    "statements": 238
-  },
-  "src/tools/branch_freshness.py": {
-    "covered": 99,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 99
-  },
-  "src/tools/bulkhead.py": {
-    "covered": 95,
-    "missing": 3,
-    "percent": 96.94,
-    "statements": 98
-  },
-  "src/tools/defs/__init__.py": {
-    "covered": 0,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 0
-  },
-  "src/tools/defs/agents.py": {
-    "covered": 1,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 1
-  },
-  "src/tools/defs/browser_web.py": {
-    "covered": 1,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 1
-  },
-  "src/tools/defs/channel_process_loops.py": {
-    "covered": 1,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 1
-  },
-  "src/tools/defs/devops.py": {
-    "covered": 1,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 1
-  },
-  "src/tools/defs/integrations_email.py": {
-    "covered": 1,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 1
-  },
-  "src/tools/defs/media_scheduling.py": {
-    "covered": 1,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 1
-  },
-  "src/tools/defs/memory_skills.py": {
-    "covered": 1,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 1
-  },
-  "src/tools/defs/system_files.py": {
-    "covered": 1,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 1
-  },
-  "src/tools/defs/tasks_knowledge.py": {
-    "covered": 1,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 1
-  },
-  "src/tools/docker_ops.py": {
-    "covered": 267,
-    "missing": 1,
-    "percent": 99.63,
-    "statements": 268
-  },
-  "src/tools/email_client.py": {
-    "covered": 210,
-    "missing": 21,
-    "percent": 90.91,
-    "statements": 231
-  },
-  "src/tools/executor.py": {
-    "covered": 301,
-    "missing": 32,
-    "percent": 90.39,
-    "statements": 333
-  },
-  "src/tools/git_ops.py": {
-    "covered": 168,
-    "missing": 1,
-    "percent": 99.41,
-    "statements": 169
-  },
-  "src/tools/handlers/__init__.py": {
-    "covered": 0,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 0
-  },
-  "src/tools/handlers/browser_web.py": {
-    "covered": 39,
-    "missing": 25,
-    "percent": 60.94,
-    "statements": 64
-  },
-  "src/tools/handlers/coding.py": {
-    "covered": 138,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 138
-  },
-  "src/tools/handlers/comms.py": {
-    "covered": 52,
-    "missing": 58,
-    "percent": 47.27,
-    "statements": 110
-  },
-  "src/tools/handlers/deps.py": {
-    "covered": 59,
-    "missing": 1,
-    "percent": 98.33,
-    "statements": 60
-  },
-  "src/tools/handlers/devops.py": {
-    "covered": 105,
-    "missing": 5,
-    "percent": 95.45,
-    "statements": 110
-  },
-  "src/tools/handlers/files_docs.py": {
-    "covered": 109,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 109
-  },
-  "src/tools/handlers/state.py": {
-    "covered": 301,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 301
-  },
-  "src/tools/handlers/system.py": {
-    "covered": 113,
-    "missing": 64,
-    "percent": 63.84,
-    "statements": 177
-  },
-  "src/tools/handlers/validation.py": {
-    "covered": 8,
-    "missing": 27,
-    "percent": 22.86,
-    "statements": 35
-  },
-  "src/tools/http_probe_ops.py": {
-    "covered": 75,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 75
-  },
-  "src/tools/kubectl_ops.py": {
-    "covered": 213,
-    "missing": 1,
-    "percent": 99.53,
-    "statements": 214
-  },
-  "src/tools/mcp_client.py": {
-    "covered": 265,
-    "missing": 81,
-    "percent": 76.59,
-    "statements": 346
-  },
-  "src/tools/output_streamer.py": {
-    "covered": 91,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 91
-  },
-  "src/tools/post_validation.py": {
-    "covered": 315,
-    "missing": 36,
-    "percent": 89.74,
-    "statements": 351
-  },
-  "src/tools/process_manager.py": {
-    "covered": 129,
-    "missing": 21,
-    "percent": 86.0,
-    "statements": 150
-  },
-  "src/tools/recovery.py": {
-    "covered": 119,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 119
-  },
-  "src/tools/registry.py": {
-    "covered": 22,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 22
-  },
-  "src/tools/result_validator.py": {
-    "covered": 98,
-    "missing": 11,
-    "percent": 89.91,
-    "statements": 109
-  },
-  "src/tools/risk_classifier.py": {
-    "covered": 156,
-    "missing": 9,
-    "percent": 94.55,
-    "statements": 165
-  },
-  "src/tools/skill_context.py": {
-    "covered": 208,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 208
-  },
-  "src/tools/skill_manager.py": {
-    "covered": 553,
-    "missing": 157,
-    "percent": 77.89,
-    "statements": 710
-  },
-  "src/tools/ssh.py": {
-    "covered": 89,
-    "missing": 10,
-    "percent": 89.9,
-    "statements": 99
-  },
-  "src/tools/ssh_pool.py": {
-    "covered": 70,
-    "missing": 13,
-    "percent": 84.34,
-    "statements": 83
-  },
-  "src/tools/terraform_ops.py": {
-    "covered": 156,
-    "missing": 1,
-    "percent": 99.36,
-    "statements": 157
-  },
-  "src/tools/time_parser.py": {
-    "covered": 108,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 108
-  },
-  "src/tools/tool_text.py": {
-    "covered": 7,
-    "missing": 3,
-    "percent": 70.0,
-    "statements": 10
-  },
-  "src/tools/url_safety.py": {
-    "covered": 80,
-    "missing": 15,
-    "percent": 84.21,
-    "statements": 95
-  },
-  "src/tools/web.py": {
-    "covered": 98,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 98
-  },
-  "src/trajectories/__init__.py": {
-    "covered": 2,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 2
-  },
-  "src/trajectories/saver.py": {
-    "covered": 181,
-    "missing": 11,
-    "percent": 94.27,
-    "statements": 192
-  },
-  "src/version.py": {
-    "covered": 8,
-    "missing": 12,
-    "percent": 40.0,
-    "statements": 20
-  },
-  "src/web/__init__.py": {
-    "covered": 0,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 0
-  },
-  "src/web/api/__init__.py": {
-    "covered": 75,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 75
-  },
-  "src/web/api/agents_loops.py": {
-    "covered": 148,
-    "missing": 2,
-    "percent": 98.67,
-    "statements": 150
-  },
-  "src/web/api/codex_admin.py": {
-    "covered": 203,
-    "missing": 16,
-    "percent": 92.69,
-    "statements": 219
-  },
-  "src/web/api/config_admin.py": {
-    "covered": 288,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 288
-  },
-  "src/web/api/integrations.py": {
-    "covered": 266,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 266
-  },
-  "src/web/api/knowledge_mem.py": {
-    "covered": 247,
-    "missing": 2,
-    "percent": 99.2,
-    "statements": 249
-  },
-  "src/web/api/llm_admin.py": {
-    "covered": 393,
-    "missing": 3,
-    "percent": 99.24,
-    "statements": 396
-  },
-  "src/web/api/observability.py": {
-    "covered": 222,
-    "missing": 10,
-    "percent": 95.69,
-    "statements": 232
-  },
-  "src/web/api/schedules_api.py": {
-    "covered": 110,
-    "missing": 0,
-    "percent": 100.0,
-    "statements": 110
-  },
-  "src/web/api/security.py": {
-    "covered": 332,
-    "missing": 17,
-    "percent": 95.13,
-    "statements": 349
-  },
-  "src/web/api/self_update.py": {
-    "covered": 79,
-    "missing": 9,
-    "percent": 89.77,
-    "statements": 88
-  },
-  "src/web/api/sessions_chat.py": {
-    "covered": 288,
-    "missing": 15,
-    "percent": 95.05,
-    "statements": 303
-  },
-  "src/web/api/skills_api.py": {
-    "covered": 79,
-    "missing": 56,
-    "percent": 58.52,
-    "statements": 135
-  },
-  "src/web/api_common.py": {
-    "covered": 66,
-    "missing": 21,
-    "percent": 75.86,
-    "statements": 87
-  },
-  "src/web/chat.py": {
-    "covered": 119,
-    "missing": 12,
-    "percent": 90.84,
-    "statements": 131
-  },
-  "src/web/websocket.py": {
-    "covered": 200,
-    "missing": 27,
-    "percent": 88.11,
-    "statements": 227
-  }
+ "src/__init__.py": {
+  "covered": 3,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 3
+ },
+ "src/agents/__init__.py": {
+  "covered": 5,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 5
+ },
+ "src/agents/loop_bridge.py": {
+  "covered": 90,
+  "missing": 1,
+  "percent": 98.9,
+  "statements": 91
+ },
+ "src/agents/manager.py": {
+  "covered": 485,
+  "missing": 59,
+  "percent": 89.15,
+  "statements": 544
+ },
+ "src/agents/trajectory.py": {
+  "covered": 133,
+  "missing": 16,
+  "percent": 89.26,
+  "statements": 149
+ },
+ "src/async_utils.py": {
+  "covered": 13,
+  "missing": 2,
+  "percent": 86.67,
+  "statements": 15
+ },
+ "src/audit/__init__.py": {
+  "covered": 3,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 3
+ },
+ "src/audit/diff_tracker.py": {
+  "covered": 60,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 60
+ },
+ "src/audit/logger.py": {
+  "covered": 276,
+  "missing": 27,
+  "percent": 91.09,
+  "statements": 303
+ },
+ "src/audit/signer.py": {
+  "covered": 71,
+  "missing": 2,
+  "percent": 97.26,
+  "statements": 73
+ },
+ "src/config/__init__.py": {
+  "covered": 30,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 30
+ },
+ "src/config/schema.py": {
+  "covered": 628,
+  "missing": 1,
+  "percent": 99.84,
+  "statements": 629
+ },
+ "src/constants.py": {
+  "covered": 17,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 17
+ },
+ "src/context/__init__.py": {
+  "covered": 2,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 2
+ },
+ "src/context/loader.py": {
+  "covered": 42,
+  "missing": 11,
+  "percent": 79.25,
+  "statements": 53
+ },
+ "src/database/__init__.py": {
+  "covered": 0,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 0
+ },
+ "src/database/repository.py": {
+  "covered": 31,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 31
+ },
+ "src/discord/__init__.py": {
+  "covered": 3,
+  "missing": 4,
+  "percent": 42.86,
+  "statements": 7
+ },
+ "src/discord/attachments.py": {
+  "covered": 315,
+  "missing": 14,
+  "percent": 95.74,
+  "statements": 329
+ },
+ "src/discord/background_task.py": {
+  "covered": 271,
+  "missing": 107,
+  "percent": 71.69,
+  "statements": 378
+ },
+ "src/discord/channel_config.py": {
+  "covered": 81,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 81
+ },
+ "src/discord/channel_logger.py": {
+  "covered": 104,
+  "missing": 9,
+  "percent": 92.04,
+  "statements": 113
+ },
+ "src/discord/channel_state.py": {
+  "covered": 77,
+  "missing": 16,
+  "percent": 82.8,
+  "statements": 93
+ },
+ "src/discord/client.py": {
+  "covered": 130,
+  "missing": 43,
+  "percent": 75.14,
+  "statements": 173
+ },
+ "src/discord/completion.py": {
+  "covered": 40,
+  "missing": 1,
+  "percent": 97.56,
+  "statements": 41
+ },
+ "src/discord/delivery.py": {
+  "covered": 99,
+  "missing": 3,
+  "percent": 97.06,
+  "statements": 102
+ },
+ "src/discord/helpers/__init__.py": {
+  "covered": 0,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 0
+ },
+ "src/discord/helpers/converters.py": {
+  "covered": 23,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 23
+ },
+ "src/discord/helpers/cooldowns.py": {
+  "covered": 25,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 25
+ },
+ "src/discord/helpers/embeds.py": {
+  "covered": 28,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 28
+ },
+ "src/discord/helpers/pagination.py": {
+  "covered": 21,
+  "missing": 20,
+  "percent": 51.22,
+  "statements": 41
+ },
+ "src/discord/helpers/permissions.py": {
+  "covered": 12,
+  "missing": 19,
+  "percent": 38.71,
+  "statements": 31
+ },
+ "src/discord/housekeeping.py": {
+  "covered": 49,
+  "missing": 11,
+  "percent": 81.67,
+  "statements": 60
+ },
+ "src/discord/intake_pipeline.py": {
+  "covered": 338,
+  "missing": 57,
+  "percent": 85.57,
+  "statements": 395
+ },
+ "src/discord/llm_gateway.py": {
+  "covered": 368,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 368
+ },
+ "src/discord/native_tools/__init__.py": {
+  "covered": 2,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 2
+ },
+ "src/discord/native_tools/agents_tasks.py": {
+  "covered": 395,
+  "missing": 16,
+  "percent": 96.11,
+  "statements": 411
+ },
+ "src/discord/native_tools/channel_ops.py": {
+  "covered": 113,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 113
+ },
+ "src/discord/native_tools/knowledge.py": {
+  "covered": 122,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 122
+ },
+ "src/discord/native_tools/media.py": {
+  "covered": 166,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 166
+ },
+ "src/discord/native_tools/registry.py": {
+  "covered": 83,
+  "missing": 6,
+  "percent": 93.26,
+  "statements": 89
+ },
+ "src/discord/native_tools/scheduling.py": {
+  "covered": 124,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 124
+ },
+ "src/discord/native_tools/skills_tools.py": {
+  "covered": 87,
+  "missing": 8,
+  "percent": 91.58,
+  "statements": 95
+ },
+ "src/discord/prompts.py": {
+  "covered": 85,
+  "missing": 25,
+  "percent": 77.27,
+  "statements": 110
+ },
+ "src/discord/response_guards.py": {
+  "covered": 154,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 154
+ },
+ "src/discord/scheduled_events.py": {
+  "covered": 225,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 225
+ },
+ "src/discord/slash_commands.py": {
+  "covered": 20,
+  "missing": 49,
+  "percent": 28.99,
+  "statements": 69
+ },
+ "src/discord/tool_catalog.py": {
+  "covered": 38,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 38
+ },
+ "src/discord/tool_loop.py": {
+  "covered": 713,
+  "missing": 57,
+  "percent": 92.6,
+  "statements": 770
+ },
+ "src/discord/tool_loop_helpers.py": {
+  "covered": 30,
+  "missing": 9,
+  "percent": 76.92,
+  "statements": 39
+ },
+ "src/discord/turn_recorder.py": {
+  "covered": 92,
+  "missing": 16,
+  "percent": 85.19,
+  "statements": 108
+ },
+ "src/discord/turn_resume.py": {
+  "covered": 174,
+  "missing": 30,
+  "percent": 85.29,
+  "statements": 204
+ },
+ "src/discord/wiring.py": {
+  "covered": 332,
+  "missing": 76,
+  "percent": 81.37,
+  "statements": 408
+ },
+ "src/error_presentation.py": {
+  "covered": 30,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 30
+ },
+ "src/health/__init__.py": {
+  "covered": 3,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 3
+ },
+ "src/health/checker.py": {
+  "covered": 239,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 239
+ },
+ "src/health/grafana_alerts.py": {
+  "covered": 235,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 235
+ },
+ "src/health/metrics.py": {
+  "covered": 193,
+  "missing": 18,
+  "percent": 91.47,
+  "statements": 211
+ },
+ "src/health/server.py": {
+  "covered": 465,
+  "missing": 178,
+  "percent": 72.32,
+  "statements": 643
+ },
+ "src/health/startup.py": {
+  "covered": 249,
+  "missing": 11,
+  "percent": 95.77,
+  "statements": 260
+ },
+ "src/health/subsystem_guard.py": {
+  "covered": 213,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 213
+ },
+ "src/json_store.py": {
+  "covered": 43,
+  "missing": 4,
+  "percent": 91.49,
+  "statements": 47
+ },
+ "src/knowledge/__init__.py": {
+  "covered": 2,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 2
+ },
+ "src/knowledge/importer.py": {
+  "covered": 165,
+  "missing": 9,
+  "percent": 94.83,
+  "statements": 174
+ },
+ "src/knowledge/store.py": {
+  "covered": 328,
+  "missing": 89,
+  "percent": 78.66,
+  "statements": 417
+ },
+ "src/learning/__init__.py": {
+  "covered": 2,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 2
+ },
+ "src/learning/loop_reflection.py": {
+  "covered": 49,
+  "missing": 5,
+  "percent": 90.74,
+  "statements": 54
+ },
+ "src/learning/reflector.py": {
+  "covered": 621,
+  "missing": 60,
+  "percent": 91.19,
+  "statements": 681
+ },
+ "src/llm/__init__.py": {
+  "covered": 12,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 12
+ },
+ "src/llm/auxiliary.py": {
+  "covered": 65,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 65
+ },
+ "src/llm/backoff.py": {
+  "covered": 10,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 10
+ },
+ "src/llm/circuit_breaker.py": {
+  "covered": 43,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 43
+ },
+ "src/llm/codex_auth.py": {
+  "covered": 375,
+  "missing": 27,
+  "percent": 93.28,
+  "statements": 402
+ },
+ "src/llm/context_compressor.py": {
+  "covered": 165,
+  "missing": 18,
+  "percent": 90.16,
+  "statements": 183
+ },
+ "src/llm/cost_tracker.py": {
+  "covered": 86,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 86
+ },
+ "src/llm/errors.py": {
+  "covered": 18,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 18
+ },
+ "src/llm/kimi.py": {
+  "covered": 233,
+  "missing": 1,
+  "percent": 99.57,
+  "statements": 234
+ },
+ "src/llm/model_breaker.py": {
+  "covered": 100,
+  "missing": 2,
+  "percent": 98.04,
+  "statements": 102
+ },
+ "src/llm/ollama.py": {
+  "covered": 179,
+  "missing": 5,
+  "percent": 97.28,
+  "statements": 184
+ },
+ "src/llm/openai_codex.py": {
+  "covered": 431,
+  "missing": 51,
+  "percent": 89.42,
+  "statements": 482
+ },
+ "src/llm/provider.py": {
+  "covered": 15,
+  "missing": 3,
+  "percent": 83.33,
+  "statements": 18
+ },
+ "src/llm/recovery.py": {
+  "covered": 107,
+  "missing": 5,
+  "percent": 95.54,
+  "statements": 112
+ },
+ "src/llm/secret_scrubber.py": {
+  "covered": 7,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 7
+ },
+ "src/llm/system_prompt.py": {
+  "covered": 34,
+  "missing": 3,
+  "percent": 91.89,
+  "statements": 37
+ },
+ "src/llm/types.py": {
+  "covered": 21,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 21
+ },
+ "src/models/__init__.py": {
+  "covered": 5,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 5
+ },
+ "src/models/guild.py": {
+  "covered": 18,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 18
+ },
+ "src/models/infraction.py": {
+  "covered": 20,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 20
+ },
+ "src/models/reminder.py": {
+  "covered": 20,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 20
+ },
+ "src/models/user.py": {
+  "covered": 14,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 14
+ },
+ "src/monitoring/__init__.py": {
+  "covered": 2,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 2
+ },
+ "src/monitoring/resource_usage.py": {
+  "covered": 154,
+  "missing": 11,
+  "percent": 93.33,
+  "statements": 165
+ },
+ "src/notifications/__init__.py": {
+  "covered": 4,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 4
+ },
+ "src/notifications/issue_tracker.py": {
+  "covered": 261,
+  "missing": 22,
+  "percent": 92.23,
+  "statements": 283
+ },
+ "src/notifications/outbound_webhooks.py": {
+  "covered": 258,
+  "missing": 3,
+  "percent": 98.85,
+  "statements": 261
+ },
+ "src/notifications/slack.py": {
+  "covered": 128,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 128
+ },
+ "src/observability/__init__.py": {
+  "covered": 3,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 3
+ },
+ "src/observability/aggregates.py": {
+  "covered": 122,
+  "missing": 5,
+  "percent": 96.06,
+  "statements": 127
+ },
+ "src/observability/context_trace.py": {
+  "covered": 120,
+  "missing": 12,
+  "percent": 90.91,
+  "statements": 132
+ },
+ "src/observability/correlation.py": {
+  "covered": 11,
+  "missing": 2,
+  "percent": 84.62,
+  "statements": 13
+ },
+ "src/observability/failure_classes.py": {
+  "covered": 14,
+  "missing": 2,
+  "percent": 87.5,
+  "statements": 16
+ },
+ "src/odin/__init__.py": {
+  "covered": 7,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 7
+ },
+ "src/odin/cli.py": {
+  "covered": 46,
+  "missing": 13,
+  "percent": 77.97,
+  "statements": 59
+ },
+ "src/odin/context.py": {
+  "covered": 122,
+  "missing": 7,
+  "percent": 94.57,
+  "statements": 129
+ },
+ "src/odin/executor.py": {
+  "covered": 42,
+  "missing": 1,
+  "percent": 97.67,
+  "statements": 43
+ },
+ "src/odin/plan_loader.py": {
+  "covered": 29,
+  "missing": 8,
+  "percent": 78.38,
+  "statements": 37
+ },
+ "src/odin/planner.py": {
+  "covered": 95,
+  "missing": 3,
+  "percent": 96.94,
+  "statements": 98
+ },
+ "src/odin/registry.py": {
+  "covered": 27,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 27
+ },
+ "src/odin/reporter.py": {
+  "covered": 25,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 25
+ },
+ "src/odin/tools/__init__.py": {
+  "covered": 0,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 0
+ },
+ "src/odin/tools/base.py": {
+  "covered": 8,
+  "missing": 1,
+  "percent": 88.89,
+  "statements": 9
+ },
+ "src/odin/tools/file_ops.py": {
+  "covered": 30,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 30
+ },
+ "src/odin/tools/http.py": {
+  "covered": 8,
+  "missing": 13,
+  "percent": 38.1,
+  "statements": 21
+ },
+ "src/odin/tools/process.py": {
+  "covered": 29,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 29
+ },
+ "src/odin/tools/shell.py": {
+  "covered": 19,
+  "missing": 1,
+  "percent": 95.0,
+  "statements": 20
+ },
+ "src/odin/types.py": {
+  "covered": 37,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 37
+ },
+ "src/odin_log/__init__.py": {
+  "covered": 2,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 2
+ },
+ "src/odin_log/logger.py": {
+  "covered": 8,
+  "missing": 11,
+  "percent": 42.11,
+  "statements": 19
+ },
+ "src/packaging/__init__.py": {
+  "covered": 0,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 0
+ },
+ "src/permissions/__init__.py": {
+  "covered": 3,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 3
+ },
+ "src/permissions/host_access.py": {
+  "covered": 154,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 154
+ },
+ "src/permissions/manager.py": {
+  "covered": 78,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 78
+ },
+ "src/permissions/token_manager.py": {
+  "covered": 132,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 132
+ },
+ "src/planning/__init__.py": {
+  "covered": 2,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 2
+ },
+ "src/planning/store.py": {
+  "covered": 101,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 101
+ },
+ "src/relevance.py": {
+  "covered": 21,
+  "missing": 1,
+  "percent": 95.45,
+  "statements": 22
+ },
+ "src/restart.py": {
+  "covered": 21,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 21
+ },
+ "src/scheduler/__init__.py": {
+  "covered": 3,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 3
+ },
+ "src/scheduler/history.py": {
+  "covered": 102,
+  "missing": 9,
+  "percent": 91.89,
+  "statements": 111
+ },
+ "src/scheduler/scheduler.py": {
+  "covered": 602,
+  "missing": 67,
+  "percent": 89.99,
+  "statements": 669
+ },
+ "src/search/__init__.py": {
+  "covered": 5,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 5
+ },
+ "src/search/embedder.py": {
+  "covered": 15,
+  "missing": 14,
+  "percent": 51.72,
+  "statements": 29
+ },
+ "src/search/fts.py": {
+  "covered": 151,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 151
+ },
+ "src/search/hybrid.py": {
+  "covered": 18,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 18
+ },
+ "src/search/sqlite_vec.py": {
+  "covered": 14,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 14
+ },
+ "src/search/vectorstore.py": {
+  "covered": 52,
+  "missing": 102,
+  "percent": 33.77,
+  "statements": 154
+ },
+ "src/sessions/__init__.py": {
+  "covered": 2,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 2
+ },
+ "src/sessions/manager.py": {
+  "covered": 775,
+  "missing": 70,
+  "percent": 91.72,
+  "statements": 845
+ },
+ "src/setup_wizard.py": {
+  "covered": 51,
+  "missing": 8,
+  "percent": 86.44,
+  "statements": 59
+ },
+ "src/tools/__init__.py": {
+  "covered": 7,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 7
+ },
+ "src/tools/affordances.py": {
+  "covered": 56,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 56
+ },
+ "src/tools/agent_tool_policy.py": {
+  "covered": 45,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 45
+ },
+ "src/tools/autonomous_loop.py": {
+  "covered": 155,
+  "missing": 83,
+  "percent": 65.13,
+  "statements": 238
+ },
+ "src/tools/branch_freshness.py": {
+  "covered": 99,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 99
+ },
+ "src/tools/bulkhead.py": {
+  "covered": 95,
+  "missing": 3,
+  "percent": 96.94,
+  "statements": 98
+ },
+ "src/tools/defs/__init__.py": {
+  "covered": 0,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 0
+ },
+ "src/tools/defs/agents.py": {
+  "covered": 5,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 5
+ },
+ "src/tools/defs/browser_web.py": {
+  "covered": 1,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 1
+ },
+ "src/tools/defs/channel_process_loops.py": {
+  "covered": 1,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 1
+ },
+ "src/tools/defs/devops.py": {
+  "covered": 1,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 1
+ },
+ "src/tools/defs/integrations_email.py": {
+  "covered": 1,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 1
+ },
+ "src/tools/defs/media_scheduling.py": {
+  "covered": 1,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 1
+ },
+ "src/tools/defs/memory_skills.py": {
+  "covered": 1,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 1
+ },
+ "src/tools/defs/system_files.py": {
+  "covered": 1,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 1
+ },
+ "src/tools/defs/tasks_knowledge.py": {
+  "covered": 1,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 1
+ },
+ "src/tools/docker_ops.py": {
+  "covered": 267,
+  "missing": 1,
+  "percent": 99.63,
+  "statements": 268
+ },
+ "src/tools/email_client.py": {
+  "covered": 210,
+  "missing": 21,
+  "percent": 90.91,
+  "statements": 231
+ },
+ "src/tools/executor.py": {
+  "covered": 400,
+  "missing": 27,
+  "percent": 93.68,
+  "statements": 427
+ },
+ "src/tools/git_ops.py": {
+  "covered": 176,
+  "missing": 1,
+  "percent": 99.44,
+  "statements": 177
+ },
+ "src/tools/handlers/__init__.py": {
+  "covered": 0,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 0
+ },
+ "src/tools/handlers/browser_web.py": {
+  "covered": 43,
+  "missing": 24,
+  "percent": 64.18,
+  "statements": 67
+ },
+ "src/tools/handlers/coding.py": {
+  "covered": 138,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 138
+ },
+ "src/tools/handlers/comms.py": {
+  "covered": 52,
+  "missing": 58,
+  "percent": 47.27,
+  "statements": 110
+ },
+ "src/tools/handlers/deps.py": {
+  "covered": 60,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 60
+ },
+ "src/tools/handlers/devops.py": {
+  "covered": 105,
+  "missing": 5,
+  "percent": 95.45,
+  "statements": 110
+ },
+ "src/tools/handlers/files_docs.py": {
+  "covered": 117,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 117
+ },
+ "src/tools/handlers/state.py": {
+  "covered": 326,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 326
+ },
+ "src/tools/handlers/system.py": {
+  "covered": 140,
+  "missing": 49,
+  "percent": 74.07,
+  "statements": 189
+ },
+ "src/tools/handlers/validation.py": {
+  "covered": 29,
+  "missing": 6,
+  "percent": 82.86,
+  "statements": 35
+ },
+ "src/tools/http_probe_ops.py": {
+  "covered": 84,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 84
+ },
+ "src/tools/image/__init__.py": {
+  "covered": 6,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 6
+ },
+ "src/tools/image/base.py": {
+  "covered": 57,
+  "missing": 2,
+  "percent": 96.61,
+  "statements": 59
+ },
+ "src/tools/image/comfyui_backend.py": {
+  "covered": 29,
+  "missing": 2,
+  "percent": 93.55,
+  "statements": 31
+ },
+ "src/tools/image/openai_backend.py": {
+  "covered": 135,
+  "missing": 15,
+  "percent": 90.0,
+  "statements": 150
+ },
+ "src/tools/image/selector.py": {
+  "covered": 88,
+  "missing": 4,
+  "percent": 95.65,
+  "statements": 92
+ },
+ "src/tools/kubectl_ops.py": {
+  "covered": 213,
+  "missing": 1,
+  "percent": 99.53,
+  "statements": 214
+ },
+ "src/tools/mcp_client.py": {
+  "covered": 265,
+  "missing": 81,
+  "percent": 76.59,
+  "statements": 346
+ },
+ "src/tools/output_streamer.py": {
+  "covered": 91,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 91
+ },
+ "src/tools/post_validation.py": {
+  "covered": 326,
+  "missing": 26,
+  "percent": 92.61,
+  "statements": 352
+ },
+ "src/tools/process_manager.py": {
+  "covered": 155,
+  "missing": 20,
+  "percent": 88.57,
+  "statements": 175
+ },
+ "src/tools/recovery.py": {
+  "covered": 119,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 119
+ },
+ "src/tools/registry.py": {
+  "covered": 22,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 22
+ },
+ "src/tools/result_validator.py": {
+  "covered": 99,
+  "missing": 11,
+  "percent": 90.0,
+  "statements": 110
+ },
+ "src/tools/risk_classifier.py": {
+  "covered": 156,
+  "missing": 9,
+  "percent": 94.55,
+  "statements": 165
+ },
+ "src/tools/safe_fetch.py": {
+  "covered": 124,
+  "missing": 15,
+  "percent": 89.21,
+  "statements": 139
+ },
+ "src/tools/skill_context.py": {
+  "covered": 223,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 223
+ },
+ "src/tools/skill_manager.py": {
+  "covered": 555,
+  "missing": 151,
+  "percent": 78.61,
+  "statements": 706
+ },
+ "src/tools/ssh.py": {
+  "covered": 214,
+  "missing": 8,
+  "percent": 96.4,
+  "statements": 222
+ },
+ "src/tools/ssh_pool.py": {
+  "covered": 70,
+  "missing": 13,
+  "percent": 84.34,
+  "statements": 83
+ },
+ "src/tools/terraform_ops.py": {
+  "covered": 156,
+  "missing": 1,
+  "percent": 99.36,
+  "statements": 157
+ },
+ "src/tools/time_parser.py": {
+  "covered": 108,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 108
+ },
+ "src/tools/tool_text.py": {
+  "covered": 7,
+  "missing": 3,
+  "percent": 70.0,
+  "statements": 10
+ },
+ "src/tools/url_safety.py": {
+  "covered": 104,
+  "missing": 15,
+  "percent": 87.39,
+  "statements": 119
+ },
+ "src/tools/web.py": {
+  "covered": 99,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 99
+ },
+ "src/tools/workspace.py": {
+  "covered": 146,
+  "missing": 5,
+  "percent": 96.69,
+  "statements": 151
+ },
+ "src/trajectories/__init__.py": {
+  "covered": 2,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 2
+ },
+ "src/trajectories/saver.py": {
+  "covered": 184,
+  "missing": 11,
+  "percent": 94.36,
+  "statements": 195
+ },
+ "src/turn_state/__init__.py": {
+  "covered": 2,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 2
+ },
+ "src/turn_state/codec.py": {
+  "covered": 79,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 79
+ },
+ "src/turn_state/durability.py": {
+  "covered": 126,
+  "missing": 16,
+  "percent": 88.73,
+  "statements": 142
+ },
+ "src/turn_state/store.py": {
+  "covered": 256,
+  "missing": 34,
+  "percent": 88.28,
+  "statements": 290
+ },
+ "src/version.py": {
+  "covered": 15,
+  "missing": 8,
+  "percent": 65.22,
+  "statements": 23
+ },
+ "src/web/__init__.py": {
+  "covered": 0,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 0
+ },
+ "src/web/api/__init__.py": {
+  "covered": 74,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 74
+ },
+ "src/web/api/agents_loops.py": {
+  "covered": 148,
+  "missing": 2,
+  "percent": 98.67,
+  "statements": 150
+ },
+ "src/web/api/codex_admin.py": {
+  "covered": 203,
+  "missing": 16,
+  "percent": 92.69,
+  "statements": 219
+ },
+ "src/web/api/config_admin.py": {
+  "covered": 292,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 292
+ },
+ "src/web/api/integrations.py": {
+  "covered": 266,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 266
+ },
+ "src/web/api/knowledge_mem.py": {
+  "covered": 279,
+  "missing": 2,
+  "percent": 99.29,
+  "statements": 281
+ },
+ "src/web/api/llm_admin.py": {
+  "covered": 510,
+  "missing": 3,
+  "percent": 99.42,
+  "statements": 513
+ },
+ "src/web/api/observability.py": {
+  "covered": 216,
+  "missing": 10,
+  "percent": 95.58,
+  "statements": 226
+ },
+ "src/web/api/schedules_api.py": {
+  "covered": 110,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 110
+ },
+ "src/web/api/security.py": {
+  "covered": 332,
+  "missing": 17,
+  "percent": 95.13,
+  "statements": 349
+ },
+ "src/web/api/self_update.py": {
+  "covered": 127,
+  "missing": 8,
+  "percent": 94.07,
+  "statements": 135
+ },
+ "src/web/api/sessions_chat.py": {
+  "covered": 288,
+  "missing": 15,
+  "percent": 95.05,
+  "statements": 303
+ },
+ "src/web/api/skills_api.py": {
+  "covered": 79,
+  "missing": 56,
+  "percent": 58.52,
+  "statements": 135
+ },
+ "src/web/api_common.py": {
+  "covered": 84,
+  "missing": 3,
+  "percent": 96.55,
+  "statements": 87
+ },
+ "src/web/chat.py": {
+  "covered": 119,
+  "missing": 12,
+  "percent": 90.84,
+  "statements": 131
+ },
+ "src/web/websocket.py": {
+  "covered": 218,
+  "missing": 27,
+  "percent": 88.98,
+  "statements": 245
+ }
 }

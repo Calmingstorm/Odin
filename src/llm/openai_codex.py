@@ -10,6 +10,13 @@ from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES,
 from .circuit_breaker import CircuitBreaker
 from .codex_auth import CodexAuth, CodexAuthPool
 from .cost_tracker import estimate_tokens
+from .errors import (
+    LLMAuthError,
+    LLMCapacityError,
+    LLMRateLimitError,
+    LLMRequestError,
+    LLMTransportError,
+)
 from .types import LLMResponse, ToolCall
 
 log = get_logger("codex")
@@ -29,8 +36,70 @@ DEFAULT_STREAM_STALL_TIMEOUT = 180
 CONNECT_TIMEOUT = 30
 
 
+# Markers the backend uses for model-tier capacity exhaustion. These arrive
+# INSIDE an HTTP 200 as SSE error events, so no status-code branch ever sees
+# them; matched against both error.type and error.code. Observed live
+# (2026-07-29/30 sol degradation): type=service_unavailable_error with
+# code=server_is_overloaded, plus bare server_error.
+_CAPACITY_ERROR_MARKERS = frozenset({
+    "service_unavailable_error",
+    "server_is_overloaded",
+    "server_error",
+})
+
+
 class CodexStreamError(RuntimeError):
-    """The SSE stream reported a terminal failure event (response.failed / error)."""
+    """The SSE stream reported a terminal failure event (response.failed / error).
+
+    Carries the structured fields parsed from the event's error object so the
+    retry engine can classify capacity failures without substring matching.
+    The message keeps the historical ``{event_type}: {json[:500]}`` shape.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str | None = None,
+        error_code: str | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+        self.error_code = error_code
+        self.retry_after = retry_after
+
+    @property
+    def is_capacity(self) -> bool:
+        return (
+            self.error_type in _CAPACITY_ERROR_MARKERS
+            or self.error_code in _CAPACITY_ERROR_MARKERS
+        )
+
+
+def _stream_error_from_event(event_type: str, event: dict) -> CodexStreamError:
+    """Build a classified CodexStreamError from a terminal SSE event.
+
+    The error object lives at ``event["error"]`` for bare ``error`` events
+    and at ``event["response"]["error"]`` for ``response.failed``; tolerate
+    both plus absence (classification simply stays empty and the failure is
+    treated as transport, today's behavior).
+    """
+    err = event.get("error")
+    if not isinstance(err, dict):
+        resp_obj = event.get("response")
+        err = resp_obj.get("error") if isinstance(resp_obj, dict) else None
+    if not isinstance(err, dict):
+        err = {}
+    error_type = err.get("type")
+    error_code = err.get("code")
+    retry_after = err.get("retry_after")
+    return CodexStreamError(
+        f"{event_type}: {json.dumps(event)[:500]}",
+        error_type=error_type if isinstance(error_type, str) else None,
+        error_code=error_code if isinstance(error_code, str) else None,
+        retry_after=float(retry_after) if isinstance(retry_after, (int, float)) else None,
+    )
 
 
 class CodexChatClient:
@@ -537,6 +606,22 @@ class CodexChatClient:
                         try:
                             result = await reader(resp)
                         except CodexStreamError as e:
+                            if e.is_capacity:
+                                # Model-tier capacity exhaustion (e.g.
+                                # server_is_overloaded) inside a 200. Every
+                                # account shares it, so: no account rotation,
+                                # no client-breaker count, no inner retry
+                                # burn. Escape immediately — the deadline-
+                                # based recovery layer owns the wait and
+                                # counts one model-breaker failure per failed
+                                # logical generation.
+                                raise LLMCapacityError(
+                                    "Codex capacity: "
+                                    f"{e.error_code or e.error_type or 'unknown'}",
+                                    provider="codex",
+                                    model=str(body.get("model") or self.model),
+                                    retry_after=e.retry_after,
+                                ) from e
                             # response.failed / error event: the "200" turned
                             # out to be a failure mid-stream — retryable.
                             self.breaker.record_failure()
@@ -553,7 +638,11 @@ class CodexChatClient:
                                 )
                                 await asyncio.sleep(wait)
                                 continue
-                            raise RuntimeError(f"Codex stream failed: {last_error}") from e
+                            raise LLMTransportError(
+                                f"Codex stream failed: {last_error}",
+                                provider="codex",
+                                model=str(body.get("model") or self.model),
+                            ) from e
                         if not result_is_empty(result):
                             self.breaker.record_success()
                             return result
@@ -601,8 +690,10 @@ class CodexChatClient:
                             token, account_id, acct_idx = await self._acquire_auth()
                             continue
                         self.breaker.record_failure()
-                        raise RuntimeError(
-                            f"Codex 401 (auth failed, no healthy account): {error_body[:200]}"
+                        raise LLMAuthError(
+                            f"Codex 401 (auth failed, no healthy account): {error_body[:200]}",
+                            provider="codex",
+                            model=str(body.get("model") or self.model),
                         )
 
                     if resp.status == 429:
@@ -623,7 +714,16 @@ class CodexChatClient:
                             await asyncio.sleep(wait)
                             token, account_id, acct_idx = await self._acquire_auth()
                             continue
-                        raise RuntimeError(f"Codex API error (429): {error_body[:500]}")
+                        # Internal rotation is exhausted at this point (every
+                        # attempt marked its account limited and re-acquired).
+                        # Typed so the outer recovery FAST-FAILS instead of
+                        # spending its budget cycling limited accounts —
+                        # quota semantics stay exactly as before.
+                        raise LLMRateLimitError(
+                            f"Codex API error (429): {error_body[:500]}",
+                            provider="codex",
+                            model=str(body.get("model") or self.model),
+                        )
 
                     if resp.status in (500, 502, 503, 504):
                         self.breaker.record_failure()
@@ -640,10 +740,20 @@ class CodexChatClient:
                             )
                             await asyncio.sleep(wait)
                             continue
-                        raise RuntimeError(f"Codex API error ({resp.status}): {error_body[:500]}")
+                        raise LLMTransportError(
+                            f"Codex API error ({resp.status}): {error_body[:500]}",
+                            provider="codex",
+                            model=str(body.get("model") or self.model),
+                        )
 
+                    # Any other status (400 bad model/malformed request, ...):
+                    # the request itself is wrong — fast-fail, never retried.
                     self.breaker.record_failure()
-                    raise RuntimeError(f"Codex API error ({resp.status}): {error_body[:500]}")
+                    raise LLMRequestError(
+                        f"Codex API error ({resp.status}): {error_body[:500]}",
+                        provider="codex",
+                        model=str(body.get("model") or self.model),
+                    )
 
             except (TimeoutError, aiohttp.ClientError) as e:
                 # asyncio.TimeoutError: the total/sock_read timeouts can fire
@@ -659,7 +769,11 @@ class CodexChatClient:
                     )
                     await asyncio.sleep(wait)
                 else:
-                    raise RuntimeError(f"Codex API connection failed: {last_error}") from e
+                    raise LLMTransportError(
+                        f"Codex API connection failed: {last_error}",
+                        provider="codex",
+                        model=str(body.get("model") or self.model),
+                    ) from e
 
         raise RuntimeError(f"Codex API failed after {self.max_retries} retries: {last_error}")
 
@@ -781,9 +895,9 @@ class CodexChatClient:
             # generation — surface it so the retry engine treats it as an
             # error instead of returning partial output as a completed turn.
             elif event_type in ("response.failed", "error"):
-                detail = json.dumps(event)[:500]
-                log.warning("Codex stream terminal failure %s: %s", event_type, detail)
-                raise CodexStreamError(f"{event_type}: {detail}")
+                exc = _stream_error_from_event(event_type, event)
+                log.warning("Codex stream terminal failure %s", exc)
+                raise exc
 
             # Incomplete (length-capped / filtered): keep the partial output
             # but mark it so callers can tell it isn't a normal completion.
@@ -876,9 +990,9 @@ class CodexChatClient:
             # Terminal failure events — surface to the retry engine instead of
             # returning partial output as a normal completion.
             elif event_type in ("response.failed", "error"):
-                detail = json.dumps(event)[:500]
-                log.warning("Codex stream terminal failure %s: %s", event_type, detail)
-                raise CodexStreamError(f"{event_type}: {detail}")
+                exc = _stream_error_from_event(event_type, event)
+                log.warning("Codex stream terminal failure %s", exc)
+                raise exc
 
             elif event_type == "response.incomplete":
                 reason = ((event.get("response") or {}).get("incomplete_details")

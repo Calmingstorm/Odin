@@ -37,6 +37,8 @@ from ..learning.loop_reflection import LoopReflectionGate
 from ..llm import CodexChatClient, KimiClient, OllamaClient
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.cost_tracker import CostTracker
+from ..llm.model_breaker import ModelBreakerRegistry
+from ..llm.recovery import RecoveryPolicy
 from ..odin_log import get_logger
 from ..permissions import PermissionManager
 from ..permissions.host_access import HostAccessManager
@@ -48,6 +50,7 @@ from ..tools import SkillManager, ToolExecutor
 from ..tools.autonomous_loop import LoopManager
 from ..tools.workspace import DEFAULT_MEMORY_PATH
 from ..trajectories.saver import TrajectorySaver
+from ..turn_state import TurnStateStore
 from .channel_config import ChannelConfigManager
 from .channel_logger import ChannelLogger
 from .channel_state import ChannelStateRegistry
@@ -119,6 +122,12 @@ class BotServices:
     stuck_loop_tracker_cls: type
     classify_command_risk: Callable
     classify_tool_risk: Callable
+    # Turn durability (2026-07-30): the checkpoint/ledger store (None =
+    # disabled) and the model-scoped capacity-breaker registry. Both live
+    # HERE so client rebuilds and live reloads never reset their state.
+    turn_store: TurnStateStore | None = None
+    model_breakers: ModelBreakerRegistry | None = None
+    recovery_policy_source: Callable[[], RecoveryPolicy] | None = None
 
 
 def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear composition root
@@ -395,6 +404,29 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
     ):
         subsystem_guard.register(_name)
 
+    # Turn durability (2026-07-30): checkpoint/ledger store + the model-
+    # scoped capacity breakers + the recovery policy source. Services-owned
+    # so provider-client rebuilds and live reloads never reset their state.
+    _lr = config.llm_recovery
+    model_breakers = ModelBreakerRegistry(
+        generation_threshold=_lr.breaker_generation_threshold,
+        cooldown_base=_lr.breaker_cooldown_base_seconds,
+        cooldown_cap=_lr.breaker_cooldown_cap_seconds,
+    )
+
+    def recovery_policy_source() -> RecoveryPolicy:
+        live = config  # config object is replaced wholesale on hot reload
+        return RecoveryPolicy(
+            deadline_seconds=live.llm_recovery.generation_deadline_seconds,
+            backoff_cap=live.llm_recovery.backoff_cap_seconds,
+        )
+
+    turn_store = None
+    if config.turn_state.enabled:
+        turn_store = TurnStateStore(config.turn_state.db_path)
+        if not turn_store.available:
+            turn_store = None  # init failed — feature off, logged loudly
+
     # Action diff tracker — records before→after diffs. Always on.
     diff_tracker = DiffTracker()
 
@@ -521,6 +553,9 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
         stuck_loop_tracker_cls=StuckLoopTracker,
         classify_command_risk=classify_command,
         classify_tool_risk=classify_tool,
+        turn_store=turn_store,
+        model_breakers=model_breakers,
+        recovery_policy_source=recovery_policy_source,
     )
 
 
@@ -570,6 +605,8 @@ def build_components(bot, services: BotServices) -> BotComponents:
         cost_tracker=services.cost_tracker,
         sessions=services.sessions,
         reflector=services.reflector,
+        model_breakers=services.model_breakers,
+        recovery_policy_source=services.recovery_policy_source,
     )
 
     # Wire LLM callbacks to whichever provider is active
@@ -696,6 +733,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             audit=services.audit,
             loop_manager=services.loop_manager,
             stuck_loop_tracker_cls=services.stuck_loop_tracker_cls,
+            turn_store=services.turn_store,
         )
     )
     agent_task_tools = AgentTaskTools(
@@ -751,7 +789,40 @@ def build_components(bot, services: BotServices) -> BotComponents:
         loop_agent_bridge=services.loop_agent_bridge,
         channel_logger=services.channel_logger,
         fts_index=services.fts_index,
+        turn_store=services.turn_store,
     )
+
+    # Suspended-turn resume (2026-07-30): explicit `resume` rides the intake
+    # pipeline; auto-resume is registered by the tool loop at suspension.
+    turn_resume = None
+    if services.turn_store is not None:
+        from .turn_resume import TurnResumeManager
+
+        async def _fetch_message(channel_id: str, message_id: str):
+            channel = bot.get_channel(int(channel_id))
+            if channel is None:
+                channel = await bot.fetch_channel(int(channel_id))
+            return await channel.fetch_message(int(message_id))
+
+        turn_resume = TurnResumeManager(
+            store=services.turn_store,
+            tool_loop=tool_loop,
+            llm_gateway=llm_gateway,
+            channel_state=services.channel_state,
+            sessions=services.sessions,
+            delivery=delivery,
+            permissions=services.permissions,
+            tool_catalog=tool_catalog,
+            get_config=lambda: bot.config,
+            fetch_message=_fetch_message,
+            auto_resume_enabled=bot.config.turn_state.auto_resume,
+            resume_ttl_hours=bot.config.turn_state.resume_ttl_hours,
+        )
+        # Late instance-attr wiring: the runner exists before the manager
+        # (the manager needs the runner), so the suspension callback is
+        # attached here rather than through the frozen deps.
+        tool_loop._on_turn_suspended = turn_resume.on_turn_suspended
+
     pipeline = MessagePipeline(
         MessagePipelineDeps(
             channel_state=services.channel_state,
@@ -763,6 +834,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             tool_loop=tool_loop,
             delivery=delivery,
             housekeeping=housekeeping,
+            turn_resume=turn_resume,
         )
     )
     intake = MessageIntake(
@@ -849,6 +921,13 @@ async def shutdown_services(bot) -> None:
             knowledge.close()
         except Exception:
             log.exception("Error closing knowledge")
+
+    turn_store = getattr(getattr(bot, "services", None), "turn_store", None)
+    if turn_store is not None:
+        try:
+            turn_store.close()
+        except Exception:
+            log.exception("Error closing turn_store")
 
     sessions = getattr(bot, "sessions", None)
     if sessions is not None:

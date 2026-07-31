@@ -64,3 +64,47 @@ def test_mark_rate_limited_accepts_custom_window():
     auth2 = CodexAuth.__new__(CodexAuth)
     auth2.mark_rate_limited()
     assert auth2.is_rate_limited() is True
+
+
+async def test_pool_exhaustion_is_typed_rate_limit():
+    """Review blocker #7 (PR #242): all-accounts-rate-limited must raise
+    LLMRateLimitError (fast-fail at the recovery layer, never an
+    unclassified defect), with the historical message preserved."""
+    import pytest
+
+    from src.llm.errors import LLMRateLimitError
+
+    pool = _pool(2)
+    for acct in pool._accounts:
+        acct.is_rate_limited.return_value = True
+    with pytest.raises(LLMRateLimitError) as exc_info:
+        await pool.acquire()
+    assert "rate-limited or backing off" in str(exc_info.value)
+    assert exc_info.value.provider == "codex"
+
+
+async def test_pool_exhaustion_all_failed_is_typed_auth():
+    import pytest
+
+    from src.llm.errors import LLMAuthError
+
+    async def boom():
+        raise RuntimeError("refresh dead")
+
+    pool = _pool(2)
+    for acct in pool._accounts:
+        acct.is_rate_limited.return_value = False
+        acct.get_access_token.side_effect = boom
+    with pytest.raises(LLMAuthError) as exc_info:
+        await pool.acquire()
+    assert "accounts failed" in str(exc_info.value)
+
+
+async def test_empty_pool_is_typed_auth():
+    import pytest
+
+    from src.llm.errors import LLMAuthError
+
+    pool = _pool(0)
+    with pytest.raises(LLMAuthError):
+        await pool.acquire()

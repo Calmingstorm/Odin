@@ -32,6 +32,7 @@ class Housekeeping:
         loop_agent_bridge,
         channel_logger,
         fts_index,
+        turn_store=None,
     ) -> None:
         self._get_config = get_config
         self._sessions = sessions
@@ -42,6 +43,7 @@ class Housekeeping:
         self._loop_agent_bridge = loop_agent_bridge
         self._channel_logger = channel_logger
         self._fts_index = fts_index
+        self._turn_store = turn_store
 
     def cleanup_stale(self) -> None:
         """Remove stale entries from per-channel caches to prevent memory leaks.
@@ -91,6 +93,33 @@ class Housekeeping:
         if self._fts_index is not None and self._channel_logger is not None:
             try:
                 self._channel_logger.index_to_fts(self._fts_index)
+            except Exception:
+                pass
+
+        # Turn-state retention: the three clocks (resumable TTL, diagnostic
+        # payload compaction, ledger expiry — OUTCOME_UNKNOWN never expires)
+        # plus the expired-ACTIVE defense sweep (a dead owner's turn must
+        # become visible to the resume path even if the boot sweep missed it).
+        if self._turn_store is not None:
+            try:
+                swept_active = self._turn_store.sweep_expired_active_sync()
+                if any(swept_active.values()):
+                    log.warning(
+                        "Expired-active turn sweep: %s (dead-owner turns "
+                        "suspended)", swept_active,
+                    )
+            except Exception:
+                pass
+            try:
+                config = self._get_config()
+                ts = getattr(config, "turn_state", None)
+                swept = self._turn_store.ttl_sweep_sync(
+                    resume_ttl_hours=getattr(ts, "resume_ttl_hours", 24.0),
+                    payload_retention_days=getattr(ts, "payload_retention_days", 7.0),
+                    ledger_retention_days=getattr(ts, "ledger_retention_days", 90.0),
+                )
+                if any(swept.values()):
+                    log.info("Turn-state TTL sweep: %s", swept)
             except Exception:
                 pass
 

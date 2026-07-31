@@ -37,10 +37,14 @@ from typing import TYPE_CHECKING, Literal
 import discord
 
 from ..llm import CircuitOpenError
+from ..llm.errors import LLMCapacityError
+from ..llm.recovery import generate_with_recovery
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
 from ..tools import ToolResult
+from ..turn_state import LedgerIntentError
+from ..turn_state.durability import TurnDurability
 
 if TYPE_CHECKING:
     from ..audit.logger import AuditLogger
@@ -321,6 +325,10 @@ class _ChatTurn:
     _validation_required: bool = False
     _validation_retries: int = 0
     _max_validation_retries: int = 2
+    # Process-local durability handle (write-invariant driver). Classified
+    # RECONSTRUCTED in the checkpoint codec: a resumed turn gets a fresh
+    # handle bound to the resume lease, never a deserialized one.
+    durability: TurnDurability = field(default_factory=TurnDurability.disabled)
 
 
 @dataclass
@@ -370,6 +378,12 @@ class ToolLoopDeps:
     audit: AuditLogger
     loop_manager: LoopManager
     stuck_loop_tracker_cls: type[StuckLoopTracker]
+    # Durable turn-state store (None = checkpointing off). Default keeps
+    # every existing construction working; wiring passes the real store.
+    turn_store: object | None = None
+    # Called with (TurnKey, generation) when a turn suspends — wiring points
+    # it at the resume manager's auto-resume registration.
+    on_turn_suspended: Callable | None = None
 
 
 class ToolLoopRunner:
@@ -391,6 +405,8 @@ class ToolLoopRunner:
         self._audit = deps.audit
         self._loop_manager = deps.loop_manager
         self._stuck_loop_tracker_cls = deps.stuck_loop_tracker_cls
+        self._turn_store = deps.turn_store
+        self._on_turn_suspended = deps.on_turn_suspended
 
     # ------------------------------------------------------------------
     # Chat pipeline (old _process_with_tools) — orchestrator + phases
@@ -418,13 +434,79 @@ class ToolLoopRunner:
         st = await self._prepare_chat_turn(
             message, history, system_prompt_override, trace, policy
         )
+        # Admission refusal: this message identity already has durable state
+        # (terminal / in-flight / suspended). A redelivered or duplicate
+        # message must never re-run its effects unledgered.
+        if st.durability.blocked is not None:
+            self._clear_active(st)
+            notices = {
+                "already_processed": (
+                    "This exact request was already processed — refusing to "
+                    "run it again. Send it as a new message if you want a "
+                    "fresh run."
+                ),
+                "in_progress": (
+                    "This exact request is already being processed elsewhere."
+                ),
+                "resumable": (
+                    "This request has preserved, resumable work — say "
+                    "`resume` to continue it instead of starting over."
+                ),
+                "admission_error": (
+                    "The durability ledger is unreachable, so I can't verify "
+                    "whether this exact request already ran. Refusing to "
+                    "execute it blind — try again shortly."
+                ),
+            }
+            text = notices.get(
+                st.durability.blocked, "This request cannot be re-run."
+            )
+            log.warning(
+                "Turn admission refused (%s) for message %s in channel %s",
+                st.durability.blocked, st._trajectory.message_id, st._ch_id,
+            )
+            return (text, False, False, [], False)
+        return await self._run_with_guards(st)
 
+    async def run_resumed(self, st: _ChatTurn) -> tuple[str, bool, bool, list[str], bool]:
+        """Continue a restored turn (built by TurnResumeManager) through the
+        same guard envelope as a fresh one. The iteration loop starts from
+        ``st.iteration`` — the restored transcript already contains every
+        earlier generation."""
+        self._channel_state.set_active_request(st._ch_id, st._req_id)
+        set_turn(
+            turn_id=st._trajectory.message_id or None,
+            source=st._trajectory.source,
+            channel_id=st._trajectory.channel_id,
+        )
+        await self._delivery.set_status("Resuming preserved work...", task_start=True)
+        return await self._run_with_guards(st)
+
+    async def _run_with_guards(
+        self, st: _ChatTurn
+    ) -> tuple[str, bool, bool, list[str], bool]:
         try:
-            return await self._run_chat_iterations(st)
+            result = await self._run_chat_iterations(st)
+            # Terminal bookkeeping (best-effort; a suspension already settled
+            # itself and this no-ops). Cancellation is terminal by design —
+            # a cancelled turn never becomes resumable.
+            await st.durability.settle_terminal(
+                cancelled=st._cancel.is_set(), is_error=bool(result[2])
+            )
+            return result
         except asyncio.CancelledError:
             # Cancellation is not an error turn: release channel ownership
-            # and let it propagate untouched (no error trajectory).
+            # and let it propagate untouched (no error trajectory). The
+            # durable cancel mark is bounded + best-effort so propagation
+            # stays prompt.
             self._clear_active(st)
+            try:
+                await asyncio.wait_for(
+                    st.durability.settle_terminal(cancelled=True, is_error=False),
+                    timeout=5.0,
+                )
+            except BaseException:  # noqa: BLE001 — never delay cancellation
+                log.warning("Durable cancel mark failed (non-fatal)")
             raise
         except Exception as exc:
             # An escaping exception used to skip BOTH the trajectory record
@@ -440,14 +522,28 @@ class ToolLoopRunner:
                 log.exception("Trajectory record failed while handling tool-loop escape")
             finally:
                 self._clear_active(st)
+            # Fail-closed epilogue: a durability failure (or any escape)
+            # marks the turn FAILED so a half-written checkpoint can never
+            # present itself as resumable. Best-effort — a fence loss here
+            # just means someone else owns the row now, and even a
+            # cancellation delivered inside the settle must not replace the
+            # original escaping error.
+            try:
+                await st.durability.settle_terminal(cancelled=False, is_error=True)
+            except BaseException:  # noqa: BLE001 — the original error must win
+                log.warning("Durable failure mark failed (non-fatal)")
             raise
 
     async def _run_chat_iterations(
         self, st: _ChatTurn
     ) -> tuple[str, bool, bool, list[str], bool]:
         """The chat iteration loop — every phase-method exit returns through
-        here; unexpected escapes are handled by run()'s guard above."""
-        for iteration in range(st.chat_cap):
+        here; unexpected escapes are handled by run()'s guard above.
+
+        Starts from ``st.iteration``: 0 for a fresh turn (unchanged), the
+        interrupted generation's index for a resumed one — the restored
+        transcript already carries everything before it."""
+        for iteration in range(st.iteration, st.chat_cap):
             st.iteration = iteration
             if st._cancel.is_set():
                 return self._stopped(st, "iteration_start")
@@ -467,6 +563,9 @@ class ToolLoopRunner:
                 kind, val = outcome
                 if kind == "done":
                     return val
+                # WI-5: the stuck nudge + warned flag go durable before the
+                # retry generation consumes them.
+                await st.durability.on_guard_injection(st)
                 continue  # nudge injected — next iteration
 
             # Gate on actual parsed tool calls, not is_tool_use (which is also
@@ -477,6 +576,9 @@ class ToolLoopRunner:
                 kind, val = await self._finalize_or_retry(st, llm_resp)
                 if kind == "done":
                     return val
+                # WI-5: consumed one-shot guard flag / continuation budget +
+                # the injected retry message go durable before the LLM retry.
+                await st.durability.on_guard_injection(st)
                 continue  # retry/continuation message injected
 
             # Build internal-format assistant content from LLMResponse
@@ -638,6 +740,25 @@ class ToolLoopRunner:
         _req_id = req_hash
         self._channel_state.set_active_request(_ch_id, _req_id)
 
+        # Durable-turn admission: Discord chat turns only, resolved the same
+        # way the trajectory source is (web/API turns share this runner via
+        # message shims carrying _odin_source="web" and have no
+        # re-fetchable Discord message — v1 checkpoint fence). Any refusal →
+        # a disabled handle and the turn runs exactly as before.
+        durability = TurnDurability.disabled()
+        if (
+            policy is CHAT_POLICY
+            and self._turn_store is not None
+            and _trajectory.source == "discord"
+        ):
+            durability = await TurnDurability.admit(
+                self._turn_store,  # type: ignore[arg-type]
+                message=message,
+                system_prompt=system_prompt,
+                tools=tools,
+                session_snapshot={"history_len": len(history)},
+            )
+
         return _ChatTurn(
             message=message,
             policy=policy,
@@ -653,6 +774,7 @@ class ToolLoopRunner:
             _cancel=_cancel,
             _ch_id=_ch_id,
             _req_id=_req_id,
+            durability=durability,
         )
 
     def _clear_active(self, st: _ChatTurn) -> None:
@@ -660,6 +782,10 @@ class ToolLoopRunner:
 
     def _stopped(self, st: _ChatTurn, where: str) -> tuple[str, bool, bool, list[str], bool]:
         log.info("Task stopped by /stop in channel %s at %s", st._ch_id, where)
+        # Carry the cancellation fact past _clear_active (which clears the
+        # shared event) so terminal settlement records TERMINAL_CANCELLED —
+        # a cancelled turn must never look resumable or completed.
+        st.durability.mark_cancelled()
         self._clear_active(st)
         suffix = ""
         if st._pending_validations or st._validation_required:
@@ -701,68 +827,129 @@ class ToolLoopRunner:
                 )
 
     async def _call_llm(self, st: _ChatTurn):
-        """Guarded LLM call with typing indicator and circuit-breaker recovery.
+        """Guarded LLM call with typing indicator and deadline-based recovery.
 
         Returns ("ok", llm_resp) or ("done", <run() return tuple>).
+
+        Transient failures — capacity (SSE overload inside a 200), transport,
+        and an open client breaker — are retried by the shared recovery
+        policy for up to the configured generation deadline (default 5 min),
+        waiting through breakers and honouring retry_after. Auth failures,
+        malformed requests, and quota exhaustion (429 after the client's own
+        account rotation) still fail fast, exactly as before. /stop
+        interrupts any recovery wait immediately.
         """
         _channel_id = str(st.message.channel.id)
+        breaker = self._llm_gateway.capacity_breaker_for()
+        policy = self._llm_gateway.recovery_policy()
+
+        def _on_wait(wait: float, remaining: float, error: BaseException) -> None:
+            log.info(
+                "LLM recovery (%s): waiting %.1fs, %.0fs of generation budget left",
+                type(error).__name__, wait, remaining,
+            )
+
+        async def _attempt():
+            return await self._llm_gateway.call_with_tools(
+                messages=st.messages,
+                system=st.system_prompt,
+                tools=st.tools or [],
+                user_id=st.user_id,
+                channel_id=_channel_id,
+                tools_used=st.tools_used_in_loop,
+            )
+
+        # A resumed generation carries only its REMAINING budget (persisted
+        # UTC deadline): the generation that already spent its five minutes
+        # gets one attempt, not a fresh window. Later generations budget
+        # normally.
+        resume_budget = st.durability.pop_resume_budget()
+        deadline_seconds = (
+            policy.deadline_seconds if resume_budget is None else resume_budget
+        )
+
+        # Persist the absolute recovery deadline BEFORE the call: a restart
+        # mid-recovery reconstructs only the remaining budget, never a fresh
+        # five minutes.
+        await st.durability.on_generation_start(st, deadline_seconds)
+
         # Typing is best-effort (shared helper): a typing failure — setup or
         # cleanup — must never fail the call or misclassify provider errors.
         async with _best_effort_typing(st.message.channel):
             try:
-                llm_resp = await self._llm_gateway.call_with_tools(
-                    messages=st.messages,
-                    system=st.system_prompt,
-                    tools=st.tools or [],
-                    user_id=st.user_id,
-                    channel_id=_channel_id,
-                    tools_used=st.tools_used_in_loop,
+                llm_resp = await generate_with_recovery(
+                    _attempt,
+                    policy=policy,
+                    breaker=breaker,
+                    deadline_seconds=deadline_seconds,
+                    cancel_event=st._cancel,
+                    on_wait=_on_wait,
                 )
-            except CircuitOpenError as coe:
-                wait_secs = min(coe.retry_after, 90.0)
-                log.info(
-                    "Circuit breaker open for %s, waiting %.0fs for recovery",
-                    coe.provider,
-                    wait_secs,
-                )
-                await asyncio.sleep(wait_secs)
-                try:
-                    llm_resp = await self._llm_gateway.call_with_tools(
-                        messages=st.messages,
-                        system=st.system_prompt,
-                        tools=st.tools or [],
-                        user_id=st.user_id,
-                        channel_id=_channel_id,
-                        tools_used=st.tools_used_in_loop,
-                    )
-                except Exception as retry_err:
-                    await self._turn_recorder._save_turn_trajectory(
-                        st._trajectory, error=str(retry_err), trace=st.trace
-                    )
-                    self._clear_active(st)
-                    return (
-                        "done",
-                        (
-                            f"LLM API error (circuit breaker recovery failed): {retry_err}",
-                            False,
-                            True,
-                            st.tools_used_in_loop,
-                            False,
-                        ),
-                    )
+            except asyncio.CancelledError:
+                if st._cancel.is_set():
+                    # /stop fired during a recovery wait — the graceful stop
+                    # path, not an error turn (same contract as the
+                    # loop-head cancel checks).
+                    return ("done", self._stopped(st, "llm_recovery"))
+                raise
+            except LLMCapacityError as cap_err:
+                # The whole recovery budget expired on capacity. With
+                # durability on, the work is preserved and the turn SUSPENDS
+                # instead of discarding twenty tool calls because the
+                # twenty-first couldn't reach the model.
+                if st.durability.enabled:
+                    return ("done", await self._suspend_turn(st, cap_err))
+                return ("done", await self._llm_error_done(st, cap_err))
             except Exception as api_err:
-                err_msg = str(api_err) or f"{type(api_err).__name__} (no message)"
-                log.error("LLM API call failed: %s", err_msg, exc_info=True)
-                await self._turn_recorder._save_turn_trajectory(
-                    st._trajectory, error=err_msg, trace=st.trace
-                )
-                self._clear_active(st)
-                return (
-                    "done",
-                    (f"LLM API error: {err_msg}", False, True, st.tools_used_in_loop, False),
-                )
+                return ("done", await self._llm_error_done(st, api_err))
 
         return ("ok", llm_resp)
+
+    async def _llm_error_done(self, st: _ChatTurn, api_err: BaseException):
+        """The legacy terminal LLM-failure path (unchanged message shape)."""
+        err_msg = str(api_err) or f"{type(api_err).__name__} (no message)"
+        log.error("LLM API call failed: %s", err_msg, exc_info=True)
+        await self._turn_recorder._save_turn_trajectory(
+            st._trajectory, error=err_msg, trace=st.trace
+        )
+        self._clear_active(st)
+        return (f"LLM API error: {err_msg}", False, True, st.tools_used_in_loop, False)
+
+    async def _suspend_turn(self, st: _ChatTurn, cap_err: LLMCapacityError):
+        """Suspend with preserved work; falls back to the plain error when
+        suspension persistence itself fails (no false preservation claims)."""
+        reason = str(cap_err) or "capacity exhausted"
+        preserved = await st.durability.suspend(st, reason)
+        if not preserved:
+            return await self._llm_error_done(st, cap_err)
+
+        minutes = max(
+            1, round(self._llm_gateway.recovery_policy().deadline_seconds / 60.0)
+        )
+        model = cap_err.model or "The model"
+        n_tools = len(st.tools_used_in_loop)
+        text = (
+            f"{model} is out of capacity — I retried for ~{minutes} minute(s) "
+            f"without getting through. I've preserved everything done so far "
+            f"({n_tools} tool call(s)) and will pick this up automatically when "
+            "capacity returns, as long as nothing else happens in this channel. "
+            "You can also reply `resume` within 24h to continue manually."
+        )
+        await self._turn_recorder._save_turn_trajectory(
+            st._trajectory,
+            final_response=text,
+            tools_used=st.tools_used_in_loop,
+            trace=st.trace,
+        )
+        self._clear_active(st)
+        if self._on_turn_suspended is not None and st.durability.lease is not None:
+            try:
+                self._on_turn_suspended(
+                    st.durability.lease.key, st.durability.lease.generation
+                )
+            except Exception:
+                log.exception("Auto-resume registration failed (non-fatal)")
+        return (text, False, True, st.tools_used_in_loop, False)
 
     async def _check_stuck_and_record(self, st: _ChatTurn, llm_resp):
         """Record this iteration's tool calls + LLM text into the trajectory
@@ -1000,6 +1187,11 @@ class ToolLoopRunner:
         _rbac_denial = self._tool_executor.check_permission(tool_name, _uid)
         if isinstance(_rbac_denial, str) and _rbac_denial:  # str = deny, None = allow
             log.warning("RBAC gate denied tool %s for user %s", tool_name, _uid)
+            # Denied before any effect: settle the PREPARED intent as
+            # definitely-not-applied so it can never look interrupted.
+            await st.durability.after_tool(
+                block, ok=False, uncertain=False, result_text=_rbac_denial
+            )
             return {"type": "tool_result", "tool_use_id": block.id, "content": _rbac_denial}
         await self._delivery.set_status(
             TOOL_STATUS_LABELS.get(tool_name, f"Running: {tool_name}")
@@ -1019,8 +1211,14 @@ class ToolLoopRunner:
         except Exception:
             pass
 
+        # WI-2: PREPARED→RUNNING BEFORE the external effect. A durability
+        # failure here raises and blocks the effect (fail-closed) — the run()
+        # escape guard turns it into a bounded error turn.
+        await st.durability.before_tool(block)
+
         t0 = time.monotonic()
         error = None
+        uncertain_outcome = False
         tool_result = None
         # Handle Discord-native tools
         try:
@@ -1052,15 +1250,21 @@ class ToolLoopRunner:
             error = str(e)
             result = f"Tool {tool_name} timed out: {e}"
             tool_result = None
+            # An execution that started and died mid-flight may have applied
+            # its effect — the ledger records OUTCOME_UNKNOWN, never a
+            # confident failure (replay must not rerun it).
+            uncertain_outcome = True
             log.warning("Tool %s timed out after %.1fs", tool_name, time.monotonic() - t0)
         except (ValueError, KeyError, TypeError) as e:
             error = str(e)
             result = f"Tool {tool_name} input error: {e}"
             tool_result = None
+            uncertain_outcome = True
         except Exception as e:
             error = str(e)
             result = f"Error executing {tool_name}: {e}"
             tool_result = None
+            uncertain_outcome = True
             log.warning("Unexpected tool error for %s: %s", tool_name, e)
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -1106,6 +1310,16 @@ class ToolLoopRunner:
 
         # Truncate large outputs before sending back to the LLM.
         tool_content = truncate_tool_output(result)
+
+        # WI-3: settle the op right after completion. ok → APPLIED;
+        # a tool-reported failure → DEFINITELY_FAILED; an exception mid-
+        # execution → OUTCOME_UNKNOWN (the effect may have applied).
+        await st.durability.after_tool(
+            block,
+            ok=(tool_result.ok if tool_result is not None else error is None),
+            uncertain=uncertain_outcome,
+            result_text=tool_content,
+        )
 
         return {
             "type": "tool_result",
@@ -1163,6 +1377,13 @@ class ToolLoopRunner:
             )
         except TimeoutError:
             error_msg = f"Tool '{block.name}' timed out after {t}s"
+            # WI-3 (interrupted): wait_for cancelled _run_one_tool before its
+            # own settle — the external effect may or may not have applied.
+            # OUTCOME_UNKNOWN via the no-downgrade settle, never rerun.
+            try:
+                await st.durability.after_tool_interrupted(block, error_msg)
+            except Exception:
+                log.exception("Ledger settle failed for timed-out %s", block.name)
             try:
                 await self._audit.log_execution(
                     user_id=str(st.message.author.id),
@@ -1187,6 +1408,28 @@ class ToolLoopRunner:
         """Run all tool calls concurrently with per-tool timeout; append the
         result block to the message list (gather preserves call order)."""
         tool_timeout = self._get_config().tools.tool_timeout_seconds
+
+        # WI-1: the LLM response transcript + PREPARED intents are durable
+        # BEFORE any execution. Malformed intents (empty/duplicate call ids)
+        # fail here and are bounced back as matched error results without
+        # executing anything (Odin's rule: fail before execution).
+        try:
+            await st.durability.on_llm_response(st, tool_calls)
+        except LedgerIntentError as intent_err:
+            log.warning("Tool batch rejected before execution: %s", intent_err)
+            tool_results = [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": b.id,
+                    "content": (
+                        f"Error: malformed tool-call batch ({intent_err}). "
+                        "NOT executed — re-issue the calls with unique ids."
+                    ),
+                }
+                for b in tool_calls
+            ]
+            st.messages.append({"role": "user", "content": list(tool_results)})
+            return tool_results
 
         # Best-effort typing: the 2026-07-16 Discord incident (typing
         # endpoint returning HTML 500s) aborted whole turns at exactly this
@@ -1278,6 +1521,11 @@ class ToolLoopRunner:
                 len(st.pending_image_blocks),
             )
             st.pending_image_blocks.clear()
+
+        # WI-4: the batch is fully settled — tool-result continuation,
+        # trajectory results, validation/vision state, and the advanced
+        # iteration go durable in one fenced checkpoint (real progress).
+        await st.durability.on_batch_settled(st)
 
         return None
 
@@ -1491,16 +1739,31 @@ class ToolLoopRunner:
         return outcome_text
 
     async def _call_loop_llm(self, st: _LoopTurn):
-        """LLM call for one loop iteration. CircuitOpenError re-raises to the
-        loop manager (policy asymmetry — the manager owns backoff).
+        """LLM call for one loop iteration with deadline-based recovery.
+
+        Typed capacity/transport failures are retried in-iteration by the
+        shared recovery policy; CircuitOpenError still re-raises to the loop
+        manager (policy asymmetry — the manager owns backoff between
+        iterations). The gateway bypass itself is unchanged (RFC-001 §4.3).
 
         Returns ("ok", response) or ("done", <run_autonomous() return str>).
         """
-        try:
-            response = await self._llm_gateway.active_client.chat_with_tools(
+        breaker = self._llm_gateway.capacity_breaker_for()
+        policy = self._llm_gateway.recovery_policy()
+
+        async def _attempt():
+            return await self._llm_gateway.active_client.chat_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
                 tools=st.tools or [],
+            )
+
+        try:
+            response = await generate_with_recovery(
+                _attempt,
+                policy=policy,
+                breaker=breaker,
+                retry_circuit_open=False,
             )
         except CircuitOpenError:
             raise
@@ -1516,6 +1779,12 @@ class ToolLoopRunner:
                     error_text=str(e),
                 ),
             )
+        # Bypass-path success: clear a latched llm_* guard key using the
+        # response's immutable provenance (never the post-await active
+        # provider) — the production mark_available wiring.
+        self._llm_gateway.notify_generation_success(
+            getattr(response, "provenance_provider", None)
+        )
         return ("ok", response)
 
     def _record_loop_iteration(self, st: _LoopTurn, response, _iteration: int) -> bool:

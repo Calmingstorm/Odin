@@ -21,6 +21,28 @@ from src.discord.native_tools.agents_tasks import (
     AgentTaskTools,
     _parse_spawn_overrides,
 )
+from src.llm.model_breaker import ModelBreakerRegistry
+from src.llm.recovery import RecoveryPolicy
+
+
+def _fake_gateway(client):
+    """Gateway fake carrying the recovery surface the callbacks now use.
+
+    The breaker registry is real (per-fake, isolated) so the callbacks'
+    admission/resolution protocol actually runs; the fast policy keeps any
+    would-be retry from sleeping meaningfully in tests.
+    """
+    registry = ModelBreakerRegistry()
+    gw = SimpleNamespace(active_client=client)
+    gw.capacity_breaker_for = lambda model=None: registry.for_model(
+        "codex", str(model or getattr(client, "model", None) or "unknown")
+    )
+    gw.recovery_policy = lambda: RecoveryPolicy(
+        deadline_seconds=0.2, backoff_base=0.01, backoff_cap=0.02, retry_after_cap=0.05
+    )
+    gw.success_notices = []
+    gw.notify_generation_success = gw.success_notices.append
+    return gw
 
 
 def _cfg(tools_enabled=True):
@@ -37,7 +59,7 @@ def _cfg(tools_enabled=True):
 def _deps(**ov):
     d: dict[str, Any] = dict(
         get_config=lambda: _cfg(),
-        llm_gateway=SimpleNamespace(active_client=object()),
+        llm_gateway=_fake_gateway(object()),
         channel_state=SimpleNamespace(background_tasks={}, background_tasks_max=50),
         tool_executor=MagicMock(),
         skill_manager=MagicMock(),
@@ -223,7 +245,7 @@ class TestLoops:
 class TestSpawnAgent:
     async def test_validation(self):
         assert "required" in await _tools()._handle_spawn_agent(_message(), {"label": "a"})
-        t = _tools(llm_gateway=SimpleNamespace(active_client=None))
+        t = _tools(llm_gateway=_fake_gateway(None))
         assert "not available" in await t._handle_spawn_agent(
             _message(), {"label": "a", "goal": "g"})
 
@@ -309,7 +331,7 @@ class TestAgentReasoningEffortCallback:
         cfg = _cfg()
         cfg.openai_codex = SimpleNamespace(agent_reasoning_effort=agent_effort)
         t = _tools(get_config=lambda: cfg,
-                   llm_gateway=SimpleNamespace(active_client=client))
+                   llm_gateway=_fake_gateway(client))
         t._agent_manager.spawn.return_value = "agent-e"
         t._agent_manager._agents = {}
         return t
@@ -340,7 +362,7 @@ class TestAgentReasoningEffortCallback:
         cfg = _cfg()
         cfg.openai_codex = SimpleNamespace(agent_reasoning_effort=None)
         t = _tools(get_config=lambda: cfg,
-                   llm_gateway=SimpleNamespace(active_client=client))
+                   llm_gateway=_fake_gateway(client))
         t._agent_manager.spawn.return_value = "agent-e"
         t._agent_manager._agents = {}
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
@@ -384,7 +406,7 @@ class TestAgentReasoningEffortCallback:
         cfg = _cfg()
         cfg.openai_codex = SimpleNamespace(agent_reasoning_effort="medium")
         t = _tools(get_config=lambda: cfg,
-                   llm_gateway=SimpleNamespace(active_client=client))
+                   llm_gateway=_fake_gateway(client))
         t._loop_manager._loops = {"L1": SimpleNamespace(
             status="running", requester_id="1", requester_name="u",
             goal="loop goal", iteration_count=1)}
@@ -407,7 +429,7 @@ class TestAgentModelCallback:
         cfg = _cfg()
         cfg.openai_codex = cfg_codex
         t = _tools(get_config=lambda: cfg,
-                   llm_gateway=SimpleNamespace(active_client=client))
+                   llm_gateway=_fake_gateway(client))
         t._agent_manager.spawn.return_value = "agent-m"
         t._agent_manager._agents = {}
         return t
@@ -556,7 +578,7 @@ class TestAgentModelCallback:
                                            agent_model="gpt-5.6-luna",
                                            model="gpt-5.6-sol")
         t = _tools(get_config=lambda: cfg,
-                   llm_gateway=SimpleNamespace(active_client=client))
+                   llm_gateway=_fake_gateway(client))
         t._loop_manager._loops = {"L1": SimpleNamespace(
             status="running", requester_id="1", requester_name="u",
             goal="loop goal", iteration_count=1)}
@@ -613,7 +635,7 @@ class TestPerSpawnModelEffort:
         # Per-spawn overrides are only accepted when the axis is Auto.
         cfg.openai_codex = self._codex_cfg(agent_model="auto", agent_effort="auto")
         t = _tools(get_config=lambda: cfg,
-                   llm_gateway=SimpleNamespace(active_client=client))
+                   llm_gateway=_fake_gateway(client))
         t._agent_manager.spawn.return_value = "agent-o"
         t._agent_manager._agents = {}
         await t._handle_spawn_agent(
@@ -634,7 +656,7 @@ class TestPerSpawnModelEffort:
         cfg = _cfg()
         cfg.openai_codex = self._codex_cfg(agent_model="gpt-5.6-terra", agent_effort="high")
         t = _tools(get_config=lambda: cfg,
-                   llm_gateway=SimpleNamespace(active_client=client))
+                   llm_gateway=_fake_gateway(client))
         t._agent_manager.spawn.return_value = "agent-i"
         t._agent_manager._agents = {}
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
@@ -652,7 +674,7 @@ class TestPerSpawnModelEffort:
         # Effort axis Auto so the field is accepted for value-validation.
         cfg.openai_codex = self._codex_cfg(agent_effort="auto")
         t = _tools(get_config=lambda: cfg,
-                   llm_gateway=SimpleNamespace(active_client=client))
+                   llm_gateway=_fake_gateway(client))
         t._agent_manager._agents = {}
         out = await t._handle_spawn_agent(
             _message(), {"label": "w", "goal": "g", "reasoning_effort": "ultra"})
@@ -665,7 +687,7 @@ class TestPerSpawnModelEffort:
         # Both axes Auto so per-task model + effort overrides are accepted.
         cfg.openai_codex = self._codex_cfg(agent_model="auto", agent_effort="auto")
         t = _tools(get_config=lambda: cfg,
-                   llm_gateway=SimpleNamespace(active_client=client))
+                   llm_gateway=_fake_gateway(client))
         t._loop_manager._loops = {"L1": SimpleNamespace(
             status="running", requester_id="1", requester_name="u",
             goal="loop goal", iteration_count=1)}
@@ -778,7 +800,7 @@ class TestLoopAgentBridge:
             _message(), {"loop_id": "L1", "tasks": ["t"]})
 
     async def test_spawn_loop_agents_no_client(self):
-        t = _tools(llm_gateway=SimpleNamespace(active_client=None))
+        t = _tools(llm_gateway=_fake_gateway(None))
         t._loop_manager._loops = {"L1": self._running_loop()}
         assert "not available" in await t._handle_spawn_loop_agents(
             _message(), {"loop_id": "L1", "tasks": ["t"]})

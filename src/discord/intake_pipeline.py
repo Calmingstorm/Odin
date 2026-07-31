@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from .prompts import PromptBuilder
     from .tool_loop import ToolLoopRunner
     from .turn_recorder import TurnRecorder
+    from .turn_resume import TurnResumeManager
 
 log = get_logger("discord")
 
@@ -406,6 +407,9 @@ class MessagePipelineDeps:
     tool_loop: ToolLoopRunner  # the tools route
     delivery: ResponseDelivery  # status, retries, chunked sends
     housekeeping: Housekeeping  # post-turn cache maintenance
+    # Suspended-turn resume manager (None = feature off). Default keeps every
+    # existing construction working; wiring passes the real manager.
+    turn_resume: TurnResumeManager | None = None
 
 
 class MessagePipeline:
@@ -419,6 +423,7 @@ class MessagePipeline:
         self._tool_loop = deps.tool_loop
         self._delivery = deps.delivery
         self._housekeeping = deps.housekeeping
+        self._turn_resume = deps.turn_resume
 
     async def run(
         self,
@@ -554,67 +559,101 @@ class MessagePipeline:
                     )
                     self._sessions.remove_last_message(channel_id, "user")
                     return
-                _trace = self._turn_recorder._new_context_trace()
-                if _trace is not None:
-                    with _trace.phase("system_prompt"):
+                # A bare `resume`/`continue` with preserved work in this
+                # channel resumes the suspended turn instead of starting a
+                # fresh one — the trigger is consumed as a command and never
+                # enters the frozen transcript. Checked BEFORE prompt/history
+                # assembly (round-3 deviation #6, PR #242): get_task_history
+                # can trigger compaction's LLM call, and a resume that halts
+                # on unresolved operations must be a genuine zero-LLM path.
+                _resumed = None
+                if self._turn_resume is not None:
+                    try:
+                        _resumed = await self._turn_resume.try_explicit_resume(message)
+                    except Exception:
+                        log.exception(
+                            "Explicit resume attempt failed — falling through "
+                            "to a normal turn"
+                        )
+                        _resumed = None
+                _trace = None
+                _sp = None
+                task_history: list = []
+                if _resumed is None:
+                    _trace = self._turn_recorder._new_context_trace()
+                    if _trace is not None:
+                        with _trace.phase("system_prompt"):
+                            _sp = self._prompt_builder.build_full_prompt(
+                                channel=message.channel,
+                                user_id=user_id,
+                                query=content,
+                                trace=_trace,
+                            )
+                    else:
                         _sp = self._prompt_builder.build_full_prompt(
                             channel=message.channel,
                             user_id=user_id,
                             query=content,
-                            trace=_trace,
                         )
-                else:
-                    _sp = self._prompt_builder.build_full_prompt(
-                        channel=message.channel,
-                        user_id=user_id,
-                        query=content,
-                    )
-                log.info("Routing to Codex with tools")
-                # Use abbreviated history to reduce poisoning from stale responses
-                # (get_task_history handles compaction internally)
-                # Pass current message content for relevance scoring —
-                # older messages unrelated to the current query are dropped
-                if _trace is not None:
-                    with _trace.phase("history"):
+                    log.info("Routing to Codex with tools")
+                    # Use abbreviated history to reduce poisoning from stale
+                    # responses (get_task_history handles compaction
+                    # internally). Pass current message content for relevance
+                    # scoring — older messages unrelated to the current
+                    # query are dropped
+                    if _trace is not None:
+                        with _trace.phase("history"):
+                            task_history = await self._sessions.get_task_history(
+                                channel_id,
+                                max_messages=160,
+                                current_query=content,
+                                trace=_trace,
+                            )
+                    else:
                         task_history = await self._sessions.get_task_history(
                             channel_id,
                             max_messages=160,
                             current_query=content,
+                        )
+                    if image_blocks and task_history and task_history[-1]["role"] == "user":
+                        last = task_history[-1]
+                        text = (
+                            last["content"]
+                            if isinstance(last["content"], str)
+                            else str(last["content"])
+                        )
+                        # Vision turns legitimately swap str content for
+                        # a block list; the LLM layer handles both shapes.
+                        task_history[-1] = {
+                            "role": "user",
+                            "content": image_blocks + [{"type": "text", "text": text}],  # type: ignore[dict-item]
+                        }
+                        log.info(
+                            "Attached %d image(s) to message for Claude vision",
+                            len(image_blocks),
+                        )
+                try:
+                    if _resumed is not None:
+                        (
+                            response,
+                            already_sent,
+                            is_error,
+                            tools_used,
+                            handoff,
+                        ) = _resumed
+                    else:
+                        (
+                            response,
+                            already_sent,
+                            is_error,
+                            tools_used,
+                            handoff,
+                        ) = await self._tool_loop.run(
+                            message,
+                            task_history,
+                            system_prompt_override=_sp,
                             trace=_trace,
                         )
-                else:
-                    task_history = await self._sessions.get_task_history(
-                        channel_id,
-                        max_messages=160,
-                        current_query=content,
-                    )
-                if image_blocks and task_history and task_history[-1]["role"] == "user":
-                    last = task_history[-1]
-                    text = (
-                        last["content"]
-                        if isinstance(last["content"], str)
-                        else str(last["content"])
-                    )
-                    # Vision turns legitimately swap str content for
-                    # a block list; the LLM layer handles both shapes.
-                    task_history[-1] = {
-                        "role": "user",
-                        "content": image_blocks + [{"type": "text", "text": text}],  # type: ignore[dict-item]
-                    }
-                    log.info("Attached %d image(s) to message for Claude vision", len(image_blocks))
-                try:
-                    (
-                        response,
-                        already_sent,
-                        is_error,
-                        tools_used,
-                        handoff,
-                    ) = await self._tool_loop.run(
-                        message,
-                        task_history,
-                        system_prompt_override=_sp,
-                        trace=_trace,
-                    )
                 except TimeoutError as codex_err:
                     _err = format_user_facing_error(codex_err)
                     log.warning("Codex tool loop timed out: %s", _err)
@@ -736,7 +775,27 @@ class MessagePipeline:
             # Save a sanitized error marker instead of the full error response.
             # The user sees the full error on Discord, but raw refusals and
             # fabrications are NOT persisted to prevent context poisoning.
-            if tools_used:
+            _preserved = False
+            if self._turn_resume is not None:
+                try:
+                    _preserved = await self._turn_resume.is_suspended(
+                        channel_id, str(message.id)
+                    )
+                except Exception:
+                    _preserved = False
+            if _preserved:
+                _tools_note = (
+                    f" after using tools ({', '.join(tools_used[:5])})"
+                    if tools_used
+                    else ""
+                )
+                sanitized = (
+                    "[Previous request was interrupted by a model-capacity "
+                    f"outage{_tools_note}. Its work is PRESERVED and resumable — "
+                    "it auto-resumes when capacity returns, or the user can "
+                    "say 'resume'.]"
+                )
+            elif tools_used:
                 sanitized = (
                     f"[Previous request used tools ({', '.join(tools_used[:5])}) "
                     f"but encountered an error. The user may ask to retry.]"
