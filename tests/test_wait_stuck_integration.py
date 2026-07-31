@@ -176,6 +176,50 @@ class TestFrozenWaitLadder:
         assert not any("wait_seconds" in d for d in devs)
 
 
+class TestFingerprintRidesTheCheckpoint:
+    async def test_wait_fingerprint_recorded_before_wi4_judged_after(self, monkeypatch):
+        """PR #244 round-1 blocker #1: the wait fingerprint must be IN the
+        tracker when WI-4 checkpoints the settled batch (a crash after the
+        checkpoint must not forget the stuck observation), while the nudge
+        appears only AFTER WI-4 — judgment is deferred until the
+        observation is durable."""
+        from src.turn_state.durability import TurnDurability
+
+        events: list[tuple[str, int, bool]] = []
+        orig = TurnDurability.on_batch_settled
+
+        async def spy(self, st):
+            fps = list(st.stuck_tracker._fingerprints)
+            nudged = any(
+                isinstance(m, dict)
+                and m.get("role") == "developer"
+                and "wait_seconds" in str(m.get("content", ""))
+                for m in st.messages
+            )
+            events.append(
+                ("wi4", sum(f.startswith("wait:") for f in fps), nudged)
+            )
+            return await orig(self, st)
+
+        monkeypatch.setattr(TurnDurability, "on_batch_settled", spy)
+
+        bot, fake = build([poll_call() for _ in range(5)])
+        bot.tool_executor.execute = AsyncMock(
+            side_effect=[poll_result(uptime=3 * (i + 1), out_bytes=500) for i in range(5)]
+        )
+        text, _, is_error, _, _ = await run_loop(bot, FakeMessage("watch"))
+        assert is_error is True
+        # Every settled wait batch checkpointed WITH its own fingerprint
+        # already recorded: counts grow 1,2,3,4 across the four executed
+        # iterations.
+        assert [n for (_, n, _) in events] == [1, 2, 3, 4]
+        # And the nudge was NOT yet in the transcript at the third WI-4 —
+        # judgment ran after the checkpoint, never before.
+        assert events[2][2] is False
+        # By the fourth WI-4 (the post-nudge retry) it was.
+        assert events[3][2] is True
+
+
 class TestMixedBatchKeepsStrictDetector:
     async def test_poll_plus_side_effect_uses_pre_execution_detector(self):
         """Two-call batches never take the wait path: the argument-only

@@ -812,7 +812,15 @@ class AgentTaskTools:
             content = result_text or error_text or "(no output)"
             if len(content) > 800:
                 content = content[:800] + "..."
-            lines.append(f"**{label}** (`{aid}`): {status}\n{content}")
+            # iterations is the stable progress marker for the wait-class
+            # stuck signature (PR #244 round-1): a silently-progressing
+            # agent must not render identically to a hung one. Runtime
+            # stays excluded — hashing elapsed time would make a hung
+            # agent immortal.
+            iters = r.get("iteration_count", 0)
+            lines.append(
+                f"**{label}** (`{aid}`): {status} [iterations={iters}]\n{content}"
+            )
 
         return "\n\n".join(lines) if lines else "No results."
 

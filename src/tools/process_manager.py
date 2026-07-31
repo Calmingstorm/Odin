@@ -8,6 +8,7 @@ output lines (max 500) and is auto-killed after 1 hour.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections import deque
 from collections.abc import Callable
@@ -30,6 +31,29 @@ MAX_POLL_WAIT_SECONDS = 120.0
 # and cancelling it — comfortably exceeds a reader's TERM-grace + KILL-grace so
 # a compliant descendant always finishes, while a wedged one can't hang re-exec.
 SHUTDOWN_REAP_TIMEOUT = 12.0
+# Display segmentation for the ring buffer: newline AND carriage return
+# both end a display segment (progress bars redraw with bare \r).
+_SEGMENT_SPLIT = re.compile(rb"[\r\n]")
+
+
+async def _wait_leader_exit(
+    proc: asyncio.subprocess.Process, timeout: float | None = None
+) -> bool:
+    """Pipe-independent wait for LEADER exit.
+
+    ``Process.wait()`` resolves only after every pipe transport closes
+    (asyncio ``_try_finish``), so a ``&``-descendant holding stdout blocks
+    it long past leader death — the PR #244 round-1 repro. ``returncode``
+    is published at SIGCHLD reap regardless of pipes, so poll it. Returns
+    True when the leader exited, False on deadline. Cancellation
+    propagates (the sleep is the await point).
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while proc.returncode is None:
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.25)
+    return True
 
 
 @dataclass
@@ -44,6 +68,7 @@ class ProcessInfo:
     output_buffer: deque = field(default_factory=lambda: deque(maxlen=OUTPUT_BUFFER_LINES))
     process: asyncio.subprocess.Process | None = None
     _reader_task: asyncio.Task | None = field(default=None, repr=False)
+    _exit_task: asyncio.Task | None = field(default=None, repr=False)
     exit_code: int | None = None
     # Monotonic progress signal: total bytes ever read from the process,
     # NOT bounded by the ring buffer — a full ring of repeated lines can
@@ -126,8 +151,11 @@ class ProcessRegistry:
         )
         self._processes[pid] = info
 
-        # Background reader task to drain stdout into the ring buffer
+        # Drainage and terminal-state publication are SEPARATE tasks:
+        # the reader drains stdout; the watcher publishes status at
+        # leader exit and reaps the group (which closes the pipe).
         info._reader_task = asyncio.create_task(self._read_output(info))
+        info._exit_task = asyncio.create_task(self._watch_exit(info))
 
         # Auto-kill after max lifetime
         from ..async_utils import fire_and_forget
@@ -155,22 +183,22 @@ class ProcessRegistry:
             return f"No process with PID {pid}."
 
         if wait_seconds > 0 and info.status == "running" and info.process is not None:
-            try:
-                await asyncio.wait_for(info.process.wait(), timeout=wait_seconds)
-            except TimeoutError:
+            if not await _wait_leader_exit(info.process, timeout=wait_seconds):
                 pass  # deadline reached — report current state
             else:
-                # The process exited during the wait: give the reader task a
-                # bounded moment to drain the tail and settle status/exit_code
-                # so the report reflects the terminal state, not a torn one.
-                # Shielded — OUR bound must not cancel the reader itself.
-                if info._reader_task is not None:
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.shield(info._reader_task), timeout=5.0
-                        )
-                    except TimeoutError:
-                        pass
+                # The leader exited during the wait: give the watcher a
+                # bounded moment to publish status/exit_code and reap the
+                # group (closing the pipe), then the reader to drain the
+                # tail — so the report reflects the terminal state, not a
+                # torn one. Shielded — OUR bound must not cancel either.
+                for settling in (info._exit_task, info._reader_task):
+                    if settling is not None:
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(settling), timeout=5.0
+                            )
+                        except TimeoutError:
+                            pass
 
         lines = list(info.output_buffer)
         status_line = f"[PID {pid}] status={info.status}"
@@ -262,8 +290,9 @@ class ProcessRegistry:
         terminate_process_tree and would strand the descendant across the exec).
         """
         killed = 0
-        # 1) TERM/KILL every still-running leader. This also unblocks its reader
-        #    (readline hits EOF), which then reaps any surviving group members.
+        # 1) TERM/KILL every still-running leader. Its exit watcher then
+        #    publishes terminal state and reaps surviving group members,
+        #    which closes the pipe and unblocks the drainer.
         for pid, info in list(self._processes.items()):
             if info.status == "running":
                 try:
@@ -273,16 +302,20 @@ class ProcessRegistry:
                     log.warning("Failed to kill PID %d during shutdown", pid)
         # 2) Let every reader/reaper finish so no group cleanup is left pending.
         for pid, info in list(self._processes.items()):
-            task = info._reader_task
-            if task is None or task.done():
-                continue
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=SHUTDOWN_REAP_TIMEOUT)
-            except TimeoutError:
-                log.warning("Reaper for PID %d did not finish; cancelling", pid)
-                task.cancel()
-            except Exception:
-                log.debug("Reaper for PID %d errored during shutdown", pid, exc_info=True)
+            for task in (info._exit_task, info._reader_task):
+                if task is None or task.done():
+                    continue
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(task), timeout=SHUTDOWN_REAP_TIMEOUT
+                    )
+                except TimeoutError:
+                    log.warning("Reaper for PID %d did not finish; cancelling", pid)
+                    task.cancel()
+                except Exception:
+                    log.debug(
+                        "Reaper for PID %d errored during shutdown", pid, exc_info=True
+                    )
         if killed:
             log.info("Shutdown: terminated %d running process(es)", killed)
         return killed
@@ -297,8 +330,9 @@ class ProcessRegistry:
         ]
         for pid in to_remove:
             info = self._processes.pop(pid)
-            if info._reader_task and not info._reader_task.done():
-                info._reader_task.cancel()
+            for task in (info._reader_task, info._exit_task):
+                if task and not task.done():
+                    task.cancel()
         return len(to_remove)
 
     # ------------------------------------------------------------------
@@ -306,39 +340,76 @@ class ProcessRegistry:
     # ------------------------------------------------------------------
 
     async def _read_output(self, info: ProcessInfo) -> None:
-        """Continuously read stdout and append to the output buffer."""
+        """Drain stdout into the ring buffer. Pure drainage — terminal
+        status and group reaping live in ``_watch_exit`` (PR #244 round-1:
+        a ``&``-descendant holding the stdout pipe kept EOF from arriving,
+        so an exited leader reported ``running`` forever and the reap
+        stalled behind drainage).
+
+        Bounded RAW reads, not ``readline()``: newline-free output and
+        carriage-return progress bars must still advance
+        ``total_output_bytes`` (it is the wait-poll progress signal), and
+        an over-limit line must not kill drainage (``readline`` raises on
+        lines beyond the stream limit; ``read(n)`` cannot).
+        """
+        pending = b""
         try:
             while info.process and info.process.stdout:
-                line = await info.process.stdout.readline()
-                if not line:
+                chunk = await info.process.stdout.read(4096)
+                if not chunk:
                     break
-                info.total_output_bytes += len(line)
-                info.output_buffer.append(line.decode("utf-8", errors="replace"))
+                info.total_output_bytes += len(chunk)
+                pending += chunk
+                # Display buffering: split on both \n and \r so progress
+                # bars render as lines; keep the unterminated tail bounded.
+                segments = _SEGMENT_SPLIT.split(pending)
+                pending = segments.pop()
+                for seg in segments:
+                    if seg:
+                        info.output_buffer.append(
+                            seg.decode("utf-8", errors="replace") + "\n"
+                        )
+                if len(pending) > 4096:
+                    info.output_buffer.append(
+                        pending.decode("utf-8", errors="replace") + "\n"
+                    )
+                    pending = b""
         except Exception:
             pass
+        if pending:
+            info.output_buffer.append(pending.decode("utf-8", errors="replace") + "\n")
 
-        # Process finished — update status
-        if info.process:
-            try:
-                await info.process.wait()
-                info.exit_code = info.process.returncode
+    async def _watch_exit(self, info: ProcessInfo) -> None:
+        """Publish terminal state at LEADER exit, then reap the group.
+
+        Separated from stdout drainage (PR #244 round-1): ``process.wait()``
+        returns when the leader exits regardless of who still holds the
+        pipe, so status/exit_code publication never waits on EOF, and the
+        reap (which kills lingering descendants — the v3.59.1 contract:
+        managed descendants are reaped when their leader exits) is what
+        CLOSES the pipe and lets the drainer finish naturally.
+        """
+        if info.process is None:
+            return
+        try:
+            await _wait_leader_exit(info.process)
+            info.exit_code = info.process.returncode
+            if info.status == "running":
                 info.status = "completed" if info.exit_code == 0 else "failed"
-            except Exception:
+        except Exception:
+            if info.status == "running":
                 info.status = "failed"
 
-            # The leader has exited, but `&`-backgrounded descendants can still
-            # be alive in its process group — a redirected one that doesn't hold
-            # stdout lets this task finish while it lingers. Reap the group NOW,
-            # while ownership is fresh: a non-empty group keeps the leader pid
-            # from being recycled, so owned_pgid still uniquely names OUR group.
-            # After this, shutdown() need not (and must not) signal a stale,
-            # possibly-recycled pgid for an already-terminal record.
-            from ..tools.ssh import terminate_process_tree
+        # Reap while ownership is fresh: a non-empty group keeps the leader
+        # pid from being recycled, so owned_pgid still uniquely names OUR
+        # group. After this, shutdown() need not (and must not) signal a
+        # stale, possibly-recycled pgid for an already-terminal record.
+        from ..tools.ssh import terminate_process_tree
 
-            try:
-                await terminate_process_tree(info.process, grace=2.0, owned_pgid=info.process.pid)
-            except Exception:
-                log.debug("group reap after PID %d exit failed", info.pid, exc_info=True)
+        try:
+            await terminate_process_tree(info.process, grace=2.0, owned_pgid=info.process.pid)
+        except Exception:
+            log.debug("group reap after PID %d exit failed", info.pid, exc_info=True)
 
     async def _enforce_lifetime(self, pid: int, max_seconds: int) -> None:
         """Auto-kill process after max lifetime."""

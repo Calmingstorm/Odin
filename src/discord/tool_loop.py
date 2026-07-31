@@ -598,23 +598,27 @@ class ToolLoopRunner:
 
             tool_results = await self._execute_tool_calls(st, tool_calls)
 
+            # Wait-class fingerprints record BEFORE WI-4 so the checkpoint
+            # carries the stuck observation with the result it observed;
+            # judgment (nudge/kill) runs only AFTER WI-4 succeeded — a
+            # confirmed-frozen kill never discards the result that proved
+            # the freeze, and a crash never forgets it (PR #244 round-1).
+            wait_iteration = self._record_wait_fingerprint(st, tool_calls, tool_results)
+
             outcome = await self._post_iteration(st, tool_calls, tool_results)
             if outcome is not None:
                 return outcome[1]
 
-            # Wait-class stuck judgment runs POST-execution, after WI-4 has
-            # checkpointed the settled batch — a confirmed-frozen kill never
-            # discards the result that proved the freeze (Odin's ordering,
-            # 2026-07-31).
-            outcome = await self._check_wait_stuck(st, tool_calls, tool_results)
-            if outcome is not None:
-                kind, val = outcome
-                if kind == "done":
-                    return val
-                # WI-5: the wait-aware nudge + consumed warned flag go
-                # durable before the retry generation.
-                await st.durability.on_guard_injection(st)
-                continue
+            if wait_iteration:
+                outcome = await self._judge_wait_stuck(st, tool_calls, tool_results)
+                if outcome is not None:
+                    kind, val = outcome
+                    if kind == "done":
+                        return val
+                    # WI-5: the wait-aware nudge + consumed warned flag go
+                    # durable before the retry generation.
+                    await st.durability.on_guard_injection(st)
+                    continue
 
             handoff = self._check_skill_handoff(st, tool_calls, tool_results)
             if handoff is not None:
@@ -1049,34 +1053,51 @@ class ToolLoopRunner:
                 return ("retry", None)
         return None
 
-    async def _check_wait_stuck(self, st: _ChatTurn, tool_calls, tool_results):
-        """Post-execution stuck judgment for wait-class iterations.
+    @staticmethod
+    def _wait_result_text(tool_calls, tool_results) -> str:
+        tc = tool_calls[0]
+        for r in tool_results:
+            if isinstance(r, dict) and r.get("tool_use_id") == tc.id:
+                return str(r.get("content", ""))
+        return ""
 
-        Runs ONLY for an iteration that was exactly one wait-class call
-        (``_check_stuck_and_record`` deferred it). Records a ``wait:``-
-        prefixed result-aware fingerprint — status transitions and
-        output-byte growth are progress; a frozen signature is not — then
-        applies the same warn-once-then-terminate ladder. ``warned`` stays
-        one-shot: later progress never re-arms it.
+    def _record_wait_fingerprint(self, st: _ChatTurn, tool_calls, tool_results) -> bool:
+        """Record (ONLY record) the result-aware fingerprint for a
+        wait-class iteration. Runs BEFORE WI-4 so the checkpoint carries
+        the stuck observation — a crash after the settled batch must not
+        restore the result while forgetting what it proved (PR #244
+        round-1 blocker #1). Judgment and termination are deferred to
+        ``_judge_wait_stuck``, which runs only after WI-4 succeeded.
 
-        Returns None to proceed, ("retry", None) after the wait-aware
-        nudge, or ("done", <run() return tuple>) on confirmed frozen
-        repetition.
+        Returns True iff this was a wait-class iteration.
         """
         iter_tool_calls = [
             {"id": tc.id, "name": tc.name, "input": tc.input} for tc in tool_calls
         ]
         if not is_wait_iteration(iter_tool_calls):
-            return None
+            return False
         tc = tool_calls[0]
-        result_text = ""
-        for r in tool_results:
-            if isinstance(r, dict) and r.get("tool_use_id") == tc.id:
-                result_text = str(r.get("content", ""))
-                break
         st.stuck_tracker.record_fingerprint(
-            wait_iteration_fingerprint(tc.name, tc.input or {}, result_text)
+            wait_iteration_fingerprint(
+                tc.name, tc.input or {}, self._wait_result_text(tool_calls, tool_results)
+            )
         )
+        return True
+
+    async def _judge_wait_stuck(self, st: _ChatTurn, tool_calls, tool_results):
+        """Post-checkpoint stuck judgment for a wait-class iteration whose
+        fingerprint ``_record_wait_fingerprint`` already recorded.
+
+        Status transitions and output-byte growth are progress; a frozen
+        signature walks the same warn-once-then-terminate ladder.
+        ``warned`` stays one-shot: later progress never re-arms it.
+
+        Returns None to proceed, ("retry", None) after the wait-aware
+        nudge, or ("done", <run() return tuple>) on confirmed frozen
+        repetition.
+        """
+        tc = tool_calls[0]
+        result_text = self._wait_result_text(tool_calls, tool_results)
         if not st.stuck_tracker.check():
             return None
         if st.stuck_tracker.warned:

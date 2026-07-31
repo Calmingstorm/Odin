@@ -233,6 +233,69 @@ class TestPollWaitSeconds:
             )
             assert code == 0, ok
 
+    async def test_carriage_return_progress_advances_output_bytes(self):
+        """PR #244 round-1 blocker #2: \\r progress bars and newline-free
+        output must advance total_output_bytes — it is the wait-poll
+        progress signal, and readline() left it at zero."""
+        reg = ProcessRegistry()
+        started = await reg.start(
+            "localhost",
+            r"printf 'step 1\rstep 2\rstep 3\r'; printf 'no newline tail'; sleep 0.3",
+        )
+        pid = int(started.split("PID ")[1].split(")")[0])
+        result = await reg.poll(pid, wait_seconds=10)
+        assert "status=completed" in result
+        info = reg._processes[pid]
+        assert info.total_output_bytes >= len("step 1\rstep 2\rstep 3\r")
+        # \r segments render as display lines; the unterminated tail is
+        # flushed at EOF.
+        joined = "".join(info.output_buffer)
+        assert "step 2" in joined
+        assert "no newline tail" in joined
+
+    async def test_over_limit_line_does_not_kill_drainage(self):
+        """A single line beyond the asyncio stream limit (64KB) killed the
+        old readline() drainer; bounded raw reads cannot overrun."""
+        reg = ProcessRegistry()
+        size = 200_000
+        started = await reg.start(
+            "localhost",
+            f"python3 -c \"import sys; sys.stdout.write('x'*{size}); "
+            'sys.stdout.flush()"',
+        )
+        pid = int(started.split("PID ")[1].split(")")[0])
+        result = await reg.poll(pid, wait_seconds=15)
+        assert "status=completed" in result
+        assert reg._processes[pid].total_output_bytes == size
+
+    async def test_leader_exit_publishes_status_despite_pipe_holding_descendant(self):
+        """PR #244 round-1 blocker #3 (Odin's repro): `sleep 20 &` — the
+        leader exits immediately while the descendant holds stdout open.
+        Terminal state must publish at LEADER exit, and the group reap
+        (which is what closes the pipe) must not stall behind EOF."""
+        import os
+
+        reg = ProcessRegistry()
+        started = await reg.start("localhost", "sleep 20 & exit 0")
+        pid = int(started.split("PID ")[1].split(")")[0])
+        start = time.monotonic()
+        result = await reg.poll(pid, wait_seconds=15)
+        elapsed = time.monotonic() - start
+        assert elapsed < 10.0  # never waited on EOF or the full deadline
+        assert "status=completed" in result
+        assert "exit_code=0" in result
+        # The v3.59.1 contract: descendants are reaped at leader exit. Give
+        # the reap a moment, then probe group existence with signal 0 (a
+        # pure existence check, delivers nothing).
+        for _ in range(40):
+            try:
+                os.killpg(pid, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.25)
+        with pytest.raises(ProcessLookupError):
+            os.killpg(pid, 0)
+
     async def test_wedged_reader_never_wedges_the_poll(self):
         """Process exits during the wait but the reader task hangs: the
         bounded (shielded) drain gives up and the poll still reports —
@@ -240,6 +303,8 @@ class TestPollWaitSeconds:
         and the shield must not cancel the reader."""
 
         class _ExitedProc:
+            returncode = 0  # leader already exited (SIGCHLD-reaped)
+
             async def wait(self):
                 return 0
 
