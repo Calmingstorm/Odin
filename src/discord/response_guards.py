@@ -582,6 +582,18 @@ class StuckLoopTracker:
         fp = _fingerprint_tool_calls(tool_calls, names_only=self._names_only)
         self._fingerprints.append(fp)
 
+    def record_fingerprint(self, fingerprint: str) -> None:
+        """Record one iteration under a caller-computed fingerprint.
+
+        Used by the post-execution wait-class path: those iterations carry
+        a ``wait:``-prefixed result-aware fingerprint instead of the
+        argument fingerprint, in the SAME window and order — the prefix
+        keeps the two families disjoint so cross-comparisons can never
+        match ambiguously. Every iteration records exactly once, through
+        exactly one of these two methods.
+        """
+        self._fingerprints.append(fingerprint)
+
     def check(self) -> bool:
         """Return True if recent iterations form a stuck pattern."""
         fps = list(self._fingerprints)
@@ -606,6 +618,97 @@ class StuckLoopTracker:
         """Clear all recorded iterations and the warned flag."""
         self._fingerprints.clear()
         self.warned = False
+
+
+# ---------------------------------------------------------------------------
+# Wait-class iterations (design settled with Odin, 2026-07-31)
+# ---------------------------------------------------------------------------
+# An iteration consisting of EXACTLY ONE wait-class call (manage_process
+# poll / wait_for_agents) is judged on a RESULT-AWARE fingerprint after
+# execution instead of the argument-only pre-execution detector: identical
+# wait-polls are the CORRECT shape while the target progresses. Mixed
+# batches — a changing poll result must never bless a repeated
+# side-effecting call riding beside it — keep the strict detector.
+
+_WAIT_MP_STATUS = re.compile(
+    r"\[PID (\d+)\] status=(\w+)(?: exit_code=(-?\d+))?"
+    r"(?: uptime=\d+s)?(?: output_bytes=(\d+))?"
+)
+_WAIT_FP_PREFIX = "wait:"  # disjoint from argument fingerprints by prefix
+
+
+def is_wait_iteration(tool_calls: list[dict]) -> bool:
+    """True iff the iteration is exactly one wait-class call."""
+    if len(tool_calls) != 1:
+        return False
+    tc = tool_calls[0]
+    name = tc.get("name", "")
+    if name == "wait_for_agents":
+        return True
+    if name == "manage_process":
+        args = tc.get("input", tc.get("arguments", {})) or {}
+        return isinstance(args, dict) and args.get("action") == "poll"
+    return False
+
+
+def wait_iteration_fingerprint(tool_name: str, tool_input: dict, result_text: str) -> str:
+    """Canonical semantic progress signature for one wait-class call.
+
+    Volatile fields (uptime, runtimes, timestamps) are EXCLUDED — hashing
+    them would make a genuinely hung target immortal. Status transitions
+    and output-byte growth count as progress; a frozen signature three
+    iterations running means nothing is happening.
+    """
+    text = result_text or ""
+    if tool_name == "manage_process":
+        m = _WAIT_MP_STATUS.search(text)
+        if m:
+            pid, status, exit_code, out_bytes = m.groups()
+            return (
+                f"{_WAIT_FP_PREFIX}mp:{pid}:{status}:"
+                f"{exit_code or ''}:{out_bytes or ''}"
+            )
+        # Non-report results ("No process with PID …", executor errors)
+        # are stable text — identical failures repeating should trip.
+        digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+        return f"{_WAIT_FP_PREFIX}mp-raw:{digest}"
+    # wait_for_agents: the rendered result is volatile-free by construction
+    # (label/status/content only — no runtimes or timestamps), so agent
+    # identity + a text digest is the semantic signature.
+    args_ids = tool_input.get("agent_ids") if isinstance(tool_input, dict) else None
+    ids = ",".join(str(a) for a in args_ids) if isinstance(args_ids, list) else ""
+    digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+    return f"{_WAIT_FP_PREFIX}agents:{ids}:{digest}"
+
+
+def wait_target_alive(tool_name: str, result_text: str) -> bool:
+    """Whether the waited-on target is still running (drives nudge choice)."""
+    text = result_text or ""
+    if tool_name == "manage_process":
+        m = _WAIT_MP_STATUS.search(text)
+        return bool(m) and m.group(2) == "running"
+    return ": running" in text or "status=running" in text
+
+
+_WAIT_PROCESS_NUDGE = {
+    "role": "developer",
+    "content": (
+        "The process is still running but has produced NO new output since "
+        "your last poll. Do not repeat the identical poll immediately: poll "
+        "again with wait_seconds (60 is a good default), check on it a "
+        "different way (e.g. ps / CPU usage), do other useful work first, "
+        "or kill it if you judge it hung."
+    ),
+}
+
+_WAIT_AGENTS_NUDGE = {
+    "role": "developer",
+    "content": (
+        "The agents are still running with no new results. Wait again with "
+        "a meaningful timeout rather than immediately re-calling, or check "
+        "individual agents with get_agent_results."
+    ),
+}
 
 
 _STUCK_LOOP_RETRY_MSG = {

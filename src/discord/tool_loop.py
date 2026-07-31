@@ -72,13 +72,18 @@ from .response_guards import (
     _HEDGING_RETRY_MSG,
     _PROMISE_RETRY_MSG,
     _TOOL_UNAVAIL_RETRY_MSG,
+    _WAIT_AGENTS_NUDGE,
+    _WAIT_PROCESS_NUDGE,
     detect_code_hedging,
     detect_fabrication,
     detect_hedging,
     detect_premature_failure,
     detect_promise_without_action,
     detect_tool_unavailable,
+    is_wait_iteration,
     truncate_tool_output,
+    wait_iteration_fingerprint,
+    wait_target_alive,
 )
 from .tool_loop_helpers import (
     _ALLOWED_WEBHOOK_IDS,
@@ -597,6 +602,20 @@ class ToolLoopRunner:
             if outcome is not None:
                 return outcome[1]
 
+            # Wait-class stuck judgment runs POST-execution, after WI-4 has
+            # checkpointed the settled batch — a confirmed-frozen kill never
+            # discards the result that proved the freeze (Odin's ordering,
+            # 2026-07-31).
+            outcome = await self._check_wait_stuck(st, tool_calls, tool_results)
+            if outcome is not None:
+                kind, val = outcome
+                if kind == "done":
+                    return val
+                # WI-5: the wait-aware nudge + consumed warned flag go
+                # durable before the retry generation.
+                await st.durability.on_guard_injection(st)
+                continue
+
             handoff = self._check_skill_handoff(st, tool_calls, tool_results)
             if handoff is not None:
                 return handoff[1]
@@ -979,6 +998,14 @@ class ToolLoopRunner:
                 reasoning_effort=getattr(llm_resp, "provenance_reasoning_effort", None),
             )
         )
+        if is_wait_iteration(iter_tool_calls):
+            # Deferred judgment (design settled with Odin, 2026-07-31):
+            # identical wait-polls are the CORRECT shape while the target
+            # progresses, and results do not exist yet at this point.
+            # _check_wait_stuck records a result-aware fingerprint for this
+            # iteration AFTER execution — exactly one record per iteration,
+            # same window, same order. Mixed batches never take this path.
+            return None
         st.stuck_tracker.record(iter_tool_calls)
         if st.stuck_tracker.check():
             if st.stuck_tracker.warned:
@@ -1021,6 +1048,86 @@ class ToolLoopRunner:
                 )
                 return ("retry", None)
         return None
+
+    async def _check_wait_stuck(self, st: _ChatTurn, tool_calls, tool_results):
+        """Post-execution stuck judgment for wait-class iterations.
+
+        Runs ONLY for an iteration that was exactly one wait-class call
+        (``_check_stuck_and_record`` deferred it). Records a ``wait:``-
+        prefixed result-aware fingerprint — status transitions and
+        output-byte growth are progress; a frozen signature is not — then
+        applies the same warn-once-then-terminate ladder. ``warned`` stays
+        one-shot: later progress never re-arms it.
+
+        Returns None to proceed, ("retry", None) after the wait-aware
+        nudge, or ("done", <run() return tuple>) on confirmed frozen
+        repetition.
+        """
+        iter_tool_calls = [
+            {"id": tc.id, "name": tc.name, "input": tc.input} for tc in tool_calls
+        ]
+        if not is_wait_iteration(iter_tool_calls):
+            return None
+        tc = tool_calls[0]
+        result_text = ""
+        for r in tool_results:
+            if isinstance(r, dict) and r.get("tool_use_id") == tc.id:
+                result_text = str(r.get("content", ""))
+                break
+        st.stuck_tracker.record_fingerprint(
+            wait_iteration_fingerprint(tc.name, tc.input or {}, result_text)
+        )
+        if not st.stuck_tracker.check():
+            return None
+        if st.stuck_tracker.warned:
+            log.warning(
+                "Frozen wait repetition confirmed after warning — terminating tool loop"
+            )
+            await self._turn_recorder._save_turn_trajectory(st._trajectory, trace=st.trace)
+            await self._turn_recorder._emit_lifecycle_event(
+                "loop.stuck",
+                {
+                    "channel_id": str(st.message.channel.id),
+                    "iteration": st.iteration,
+                    "tools_used": st.tools_used_in_loop,
+                },
+            )
+            self._clear_active(st)
+            return (
+                "done",
+                (
+                    (
+                        f"Stopped after {st.iteration + 1} iterations: repeated "
+                        f"waiting on {tc.name} with no observable progress "
+                        f"(no status change, no new output). The background "
+                        f"work itself was not touched."
+                    ),
+                    False,
+                    True,
+                    st.tools_used_in_loop,
+                    False,
+                ),
+            )
+        st.stuck_tracker.warned = True
+        if wait_target_alive(tc.name, result_text):
+            nudge = (
+                _WAIT_PROCESS_NUDGE if tc.name == "manage_process" else _WAIT_AGENTS_NUDGE
+            )
+            log.info("Frozen wait pattern detected (target alive) — injecting wait nudge")
+        else:
+            # Terminal/error results repeating: the target is NOT alive, so
+            # the wait-specific advice would be a lie — ordinary guidance.
+            nudge = {
+                "role": "developer",
+                "content": (
+                    "You are repeating the same call against a finished or "
+                    "missing target and getting the same result. Act on the "
+                    "result you already have, or report and stop."
+                ),
+            }
+            log.info("Frozen wait pattern detected (target not alive) — injecting nudge")
+        st.messages.append(dict(nudge))
+        return ("retry", None)
 
     async def _finalize_or_retry(self, st: _ChatTurn, llm_resp):
         """The text-only-response branch: validation enforcement, the
