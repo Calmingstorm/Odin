@@ -55,20 +55,33 @@ def set_child_subreaper(enabled: bool = True) -> bool:
     return child_subreaper_active()
 
 
-def reap_adopted_zombies(adopted_pids: frozenset[int] = frozenset()) -> int:
+def reap_adopted_zombies(
+    adopted: set[tuple[int, int]] | frozenset[tuple[int, int]] = frozenset(),
+) -> int:
     """Reap zombies among orphans we previously VERIFIED as ours.
 
     Attribution happened while each process was alive (a zombie's
-    environment is unreadable), so this works from recorded pids. Only
-    zombies parented to us are touched, and ``waitpid`` on anything that
-    is not our child raises and is swallowed — another subsystem's status
-    is never taken.
+    environment is unreadable), so this works from recorded
+    ``(pid, starttime)`` identities — the starttime is re-checked so pid
+    reuse can never redirect a ``waitpid`` at an unrelated child
+    (round-11 #2). Only zombies parented to us are touched, and settled
+    entries are pruned from a mutable record.
     """
-    if not adopted_pids:
+    if not adopted:
         return 0
     reaped = 0
     mypid = os.getpid()
-    for pid in adopted_pids:
+    mutable = adopted if isinstance(adopted, set) else None
+    for pid, start in list(adopted):
+        current = _proc_starttime(pid)
+        if current is None:
+            if mutable is not None:
+                mutable.discard((pid, start))
+            continue
+        if current != start:
+            if mutable is not None:
+                mutable.discard((pid, start))  # pid reused — not ours
+            continue
         try:
             raw = Path(f"/proc/{pid}/stat").read_bytes()
             rest = raw.rsplit(b")", 1)[1].split()
@@ -79,6 +92,8 @@ def reap_adopted_zombies(adopted_pids: frozenset[int] = frozenset()) -> int:
         try:
             if os.waitpid(pid, os.WNOHANG)[0]:
                 reaped += 1
+                if mutable is not None:
+                    mutable.discard((pid, start))
         except (ChildProcessError, OSError):
             pass
     return reaped
@@ -160,6 +175,22 @@ def _proc_ids(pid: int) -> tuple[int, int] | None | str:
         return "unknown"  # malformed — never treated as absence
 
 
+def _proc_starttime(pid: int) -> int | None:
+    """Field 22 of /proc/<pid>/stat — the incarnation discriminator.
+
+    A bare pid is not an identity: after reuse it names a different
+    process entirely (round-11 #2). ``(pid, starttime)`` is stable and
+    unique for the life of one incarnation, so a recorded escapee can
+    never be confused with whatever later occupies its pid.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes()
+        rest = raw.rsplit(b")", 1)[1].split()
+        return int(rest[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def _proc_session(pid: int) -> int | None | str:
     """Session id alone (see :func:`_proc_ids` for the sentinel contract)."""
     ids = _proc_ids(pid)
@@ -175,7 +206,8 @@ def _scan_owned_members(
     adopted_by: int | None = None,
     known_own_children: frozenset[int] = frozenset(),
     job_token: str | None = None,
-    adopted_sink: set[int] | None = None,
+    proc_token: str | None = None,
+    adopted_sink: set[tuple[int, int]] | None = None,
 ) -> tuple[list[tuple[int, int]], bool]:
     """Enumerate every process we own, each PINNED with a pidfd.
 
@@ -261,18 +293,35 @@ def _scan_owned_members(
             ):
                 if job_token is None:
                     return None  # cannot attribute — ambiguous, never killed
-                token = _read_job_token(cur)
+                tokens = _read_env_tokens(cur)
+                if tokens is _UNKNOWN or tokens is None:
+                    return None  # unreadable — ambiguous, fail closed
+                assert isinstance(tokens, dict)
+                if PROC_TOKEN_ENV not in tokens or (
+                    proc_token is not None
+                    and tokens.get(PROC_TOKEN_ENV) != proc_token
+                ):
+                    # No Odin process marker at all: the environment was
+                    # DISCARDED (`env -i`, execve with an empty env), so
+                    # "not ours" cannot be concluded — an escapee could
+                    # erase its own provenance and be certified gone while
+                    # alive (round-11 #1). Fail closed.
+                    return None
+                token = tokens.get(JOB_TOKEN_ENV)
                 if token == job_token:
                     # Record provenance NOW: a zombie has no address
                     # space, so /proc/<pid>/environ becomes unreadable the
                     # moment it dies — identification must happen while it
                     # is alive, and reaping later goes by recorded pid.
                     if adopted_sink is not None:
-                        adopted_sink.add(cur)
+                        start = _proc_starttime(cur)
+                        if start is not None:
+                            adopted_sink.add((cur, start))
                     return True  # our escapee: adopted AND provably ours
-                if token is _UNKNOWN:
-                    return None  # unreadable provenance — ambiguous
-                return False  # another subsystem's child — NOT ours
+                # Carries OUR process marker but a different job (or
+                # none): another Odin subsystem's child — decidedly not
+                # this job's, and killing it would be collateral damage.
+                return False
             cur = ppid
         return None  # bound exhausted — UNKNOWN, never "not ours"
 
@@ -288,20 +337,28 @@ def _scan_owned_members(
 
 
 JOB_TOKEN_ENV = "ODIN_BG_JOB"
+# Process-wide provenance: stamped into os.environ at startup, so EVERY
+# subprocess Odin spawns inherits it — background jobs, ssh/run_command
+# children, browser workers alike. It is what lets a direct child with a
+# DIFFERENT job (or none) be decided "another subsystem's, not ours"
+# instead of ambiguous; only a child that deliberately discarded its
+# environment lacks it, and that is exactly the case that must fail
+# closed (round-11 #1).
+PROC_TOKEN_ENV = "ODIN_PROC"
 
 
-def _read_job_token(pid: int) -> str | None | object:
-    """This process's managed-job token from /proc/<pid>/environ.
+def _read_env_tokens(pid: int) -> dict[str, str] | None | object:
+    """This process's Odin provenance markers from /proc/<pid>/environ.
 
-    Returns the token, ``None`` when the process carries none (or is
-    gone), or :data:`_UNKNOWN` when the environment could not be read —
-    ambiguity, never absence.
+    Returns a dict with whichever of ``ODIN_PROC``/``ODIN_BG_JOB`` are
+    present, ``None`` when the process is gone, or :data:`_UNKNOWN` when
+    the environment could not be read — ambiguity, never absence.
 
-    The token is injected at spawn and inherited across fork AND exec, so
-    it follows a descendant that double-forks or calls ``setsid()``. It
-    is per-JOB, which process-wide subreaping cannot provide: adoption
-    alone cannot tell OUR escapee from an unrelated subprocess another
-    Odin subsystem started (round-10).
+    The markers are inherited across fork AND exec, so they follow a
+    descendant that double-forks or calls ``setsid()``. They are NOT a
+    security boundary: a child can discard its environment, which is why
+    a missing process marker fails closed rather than reading as "not
+    ours" (round-11 #1).
     """
     try:
         raw = Path(f"/proc/{pid}/environ").read_bytes()
@@ -309,27 +366,49 @@ def _read_job_token(pid: int) -> str | None | object:
         return None
     except OSError:
         return _UNKNOWN
-    marker = JOB_TOKEN_ENV.encode() + b"="
-    for item in raw.split(b"\0"):
-        if item.startswith(marker):
-            return item[len(marker):].decode("utf-8", "replace")
-    return None
+    found: dict[str, str] = {}
+    for key in (PROC_TOKEN_ENV, JOB_TOKEN_ENV):
+        marker = key.encode() + b"="
+        for item in raw.split(b"\0"):
+            if item.startswith(marker):
+                found[key] = item[len(marker):].decode("utf-8", "replace")
+                break
+    return found
 
 
-def _reap_adopted(pids: set[int], known_own_children: frozenset[int]) -> None:
+def _read_job_token(pid: int) -> str | None | object:
+    """Just this job's token (see :func:`_read_env_tokens`)."""
+    tokens = _read_env_tokens(pid)
+    if tokens is None or tokens is _UNKNOWN:
+        return tokens
+    assert isinstance(tokens, dict)
+    return tokens.get(JOB_TOKEN_ENV)
+
+
+def _reap_adopted(
+    identities: set[tuple[int, int]], known_own_children: frozenset[int]
+) -> None:
     """Non-blocking reap of orphans already VERIFIED as ours.
 
-    ``pids`` were attributed to this job by provenance while they were
-    alive — a zombie has no address space, so its environment cannot be
-    re-read afterwards. Pids we deliberately spawned are still excluded:
-    asyncio's child watcher owns those statuses and stealing one would
-    break it. Never ``waitpid(-1)`` for the same reason.
+    Entries are ``(pid, starttime)``: a bare pid is not an identity after
+    reuse (round-11 #2), so the incarnation is re-checked before any
+    ``waitpid``. Pids we deliberately spawned are still excluded —
+    asyncio's child watcher owns those statuses. Never ``waitpid(-1)``.
+    Settled entries are pruned so the record cannot grow without bound.
     """
-    for pid in list(pids):
+    for pid, start in list(identities):
         if pid in known_own_children:
             continue
+        current = _proc_starttime(pid)
+        if current is None:
+            identities.discard((pid, start))  # provably gone
+            continue
+        if current != start:
+            identities.discard((pid, start))  # pid reused — not our process
+            continue
         try:
-            os.waitpid(pid, os.WNOHANG)
+            if os.waitpid(pid, os.WNOHANG)[0]:
+                identities.discard((pid, start))
         except (ChildProcessError, OSError):
             pass  # not our child, or already reaped
 
@@ -373,7 +452,8 @@ async def _terminate_session_until_empty(
     known_own_children: frozenset[int] = frozenset(),
     containment: bool = True,
     job_token: str | None = None,
-    adopted_sink: set[int] | None = None,
+    proc_token: str | None = None,
+    adopted_sink: set[tuple[int, int]] | None = None,
 ) -> bool:
     """Drive everything we own to provably empty.
 
@@ -397,7 +477,9 @@ async def _terminate_session_until_empty(
     (round-9 #1).
     """
     deadline = time.monotonic() + timeout
-    adopted: set[int] = adopted_sink if adopted_sink is not None else set()
+    adopted: set[tuple[int, int]] = (
+        adopted_sink if adopted_sink is not None else set()
+    )
     termed: set[int] = set()
     escalate_at = time.monotonic() + grace if term_first else 0.0
     clean_scans = 0
@@ -408,6 +490,7 @@ async def _terminate_session_until_empty(
             adopted_by=adopted_by,
             known_own_children=known_own_children,
             job_token=job_token,
+            proc_token=proc_token,
             adopted_sink=adopted,
         )
         try:
@@ -518,7 +601,7 @@ class ProcessRegistry:
         # Orphans verified as OURS by provenance while alive — reaping
         # goes by recorded pid because a zombie's environment is
         # unreadable (round-10).
-        self._adopted_pids: set[int] = set()
+        self._adopted_pids: set[tuple[int, int]] = set()
 
     @property
     def _containment(self) -> bool:
@@ -824,7 +907,7 @@ class ProcessRegistry:
             self._processes.pop(pid)
         # Adopted orphans die as zombies (nothing else will wait on them);
         # sweep them here so a long-running process cannot accumulate.
-        reap_adopted_zombies(frozenset(self._adopted_pids))
+        reap_adopted_zombies(self._adopted_pids)
         return len(to_remove)
 
     # ------------------------------------------------------------------
@@ -855,6 +938,7 @@ class ProcessRegistry:
             known_own_children=frozenset(self._own_children),
             containment=self._containment,
             job_token=info.job_token or None,
+            proc_token=os.environ.get(PROC_TOKEN_ENV),
             adopted_sink=self._adopted_pids,
         )
         info.session_confirmed_empty = gone
@@ -950,6 +1034,7 @@ class ProcessRegistry:
                 known_own_children=frozenset(self._own_children),
                 containment=self._containment,
                 job_token=info.job_token or None,
+                proc_token=os.environ.get(PROC_TOKEN_ENV),
                 adopted_sink=self._adopted_pids,
             )
         except Exception:

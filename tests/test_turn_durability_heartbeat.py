@@ -52,11 +52,39 @@ async def admit(store):
 async def test_beats_keep_the_lease_alive_past_the_ttl(tmp_path):
     store = make_store(tmp_path, ttl=0.3)
     handle = await admit(store)
-    await asyncio.sleep(0.8)  # ~2.5x TTL, several real beats
-    (expires,) = store._conn.execute(
-        "SELECT lease_expires_at FROM turns"
-    ).fetchone()
-    assert expires > time.time()  # still alive
+
+    def expiry() -> float:
+        (value,) = store._conn.execute(
+            "SELECT lease_expires_at FROM turns"
+        ).fetchone()
+        return float(value)
+
+    # Observe RENEWALS rather than sampling liveness at one instant: under
+    # coverage instrumentation a beat can land late, and an instantaneous
+    # "expires > now" check then fails for a lease that is being renewed
+    # perfectly well. The contract is that beats keep pushing the deadline
+    # out past the original TTL.
+    original = expiry()  # the deadline the turn would die on unaided
+    renewals = 0
+    renewed_past_original = False
+    last = original
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+        current = expiry()
+        if current > last:
+            renewals += 1
+            last = current
+            if time.time() > original:
+                # A renewal recorded AFTER the original deadline had
+                # already passed: the lease outlived it because beats
+                # kept pushing it out.
+                renewed_past_original = True
+        if renewals >= 2 and renewed_past_original:
+            break
+    assert renewals >= 2, "heartbeat never renewed the lease twice"
+    assert renewed_past_original, "lease was never renewed past its first deadline"
+
     await handle.settle_terminal(cancelled=False, is_error=False)
     assert handle._heartbeat_task is None  # stopped on settlement
     store.close()

@@ -1608,9 +1608,11 @@ class TestContainmentHelpers:
                     break
                 await asyncio.sleep(0.05)
             assert grandchild is not None, "orphan never reparented to us"
-            # Once it dies it is a zombie; the recorded pid still reaps it.
+            identity = (grandchild, pm._proc_starttime(grandchild))
+            assert identity[1] is not None
+            # Once it dies it is a zombie; the recorded IDENTITY reaps it.
             for _ in range(60):
-                if pm.reap_adopted_zombies(frozenset({grandchild})) >= 1:
+                if pm.reap_adopted_zombies({identity}) >= 1:
                     break
                 await asyncio.sleep(0.1)
             else:
@@ -1632,6 +1634,8 @@ class TestContainmentHelpers:
     def test_sweeper_survives_unreadable_proc(self, monkeypatch):
         import src.tools.process_manager as pm
 
+        monkeypatch.setattr(pm, "_proc_starttime", lambda _pid: 111)
+
         class FakePath:
             def __init__(self, _p):
                 pass
@@ -1640,7 +1644,7 @@ class TestContainmentHelpers:
                 raise OSError("unreadable")
 
         monkeypatch.setattr(pm, "Path", FakePath)
-        assert pm.reap_adopted_zombies(frozenset({4242})) == 0
+        assert pm.reap_adopted_zombies({(4242, 111)}) == 0
 
     def test_prctl_nonzero_return_reads_state(self, monkeypatch):
         """A failing prctl must not be reported as success — the value is
@@ -1677,7 +1681,8 @@ class TestContainmentHelpers:
             raise ChildProcessError("not ours")
 
         monkeypatch.setattr(pm.os, "waitpid", not_our_child)
-        assert pm.reap_adopted_zombies(frozenset({111, 222})) == 0
+        monkeypatch.setattr(pm, "_proc_starttime", lambda _pid: 5)
+        assert pm.reap_adopted_zombies({(111, 5), (222, 5)}) == 0
 
     def test_inline_reap_skips_own_children(self, monkeypatch):
         """The in-loop reap after KILL uses the same asyncio-safety rule:
@@ -1688,7 +1693,8 @@ class TestContainmentHelpers:
         monkeypatch.setattr(
             pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
         )
-        pm._reap_adopted({100, 200}, frozenset({100}))
+        monkeypatch.setattr(pm, "_proc_starttime", lambda _pid: 42)
+        pm._reap_adopted({(100, 42), (200, 42)}, frozenset({100}))
         assert waited == [200]  # 100 is ours → left to asyncio's watcher
 
 
@@ -1769,12 +1775,34 @@ class TestNoCollateralDamage:
             pm.os, "pidfd_open", lambda _pid: os.open("/dev/null", os.O_RDONLY)
         )
         monkeypatch.setattr(pm, "_proc_ids", lambda _pid: (mypid, 999))
-        monkeypatch.setattr(pm, "_read_job_token", lambda _pid: pm._UNKNOWN)
+        monkeypatch.setattr(pm, "_read_env_tokens", lambda _pid: pm._UNKNOWN)
         pinned, complete = pm._scan_owned_members(
-            7, leader_pid=7, adopted_by=mypid, job_token="tok"
+            7, leader_pid=7, adopted_by=mypid, job_token="tok", proc_token="P"
         )
         pm._close_pinned(pinned)
         assert pinned == []  # untouched
+        assert complete is False  # emptiness cannot be affirmed
+
+    def test_stripped_provenance_fails_closed(self, monkeypatch):
+        """Round-11 #1: the environment is CHILD-CONTROLLED (`env -i`),
+        so a MISSING token can never mean 'not ours' — an escapee could
+        erase its own provenance and be certified gone while alive. It is
+        ambiguous: untouched, and the scan is incomplete."""
+        import src.tools.process_manager as pm
+
+        mypid = os.getpid()
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["4242"])
+        monkeypatch.setattr(
+            pm.os, "pidfd_open", lambda _pid: os.open("/dev/null", os.O_RDONLY)
+        )
+        monkeypatch.setattr(pm, "_proc_ids", lambda _pid: (mypid, 999))
+        # No Odin process marker at all: the environment was discarded.
+        monkeypatch.setattr(pm, "_read_env_tokens", lambda _pid: {})
+        pinned, complete = pm._scan_owned_members(
+            7, leader_pid=7, adopted_by=mypid, job_token="tok", proc_token="P"
+        )
+        pm._close_pinned(pinned)
+        assert pinned == []  # never killed on a guess
         assert complete is False  # emptiness cannot be affirmed
 
     def test_foreign_token_is_explicitly_not_ours(self, monkeypatch):
@@ -1786,12 +1814,18 @@ class TestNoCollateralDamage:
             pm.os, "pidfd_open", lambda _pid: os.open("/dev/null", os.O_RDONLY)
         )
         monkeypatch.setattr(pm, "_proc_ids", lambda _pid: (mypid, 999))
-        monkeypatch.setattr(pm, "_read_job_token", lambda _pid: "someone-elses")
+        # Carries our PROCESS marker but a different job token.
+        monkeypatch.setattr(
+            pm, "_read_env_tokens",
+            lambda _pid: {pm.PROC_TOKEN_ENV: "P", pm.JOB_TOKEN_ENV: "someone-elses"},
+        )
         pinned, complete = pm._scan_owned_members(
-            7, leader_pid=7, adopted_by=mypid, job_token="tok"
+            7, leader_pid=7, adopted_by=mypid, job_token="tok", proc_token="P"
         )
         pm._close_pinned(pinned)
-        assert pinned == [] and complete is True  # decided: not ours
+        # A DIFFERENT job's token is positive evidence, so this one is
+        # decided (not ours) and the scan stays complete.
+        assert pinned == [] and complete is True
 
     def test_reap_never_touches_foreign_provenance(self, monkeypatch):
         import src.tools.process_manager as pm
@@ -1801,8 +1835,10 @@ class TestNoCollateralDamage:
             pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
         )
         monkeypatch.setattr(pm, "_read_job_token", lambda pid: "ours" if pid == 1 else "theirs")
-        # Only pids VERIFIED as ours (recorded at scan time) are reaped.
-        pm._reap_adopted({1}, frozenset())
+        # Only identities VERIFIED as ours (recorded at scan time) are
+        # reaped, and the incarnation must still match.
+        monkeypatch.setattr(pm, "_proc_starttime", lambda _pid: 111)
+        pm._reap_adopted({(1, 111)}, frozenset())
         assert waited == [1]
         waited.clear()
         pm._reap_adopted(set(), frozenset())  # nothing verified → no reaping
@@ -1882,4 +1918,82 @@ class TestProvenanceArms:
             raise ChildProcessError("not our child")
 
         monkeypatch.setattr(pm.os, "waitpid", boom)
-        pm._reap_adopted({4242}, frozenset())  # must not raise
+        monkeypatch.setattr(pm, "_proc_starttime", lambda _pid: 111)
+        pm._reap_adopted({(4242, 111)}, frozenset())  # must not raise
+
+
+class TestPidReuseSafety:
+    """Round-11 #2: a bare pid is not an identity. Records carry the
+    process's starttime so a reused pid can never redirect a waitpid."""
+
+    def test_reap_skips_reused_pid_and_prunes_it(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        waited: list[int] = []
+        monkeypatch.setattr(
+            pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
+        )
+        monkeypatch.setattr(pm, "_proc_starttime", lambda _pid: 999)  # different
+        recorded = {(4242, 111)}
+        pm._reap_adopted(recorded, frozenset())
+        assert waited == []  # the incarnation differs → never waited on
+        assert recorded == set()  # stale record pruned
+
+    def test_reap_prunes_vanished_identity(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(pm, "_proc_starttime", lambda _pid: None)
+        recorded = {(4242, 111)}
+        pm._reap_adopted(recorded, frozenset())
+        assert recorded == set()  # provably gone → pruned
+
+    def test_sweeper_skips_reused_pid(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        waited: list[int] = []
+        monkeypatch.setattr(
+            pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
+        )
+        monkeypatch.setattr(pm, "_proc_starttime", lambda _pid: 999)
+        recorded = {(4242, 111)}
+        assert pm.reap_adopted_zombies(recorded) == 0
+        assert waited == [] and recorded == set()
+
+    def test_recorded_identity_carries_starttime(self, monkeypatch):
+        """The scan records (pid, starttime), not a bare pid."""
+        import src.tools.process_manager as pm
+
+        mypid = os.getpid()
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["4242"])
+        monkeypatch.setattr(
+            pm.os, "pidfd_open", lambda _pid: os.open("/dev/null", os.O_RDONLY)
+        )
+        monkeypatch.setattr(pm, "_proc_ids", lambda _pid: (mypid, 999))
+        monkeypatch.setattr(
+            pm, "_read_env_tokens",
+            lambda _pid: {pm.PROC_TOKEN_ENV: "P", pm.JOB_TOKEN_ENV: "tok"},
+        )
+        monkeypatch.setattr(pm, "_proc_starttime", lambda _pid: 777)
+        sink: set[tuple[int, int]] = set()
+        pinned, complete = pm._scan_owned_members(
+            7, leader_pid=7, adopted_by=mypid, job_token="tok",
+            proc_token="P", adopted_sink=sink,
+        )
+        pm._close_pinned(pinned)
+        assert sink == {(4242, 777)}
+
+    def test_starttime_reader_states(self):
+        import src.tools.process_manager as pm
+
+        assert pm._proc_starttime(4_000_000) is None  # gone
+        assert isinstance(pm._proc_starttime(os.getpid()), int)  # live
+
+    def test_sweeper_prunes_vanished_identity(self, monkeypatch):
+        """A recorded escapee that is provably gone is pruned from the
+        record rather than retained forever."""
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(pm, "_proc_starttime", lambda _pid: None)
+        recorded = {(4242, 111)}
+        assert pm.reap_adopted_zombies(recorded) == 0
+        assert recorded == set()

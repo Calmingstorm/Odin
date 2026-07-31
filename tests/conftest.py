@@ -242,8 +242,12 @@ def _process_containment():
     correctly refuses to claim success and every shutdown path raises —
     tests would be exercising a mode production never runs in.
     """
-    from src.tools.process_manager import set_child_subreaper
+    import os
+    import secrets
+
+    from src.tools.process_manager import PROC_TOKEN_ENV, set_child_subreaper
 
     previous = set_child_subreaper(True)
+    os.environ.setdefault(PROC_TOKEN_ENV, secrets.token_hex(8))
     yield
     set_child_subreaper(previous)

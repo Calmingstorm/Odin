@@ -10,6 +10,7 @@ between the two bots stays predictable.
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 from pathlib import Path
@@ -88,7 +89,16 @@ def _enable_process_containment(log) -> None:
     reparents to PID 1 and becomes unattributable — and the process
     manager then refuses to claim its cleanup is complete (PR #244).
     """
-    from .tools.process_manager import set_child_subreaper
+    import secrets
+
+    from .tools.process_manager import PROC_TOKEN_ENV, set_child_subreaper
+
+    # Process-wide provenance: stamped into os.environ BEFORE any
+    # subprocess is spawned, so every child Odin creates inherits it and
+    # background-job cleanup can tell another subsystem's child (decided
+    # not-ours) from one that discarded its environment (ambiguous, fails
+    # closed).
+    os.environ.setdefault(PROC_TOKEN_ENV, secrets.token_hex(8))
 
     if set_child_subreaper(True):
         log.debug("Child-subreaper containment active")
