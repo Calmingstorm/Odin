@@ -782,12 +782,13 @@ class TestRound3Blockers:
 
 
 class TestRaceFreeGroupTermination:
-    """Round-5 blocker #2: every signal to a post-leader-exit group goes
-    through a pidfd pinned BEFORE membership verification, so pid reuse
-    between check and signal cannot misdirect it."""
+    """Round-5 #2 / round-6 #1-#2: every signal goes to a pidfd pinned
+    BEFORE membership verification (no pid-reuse window), every pass
+    RE-ENUMERATES (fork-on-TERM cannot escape), and a scan that could not
+    complete is never mistaken for an empty group."""
 
     async def test_pins_only_true_group_members(self):
-        from src.tools.process_manager import _close_pinned, _pinned_group_members
+        from src.tools.process_manager import _close_pinned, _scan_group_members
 
         proc = await asyncio.create_subprocess_shell(
             "sleep 5 & sleep 5", stdout=asyncio.subprocess.PIPE,
@@ -795,23 +796,63 @@ class TestRaceFreeGroupTermination:
         )
         try:
             await asyncio.sleep(0.4)
-            pinned = _pinned_group_members(proc.pid)
+            pinned, complete = _scan_group_members(proc.pid)
             try:
                 pids = {pid for pid, _fd in pinned}
-                assert proc.pid in pids  # the leader
-                assert len(pids) >= 2  # plus descendants
-                # NOTHING outside the group: our own process is never pinned.
-                assert os.getpid() not in pids
+                assert complete is True
+                assert proc.pid in pids and len(pids) >= 2
+                assert os.getpid() not in pids  # nothing outside the group
             finally:
                 _close_pinned(pinned)
         finally:
             proc.kill()
             await proc.wait()
 
-    async def test_reap_racefree_kills_term_immune_descendant(self):
-        from src.tools.process_manager import _reap_group_racefree
+    async def test_fork_on_term_descendant_cannot_escape(self):
+        """Round-6 blocker #1 (Odin's repro): a TERM handler that forks a
+        fresh same-session TERM-immune child is caught by the NEXT
+        enumeration pass — a one-shot pinned set would miss it."""
+        from src.tools.process_manager import (
+            _scan_group_members,
+            _terminate_group_until_empty,
+        )
 
-        # A descendant that ignores SIGTERM: only the KILL escalation ends it.
+        script = (
+            "import os, signal, sys, time\n"
+            "def handler(sig, frm):\n"
+            "    if os.fork() == 0:\n"
+            "        signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "        time.sleep(60)\n"
+            "        os._exit(0)\n"
+            "    os._exit(0)\n"
+            "signal.signal(signal.SIGTERM, handler)\n"
+            "time.sleep(60)\n"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "python3", "-c", script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        pgid = proc.pid
+        try:
+            await asyncio.sleep(0.5)
+            gone = await _terminate_group_until_empty(pgid, grace=0.5, timeout=10.0)
+            assert gone is True  # affirmative empty observation
+            pinned, complete = _scan_group_members(pgid)
+            try:
+                assert complete and not pinned  # the forked child died too
+            finally:
+                from src.tools.process_manager import _close_pinned
+
+                _close_pinned(pinned)
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+
+    async def test_term_immune_descendant_is_killed(self):
+        from src.tools.process_manager import _terminate_group_until_empty
+
         proc = await asyncio.create_subprocess_shell(
             "python3 -c \"import signal,time;"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN);time.sleep(30)\" & "
@@ -819,35 +860,75 @@ class TestRaceFreeGroupTermination:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, start_new_session=True,
         )
-        pgid = proc.pid
         try:
             await asyncio.sleep(0.5)
-            await _reap_group_racefree(pgid, grace=0.5)
-            from src.tools.process_manager import _pinned_group_members
-
-            for _ in range(30):
-                pinned = _pinned_group_members(pgid)
-                alive = len(pinned)
-                _close_pinned_local(pinned)
-                if alive == 0:
-                    break
-                await asyncio.sleep(0.2)
-            assert alive == 0  # TERM-immune descendant did NOT survive
+            assert await _terminate_group_until_empty(
+                proc.pid, grace=0.5, timeout=10.0
+            ) is True
         finally:
             if proc.returncode is None:
                 proc.kill()
                 await proc.wait()
 
-    async def test_empty_group_is_a_noop(self):
-        from src.tools.process_manager import _kill_group_racefree_sync
+    async def test_empty_group_is_immediately_complete(self):
+        from src.tools.process_manager import _terminate_group_until_empty
 
-        assert _kill_group_racefree_sync(4_000_000) == 0
+        assert await _terminate_group_until_empty(4_000_000, timeout=1.0) is True
 
 
-def _close_pinned_local(pinned):
-    from src.tools.process_manager import _close_pinned
+class TestScanCompleteness:
+    """Round-6 blocker #2: inspection failure is NOT absence."""
 
-    _close_pinned(pinned)
+    def test_unreadable_proc_is_incomplete(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(
+            pm.os, "listdir", lambda _p: (_ for _ in ()).throw(OSError("nope"))
+        )
+        pinned, complete = pm._scan_group_members(1234)
+        assert pinned == [] and complete is False
+
+    def test_pidfd_exhaustion_is_incomplete_not_empty(self, monkeypatch):
+        """Odin's EMFILE repro: pidfd_open failing for LIVE processes must
+        not render the group empty."""
+        import src.tools.process_manager as pm
+
+        def emfile(_pid):
+            raise OSError(24, "Too many open files")
+
+        monkeypatch.setattr(pm.os, "pidfd_open", emfile)
+        pinned, complete = pm._scan_group_members(1234)
+        assert pinned == [] and complete is False
+
+    def test_vanished_candidate_does_not_spoil_the_scan(self, monkeypatch):
+        """A process that exits mid-scan is genuinely gone — ESRCH from
+        pidfd_open keeps the scan COMPLETE."""
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(
+            pm.os, "pidfd_open",
+            lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
+        )
+        pinned, complete = pm._scan_group_members(1234)
+        assert pinned == [] and complete is True
+
+    def test_stat_read_error_is_unknown_not_gone(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        class FakePath:
+            def __init__(self, _p):
+                pass
+
+            def read_text(self):
+                raise OSError(24, "Too many open files")
+
+        monkeypatch.setattr(pm, "Path", FakePath)
+        assert pm._stat_fields(1) == "unknown"
+
+    def test_stat_missing_is_gone(self):
+        import src.tools.process_manager as pm
+
+        assert pm._stat_fields(4_000_000) is None
 
 
 class TestShutdownBarrier:
@@ -881,14 +962,13 @@ class TestShutdownBarrier:
         reg._processes[proc.pid] = info
         try:
             start = time.monotonic()
-            await asyncio.wait_for(reg.shutdown(), timeout=SHUTDOWN_REAP_TIMEOUT + 15)
-            assert time.monotonic() - start < SHUTDOWN_REAP_TIMEOUT + 15
-            # Barrier held: leader reaped and the group provably gone
-            # BEFORE shutdown returned, despite the immortal task.
-            assert proc.returncode is not None
-            from src.tools.process_manager import _kill_group_racefree_sync
+            await asyncio.wait_for(reg.shutdown(), timeout=SHUTDOWN_REAP_TIMEOUT + 20)
+            assert time.monotonic() - start < SHUTDOWN_REAP_TIMEOUT + 20
+            assert proc.returncode is not None  # leader reaped
+            from src.tools.process_manager import _scan_group_members
 
-            assert _kill_group_racefree_sync(proc.pid) == 0
+            pinned, complete = _scan_group_members(proc.pid)
+            assert complete and not pinned  # group provably empty
         finally:
             resist = False
             task.cancel()
@@ -900,18 +980,22 @@ class TestShutdownBarrier:
                 proc.kill()
                 await proc.wait()
 
-    async def test_kill_group_until_gone_reports_failure_loudly(self, monkeypatch):
-        """An unkillable survivor makes the barrier return False (the
-        caller's loud report), never a silent success."""
+    async def test_barrier_reports_failure_when_scan_cannot_complete(
+        self, monkeypatch
+    ):
+        """Round-6 #2 end-to-end: a scan that cannot complete makes the
+        barrier return False — never a false success with a live group."""
         import src.tools.process_manager as pm
 
         reg = ProcessRegistry()
-        monkeypatch.setattr(pm, "_kill_group_racefree_sync", lambda pgid: 1)
+        monkeypatch.setattr(
+            pm.os, "listdir", lambda _p: (_ for _ in ()).throw(OSError("nope"))
+        )
         stub = type("P", (), {"pid": 4242, "returncode": 0})()
         info = ProcessInfo(
             pid=4242, command="x", host="local", start_time=0.0, process=stub,
         )
-        assert await reg._kill_group_until_gone(info, timeout=0.3) is False
+        assert await reg._kill_group_until_gone(info, timeout=0.5) is False
 
     async def test_kill_group_until_gone_no_process_is_true(self):
         reg = ProcessRegistry()
@@ -920,15 +1004,23 @@ class TestShutdownBarrier:
 
 
 class TestRaceFreeHelperArms:
-    """Defensive arms of the pidfd machinery — every one is a fail-safe
-    path (skip the candidate / treat as exited), never a signal."""
+    def test_close_pinned_tolerates_bad_fd(self):
+        from src.tools.process_manager import _close_pinned
 
-    def test_stat_fields_missing_process(self):
-        from src.tools.process_manager import _stat_fields
+        _close_pinned([(1, 999_999)])  # already-closed fd → swallowed
 
-        assert _stat_fields(4_000_000) is None
+    def test_pidfd_exited_on_bad_fd_reports_exited(self, monkeypatch):
+        import select as _select
 
-    def test_stat_fields_malformed_stat(self, tmp_path, monkeypatch):
+        from src.tools.process_manager import _pidfd_exited
+
+        monkeypatch.setattr(
+            _select, "select",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("bad fd")),
+        )
+        assert _pidfd_exited(999_999) is True
+
+    def test_malformed_stat_is_gone(self, monkeypatch):
         import src.tools.process_manager as pm
 
         class FakePath:
@@ -941,34 +1033,45 @@ class TestRaceFreeHelperArms:
         monkeypatch.setattr(pm, "Path", FakePath)
         assert pm._stat_fields(1) is None
 
-    def test_pinned_members_survives_unreadable_proc(self, monkeypatch):
+    def test_pinned_member_with_unreadable_stat_is_incomplete(self, monkeypatch):
+        """A candidate we pinned but cannot classify (stat unreadable)
+        leaves the scan INCOMPLETE — never silently skipped as absent."""
         import src.tools.process_manager as pm
 
-        def boom(_path):
-            raise OSError("proc unavailable")
+        real_stat = pm._stat_fields
+        target = os.getpid()
 
-        monkeypatch.setattr(pm.os, "listdir", boom)
-        assert pm._pinned_group_members(1234) == []
+        def flaky(pid):
+            return "unknown" if pid == target else real_stat(pid)
 
-    def test_close_pinned_tolerates_bad_fd(self):
-        from src.tools.process_manager import _close_pinned
+        monkeypatch.setattr(pm, "_stat_fields", flaky)
+        pinned, complete = pm._scan_group_members(4_000_001)
+        assert complete is False
+        pm._close_pinned(pinned)
 
-        _close_pinned([(1, 999_999)])  # already-closed fd → swallowed
+    def test_signal_to_dead_pidfd_is_swallowed(self):
+        """Signalling a pidfd whose process already exited must not raise
+        out of a termination pass."""
+        import src.tools.process_manager as pm
 
-    def test_pidfd_exited_on_bad_fd_reports_exited(self, monkeypatch):
-        """An unusable fd must read as EXITED (fail-safe): the caller then
-        stops waiting on it rather than looping forever."""
-        import select as _select
+        assert pm._signal_pinned([(1, 999_999)], 15) is None  # bad fd → debug log
 
-        from src.tools.process_manager import _pidfd_exited
+    async def test_pidfd_exited_true_after_exit(self):
+        """The positive arm: a pidfd polls readable once its process is
+        gone (the loop's completion signal)."""
+        import src.tools.process_manager as pm
 
-        def boom(*_a, **_k):
-            raise OSError("bad file descriptor")
-
-        monkeypatch.setattr(_select, "select", boom)
-        assert _pidfd_exited(999_999) is True
-
-    async def test_reap_racefree_returns_when_nothing_pinned(self):
-        from src.tools.process_manager import _reap_group_racefree
-
-        await _reap_group_racefree(4_000_000, grace=0.1)  # returns immediately
+        proc = await asyncio.create_subprocess_shell(
+            "true", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        fd = os.pidfd_open(proc.pid)
+        try:
+            await proc.wait()
+            for _ in range(30):
+                if pm._pidfd_exited(fd):
+                    break
+                await asyncio.sleep(0.1)
+            assert pm._pidfd_exited(fd) is True
+        finally:
+            os.close(fd)

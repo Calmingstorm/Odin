@@ -67,48 +67,71 @@ def _utf8_boundary_split(buf: bytes) -> tuple[bytes, bytes]:
 
 
 
-def _stat_fields(pid: int) -> tuple[int, int] | None:
+def _stat_fields(pid: int) -> tuple[int, int] | None | str:
     """(pgrp, session) from /proc/<pid>/stat, parsed after the comm parens
-    (comm may embed spaces/parens). None when the process vanished."""
+    (comm may embed spaces/parens).
+
+    Returns None when the process is provably GONE (ENOENT/malformed —
+    a vanished process is not a member), or the sentinel ``"unknown"``
+    when inspection FAILED for another reason, which the caller must
+    treat as an incomplete scan rather than as absence (round-6 #2).
+    """
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return None  # exited between listdir and read — genuinely gone
+    except OSError:
+        return "unknown"  # EMFILE/EACCES/… — we do NOT know
+    try:
         rest = stat.rsplit(")", 1)[1].split()
         return int(rest[2]), int(rest[3])
-    except (OSError, IndexError, ValueError):
+    except (IndexError, ValueError):
         return None
 
 
-def _pinned_group_members(pgid: int) -> list[tuple[int, int]]:
+def _scan_group_members(pgid: int) -> tuple[list[tuple[int, int]], bool]:
     """Enumerate the group's members, each PINNED with a pidfd.
 
-    The pin happens BEFORE membership is verified, so the verification and
-    every later signal act on the exact process the fd names — pid reuse
-    between steps is structurally impossible (PR #244 round-5 blocker #2).
-    Membership = pgrp == pgid AND session == pgid: our leader was spawned
-    with start_new_session, its descendants inherit that session, and
-    setpgid cannot move a foreign process into it (same-session rule).
-    Candidates that cannot be pinned or verified are skipped — fail-safe.
-    Caller owns the returned fds.
+    Returns ``(pinned, complete)``. The pin happens BEFORE membership is
+    verified, so verification and every later signal act on the exact
+    process the fd names — pid reuse between steps is structurally
+    impossible (round-5 #2). Membership = pgrp == session == pgid: our
+    leader was spawned with start_new_session, its descendants inherit
+    that session, and setpgid cannot move a foreign process into it.
+
+    ``complete`` is False whenever ANY candidate could not be inspected
+    or pinned for a reason other than "it exited" — an unreadable /proc
+    or an fd-exhausted pidfd_open must never be mistaken for an empty
+    group (round-6 #2). Caller owns the returned fds.
     """
     pinned: list[tuple[int, int]] = []
     try:
         entries = os.listdir("/proc")
     except OSError:
-        return pinned
+        return pinned, False
+    complete = True
     for entry in entries:
         if not entry.isdigit():
             continue
         pid = int(entry)
         try:
             fd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            continue  # exited — not a member
         except OSError:
+            # EMFILE/ENFILE/EPERM: we could not pin it, so its membership
+            # is UNKNOWN unless the process is provably gone.
+            if _stat_fields(pid) is not None:
+                complete = False
             continue
         fields = _stat_fields(pid)
-        if fields is not None and fields == (pgid, pgid):
+        if fields == (pgid, pgid):
             pinned.append((pid, fd))
-        else:
-            os.close(fd)
-    return pinned
+            continue
+        if fields == "unknown":
+            complete = False
+        os.close(fd)
+    return pinned, complete
 
 
 def _signal_pinned(pinned: list[tuple[int, int]], sig: int) -> None:
@@ -127,30 +150,6 @@ def _close_pinned(pinned: list[tuple[int, int]]) -> None:
             pass
 
 
-async def _reap_group_racefree(pgid: int, grace: float = 2.0) -> None:
-    """TERM → bounded grace → KILL for every surviving group member,
-    delivered exclusively through pinned pidfds. Replaces killpg for the
-    post-leader-exit sweeps, where a numeric pgid can go stale."""
-    pinned = _pinned_group_members(pgid)
-    if not pinned:
-        return
-    try:
-        _signal_pinned(pinned, signal.SIGTERM)
-        deadline = time.monotonic() + grace
-        while time.monotonic() < deadline:
-            if all(_stat_fields(pid) is None or os.path.exists(f"/proc/{pid}") is False
-                   for pid, _fd in pinned):
-                break
-            # pidfds poll readable at exit; a cheap sleep-poll keeps this
-            # dependency-free and the bound tight.
-            await asyncio.sleep(0.1)
-            if all(_pidfd_exited(fd) for _pid, fd in pinned):
-                break
-        _signal_pinned(pinned, signal.SIGKILL)
-    finally:
-        _close_pinned(pinned)
-
-
 def _pidfd_exited(fd: int) -> bool:
     """A pidfd polls readable exactly when its process has exited."""
     import select
@@ -162,15 +161,40 @@ def _pidfd_exited(fd: int) -> bool:
         return True
 
 
-def _kill_group_racefree_sync(pgid: int) -> int:
-    """Immediate SIGKILL of every pinned member — the synchronous
-    last-resort used by the shutdown barrier. Returns members signalled."""
-    pinned = _pinned_group_members(pgid)
-    try:
-        _signal_pinned(pinned, signal.SIGKILL)
-        return len(pinned)
-    finally:
-        _close_pinned(pinned)
+async def _terminate_group_until_empty(
+    pgid: int, *, grace: float = 2.0, timeout: float = 10.0, term_first: bool = True
+) -> bool:
+    """Drive an owned process group to provably empty.
+
+    Every pass RE-ENUMERATES (round-6 #1): a TERM handler that forks a
+    fresh same-session child is caught by the next pass, where a
+    one-shot pinned set would miss it entirely. TERM is offered once per
+    pid (when ``term_first``), then the passes escalate to KILL, which
+    cannot be caught or forked around.
+
+    Returns True ONLY on an affirmative observation of an empty group
+    from a COMPLETE scan — an unreadable /proc or fd exhaustion returns
+    False, never a false success (round-6 #2).
+    """
+    deadline = time.monotonic() + timeout
+    termed: set[int] = set()
+    escalate_at = time.monotonic() + grace if term_first else 0.0
+    while True:
+        pinned, complete = _scan_group_members(pgid)
+        try:
+            if complete and not pinned:
+                return True
+            if term_first and time.monotonic() < escalate_at:
+                fresh = [(p, fd) for p, fd in pinned if p not in termed]
+                _signal_pinned(fresh, signal.SIGTERM)
+                termed.update(p for p, _fd in fresh)
+            else:
+                _signal_pinned(pinned, signal.SIGKILL)
+        finally:
+            _close_pinned(pinned)
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.1)
 
 
 async def _wait_leader_exit(
@@ -508,39 +532,36 @@ class ProcessRegistry:
     # ------------------------------------------------------------------
 
     async def _kill_group_until_gone(
-        self, info: ProcessInfo, timeout: float = 6.0
+        self, info: ProcessInfo, timeout: float = 8.0
     ) -> bool:
         """Bounded, race-free termination of everything we still own.
 
-        The shutdown completion barrier (round-4 #1, hardened round-5 #1):
-        repeatedly pin the surviving group members by pidfd, SIGKILL them,
-        and re-enumerate until the group is empty or the bound elapses —
-        every signal aimed at a process pinned BEFORE its membership was
-        verified, so pid reuse cannot misdirect one. The leader is reaped
-        in the same loop so no zombie crosses the exec.
+        The shutdown completion barrier: drive the owned session empty
+        with repeated COMPLETE enumeration (fork-on-signal descendants
+        are caught by the next pass) and reap the leader, then return
+        only on an AFFIRMATIVE observation — an unreadable /proc or fd
+        exhaustion yields False, never assumed success (round-6).
 
-        Returns True when the group is provably gone. A False return is
-        LOUD (error, not debug) and is what the caller reports.
+        A False return is LOUD (error) and is what the caller reports.
         """
         proc = info.process
         if proc is None:
             return True
-        deadline = time.monotonic() + timeout
-        while True:
-            survivors = _kill_group_racefree_sync(proc.pid)
-            if proc.returncode is None:
-                # Reap the leader (bounded) so it cannot linger as a zombie.
-                await _wait_leader_exit(proc, timeout=0.5)
-            if survivors == 0 and proc.returncode is not None:
-                return True
-            if time.monotonic() >= deadline:
-                log.error(
-                    "Shutdown could not confirm PID %d's group is gone "
-                    "(%d member(s) still present, leader rc=%r)",
-                    info.pid, survivors, proc.returncode,
-                )
-                return False
-            await asyncio.sleep(0.1)
+        gone = await _terminate_group_until_empty(
+            proc.pid, timeout=timeout, term_first=False
+        )
+        if proc.returncode is None:
+            # Reap the leader (bounded) so no zombie crosses the exec.
+            await _wait_leader_exit(proc, timeout=1.0)
+        if gone and proc.returncode is not None:
+            return True
+        log.error(
+            "Shutdown could not confirm PID %d's owned group is gone "
+            "(group_empty_observed=%s, leader_rc=%r) — re-exec may inherit "
+            "orphaned descendants",
+            info.pid, gone, proc.returncode,
+        )
+        return False
 
     async def _read_output(self, info: ProcessInfo) -> None:
         """Drain stdout into the ring buffer. Pure drainage — terminal
@@ -613,7 +634,9 @@ class ProcessRegistry:
         # signal now goes through pidfds pinned BEFORE membership
         # verification: TERM, bounded grace, then KILL for survivors.
         try:
-            await _reap_group_racefree(info.process.pid, grace=2.0)
+            await _terminate_group_until_empty(
+                info.process.pid, grace=2.0, timeout=10.0
+            )
         except Exception:
             log.debug("group reap after PID %d exit failed", info.pid, exc_info=True)
 
