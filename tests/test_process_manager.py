@@ -2023,54 +2023,136 @@ class TestSelectiveProvenanceErasure:
         assert pinned == []  # never killed on a guess
         assert complete is False  # and emptiness is NOT affirmed
 
-    async def test_selective_erasure_escapee_blocks_affirmative_cleanup(self):
-        """Odin's exact repro through the real start() path: an escapee
-        that keeps ODIN_PROC but deletes ODIN_BG_JOB must prevent
-        confirmed-empty while it is alive."""
+    async def test_forged_or_erased_token_cannot_survive_teardown(self):
+        """Round-13 (Odin's token-REPLACEMENT repro): environment markers
+        are child-controlled, so they can be deleted OR forged and can
+        never prove a process foreign. At teardown, adoption alone is
+        sufficient — a descendant that forges its provenance, double-forks
+        and setsid()s is still ended, and cleanup's verdict is honest.
+
+        Unconditional: the escapee is located deterministically (it writes
+        its pid to a file) rather than by a search that could pass
+        vacuously — the flaw Odin found in the previous pin.
+        """
         import src.tools.process_manager as pm
 
         previously = pm.child_subreaper_active()
         pm.set_child_subreaper(True)
         reg = ProcessRegistry()
-        escaped_pid = None
+        pidfile = None
+        escaped = None
         try:
-            escape = (
-                "import os,signal,sys,time\n"
-                "if os.fork()==0:\n"
-                " os.setsid()\n"
-                " os.environ.pop('ODIN_BG_JOB', None)\n"
-                " os.execve(sys.executable, [sys.executable, '-c',"
-                " 'import signal,time;"
-                " signal.signal(signal.SIGTERM, signal.SIG_IGN);"
-                " time.sleep(45)'], os.environ)\n"
-                "sys.exit(0)\n"
-            )
-            started = await reg.start("localhost", f'python3 -c "exec({escape!r})"')
+            import tempfile
+
+            fd, pidfile = tempfile.mkstemp(prefix="escapee-", suffix=".pid")
+            os.close(fd)
+            # Script goes to a FILE: quoting a python source string through
+            # the shell is how earlier attempts silently produced a dead
+            # escapee (repr picks double quotes when the body contains
+            # single ones, and the shell then breaks on the parens).
+            script = f"""
+import os, signal, sys, time
+if os.fork() == 0:
+    os.setsid()
+    os.environ['ODIN_BG_JOB'] = 'forged-not-a-real-job'
+    with open({pidfile!r}, 'w') as fh:
+        fh.write(str(os.getpid()))
+    os.execve(
+        sys.executable,
+        [sys.executable, '-c',
+         'import signal,time\\n'
+         'signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n'
+         'time.sleep(45)\\n'],
+        os.environ,
+    )
+sys.exit(0)
+"""
+            script_path = pidfile + ".py"
+            with open(script_path, "w") as fh:
+                fh.write(script)
+            started = await reg.start("localhost", f"python3 {script_path}")
             pid = int(started.split("PID ")[1].split(")")[0])
-            await asyncio.sleep(1.2)
-            info = reg._processes[pid]
-            gone = await reg._kill_group_until_gone(info, timeout=6.0)
-            # The escapee is alive with erased job provenance: cleanup must
-            # NOT claim success.
-            for entry in os.listdir("/proc"):
-                if not entry.isdigit():
-                    continue
-                ids = pm._proc_ids(int(entry))
-                if (
-                    isinstance(ids, tuple)
-                    and ids[0] == os.getpid()
-                    and int(entry) not in reg._own_children
-                    and pm._read_job_token(int(entry)) is None
-                ):
-                    escaped_pid = int(entry)
+
+            for _ in range(60):
+                text = open(pidfile).read().strip()
+                if text:
+                    escaped = int(text)
                     break
-            if escaped_pid is not None:
-                assert gone is False  # ambiguity ⇒ no affirmative emptiness
+                await asyncio.sleep(0.1)
+            assert escaped is not None, "escapee never reported its pid"
+            assert pm._read_job_token(escaped) == "forged-not-a-real-job"
+            assert pm._proc_starttime(escaped) is not None  # alive
+
+            info = reg._processes[pid]
+            gone = await reg._kill_group_until_gone(info, timeout=15.0)
+
+            assert gone is True  # teardown resolves adoption as ours…
+            # …and the forged escapee is actually DEAD, not just claimed.
+            for _ in range(40):
+                ids = pm._proc_ids(escaped)
+                if ids is None:
+                    break
+                await asyncio.sleep(0.25)
+            assert pm._proc_ids(escaped) is None, "forged escapee survived teardown"
         finally:
-            if escaped_pid is not None:
+            if escaped is not None:
                 try:
-                    os.kill(escaped_pid, 9)
+                    os.kill(escaped, 9)
                 except ProcessLookupError:
                     pass
+            if pidfile is not None:
+                for path in (pidfile, pidfile + ".py"):
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
             await reg.shutdown()
             pm.set_child_subreaper(previously)
+
+    def test_live_cleanup_still_refuses_to_guess(self, monkeypatch):
+        """Outside teardown the rule is unchanged: a forged/absent token
+        is ambiguous — untouched, and emptiness is not affirmed."""
+        import src.tools.process_manager as pm
+
+        mypid = os.getpid()
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["4242"])
+        monkeypatch.setattr(
+            pm.os, "pidfd_open", lambda _pid: os.open("/dev/null", os.O_RDONLY)
+        )
+        monkeypatch.setattr(pm, "_proc_ids", lambda _pid: (mypid, 999))
+        monkeypatch.setattr(
+            pm, "_read_env_tokens", lambda _pid: {pm.PROC_TOKEN_ENV: "P"}
+        )
+        pinned, complete = pm._scan_owned_members(
+            7, leader_pid=7, adopted_by=mypid, job_token="tok", proc_token="P"
+        )
+        pm._close_pinned(pinned)
+        assert pinned == [] and complete is False
+
+    def test_unavailable_own_session_never_sweeps(self, monkeypatch):
+        """If our own session id cannot be read, the teardown arm must not
+        fire — an unknown 'own session' would make every adopted child
+        look like an escapee."""
+        import src.tools.process_manager as pm
+
+        mypid = os.getpid()
+        monkeypatch.setattr(
+            pm.os, "getsid", lambda _p: (_ for _ in ()).throw(OSError("no sid"))
+        )
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["4242"])
+        monkeypatch.setattr(
+            pm.os, "pidfd_open", lambda _pid: os.open("/dev/null", os.O_RDONLY)
+        )
+        # A direct child in session -1 would "differ" from an unreadable
+        # own-session sentinel; provenance must still decide it.
+        monkeypatch.setattr(pm, "_proc_ids", lambda _pid: (mypid, -1))
+        monkeypatch.setattr(
+            pm, "_read_env_tokens", lambda _pid: {pm.PROC_TOKEN_ENV: "P"}
+        )
+        pinned, complete = pm._scan_owned_members(
+            7, leader_pid=7, adopted_by=mypid, job_token="tok",
+            proc_token="P", teardown=True,
+        )
+        pm._close_pinned(pinned)
+        assert pinned == []  # not swept on an unknown own-session
+        assert complete is False  # and emptiness is not affirmed

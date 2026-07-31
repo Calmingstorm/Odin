@@ -208,6 +208,7 @@ def _scan_owned_members(
     job_token: str | None = None,
     proc_token: str | None = None,
     adopted_sink: set[tuple[int, int]] | None = None,
+    teardown: bool = False,
 ) -> tuple[list[tuple[int, int]], bool]:
     """Enumerate every process we own, each PINNED with a pidfd.
 
@@ -227,9 +228,17 @@ def _scan_owned_members(
       ALSO carry this job's ``ODIN_BG_JOB`` token, injected at spawn and
       inherited across fork, exec and setsid.
 
-    A direct child whose provenance cannot be established is left
-    UNTOUCHED and makes the scan incomplete — ambiguity never authorizes
-    a kill, and never permits affirmative emptiness either.
+    Environment markers are CHILD-CONTROLLED: a descendant can delete or
+    FORGE them, so they can never prove a process foreign. During normal
+    operation that means ambiguity is left UNTOUCHED and makes the scan
+    incomplete — never a kill, never affirmative emptiness.
+
+    ``teardown=True`` (the shutdown barrier only) resolves that ambiguity
+    the other way, on kernel facts alone: every adopted orphan is ours to
+    end. There is no collateral concern at that point — the whole process
+    is going away, every subsystem's children are being torn down with
+    it, and the alternative is exec'"'"'ing over survivors we cannot see
+    (round-13).
 
     The pin happens BEFORE membership is verified, so verification and
     every later signal act on the exact process the fd names. ``complete``
@@ -239,6 +248,10 @@ def _scan_owned_members(
     (round-9 #3). Caller owns the returned fds.
     """
     pinned: list[tuple[int, int]] = []
+    try:
+        own_session = os.getsid(0)
+    except OSError:
+        own_session = -1
     try:
         entries = os.listdir("/proc")
     except OSError:
@@ -297,6 +310,19 @@ def _scan_owned_members(
                 if tokens is _UNKNOWN or tokens is None:
                     return None  # unreadable — ambiguous, fail closed
                 assert isinstance(tokens, dict)
+                if teardown and session != own_session:
+                    # Shutdown: an adopted orphan that LEFT our session is
+                    # an escapee — only `setsid()` gets a process out, and
+                    # no forged or deleted environment marker can buy it
+                    # survival past our own teardown. Ordinary subsystem
+                    # children (ssh, run_command, browser) stay IN our
+                    # session, so they are never swept by this arm — the
+                    # round-10 collateral-damage rule still holds.
+                    if adopted_sink is not None:
+                        start = _proc_starttime(cur)
+                        if start is not None:
+                            adopted_sink.add((cur, start))
+                    return True
                 if PROC_TOKEN_ENV not in tokens or (
                     proc_token is not None
                     and tokens.get(PROC_TOKEN_ENV) != proc_token
@@ -466,6 +492,7 @@ async def _terminate_session_until_empty(
     job_token: str | None = None,
     proc_token: str | None = None,
     adopted_sink: set[tuple[int, int]] | None = None,
+    teardown: bool = False,
 ) -> bool:
     """Drive everything we own to provably empty.
 
@@ -504,6 +531,7 @@ async def _terminate_session_until_empty(
             job_token=job_token,
             proc_token=proc_token,
             adopted_sink=adopted,
+            teardown=teardown,
         )
         try:
             if complete and not pinned and containment:
@@ -952,6 +980,7 @@ class ProcessRegistry:
             job_token=info.job_token or None,
             proc_token=os.environ.get(PROC_TOKEN_ENV),
             adopted_sink=self._adopted_pids,
+            teardown=True,  # shutdown barrier: adoption is sufficient
         )
         info.session_confirmed_empty = gone
         if proc.returncode is None:
