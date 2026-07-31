@@ -157,7 +157,7 @@ class ProcessRegistry:
         if wait_seconds > 0 and info.status == "running" and info.process is not None:
             try:
                 await asyncio.wait_for(info.process.wait(), timeout=wait_seconds)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass  # deadline reached — report current state
             else:
                 # The process exited during the wait: give the reader task a
@@ -169,7 +169,7 @@ class ProcessRegistry:
                         await asyncio.wait_for(
                             asyncio.shield(info._reader_task), timeout=5.0
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         pass
 
         lines = list(info.output_buffer)

@@ -686,7 +686,7 @@ def wait_target_alive(tool_name: str, result_text: str) -> bool:
     text = result_text or ""
     if tool_name == "manage_process":
         m = _WAIT_MP_STATUS.search(text)
-        return bool(m) and m.group(2) == "running"
+        return m is not None and m.group(2) == "running"
     return ": running" in text or "status=running" in text
 
 
