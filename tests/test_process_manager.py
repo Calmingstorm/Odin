@@ -1443,6 +1443,7 @@ class TestSubreaperContainment:
                 pid, leader_pid=pid,
                 adopted_by=os.getpid(),
                 known_own_children=frozenset(reg._own_children),
+                job_token=reg._processes[pid].job_token,
             )
             adopted = len(pinned)
             _close_pinned(pinned)
@@ -1456,13 +1457,14 @@ class TestSubreaperContainment:
                 pid, leader_pid=pid,
                 adopted_by=os.getpid(),
                 known_own_children=frozenset(reg._own_children),
+                job_token=reg._processes[pid].job_token,
             )
             left = len(pinned)
             _close_pinned(pinned)
             assert complete and left == 0
         finally:
             await reg.shutdown()
-            reap_adopted_zombies(frozenset(reg._own_children))
+            reap_adopted_zombies(frozenset(reg._adopted_pids))
             set_child_subreaper(previously)
 
     def test_registry_does_not_flip_process_state(self):
@@ -1561,59 +1563,84 @@ class TestContainmentHelpers:
         assert pm.child_subreaper_active() is False
         assert pm.set_child_subreaper(True) is False
 
-    async def test_sweeper_reaps_adopted_zombie_only(self):
-        from src.tools.process_manager import (
-            child_subreaper_active,
-            reap_adopted_zombies,
-            set_child_subreaper,
-        )
+    async def test_sweeper_reaps_recorded_adopted_zombie(self):
+        """Attribution happens while the process is ALIVE (a zombie's
+        environ is unreadable), so the sweeper works from recorded pids —
+        and only reaps zombies that are actually parented to us."""
+        import src.tools.process_manager as pm
 
-        before = child_subreaper_active()
-        set_child_subreaper(True)
+        before = pm.child_subreaper_active()
+        pm.set_child_subreaper(True)
         try:
-            # A double-forked orphan: reparents to US, dies immediately,
-            # and lingers as a zombie nobody else will wait on.
             src = (
-                "import os,sys\n"
+                "import os,sys,time\n"
                 "if os.fork()==0:\n"
+                " time.sleep(0.6)\n"
                 " os._exit(0)\n"
                 "sys.exit(0)\n"
             )
+            env = dict(os.environ)
+            env[pm.JOB_TOKEN_ENV] = "sweeper-test-token"
             proc = await asyncio.create_subprocess_shell(
                 f'python3 -c "exec({src!r})"',
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                env=env,
             )
             await proc.wait()
+            # Identify the orphan WHILE ALIVE, by provenance.
+            grandchild = None
             for _ in range(40):
-                if reap_adopted_zombies(frozenset({proc.pid})) >= 1:
+                for entry in os.listdir("/proc"):
+                    if not entry.isdigit():
+                        continue
+                    pid = int(entry)
+                    ids = pm._proc_ids(pid)
+                    if (
+                        isinstance(ids, tuple)
+                        and ids[0] == os.getpid()
+                        and pid != proc.pid
+                        and pm._read_job_token(pid) == "sweeper-test-token"
+                    ):
+                        grandchild = pid
+                        break
+                if grandchild is not None:
+                    break
+                await asyncio.sleep(0.05)
+            assert grandchild is not None, "orphan never reparented to us"
+            # Once it dies it is a zombie; the recorded pid still reaps it.
+            for _ in range(60):
+                if pm.reap_adopted_zombies(frozenset({grandchild})) >= 1:
                     break
                 await asyncio.sleep(0.1)
             else:
                 pytest.fail("adopted zombie was never reaped")
         finally:
-            set_child_subreaper(before)
+            pm.set_child_subreaper(before)
 
-    def test_sweeper_never_touches_own_children(self, monkeypatch):
-        """Our deliberate children belong to asyncio's watcher — stealing
-        a status would break it, so they are skipped by pid."""
+    def test_sweeper_is_a_noop_without_tokens(self, monkeypatch):
+        """No job tokens ⇒ nothing is provably ours ⇒ nothing is reaped."""
         import src.tools.process_manager as pm
 
         waited: list[int] = []
-        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["4242"])
         monkeypatch.setattr(
             pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
         )
-        assert pm.reap_adopted_zombies(frozenset({4242})) == 0
+        assert pm.reap_adopted_zombies() == 0  # no recorded pids → no-op
         assert waited == []
 
     def test_sweeper_survives_unreadable_proc(self, monkeypatch):
         import src.tools.process_manager as pm
 
-        monkeypatch.setattr(
-            pm.os, "listdir", lambda _p: (_ for _ in ()).throw(OSError("nope"))
-        )
-        assert pm.reap_adopted_zombies() == 0
+        class FakePath:
+            def __init__(self, _p):
+                pass
+
+            def read_bytes(self):
+                raise OSError("unreadable")
+
+        monkeypatch.setattr(pm, "Path", FakePath)
+        assert pm.reap_adopted_zombies(frozenset({4242})) == 0
 
     def test_prctl_nonzero_return_reads_state(self, monkeypatch):
         """A failing prctl must not be reported as success — the value is
@@ -1629,11 +1656,11 @@ class TestContainmentHelpers:
         assert pm.set_child_subreaper(True) is False
 
     def test_sweeper_skips_unreadable_and_unwaitable_entries(self, monkeypatch):
+        """Unreadable /proc entries and non-children are skipped, never
+        raised."""
         """A vanished/unreadable /proc entry and a pid that is not our
         child are both skipped, never raised."""
         import src.tools.process_manager as pm
-
-        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["111", "222"])
 
         class FakePath:
             def __init__(self, path):
@@ -1650,7 +1677,7 @@ class TestContainmentHelpers:
             raise ChildProcessError("not ours")
 
         monkeypatch.setattr(pm.os, "waitpid", not_our_child)
-        assert pm.reap_adopted_zombies() == 0  # neither raised, neither counted
+        assert pm.reap_adopted_zombies(frozenset({111, 222})) == 0
 
     def test_inline_reap_skips_own_children(self, monkeypatch):
         """The in-loop reap after KILL uses the same asyncio-safety rule:
@@ -1661,5 +1688,198 @@ class TestContainmentHelpers:
         monkeypatch.setattr(
             pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
         )
-        pm._reap_adopted([100, 200], frozenset({100}))
+        pm._reap_adopted({100, 200}, frozenset({100}))
         assert waited == [200]  # 100 is ours → left to asyncio's watcher
+
+
+class TestNoCollateralDamage:
+    """Round-10: adoption is containment, NOT attribution. Cleanup of one
+    managed job must never touch another subsystem's direct child."""
+
+    async def test_unrelated_asyncio_child_is_never_signalled(self):
+        from src.tools.process_manager import (
+            child_subreaper_active,
+            set_child_subreaper,
+        )
+
+        previously = child_subreaper_active()
+        set_child_subreaper(True)
+        reg = ProcessRegistry()
+        # A direct child of THIS process created outside the registry —
+        # exactly what another Odin subsystem (ssh, run_command) has.
+        unrelated = await asyncio.create_subprocess_shell(
+            "sleep 30", stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            started = await reg.start("localhost", "true")
+            pid = int(started.split("PID ")[1].split(")")[0])
+            info = reg._processes[pid]
+            assert info.job_token  # provenance minted at spawn
+            gone = await reg._kill_group_until_gone(info, timeout=10.0)
+            assert gone is True  # managed job cleaned up…
+            await asyncio.sleep(0.3)
+            # …and the unrelated child is untouched: not signalled, alive.
+            assert unrelated.returncode is None
+        finally:
+            unrelated.kill()
+            await unrelated.wait()
+            await reg.shutdown()
+            set_child_subreaper(previously)
+
+    async def test_escapee_of_another_job_is_not_ours(self):
+        """Two managed jobs: job A's cleanup must not claim job B's
+        adopted escapee — tokens differ."""
+        import src.tools.process_manager as pm
+
+        previously = pm.child_subreaper_active()
+        pm.set_child_subreaper(True)
+        reg = ProcessRegistry()
+        try:
+            a = await reg.start("localhost", "sleep 20")
+            b = await reg.start("localhost", "sleep 20")
+            pid_a = int(a.split("PID ")[1].split(")")[0])
+            pid_b = int(b.split("PID ")[1].split(")")[0])
+            info_a, info_b = reg._processes[pid_a], reg._processes[pid_b]
+            assert info_a.job_token != info_b.job_token
+            # Job B's leader, seen from job A's scan with A's token, is
+            # NOT owned by A (different provenance, different session).
+            pinned, complete = pm._scan_owned_members(
+                pid_a, leader_pid=pid_a,
+                adopted_by=os.getpid(),
+                known_own_children=frozenset(reg._own_children),
+                job_token=info_a.job_token,
+            )
+            owned = {p for p, _fd in pinned}
+            pm._close_pinned(pinned)
+            assert pid_b not in owned
+        finally:
+            await reg.shutdown()
+            pm.set_child_subreaper(previously)
+
+    def test_ambiguous_direct_child_is_untouched_and_incomplete(self, monkeypatch):
+        """A direct child whose provenance cannot be READ is left alone
+        AND makes the scan incomplete — ambiguity never authorizes a kill
+        nor permits affirmative emptiness."""
+        import src.tools.process_manager as pm
+
+        mypid = os.getpid()
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["4242"])
+        monkeypatch.setattr(
+            pm.os, "pidfd_open", lambda _pid: os.open("/dev/null", os.O_RDONLY)
+        )
+        monkeypatch.setattr(pm, "_proc_ids", lambda _pid: (mypid, 999))
+        monkeypatch.setattr(pm, "_read_job_token", lambda _pid: pm._UNKNOWN)
+        pinned, complete = pm._scan_owned_members(
+            7, leader_pid=7, adopted_by=mypid, job_token="tok"
+        )
+        pm._close_pinned(pinned)
+        assert pinned == []  # untouched
+        assert complete is False  # emptiness cannot be affirmed
+
+    def test_foreign_token_is_explicitly_not_ours(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        mypid = os.getpid()
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["4242"])
+        monkeypatch.setattr(
+            pm.os, "pidfd_open", lambda _pid: os.open("/dev/null", os.O_RDONLY)
+        )
+        monkeypatch.setattr(pm, "_proc_ids", lambda _pid: (mypid, 999))
+        monkeypatch.setattr(pm, "_read_job_token", lambda _pid: "someone-elses")
+        pinned, complete = pm._scan_owned_members(
+            7, leader_pid=7, adopted_by=mypid, job_token="tok"
+        )
+        pm._close_pinned(pinned)
+        assert pinned == [] and complete is True  # decided: not ours
+
+    def test_reap_never_touches_foreign_provenance(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        waited: list[int] = []
+        monkeypatch.setattr(
+            pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
+        )
+        monkeypatch.setattr(pm, "_read_job_token", lambda pid: "ours" if pid == 1 else "theirs")
+        # Only pids VERIFIED as ours (recorded at scan time) are reaped.
+        pm._reap_adopted({1}, frozenset())
+        assert waited == [1]
+        waited.clear()
+        pm._reap_adopted(set(), frozenset())  # nothing verified → no reaping
+        assert waited == []
+
+
+class TestProvenanceArms:
+    """Defensive arms of the per-job provenance reader."""
+
+    def test_no_token_means_adoption_cannot_attribute(self, monkeypatch):
+        """Without a job token there is no way to attribute an adopted
+        child, so it is ambiguous: untouched, and the scan is incomplete."""
+        import src.tools.process_manager as pm
+
+        mypid = os.getpid()
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["4242"])
+        monkeypatch.setattr(
+            pm.os, "pidfd_open", lambda _pid: os.open("/dev/null", os.O_RDONLY)
+        )
+        monkeypatch.setattr(pm, "_proc_ids", lambda _pid: (mypid, 999))
+        pinned, complete = pm._scan_owned_members(
+            7, leader_pid=7, adopted_by=mypid, job_token=None
+        )
+        pm._close_pinned(pinned)
+        assert pinned == [] and complete is False
+
+    def test_token_reader_states(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        # Gone → None (absence is provable).
+        assert pm._read_job_token(4_000_000) is None
+
+        class GonePath:
+            def __init__(self, _p):
+                pass
+
+            def read_bytes(self):
+                raise FileNotFoundError()
+
+        monkeypatch.setattr(pm, "Path", GonePath)
+        assert pm._read_job_token(1) is None
+
+        class UnreadablePath:
+            def __init__(self, _p):
+                pass
+
+            def read_bytes(self):
+                raise PermissionError("denied")
+
+        monkeypatch.setattr(pm, "Path", UnreadablePath)
+        assert pm._read_job_token(1) is pm._UNKNOWN  # ambiguity, not absence
+
+        class TokenPath:
+            def __init__(self, _p):
+                pass
+
+            def read_bytes(self):
+                return b"PATH=/usr/bin\x00ODIN_BG_JOB=abc123\x00HOME=/root\x00"
+
+        monkeypatch.setattr(pm, "Path", TokenPath)
+        assert pm._read_job_token(1) == "abc123"
+
+        class NoTokenPath:
+            def __init__(self, _p):
+                pass
+
+            def read_bytes(self):
+                return b"PATH=/usr/bin\x00HOME=/root\x00"
+
+        monkeypatch.setattr(pm, "Path", NoTokenPath)
+        assert pm._read_job_token(1) is None  # carries no token
+
+    def test_reap_swallows_unwaitable(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        def boom(_pid, _flags):
+            raise ChildProcessError("not our child")
+
+        monkeypatch.setattr(pm.os, "waitpid", boom)
+        pm._reap_adopted({4242}, frozenset())  # must not raise

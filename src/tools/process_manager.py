@@ -11,6 +11,7 @@ import asyncio
 import ctypes
 import os
 import re
+import secrets
 import signal
 import time
 from collections import deque
@@ -23,6 +24,8 @@ from .workspace import WorkspaceError, workspace_env
 
 log = get_logger("process_manager")
 
+
+_UNKNOWN = object()  # "could not determine" — never means "absent"
 
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
@@ -52,27 +55,20 @@ def set_child_subreaper(enabled: bool = True) -> bool:
     return child_subreaper_active()
 
 
-def reap_adopted_zombies(known_own_children: frozenset[int] = frozenset()) -> int:
-    """Reap zombies WE adopted as subreaper. Returns the count reaped.
+def reap_adopted_zombies(adopted_pids: frozenset[int] = frozenset()) -> int:
+    """Reap zombies among orphans we previously VERIFIED as ours.
 
-    Adoption makes us the parent of escaped descendants, so once they die
-    they linger until someone waits on them. Only pids we did NOT
-    deliberately spawn are touched: asyncio's child watcher owns the
-    statuses of our own children, and stealing one would break it. Never
-    ``waitpid(-1)`` for the same reason.
+    Attribution happened while each process was alive (a zombie's
+    environment is unreadable), so this works from recorded pids. Only
+    zombies parented to us are touched, and ``waitpid`` on anything that
+    is not our child raises and is swallowed — another subsystem's status
+    is never taken.
     """
-    reaped = 0
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
+    if not adopted_pids:
         return 0
+    reaped = 0
     mypid = os.getpid()
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        pid = int(entry)
-        if pid in known_own_children:
-            continue
+    for pid in adopted_pids:
         try:
             raw = Path(f"/proc/{pid}/stat").read_bytes()
             rest = raw.rsplit(b")", 1)[1].split()
@@ -178,6 +174,8 @@ def _scan_owned_members(
     *,
     adopted_by: int | None = None,
     known_own_children: frozenset[int] = frozenset(),
+    job_token: str | None = None,
+    adopted_sink: set[int] | None = None,
 ) -> tuple[list[tuple[int, int]], bool]:
     """Enumerate every process we own, each PINNED with a pidfd.
 
@@ -189,11 +187,17 @@ def _scan_owned_members(
     - **Ancestry** — a descendant that called ``setsid()`` left the
       session but is still ours while its parent chain reaches the
       leader (round-8 #1).
-    - **Adoption** ``ppid == adopted_by`` — a descendant that ALSO
-      double-forked left the ancestry chain too; as a child subreaper we
-      adopt it instead of PID 1 (round-9 #1), so it is ours again. Our
-      own deliberate children (``known_own_children``) are excluded:
-      those belong to other subsystems, not to this session.
+    - **Adoption + provenance** — a descendant that ALSO double-forked
+      left the ancestry chain too; as a child subreaper we adopt it
+      instead of PID 1 (round-9 #1). Adoption alone is NOT attribution:
+      other Odin subsystems have direct children too, and killing those
+      would be collateral damage (round-10). An adopted process must
+      ALSO carry this job's ``ODIN_BG_JOB`` token, injected at spawn and
+      inherited across fork, exec and setsid.
+
+    A direct child whose provenance cannot be established is left
+    UNTOUCHED and makes the scan incomplete — ambiguity never authorizes
+    a kill, and never permits affirmative emptiness either.
 
     The pin happens BEFORE membership is verified, so verification and
     every later signal act on the exact process the fd names. ``complete``
@@ -255,7 +259,20 @@ def _scan_owned_members(
                 and ppid == adopted_by
                 and cur not in known_own_children
             ):
-                return True  # orphan we adopted as subreaper
+                if job_token is None:
+                    return None  # cannot attribute — ambiguous, never killed
+                token = _read_job_token(cur)
+                if token == job_token:
+                    # Record provenance NOW: a zombie has no address
+                    # space, so /proc/<pid>/environ becomes unreadable the
+                    # moment it dies — identification must happen while it
+                    # is alive, and reaping later goes by recorded pid.
+                    if adopted_sink is not None:
+                        adopted_sink.add(cur)
+                    return True  # our escapee: adopted AND provably ours
+                if token is _UNKNOWN:
+                    return None  # unreadable provenance — ambiguous
+                return False  # another subsystem's child — NOT ours
             cur = ppid
         return None  # bound exhausted — UNKNOWN, never "not ours"
 
@@ -270,15 +287,45 @@ def _scan_owned_members(
     return pinned, complete
 
 
-def _reap_adopted(pids: list[int], known_own_children: frozenset[int]) -> None:
-    """Non-blocking reap of orphans WE adopted as subreaper.
+JOB_TOKEN_ENV = "ODIN_BG_JOB"
 
-    Adoption makes us the parent of escaped descendants, so once killed
-    they linger as zombies until someone waits on them. Only pids we did
-    NOT deliberately spawn are reaped here: asyncio's child watcher owns
-    the statuses of our own children, and stealing one would break it.
+
+def _read_job_token(pid: int) -> str | None | object:
+    """This process's managed-job token from /proc/<pid>/environ.
+
+    Returns the token, ``None`` when the process carries none (or is
+    gone), or :data:`_UNKNOWN` when the environment could not be read —
+    ambiguity, never absence.
+
+    The token is injected at spawn and inherited across fork AND exec, so
+    it follows a descendant that double-forks or calls ``setsid()``. It
+    is per-JOB, which process-wide subreaping cannot provide: adoption
+    alone cannot tell OUR escapee from an unrelated subprocess another
+    Odin subsystem started (round-10).
     """
-    for pid in pids:
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except OSError:
+        return _UNKNOWN
+    marker = JOB_TOKEN_ENV.encode() + b"="
+    for item in raw.split(b"\0"):
+        if item.startswith(marker):
+            return item[len(marker):].decode("utf-8", "replace")
+    return None
+
+
+def _reap_adopted(pids: set[int], known_own_children: frozenset[int]) -> None:
+    """Non-blocking reap of orphans already VERIFIED as ours.
+
+    ``pids`` were attributed to this job by provenance while they were
+    alive — a zombie has no address space, so its environment cannot be
+    re-read afterwards. Pids we deliberately spawned are still excluded:
+    asyncio's child watcher owns those statuses and stealing one would
+    break it. Never ``waitpid(-1)`` for the same reason.
+    """
+    for pid in list(pids):
         if pid in known_own_children:
             continue
         try:
@@ -325,6 +372,8 @@ async def _terminate_session_until_empty(
     adopted_by: int | None = None,
     known_own_children: frozenset[int] = frozenset(),
     containment: bool = True,
+    job_token: str | None = None,
+    adopted_sink: set[int] | None = None,
 ) -> bool:
     """Drive everything we own to provably empty.
 
@@ -348,6 +397,7 @@ async def _terminate_session_until_empty(
     (round-9 #1).
     """
     deadline = time.monotonic() + timeout
+    adopted: set[int] = adopted_sink if adopted_sink is not None else set()
     termed: set[int] = set()
     escalate_at = time.monotonic() + grace if term_first else 0.0
     clean_scans = 0
@@ -357,6 +407,8 @@ async def _terminate_session_until_empty(
             leader_pid=sid,
             adopted_by=adopted_by,
             known_own_children=known_own_children,
+            job_token=job_token,
+            adopted_sink=adopted,
         )
         try:
             if complete and not pinned and containment:
@@ -374,7 +426,7 @@ async def _terminate_session_until_empty(
                     # Adopted orphans become zombies once killed — reap
                     # them so a long-running process does not accumulate
                     # entries (our own children stay with asyncio).
-                    _reap_adopted([p for p, _fd in pinned], known_own_children)
+                    _reap_adopted(adopted, known_own_children)
         finally:
             _close_pinned(pinned)
         if time.monotonic() >= deadline:
@@ -430,6 +482,11 @@ class ProcessInfo:
     # session was OBSERVED empty by a complete scan. shutdown() requires
     # this before it may report clean teardown / permit re-exec.
     session_confirmed_empty: bool = False
+    # Per-job provenance (round-10): injected into the spawn environment
+    # and inherited across fork/exec/setsid, so an escaped descendant is
+    # attributable to THIS job and never confused with another
+    # subsystem's direct child.
+    job_token: str = ""
 
 
 class ProcessRegistry:
@@ -458,6 +515,10 @@ class ProcessRegistry:
         # Pids WE deliberately spawned here: an adopted orphan is any
         # child of ours that is NOT one of these.
         self._own_children: set[int] = set()
+        # Orphans verified as OURS by provenance while alive — reaping
+        # goes by recorded pid because a zombie's environment is
+        # unreadable (round-10).
+        self._adopted_pids: set[int] = set()
 
     @property
     def _containment(self) -> bool:
@@ -493,7 +554,9 @@ class ProcessRegistry:
             # group, so kill()/shutdown() can take out descendants
             # (`sh -c 'x & ...'`) instead of just the shell leader.
             workspace = self._resolve_workspace()
-            env = workspace_env(Path(workspace)) if workspace else None
+            job_token = secrets.token_hex(8)
+            env = dict(workspace_env(Path(workspace))) if workspace else dict(os.environ)
+            env[JOB_TOKEN_ENV] = job_token
         except WorkspaceError as e:
             # The workspace is unusable. This is a REFUSAL, not a spawn error:
             # it must read as a failure to the tool loop, not as a started
@@ -519,6 +582,7 @@ class ProcessRegistry:
             host=host,
             start_time=time.time(),
             process=proc,
+            job_token=job_token,
         )
         self._processes[pid] = info
         self._own_children.add(pid)
@@ -760,7 +824,7 @@ class ProcessRegistry:
             self._processes.pop(pid)
         # Adopted orphans die as zombies (nothing else will wait on them);
         # sweep them here so a long-running process cannot accumulate.
-        reap_adopted_zombies(frozenset(self._own_children))
+        reap_adopted_zombies(frozenset(self._adopted_pids))
         return len(to_remove)
 
     # ------------------------------------------------------------------
@@ -790,6 +854,8 @@ class ProcessRegistry:
             adopted_by=os.getpid(),
             known_own_children=frozenset(self._own_children),
             containment=self._containment,
+            job_token=info.job_token or None,
+            adopted_sink=self._adopted_pids,
         )
         info.session_confirmed_empty = gone
         if proc.returncode is None:
@@ -883,6 +949,8 @@ class ProcessRegistry:
                 adopted_by=os.getpid(),
                 known_own_children=frozenset(self._own_children),
                 containment=self._containment,
+                job_token=info.job_token or None,
+                adopted_sink=self._adopted_pids,
             )
         except Exception:
             info.session_confirmed_empty = False

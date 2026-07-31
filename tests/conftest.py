@@ -242,9 +242,8 @@ def _process_containment():
     correctly refuses to claim success and every shutdown path raises —
     tests would be exercising a mode production never runs in.
     """
-    from src.tools.process_manager import reap_adopted_zombies, set_child_subreaper
+    from src.tools.process_manager import set_child_subreaper
 
     previous = set_child_subreaper(True)
     yield
-    reap_adopted_zombies()
     set_child_subreaper(previous)
