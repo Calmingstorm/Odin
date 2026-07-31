@@ -1035,6 +1035,152 @@ class TestUncleanBarrierExit:
         assert b"UNREACHABLE" not in proc.stderr
         assert b"BlockingReprError" in proc.stderr  # named by object.__repr__
 
+    @staticmethod
+    def _hostile_del_error():
+        """An exception whose __del__ blocks forever — armed via a flag
+        so the parked instance can be disarmed before interpreter
+        shutdown (the parking lot is never cleared, by design)."""
+        import threading
+
+        executed: list = []
+        armed = {"on": True}
+
+        class BlockingDelError(RuntimeError):
+            def __del__(self):
+                if armed["on"]:
+                    executed.append(True)
+                    threading.Event().wait()
+
+        return BlockingDelError, executed, armed
+
+    def test_hostile_del_cannot_hang_the_crash_guard(self, monkeypatch):
+        """Round-22: clearing the `except ... as exc` binding could drop
+        the final reference and run a user __del__ on the main thread
+        before os._exit. Parking the exception makes the finalizer
+        unreachable — it must never execute."""
+        import logging
+        import time
+
+        import src.__main__ as entry
+        import src.tools.process_manager as pm
+
+        blocking_del_error, executed, armed = self._hostile_del_error()
+        calls: list = []
+        monkeypatch.setattr(entry.os, "_exit", lambda code: calls.append(code))
+
+        def crash(*_a):
+            raise blocking_del_error("boom")
+
+        monkeypatch.setattr(entry, "_finalize_loop", crash)
+        loop = asyncio.new_event_loop()
+        start = time.monotonic()
+        entry._finalize_and_exit(
+            loop, pm.AdoptedZombieReaper(), logging.getLogger("t"), 0
+        )
+        assert time.monotonic() - start < 3.0
+        assert calls == [1]
+        assert executed == []  # the __del__ never ran: the ref is parked
+        loop.close()
+        armed["on"] = False  # disarm before interpreter shutdown
+
+    def test_hostile_del_cannot_hang_the_barrier_arm(self):
+        import logging
+        import time
+
+        import src.tools.process_manager as pm
+        from src.__main__ import _finalize_loop
+
+        blocking_del_error, executed, armed = self._hostile_del_error()
+        loop = asyncio.new_event_loop()
+
+        def explode(_coro):
+            raise blocking_del_error("barrier blew up")
+
+        loop.run_until_complete = explode  # type: ignore[method-assign]
+        start = time.monotonic()
+        failure = _finalize_loop(
+            loop, pm.AdoptedZombieReaper(), logging.getLogger("t")
+        )
+        assert time.monotonic() - start < 3.0
+        assert failure is not None and "BlockingDelError" in failure
+        assert executed == []
+        loop.close()
+        armed["on"] = False
+
+    def test_hostile_del_cannot_hang_the_drain_arm(self):
+        import logging
+        import time
+
+        import src.tools.process_manager as pm
+        from src.__main__ import _finalize_loop
+
+        blocking_del_error, executed, armed = self._hostile_del_error()
+        loop = asyncio.new_event_loop()
+        reaper = pm.AdoptedZombieReaper()
+
+        def explode():
+            raise blocking_del_error("drain blew up")
+
+        reaper.drain_at_teardown = explode  # type: ignore[method-assign]
+        start = time.monotonic()
+        failure = _finalize_loop(loop, reaper, logging.getLogger("t"))
+        assert time.monotonic() - start < 3.0
+        assert failure is not None and "drain failed" in failure
+        assert "BlockingDelError" in failure
+        assert executed == []
+        loop.close()
+        armed["on"] = False
+
+    def test_hostile_del_process_level(self, tmp_path):
+        """Odin's round-22 repro shape in a real process: the marker
+        inside __del__ must never print, and the child exits fast."""
+        import subprocess
+        import time
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        script = tmp_path / "blocking_del.py"
+        script.write_text(
+            "import asyncio\n"
+            "import logging\n"
+            "import sys\n"
+            "import threading\n"
+            "\n"
+            "logging.basicConfig(level=logging.INFO)\n"
+            "from src.__main__ import _finalize_and_exit\n"
+            "from src.tools.process_manager import AdoptedZombieReaper\n"
+            "\n"
+            "class BlockingDelError(RuntimeError):\n"
+            "    def __del__(self):\n"
+            "        print('BLOCKING_DEL_ENTER', file=sys.__stderr__, flush=True)\n"
+            "        threading.Event().wait()\n"
+            "\n"
+            "loop = asyncio.new_event_loop()\n"
+            "\n"
+            "def explode(_coro):\n"
+            "    raise BlockingDelError('barrier blew up')\n"
+            "\n"
+            "loop.run_until_complete = explode\n"
+            "print('FINALIZE_ENTER', file=sys.stderr, flush=True)\n"
+            "_finalize_and_exit(\n"
+            "    loop, AdoptedZombieReaper(), logging.getLogger('repro'), 0\n"
+            ")\n"
+            "print('UNREACHABLE', file=sys.stderr, flush=True)\n"
+        )
+        start = time.monotonic()
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=repo_root,
+            capture_output=True,
+            timeout=15,
+        )
+        elapsed = time.monotonic() - start
+        assert proc.returncode == 1
+        assert elapsed < 10.0
+        assert b"FINALIZE_ENTER" in proc.stderr
+        assert b"BLOCKING_DEL_ENTER" not in proc.stderr  # never finalized
+        assert b"UNREACHABLE" not in proc.stderr
+
     def test_thread_guard_catches_base_exceptions(self, monkeypatch):
         """os._exit is unconditional: even a BaseException out of the
         scribe machinery (a signal mid-join) must not stop it."""

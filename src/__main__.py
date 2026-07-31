@@ -132,6 +132,17 @@ def _enable_process_containment(log) -> bool:
 _FINALIZE_STEP_TIMEOUT = 3.0
 
 
+# Objects caught on the emergency path are parked here FOREVER — the
+# process exits moments later. CPython clears an `except ... as exc`
+# binding when the handler ends; if that drops the final reference, a
+# user-defined __del__ runs synchronously on the main thread BEFORE
+# os._exit is reached (round-22, reproduced on all three failure
+# paths). Parking keeps the reference alive so no finalizer can ever
+# run on this path. Never cleared, never capped: eviction would drop
+# references, which is exactly the hazard.
+_PARKED_FOR_EXIT: list[object] = []
+
+
 def _safe_repr(exc: BaseException) -> str:
     """Identity of ``exc`` without executing ANY of its code (round-21).
 
@@ -181,11 +192,13 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
     """
     owners_stopped = False
     failure = ""
+    pending: list = []
+    done: set = set()
+    refused: set = set()
     try:
         pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
         for task in pending:
             task.cancel()
-        refused: set = set()
         if pending:
             done, refused = loop.run_until_complete(
                 asyncio.wait(pending, timeout=_FINALIZE_STEP_TIMEOUT)
@@ -205,17 +218,22 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
                     asyncio.wait({hook}, timeout=_FINALIZE_STEP_TIMEOUT)
                 )
                 if hung:
+                    _PARKED_FOR_EXIT.append(hook)
                     failure = f"{label} shutdown did not finish"
                     break
                 if hook.exception() is not None:
                     # A hook that RAISED is as unproven as one that hung
                     # — asyncio.wait reports it done, but done-with-error
-                    # is not a completed barrier.
+                    # is not a completed barrier. Park the task: its
+                    # exception (and coroutine frame) must not be freed
+                    # on this path (round-22).
+                    _PARKED_FOR_EXIT.append(hook)
                     failure = f"{label} shutdown failed"
                     break
             else:
                 owners_stopped = True
     except Exception as exc:
+        _PARKED_FOR_EXIT.append(exc)  # a dropped ref could run __del__
         failure = "exception during loop drain: " + _safe_repr(exc)
     if not owners_stopped:
         # UNPROVEN verdict. From here to os._exit there must be NO
@@ -226,6 +244,10 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
         # veto record (restart.block_reexec logs), not even
         # loop.close() (pending-task warnings go through logging): the
         # caller's emergency path says all of it from a bounded scribe.
+        # The task collections are parked too — releasing them at frame
+        # exit would free coroutine frames whose locals can carry
+        # user-defined finalizers (round-22).
+        _PARKED_FOR_EXIT.extend((pending, done, refused))
         return failure or "owner barrier unproven"
     try:
         drained, verified = zombie_reaper.drain_at_teardown()
@@ -233,7 +255,9 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
         # A failing drain is a FAILURE VERDICT like any other: no
         # synchronous logging, no veto record here — a blocking handler
         # would hang the main thread before the emergency exit is
-        # reachable (round-20 #1). The reason travels to the scribe.
+        # reachable (round-20 #1). The reason travels to the scribe;
+        # the exception is parked so no __del__ fires here (round-22).
+        _PARKED_FOR_EXIT.append(exc)
         return "final zombie drain failed: " + _safe_repr(exc)
     if not verified:
         return "final zombie drain could not verify a clean process table"
@@ -267,7 +291,9 @@ def _finalize_and_exit(
         # unproven — resurfacing the exception would resurrect ordinary
         # interpreter shutdown and the round-17 hang with it. The repr
         # is guarded too: a broken __repr__ raising HERE would escape
-        # this very handler (round-20 #2).
+        # this very handler (round-20 #2), and the exception is parked
+        # so clearing this binding cannot run a __del__ (round-22).
+        _PARKED_FOR_EXIT.append(exc)
         failure = "finalize crashed: " + _safe_repr(exc)
     if failure is None:
         return
@@ -324,8 +350,8 @@ def _emergency_exit(log, exit_code: int, reason: str) -> None:
         )
         scribe.start()
         scribe.join(timeout=1.0)
-    except BaseException:  # noqa: BLE001 — os._exit is unconditional
-        pass
+    except BaseException as exc:  # noqa: BLE001 — os._exit is unconditional
+        _PARKED_FOR_EXIT.append(exc)
     os._exit(exit_code or 1)
 
 
