@@ -132,6 +132,23 @@ def _enable_process_containment(log) -> bool:
 _FINALIZE_STEP_TIMEOUT = 3.0
 
 
+def _safe_repr(exc: BaseException) -> str:
+    """repr() that cannot raise (round-20 #2).
+
+    A failure reason is built INSIDE exception handlers on the
+    emergency path — a hostile or broken ``__repr__`` raising there
+    would escape the very guard that exists to make ``os._exit``
+    unconditional.
+    """
+    try:
+        return repr(exc)
+    except BaseException:
+        try:
+            return type(exc).__name__
+        except BaseException:
+            return "unrepresentable exception"
+
+
 def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
     """Teardown tail in the exact round-15 §3.3 order.
 
@@ -196,7 +213,7 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
             else:
                 owners_stopped = True
     except Exception as exc:
-        failure = f"exception during loop drain: {exc!r}"
+        failure = f"exception during loop drain: {_safe_repr(exc)}"
     if not owners_stopped:
         # UNPROVEN verdict. From here to os._exit there must be NO
         # synchronous I/O: a blocking logging handler would hang the
@@ -209,16 +226,16 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
         return failure or "owner barrier unproven"
     try:
         drained, verified = zombie_reaper.drain_at_teardown()
-        if drained:
-            log.info("Reaped %d adopted zombie(s) at teardown", drained)
-        if not verified:
-            restart.block_reexec(
-                "final zombie drain could not verify a clean process "
-                "table"
-            )
-    except Exception:
-        log.exception("adopted-zombie teardown drain error")
-        restart.block_reexec("final zombie drain failed")
+    except Exception as exc:
+        # A failing drain is a FAILURE VERDICT like any other: no
+        # synchronous logging, no veto record here — a blocking handler
+        # would hang the main thread before the emergency exit is
+        # reachable (round-20 #1). The reason travels to the scribe.
+        return f"final zombie drain failed: {_safe_repr(exc)}"
+    if not verified:
+        return "final zombie drain could not verify a clean process table"
+    if drained:
+        log.info("Reaped %d adopted zombie(s) at teardown", drained)
     loop.close()
     log.info("Odin stopped")
     return None
@@ -245,8 +262,10 @@ def _finalize_and_exit(
     except BaseException as exc:  # noqa: BLE001 — nothing may escape this path
         # Whatever leaked out of finalize, the process state is at best
         # unproven — resurfacing the exception would resurrect ordinary
-        # interpreter shutdown and the round-17 hang with it.
-        failure = f"finalize crashed: {exc!r}"
+        # interpreter shutdown and the round-17 hang with it. The repr
+        # is guarded too: a broken __repr__ raising HERE would escape
+        # this very handler (round-20 #2).
+        failure = f"finalize crashed: {_safe_repr(exc)}"
     if failure is None:
         return
     _emergency_exit(log, exit_code, failure)
@@ -271,16 +290,16 @@ def _emergency_exit(log, exit_code: int, reason: str) -> None:
     def _last_words() -> None:
         try:
             restart.block_reexec(
-                "event-loop drain failed — subprocess owners not proven "
-                f"stopped, final zombie drain skipped ({reason})"
+                "teardown could not prove a clean process state — "
+                f"in-place re-exec unsafe ({reason})"
             )
         except Exception:
             pass
         try:
             log.error(
-                "Event-loop drain incomplete (%s) — exiting without "
-                "interpreter shutdown: unproven subprocess owners may "
-                "include blocked non-daemon threads",
+                "Teardown unproven (%s) — exiting without interpreter "
+                "shutdown: state may include blocked non-daemon threads "
+                "or unreaped children",
                 reason,
             )
         except Exception:
@@ -302,7 +321,7 @@ def _emergency_exit(log, exit_code: int, reason: str) -> None:
         )
         scribe.start()
         scribe.join(timeout=1.0)
-    except Exception:
+    except BaseException:  # noqa: BLE001 — os._exit is unconditional
         pass
     os._exit(exit_code or 1)
 

@@ -431,7 +431,10 @@ class TestFinalizeLoop:
         assert restart.reexec_blocked() is None  # verified drain ⇒ no veto
         assert not os.path.exists(f"/proc/{orphan}")  # consumed at teardown
 
-    def test_unverified_drain_blocks_reexec(self):
+    def test_unverified_drain_is_a_failure_verdict(self):
+        """Round-20 #1: a drain that cannot verify is a failure verdict
+        like any other — returned with ZERO I/O (no veto record, no
+        logging, loop untouched); the emergency scribe says it."""
         import logging
 
         import src.tools.process_manager as pm
@@ -441,12 +444,13 @@ class TestFinalizeLoop:
         loop = asyncio.new_event_loop()
         reaper = pm.AdoptedZombieReaper()
         reaper.drain_at_teardown = lambda: (0, False)  # type: ignore[method-assign]
-        _finalize_loop(loop, reaper, logging.getLogger("test"))
-        veto = restart.reexec_blocked()
-        assert veto is not None and "verify" in veto
-        assert loop.is_closed()
+        failure = _finalize_loop(loop, reaper, logging.getLogger("test"))
+        assert failure is not None and "could not verify" in failure
+        assert restart.reexec_blocked() is None
+        assert not loop.is_closed()
+        loop.close()
 
-    def test_drain_exception_blocks_reexec(self):
+    def test_raising_drain_is_a_failure_verdict(self):
         import logging
 
         import src.tools.process_manager as pm
@@ -460,10 +464,12 @@ class TestFinalizeLoop:
             raise RuntimeError("drain exploded")
 
         reaper.drain_at_teardown = explode  # type: ignore[method-assign]
-        _finalize_loop(loop, reaper, logging.getLogger("test"))
-        veto = restart.reexec_blocked()
-        assert veto is not None and "failed" in veto
-        assert loop.is_closed()
+        failure = _finalize_loop(loop, reaper, logging.getLogger("test"))
+        assert failure is not None
+        assert "drain failed" in failure and "drain exploded" in failure
+        assert restart.reexec_blocked() is None
+        assert not loop.is_closed()
+        loop.close()
 
     def test_cancellation_resistant_task_cannot_hold_teardown(self):
         """Round-16 #2: a task that swallows CancelledError must not make
@@ -688,6 +694,55 @@ class TestUncleanBarrierExit:
         assert b"UNREACHABLE" not in proc.stderr  # os._exit, not a return
         assert b"default-executor shutdown did not finish" in proc.stderr
 
+    def test_failing_drain_with_blocking_logger_exits_promptly(self, tmp_path):
+        """Round-20 #1, process level (Odin's repro shape): owners are
+        PROVEN, the drain fails, and the root logger blocks — the old
+        code hung in block_reexec/log.exception before selecting the
+        emergency path. Now the process still exits nonzero fast."""
+        import subprocess
+        import time
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        script = tmp_path / "blocked_drain_logger.py"
+        script.write_text(
+            "import asyncio\n"
+            "import logging\n"
+            "import sys\n"
+            "import threading\n"
+            "\n"
+            "logging.basicConfig(level=logging.INFO)\n"
+            "from src.__main__ import _finalize_and_exit\n"
+            "from src.tools.process_manager import AdoptedZombieReaper\n"
+            "\n"
+            "loop = asyncio.new_event_loop()\n"
+            "reaper = AdoptedZombieReaper()\n"
+            "reaper.drain_at_teardown = lambda: (0, False)\n"
+            "print('FINALIZE_ENTER', file=sys.stderr, flush=True)\n"
+            "class BlockingHandler(logging.Handler):\n"
+            "    def emit(self, record):\n"
+            "        print('BLOCKING_LOG_EMIT', file=sys.__stderr__, flush=True)\n"
+            "        threading.Event().wait()\n"
+            "logging.getLogger().addHandler(BlockingHandler())\n"
+            "_finalize_and_exit(\n"
+            "    loop, reaper, logging.getLogger('repro'), 0\n"
+            ")\n"
+            "print('UNREACHABLE', file=sys.stderr, flush=True)\n"
+        )
+        start = time.monotonic()
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=repo_root,
+            capture_output=True,
+            timeout=15,
+        )
+        elapsed = time.monotonic() - start
+        assert proc.returncode == 1
+        assert elapsed < 10.0
+        assert b"FINALIZE_ENTER" in proc.stderr
+        assert b"UNREACHABLE" not in proc.stderr
+        assert b"could not verify" in proc.stderr  # said by the scribe
+
     def test_unclean_barrier_uses_immediate_exit(self, monkeypatch):
         """In-process arm coverage: unproven owners → os._exit with a
         promoted nonzero code; a clean barrier returns normally."""
@@ -707,7 +762,8 @@ class TestUncleanBarrierExit:
         assert calls == [1]
         # The veto is recorded by the emergency scribe, reason included.
         veto = restart.reexec_blocked()
-        assert veto is not None and "boom reason" in veto and "owners" in veto
+        assert veto is not None and "boom reason" in veto
+        assert "could not prove" in veto
         entry._finalize_and_exit(
             loop, pm.AdoptedZombieReaper(), logging.getLogger("t"), 7
         )
@@ -760,6 +816,108 @@ class TestUncleanBarrierExit:
             loop.close()
         finally:
             poisoned.handlers.clear()
+
+    def test_drain_failure_path_never_logs(self):
+        """Round-20 #1 core: between a drain-failure verdict and the
+        return there is NO synchronous I/O either — a blocking handler
+        must not hang the main thread before the emergency exit."""
+        import logging
+        import threading
+        import time
+
+        import src.tools.process_manager as pm
+        from src.__main__ import _finalize_loop
+
+        class BlockingHandler(logging.Handler):
+            def emit(self, record):
+                threading.Event().wait()
+
+        poisoned = logging.getLogger("test-poisoned-drain")
+        poisoned.propagate = False
+        poisoned.addHandler(BlockingHandler())
+        try:
+            loop = asyncio.new_event_loop()
+            reaper = pm.AdoptedZombieReaper()
+            reaper.drain_at_teardown = lambda: (0, False)  # type: ignore[method-assign]
+            start = time.monotonic()
+            failure = _finalize_loop(loop, reaper, poisoned)
+            assert time.monotonic() - start < 5.0  # never touched the logger
+            assert failure is not None and "could not verify" in failure
+            loop.close()
+        finally:
+            poisoned.handlers.clear()
+
+    def test_broken_repr_cannot_escape_the_crash_guard(self, monkeypatch):
+        """Round-20 #2: a hostile __repr__ raising inside the crash
+        guard must not keep os._exit from running."""
+        import logging
+
+        import src.__main__ as entry
+        import src.tools.process_manager as pm
+        from src import restart
+
+        class EvilReprError(RuntimeError):
+            def __repr__(self):
+                raise ValueError("repr broke")
+
+        calls: list = []
+        monkeypatch.setattr(entry.os, "_exit", lambda code: calls.append(code))
+
+        def crash(*_a):
+            raise EvilReprError("boom")
+
+        monkeypatch.setattr(entry, "_finalize_loop", crash)
+        loop = asyncio.new_event_loop()
+        entry._finalize_and_exit(
+            loop, pm.AdoptedZombieReaper(), logging.getLogger("t"), 0
+        )
+        assert calls == [1]
+        veto = restart.reexec_blocked()
+        assert veto is not None and "finalize crashed" in veto
+        assert "EvilReprError" in veto  # safe-repr fallback names the type
+        loop.close()
+
+    def test_broken_repr_in_barrier_exception_arm(self):
+        """The barrier's own except arm builds a reason from the caught
+        exception — that construction must not raise either."""
+        import logging
+
+        import src.tools.process_manager as pm
+        from src.__main__ import _finalize_loop
+
+        class EvilReprError(RuntimeError):
+            def __repr__(self):
+                raise ValueError("repr broke")
+
+        loop = asyncio.new_event_loop()
+
+        def explode(_coro):
+            raise EvilReprError("barrier blew up")
+
+        loop.run_until_complete = explode  # type: ignore[method-assign]
+        failure = _finalize_loop(
+            loop, pm.AdoptedZombieReaper(), logging.getLogger("t")
+        )
+        assert failure is not None and "EvilReprError" in failure
+        loop.close()
+
+    def test_thread_guard_catches_base_exceptions(self, monkeypatch):
+        """os._exit is unconditional: even a BaseException out of the
+        scribe machinery (a signal mid-join) must not stop it."""
+        import logging
+        import threading
+
+        import src.__main__ as entry
+
+        calls: list = []
+        monkeypatch.setattr(entry.os, "_exit", lambda code: calls.append(code))
+
+        def interrupted(*_a, **_k):
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(threading, "Thread", interrupted)
+        entry._emergency_exit(logging.getLogger("t"), 4, "test reason")
+        assert calls == [4]
 
     def test_finalize_crash_still_exits_immediately(self, monkeypatch):
         """Nothing may escape _finalize_and_exit into ordinary
