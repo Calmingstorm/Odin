@@ -48,6 +48,7 @@ from ..search import LocalEmbedder, SessionVectorStore
 from ..sessions import SessionManager
 from ..tools import SkillManager, ToolExecutor
 from ..tools.autonomous_loop import LoopManager
+from ..tools.process_manager import ProcessCleanupError
 from ..tools.workspace import DEFAULT_MEMORY_PATH
 from ..trajectories.saver import TrajectorySaver
 from ..turn_state import TurnStateStore
@@ -913,6 +914,15 @@ async def shutdown_services(bot) -> None:
     if process_registry is not None:
         try:
             await process_registry.shutdown()
+        except ProcessCleanupError:
+            # Teardown could not PROVE the owned session is empty (PR #244
+            # round-7 #3). Surfaced at ERROR with the registry's detail
+            # rather than swallowed as ordinary noise: an in-place re-exec
+            # after this may inherit surviving descendants.
+            log.exception(
+                "Process cleanup could not be verified — surviving "
+                "descendants may outlive this process"
+            )
         except Exception:
             log.exception("Error shutting down process_registry")
 

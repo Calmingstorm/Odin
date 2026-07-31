@@ -788,7 +788,7 @@ class TestRaceFreeGroupTermination:
     complete is never mistaken for an empty group."""
 
     async def test_pins_only_true_group_members(self):
-        from src.tools.process_manager import _close_pinned, _scan_group_members
+        from src.tools.process_manager import _close_pinned, _scan_session_members
 
         proc = await asyncio.create_subprocess_shell(
             "sleep 5 & sleep 5", stdout=asyncio.subprocess.PIPE,
@@ -796,7 +796,7 @@ class TestRaceFreeGroupTermination:
         )
         try:
             await asyncio.sleep(0.4)
-            pinned, complete = _scan_group_members(proc.pid)
+            pinned, complete = _scan_session_members(proc.pid)
             try:
                 pids = {pid for pid, _fd in pinned}
                 assert complete is True
@@ -813,8 +813,8 @@ class TestRaceFreeGroupTermination:
         fresh same-session TERM-immune child is caught by the NEXT
         enumeration pass — a one-shot pinned set would miss it."""
         from src.tools.process_manager import (
-            _scan_group_members,
-            _terminate_group_until_empty,
+            _scan_session_members,
+            _terminate_session_until_empty,
         )
 
         script = (
@@ -836,9 +836,9 @@ class TestRaceFreeGroupTermination:
         pgid = proc.pid
         try:
             await asyncio.sleep(0.5)
-            gone = await _terminate_group_until_empty(pgid, grace=0.5, timeout=10.0)
+            gone = await _terminate_session_until_empty(pgid, grace=0.5, timeout=10.0)
             assert gone is True  # affirmative empty observation
-            pinned, complete = _scan_group_members(pgid)
+            pinned, complete = _scan_session_members(pgid)
             try:
                 assert complete and not pinned  # the forked child died too
             finally:
@@ -851,7 +851,7 @@ class TestRaceFreeGroupTermination:
                 await proc.wait()
 
     async def test_term_immune_descendant_is_killed(self):
-        from src.tools.process_manager import _terminate_group_until_empty
+        from src.tools.process_manager import _terminate_session_until_empty
 
         proc = await asyncio.create_subprocess_shell(
             "python3 -c \"import signal,time;"
@@ -862,7 +862,7 @@ class TestRaceFreeGroupTermination:
         )
         try:
             await asyncio.sleep(0.5)
-            assert await _terminate_group_until_empty(
+            assert await _terminate_session_until_empty(
                 proc.pid, grace=0.5, timeout=10.0
             ) is True
         finally:
@@ -871,9 +871,9 @@ class TestRaceFreeGroupTermination:
                 await proc.wait()
 
     async def test_empty_group_is_immediately_complete(self):
-        from src.tools.process_manager import _terminate_group_until_empty
+        from src.tools.process_manager import _terminate_session_until_empty
 
-        assert await _terminate_group_until_empty(4_000_000, timeout=1.0) is True
+        assert await _terminate_session_until_empty(4_000_000, timeout=1.0) is True
 
 
 class TestScanCompleteness:
@@ -885,7 +885,7 @@ class TestScanCompleteness:
         monkeypatch.setattr(
             pm.os, "listdir", lambda _p: (_ for _ in ()).throw(OSError("nope"))
         )
-        pinned, complete = pm._scan_group_members(1234)
+        pinned, complete = pm._scan_session_members(1234)
         assert pinned == [] and complete is False
 
     def test_pidfd_exhaustion_is_incomplete_not_empty(self, monkeypatch):
@@ -897,7 +897,7 @@ class TestScanCompleteness:
             raise OSError(24, "Too many open files")
 
         monkeypatch.setattr(pm.os, "pidfd_open", emfile)
-        pinned, complete = pm._scan_group_members(1234)
+        pinned, complete = pm._scan_session_members(1234)
         assert pinned == [] and complete is False
 
     def test_vanished_candidate_does_not_spoil_the_scan(self, monkeypatch):
@@ -909,7 +909,7 @@ class TestScanCompleteness:
             pm.os, "pidfd_open",
             lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
         )
-        pinned, complete = pm._scan_group_members(1234)
+        pinned, complete = pm._scan_session_members(1234)
         assert pinned == [] and complete is True
 
     def test_stat_read_error_is_unknown_not_gone(self, monkeypatch):
@@ -919,16 +919,16 @@ class TestScanCompleteness:
             def __init__(self, _p):
                 pass
 
-            def read_text(self):
+            def read_bytes(self):
                 raise OSError(24, "Too many open files")
 
         monkeypatch.setattr(pm, "Path", FakePath)
-        assert pm._stat_fields(1) == "unknown"
+        assert pm._proc_session(1) == "unknown"
 
     def test_stat_missing_is_gone(self):
         import src.tools.process_manager as pm
 
-        assert pm._stat_fields(4_000_000) is None
+        assert pm._proc_session(4_000_000) is None
 
 
 class TestShutdownBarrier:
@@ -965,9 +965,9 @@ class TestShutdownBarrier:
             await asyncio.wait_for(reg.shutdown(), timeout=SHUTDOWN_REAP_TIMEOUT + 20)
             assert time.monotonic() - start < SHUTDOWN_REAP_TIMEOUT + 20
             assert proc.returncode is not None  # leader reaped
-            from src.tools.process_manager import _scan_group_members
+            from src.tools.process_manager import _scan_session_members
 
-            pinned, complete = _scan_group_members(proc.pid)
+            pinned, complete = _scan_session_members(proc.pid)
             assert complete and not pinned  # group provably empty
         finally:
             resist = False
@@ -1020,32 +1020,48 @@ class TestRaceFreeHelperArms:
         )
         assert _pidfd_exited(999_999) is True
 
-    def test_malformed_stat_is_gone(self, monkeypatch):
+    def test_malformed_stat_is_unknown_not_gone(self, monkeypatch):
+        """Round-7 #2: only provable disappearance may read as GONE."""
         import src.tools.process_manager as pm
 
         class FakePath:
             def __init__(self, _p):
                 pass
 
-            def read_text(self):
-                return "1 (comm) S"  # too few fields after the parens
+            def read_bytes(self):
+                return b"1 (comm) S"  # too few fields after the parens
 
         monkeypatch.setattr(pm, "Path", FakePath)
-        assert pm._stat_fields(1) is None
+        assert pm._proc_session(1) == "unknown"
+
+    def test_non_utf8_comm_is_parsed_not_raised(self, monkeypatch):
+        """Round-7 #2: comm may hold arbitrary bytes — parsing on BYTES
+        means a non-UTF-8 name neither raises nor reads as absence."""
+        import src.tools.process_manager as pm
+
+        class FakePath:
+            def __init__(self, _p):
+                pass
+
+            def read_bytes(self):
+                return b"7 (od\xffin) S 1 42 4242 " + b"0 " * 40
+
+        monkeypatch.setattr(pm, "Path", FakePath)
+        assert pm._proc_session(7) == 4242
 
     def test_pinned_member_with_unreadable_stat_is_incomplete(self, monkeypatch):
         """A candidate we pinned but cannot classify (stat unreadable)
         leaves the scan INCOMPLETE — never silently skipped as absent."""
         import src.tools.process_manager as pm
 
-        real_stat = pm._stat_fields
+        real_stat = pm._proc_session
         target = os.getpid()
 
         def flaky(pid):
             return "unknown" if pid == target else real_stat(pid)
 
-        monkeypatch.setattr(pm, "_stat_fields", flaky)
-        pinned, complete = pm._scan_group_members(4_000_001)
+        monkeypatch.setattr(pm, "_proc_session", flaky)
+        pinned, complete = pm._scan_session_members(4_000_001)
         assert complete is False
         pm._close_pinned(pinned)
 
@@ -1075,3 +1091,156 @@ class TestRaceFreeHelperArms:
             assert pm._pidfd_exited(fd) is True
         finally:
             os.close(fd)
+
+
+class TestSessionFenceEscapes:
+    """Round-7 #1: leaving the process GROUP does not leave the session."""
+
+    async def test_setpgid_escapee_is_still_terminated(self):
+        """Odin's repro: a TERM-immune descendant calls setpgid(0, 0) to
+        leave the original group while staying in our session. Group-based
+        membership made it invisible; session-based membership does not."""
+        from src.tools.process_manager import (
+            _close_pinned,
+            _scan_session_members,
+            _terminate_session_until_empty,
+        )
+
+        # setpgid(0, 0) → new GROUP, SAME session; TERM ignored.
+        escapee = (
+            "import os,signal,time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "os.setpgid(0,0); time.sleep(60)"
+        )
+        proc = await asyncio.create_subprocess_shell(
+            f'python3 -c "{escapee}" & exit 0',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        sid = proc.pid
+        try:
+            await asyncio.sleep(0.6)
+            pinned, complete = _scan_session_members(sid)
+            try:
+                # The escapee is VISIBLE: it left the group, not the session.
+                assert complete and len(pinned) >= 1
+            finally:
+                _close_pinned(pinned)
+            assert await _terminate_session_until_empty(
+                sid, grace=0.5, timeout=12.0
+            ) is True
+            pinned, complete = _scan_session_members(sid)
+            try:
+                assert complete and not pinned  # escapee is gone
+            finally:
+                _close_pinned(pinned)
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+
+
+class TestShutdownAffirmativeProof:
+    """Round-7 #3: a completed watcher is not proof; shutdown re-verifies
+    and escalates anything it cannot prove."""
+
+    async def test_failed_watcher_reap_is_reverified_and_escalated(
+        self, monkeypatch
+    ):
+        import src.tools.process_manager as pm
+
+        reg = ProcessRegistry()
+        stub = type("P", (), {"pid": 4242, "returncode": 0})()
+        info = ProcessInfo(
+            pid=4242, command="x", host="local", start_time=0.0,
+            status="completed", exit_code=0, process=stub,
+        )
+        info.session_confirmed_empty = False  # the watcher's reap FAILED
+        info._exit_task = None
+        reg._processes[4242] = info
+
+        # Verification cannot complete either → shutdown must escalate.
+        monkeypatch.setattr(
+            pm.os, "listdir", lambda _p: (_ for _ in ()).throw(OSError("nope"))
+        )
+        with pytest.raises(pm.ProcessCleanupError) as exc:
+            await reg.shutdown()
+        assert "4242" in str(exc.value)
+
+    async def test_confirmed_record_needs_no_reverification(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        reg = ProcessRegistry()
+        stub = type("P", (), {"pid": 4242, "returncode": 0})()
+        info = ProcessInfo(
+            pid=4242, command="x", host="local", start_time=0.0,
+            status="completed", exit_code=0, process=stub,
+        )
+        info.session_confirmed_empty = True  # the watcher PROVED it
+        reg._processes[4242] = info
+        called = False
+
+        def boom(_p):
+            nonlocal called
+            called = True
+            raise OSError("must not be re-scanned")
+
+        monkeypatch.setattr(pm.os, "listdir", boom)
+        assert await reg.shutdown() == 0
+        assert called is False
+
+    async def test_watcher_records_its_verdict(self):
+        """The verdict reaches ProcessInfo instead of being discarded."""
+        reg = ProcessRegistry()
+        started = await reg.start("localhost", "echo hi; exit 0")
+        pid = int(started.split("PID ")[1].split(")")[0])
+        await reg.poll(pid, wait_seconds=15)
+        for _ in range(40):
+            if reg._processes[pid].session_confirmed_empty:
+                break
+            await asyncio.sleep(0.25)
+        assert reg._processes[pid].session_confirmed_empty is True
+        assert await reg.shutdown() == 0  # no escalation
+
+    async def test_final_verification_exception_is_escalated(self, monkeypatch):
+        """A verification that RAISES is as unproven as one returning
+        False — both escalate rather than passing teardown."""
+        import src.tools.process_manager as pm
+
+        reg = ProcessRegistry()
+        stub = type("P", (), {"pid": 4242, "returncode": 0})()
+        info = ProcessInfo(
+            pid=4242, command="x", host="local", start_time=0.0,
+            status="completed", exit_code=0, process=stub,
+        )
+        reg._processes[4242] = info
+
+        async def boom(_info, timeout=8.0):
+            raise RuntimeError("verification exploded")
+
+        monkeypatch.setattr(reg, "_kill_group_until_gone", boom)
+        with pytest.raises(pm.ProcessCleanupError):
+            await reg.shutdown()
+
+    async def test_watcher_records_failure_when_reap_raises(self, monkeypatch):
+        """A reap that raises inside the watcher leaves the record
+        UNCONFIRMED (never silently 'clean')."""
+        import src.tools.process_manager as pm
+
+        reg = ProcessRegistry()
+
+        async def boom(*_a, **_k):
+            raise RuntimeError("reap exploded")
+
+        monkeypatch.setattr(pm, "_terminate_session_until_empty", boom)
+        proc = await asyncio.create_subprocess_shell(
+            "true", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        info = ProcessInfo(
+            pid=proc.pid, command="true", host="local",
+            start_time=time.time(), process=proc,
+        )
+        reg._processes[proc.pid] = info
+        await reg._watch_exit(info)
+        assert info.session_confirmed_empty is False

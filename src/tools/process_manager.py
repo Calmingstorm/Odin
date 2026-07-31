@@ -22,6 +22,15 @@ from .workspace import WorkspaceError, workspace_env
 
 log = get_logger("process_manager")
 
+
+class ProcessCleanupError(RuntimeError):
+    """Shutdown could not affirmatively prove the owned session is empty.
+
+    Raised so the caller — which re-execs in place after teardown — sees
+    that descendants may survive, rather than shutdown returning normally
+    on unverified state (round-7 #3).
+    """
+
 MAX_CONCURRENT = 20
 MAX_LIFETIME_SECONDS = 3600  # 1 hour
 OUTPUT_BUFFER_LINES = 500
@@ -67,42 +76,50 @@ def _utf8_boundary_split(buf: bytes) -> tuple[bytes, bytes]:
 
 
 
-def _stat_fields(pid: int) -> tuple[int, int] | None | str:
-    """(pgrp, session) from /proc/<pid>/stat, parsed after the comm parens
-    (comm may embed spaces/parens).
+def _proc_session(pid: int) -> int | None | str:
+    """The SESSION id from /proc/<pid>/stat.
 
-    Returns None when the process is provably GONE (ENOENT/malformed —
-    a vanished process is not a member), or the sentinel ``"unknown"``
-    when inspection FAILED for another reason, which the caller must
-    treat as an incomplete scan rather than as absence (round-6 #2).
+    Session — not process group — is the ownership fence (round-7 #1): a
+    descendant may call ``setpgid(0, 0)`` and leave the original group
+    while remaining in our session, and the only way OUT of a session is
+    ``setsid()``, which makes the caller a NEW session leader (so it can
+    never join ours from outside either).
+
+    Returns the sid, ``None`` only when the process is PROVABLY gone
+    (ENOENT/ESRCH), or the sentinel ``"unknown"`` for any other failure —
+    a malformed or unreadable stat must never read as absence
+    (round-7 #2). Parsing is done on BYTES: ``comm`` may hold arbitrary
+    non-UTF-8, which decoding would raise on.
     """
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except FileNotFoundError:
+        raw = Path(f"/proc/{pid}/stat").read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
         return None  # exited between listdir and read — genuinely gone
     except OSError:
         return "unknown"  # EMFILE/EACCES/… — we do NOT know
     try:
-        rest = stat.rsplit(")", 1)[1].split()
-        return int(rest[2]), int(rest[3])
+        rest = raw.rsplit(b")", 1)[1].split()
+        return int(rest[3])  # field 6 (session), 0-indexed after comm
     except (IndexError, ValueError):
-        return None
+        return "unknown"  # malformed — never treated as absence
 
 
-def _scan_group_members(pgid: int) -> tuple[list[tuple[int, int]], bool]:
-    """Enumerate the group's members, each PINNED with a pidfd.
+def _scan_session_members(sid: int) -> tuple[list[tuple[int, int]], bool]:
+    """Enumerate the owned SESSION's members, each PINNED with a pidfd.
 
-    Returns ``(pinned, complete)``. The pin happens BEFORE membership is
-    verified, so verification and every later signal act on the exact
-    process the fd names — pid reuse between steps is structurally
-    impossible (round-5 #2). Membership = pgrp == session == pgid: our
-    leader was spawned with start_new_session, its descendants inherit
-    that session, and setpgid cannot move a foreign process into it.
+    The pin happens BEFORE membership is verified, so verification and
+    every later signal act on the exact process the fd names — pid reuse
+    between steps is structurally impossible (round-5 #2). Membership is
+    ``session == sid`` (round-7 #1): our leader was spawned with
+    ``start_new_session``, so it IS the session leader (sid == its pid),
+    descendants inherit the session, and a process can only leave by
+    becoming its own session leader — never join ours.
 
     ``complete`` is False whenever ANY candidate could not be inspected
-    or pinned for a reason other than "it exited" — an unreadable /proc
-    or an fd-exhausted pidfd_open must never be mistaken for an empty
-    group (round-6 #2). Caller owns the returned fds.
+    or pinned for a reason other than provable disappearance — an
+    unreadable /proc, an fd-exhausted pidfd_open, or a malformed stat
+    must never be mistaken for an empty session (round-6 #2, round-7 #2).
+    Caller owns the returned fds.
     """
     pinned: list[tuple[int, int]] = []
     try:
@@ -119,16 +136,15 @@ def _scan_group_members(pgid: int) -> tuple[list[tuple[int, int]], bool]:
         except ProcessLookupError:
             continue  # exited — not a member
         except OSError:
-            # EMFILE/ENFILE/EPERM: we could not pin it, so its membership
-            # is UNKNOWN unless the process is provably gone.
-            if _stat_fields(pid) is not None:
+            # Could not pin: membership UNKNOWN unless provably gone.
+            if _proc_session(pid) is not None:
                 complete = False
             continue
-        fields = _stat_fields(pid)
-        if fields == (pgid, pgid):
+        session = _proc_session(pid)
+        if session == sid:
             pinned.append((pid, fd))
             continue
-        if fields == "unknown":
+        if session == "unknown":
             complete = False
         os.close(fd)
     return pinned, complete
@@ -161,26 +177,27 @@ def _pidfd_exited(fd: int) -> bool:
         return True
 
 
-async def _terminate_group_until_empty(
-    pgid: int, *, grace: float = 2.0, timeout: float = 10.0, term_first: bool = True
+async def _terminate_session_until_empty(
+    sid: int, *, grace: float = 2.0, timeout: float = 10.0, term_first: bool = True
 ) -> bool:
-    """Drive an owned process group to provably empty.
+    """Drive the owned SESSION to provably empty.
 
     Every pass RE-ENUMERATES (round-6 #1): a TERM handler that forks a
-    fresh same-session child is caught by the next pass, where a
-    one-shot pinned set would miss it entirely. TERM is offered once per
-    pid (when ``term_first``), then the passes escalate to KILL, which
-    cannot be caught or forked around.
+    fresh child — or one that calls ``setpgid`` to leave the original
+    group (round-7 #1) — is caught by the next pass, where a one-shot
+    pinned set would miss it. TERM is offered once per pid (when
+    ``term_first``), then the passes escalate to KILL, which cannot be
+    caught or forked around.
 
-    Returns True ONLY on an affirmative observation of an empty group
-    from a COMPLETE scan — an unreadable /proc or fd exhaustion returns
-    False, never a false success (round-6 #2).
+    Returns True ONLY on an affirmative observation of an empty session
+    from a COMPLETE scan — an unreadable /proc, fd exhaustion, or a
+    malformed stat returns False, never a false success.
     """
     deadline = time.monotonic() + timeout
     termed: set[int] = set()
     escalate_at = time.monotonic() + grace if term_first else 0.0
     while True:
-        pinned, complete = _scan_group_members(pgid)
+        pinned, complete = _scan_session_members(sid)
         try:
             if complete and not pinned:
                 return True
@@ -235,6 +252,10 @@ class ProcessInfo:
     # NOT bounded by the ring buffer — a full ring of repeated lines can
     # look frozen while output is still arriving; this counter cannot.
     total_output_bytes: int = 0
+    # Affirmative cleanup proof (round-7 #3): True only once the owned
+    # session was OBSERVED empty by a complete scan. shutdown() requires
+    # this before it may report clean teardown / permit re-exec.
+    session_confirmed_empty: bool = False
 
 
 class ProcessRegistry:
@@ -497,8 +518,30 @@ class ProcessRegistry:
                     log.debug(
                         "Reaper for PID %d errored during shutdown", pid, exc_info=True
                     )
+        # 3) FINAL AFFIRMATIVE PROOF (round-7 #3). A completed watcher is
+        #    not proof by itself: it may have recorded a FAILED reap, and
+        #    the timeout fallback's verdict must not be discarded either.
+        #    Every record that has not been OBSERVED session-empty is
+        #    re-verified here; anything still unproven is escalated to the
+        #    caller, which owns the re-exec decision.
+        unproven: list[int] = []
+        for pid, info in list(self._processes.items()):
+            if info.session_confirmed_empty or info.process is None:
+                continue
+            try:
+                if not await self._kill_group_until_gone(info):
+                    unproven.append(pid)
+            except Exception:
+                log.exception("Final cleanup verification failed for PID %d", pid)
+                unproven.append(pid)
         if killed:
             log.info("Shutdown: terminated %d running process(es)", killed)
+        if unproven:
+            raise ProcessCleanupError(
+                "could not confirm the owned session is empty for "
+                f"PID(s) {sorted(unproven)} — descendants may survive a "
+                "re-exec"
+            )
         return killed
 
     def cleanup(self) -> int:
@@ -547,9 +590,10 @@ class ProcessRegistry:
         proc = info.process
         if proc is None:
             return True
-        gone = await _terminate_group_until_empty(
+        gone = await _terminate_session_until_empty(
             proc.pid, timeout=timeout, term_first=False
         )
+        info.session_confirmed_empty = gone
         if proc.returncode is None:
             # Reap the leader (bounded) so no zombie crosses the exec.
             await _wait_leader_exit(proc, timeout=1.0)
@@ -634,11 +678,17 @@ class ProcessRegistry:
         # signal now goes through pidfds pinned BEFORE membership
         # verification: TERM, bounded grace, then KILL for survivors.
         try:
-            await _terminate_group_until_empty(
+            info.session_confirmed_empty = await _terminate_session_until_empty(
                 info.process.pid, grace=2.0, timeout=10.0
             )
         except Exception:
-            log.debug("group reap after PID %d exit failed", info.pid, exc_info=True)
+            info.session_confirmed_empty = False
+            log.debug("session reap after PID %d exit failed", info.pid, exc_info=True)
+        if not info.session_confirmed_empty:
+            log.error(
+                "Could not confirm PID %d's owned session is empty after "
+                "leader exit — shutdown will re-verify", info.pid,
+            )
 
     async def _enforce_lifetime(self, pid: int, max_seconds: int) -> None:
         """Auto-kill process after max lifetime."""

@@ -455,18 +455,23 @@ class TestProductionPipelinePath:
         assert h2.row()[0] == TurnStatus.SUSPENDED
 
         heal_capacity(h2, text_response("Pipeline auto-finish."))
-        # Wait for a TERMINAL status — the row passes through ACTIVE while
-        # the auto-resume runs (breaking on first non-SUSPENDED raced the
-        # in-flight resume under coverage instrumentation).
+
+        def delivered() -> bool:
+            return any(
+                "Pipeline auto-finish." in (r["content"] or "")
+                for r in original.replies
+            )
+
+        # Wait for the USER-VISIBLE outcome, not just the row status: the
+        # turn settles TERMINAL a moment before delivery completes, and
+        # asserting on the status alone raced the reply under coverage
+        # instrumentation on CI.
         for _ in range(600):
             await asyncio.sleep(0.05)
-            if h2.row()[0] in TurnStatus.TERMINAL:
+            if h2.row()[0] in TurnStatus.TERMINAL and delivered():
                 break
         assert h2.row()[0] == TurnStatus.TERMINAL_COMPLETED
-        assert any(
-            "Pipeline auto-finish." in (r["content"] or "")
-            for r in original.replies
-        )
+        assert delivered()
         for task in list(h2.manager._waiters.values()):
             task.cancel()
 
