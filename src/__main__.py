@@ -122,6 +122,16 @@ def _enable_process_containment(log) -> bool:
     return False
 
 
+# Per-step ceiling for the finalize barrier. Every await in
+# _finalize_loop is bounded by it: a cancellation-resistant task (or a
+# wedged executor thread) must never be able to hold teardown hostage —
+# an unbounded wait here made the final drain and the re-exec veto
+# UNREACHABLE (round-16 #2), which is the v3.62.3 shutdown-hang class
+# reinvented at the last barrier. Bounds only bite in that pathological
+# case; the normal path completes in milliseconds.
+_FINALIZE_STEP_TIMEOUT = 3.0
+
+
 def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> None:
     """Teardown tail in the exact round-15 §3.3 order.
 
@@ -134,24 +144,53 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> None:
     status a still-running owner legitimately awaits — round-15
     blocker #1).
 
-    Failure anywhere on this path VETOES the in-place re-exec
+    Every step is BOUNDED (``asyncio.wait`` returns at its timeout no
+    matter how cancellation-resistant a task is — ``gather`` does not),
+    and failure anywhere on this path VETOES the in-place re-exec
     (``restart.block_reexec``): exec'ing over an unverified process
     table hands invisible survivors to the new image, while exiting
     lets the supervisor start clean and PID 1 reap whatever remains.
     """
     owners_stopped = False
+    failure = ""
     try:
         pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
         for task in pending:
             task.cancel()
+        refused: set = set()
         if pending:
-            loop.run_until_complete(
-                asyncio.gather(*pending, return_exceptions=True)
+            done, refused = loop.run_until_complete(
+                asyncio.wait(pending, timeout=_FINALIZE_STEP_TIMEOUT)
             )
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.run_until_complete(loop.shutdown_default_executor())
-        owners_stopped = True
+            for settled in done:
+                if not settled.cancelled():
+                    settled.exception()  # retrieve; parity with gather()
+        if refused:
+            failure = f"{len(refused)} task(s) survived cancellation"
+        else:
+            for label, factory in (
+                ("async-generator", loop.shutdown_asyncgens),
+                ("default-executor", loop.shutdown_default_executor),
+            ):
+                hook = loop.create_task(factory())
+                _done, hung = loop.run_until_complete(
+                    asyncio.wait({hook}, timeout=_FINALIZE_STEP_TIMEOUT)
+                )
+                if hung:
+                    failure = f"{label} shutdown did not finish"
+                    break
+                if hook.exception() is not None:
+                    # A hook that RAISED is as unproven as one that hung
+                    # — asyncio.wait reports it done, but done-with-error
+                    # is not a completed barrier.
+                    failure = f"{label} shutdown failed"
+                    break
+            else:
+                owners_stopped = True
+        if failure:
+            log.error("Event-loop drain incomplete: %s", failure)
     except Exception:
+        failure = "exception during loop drain"
         log.exception("Event-loop drain failed")
     if owners_stopped:
         try:
@@ -169,7 +208,7 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> None:
     else:
         restart.block_reexec(
             "event-loop drain failed — subprocess owners not proven "
-            "stopped, final zombie drain skipped"
+            f"stopped, final zombie drain skipped ({failure})"
         )
     loop.close()
     log.info("Odin stopped")

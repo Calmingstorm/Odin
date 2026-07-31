@@ -112,17 +112,25 @@ class SSHConnectionPool:
         recorded incarnation is still alive, which costs one /proc read
         and no subprocess.
         """
-        from .process_manager import _proc_starttime, register_reap_identity
+        from .process_manager import (
+            _proc_live_starttime,
+            _proc_starttime,
+            register_reap_identity,
+        )
 
         key = self._key(host, ssh_user)
         recorded = self._registered_masters.get(key)
         if recorded is not None:
             pid, start = recorded
-            if _proc_starttime(pid) == start:
+            if _proc_live_starttime(pid) == start:
                 # Refresh the registration's age so a long-lived,
                 # actively reused master never ages out of the registry.
                 register_reap_identity(pid, start, source=f"ssh-master:{key}")
                 return True
+            # Gone, reused — or a ZOMBIE: a corpse awaiting reap is not a
+            # live master, and treating it as one would let its
+            # replacement bypass registration entirely (round-16 #1).
+            # The zombie's own registration stays in the reap registry.
             self._registered_masters.pop(key, None)
         socket = self.get_socket_path(host, ssh_user)
         if not os.path.exists(socket):

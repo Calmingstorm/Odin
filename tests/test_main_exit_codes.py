@@ -465,6 +465,97 @@ class TestFinalizeLoop:
         assert veto is not None and "failed" in veto
         assert loop.is_closed()
 
+    def test_cancellation_resistant_task_cannot_hold_teardown(self):
+        """Round-16 #2: a task that swallows CancelledError must not make
+        the final drain and the re-exec veto UNREACHABLE. The barrier is
+        bounded; the unproven owners veto re-exec instead."""
+        import logging
+        import time
+
+        import src.tools.process_manager as pm
+        from src import restart
+        from src.__main__ import _finalize_loop
+
+        loop = asyncio.new_event_loop()
+
+        async def stubborn():
+            while True:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    continue  # refuses to die
+
+        async def arm():
+            loop.create_task(stubborn())
+
+        loop.run_until_complete(arm())
+        reaper = pm.AdoptedZombieReaper()
+        drained: list = []
+        reaper.drain_at_teardown = (  # type: ignore[method-assign]
+            lambda: drained.append(True) or (0, True)
+        )
+        start = time.monotonic()
+        _finalize_loop(loop, reaper, logging.getLogger("test"))
+        assert time.monotonic() - start < 5.0  # Odin's probe bound
+        assert drained == []  # owners unproven ⇒ drain skipped
+        veto = restart.reexec_blocked()
+        assert veto is not None and "survived cancellation" in veto
+        assert loop.is_closed()
+
+    def test_hung_asyncgen_shutdown_is_bounded_and_vetoes(self):
+        import logging
+        import time
+
+        import src.tools.process_manager as pm
+        from src import restart
+        from src.__main__ import _finalize_loop
+
+        loop = asyncio.new_event_loop()
+
+        async def never():
+            await asyncio.Event().wait()
+
+        loop.shutdown_asyncgens = never  # type: ignore[method-assign]
+        reaper = pm.AdoptedZombieReaper()
+        drained: list = []
+        reaper.drain_at_teardown = (  # type: ignore[method-assign]
+            lambda: drained.append(True) or (0, True)
+        )
+        start = time.monotonic()
+        _finalize_loop(loop, reaper, logging.getLogger("test"))
+        assert time.monotonic() - start < 5.0
+        assert drained == []
+        veto = restart.reexec_blocked()
+        assert veto is not None and "async-generator" in veto
+        assert loop.is_closed()
+
+    def test_hung_executor_shutdown_is_bounded_and_vetoes(self):
+        import logging
+        import time
+
+        import src.tools.process_manager as pm
+        from src import restart
+        from src.__main__ import _finalize_loop
+
+        loop = asyncio.new_event_loop()
+
+        async def never():
+            await asyncio.Event().wait()
+
+        loop.shutdown_default_executor = never  # type: ignore[method-assign]
+        reaper = pm.AdoptedZombieReaper()
+        drained: list = []
+        reaper.drain_at_teardown = (  # type: ignore[method-assign]
+            lambda: drained.append(True) or (0, True)
+        )
+        start = time.monotonic()
+        _finalize_loop(loop, reaper, logging.getLogger("test"))
+        assert time.monotonic() - start < 5.0
+        assert drained == []
+        veto = restart.reexec_blocked()
+        assert veto is not None and "default-executor" in veto
+        assert loop.is_closed()
+
     def test_failed_owner_barrier_skips_drain_and_blocks(self):
         """If subprocess owners cannot be proven stopped, running the
         drain could steal a status a live owner still awaits — it must

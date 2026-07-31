@@ -2536,6 +2536,81 @@ class TestAdoptedZombieReaper:
         assert reaper.sweep_once() == 1
         assert master not in self._our_zombie_map()
 
+    async def test_dead_master_record_does_not_mask_its_replacement(
+        self, tmp_path, monkeypatch
+    ):
+        """Round-16 #1: a cached master record whose process is now a
+        ZOMBIE is not alive — the fast path must fall through and
+        re-probe, so the REPLACEMENT master gets registered. The
+        corpse's own registration survives for the reaper."""
+        import shutil
+
+        import src.tools.process_manager as pm
+        import src.tools.ssh_pool as sp
+
+        sleep_bin = shutil.which("sleep")
+        assert sleep_bin is not None
+        fake_ssh = tmp_path / "ssh"
+        shutil.copy(sleep_bin, fake_ssh)
+        fake_ssh.chmod(0o755)
+        master_a = await self._spawn_adopted(
+            tmp_path, lifetime="300", exec_path=str(fake_ssh)
+        )
+        await self._wait_adopted_alive(master_a)
+        master_b = await self._spawn_adopted(
+            tmp_path, lifetime="300", exec_path=str(fake_ssh)
+        )
+        await self._wait_adopted_alive(master_b)
+
+        pool = sp.SSHConnectionPool(socket_dir=str(tmp_path / "sockets"))
+        open(pool.get_socket_path("h1", "root"), "w").close()
+        current = {"pid": master_a}
+        calls: list = []
+
+        class FakeCheck:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"Master running (pid=%d)\r\n" % current["pid"], b"")
+
+            def kill(self):
+                pass
+
+            async def wait(self):
+                return 0
+
+        async def fake_exec(*argv, **_kw):
+            calls.append(argv)
+            return FakeCheck()
+
+        monkeypatch.setattr(sp.asyncio, "create_subprocess_exec", fake_exec)
+        assert await pool.ensure_master_registered("h1", "root") is True
+        table, _c = pm._scan_process_table()
+        identity_a = (master_a, table[master_a][1])
+        assert identity_a in pm.registered_reap_identities()
+
+        # A dies (ControlPersist expiry) and is now OUR ZOMBIE, unreaped;
+        # its replacement B is already serving the socket.
+        os.kill(master_a, 9)
+        await self._wait_zombie(master_a)
+        current["pid"] = master_b
+        probes = len(calls)
+        assert await pool.ensure_master_registered("h1", "root") is True
+        assert len(calls) == probes + 1  # re-probed — no stale fast path
+        table, _c = pm._scan_process_table()
+        identity_b = (master_b, table[master_b][1])
+        assert identity_b in pm.registered_reap_identities()
+        assert identity_a in pm.registered_reap_identities()  # corpse kept
+
+        reaper = pm.AdoptedZombieReaper(grace=0.0)
+        assert reaper.sweep_once() == 1  # A reaped…
+        assert master_a not in self._our_zombie_map()
+        table, _c = pm._scan_process_table()
+        assert table[master_b][2] != b"Z"  # …B alive and untouched
+        os.kill(master_b, 9)
+        await self._wait_zombie(master_b)
+        assert reaper.sweep_once() == 1  # B's own zombie is covered too
+
     # -- exclusions and fail-closed inspection ------------------------------
 
     async def test_pidfd_owned_child_is_never_reaped(self, monkeypatch):
@@ -2906,6 +2981,29 @@ class TestAdoptedZombieReaper:
         finally:
             live.terminate()
             live.wait()
+
+    def test_proc_live_starttime_states(self):
+        """Alive → its starttime; gone → None (the zombie arm is proven
+        by the replacement-master pin: a corpse is never 'live')."""
+        import subprocess
+
+        import src.tools.process_manager as pm
+
+        live = subprocess.Popen(["sleep", "30"])
+        try:
+            assert (
+                pm._proc_live_starttime(live.pid)
+                == pm._proc_starttime(live.pid)
+            )
+        finally:
+            live.terminate()
+            live.wait()
+        free_pid = next(
+            p
+            for p in range(4194000, 4194304)
+            if not os.path.exists(f"/proc/{p}")
+        )
+        assert pm._proc_live_starttime(free_pid) is None
 
     def test_scan_marks_unreadable_stat_incomplete(self, monkeypatch):
         """A pid listed in /proc whose stat cannot be read (EACCES shape)

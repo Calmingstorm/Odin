@@ -640,6 +640,25 @@ def _proc_starttime(pid: int) -> int | None:
         return None
 
 
+def _proc_live_starttime(pid: int) -> int | None:
+    """Starttime of a LIVE (non-zombie) incarnation, else None.
+
+    A zombie still shows its starttime until it is reaped, so starttime
+    alone cannot distinguish "this process is alive" from "this is a
+    corpse awaiting reap" (round-16 #1: a cached ssh-master record must
+    not treat its own zombie as proof of liveness — the replacement
+    master would silently bypass registration and leak until teardown).
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes()
+        rest = raw.rsplit(b")", 1)[1].split()
+        if rest[0] == b"Z":
+            return None
+        return int(rest[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def _proc_session(pid: int) -> int | None | str:
     """Session id alone (see :func:`_proc_ids` for the sentinel contract)."""
     ids = _proc_ids(pid)
