@@ -735,16 +735,14 @@ class TestRound3Blockers:
         try:
             start = time.monotonic()
             await reg.shutdown()
-            assert time.monotonic() - start < SHUTDOWN_REAP_TIMEOUT + 5
-            # The group died by the synchronous hard kill, not the reap.
-            for _ in range(20):
-                try:
-                    os.killpg(proc.pid, 0)
-                except ProcessLookupError:
-                    break
-                await asyncio.sleep(0.25)
+            assert time.monotonic() - start < SHUTDOWN_REAP_TIMEOUT + 10
+            # COMPLETION BARRIER (round-4 blocker #1): shutdown returns only
+            # after the cancellation landed, the leader was reaped, and the
+            # group provably dissolved.
+            assert info._exit_task.done()
+            assert proc.returncode is not None  # leader reaped, no zombie
             with pytest.raises(ProcessLookupError):
-                os.killpg(proc.pid, 0)
+                os.killpg(proc.pid, 0)  # group gone BEFORE shutdown returned
         finally:
             gate.set()
             if proc.returncode is None:
@@ -811,3 +809,116 @@ class TestHardKillGroup:
             process=type("P", (), {"pid": 4242})(),
         )
         ProcessRegistry._hard_kill_group(info)  # Exception arm → debug log
+
+
+class TestPgidRecycleGuard:
+    async def test_unreaped_leader_pins_the_pgid(self):
+        proc = await asyncio.create_subprocess_shell(
+            "sleep 5", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        info = ProcessInfo(
+            pid=proc.pid, command="sleep 5", host="local",
+            start_time=time.time(), process=proc,
+        )
+        try:
+            assert ProcessRegistry._pgid_safe_to_signal(info) is True
+        finally:
+            proc.kill()
+            await proc.wait()
+
+    async def test_reaped_leader_with_proc_entry_is_recycled(self):
+        """After reap, a PRESENT /proc/<pgid> can only be an unrelated
+        process that recycled the pid — never signalled (round-4)."""
+        import os as _os
+
+        stub = type("P", (), {"pid": _os.getpid(), "returncode": 0})()
+        info = ProcessInfo(
+            pid=stub.pid, command="x", host="local",
+            start_time=0.0, process=stub,
+        )
+        assert ProcessRegistry._pgid_safe_to_signal(info) is False
+
+    async def test_reaped_and_gone_is_safe(self):
+        proc = await asyncio.create_subprocess_shell(
+            "true", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        await proc.wait()
+        info = ProcessInfo(
+            pid=proc.pid, command="true", host="local",
+            start_time=time.time(), status="completed", process=proc,
+        )
+        # /proc entry gone after reap: killpg reaches our surviving members
+        # or raises ESRCH — both safe.
+        assert ProcessRegistry._pgid_safe_to_signal(info) is True
+
+    def test_no_process_is_never_safe(self):
+        info = ProcessInfo(pid=1, command="x", host="local", start_time=0.0)
+        assert ProcessRegistry._pgid_safe_to_signal(info) is False
+
+
+class TestShutdownBarrierArms:
+    async def test_abandoned_reaper_error_is_swallowed(self):
+        """A reaper that dies with a non-cancel error when cancelled must
+        not break the shutdown barrier."""
+        reg = ProcessRegistry()
+        gate = asyncio.Event()
+
+        async def bad_reaper():
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                raise ValueError("reaper corrupted on cancel") from None
+
+        proc = await asyncio.create_subprocess_shell(
+            "true", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        await proc.wait()
+        info = ProcessInfo(
+            pid=proc.pid, command="true", host="local",
+            start_time=time.time(), status="completed", exit_code=0,
+            process=proc,
+        )
+        info._exit_task = asyncio.create_task(bad_reaper())
+        reg._processes[proc.pid] = info
+        await reg.shutdown()  # must not raise
+        assert info._exit_task.done()
+
+    async def test_confirm_group_gone_warns_on_survivor(self):
+        """A group that outlives the confirmation window is logged loudly,
+        never silently abandoned."""
+        reg = ProcessRegistry()
+        proc = await asyncio.create_subprocess_shell(
+            "sleep 5", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        info = ProcessInfo(
+            pid=proc.pid, command="sleep 5", host="local",
+            start_time=time.time(), process=proc,
+        )
+        try:
+            await reg._confirm_group_gone(info, timeout=0.3)  # exhausts window
+        finally:
+            proc.kill()
+            await proc.wait()
+
+    async def test_confirm_group_gone_tolerates_probe_errors(self, monkeypatch):
+        """A probe error (e.g. EPERM against a group we cannot signal)
+        ends the confirmation quietly — never raises out of shutdown."""
+        import os as _os
+
+        reg = ProcessRegistry()
+
+        def eperm(pgid, sig):
+            raise PermissionError("operation not permitted")
+
+        monkeypatch.setattr(_os, "killpg", eperm)
+        stub = type("P", (), {"pid": 4242, "returncode": None})()
+        info = ProcessInfo(
+            pid=4242, command="x", host="local", start_time=0.0, process=stub,
+        )
+        start = time.monotonic()
+        await reg._confirm_group_gone(info, timeout=5.0)
+        assert time.monotonic() - start < 1.0  # returned on first probe error

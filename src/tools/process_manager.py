@@ -348,15 +348,28 @@ class ProcessRegistry:
                     )
                 except TimeoutError:
                     # A wedged async reap must not strand TERM-immune
-                    # descendants across re-exec (round-3 blocker #2):
-                    # hard-KILL the owned group SYNCHRONOUSLY — bounded, no
-                    # await — before abandoning the task.
+                    # descendants across re-exec (round-3 blocker #2) — but
+                    # the fallback may only signal a PGID that is provably
+                    # still ours (round-4 blocker #1), and must leave a
+                    # COMPLETION BARRIER behind: cancellation awaited, the
+                    # leader reaped, group disappearance confirmed.
                     log.warning(
                         "Reaper for PID %d did not finish; hard-killing group "
                         "before abandoning", pid,
                     )
-                    self._hard_kill_group(info)
+                    if self._pgid_safe_to_signal(info):
+                        self._hard_kill_group(info)
                     task.cancel()
+                    try:
+                        await asyncio.wait_for(task, timeout=2.0)
+                    except (TimeoutError, asyncio.CancelledError):
+                        pass
+                    except Exception:
+                        log.debug("abandoned reaper errored", exc_info=True)
+                    if info.process is not None and info.process.returncode is None:
+                        # Reap the leader so no zombie crosses the exec.
+                        await _wait_leader_exit(info.process, timeout=3.0)
+                    await self._confirm_group_gone(info)
                 except Exception:
                     log.debug(
                         "Reaper for PID %d errored during shutdown", pid, exc_info=True
@@ -394,6 +407,50 @@ class ProcessRegistry:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _pgid_safe_to_signal(info: ProcessInfo) -> bool:
+        """Whether ``info``'s recorded PGID still provably names OUR group.
+
+        An unreaped leader (``returncode is None``) pins its pid — the
+        value cannot be recycled while the process (or its zombie) exists.
+        After the leader is reaped, POSIX keeps the pgid VALUE unusable
+        while any group member survives, and a NEW group can only claim it
+        via a new leader process occupying exactly that pid — which would
+        appear in /proc. So: /proc/<pgid> PRESENT after reap ⇒ recycled ⇒
+        never signal; ABSENT ⇒ killpg reaches our surviving members or
+        raises ESRCH — both safe (round-4 blocker #1).
+        """
+        proc = info.process
+        if proc is None:
+            return False
+        if proc.returncode is None:
+            return True
+        return not Path(f"/proc/{proc.pid}").exists()
+
+    async def _confirm_group_gone(self, info: ProcessInfo, timeout: float = 3.0) -> None:
+        """Bounded confirmation that the owned group has dissolved.
+
+        Part of the shutdown completion barrier: signal-0 existence probes
+        (deliver nothing) until ESRCH or the bound — a still-present group
+        at the bound is LOGGED loudly rather than silently abandoned.
+        """
+        proc = info.process
+        if proc is None or not self._pgid_safe_to_signal(info):
+            return
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(proc.pid, 0)
+            except ProcessLookupError:
+                return
+            except Exception:
+                return
+            await asyncio.sleep(0.1)
+        log.warning(
+            "Process group %d still present after shutdown hard-kill window",
+            proc.pid,
+        )
 
     @staticmethod
     def _hard_kill_group(info: ProcessInfo) -> None:

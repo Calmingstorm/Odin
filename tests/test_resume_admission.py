@@ -1094,3 +1094,23 @@ class TestRestoredTrackerJudgedBeforeGeneration:
         assert result is not None
         assert result[0] == "resumed and acted on the nudge"
         assert len(h.fake.calls) == calls_before + 1  # generation GRANTED
+
+
+class TestLegacyCheckpointCompatibility:
+    async def test_pre_pr244_checkpoint_resumes_with_default_pending(self, tmp_path):
+        """PR #244 round-4 blocker #2: suspended checkpoints written by
+        v3.67.0 (no wait_judgment_pending, same CODEC_VERSION) must resume
+        after upgrade — the field defaults to False during validation,
+        AFTER the store's digest verification."""
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("resumed a legacy checkpoint"))
+        make_breaker_probe_ready(h)
+        (payload_text,) = h.store._conn.execute("SELECT payload FROM turns").fetchone()
+        payload = json.loads(payload_text)
+        del payload["fields"]["wait_judgment_pending"]  # the v3.67.0 shape
+        rewrite_payload_with_valid_digest(h.store, json.dumps(payload, sort_keys=True))
+
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        assert result[0] == "resumed a legacy checkpoint"
+        assert h.row()[0] == TurnStatus.TERMINAL_COMPLETED

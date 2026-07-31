@@ -483,6 +483,15 @@ def validate_payload(payload: Any) -> None:
     fields = payload.get("fields")
     if not isinstance(fields, dict):
         raise CheckpointInvalidError("missing fields envelope")
+    # Legacy v1 normalization (PR #244 round-4 blocker #2): checkpoints
+    # written before wait_judgment_pending existed — same CODEC_VERSION —
+    # safely default it to False. This runs AFTER the store's digest
+    # verification (load_resumable_sync rejects tampered payloads before
+    # any caller sees them), so normalization can never launder an edit.
+    # The one and only field this is allowed for; everything else keeps
+    # the exact-set contract.
+    if "wait_judgment_pending" not in fields:
+        fields["wait_judgment_pending"] = False
     missing = PERSISTED_FIELDS - fields.keys()
     if missing:
         raise CheckpointInvalidError(f"missing persisted fields: {sorted(missing)}")
