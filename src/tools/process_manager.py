@@ -76,20 +76,13 @@ def _utf8_boundary_split(buf: bytes) -> tuple[bytes, bytes]:
 
 
 
-def _proc_session(pid: int) -> int | None | str:
-    """The SESSION id from /proc/<pid>/stat.
+def _proc_ids(pid: int) -> tuple[int, int] | None | str:
+    """``(ppid, session)`` from /proc/<pid>/stat.
 
-    Session — not process group — is the ownership fence (round-7 #1): a
-    descendant may call ``setpgid(0, 0)`` and leave the original group
-    while remaining in our session, and the only way OUT of a session is
-    ``setsid()``, which makes the caller a NEW session leader (so it can
-    never join ours from outside either).
-
-    Returns the sid, ``None`` only when the process is PROVABLY gone
+    Returns ``None`` only when the process is PROVABLY gone
     (ENOENT/ESRCH), or the sentinel ``"unknown"`` for any other failure —
-    a malformed or unreadable stat must never read as absence
-    (round-7 #2). Parsing is done on BYTES: ``comm`` may hold arbitrary
-    non-UTF-8, which decoding would raise on.
+    a malformed or unreadable stat must never read as absence. Parsing is
+    done on BYTES: ``comm`` may hold arbitrary non-UTF-8.
     """
     try:
         raw = Path(f"/proc/{pid}/stat").read_bytes()
@@ -99,34 +92,49 @@ def _proc_session(pid: int) -> int | None | str:
         return "unknown"  # EMFILE/EACCES/… — we do NOT know
     try:
         rest = raw.rsplit(b")", 1)[1].split()
-        return int(rest[3])  # field 6 (session), 0-indexed after comm
+        return int(rest[1]), int(rest[3])  # ppid, session
     except (IndexError, ValueError):
         return "unknown"  # malformed — never treated as absence
 
 
-def _scan_session_members(sid: int) -> tuple[list[tuple[int, int]], bool]:
-    """Enumerate the owned SESSION's members, each PINNED with a pidfd.
+def _proc_session(pid: int) -> int | None | str:
+    """Session id alone (see :func:`_proc_ids` for the sentinel contract)."""
+    ids = _proc_ids(pid)
+    if isinstance(ids, tuple):
+        return ids[1]
+    return ids
+
+
+def _scan_owned_members(
+    sid: int, leader_pid: int | None = None
+) -> tuple[list[tuple[int, int]], bool]:
+    """Enumerate every process we own, each PINNED with a pidfd.
+
+    Ownership is the UNION of two relations, because neither alone is
+    sufficient:
+
+    - **Session** ``session == sid``: our leader was spawned with
+      ``start_new_session`` (so ``sid == leader_pid``); descendants
+      inherit it and cannot be joined from outside.
+    - **Ancestry** (round-8 #1): a descendant that calls ``setsid()``
+      leaves the session, but while its parent chain still reaches our
+      leader it remains provably ours. The walk is bounded and
+      cycle-safe.
 
     The pin happens BEFORE membership is verified, so verification and
     every later signal act on the exact process the fd names — pid reuse
-    between steps is structurally impossible (round-5 #2). Membership is
-    ``session == sid`` (round-7 #1): our leader was spawned with
-    ``start_new_session``, so it IS the session leader (sid == its pid),
-    descendants inherit the session, and a process can only leave by
-    becoming its own session leader — never join ours.
-
-    ``complete`` is False whenever ANY candidate could not be inspected
-    or pinned for a reason other than provable disappearance — an
-    unreadable /proc, an fd-exhausted pidfd_open, or a malformed stat
-    must never be mistaken for an empty session (round-6 #2, round-7 #2).
-    Caller owns the returned fds.
+    between steps is structurally impossible. ``complete`` is False
+    whenever any candidate could not be inspected or pinned for a reason
+    other than provable disappearance. Caller owns the returned fds.
     """
     pinned: list[tuple[int, int]] = []
     try:
         entries = os.listdir("/proc")
     except OSError:
         return pinned, False
+    ids: dict[int, tuple[int, int]] = {}
     complete = True
+    candidates: list[tuple[int, int]] = []
     for entry in entries:
         if not entry.isdigit():
             continue
@@ -137,16 +145,41 @@ def _scan_session_members(sid: int) -> tuple[list[tuple[int, int]], bool]:
             continue  # exited — not a member
         except OSError:
             # Could not pin: membership UNKNOWN unless provably gone.
-            if _proc_session(pid) is not None:
+            if _proc_ids(pid) is not None:
                 complete = False
             continue
-        session = _proc_session(pid)
-        if session == sid:
-            pinned.append((pid, fd))
+        info = _proc_ids(pid)
+        if isinstance(info, tuple):
+            ids[pid] = info
+            candidates.append((pid, fd))
             continue
-        if session == "unknown":
+        if info == "unknown":
             complete = False
         os.close(fd)
+
+    def _owned(pid: int) -> bool:
+        seen: set[int] = set()
+        cur = pid
+        for _ in range(64):  # bounded: no unbounded walk, no cycles
+            if cur in seen or cur <= 1:
+                return False
+            seen.add(cur)
+            entry = ids.get(cur)
+            if entry is None:
+                return False  # chain left our snapshot — not provably ours
+            ppid, session = entry
+            if session == sid:
+                return True
+            if leader_pid is not None and (cur == leader_pid or ppid == leader_pid):
+                return True
+            cur = ppid
+        return False
+
+    for pid, fd in candidates:
+        if _owned(pid):
+            pinned.append((pid, fd))
+        else:
+            os.close(fd)
     return pinned, complete
 
 
@@ -178,40 +211,56 @@ def _pidfd_exited(fd: int) -> bool:
 
 
 async def _terminate_session_until_empty(
-    sid: int, *, grace: float = 2.0, timeout: float = 10.0, term_first: bool = True
+    sid: int,
+    *,
+    grace: float = 2.0,
+    timeout: float = 10.0,
+    term_first: bool = True,
+    settle_scans: int = 2,
+    settle_delay: float = 0.2,
 ) -> bool:
-    """Drive the owned SESSION to provably empty.
+    """Drive everything we own to provably empty.
 
-    Every pass RE-ENUMERATES (round-6 #1): a TERM handler that forks a
-    fresh child — or one that calls ``setpgid`` to leave the original
-    group (round-7 #1) — is caught by the next pass, where a one-shot
-    pinned set would miss it. TERM is offered once per pid (when
-    ``term_first``), then the passes escalate to KILL, which cannot be
-    caught or forked around.
+    Every pass RE-ENUMERATES (round-6 #1), so a signal handler that forks
+    a fresh child — or one that changes its process group (round-7 #1) —
+    is caught by the next pass. TERM is offered once per pid (when
+    ``term_first``), then passes escalate to KILL, which cannot be caught
+    or forked around.
 
-    Returns True ONLY on an affirmative observation of an empty session
-    from a COMPLETE scan — an unreadable /proc, fd exhaustion, or a
-    malformed stat returns False, never a false success.
+    Emptiness requires ``settle_scans`` CONSECUTIVE complete-and-empty
+    scans separated by ``settle_delay`` (round-8 #2): a single snapshot
+    can miss a member that forked after enumeration and exited before the
+    scan finished, leaving a child behind. The repeated scans also give
+    any such child time to appear in /proc.
+
+    Returns True only on that repeated affirmative observation — an
+    unreadable /proc, fd exhaustion, or a malformed stat returns False,
+    never a false success.
     """
     deadline = time.monotonic() + timeout
     termed: set[int] = set()
     escalate_at = time.monotonic() + grace if term_first else 0.0
+    clean_scans = 0
     while True:
-        pinned, complete = _scan_session_members(sid)
+        pinned, complete = _scan_owned_members(sid, leader_pid=sid)
         try:
             if complete and not pinned:
-                return True
-            if term_first and time.monotonic() < escalate_at:
-                fresh = [(p, fd) for p, fd in pinned if p not in termed]
-                _signal_pinned(fresh, signal.SIGTERM)
-                termed.update(p for p, _fd in fresh)
+                clean_scans += 1
+                if clean_scans >= settle_scans:
+                    return True
             else:
-                _signal_pinned(pinned, signal.SIGKILL)
+                clean_scans = 0
+                if term_first and time.monotonic() < escalate_at:
+                    fresh = [(p, fd) for p, fd in pinned if p not in termed]
+                    _signal_pinned(fresh, signal.SIGTERM)
+                    termed.update(p for p, _fd in fresh)
+                else:
+                    _signal_pinned(pinned, signal.SIGKILL)
         finally:
             _close_pinned(pinned)
         if time.monotonic() >= deadline:
             return False
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(settle_delay if clean_scans else 0.1)
 
 
 async def _wait_leader_exit(

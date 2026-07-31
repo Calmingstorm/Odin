@@ -914,15 +914,18 @@ async def shutdown_services(bot) -> None:
     if process_registry is not None:
         try:
             await process_registry.shutdown()
-        except ProcessCleanupError:
-            # Teardown could not PROVE the owned session is empty (PR #244
-            # round-7 #3). Surfaced at ERROR with the registry's detail
-            # rather than swallowed as ordinary noise: an in-place re-exec
-            # after this may inherit surviving descendants.
+        except ProcessCleanupError as cleanup_err:
+            # Teardown could not PROVE the owned session is empty. Reported
+            # loudly AND used to VETO the in-place re-exec (round-8 #3):
+            # exec would hand the survivors to the new image invisibly.
+            # The rest of teardown still runs.
             log.exception(
                 "Process cleanup could not be verified — surviving "
                 "descendants may outlive this process"
             )
+            from ..restart import block_reexec
+
+            block_reexec(f"process cleanup unverified: {cleanup_err}")
         except Exception:
             log.exception("Error shutting down process_registry")
 

@@ -788,7 +788,7 @@ class TestRaceFreeGroupTermination:
     complete is never mistaken for an empty group."""
 
     async def test_pins_only_true_group_members(self):
-        from src.tools.process_manager import _close_pinned, _scan_session_members
+        from src.tools.process_manager import _close_pinned, _scan_owned_members
 
         proc = await asyncio.create_subprocess_shell(
             "sleep 5 & sleep 5", stdout=asyncio.subprocess.PIPE,
@@ -796,7 +796,7 @@ class TestRaceFreeGroupTermination:
         )
         try:
             await asyncio.sleep(0.4)
-            pinned, complete = _scan_session_members(proc.pid)
+            pinned, complete = _scan_owned_members(proc.pid)
             try:
                 pids = {pid for pid, _fd in pinned}
                 assert complete is True
@@ -813,7 +813,7 @@ class TestRaceFreeGroupTermination:
         fresh same-session TERM-immune child is caught by the NEXT
         enumeration pass — a one-shot pinned set would miss it."""
         from src.tools.process_manager import (
-            _scan_session_members,
+            _scan_owned_members,
             _terminate_session_until_empty,
         )
 
@@ -838,7 +838,7 @@ class TestRaceFreeGroupTermination:
             await asyncio.sleep(0.5)
             gone = await _terminate_session_until_empty(pgid, grace=0.5, timeout=10.0)
             assert gone is True  # affirmative empty observation
-            pinned, complete = _scan_session_members(pgid)
+            pinned, complete = _scan_owned_members(pgid)
             try:
                 assert complete and not pinned  # the forked child died too
             finally:
@@ -885,7 +885,7 @@ class TestScanCompleteness:
         monkeypatch.setattr(
             pm.os, "listdir", lambda _p: (_ for _ in ()).throw(OSError("nope"))
         )
-        pinned, complete = pm._scan_session_members(1234)
+        pinned, complete = pm._scan_owned_members(1234)
         assert pinned == [] and complete is False
 
     def test_pidfd_exhaustion_is_incomplete_not_empty(self, monkeypatch):
@@ -897,7 +897,7 @@ class TestScanCompleteness:
             raise OSError(24, "Too many open files")
 
         monkeypatch.setattr(pm.os, "pidfd_open", emfile)
-        pinned, complete = pm._scan_session_members(1234)
+        pinned, complete = pm._scan_owned_members(1234)
         assert pinned == [] and complete is False
 
     def test_vanished_candidate_does_not_spoil_the_scan(self, monkeypatch):
@@ -909,7 +909,7 @@ class TestScanCompleteness:
             pm.os, "pidfd_open",
             lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
         )
-        pinned, complete = pm._scan_session_members(1234)
+        pinned, complete = pm._scan_owned_members(1234)
         assert pinned == [] and complete is True
 
     def test_stat_read_error_is_unknown_not_gone(self, monkeypatch):
@@ -965,9 +965,9 @@ class TestShutdownBarrier:
             await asyncio.wait_for(reg.shutdown(), timeout=SHUTDOWN_REAP_TIMEOUT + 20)
             assert time.monotonic() - start < SHUTDOWN_REAP_TIMEOUT + 20
             assert proc.returncode is not None  # leader reaped
-            from src.tools.process_manager import _scan_session_members
+            from src.tools.process_manager import _scan_owned_members
 
-            pinned, complete = _scan_session_members(proc.pid)
+            pinned, complete = _scan_owned_members(proc.pid)
             assert complete and not pinned  # group provably empty
         finally:
             resist = False
@@ -1054,14 +1054,14 @@ class TestRaceFreeHelperArms:
         leaves the scan INCOMPLETE — never silently skipped as absent."""
         import src.tools.process_manager as pm
 
-        real_stat = pm._proc_session
+        real_ids = pm._proc_ids
         target = os.getpid()
 
         def flaky(pid):
-            return "unknown" if pid == target else real_stat(pid)
+            return "unknown" if pid == target else real_ids(pid)
 
-        monkeypatch.setattr(pm, "_proc_session", flaky)
-        pinned, complete = pm._scan_session_members(4_000_001)
+        monkeypatch.setattr(pm, "_proc_ids", flaky)
+        pinned, complete = pm._scan_owned_members(4_000_001)
         assert complete is False
         pm._close_pinned(pinned)
 
@@ -1102,7 +1102,7 @@ class TestSessionFenceEscapes:
         membership made it invisible; session-based membership does not."""
         from src.tools.process_manager import (
             _close_pinned,
-            _scan_session_members,
+            _scan_owned_members,
             _terminate_session_until_empty,
         )
 
@@ -1120,7 +1120,7 @@ class TestSessionFenceEscapes:
         sid = proc.pid
         try:
             await asyncio.sleep(0.6)
-            pinned, complete = _scan_session_members(sid)
+            pinned, complete = _scan_owned_members(sid)
             try:
                 # The escapee is VISIBLE: it left the group, not the session.
                 assert complete and len(pinned) >= 1
@@ -1129,7 +1129,7 @@ class TestSessionFenceEscapes:
             assert await _terminate_session_until_empty(
                 sid, grace=0.5, timeout=12.0
             ) is True
-            pinned, complete = _scan_session_members(sid)
+            pinned, complete = _scan_owned_members(sid)
             try:
                 assert complete and not pinned  # escapee is gone
             finally:
@@ -1244,3 +1244,144 @@ class TestShutdownAffirmativeProof:
         reg._processes[proc.pid] = info
         await reg._watch_exit(info)
         assert info.session_confirmed_empty is False
+
+
+class TestSetsidEscapeAndSettleWindow:
+    """Round-8 #1/#2: ancestry catches a setsid escapee whose parent chain
+    still reaches our leader; emptiness needs consecutive clean scans."""
+
+    async def test_setsid_child_is_still_owned_via_ancestry(self):
+        from src.tools.process_manager import (
+            _close_pinned,
+            _scan_owned_members,
+            _terminate_session_until_empty,
+        )
+
+        # Child calls setsid() → leaves our SESSION entirely, but its
+        # parent (the managed shell) stays alive, so ancestry still owns it.
+        escapee = (
+            "import os,signal,time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "os.setsid(); time.sleep(60)"
+        )
+        proc = await asyncio.create_subprocess_shell(
+            f'python3 -c "{escapee}" & sleep 60',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        sid = proc.pid
+        try:
+            await asyncio.sleep(0.7)
+            pinned, complete = _scan_owned_members(sid, leader_pid=sid)
+            try:
+                assert complete
+                # The setsid escapee is OWNED through the ancestry relation.
+                assert len(pinned) >= 3  # shell + sleep + escapee
+            finally:
+                _close_pinned(pinned)
+            assert await _terminate_session_until_empty(
+                sid, grace=0.5, timeout=15.0
+            ) is True
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+
+    async def test_single_clean_scan_is_not_enough(self, monkeypatch):
+        """Round-8 #2: one complete-and-empty snapshot must NOT prove
+        emptiness — a member can fork after enumeration and exit."""
+        import src.tools.process_manager as pm
+
+        scans = {"n": 0}
+
+        def scan(_sid, leader_pid=None):
+            scans["n"] += 1
+            if scans["n"] == 1:
+                return [], True  # first snapshot looks empty…
+            if scans["n"] == 2:
+                return [(4242, -1)], True  # …but a forked child appears
+            return [], True
+
+        monkeypatch.setattr(pm, "_scan_owned_members", scan)
+        monkeypatch.setattr(pm, "_signal_pinned", lambda *_a: None)
+        monkeypatch.setattr(pm, "_close_pinned", lambda *_a: None)
+        assert await pm._terminate_session_until_empty(
+            1234, timeout=5.0, term_first=False
+        ) is True
+        # It kept scanning past the first clean look and caught the child.
+        assert scans["n"] >= 4
+
+    async def test_settle_window_counts_consecutive_only(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        seq = [([], True), ([(1, -1)], True), ([], True), ([], True)]
+        calls = {"n": 0}
+
+        def scan(_sid, leader_pid=None):
+            i = min(calls["n"], len(seq) - 1)
+            calls["n"] += 1
+            return seq[i]
+
+        monkeypatch.setattr(pm, "_scan_owned_members", scan)
+        monkeypatch.setattr(pm, "_signal_pinned", lambda *_a: None)
+        monkeypatch.setattr(pm, "_close_pinned", lambda *_a: None)
+        assert await pm._terminate_session_until_empty(
+            1, timeout=5.0, term_first=False
+        ) is True
+        assert calls["n"] == 4  # the non-empty scan RESET the counter
+
+
+class TestReexecVeto:
+    """Round-8 #3: unprovable cleanup must PREVENT the in-place re-exec."""
+
+    def test_block_and_read_veto(self):
+        from src import restart
+
+        restart.reset()
+        assert restart.reexec_blocked() is None
+        restart.block_reexec("cleanup unverified: PID [42]")
+        assert "PID [42]" in (restart.reexec_blocked() or "")
+        restart.reset()
+        assert restart.reexec_blocked() is None
+
+    async def test_wiring_vetoes_on_cleanup_error(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from src import restart
+        from src.discord.wiring import shutdown_services
+        from src.tools.process_manager import ProcessCleanupError
+
+        restart.reset()
+        registry = SimpleNamespace(
+            shutdown=AsyncMock(side_effect=ProcessCleanupError("PID [4242] unproven"))
+        )
+        bot = SimpleNamespace(
+            tool_executor=SimpleNamespace(_process_registry=registry)
+        )
+        try:
+            await shutdown_services(bot)
+            veto = restart.reexec_blocked()
+            assert veto is not None and "4242" in veto
+        finally:
+            restart.reset()
+
+    def test_ancestry_walk_is_bounded_and_cycle_safe(self, monkeypatch):
+        """The ppid walk must terminate on a chain that leaves our
+        snapshot, and on a (kernel-impossible but cheap to guard) cycle —
+        neither may loop or claim ownership."""
+        import src.tools.process_manager as pm
+
+        # /proc lists two pids; one's parent is OUTSIDE the snapshot, the
+        # other pair points at each other.
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["100", "200", "300"])
+        monkeypatch.setattr(pm.os, "pidfd_open", lambda pid: os.open("/dev/null", os.O_RDONLY))
+        table = {
+            100: (999, 5),   # parent 999 not in the snapshot → unowned
+            200: (300, 5),   # 200 ↔ 300 cycle, neither in our session
+            300: (200, 5),
+        }
+        monkeypatch.setattr(pm, "_proc_ids", lambda pid: table.get(pid, "unknown"))
+        pinned, complete = pm._scan_owned_members(7, leader_pid=7)
+        assert pinned == []  # nothing claimed
+        assert complete is True

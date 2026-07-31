@@ -315,6 +315,17 @@ def main() -> None:
         log.info("Odin stopped")
 
     if restart.restart_requested():
+        veto = restart.reexec_blocked()
+        if veto:
+            # Teardown could not prove it terminated everything it owned
+            # (PR #244 round-8 #3). Exec would hand those survivors to the
+            # new image invisibly; exiting nonzero lets the supervisor
+            # start a clean one instead.
+            log.error(
+                "Restart requested but in-place re-exec is vetoed (%s) — "
+                "exiting for a supervisor restart instead", veto,
+            )
+            sys.exit(exit_code or 1)
         # In-place restart (self-update / setup wizard): replace the process
         # image instead of exiting so recovery does not depend on the unit's
         # Restart= policy. Exec failure exits nonzero — a clean-exit fallback
