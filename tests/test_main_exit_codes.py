@@ -425,7 +425,7 @@ class TestFinalizeLoop:
             return real_drain()
 
         reaper.drain_at_teardown = traced_drain  # type: ignore[method-assign]
-        assert _finalize_loop(loop, reaper, logging.getLogger("test")) is True
+        assert _finalize_loop(loop, reaper, logging.getLogger("test")) is None
         assert order == ["executor", "drain"]  # owners stop, THEN drain
         assert loop.is_closed()
         assert restart.reexec_blocked() is None  # verified drain ⇒ no veto
@@ -495,12 +495,16 @@ class TestFinalizeLoop:
             lambda: drained.append(True) or (0, True)
         )
         start = time.monotonic()
-        assert _finalize_loop(loop, reaper, logging.getLogger("test")) is False
+        failure = _finalize_loop(loop, reaper, logging.getLogger("test"))
         assert time.monotonic() - start < 5.0  # Odin's probe bound
+        assert failure is not None and "survived cancellation" in failure
         assert drained == []  # owners unproven ⇒ drain skipped
-        veto = restart.reexec_blocked()
-        assert veto is not None and "survived cancellation" in veto
-        assert loop.is_closed()
+        # The unproven path has NO side effects: the veto travels with
+        # the emergency scribe, and the loop is left alone (round-19 —
+        # close() warnings go through logging).
+        assert restart.reexec_blocked() is None
+        assert not loop.is_closed()
+        loop.close()
 
     def test_hung_asyncgen_shutdown_is_bounded_and_vetoes(self):
         import logging
@@ -522,12 +526,13 @@ class TestFinalizeLoop:
             lambda: drained.append(True) or (0, True)
         )
         start = time.monotonic()
-        _finalize_loop(loop, reaper, logging.getLogger("test"))
+        failure = _finalize_loop(loop, reaper, logging.getLogger("test"))
         assert time.monotonic() - start < 5.0
+        assert failure is not None and "async-generator" in failure
         assert drained == []
-        veto = restart.reexec_blocked()
-        assert veto is not None and "async-generator" in veto
-        assert loop.is_closed()
+        assert restart.reexec_blocked() is None
+        assert not loop.is_closed()
+        loop.close()
 
     def test_hung_executor_shutdown_is_bounded_and_vetoes(self):
         import logging
@@ -549,12 +554,13 @@ class TestFinalizeLoop:
             lambda: drained.append(True) or (0, True)
         )
         start = time.monotonic()
-        _finalize_loop(loop, reaper, logging.getLogger("test"))
+        failure = _finalize_loop(loop, reaper, logging.getLogger("test"))
         assert time.monotonic() - start < 5.0
+        assert failure is not None and "default-executor" in failure
         assert drained == []
-        veto = restart.reexec_blocked()
-        assert veto is not None and "default-executor" in veto
-        assert loop.is_closed()
+        assert restart.reexec_blocked() is None
+        assert not loop.is_closed()
+        loop.close()
 
     def test_failed_owner_barrier_skips_drain_and_blocks(self):
         """If subprocess owners cannot be proven stopped, running the
@@ -577,11 +583,12 @@ class TestFinalizeLoop:
         reaper.drain_at_teardown = (  # type: ignore[method-assign]
             lambda: drained.append(True) or (0, True)
         )
-        _finalize_loop(loop, reaper, logging.getLogger("test"))
+        failure = _finalize_loop(loop, reaper, logging.getLogger("test"))
+        assert failure is not None and "default-executor" in failure
         assert drained == []  # never ran on unproven owners
-        veto = restart.reexec_blocked()
-        assert veto is not None and "owners" in veto
-        assert loop.is_closed()
+        assert restart.reexec_blocked() is None
+        assert not loop.is_closed()
+        loop.close()
 
 
 class TestUncleanBarrierExit:
@@ -592,6 +599,19 @@ class TestUncleanBarrierExit:
 
     _SINKS = {
         "healthy": "",
+        "raising_log": (
+            "class RaisingHandler(logging.Handler):\n"
+            "    def emit(self, record):\n"
+            "        raise OSError('forced handler failure')\n"
+            "logging.getLogger().addHandler(RaisingHandler())\n"
+        ),
+        "blocking_log": (
+            "class BlockingHandler(logging.Handler):\n"
+            "    def emit(self, record):\n"
+            "        print('BLOCKING_LOG_EMIT', file=sys.__stderr__, flush=True)\n"
+            "        threading.Event().wait()\n"
+            "logging.getLogger().addHandler(BlockingHandler())\n"
+        ),
         "raising": (
             "class BrokenOut:\n"
             "    def write(self, *_a):\n"
@@ -610,7 +630,9 @@ class TestUncleanBarrierExit:
         ),
     }
 
-    @pytest.mark.parametrize("sink", ["healthy", "raising", "blocking"])
+    @pytest.mark.parametrize(
+        "sink", ["healthy", "raising", "blocking", "raising_log", "blocking_log"]
+    )
     def test_blocked_executor_worker_cannot_hold_process_exit(
         self, tmp_path, sink
     ):
@@ -673,25 +695,96 @@ class TestUncleanBarrierExit:
 
         import src.__main__ as entry
         import src.tools.process_manager as pm
+        from src import restart
 
         calls: list = []
         monkeypatch.setattr(entry.os, "_exit", lambda code: calls.append(code))
-        monkeypatch.setattr(entry, "_finalize_loop", lambda *_a: False)
+        monkeypatch.setattr(entry, "_finalize_loop", lambda *_a: "boom reason")
         loop = asyncio.new_event_loop()
         entry._finalize_and_exit(
             loop, pm.AdoptedZombieReaper(), logging.getLogger("t"), 0
         )
         assert calls == [1]
+        # The veto is recorded by the emergency scribe, reason included.
+        veto = restart.reexec_blocked()
+        assert veto is not None and "boom reason" in veto and "owners" in veto
         entry._finalize_and_exit(
             loop, pm.AdoptedZombieReaper(), logging.getLogger("t"), 7
         )
         assert calls == [1, 7]
 
-        monkeypatch.setattr(entry, "_finalize_loop", lambda *_a: True)
+        monkeypatch.setattr(entry, "_finalize_loop", lambda *_a: None)
         entry._finalize_and_exit(
             loop, pm.AdoptedZombieReaper(), logging.getLogger("t"), 0
         )
         assert calls == [1, 7]  # clean barrier: no immediate exit
+        loop.close()
+
+    def test_unproven_verdict_path_never_logs(self):
+        """Round-19 core: between the unproven verdict and the return
+        there is NO synchronous I/O — a blocking logging handler must
+        not be able to hang the main thread before the emergency exit
+        is reachable."""
+        import logging
+        import threading
+        import time
+
+        import src.tools.process_manager as pm
+        from src.__main__ import _finalize_loop
+
+        class BlockingHandler(logging.Handler):
+            def emit(self, record):
+                threading.Event().wait()
+
+        poisoned = logging.getLogger("test-poisoned-finalize")
+        poisoned.propagate = False
+        poisoned.addHandler(BlockingHandler())
+        try:
+            loop = asyncio.new_event_loop()
+
+            async def stubborn():
+                while True:
+                    try:
+                        await asyncio.sleep(3600)
+                    except asyncio.CancelledError:
+                        continue
+
+            async def arm():
+                loop.create_task(stubborn())
+
+            loop.run_until_complete(arm())
+            start = time.monotonic()
+            failure = _finalize_loop(loop, pm.AdoptedZombieReaper(), poisoned)
+            assert time.monotonic() - start < 5.0  # never touched the logger
+            assert failure is not None and "survived cancellation" in failure
+            loop.close()
+        finally:
+            poisoned.handlers.clear()
+
+    def test_finalize_crash_still_exits_immediately(self, monkeypatch):
+        """Nothing may escape _finalize_and_exit into ordinary
+        interpreter shutdown — even finalize itself crashing becomes an
+        unproven verdict and an immediate exit."""
+        import logging
+
+        import src.__main__ as entry
+        import src.tools.process_manager as pm
+        from src import restart
+
+        calls: list = []
+        monkeypatch.setattr(entry.os, "_exit", lambda code: calls.append(code))
+
+        def crash(*_a):
+            raise RuntimeError("finalize blew up")
+
+        monkeypatch.setattr(entry, "_finalize_loop", crash)
+        loop = asyncio.new_event_loop()
+        entry._finalize_and_exit(
+            loop, pm.AdoptedZombieReaper(), logging.getLogger("t"), 0
+        )
+        assert calls == [1]
+        veto = restart.reexec_blocked()
+        assert veto is not None and "finalize crashed" in veto
         loop.close()
 
     def test_emergency_exit_survives_raising_and_blocked_sinks(
@@ -717,7 +810,7 @@ class TestUncleanBarrierExit:
                 raise OSError("flush refused")
 
         monkeypatch.setattr(entry.sys, "stdout", Raising())
-        entry._emergency_exit(logging.getLogger("t"), 0)
+        entry._emergency_exit(logging.getLogger("t"), 0, "test reason")
         assert calls == [1]
 
         class Blocking:
@@ -729,7 +822,7 @@ class TestUncleanBarrierExit:
 
         monkeypatch.setattr(entry.sys, "stdout", Blocking())
         start = time.monotonic()
-        entry._emergency_exit(logging.getLogger("t"), 5)
+        entry._emergency_exit(logging.getLogger("t"), 5, "test reason")
         assert calls == [1, 5]
         assert time.monotonic() - start < 3.0  # bounded by the scribe join
 

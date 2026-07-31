@@ -132,7 +132,7 @@ def _enable_process_containment(log) -> bool:
 _FINALIZE_STEP_TIMEOUT = 3.0
 
 
-def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> bool:
+def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
     """Teardown tail in the exact round-15 §3.3 order.
 
     Drain before close: cancel stragglers, then run the loop's async
@@ -151,11 +151,13 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> bool:
     table hands invisible survivors to the new image, while exiting
     lets the supervisor start clean and PID 1 reap whatever remains.
 
-    Returns True when the owner barrier completed (tasks, async
-    generators and the default executor all provably stopped). False
-    means unproven owners MAY include blocked non-daemon threads — the
-    caller must then leave via :func:`_finalize_and_exit`'s immediate
-    path, never via ordinary interpreter shutdown (round-17).
+    Returns None when the owner barrier completed (tasks, async
+    generators and the default executor all provably stopped), else the
+    failure reason. An unproven verdict means owners MAY include
+    blocked non-daemon threads — the caller must then leave via the
+    emergency path, never via ordinary interpreter shutdown (round-17)
+    — and the unproven return path itself performs NO synchronous I/O,
+    not even logging or the veto record (round-19).
     """
     owners_stopped = False
     failure = ""
@@ -193,32 +195,33 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> bool:
                     break
             else:
                 owners_stopped = True
-        if failure:
-            log.error("Event-loop drain incomplete: %s", failure)
+    except Exception as exc:
+        failure = f"exception during loop drain: {exc!r}"
+    if not owners_stopped:
+        # UNPROVEN verdict. From here to os._exit there must be NO
+        # synchronous I/O: a blocking logging handler would hang the
+        # main thread before the emergency exit is ever reachable, and
+        # a raising one would unwind into ordinary interpreter shutdown
+        # — the exact round-17 hang again (round-19). No log line, no
+        # veto record (restart.block_reexec logs), not even
+        # loop.close() (pending-task warnings go through logging): the
+        # caller's emergency path says all of it from a bounded scribe.
+        return failure or "owner barrier unproven"
+    try:
+        drained, verified = zombie_reaper.drain_at_teardown()
+        if drained:
+            log.info("Reaped %d adopted zombie(s) at teardown", drained)
+        if not verified:
+            restart.block_reexec(
+                "final zombie drain could not verify a clean process "
+                "table"
+            )
     except Exception:
-        failure = "exception during loop drain"
-        log.exception("Event-loop drain failed")
-    if owners_stopped:
-        try:
-            drained, verified = zombie_reaper.drain_at_teardown()
-            if drained:
-                log.info("Reaped %d adopted zombie(s) at teardown", drained)
-            if not verified:
-                restart.block_reexec(
-                    "final zombie drain could not verify a clean process "
-                    "table"
-                )
-        except Exception:
-            log.exception("adopted-zombie teardown drain error")
-            restart.block_reexec("final zombie drain failed")
-    else:
-        restart.block_reexec(
-            "event-loop drain failed — subprocess owners not proven "
-            f"stopped, final zombie drain skipped ({failure})"
-        )
+        log.exception("adopted-zombie teardown drain error")
+        restart.block_reexec("final zombie drain failed")
     loop.close()
     log.info("Odin stopped")
-    return owners_stopped
+    return None
 
 
 def _finalize_and_exit(
@@ -237,32 +240,48 @@ def _finalize_and_exit(
     Returns normally when the barrier completed; the caller then owns
     the ordinary restart/exit tail.
     """
-    if _finalize_loop(loop, zombie_reaper, log):
+    try:
+        failure = _finalize_loop(loop, zombie_reaper, log)
+    except BaseException as exc:  # noqa: BLE001 — nothing may escape this path
+        # Whatever leaked out of finalize, the process state is at best
+        # unproven — resurfacing the exception would resurrect ordinary
+        # interpreter shutdown and the round-17 hang with it.
+        failure = f"finalize crashed: {exc!r}"
+    if failure is None:
         return
-    _emergency_exit(log, exit_code)
+    _emergency_exit(log, exit_code, failure)
 
 
-def _emergency_exit(log, exit_code: int) -> None:
-    """Leave NOW, depending on no ordinary I/O whatsoever (round-18).
+def _emergency_exit(log, exit_code: int, reason: str) -> None:
+    """Leave NOW, depending on no ordinary I/O whatsoever (round-18/19).
 
     Behind an unproven barrier even the last words are best-effort: a
-    logging sink or stream flush can itself RAISE — or BLOCK forever on
-    a wedged pipe — and either kept ``os._exit`` from ever running (the
-    round-18 repro: a raising ``stdout.flush`` unwound into ordinary
-    interpreter shutdown, which then hung on the blocked worker until
-    SIGKILL). All output therefore happens in a daemon thread with a
-    bounded join: whatever it cannot say within the bound is abandoned
-    with it at exit, and the exit itself depends on nothing.
+    logging HANDLER or stream flush can itself RAISE — or BLOCK forever
+    on a wedged pipe — and either kept ``os._exit`` from ever running
+    (round-18: a raising ``stdout.flush``; round-19: a blocking
+    ``log.error`` before the verdict even returned). ALL remaining
+    output — the veto record included, since ``restart.block_reexec``
+    logs — therefore happens in a daemon thread with a bounded join:
+    whatever it cannot say within the bound is abandoned with it at
+    exit, and the exit itself depends on nothing.
     """
     import logging
     import threading
 
     def _last_words() -> None:
         try:
+            restart.block_reexec(
+                "event-loop drain failed — subprocess owners not proven "
+                f"stopped, final zombie drain skipped ({reason})"
+            )
+        except Exception:
+            pass
+        try:
             log.error(
-                "Exiting without interpreter shutdown: unproven "
-                "subprocess owners may include blocked non-daemon "
-                "threads"
+                "Event-loop drain incomplete (%s) — exiting without "
+                "interpreter shutdown: unproven subprocess owners may "
+                "include blocked non-daemon threads",
+                reason,
             )
         except Exception:
             pass
