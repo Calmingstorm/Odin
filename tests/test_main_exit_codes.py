@@ -425,7 +425,7 @@ class TestFinalizeLoop:
             return real_drain()
 
         reaper.drain_at_teardown = traced_drain  # type: ignore[method-assign]
-        _finalize_loop(loop, reaper, logging.getLogger("test"))
+        assert _finalize_loop(loop, reaper, logging.getLogger("test")) is True
         assert order == ["executor", "drain"]  # owners stop, THEN drain
         assert loop.is_closed()
         assert restart.reexec_blocked() is None  # verified drain ⇒ no veto
@@ -495,7 +495,7 @@ class TestFinalizeLoop:
             lambda: drained.append(True) or (0, True)
         )
         start = time.monotonic()
-        _finalize_loop(loop, reaper, logging.getLogger("test"))
+        assert _finalize_loop(loop, reaper, logging.getLogger("test")) is False
         assert time.monotonic() - start < 5.0  # Odin's probe bound
         assert drained == []  # owners unproven ⇒ drain skipped
         veto = restart.reexec_blocked()
@@ -582,6 +582,90 @@ class TestFinalizeLoop:
         veto = restart.reexec_blocked()
         assert veto is not None and "owners" in veto
         assert loop.is_closed()
+
+
+class TestUncleanBarrierExit:
+    """Round-17: a blocked default-executor worker is a NON-DAEMON
+    thread. The bounded barrier returns and vetoes, but ordinary
+    interpreter shutdown then joins that thread forever — the exit must
+    not rely on Python shutdown."""
+
+    def test_blocked_executor_worker_cannot_hold_process_exit(self, tmp_path):
+        """Process-level, real blocked worker (Odin's round-17 repro
+        shape): the process must actually EXIT nonzero, promptly."""
+        import subprocess
+        import time
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        script = tmp_path / "blocked_worker.py"
+        script.write_text(
+            "import asyncio\n"
+            "import logging\n"
+            "import sys\n"
+            "import threading\n"
+            "\n"
+            "logging.basicConfig(level=logging.INFO)\n"
+            "from src.__main__ import _finalize_and_exit\n"
+            "from src.tools.process_manager import AdoptedZombieReaper\n"
+            "\n"
+            "loop = asyncio.new_event_loop()\n"
+            "\n"
+            "def blocked():\n"
+            "    threading.Event().wait()  # a worker that never returns\n"
+            "\n"
+            "async def arm():\n"
+            "    loop.run_in_executor(None, blocked)\n"
+            "    await asyncio.sleep(0.2)  # let the worker actually start\n"
+            "\n"
+            "loop.run_until_complete(arm())\n"
+            "print('FINALIZE_ENTER', flush=True)\n"
+            "_finalize_and_exit(\n"
+            "    loop, AdoptedZombieReaper(), logging.getLogger('repro'), 0\n"
+            ")\n"
+            "print('UNREACHABLE', flush=True)\n"
+        )
+        start = time.monotonic()
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=repo_root,
+            capture_output=True,
+            timeout=15,  # a regression hangs here and fails loudly
+        )
+        elapsed = time.monotonic() - start
+        assert proc.returncode == 1  # exit_code 0 promoted: unclean = failure
+        assert elapsed < 10.0  # bounded barrier + immediate exit
+        assert b"FINALIZE_ENTER" in proc.stdout
+        assert b"UNREACHABLE" not in proc.stdout  # os._exit, not a return
+        assert b"default-executor shutdown did not finish" in proc.stderr
+
+    def test_unclean_barrier_uses_immediate_exit(self, monkeypatch):
+        """In-process arm coverage: unproven owners → os._exit with a
+        promoted nonzero code; a clean barrier returns normally."""
+        import logging
+
+        import src.__main__ as entry
+        import src.tools.process_manager as pm
+
+        calls: list = []
+        monkeypatch.setattr(entry.os, "_exit", lambda code: calls.append(code))
+        monkeypatch.setattr(entry, "_finalize_loop", lambda *_a: False)
+        loop = asyncio.new_event_loop()
+        entry._finalize_and_exit(
+            loop, pm.AdoptedZombieReaper(), logging.getLogger("t"), 0
+        )
+        assert calls == [1]
+        entry._finalize_and_exit(
+            loop, pm.AdoptedZombieReaper(), logging.getLogger("t"), 7
+        )
+        assert calls == [1, 7]
+
+        monkeypatch.setattr(entry, "_finalize_loop", lambda *_a: True)
+        entry._finalize_and_exit(
+            loop, pm.AdoptedZombieReaper(), logging.getLogger("t"), 0
+        )
+        assert calls == [1, 7]  # clean barrier: no immediate exit
+        loop.close()
 
 
 class TestVetoedReexec:

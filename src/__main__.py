@@ -132,7 +132,7 @@ def _enable_process_containment(log) -> bool:
 _FINALIZE_STEP_TIMEOUT = 3.0
 
 
-def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> None:
+def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> bool:
     """Teardown tail in the exact round-15 §3.3 order.
 
     Drain before close: cancel stragglers, then run the loop's async
@@ -150,6 +150,12 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> None:
     (``restart.block_reexec``): exec'ing over an unverified process
     table hands invisible survivors to the new image, while exiting
     lets the supervisor start clean and PID 1 reap whatever remains.
+
+    Returns True when the owner barrier completed (tasks, async
+    generators and the default executor all provably stopped). False
+    means unproven owners MAY include blocked non-daemon threads — the
+    caller must then leave via :func:`_finalize_and_exit`'s immediate
+    path, never via ordinary interpreter shutdown (round-17).
     """
     owners_stopped = False
     failure = ""
@@ -212,6 +218,42 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> None:
         )
     loop.close()
     log.info("Odin stopped")
+    return owners_stopped
+
+
+def _finalize_and_exit(
+    loop, zombie_reaper: AdoptedZombieReaper, log, exit_code: int
+) -> None:
+    """Run the finalize barrier; on unproven owners, LEAVE immediately.
+
+    A genuinely blocked default-executor worker is a NON-DAEMON thread:
+    the bounded barrier correctly returns and vetoes re-exec, but
+    ordinary interpreter shutdown then joins that thread forever —
+    ``sys.exit`` never reaches the supervisor and systemd has to
+    SIGKILL (round-17, real-process repro RC=124). ``os._exit`` is the
+    exit path that does not rely on Python shutdown: buffers are
+    flushed explicitly, and skipping atexit is the point — nothing
+    behind an unproven barrier can be trusted to finish.
+
+    Returns normally when the barrier completed; the caller then owns
+    the ordinary restart/exit tail.
+    """
+    import logging
+
+    if _finalize_loop(loop, zombie_reaper, log):
+        return
+    log.error(
+        "Exiting without interpreter shutdown: unproven subprocess "
+        "owners may include blocked non-daemon threads"
+    )
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code or 1)
 
 
 def main() -> None:
@@ -446,7 +488,7 @@ def main() -> None:
         except Exception:
             log.exception("Cleanup after fatal startup error failed")
     finally:
-        _finalize_loop(loop, zombie_reaper, log)
+        _finalize_and_exit(loop, zombie_reaper, log, exit_code)
 
     if restart.restart_requested():
         veto = restart.reexec_blocked()
