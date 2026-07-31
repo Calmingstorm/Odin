@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 from src import restart
+from src.tools.process_manager import AdoptedZombieReaper
 
 
 def _wire_observability(health, bot, log) -> None:
@@ -80,7 +81,7 @@ def _wire_observability(health, bot, log) -> None:
     log.info("Observability wired: metric sources and component health checks registered")
 
 
-def _enable_process_containment(log) -> None:
+def _enable_process_containment(log) -> bool:
     """Become a child subreaper so escaped descendants stay ours.
 
     Process-wide state, so it is set ONCE here at the application
@@ -111,12 +112,14 @@ def _enable_process_containment(log) -> None:
 
     if set_child_subreaper(True):
         log.debug("Child-subreaper containment active")
+        return True
     else:
         log.error(
             "Could not become a child subreaper — escaped background "
             "descendants would be unattributable; cleanup will refuse to "
             "report success and in-place restarts will be blocked"
         )
+    return False
 
 
 def main() -> None:
@@ -152,7 +155,11 @@ def main() -> None:
     )
     log = get_logger("main")
     log.info("Starting Odin")
-    _enable_process_containment(log)
+    containment = _enable_process_containment(log)
+    # Containment makes escaped descendants OURS, so we owe them a reaper:
+    # nothing else will wait on an adopted orphan, and without this they
+    # accumulate as zombies for the process lifetime (PR #244 soak).
+    zombie_reaper = AdoptedZombieReaper()
 
     # STARTUP MIGRATION — must run after the real configuration is loaded and
     # before any command service begins.
@@ -239,6 +246,8 @@ def main() -> None:
     async def run() -> None:
         nonlocal exit_code
         try:
+            if containment:
+                zombie_reaper.start()
             await health.start()
 
             async def _webhook_send(channel_id: str, text: str) -> None:
@@ -310,6 +319,18 @@ def main() -> None:
             await health.stop()
         except Exception:
             log.exception("health stop error")
+        # Containment reparents escaped descendants to US, so nothing else
+        # will ever wait on them. Stop the periodic reaper, then drain once
+        # without grace — every subprocess-owning subsystem has closed by
+        # here, so no legitimate future wait remains and no zombie can
+        # survive an in-place execve.
+        try:
+            await zombie_reaper.stop()
+            drained = zombie_reaper.drain_at_teardown()
+            if drained:
+                log.info("Reaped %d adopted zombie(s) at teardown", drained)
+        except Exception:
+            log.exception("adopted-zombie teardown drain error")
 
     try:
         loop.run_until_complete(run())

@@ -2156,3 +2156,342 @@ sys.exit(0)
         pm._close_pinned(pinned)
         assert pinned == []  # not swept on an unknown own-session
         assert complete is False  # and emptiness is not affirmed
+
+
+class TestAdoptedZombieReaper:
+    """PR #244 soak finding: containment reparents escaped descendants to
+    us, so nothing else will ever wait on them — without a reaper they
+    accumulate as zombies for the process lifetime. Ownership is decided
+    by evidence (open pidfd, registered identity), never by age alone."""
+
+    @staticmethod
+    async def _make_real_orphan_zombie() -> int:
+        """A REAL double-forked orphan that dies immediately: reparented to
+        us by containment, and owned by nobody (Odin's amendment: test the
+        real behavior, not a mocked zombie)."""
+        import tempfile
+
+        fd, pidfile = tempfile.mkstemp(prefix="orphan-", suffix=".pid")
+        os.close(fd)
+        script_path = pidfile + ".py"
+        with open(script_path, "w") as fh:
+            fh.write(
+                "import os, sys, time\n"
+                "if os.fork() == 0:\n"
+                f"    with open({pidfile!r}, 'w') as fh:\n"
+                "        fh.write(str(os.getpid()))\n"
+                "    time.sleep(0.2)\n"
+                "    os._exit(0)\n"
+                "sys.exit(0)\n"
+            )
+        proc = await asyncio.create_subprocess_exec(
+            "python3", script_path,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        orphan = None
+        for _ in range(60):
+            text = open(pidfile).read().strip()
+            if text:
+                orphan = int(text)
+                break
+            await asyncio.sleep(0.05)
+        for path in (pidfile, script_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        assert orphan is not None, "orphan never reported its pid"
+        return orphan
+
+    async def test_real_orphan_zombie_is_reaped_after_grace(self):
+        import src.tools.process_manager as pm
+
+        previously = pm.child_subreaper_active()
+        pm.set_child_subreaper(True)
+        try:
+            orphan = await self._make_real_orphan_zombie()
+            # Wait for it to actually become OUR zombie.
+            for _ in range(60):
+                if (orphan, ) and any(
+                    pid == orphan for pid, _st in pm._zombie_children(os.getpid())
+                ):
+                    break
+                await asyncio.sleep(0.1)
+            zombies = pm._zombie_children(os.getpid())
+            assert any(pid == orphan for pid, _st in zombies), "never became our zombie"
+
+            reaper = pm.AdoptedZombieReaper(grace=0.0)
+            assert reaper.sweep_once() >= 1
+            assert reaper.reaped_total >= 1
+            # Gone for good.
+            assert not any(
+                pid == orphan for pid, _st in pm._zombie_children(os.getpid())
+            )
+        finally:
+            pm.set_child_subreaper(previously)
+
+    async def test_grace_period_holds_a_fresh_zombie(self):
+        """A zombie younger than the grace is left alone — it may still be
+        settling in a watcher."""
+        import src.tools.process_manager as pm
+
+        previously = pm.child_subreaper_active()
+        pm.set_child_subreaper(True)
+        try:
+            orphan = await self._make_real_orphan_zombie()
+            for _ in range(60):
+                if any(pid == orphan for pid, _st in pm._zombie_children(os.getpid())):
+                    break
+                await asyncio.sleep(0.1)
+            reaper = pm.AdoptedZombieReaper(grace=3600.0)  # effectively never
+            assert reaper.sweep_once() == 0
+            assert reaper.pending_zombies >= 1  # tracked, not reaped
+            assert any(pid == orphan for pid, _st in pm._zombie_children(os.getpid()))
+            # Teardown drain ignores the grace and takes it.
+            assert reaper.drain_at_teardown() >= 1
+        finally:
+            pm.set_child_subreaper(previously)
+
+    async def test_pidfd_owned_child_is_never_reaped(self, monkeypatch):
+        """The decisive exclusion: an open pidfd means asyncio still owns
+        that exit status, so the reaper must not take it — even when the
+        process IS a zombie and past the grace."""
+        import src.tools.process_manager as pm
+
+        proc = await asyncio.create_subprocess_exec(
+            "true", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        held = os.pidfd_open(proc.pid)  # stand in for the watcher's pidfd
+        try:
+            owned = pm._pidfd_owned_pids()
+            assert owned is not None and proc.pid in owned
+            # Present it as a settled zombie of ours, past any grace.
+            monkeypatch.setattr(
+                pm, "_zombie_children", lambda _p: {(proc.pid, 12345): None}
+            )
+            waited: list[int] = []
+            monkeypatch.setattr(
+                pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
+            )
+            reaper = pm.AdoptedZombieReaper(grace=0.0)
+            assert reaper.sweep_once() == 0
+            assert waited == []  # its status was never consumed by us
+            assert reaper.reaped_total == 0
+        finally:
+            os.close(held)
+            await proc.wait()
+
+    def test_unreadable_fd_table_reaps_nothing(self, monkeypatch):
+        """If we cannot enumerate our own fds we cannot prove abandonment,
+        so the pass must reap nothing — even with an eligible zombie
+        present and the grace elapsed."""
+        import src.tools.process_manager as pm
+
+        real_listdir = pm.os.listdir
+
+        def selective(path):
+            if str(path).startswith("/proc/self/fd"):
+                raise OSError("fd table unreadable")
+            return real_listdir(path)
+
+        monkeypatch.setattr(pm.os, "listdir", selective)
+        assert pm._pidfd_owned_pids() is None
+        # An eligible zombie IS present and past the grace…
+        monkeypatch.setattr(
+            pm, "_zombie_children", lambda _p: {(4242, 111): None}
+        )
+        waited: list[int] = []
+        monkeypatch.setattr(
+            pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
+        )
+        reaper = pm.AdoptedZombieReaper(grace=0.0)
+        assert reaper.sweep_once() == 0  # …and is still not reaped
+        assert waited == []
+
+    def test_registered_identity_is_skipped(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        identity = (4242, 111)
+        monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
+        monkeypatch.setattr(pm, "_zombie_children", lambda _p: {identity: None})
+        waited: list[int] = []
+        monkeypatch.setattr(
+            pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
+        )
+        reaper = pm.AdoptedZombieReaper(
+            grace=0.0, registered=lambda: frozenset({identity})
+        )
+        assert reaper.sweep_once() == 0
+        assert waited == []
+
+    def test_identity_change_between_observations_is_dropped(self, monkeypatch):
+        """A pid whose incarnation changed between passes is not the
+        process we saw — it is dropped, never waited on."""
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
+        seq = [{(4242, 111): None}, {(4242, 999): None}]
+        monkeypatch.setattr(pm, "_zombie_children", lambda _p: seq[0])
+        reaper = pm.AdoptedZombieReaper(grace=3600.0)
+        reaper.sweep_once()
+        assert reaper.pending_zombies == 1
+        seq[0] = seq[1]  # pid reused by a different incarnation
+        reaper.sweep_once()
+        assert (4242, 111) not in reaper._first_seen  # old identity forgotten
+
+    async def test_sweep_failure_does_not_kill_the_task(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        reaper = pm.AdoptedZombieReaper(scan_interval=0.05, grace=0.0)
+        calls = {"n": 0}
+
+        def boom():
+            calls["n"] += 1
+            raise RuntimeError("sweep exploded")
+
+        monkeypatch.setattr(reaper, "sweep_once", boom)
+        pm.set_child_subreaper(True)
+        reaper.start()
+        try:
+            for _ in range(40):
+                if calls["n"] >= 2:
+                    break
+                await asyncio.sleep(0.05)
+            assert calls["n"] >= 2  # survived the first failure
+            assert reaper._task is not None and not reaper._task.done()
+        finally:
+            await reaper.stop()
+
+    async def test_start_requires_containment_and_stop_is_clean(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(pm, "child_subreaper_active", lambda: False)
+        reaper = pm.AdoptedZombieReaper()
+        reaper.start()
+        assert reaper._task is None  # no containment ⇒ nothing to reap
+
+        monkeypatch.setattr(pm, "child_subreaper_active", lambda: True)
+        reaper.start()
+        assert reaper._task is not None
+        await reaper.stop()
+        assert reaper._task is None
+
+    def test_stats_surface(self):
+        import src.tools.process_manager as pm
+
+        reaper = pm.AdoptedZombieReaper()
+        assert reaper.stats == {"pending_zombies": 0, "reaped_total": 0}
+
+    def test_pidfd_scan_tolerates_malformed_fdinfo(self, monkeypatch, tmp_path):
+        """A malformed or racing fdinfo entry is skipped, never raised."""
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["3", "4"])
+
+        class FakePath:
+            def __init__(self, path):
+                self.path = str(path)
+
+            def read_text(self):
+                if self.path.endswith("/3"):
+                    return "pos:\t0\nPid:\tnot-a-number\n"  # malformed
+                raise OSError("fd closed under us")  # racing close
+
+        monkeypatch.setattr(pm, "Path", FakePath)
+        assert pm._pidfd_owned_pids() == set()  # neither raised
+
+    def test_zombie_scan_tolerates_unreadable_proc(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(
+            pm.os, "listdir", lambda _p: (_ for _ in ()).throw(OSError("gone"))
+        )
+        assert pm._zombie_children(os.getpid()) == {}
+
+    async def test_stop_is_idempotent_without_a_task(self):
+        import src.tools.process_manager as pm
+
+        reaper = pm.AdoptedZombieReaper()
+        await reaper.stop()  # never started — must be a clean no-op
+        await reaper.stop()
+
+    async def test_cancellation_propagates_out_of_the_loop(self, monkeypatch):
+        """CancelledError must end the task, not be swallowed as a
+        per-pass failure."""
+        import src.tools.process_manager as pm
+
+        reaper = pm.AdoptedZombieReaper(scan_interval=0.01, grace=0.0)
+        monkeypatch.setattr(pm, "child_subreaper_active", lambda: True)
+
+        def cancel_now():
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(reaper, "sweep_once", cancel_now)
+        reaper.start()
+        task = reaper._task
+        assert task is not None
+        for _ in range(60):
+            if task.done():
+                break
+            await asyncio.sleep(0.02)
+        assert task.done() and task.cancelled()
+        await reaper.stop()
+
+    def test_vanished_between_verify_and_reap_is_dropped(self, monkeypatch):
+        """The re-verification immediately before waitpid: an identity that
+        stopped being our zombie is dropped, never waited on."""
+        import src.tools.process_manager as pm
+
+        identity = (4242, 111)
+        monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
+        calls = {"n": 0}
+
+        def zombies(_p):
+            calls["n"] += 1
+            return {identity: None} if calls["n"] == 1 else {}
+
+        monkeypatch.setattr(pm, "_zombie_children", zombies)
+        waited: list[int] = []
+        monkeypatch.setattr(
+            pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
+        )
+        reaper = pm.AdoptedZombieReaper(grace=0.0)
+        assert reaper.sweep_once() == 0
+        assert waited == []  # re-verify said it was gone
+        assert reaper.pending_zombies == 0
+
+    def test_waitpid_error_is_swallowed(self, monkeypatch):
+        """Losing the race to another owner is not an error."""
+        import src.tools.process_manager as pm
+
+        identity = (4242, 111)
+        monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
+        monkeypatch.setattr(pm, "_zombie_children", lambda _p: {identity: None})
+
+        def not_ours(_pid, _flags):
+            raise ChildProcessError("someone else took it")
+
+        monkeypatch.setattr(pm.os, "waitpid", not_ours)
+        reaper = pm.AdoptedZombieReaper(grace=0.0)
+        assert reaper.sweep_once() == 0
+        assert reaper.reaped_total == 0
+
+    def test_zombie_scan_skips_vanished_and_malformed_entries(self, monkeypatch):
+        """A process that exits mid-scan, or a truncated stat line, is
+        skipped rather than raising out of the sweep."""
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["111", "222", "notapid"])
+
+        class FakePath:
+            def __init__(self, path):
+                self.path = str(path)
+
+            def read_bytes(self):
+                if "/111/" in self.path:
+                    raise FileNotFoundError()  # vanished mid-scan
+                return b"222 (x) Z"  # truncated — no fields after comm
+
+        monkeypatch.setattr(pm, "Path", FakePath)
+        assert pm._zombie_children(os.getpid()) == {}

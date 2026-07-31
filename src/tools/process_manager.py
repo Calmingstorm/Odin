@@ -99,6 +99,181 @@ def reap_adopted_zombies(
     return reaped
 
 
+
+def _pidfd_owned_pids() -> set[int] | None:
+    """PIDs for which THIS process holds an open pidfd.
+
+    The runtime uses ``PidfdChildWatcher``, so an open pidfd means the
+    event loop still owns that child's exit status and nobody else may
+    consume it — the decisive ownership signal (round-14 design, Odin:
+    "age alone is not proof that nobody owns the exit status").
+
+    Returns None when the fd table cannot be read: the caller must then
+    prove nothing and reap nothing.
+    """
+    try:
+        entries = os.listdir("/proc/self/fd")
+    except OSError:
+        return None
+    owned: set[int] = set()
+    for entry in entries:
+        try:
+            info = Path(f"/proc/self/fdinfo/{entry}").read_text()
+        except OSError:
+            continue  # fd closed under us — not evidence either way
+        for line in info.splitlines():
+            if line.startswith("Pid:"):
+                try:
+                    owned.add(int(line.split()[1]))
+                except (IndexError, ValueError):
+                    pass
+                break
+    return owned
+
+
+def _zombie_children(parent: int) -> dict[tuple[int, int], None]:
+    """``(pid, starttime)`` of every zombie whose parent is ``parent``."""
+    found: dict[tuple[int, int], None] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            raw = Path(f"/proc/{pid}/stat").read_bytes()
+            rest = raw.rsplit(b")", 1)[1].split()
+            if rest[0] != b"Z" or int(rest[1]) != parent:
+                continue
+            found[(pid, int(rest[19]))] = None
+        except (OSError, IndexError, ValueError):
+            continue
+    return found
+
+
+class AdoptedZombieReaper:
+    """Reaps orphaned descendants that child-subreaper containment made
+    ours (PR #244 soak finding).
+
+    Containment reparents escaped grandchildren to this process instead
+    of PID 1, so nothing else will ever wait on them — an ``ssh``
+    ControlPersist master or a job shell's forked child otherwise lingers
+    as a zombie forever. Ownership is decided by evidence, never by
+    guesswork:
+
+    - an open **pidfd** for that pid means asyncio still owns the status
+      (never reaped);
+    - an explicitly **registered** child identity is skipped;
+    - a candidate must be observed as the same ``(pid, starttime)``
+      zombie across at least ``grace`` seconds, and re-verified
+      immediately before the ``waitpid(pid, WNOHANG)``.
+
+    An unreadable fd table proves nothing, so the pass reaps nothing.
+    """
+
+    SCAN_INTERVAL = 15.0
+    GRACE = 30.0
+
+    def __init__(
+        self,
+        *,
+        registered: Callable[[], frozenset[tuple[int, int]]] | None = None,
+        scan_interval: float = SCAN_INTERVAL,
+        grace: float = GRACE,
+    ) -> None:
+        self._registered = registered
+        self._scan_interval = scan_interval
+        self._grace = grace
+        self._first_seen: dict[tuple[int, int], float] = {}
+        self._task: asyncio.Task | None = None
+        self.reaped_total = 0
+
+    @property
+    def pending_zombies(self) -> int:
+        return len(self._first_seen)
+
+    @property
+    def stats(self) -> dict[str, int]:
+        return {
+            "pending_zombies": self.pending_zombies,
+            "reaped_total": self.reaped_total,
+        }
+
+    def start(self) -> None:
+        """Begin sweeping. Only meaningful once containment is active —
+        without it, orphans go to PID 1 and are never ours."""
+        if self._task is not None or not child_subreaper_active():
+            return
+        self._task = asyncio.create_task(self._run(), name="zombie-reaper")
+
+    async def stop(self) -> None:
+        task, self._task = self._task, None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _run(self) -> None:
+        while True:
+            await asyncio.sleep(self._scan_interval)
+            try:
+                self.sweep_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A failing pass must never silently kill the task.
+                log.exception("Adopted-zombie sweep failed (continuing)")
+
+    def sweep_once(self, *, ignore_grace: bool = False) -> int:
+        """One pass. Returns the number reaped."""
+        owned = _pidfd_owned_pids()
+        if owned is None:
+            return 0  # cannot prove abandonment — reap nothing
+        mypid = os.getpid()
+        registered = self._registered() if self._registered else frozenset()
+        current = _zombie_children(mypid)
+        # Forget identities that are no longer zombies of ours.
+        for identity in list(self._first_seen):
+            if identity not in current:
+                del self._first_seen[identity]
+        now = time.monotonic()
+        reaped = 0
+        for identity in current:
+            pid, start = identity
+            if pid in owned or identity in registered:
+                self._first_seen.pop(identity, None)
+                continue
+            first = self._first_seen.setdefault(identity, now)
+            if not ignore_grace and (now - first) < self._grace:
+                continue
+            # Re-verify the exact incarnation immediately before reaping.
+            if identity not in _zombie_children(mypid):
+                self._first_seen.pop(identity, None)
+                continue
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0]:
+                    reaped += 1
+                    self.reaped_total += 1
+            except (ChildProcessError, OSError):
+                pass  # someone else owned it after all
+            self._first_seen.pop(identity, None)
+        return reaped
+
+    def drain_at_teardown(self) -> int:
+        """Final exact-PID drain, no grace.
+
+        Runs after every subprocess-owning subsystem has closed, so no
+        legitimate future wait remains — and it keeps zombies from
+        surviving an in-place ``execve`` (Odin's teardown amendment).
+        """
+        return self.sweep_once(ignore_grace=True)
+
+
 class ProcessCleanupError(RuntimeError):
     """Shutdown could not affirmatively prove the owned session is empty.
 
