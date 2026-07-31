@@ -324,6 +324,13 @@ class _ChatTurn:
     hedging_retried: bool = False
     code_hedging_retried: bool = False
     premature_failure_retried: bool = False
+    # True between a wait-class fingerprint's WI-4 (recorded) and its
+    # judgment (nudge/kill/clear). Persisted: a crash in that window must
+    # resume INTO the judgment — while a nudge already delivered before a
+    # later suspension must NOT be re-judged into a zero-generation kill
+    # (PR #244 round-3 blocker #1: the phase is explicit, never inferred
+    # from historical fingerprints).
+    wait_judgment_pending: bool = False
     pending_image_blocks: list = field(default_factory=list)
     _op_tool_details: list = field(default_factory=list)
     _pending_validations: list = field(default_factory=list)
@@ -1062,17 +1069,22 @@ class ToolLoopRunner:
         return None
 
     async def _judge_entry_stuck(self, st: _ChatTurn):
-        """Judge a tracker that is ALREADY tripped at loop entry.
+        """Complete a PENDING wait judgment at loop entry.
 
         The wait fingerprint is recorded before WI-4 but judged after it —
         a crash in that window restores a tripped tracker whose judgment
-        never ran (PR #244 round-2 blocker #2). Without this, the resumed
-        turn gets a free generation-plus-poll before the ladder acts.
-        A fresh turn's tracker is empty, so this is a no-op everywhere
-        except that restored window. ``warned`` semantics are identical to
-        in-turn judgment: consumed flag → terminate with zero generations;
-        unconsumed → nudge before the first generation.
+        never ran (round-2 blocker #2). The pending phase is EXPLICIT
+        persisted state, never inferred from historical fingerprints
+        (round-3 blocker #1): a nudge already delivered before a later
+        suspension resumes with the phase clear and gets its post-nudge
+        generation — only a genuinely undelivered judgment is completed
+        here. ``warned`` semantics are identical to in-turn judgment:
+        consumed flag → terminate with zero generations; unconsumed →
+        nudge before the first generation.
         """
+        if not st.wait_judgment_pending:
+            return None
+        st.wait_judgment_pending = False
         if not st.stuck_tracker.check():
             return None
         last_fp = st.stuck_tracker.last_fingerprint
@@ -1117,17 +1129,11 @@ class ToolLoopRunner:
                     "result you already have, or report and stop."
                 ),
             }
-        elif last_fp.startswith("wait:"):
-            nudge = dict(_WAIT_AGENTS_NUDGE)
         else:
-            nudge = {
-                "role": "developer",
-                "content": (
-                    "You appear to be repeating the same tool-call sequence. "
-                    "Try a different approach or summarise progress and stop."
-                ),
-            }
-        log.info("Restored tracker tripped at entry — injecting nudge before generation")
+            # Pending is set only by wait iterations, so the last
+            # fingerprint is always wait:* — mp handled above, agents here.
+            nudge = dict(_WAIT_AGENTS_NUDGE)
+        log.info("Pending wait judgment tripped at entry — injecting nudge before generation")
         st.messages.append(nudge)
         return ("retry", None)
 
@@ -1160,6 +1166,9 @@ class ToolLoopRunner:
                 tc.name, tc.input or {}, self._wait_result_text(tool_calls, tool_results)
             )
         )
+        # Explicit pending-judgment phase (round-3 blocker #1): rides the
+        # same WI-4 as the fingerprint; cleared by the judgment itself.
+        st.wait_judgment_pending = True
         return True
 
     async def _judge_wait_stuck(self, st: _ChatTurn, tool_calls, tool_results):
@@ -1176,6 +1185,10 @@ class ToolLoopRunner:
         """
         tc = tool_calls[0]
         result_text = self._wait_result_text(tool_calls, tool_results)
+        # Judgment is happening NOW — the pending phase ends whatever the
+        # outcome (the retry path persists this via WI-5; the no-trip path
+        # via the next WI-4; the kill is terminal).
+        st.wait_judgment_pending = False
         if not st.stuck_tracker.check():
             return None
         if st.stuck_tracker.warned:

@@ -52,6 +52,7 @@ PERSISTED_FIELDS: frozenset[str] = frozenset({
     "hedging_retried",
     "code_hedging_retried",
     "premature_failure_retried",
+    "wait_judgment_pending",
     "pending_image_blocks",  # blob-externalized
     "_op_tool_details",
     "_pending_validations",
@@ -391,6 +392,7 @@ def snapshot_chat_turn(st, *, store_blob, generation_seq: int, extra: dict | Non
             "hedging_retried": st.hedging_retried,
             "code_hedging_retried": st.code_hedging_retried,
             "premature_failure_retried": st.premature_failure_retried,
+            "wait_judgment_pending": st.wait_judgment_pending,
             "pending_image_blocks": _externalize_blocks(
                 list(st.pending_image_blocks), store_blob
             ),
@@ -426,7 +428,7 @@ class CheckpointInvalidError(ValueError):
 _GUARD_FLAG_FIELDS = (
     "fabrication_retried", "promise_retried", "unavail_retried",
     "hedging_retried", "code_hedging_retried", "premature_failure_retried",
-    "_validation_required",
+    "_validation_required", "wait_judgment_pending",
 )
 _NON_NEGATIVE_INT_FIELDS = (
     "iteration", "continuation_count", "max_continuations",

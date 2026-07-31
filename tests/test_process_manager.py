@@ -16,6 +16,7 @@ from src.tools.process_manager import (
     MAX_CONCURRENT,
     MAX_LIFETIME_SECONDS,
     OUTPUT_BUFFER_LINES,
+    SHUTDOWN_REAP_TIMEOUT,
     ProcessInfo,
     ProcessRegistry,
 )
@@ -705,3 +706,108 @@ class TestUtf8BoundarySplit:
         head, tail = _utf8_boundary_split(buf)
         assert head + tail == buf
         assert len(tail) <= 3
+
+
+class TestRound3Blockers:
+    async def test_shutdown_hard_kills_group_before_abandoning_wedged_reap(self):
+        """PR #244 round-3 blocker #2: a wedged async reap must not strand
+        the owned group across re-exec — shutdown hard-KILLs the group
+        synchronously before cancelling the task."""
+        import os
+
+        reg = ProcessRegistry()
+        proc = await asyncio.create_subprocess_shell(
+            "sleep 30", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        gate = asyncio.Event()  # never set — the wedged "reaper"
+
+        async def wedged():
+            await gate.wait()
+
+        info = ProcessInfo(
+            pid=proc.pid, command="sleep 30", host="local",
+            start_time=time.time(), status="completed", exit_code=0,
+            process=proc,
+        )
+        info._exit_task = asyncio.create_task(wedged())
+        reg._processes[proc.pid] = info
+        try:
+            start = time.monotonic()
+            await reg.shutdown()
+            assert time.monotonic() - start < SHUTDOWN_REAP_TIMEOUT + 5
+            # The group died by the synchronous hard kill, not the reap.
+            for _ in range(20):
+                try:
+                    os.killpg(proc.pid, 0)
+                except ProcessLookupError:
+                    break
+                await asyncio.sleep(0.25)
+            with pytest.raises(ProcessLookupError):
+                os.killpg(proc.pid, 0)
+        finally:
+            gate.set()
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+
+    async def test_zero_wait_poll_settles_when_returncode_beats_publication(self):
+        """PR #244 round-3 blocker #3: returncode set but status not yet
+        published — a zero-wait poll must settle via the watcher instead
+        of reporting stale running status with a torn tail."""
+        reg = ProcessRegistry()
+        proc = await asyncio.create_subprocess_shell(
+            "echo tail-marker; exit 0",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        # Let the child exit (returncode set at SIGCHLD reap) WITHOUT any
+        # watcher having run yet — status still says running.
+        for _ in range(40):
+            if proc.returncode is not None:
+                break
+            await asyncio.sleep(0.1)
+        assert proc.returncode is not None
+        info = ProcessInfo(
+            pid=proc.pid, command="echo", host="local",
+            start_time=time.time(), process=proc,  # status="running"
+        )
+        info._reader_task = asyncio.create_task(reg._read_output(info))
+        info._exit_task = asyncio.create_task(reg._watch_exit(info))
+        reg._processes[proc.pid] = info
+
+        result = await reg.poll(proc.pid)  # wait_seconds=0
+        assert "status=completed" in result
+        assert "exit_code=0" in result
+        assert "tail-marker" in result
+
+
+class TestHardKillGroup:
+    async def test_already_dead_group_is_the_goal_state(self):
+        proc = await asyncio.create_subprocess_shell(
+            "true", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        await proc.wait()
+        info = ProcessInfo(
+            pid=proc.pid, command="true", host="local",
+            start_time=time.time(), status="completed", process=proc,
+        )
+        ProcessRegistry._hard_kill_group(info)  # ProcessLookupError → pass
+
+    def test_no_process_is_a_noop(self):
+        info = ProcessInfo(pid=1, command="x", host="local", start_time=0.0)
+        ProcessRegistry._hard_kill_group(info)  # process=None → return
+
+    def test_unexpected_error_is_swallowed(self, monkeypatch):
+        import os as _os
+
+        def boom(pgid, sig):
+            raise PermissionError("nope")
+
+        monkeypatch.setattr(_os, "killpg", boom)
+        info = ProcessInfo(
+            pid=1, command="x", host="local", start_time=0.0,
+            process=type("P", (), {"pid": 4242})(),
+        )
+        ProcessRegistry._hard_kill_group(info)  # Exception arm → debug log

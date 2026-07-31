@@ -989,14 +989,18 @@ class TestRestoredTrackerJudgedBeforeGeneration:
     judgment must not buy the resumed turn a free generation-plus-poll."""
 
     @staticmethod
-    def _trip_tracker(h, *, warned: bool):
+    def _trip_tracker(h, *, warned: bool, fp: str = "wait:mp:77:running::500",
+                      pending: bool = True):
         (payload_text,) = h.store._conn.execute(
             "SELECT payload FROM turns"
         ).fetchone()
         payload = json.loads(payload_text)
-        fp = "wait:mp:77:running::500"
         payload["fields"]["stuck_tracker"]["fingerprints"] = [fp, fp, fp]
         payload["fields"]["stuck_tracker"]["warned"] = warned
+        # The crash window this class models: the fingerprint's WI-4 landed
+        # but its judgment never ran — the EXPLICIT persisted phase
+        # (round-3 blocker #1), never inferred from fingerprints.
+        payload["fields"]["wait_judgment_pending"] = pending
         rewrite_payload_with_valid_digest(
             h.store, json.dumps(payload, sort_keys=True)
         )
@@ -1033,11 +1037,7 @@ class TestRestoredTrackerJudgedBeforeGeneration:
         h, original = await suspend_turn(tmp_path)
         heal_capacity(h, text_response("adjusted the wait"))
         make_breaker_probe_ready(h)
-        (payload_text,) = h.store._conn.execute("SELECT payload FROM turns").fetchone()
-        payload = json.loads(payload_text)
-        fp = "wait:agents:a1,a2:deadbeef"
-        payload["fields"]["stuck_tracker"]["fingerprints"] = [fp, fp, fp]
-        rewrite_payload_with_valid_digest(h.store, json.dumps(payload, sort_keys=True))
+        self._trip_tracker(h, warned=False, fp="wait:agents:a1,a2:deadbeef")
         calls_before = len(h.fake.calls)
         result = await h.manager.try_explicit_resume(resume_msg(original))
         assert result is not None and result[0] == "adjusted the wait"
@@ -1048,28 +1048,49 @@ class TestRestoredTrackerJudgedBeforeGeneration:
         h, original = await suspend_turn(tmp_path)
         heal_capacity(h, text_response("acted on it"))
         make_breaker_probe_ready(h)
-        (payload_text,) = h.store._conn.execute("SELECT payload FROM turns").fetchone()
-        payload = json.loads(payload_text)
-        fp = "wait:mp:77:completed:0:500"
-        payload["fields"]["stuck_tracker"]["fingerprints"] = [fp, fp, fp]
-        rewrite_payload_with_valid_digest(h.store, json.dumps(payload, sort_keys=True))
+        self._trip_tracker(h, warned=False, fp="wait:mp:77:completed:0:500")
         calls_before = len(h.fake.calls)
         result = await h.manager.try_explicit_resume(resume_msg(original))
         assert result is not None
         devs = h.fake.developer_messages_of_call(calls_before)
         assert any("finished or missing target" in d for d in devs)
 
-    async def test_restored_argument_fp_gets_classic_nudge(self, tmp_path):
+    async def test_delivered_nudge_is_never_rejudged_on_resume(self, tmp_path):
+        """PR #244 round-3 blocker #1 (tampered form): a tripped tracker
+        with warned=True but NO pending judgment is a nudge that was
+        already delivered — the resumed turn gets its post-nudge
+        generation, never a zero-generation kill."""
         h, original = await suspend_turn(tmp_path)
-        heal_capacity(h, text_response("changed approach"))
+        heal_capacity(h, text_response("acted on the earlier nudge"))
         make_breaker_probe_ready(h)
-        (payload_text,) = h.store._conn.execute("SELECT payload FROM turns").fetchone()
-        payload = json.loads(payload_text)
-        fp = "parse_time({'text': 'now'})"
-        payload["fields"]["stuck_tracker"]["fingerprints"] = [fp, fp, fp]
-        rewrite_payload_with_valid_digest(h.store, json.dumps(payload, sort_keys=True))
+        self._trip_tracker(h, warned=True, pending=False)
+        calls_before = len(h.fake.calls)
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None and result[0] == "acted on the earlier nudge"
+        assert len(h.fake.calls) == calls_before + 1  # generation GRANTED
+
+    async def test_real_nudge_then_suspension_resumes_into_generation(self, tmp_path):
+        """PR #244 round-3 blocker #1 (Odin's exact repro, no tamper):
+        frozen polls → nudge delivered in-turn (WI-5) → capacity failure
+        suspends → resume must generate, not terminate."""
+        h, original = await suspend_turn(
+            tmp_path,
+            script=[
+                tool_call_response(("manage_process", {"action": "poll", "pid": 9})),
+                tool_call_response(("manage_process", {"action": "poll", "pid": 9})),
+                tool_call_response(("manage_process", {"action": "poll", "pid": 9})),
+                # 4th generation (post-nudge) hits capacity → suspends
+            ],
+        )
+        # Suspension happened AFTER the nudge: warned consumed, judgment
+        # NOT pending (it completed by delivering the nudge).
+        payload = json.loads(h.row()[1])
+        assert payload["fields"]["stuck_tracker"]["warned"] is True
+        assert payload["fields"]["wait_judgment_pending"] is False
+
+        heal_capacity(h, text_response("resumed and acted on the nudge"))
         calls_before = len(h.fake.calls)
         result = await h.manager.try_explicit_resume(resume_msg(original))
         assert result is not None
-        devs = h.fake.developer_messages_of_call(calls_before)
-        assert any("repeating the same tool-call sequence" in d for d in devs)
+        assert result[0] == "resumed and acted on the nudge"
+        assert len(h.fake.calls) == calls_before + 1  # generation GRANTED

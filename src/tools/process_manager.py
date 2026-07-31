@@ -8,7 +8,9 @@ output lines (max 500) and is auto-killed after 1 hour.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import signal
 import time
 from collections import deque
 from collections.abc import Callable
@@ -210,7 +212,12 @@ class ProcessRegistry:
         if not info:
             return f"No process with PID {pid}."
 
-        exited = info.status != "running"
+        # Exit detection must not depend on the watcher having PUBLISHED
+        # yet (round-3 blocker #3): returncode is set at SIGCHLD reap, so a
+        # zero-wait poll landing in the publication window still settles.
+        exited = info.status != "running" or (
+            info.process is not None and info.process.returncode is not None
+        )
         if wait_seconds > 0 and not exited and info.process is not None:
             exited = await _wait_leader_exit(info.process, timeout=wait_seconds)
         if exited:
@@ -340,7 +347,15 @@ class ProcessRegistry:
                         asyncio.shield(task), timeout=SHUTDOWN_REAP_TIMEOUT
                     )
                 except TimeoutError:
-                    log.warning("Reaper for PID %d did not finish; cancelling", pid)
+                    # A wedged async reap must not strand TERM-immune
+                    # descendants across re-exec (round-3 blocker #2):
+                    # hard-KILL the owned group SYNCHRONOUSLY — bounded, no
+                    # await — before abandoning the task.
+                    log.warning(
+                        "Reaper for PID %d did not finish; hard-killing group "
+                        "before abandoning", pid,
+                    )
+                    self._hard_kill_group(info)
                     task.cancel()
                 except Exception:
                     log.debug(
@@ -379,6 +394,29 @@ class ProcessRegistry:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _hard_kill_group(info: ProcessInfo) -> None:
+        """Synchronous last-resort SIGKILL of the OWNED process group.
+
+        Only ever called for a group our start() created with
+        start_new_session=True, so the leader pid IS the pgid. Same
+        signallable guard shape as terminate_process_tree: pgid must be
+        real (>1) and never our own group — a broadcast is impossible by
+        construction (the v3.59.1 rail).
+        """
+        proc = info.process
+        if proc is None:
+            return
+        pgid = proc.pid
+        try:
+            if pgid > 1 and pgid != os.getpgrp():
+                os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # group already gone — the goal state
+        except Exception:
+            log.debug("hard group kill for PID %d failed", info.pid, exc_info=True)
+
 
     async def _read_output(self, info: ProcessInfo) -> None:
         """Drain stdout into the ring buffer. Pure drainage — terminal
