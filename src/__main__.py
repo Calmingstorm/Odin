@@ -230,29 +230,61 @@ def _finalize_and_exit(
     the bounded barrier correctly returns and vetoes re-exec, but
     ordinary interpreter shutdown then joins that thread forever —
     ``sys.exit`` never reaches the supervisor and systemd has to
-    SIGKILL (round-17, real-process repro RC=124). ``os._exit`` is the
-    exit path that does not rely on Python shutdown: buffers are
-    flushed explicitly, and skipping atexit is the point — nothing
-    behind an unproven barrier can be trusted to finish.
+    SIGKILL (round-17, real-process repro RC=124). Skipping atexit is
+    the point — nothing behind an unproven barrier can be trusted to
+    finish.
 
     Returns normally when the barrier completed; the caller then owns
     the ordinary restart/exit tail.
     """
-    import logging
-
     if _finalize_loop(loop, zombie_reaper, log):
         return
-    log.error(
-        "Exiting without interpreter shutdown: unproven subprocess "
-        "owners may include blocked non-daemon threads"
-    )
-    for handler in logging.getLogger().handlers:
+    _emergency_exit(log, exit_code)
+
+
+def _emergency_exit(log, exit_code: int) -> None:
+    """Leave NOW, depending on no ordinary I/O whatsoever (round-18).
+
+    Behind an unproven barrier even the last words are best-effort: a
+    logging sink or stream flush can itself RAISE — or BLOCK forever on
+    a wedged pipe — and either kept ``os._exit`` from ever running (the
+    round-18 repro: a raising ``stdout.flush`` unwound into ordinary
+    interpreter shutdown, which then hung on the blocked worker until
+    SIGKILL). All output therefore happens in a daemon thread with a
+    bounded join: whatever it cannot say within the bound is abandoned
+    with it at exit, and the exit itself depends on nothing.
+    """
+    import logging
+    import threading
+
+    def _last_words() -> None:
         try:
-            handler.flush()
+            log.error(
+                "Exiting without interpreter shutdown: unproven "
+                "subprocess owners may include blocked non-daemon "
+                "threads"
+            )
         except Exception:
             pass
-    sys.stdout.flush()
-    sys.stderr.flush()
+        try:
+            flushes = [h.flush for h in logging.getLogger().handlers]
+            flushes += [sys.stdout.flush, sys.stderr.flush]
+        except Exception:
+            return
+        for flush in flushes:
+            try:
+                flush()
+            except Exception:
+                pass
+
+    try:
+        scribe = threading.Thread(
+            target=_last_words, name="emergency-exit-flush", daemon=True
+        )
+        scribe.start()
+        scribe.join(timeout=1.0)
+    except Exception:
+        pass
     os._exit(exit_code or 1)
 
 

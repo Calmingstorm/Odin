@@ -590,15 +590,41 @@ class TestUncleanBarrierExit:
     interpreter shutdown then joins that thread forever — the exit must
     not rely on Python shutdown."""
 
-    def test_blocked_executor_worker_cannot_hold_process_exit(self, tmp_path):
+    _SINKS = {
+        "healthy": "",
+        "raising": (
+            "class BrokenOut:\n"
+            "    def write(self, *_a):\n"
+            "        return 0\n"
+            "    def flush(self):\n"
+            "        raise OSError('forced stdout flush failure')\n"
+            "sys.stdout = BrokenOut()\n"
+        ),
+        "blocking": (
+            "class BlockedOut:\n"
+            "    def write(self, *_a):\n"
+            "        return 0\n"
+            "    def flush(self):\n"
+            "        threading.Event().wait()\n"
+            "sys.stdout = BlockedOut()\n"
+        ),
+    }
+
+    @pytest.mark.parametrize("sink", ["healthy", "raising", "blocking"])
+    def test_blocked_executor_worker_cannot_hold_process_exit(
+        self, tmp_path, sink
+    ):
         """Process-level, real blocked worker (Odin's round-17 repro
-        shape): the process must actually EXIT nonzero, promptly."""
+        shape): the process must actually EXIT nonzero, promptly — even
+        when the output sink itself RAISES or BLOCKS (round-18: a
+        raising stdout.flush unwound into ordinary interpreter shutdown
+        and hung; a blocking sink never returned at all)."""
         import subprocess
         import time
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[1]
-        script = tmp_path / "blocked_worker.py"
+        script = tmp_path / f"blocked_worker_{sink}.py"
         script.write_text(
             "import asyncio\n"
             "import logging\n"
@@ -619,11 +645,12 @@ class TestUncleanBarrierExit:
             "    await asyncio.sleep(0.2)  # let the worker actually start\n"
             "\n"
             "loop.run_until_complete(arm())\n"
-            "print('FINALIZE_ENTER', flush=True)\n"
-            "_finalize_and_exit(\n"
+            "print('FINALIZE_ENTER', file=sys.stderr, flush=True)\n"
+            + self._SINKS[sink]
+            + "_finalize_and_exit(\n"
             "    loop, AdoptedZombieReaper(), logging.getLogger('repro'), 0\n"
             ")\n"
-            "print('UNREACHABLE', flush=True)\n"
+            "print('UNREACHABLE', file=sys.stderr, flush=True)\n"
         )
         start = time.monotonic()
         proc = subprocess.run(
@@ -634,9 +661,9 @@ class TestUncleanBarrierExit:
         )
         elapsed = time.monotonic() - start
         assert proc.returncode == 1  # exit_code 0 promoted: unclean = failure
-        assert elapsed < 10.0  # bounded barrier + immediate exit
-        assert b"FINALIZE_ENTER" in proc.stdout
-        assert b"UNREACHABLE" not in proc.stdout  # os._exit, not a return
+        assert elapsed < 10.0  # bounded barrier + bounded last words
+        assert b"FINALIZE_ENTER" in proc.stderr
+        assert b"UNREACHABLE" not in proc.stderr  # os._exit, not a return
         assert b"default-executor shutdown did not finish" in proc.stderr
 
     def test_unclean_barrier_uses_immediate_exit(self, monkeypatch):
@@ -666,6 +693,45 @@ class TestUncleanBarrierExit:
         )
         assert calls == [1, 7]  # clean barrier: no immediate exit
         loop.close()
+
+    def test_emergency_exit_survives_raising_and_blocked_sinks(
+        self, monkeypatch
+    ):
+        """The exit depends on NOTHING: a raising stdout is swallowed by
+        the scribe thread; a blocking one is abandoned at the bounded
+        join. os._exit runs either way."""
+        import logging
+        import threading
+        import time
+
+        import src.__main__ as entry
+
+        calls: list = []
+        monkeypatch.setattr(entry.os, "_exit", lambda code: calls.append(code))
+
+        class Raising:
+            def write(self, *_a):
+                return 0
+
+            def flush(self):
+                raise OSError("flush refused")
+
+        monkeypatch.setattr(entry.sys, "stdout", Raising())
+        entry._emergency_exit(logging.getLogger("t"), 0)
+        assert calls == [1]
+
+        class Blocking:
+            def write(self, *_a):
+                return 0
+
+            def flush(self):
+                threading.Event().wait()
+
+        monkeypatch.setattr(entry.sys, "stdout", Blocking())
+        start = time.monotonic()
+        entry._emergency_exit(logging.getLogger("t"), 5)
+        assert calls == [1, 5]
+        assert time.monotonic() - start < 3.0  # bounded by the scribe join
 
 
 class TestVetoedReexec:
