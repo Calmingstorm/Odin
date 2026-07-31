@@ -548,6 +548,14 @@ class ToolLoopRunner:
         Starts from ``st.iteration``: 0 for a fresh turn (unchanged), the
         interrupted generation's index for a resumed one — the restored
         transcript already carries everything before it."""
+        entry_outcome = await self._judge_entry_stuck(st)
+        if entry_outcome is not None:
+            kind, val = entry_outcome
+            if kind == "done":
+                return val
+            # WI-5: the entry nudge + consumed warned flag go durable
+            # before the first generation consumes them.
+            await st.durability.on_guard_injection(st)
         for iteration in range(st.iteration, st.chat_cap):
             st.iteration = iteration
             if st._cancel.is_set():
@@ -1052,6 +1060,76 @@ class ToolLoopRunner:
                 )
                 return ("retry", None)
         return None
+
+    async def _judge_entry_stuck(self, st: _ChatTurn):
+        """Judge a tracker that is ALREADY tripped at loop entry.
+
+        The wait fingerprint is recorded before WI-4 but judged after it —
+        a crash in that window restores a tripped tracker whose judgment
+        never ran (PR #244 round-2 blocker #2). Without this, the resumed
+        turn gets a free generation-plus-poll before the ladder acts.
+        A fresh turn's tracker is empty, so this is a no-op everywhere
+        except that restored window. ``warned`` semantics are identical to
+        in-turn judgment: consumed flag → terminate with zero generations;
+        unconsumed → nudge before the first generation.
+        """
+        if not st.stuck_tracker.check():
+            return None
+        last_fp = st.stuck_tracker.last_fingerprint
+        if st.stuck_tracker.warned:
+            log.warning(
+                "Restored tracker already confirmed-stuck — terminating before generation"
+            )
+            await self._turn_recorder._save_turn_trajectory(st._trajectory, trace=st.trace)
+            await self._turn_recorder._emit_lifecycle_event(
+                "loop.stuck",
+                {
+                    "channel_id": str(st.message.channel.id),
+                    "iteration": st.iteration,
+                    "tools_used": st.tools_used_in_loop,
+                },
+            )
+            self._clear_active(st)
+            return (
+                "done",
+                (
+                    (
+                        "Stopped on resume: the preserved iterations were already "
+                        "repeating with no observable progress and the warning was "
+                        "already consumed. The background work itself was not touched."
+                    ),
+                    False,
+                    True,
+                    st.tools_used_in_loop,
+                    False,
+                ),
+            )
+        st.stuck_tracker.warned = True
+        if last_fp.startswith("wait:mp"):
+            # Alive-ness rides IN the fingerprint (wait:mp:<pid>:<status>:…).
+            parts = last_fp.split(":")
+            alive = len(parts) > 3 and parts[3] == "running"
+            nudge = dict(_WAIT_PROCESS_NUDGE) if alive else {
+                "role": "developer",
+                "content": (
+                    "You are repeating the same call against a finished or "
+                    "missing target and getting the same result. Act on the "
+                    "result you already have, or report and stop."
+                ),
+            }
+        elif last_fp.startswith("wait:"):
+            nudge = dict(_WAIT_AGENTS_NUDGE)
+        else:
+            nudge = {
+                "role": "developer",
+                "content": (
+                    "You appear to be repeating the same tool-call sequence. "
+                    "Try a different approach or summarise progress and stop."
+                ),
+            }
+        log.info("Restored tracker tripped at entry — injecting nudge before generation")
+        st.messages.append(nudge)
+        return ("retry", None)
 
     @staticmethod
     def _wait_result_text(tool_calls, tool_results) -> str:

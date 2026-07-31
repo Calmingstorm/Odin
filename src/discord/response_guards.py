@@ -614,6 +614,12 @@ class StuckLoopTracker:
         """Number of iterations recorded so far."""
         return len(self._fingerprints)
 
+    @property
+    def last_fingerprint(self) -> str:
+        """The most recent fingerprint ('' when none) — lets entry-time
+        judgment of a RESTORED tracker pick the right nudge family."""
+        return self._fingerprints[-1] if self._fingerprints else ""
+
     def reset(self) -> None:
         """Clear all recorded iterations and the warned flag."""
         self._fingerprints.clear()

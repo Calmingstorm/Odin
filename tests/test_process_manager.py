@@ -600,3 +600,108 @@ class TestConstants:
 
     def test_output_buffer_lines(self):
         assert OUTPUT_BUFFER_LINES == 500
+
+
+class TestRound2Blockers:
+    async def test_cleanup_never_cancels_inflight_reap(self):
+        """PR #244 round-2 blocker #1: cleanup() must never cancel a
+        lifecycle task — cancellation propagates through the group reap
+        and strands TERM-immune descendants (the v3.59.1 class). A record
+        with running tasks is deferred, not cancelled."""
+        reg = ProcessRegistry()
+        gate = asyncio.Event()
+
+        async def slow_reap():
+            await gate.wait()
+
+        task = asyncio.create_task(slow_reap())
+        await asyncio.sleep(0)
+        info = ProcessInfo(
+            pid=1, command="test", host="local",
+            start_time=time.time() - 7200,  # old enough to be eligible
+            status="completed", exit_code=0,
+        )
+        info._exit_task = task
+        reg._processes[1] = info
+
+        removed = reg.cleanup()
+        assert removed == 0  # deferred, present, NOT cancelled
+        assert 1 in reg._processes
+        assert not task.cancelled()
+
+        gate.set()
+        await task
+        assert reg.cleanup() == 1  # next cycle removes it
+        assert 1 not in reg._processes
+
+    async def test_terminal_poll_waits_for_drain_completion(self):
+        """PR #244 round-2 blocker #3: a poll landing between terminal
+        status publication and drain completion must still report the
+        final output, not a torn tail."""
+        reg = ProcessRegistry()
+        info = ProcessInfo(
+            pid=1, command="test", host="local", start_time=time.time(),
+            status="completed", exit_code=0,
+        )
+
+        async def late_drain():
+            await asyncio.sleep(0.3)
+            info.output_buffer.append("the final tail\n")
+
+        info._reader_task = asyncio.create_task(late_drain())
+        reg._processes[1] = info
+        result = await reg.poll(1)  # wait_seconds=0 — still settles drain
+        assert "the final tail" in result
+
+    async def test_forced_flush_never_splits_multibyte_utf8(self):
+        """PR #244 round-2 blocker #4: >4096 bytes of unterminated
+        multibyte output crosses the forced-flush boundary — the split
+        must land on a UTF-8 boundary, never mid-sequence."""
+        reg = ProcessRegistry()
+        # 3000 × 'я' (2 bytes) = 6000 bytes, no newline: guarantees a
+        # forced flush with an odd chance of landing mid-character.
+        started = await reg.start(
+            "localhost",
+            'python3 -c "import sys; sys.stdout.write(\'\\u044f\'*3000); '
+            'sys.stdout.flush()"',
+        )
+        pid = int(started.split("PID ")[1].split(")")[0])
+        result = await reg.poll(pid, wait_seconds=15)
+        assert "status=completed" in result
+        info = reg._processes[pid]
+        assert info.total_output_bytes == 6000
+        joined = "".join(info.output_buffer)
+        assert "\ufffd" not in joined
+        assert joined.count("я") == 3000
+
+
+class TestUtf8BoundarySplit:
+    def test_ascii_passthrough(self):
+        from src.tools.process_manager import _utf8_boundary_split
+
+        head, tail = _utf8_boundary_split(b"hello world")
+        assert head == b"hello world" and tail == b""
+
+    def test_carries_partial_sequences(self):
+        from src.tools.process_manager import _utf8_boundary_split
+
+        euro = "€".encode()  # 3 bytes
+        for cut in (1, 2):
+            head, tail = _utf8_boundary_split(b"abc" + euro[:cut])
+            assert head == b"abc" and tail == euro[:cut]
+        # Complete sequence at the end flushes whole.
+        head, tail = _utf8_boundary_split(b"abc" + euro)
+        assert head == b"abc" + euro and tail == b""
+        # 4-byte lead with only 2 bytes present.
+        clef = "\U0001d11e".encode()  # 4 bytes
+        head, tail = _utf8_boundary_split(b"x" + clef[:2])
+        assert head == b"x" and tail == clef[:2]
+
+    def test_binary_garbage_bounded_carry(self):
+        from src.tools.process_manager import _utf8_boundary_split
+
+        # Pure continuation bytes: at most 3 carried, rest flushes.
+        buf = b"data" + b"\x80\x80\x80\x80"
+        head, tail = _utf8_boundary_split(buf)
+        assert head + tail == buf
+        assert len(tail) <= 3

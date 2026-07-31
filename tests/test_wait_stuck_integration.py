@@ -241,3 +241,16 @@ class TestMixedBatchKeepsStrictDetector:
         # Pre-execution kill: the third (nudge) and fourth (kill) batches
         # never executed — 2 batches × 2 calls.
         assert bot.tool_executor.execute.await_count == 4
+
+
+class TestWaitResultTextPairing:
+    def test_unmatched_tool_use_id_yields_empty(self):
+        from types import SimpleNamespace
+
+        from src.discord.tool_loop import ToolLoopRunner
+
+        out = ToolLoopRunner._wait_result_text(
+            [SimpleNamespace(id="call-x")],
+            [{"tool_use_id": "call-y", "content": "other"}],
+        )
+        assert out == ""

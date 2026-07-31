@@ -36,6 +36,34 @@ SHUTDOWN_REAP_TIMEOUT = 12.0
 _SEGMENT_SPLIT = re.compile(rb"[\r\n]")
 
 
+def _utf8_boundary_split(buf: bytes) -> tuple[bytes, bytes]:
+    """Split ``buf`` so the head never ends mid-UTF-8-sequence.
+
+    Backs off past trailing continuation bytes (0b10xxxxxx) and, if the
+    byte before them is a multibyte lead whose sequence is incomplete,
+    past the lead too. Arbitrary binary output degrades gracefully: at
+    most 3 bytes are carried, everything else flushes with
+    errors='replace' as before.
+    """
+    i = len(buf)
+    while i > 0 and (len(buf) - i) < 3 and (buf[i - 1] & 0xC0) == 0x80:
+        i -= 1
+    if i > 0:
+        lead = buf[i - 1]
+        expected = 0
+        if (lead & 0xE0) == 0xC0:
+            expected = 2
+        elif (lead & 0xF0) == 0xE0:
+            expected = 3
+        elif (lead & 0xF8) == 0xF0:
+            expected = 4
+        if expected and (len(buf) - (i - 1)) < expected:
+            # Incomplete trailing sequence: carry lead + continuations.
+            return buf[: i - 1], buf[i - 1 :]
+    # Trailing unit is complete (or not UTF-8 at all): flush everything.
+    return buf, b""
+
+
 async def _wait_leader_exit(
     proc: asyncio.subprocess.Process, timeout: float | None = None
 ) -> bool:
@@ -182,23 +210,25 @@ class ProcessRegistry:
         if not info:
             return f"No process with PID {pid}."
 
-        if wait_seconds > 0 and info.status == "running" and info.process is not None:
-            if not await _wait_leader_exit(info.process, timeout=wait_seconds):
-                pass  # deadline reached — report current state
-            else:
-                # The leader exited during the wait: give the watcher a
-                # bounded moment to publish status/exit_code and reap the
-                # group (closing the pipe), then the reader to drain the
-                # tail — so the report reflects the terminal state, not a
-                # torn one. Shielded — OUR bound must not cancel either.
-                for settling in (info._exit_task, info._reader_task):
-                    if settling is not None:
-                        try:
-                            await asyncio.wait_for(
-                                asyncio.shield(settling), timeout=5.0
-                            )
-                        except TimeoutError:
-                            pass
+        exited = info.status != "running"
+        if wait_seconds > 0 and not exited and info.process is not None:
+            exited = await _wait_leader_exit(info.process, timeout=wait_seconds)
+        if exited:
+            # Terminal report discipline (PR #244 round-2 blocker #3): the
+            # leader is gone — whether it exited during OUR wait or before
+            # this poll — so give the watcher a bounded moment to publish
+            # status/exit_code and reap the group (closing the pipe), then
+            # the reader to drain the tail. Without this, a poll landing
+            # between status publication and drain completion reports a
+            # terminal process with its final output missing. Shielded —
+            # our bound must not cancel either task; normally both are
+            # already done and this costs nothing.
+            for settling in (info._exit_task, info._reader_task):
+                if settling is not None and not settling.done():
+                    try:
+                        await asyncio.wait_for(asyncio.shield(settling), timeout=5.0)
+                    except TimeoutError:
+                        pass
 
         lines = list(info.output_buffer)
         status_line = f"[PID {pid}] status={info.status}"
@@ -321,18 +351,29 @@ class ProcessRegistry:
         return killed
 
     def cleanup(self) -> int:
-        """Remove dead processes older than 1 hour. Returns count removed."""
+        """Remove dead processes older than 1 hour. Returns count removed.
+
+        NEVER cancels lifecycle tasks (PR #244 round-2 blocker #1): the
+        exit watcher may be mid-group-reap, and cancellation propagates
+        through ``terminate_process_tree`` — stranding a TERM-immune
+        descendant is exactly the v3.59.1 shutdown bug reinvented. A
+        record whose tasks are still running simply stays until the next
+        cycle; the reap is self-terminating (TERM grace then KILL), so
+        deferral is bounded by nature, not by us.
+        """
         now = time.time()
         to_remove = [
             pid
             for pid, info in self._processes.items()
-            if info.status != "running" and (now - info.start_time) > MAX_LIFETIME_SECONDS
+            if info.status != "running"
+            and (now - info.start_time) > MAX_LIFETIME_SECONDS
+            and all(
+                t is None or t.done()
+                for t in (info._reader_task, info._exit_task)
+            )
         ]
         for pid in to_remove:
-            info = self._processes.pop(pid)
-            for task in (info._reader_task, info._exit_task):
-                if task and not task.done():
-                    task.cancel()
+            self._processes.pop(pid)
         return len(to_remove)
 
     # ------------------------------------------------------------------
@@ -370,10 +411,14 @@ class ProcessRegistry:
                             seg.decode("utf-8", errors="replace") + "\n"
                         )
                 if len(pending) > 4096:
-                    info.output_buffer.append(
-                        pending.decode("utf-8", errors="replace") + "\n"
-                    )
-                    pending = b""
+                    # Forced flush of an unterminated tail must not split a
+                    # multibyte sequence (PR #244 round-2 blocker #4): cut
+                    # at a UTF-8 boundary and carry the partial sequence.
+                    flush, pending = _utf8_boundary_split(pending)
+                    if flush:
+                        info.output_buffer.append(
+                            flush.decode("utf-8", errors="replace") + "\n"
+                        )
         except Exception:
             pass
         if pending:
