@@ -346,3 +346,164 @@ class TestShutdownBarrierAndInPlaceRestart:
         with patch("os.execve") as execve:
             assert signal_entry_point() is None
         execve.assert_not_called()
+
+
+class TestFinalizeLoop:
+    """PR #244 round-15 §3.3 steps 2–6: the owner barrier (loop tasks,
+    async generators, default executor) must complete BEFORE the final
+    zombie drain, and any unproven step VETOES the in-place re-exec."""
+
+    @staticmethod
+    def _spawn_orphan_zombie(loop, tmp_path) -> int:
+        """A real, unobserved adopted zombie of THIS process (containment
+        is enabled suite-wide in conftest)."""
+        import os
+        import time
+
+        pidfile = tmp_path / "orphan.pid"
+        script = tmp_path / "orphan.py"
+        script.write_text(
+            "import os, sys\n"
+            "if os.fork() == 0:\n"
+            f"    with open({str(pidfile)!r}, 'w') as fh:\n"
+            "        fh.write(str(os.getpid()))\n"
+            "    os._exit(0)\n"
+            "sys.exit(0)\n"
+        )
+
+        async def spawn():
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, str(script),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            for _ in range(200):
+                text = pidfile.read_text().strip() if pidfile.exists() else ""
+                if text:
+                    return int(text)
+                await asyncio.sleep(0.02)
+            raise AssertionError("orphan never reported its pid")
+
+        orphan = loop.run_until_complete(spawn())
+        for _ in range(200):
+            try:
+                raw = open(f"/proc/{orphan}/stat", "rb").read()
+                rest = raw.rsplit(b")", 1)[1].split()
+                if rest[0] == b"Z" and int(rest[1]) == os.getpid():
+                    return orphan
+            except (OSError, IndexError, ValueError):
+                pass
+            time.sleep(0.02)
+        raise AssertionError("orphan never became our zombie")
+
+    def test_drain_runs_after_executor_and_consumes_unobserved_zombie(
+        self, tmp_path
+    ):
+        import logging
+        import os
+
+        import src.tools.process_manager as pm
+        from src import restart
+        from src.__main__ import _finalize_loop
+
+        loop = asyncio.new_event_loop()
+        orphan = self._spawn_orphan_zombie(loop, tmp_path)
+        reaper = pm.AdoptedZombieReaper()
+        order: list = []
+        real_exec_shutdown = loop.shutdown_default_executor
+
+        async def traced_executor():
+            order.append("executor")
+            await real_exec_shutdown()
+
+        loop.shutdown_default_executor = traced_executor  # type: ignore[method-assign]
+        real_drain = reaper.drain_at_teardown
+
+        def traced_drain():
+            order.append("drain")
+            return real_drain()
+
+        reaper.drain_at_teardown = traced_drain  # type: ignore[method-assign]
+        _finalize_loop(loop, reaper, logging.getLogger("test"))
+        assert order == ["executor", "drain"]  # owners stop, THEN drain
+        assert loop.is_closed()
+        assert restart.reexec_blocked() is None  # verified drain ⇒ no veto
+        assert not os.path.exists(f"/proc/{orphan}")  # consumed at teardown
+
+    def test_unverified_drain_blocks_reexec(self):
+        import logging
+
+        import src.tools.process_manager as pm
+        from src import restart
+        from src.__main__ import _finalize_loop
+
+        loop = asyncio.new_event_loop()
+        reaper = pm.AdoptedZombieReaper()
+        reaper.drain_at_teardown = lambda: (0, False)  # type: ignore[method-assign]
+        _finalize_loop(loop, reaper, logging.getLogger("test"))
+        veto = restart.reexec_blocked()
+        assert veto is not None and "verify" in veto
+        assert loop.is_closed()
+
+    def test_drain_exception_blocks_reexec(self):
+        import logging
+
+        import src.tools.process_manager as pm
+        from src import restart
+        from src.__main__ import _finalize_loop
+
+        loop = asyncio.new_event_loop()
+        reaper = pm.AdoptedZombieReaper()
+
+        def explode():
+            raise RuntimeError("drain exploded")
+
+        reaper.drain_at_teardown = explode  # type: ignore[method-assign]
+        _finalize_loop(loop, reaper, logging.getLogger("test"))
+        veto = restart.reexec_blocked()
+        assert veto is not None and "failed" in veto
+        assert loop.is_closed()
+
+    def test_failed_owner_barrier_skips_drain_and_blocks(self):
+        """If subprocess owners cannot be proven stopped, running the
+        drain could steal a status a live owner still awaits — it must
+        be SKIPPED, and the re-exec vetoed."""
+        import logging
+
+        import src.tools.process_manager as pm
+        from src import restart
+        from src.__main__ import _finalize_loop
+
+        loop = asyncio.new_event_loop()
+        reaper = pm.AdoptedZombieReaper()
+
+        async def broken():
+            raise RuntimeError("executor wedged")
+
+        loop.shutdown_default_executor = broken  # type: ignore[method-assign]
+        drained: list = []
+        reaper.drain_at_teardown = (  # type: ignore[method-assign]
+            lambda: drained.append(True) or (0, True)
+        )
+        _finalize_loop(loop, reaper, logging.getLogger("test"))
+        assert drained == []  # never ran on unproven owners
+        veto = restart.reexec_blocked()
+        assert veto is not None and "owners" in veto
+        assert loop.is_closed()
+
+
+class TestVetoedReexec:
+    def test_vetoed_reexec_exits_nonzero_instead_of_exec(self, signal_entry_point):
+        """§3.6 pin: a failed final proof blocks execve — the process
+        exits nonzero so the supervisor starts a clean image and PID 1
+        inherits whatever survived."""
+        from src import restart
+
+        restart.request_restart()
+        restart.block_reexec("unproven teardown (test)")
+        with patch("os.execve") as execve:
+            with pytest.raises(SystemExit) as excinfo:
+                signal_entry_point()
+        execve.assert_not_called()
+        assert excinfo.value.code == 1

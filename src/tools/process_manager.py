@@ -105,11 +105,15 @@ def _pidfd_owned_pids() -> set[int] | None:
 
     The runtime uses ``PidfdChildWatcher``, so an open pidfd means the
     event loop still owns that child's exit status and nobody else may
-    consume it — the decisive ownership signal (round-14 design, Odin:
+    consume it — the decisive exclusion signal (round-14 design, Odin:
     "age alone is not proof that nobody owns the exit status").
 
-    Returns None when the fd table cannot be read: the caller must then
-    prove nothing and reap nothing.
+    Fail-closed inspection rule (round-15 blocker #2): a malformed or
+    unreadable **pidfd** entry makes the WHOLE pass incomplete (``None``)
+    — a partial owned-set once let a real asyncio-owned child be reaped.
+    An entry that PROVABLY closed between enumeration and inspection is
+    gone, not ambiguous. Ordinary descriptors (files, sockets — no
+    ``Pid:`` line in fdinfo) are classifiable and never poison the pass.
     """
     try:
         entries = os.listdir("/proc/self/fd")
@@ -119,38 +123,201 @@ def _pidfd_owned_pids() -> set[int] | None:
     for entry in entries:
         try:
             info = Path(f"/proc/self/fdinfo/{entry}").read_text()
+        except FileNotFoundError:
+            continue  # provably closed between enumeration and inspection
         except OSError:
-            continue  # fd closed under us — not evidence either way
+            return None  # unreadable: could be a pidfd — prove nothing
         for line in info.splitlines():
             if line.startswith("Pid:"):
                 try:
                     owned.add(int(line.split()[1]))
                 except (IndexError, ValueError):
-                    pass
+                    # A pidfd we cannot attribute: the inspection is
+                    # incomplete, and a partial owned-set must never
+                    # authorize reaping.
+                    return None
                 break
     return owned
 
 
-def _zombie_children(parent: int) -> dict[tuple[int, int], None]:
-    """``(pid, starttime)`` of every zombie whose parent is ``parent``."""
-    found: dict[tuple[int, int], None] = {}
+def _scan_process_table() -> tuple[dict[int, tuple[int, int, bytes]], bool]:
+    """``pid -> (ppid, starttime, state)`` for every readable process.
+
+    ``complete`` is False when the table may be MISSING a live process:
+    an unreadable /proc, an unreadable stat (non-ENOENT), or a malformed
+    stat line. An incomplete table still carries positive observations,
+    but absence must not be inferred from it and reaping must not be
+    authorized on it (round-15 design §3.4). Parsing is done on BYTES:
+    ``comm`` may hold arbitrary non-UTF-8.
+    """
+    table: dict[int, tuple[int, int, bytes]] = {}
     try:
         entries = os.listdir("/proc")
     except OSError:
-        return found
+        return table, False
+    complete = True
     for entry in entries:
         if not entry.isdigit():
             continue
         pid = int(entry)
         try:
             raw = Path(f"/proc/{pid}/stat").read_bytes()
-            rest = raw.rsplit(b")", 1)[1].split()
-            if rest[0] != b"Z" or int(rest[1]) != parent:
-                continue
-            found[(pid, int(rest[19]))] = None
-        except (OSError, IndexError, ValueError):
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # exited between listdir and read — provably gone
+        except OSError:
+            complete = False
             continue
+        try:
+            rest = raw.rsplit(b")", 1)[1].split()
+            table[pid] = (int(rest[1]), int(rest[19]), rest[0])
+        except (IndexError, ValueError):
+            complete = False
+    return table, complete
+
+
+def _descendants_of(
+    table: dict[int, tuple[int, int, bytes]], root: int
+) -> set[int]:
+    """Transitive descendants of ``root`` within one table snapshot.
+
+    Everything containment can ever hand us is in here: subreaper
+    adoption applies only to descendants, and a process that already
+    reparented to us appears as our direct child in the same snapshot.
+    """
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _start, _state) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    found: set[int] = set()
+    stack = [root]
+    while stack:
+        for child in children.get(stack.pop(), ()):
+            if child not in found:
+                found.add(child)
+                stack.append(child)
     return found
+
+
+def _reap_identity(pid: int, starttime: int, parent: int) -> bool | None:
+    """Identity-stable consumption of ONE verified zombie (design §3.5).
+
+    Sequence: ``pidfd_open`` FIRST, then re-verify ``(starttime, state=Z,
+    ppid==parent)`` from /proc — the fd and that read name the same
+    current occupant of the pid, so pid reuse between any earlier
+    snapshot and the open cannot redirect the reap — then
+    ``waitid(P_PIDFD)`` through the fd, which stays pinned to that exact
+    incarnation no matter what the pid later names.
+
+    Returns True (status consumed), None (identity provably gone —
+    reaped elsewhere or pid reused), or False (must not / could not act;
+    nothing was consumed).
+    """
+    try:
+        fd = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return None
+    except OSError:
+        return False
+    try:
+        try:
+            raw = Path(f"/proc/{pid}/stat").read_bytes()
+        except (FileNotFoundError, ProcessLookupError):
+            return None
+        except OSError:
+            return False
+        try:
+            rest = raw.rsplit(b")", 1)[1].split()
+            state, ppid, start = rest[0], int(rest[1]), int(rest[19])
+        except (IndexError, ValueError):
+            return False
+        if start != starttime:
+            return None  # pid reused — the recorded incarnation is gone
+        if state != b"Z" or ppid != parent:
+            return False
+        try:
+            result = os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG)
+        except ChildProcessError:
+            return None  # consumed by someone else — not ours to take
+        except OSError:
+            return False
+        return result is not None
+    finally:
+        os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# Positive-ownership registration (round-15 design §3.1.2)
+#
+# Observed reparenting cannot cover a descendant whose intermediate parent
+# exits entirely between scans — an ssh ControlPersist master daemonizes in
+# milliseconds, so its first observation is already ``ppid == us`` with no
+# recorded transition. Subsystems that KNOW a process is theirs therefore
+# register its identity while it is alive. Process-global on purpose: there
+# is exactly one subreaper per process, and registration must reach it from
+# any subsystem without threading an instance through every constructor.
+# ---------------------------------------------------------------------------
+
+_REAP_REGISTRY_CAP = 256
+_reap_registry: dict[tuple[int, int], tuple[float, str]] = {}
+_reap_registry_evictions = 0
+
+
+def register_reap_identity(pid: int, starttime: int, *, source: str) -> None:
+    """Register ``(pid, starttime)`` as ours-to-reap once it dies.
+
+    Registration is EVIDENCE, not action: the reaper still requires the
+    identity to be observed as our own zombie, to survive the grace
+    period, and to pass the pidfd exclusion. Re-registering refreshes
+    the entry's age. Saturation evicts the oldest entry — losing
+    evidence defers that reap to teardown; it can never create
+    eligibility (design §3.4).
+    """
+    global _reap_registry_evictions
+    if (pid, starttime) not in _reap_registry:
+        while len(_reap_registry) >= _REAP_REGISTRY_CAP:
+            oldest = min(_reap_registry, key=lambda k: _reap_registry[k][0])
+            del _reap_registry[oldest]
+            _reap_registry_evictions += 1
+            log.warning(
+                "Reap registry saturated: evicted %r (evidence lost — its "
+                "zombie defers to the teardown drain)", oldest,
+            )
+    _reap_registry[(pid, starttime)] = (time.monotonic(), source)
+
+
+def register_reap_candidate(pid: int, *, source: str) -> int | None:
+    """Verify ``pid`` against /proc and register its LIVE identity.
+
+    Returns the starttime that was registered, or None when the process
+    could not be identified (gone, or /proc unreadable) — a guess must
+    never enter the registry.
+    """
+    starttime = _proc_starttime(pid)
+    if starttime is None:
+        return None
+    register_reap_identity(pid, starttime, source=source)
+    return starttime
+
+
+def registered_reap_identities() -> frozenset[tuple[int, int]]:
+    """Snapshot of the currently registered identities."""
+    return frozenset(_reap_registry)
+
+
+def _reset_reap_registry() -> None:
+    """Test hygiene only: drop all registrations and counters."""
+    global _reap_registry_evictions
+    _reap_registry.clear()
+    _reap_registry_evictions = 0
+
+
+@dataclass
+class _Candidate:
+    """Bounded per-descendant history (round-15 design §3.4)."""
+
+    last_seen_ppid: int
+    last_seen_at: float
+    adoption_observed: bool = False
+    zombie_since: float | None = None
 
 
 class AdoptedZombieReaper:
@@ -159,46 +326,64 @@ class AdoptedZombieReaper:
 
     Containment reparents escaped grandchildren to this process instead
     of PID 1, so nothing else will ever wait on them — an ``ssh``
-    ControlPersist master or a job shell's forked child otherwise lingers
-    as a zombie forever. Ownership is decided by evidence, never by
-    guesswork:
+    ControlPersist master or a job shell's forked child otherwise
+    lingers as a zombie forever. Eligibility is a union of POSITIVE
+    evidence only (round-15 design §3.1):
 
-    - an open **pidfd** for that pid means asyncio still owns the status
-      (never reaped);
-    - an explicitly **registered** child identity is skipped;
-    - a candidate must be observed as the same ``(pid, starttime)``
-      zombie across at least ``grace`` seconds, and re-verified
-      immediately before the ``waitpid(pid, WNOHANG)``.
+    - **observed reparenting** — the same ``(pid, starttime)`` was seen
+      alive with ``ppid != us`` and later with ``ppid == us``; a
+      directly spawned child has us as parent from birth and can never
+      satisfy this, which is the safety property that keeps ordinary
+      ``subprocess.Popen`` children untouchable;
+    - **explicit registration** while alive by the spawning subsystem
+      (ssh ControlPersist masters, background-job descendants);
+    - **final teardown** (:meth:`drain_at_teardown`) — after every
+      subprocess owner has stopped, every remaining zombie child is
+      ours by construction.
 
-    An unreadable fd table proves nothing, so the pass reaps nothing.
+    A candidate must additionally survive :attr:`GRACE` measured from
+    its first observation AS A ZOMBIE (adoption age proves nothing
+    about status interest — §3.2), must not be pidfd-owned by asyncio,
+    and is consumed only through the identity-stable §3.5 sequence.
+    Incomplete evidence — an unreadable fd table, a malformed pidfd
+    entry, an incomplete /proc scan — authorizes nothing.
     """
 
     SCAN_INTERVAL = 15.0
     GRACE = 30.0
+    # History bounds (§3.4): a fork storm or prolonged /proc failure must
+    # not grow tracking without limit. Eviction only loses evidence — an
+    # evicted identity re-enters as a fresh candidate and its reap defers.
+    MAX_TRACKED = 512
+    MAX_AGE = 3600.0
 
     def __init__(
         self,
         *,
-        registered: Callable[[], frozenset[tuple[int, int]]] | None = None,
         scan_interval: float = SCAN_INTERVAL,
         grace: float = GRACE,
     ) -> None:
-        self._registered = registered
         self._scan_interval = scan_interval
         self._grace = grace
-        self._first_seen: dict[tuple[int, int], float] = {}
+        self._candidates: dict[tuple[int, int], _Candidate] = {}
         self._task: asyncio.Task | None = None
         self.reaped_total = 0
+        self.evicted_total = 0
 
     @property
     def pending_zombies(self) -> int:
-        return len(self._first_seen)
+        return sum(
+            1 for c in self._candidates.values() if c.zombie_since is not None
+        )
 
     @property
     def stats(self) -> dict[str, int]:
         return {
             "pending_zombies": self.pending_zombies,
             "reaped_total": self.reaped_total,
+            "tracked_candidates": len(self._candidates),
+            "registered_candidates": len(_reap_registry),
+            "evicted_total": self.evicted_total + _reap_registry_evictions,
         }
 
     def start(self) -> None:
@@ -229,49 +414,138 @@ class AdoptedZombieReaper:
                 # A failing pass must never silently kill the task.
                 log.exception("Adopted-zombie sweep failed (continuing)")
 
-    def sweep_once(self, *, ignore_grace: bool = False) -> int:
-        """One pass. Returns the number reaped."""
+    def sweep_once(self) -> int:
+        """One observe → prune → reap pass. Returns the number reaped."""
+        mypid = os.getpid()
+        now = time.monotonic()
+        table, complete = _scan_process_table()
+        evicted = 0
+        for pid in _descendants_of(table, mypid):
+            ppid, start, state = table[pid]
+            identity = (pid, start)
+            cand = self._candidates.get(identity)
+            if cand is None:
+                if len(self._candidates) >= self.MAX_TRACKED:
+                    oldest = min(
+                        self._candidates,
+                        key=lambda k: self._candidates[k].last_seen_at,
+                    )
+                    del self._candidates[oldest]
+                    evicted += 1
+                cand = _Candidate(last_seen_ppid=ppid, last_seen_at=now)
+                self._candidates[identity] = cand
+            else:
+                if ppid == mypid and cand.last_seen_ppid != mypid:
+                    # Same incarnation, previously under another parent,
+                    # now under us: kernel-observed adoption. A first
+                    # sighting that is ALREADY ours records ppid == us
+                    # and can never flip this flag (§3.6 pin 1).
+                    cand.adoption_observed = True
+                cand.last_seen_ppid = ppid
+                cand.last_seen_at = now
+            if state == b"Z" and ppid == mypid and cand.zombie_since is None:
+                # Grace runs from the first observation AS A ZOMBIE —
+                # time spent adopted-but-alive must not pre-spend it
+                # (§3.2: a long-lived ControlPersist master would
+                # otherwise exhaust its grace before it dies).
+                cand.zombie_since = now
+        if complete:
+            # Only a COMPLETE table may infer absence (§3.4): identities
+            # that disappeared or changed incarnation are forgotten, in
+            # both the candidate history and the registration registry.
+            for identity in list(self._candidates):
+                entry = table.get(identity[0])
+                if entry is None or entry[1] != identity[1]:
+                    del self._candidates[identity]
+            for identity in list(_reap_registry):
+                entry = table.get(identity[0])
+                if entry is None or entry[1] != identity[1]:
+                    del _reap_registry[identity]
+        # Age bound: the backstop for prolonged /proc failure, where the
+        # completeness-gated pruning above never runs.
+        for identity, cand in list(self._candidates.items()):
+            if (now - cand.last_seen_at) > self.MAX_AGE:
+                del self._candidates[identity]
+                evicted += 1
+        if evicted:
+            self.evicted_total += evicted
+            log.warning(
+                "Zombie-candidate history evicted %d entry(ies) (cap/age) — "
+                "affected reaps defer to teardown", evicted,
+            )
+        if not complete:
+            return 0  # an incomplete scan authorizes nothing (§3.4)
         owned = _pidfd_owned_pids()
         if owned is None:
             return 0  # cannot prove abandonment — reap nothing
-        mypid = os.getpid()
-        registered = self._registered() if self._registered else frozenset()
-        current = _zombie_children(mypid)
-        # Forget identities that are no longer zombies of ours.
-        for identity in list(self._first_seen):
-            if identity not in current:
-                del self._first_seen[identity]
-        now = time.monotonic()
         reaped = 0
-        for identity in current:
+        for identity, cand in list(self._candidates.items()):
             pid, start = identity
-            if pid in owned or identity in registered:
-                self._first_seen.pop(identity, None)
+            if cand.zombie_since is None or pid in owned:
                 continue
-            first = self._first_seen.setdefault(identity, now)
-            if not ignore_grace and (now - first) < self._grace:
+            if (now - cand.zombie_since) < self._grace:
                 continue
-            # Re-verify the exact incarnation immediately before reaping.
-            if identity not in _zombie_children(mypid):
-                self._first_seen.pop(identity, None)
-                continue
-            try:
-                if os.waitpid(pid, os.WNOHANG)[0]:
-                    reaped += 1
-                    self.reaped_total += 1
-            except (ChildProcessError, OSError):
-                pass  # someone else owned it after all
-            self._first_seen.pop(identity, None)
+            if not (cand.adoption_observed or identity in _reap_registry):
+                continue  # no positive evidence — age alone never reaps
+            verdict = _reap_identity(pid, start, mypid)
+            if verdict is True:
+                reaped += 1
+                self.reaped_total += 1
+            if verdict is not False:
+                del self._candidates[identity]
+                _reap_registry.pop(identity, None)
         return reaped
 
-    def drain_at_teardown(self) -> int:
-        """Final exact-PID drain, no grace.
+    def drain_at_teardown(self) -> tuple[int, bool]:
+        """Final no-grace drain (design §3.3 step 5).
 
-        Runs after every subprocess-owning subsystem has closed, so no
-        legitimate future wait remains — and it keeps zombies from
-        surviving an in-place ``execve`` (Odin's teardown amendment).
+        Returns ``(reaped, verified)``. Runs after the periodic reaper
+        is stopped, loop tasks are done, async generators are shut and
+        the default executor has joined — every subprocess owner has
+        stopped, so EVERY remaining zombie child is ours: transition
+        history and registration are unnecessary (nobody can
+        legitimately wait later), and the pidfd exclusion does not
+        apply (asyncio will never run its callbacks again; the same
+        fact is what keeps zombies from surviving an in-place
+        ``execve``).
+
+        ``verified`` is True only when a COMPLETE scan observed zero
+        remaining zombie children. The caller must treat False as a
+        VETO for in-place re-exec (§3.3): exec'ing over unproven state
+        hands invisible survivors to the new image.
         """
-        return self.sweep_once(ignore_grace=True)
+        mypid = os.getpid()
+        total = 0
+
+        def _remaining() -> tuple[list[tuple[int, int]], bool]:
+            table, complete = _scan_process_table()
+            return (
+                [
+                    (pid, entry[1])
+                    for pid, entry in table.items()
+                    if entry[2] == b"Z" and entry[0] == mypid
+                ],
+                complete,
+            )
+
+        # A still-live adopted child may die mid-drain and add a fresh
+        # zombie; bounded re-scans converge on the settled table.
+        for _attempt in range(4):
+            zombies, complete = _remaining()
+            if complete and not zombies:
+                return total, True
+            progressed = False
+            for pid, start in zombies:
+                verdict = _reap_identity(pid, start, mypid)
+                if verdict is True:
+                    total += 1
+                    self.reaped_total += 1
+                if verdict is not False:
+                    progressed = True
+            if not progressed:
+                return total, False
+        zombies, complete = _remaining()
+        return total, (complete and not zombies)
 
 
 class ProcessCleanupError(RuntimeError):
@@ -525,6 +799,18 @@ def _scan_owned_members(
                         start = _proc_starttime(cur)
                         if start is not None:
                             adopted_sink.add((cur, start))
+                            if not teardown:
+                                # Positive ownership, proven while alive:
+                                # its exit status will land on us, and the
+                                # central reaper may consume it (§3.1.2).
+                                # (Usually redundant with the direct-child
+                                # registration below — this arm still
+                                # covers an adopted ancestor reached from
+                                # a descendant's walk when the ancestor's
+                                # own candidate pin failed.)
+                                register_reap_identity(
+                                    cur, start, source="job-escapee"
+                                )
                     return True  # our escapee: adopted AND provably ours
                 # Carries OUR process marker but a different job (or
                 # none): another Odin subsystem's child — decidedly not
@@ -537,6 +823,25 @@ def _scan_owned_members(
         verdict = _owned(pid)
         if verdict:
             pinned.append((pid, fd))
+            if (
+                not teardown
+                and adopted_sink is not None
+                and adopted_by is not None
+                and pid not in known_own_children
+                and ids[pid][0] == adopted_by
+            ):
+                # A verified-ours member that is ALREADY our direct child
+                # was ADOPTED — its original parent died — so its exit
+                # status will land on us and nothing else will ever wait
+                # on it. Capture the identity while it is alive: a zombie
+                # can no longer be attributed. (Round-15: the soak's
+                # job-shell `sleep` was exactly this — killed as a
+                # session member but never recorded as adopted, so its
+                # zombie lingered for the process lifetime.)
+                start = _proc_starttime(pid)
+                if start is not None:
+                    adopted_sink.add((pid, start))
+                    register_reap_identity(pid, start, source="job-adopted")
             continue
         if verdict is None:
             complete = False

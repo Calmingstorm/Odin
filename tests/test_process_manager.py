@@ -2157,188 +2157,986 @@ sys.exit(0)
         assert pinned == []  # not swept on an unknown own-session
         assert complete is False  # and emptiness is not affirmed
 
+class TestProcessTableScan:
+    """The one scanner every reaping decision reads: pid → (ppid,
+    starttime, state), with HONEST completeness."""
+
+    def test_unreadable_proc_is_incomplete(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(
+            pm.os, "listdir", lambda _p: (_ for _ in ()).throw(OSError("gone"))
+        )
+        table, complete = pm._scan_process_table()
+        assert table == {} and complete is False
+
+    def test_vanished_entry_is_skipped_and_still_complete(self, monkeypatch):
+        """A process that exits mid-scan is provably gone — skipping it
+        does not blind the scan."""
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["111", "notapid"])
+
+        class FakePath:
+            def __init__(self, path):
+                self.path = str(path)
+
+            def read_bytes(self):
+                raise FileNotFoundError()
+
+        monkeypatch.setattr(pm, "Path", FakePath)
+        table, complete = pm._scan_process_table()
+        assert table == {} and complete is True
+
+    def test_malformed_stat_makes_the_scan_incomplete(self, monkeypatch):
+        """A truncated stat is a process whose state is UNKNOWN: the scan
+        must say so, or absence would be inferred from a blind spot."""
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["222"])
+
+        class FakePath:
+            def __init__(self, path):
+                self.path = str(path)
+
+            def read_bytes(self):
+                return b"222 (x) Z"  # no fields after the state
+
+        monkeypatch.setattr(pm, "Path", FakePath)
+        table, complete = pm._scan_process_table()
+        assert table == {} and complete is False
+
+    def test_descendants_follow_chains_and_adoption(self):
+        import src.tools.process_manager as pm
+
+        table = {
+            10: (1, 5, b"S"),  # unrelated
+            20: (100, 6, b"S"),  # direct child
+            21: (20, 7, b"S"),  # grandchild
+            22: (21, 8, b"Z"),  # great-grandchild, zombie
+            30: (100, 9, b"Z"),  # adopted straight under us
+        }
+        assert pm._descendants_of(table, 100) == {20, 21, 22, 30}
+
+
+class TestPidfdInspection:
+    """Round-15 blocker #2 groundwork: the owned-pidfd inspection must be
+    complete evidence or no evidence."""
+
+    async def test_held_pidfd_is_found_and_ordinary_fds_never_poison(self):
+        import src.tools.process_manager as pm
+
+        proc = await asyncio.create_subprocess_exec(
+            "sleep", "5",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        held = os.pidfd_open(proc.pid)
+        extra = os.open("/dev/null", os.O_RDONLY)  # an ordinary fd
+        try:
+            owned = pm._pidfd_owned_pids()
+            assert owned is not None  # ordinary fds are classifiable
+            assert proc.pid in owned
+        finally:
+            os.close(extra)
+            os.close(held)
+            proc.terminate()
+            await proc.wait()
+
+    def test_closed_between_enumeration_and_inspection_is_gone(self, monkeypatch):
+        """An entry that PROVABLY closed under us is gone, not ambiguous —
+        it must not poison the pass."""
+        import src.tools.process_manager as pm
+
+        real_listdir = os.listdir
+
+        def with_ghost(path):
+            entries = list(real_listdir(path))
+            if str(path) == "/proc/self/fd":
+                entries.append("999999")  # closed before inspection
+            return entries
+
+        monkeypatch.setattr(pm.os, "listdir", with_ghost)
+        assert pm._pidfd_owned_pids() is not None
+
+    def test_unreadable_fd_listing_proves_nothing(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        real_listdir = os.listdir
+
+        def refuse(path):
+            if str(path) == "/proc/self/fd":
+                raise OSError("fd table unreadable")
+            return real_listdir(path)
+
+        monkeypatch.setattr(pm.os, "listdir", refuse)
+        assert pm._pidfd_owned_pids() is None
+
 
 class TestAdoptedZombieReaper:
     """PR #244 soak finding: containment reparents escaped descendants to
     us, so nothing else will ever wait on them — without a reaper they
-    accumulate as zombies for the process lifetime. Ownership is decided
-    by evidence (open pidfd, registered identity), never by age alone."""
+    accumulate as zombies for the process lifetime.
+
+    Round-15 rework: eligibility is a union of POSITIVE evidence only
+    (observed same-incarnation reparenting, explicit registration by the
+    spawning subsystem, or final teardown) — never age, never adoption
+    alone. Lifecycle pins run against REAL processes (Odin's amendment)."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_registry(self):
+        import src.tools.process_manager as pm
+
+        pm._reset_reap_registry()
+        yield
+        pm._reset_reap_registry()
+
+    # -- real-process helpers ------------------------------------------------
 
     @staticmethod
-    async def _make_real_orphan_zombie() -> int:
-        """A REAL double-forked orphan that dies immediately: reparented to
-        us by containment, and owned by nobody (Odin's amendment: test the
-        real behavior, not a mocked zombie)."""
-        import tempfile
+    async def _spawn_adopted(
+        tmp_path,
+        *,
+        lifetime: str = "0.2",
+        exec_path: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> int:
+        """A REAL double-forked orphan, reparented to us by containment.
 
-        fd, pidfile = tempfile.mkstemp(prefix="orphan-", suffix=".pid")
-        os.close(fd)
-        script_path = pidfile + ".py"
-        with open(script_path, "w") as fh:
-            fh.write(
-                "import os, sys, time\n"
-                "if os.fork() == 0:\n"
-                f"    with open({pidfile!r}, 'w') as fh:\n"
-                "        fh.write(str(os.getpid()))\n"
-                "    time.sleep(0.2)\n"
-                "    os._exit(0)\n"
-                "sys.exit(0)\n"
+        The default short lifetime dies promptly — an unobserved adopted
+        zombie. A long lifetime keeps it alive for the test to kill.
+        ``exec_path`` replaces the child image (comm follows the binary,
+        which is how a ControlPersist master looks). Returns the orphan
+        pid once reported.
+        """
+        import sys
+
+        pidfile = tmp_path / f"orphan-{os.urandom(4).hex()}.pid"
+        script = pidfile.with_suffix(".py")
+        if exec_path is not None:
+            tail = (
+                f"    os.execv({str(exec_path)!r}, "
+                f"[{str(exec_path)!r}, {lifetime!r}])\n"
             )
+        else:
+            tail = f"    time.sleep({lifetime})\n    os._exit(0)\n"
+        script.write_text(
+            "import os, sys, time\n"
+            "if os.fork() == 0:\n"
+            f"    with open({str(pidfile)!r}, 'w') as fh:\n"
+            "        fh.write(str(os.getpid()))\n"
+            + tail
+            + "sys.exit(0)\n"
+        )
         proc = await asyncio.create_subprocess_exec(
-            "python3", script_path,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            sys.executable, str(script),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            env={**os.environ, **(env or {})},
         )
         await proc.wait()
-        orphan = None
-        for _ in range(60):
-            text = open(pidfile).read().strip()
+        for _ in range(100):
+            text = pidfile.read_text().strip() if pidfile.exists() else ""
             if text:
-                orphan = int(text)
-                break
+                return int(text)
             await asyncio.sleep(0.05)
-        for path in (pidfile, script_path):
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-        assert orphan is not None, "orphan never reported its pid"
-        return orphan
+        raise AssertionError("orphan never reported its pid")
 
-    async def test_real_orphan_zombie_is_reaped_after_grace(self):
+    @staticmethod
+    def _our_zombie_map() -> dict[int, int]:
+        """pid → starttime of every zombie currently parented to us."""
         import src.tools.process_manager as pm
 
-        previously = pm.child_subreaper_active()
-        pm.set_child_subreaper(True)
-        try:
-            orphan = await self._make_real_orphan_zombie()
-            # Wait for it to actually become OUR zombie.
-            for _ in range(60):
-                if (orphan, ) and any(
-                    pid == orphan for pid, _st in pm._zombie_children(os.getpid())
-                ):
-                    break
-                await asyncio.sleep(0.1)
-            zombies = pm._zombie_children(os.getpid())
-            assert any(pid == orphan for pid, _st in zombies), "never became our zombie"
+        table, _complete = pm._scan_process_table()
+        return {
+            pid: entry[1]
+            for pid, entry in table.items()
+            if entry[2] == b"Z" and entry[0] == os.getpid()
+        }
 
-            reaper = pm.AdoptedZombieReaper(grace=0.0)
-            assert reaper.sweep_once() >= 1
-            assert reaper.reaped_total >= 1
-            # Gone for good.
-            assert not any(
-                pid == orphan for pid, _st in pm._zombie_children(os.getpid())
-            )
-        finally:
-            pm.set_child_subreaper(previously)
+    @classmethod
+    async def _wait_zombie(cls, pid: int) -> int:
+        """Wait until ``pid`` is our zombie; returns its starttime."""
+        for _ in range(200):
+            zombies = cls._our_zombie_map()
+            if pid in zombies:
+                return zombies[pid]
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"{pid} never became our zombie")
 
-    async def test_grace_period_holds_a_fresh_zombie(self):
-        """A zombie younger than the grace is left alone — it may still be
-        settling in a watcher."""
+    @staticmethod
+    async def _wait_adopted_alive(pid: int) -> None:
         import src.tools.process_manager as pm
 
-        previously = pm.child_subreaper_active()
-        pm.set_child_subreaper(True)
-        try:
-            orphan = await self._make_real_orphan_zombie()
-            for _ in range(60):
-                if any(pid == orphan for pid, _st in pm._zombie_children(os.getpid())):
-                    break
-                await asyncio.sleep(0.1)
-            reaper = pm.AdoptedZombieReaper(grace=3600.0)  # effectively never
+        for _ in range(200):
+            table, _complete = pm._scan_process_table()
+            entry = table.get(pid)
+            if entry is not None and entry[0] == os.getpid() and entry[2] != b"Z":
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"{pid} never adopted alive")
+
+    # -- eligibility: the positive-evidence union ---------------------------
+
+    async def test_fast_double_fork_is_not_claimed_without_registration(
+        self, tmp_path
+    ):
+        """§3.6 pin 1: an orphan whose intermediate parent died between
+        scans is FIRST seen already parented to us — transition history
+        must not claim it. Registration is exactly what unlocks it."""
+        import src.tools.process_manager as pm
+
+        orphan = await self._spawn_adopted(tmp_path)
+        start = await self._wait_zombie(orphan)
+        reaper = pm.AdoptedZombieReaper(grace=0.0)
+        for _ in range(3):
             assert reaper.sweep_once() == 0
-            assert reaper.pending_zombies >= 1  # tracked, not reaped
-            assert any(pid == orphan for pid, _st in pm._zombie_children(os.getpid()))
-            # Teardown drain ignores the grace and takes it.
-            assert reaper.drain_at_teardown() >= 1
+        assert orphan in self._our_zombie_map()  # untouched without evidence
+        assert reaper.pending_zombies >= 1  # tracked, not claimed
+        pm.register_reap_identity(orphan, start, source="test")
+        assert reaper.sweep_once() == 1
+        assert orphan not in self._our_zombie_map()
+        assert reaper.reaped_total == 1
+
+    async def test_direct_popen_child_retains_status(self):
+        """Round-15 blocker #1: a synchronous ``Popen`` child has no
+        pidfd, but it has a legitimate owner. Positive evidence can never
+        exist for it, so its status survives every sweep (Odin's repro:
+        exit 23 was read as 0 after the old reaper stole it)."""
+        import subprocess
+
+        import src.tools.process_manager as pm
+
+        child = subprocess.Popen(["sh", "-c", "exit 23"])
+        try:
+            for _ in range(200):
+                if child.pid in self._our_zombie_map():
+                    break
+                time.sleep(0.02)
+            assert child.pid in self._our_zombie_map()
+            reaper = pm.AdoptedZombieReaper(grace=0.0)
+            for _ in range(3):
+                assert reaper.sweep_once() == 0
+            assert child.pid in self._our_zombie_map()  # still waitable
         finally:
-            pm.set_child_subreaper(previously)
+            assert child.wait() == 23
+
+    async def test_observed_reparenting_grants_eligibility(self, tmp_path):
+        """The transition rule end-to-end on real processes: seen under
+        its intermediate parent, then seen adopted (same incarnation) —
+        that history alone authorizes the reap once it dies."""
+        import sys
+
+        import src.tools.process_manager as pm
+
+        pidfile = tmp_path / "gc.pid"
+        flag = tmp_path / "release"
+        script = tmp_path / "linger.py"
+        script.write_text(
+            "import os, sys, time\n"
+            "if os.fork() == 0:\n"
+            f"    with open({str(pidfile)!r}, 'w') as fh:\n"
+            "        fh.write(str(os.getpid()))\n"
+            "    time.sleep(300)\n"
+            "    os._exit(0)\n"
+            "for _ in range(1200):\n"
+            f"    if os.path.exists({str(flag)!r}):\n"
+            "        break\n"
+            "    time.sleep(0.05)\n"
+            "sys.exit(0)\n"
+        )
+        inter = await asyncio.create_subprocess_exec(
+            sys.executable, str(script),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            for _ in range(200):
+                if pidfile.exists() and pidfile.read_text().strip():
+                    break
+                await asyncio.sleep(0.05)
+            gpid = int(pidfile.read_text())
+            reaper = pm.AdoptedZombieReaper(grace=0.0)
+            reaper.sweep_once()  # observed under the intermediate parent
+            identity = next(i for i in reaper._candidates if i[0] == gpid)
+            assert reaper._candidates[identity].adoption_observed is False
+            flag.write_text("go")  # release the intermediate parent
+            await inter.wait()
+            await self._wait_adopted_alive(gpid)
+            reaper.sweep_once()  # same incarnation, now parented to us
+            assert reaper._candidates[identity].adoption_observed is True
+            os.kill(gpid, 9)
+            start = await self._wait_zombie(gpid)
+            assert (gpid, start) == identity
+            assert reaper.sweep_once() == 1  # transition history alone
+            assert gpid not in self._our_zombie_map()
+        finally:
+            if inter.returncode is None:
+                inter.kill()
+                await inter.wait()
+
+    async def test_ssh_master_registration_reaches_pidfd_reap(
+        self, tmp_path, monkeypatch
+    ):
+        """§3.6 pin: the ControlPersist shape end-to-end — daemonized in
+        milliseconds (no observable transition), identified via ``-O
+        check`` while alive, registered, and reaped through the §3.5
+        sequence after it dies."""
+        import shutil
+
+        import src.tools.process_manager as pm
+        import src.tools.ssh_pool as sp
+
+        sleep_bin = shutil.which("sleep")
+        assert sleep_bin is not None
+        fake_ssh = tmp_path / "ssh"
+        shutil.copy(sleep_bin, fake_ssh)
+        fake_ssh.chmod(0o755)
+        master = await self._spawn_adopted(
+            tmp_path, lifetime="300", exec_path=str(fake_ssh)
+        )
+        await self._wait_adopted_alive(master)
+
+        pool = sp.SSHConnectionPool(socket_dir=str(tmp_path / "sockets"))
+        socket_path = pool.get_socket_path("h1", "root")
+        open(socket_path, "w").close()
+
+        calls: list[tuple] = []
+
+        class FakeCheck:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"Master running (pid=%d)\r\n" % master, b"")
+
+            def kill(self):
+                pass
+
+            async def wait(self):
+                return 0
+
+        async def fake_exec(*argv, **_kw):
+            calls.append(argv)
+            return FakeCheck()
+
+        monkeypatch.setattr(sp.asyncio, "create_subprocess_exec", fake_exec)
+        assert await pool.ensure_master_registered("h1", "root") is True
+        table, _complete = pm._scan_process_table()
+        identity = (master, table[master][1])
+        assert identity in pm.registered_reap_identities()
+        # Fast path: same live incarnation → no second -O check subprocess.
+        before = len(calls)
+        assert await pool.ensure_master_registered("h1", "root") is True
+        assert len(calls) == before
+
+        os.kill(master, 9)  # ControlPersist expiry stand-in
+        start = await self._wait_zombie(master)
+        assert (master, start) == identity
+        reaper = pm.AdoptedZombieReaper(grace=0.0)
+        assert reaper.sweep_once() == 1
+        assert master not in self._our_zombie_map()
+
+    # -- exclusions and fail-closed inspection ------------------------------
 
     async def test_pidfd_owned_child_is_never_reaped(self, monkeypatch):
         """The decisive exclusion: an open pidfd means asyncio still owns
-        that exit status, so the reaper must not take it — even when the
-        process IS a zombie and past the grace."""
+        that exit status — even a REGISTERED, grace-expired zombie must
+        not be taken."""
         import src.tools.process_manager as pm
 
         proc = await asyncio.create_subprocess_exec(
-            "true", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            "true",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        held = os.pidfd_open(proc.pid)  # stand in for the watcher's pidfd
+        held = os.pidfd_open(proc.pid)
         try:
             owned = pm._pidfd_owned_pids()
             assert owned is not None and proc.pid in owned
-            # Present it as a settled zombie of ours, past any grace.
+            fake_table = {proc.pid: (os.getpid(), 12345, b"Z")}
             monkeypatch.setattr(
-                pm, "_zombie_children", lambda _p: {(proc.pid, 12345): None}
+                pm, "_scan_process_table", lambda: (dict(fake_table), True)
             )
-            waited: list[int] = []
+            pm.register_reap_identity(proc.pid, 12345, source="test")
+            touched: list = []
             monkeypatch.setattr(
-                pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
+                pm, "_reap_identity", lambda *a: touched.append(a) or True
             )
             reaper = pm.AdoptedZombieReaper(grace=0.0)
             assert reaper.sweep_once() == 0
-            assert waited == []  # its status was never consumed by us
-            assert reaper.reaped_total == 0
+            assert touched == []  # its status was never approached
         finally:
             os.close(held)
             await proc.wait()
 
-    def test_unreadable_fd_table_reaps_nothing(self, monkeypatch):
-        """If we cannot enumerate our own fds we cannot prove abandonment,
-        so the pass must reap nothing — even with an eligible zombie
-        present and the grace elapsed."""
+    async def test_malformed_pidfd_entry_blocks_the_pass(
+        self, tmp_path, monkeypatch
+    ):
+        """Round-15 blocker #2 (replaces the pin that BLESSED the unsafe
+        skip): ONE pidfd whose fdinfo cannot be attributed makes the whole
+        inspection incomplete, and an otherwise-eligible zombie is NOT
+        reaped. Clearing the fault reaps it — proof the pin is
+        load-bearing."""
+        from pathlib import Path as RealPath
+
         import src.tools.process_manager as pm
 
-        real_listdir = pm.os.listdir
+        orphan = await self._spawn_adopted(tmp_path)
+        start = await self._wait_zombie(orphan)
+        pm.register_reap_identity(orphan, start, source="test")
 
-        def selective(path):
-            if str(path).startswith("/proc/self/fd"):
+        holder = await asyncio.create_subprocess_exec(
+            "sleep", "30",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        held = os.pidfd_open(holder.pid)
+        target = f"/proc/self/fdinfo/{held}"
+        try:
+
+            class Fake:
+                def __init__(self, path):
+                    self._p = RealPath(path)
+
+                def read_text(self):
+                    if str(self._p) == target:
+                        return "pos:\t0\nPid:\tnot-a-number\n"
+                    return self._p.read_text()
+
+                def read_bytes(self):
+                    return self._p.read_bytes()
+
+            reaper = pm.AdoptedZombieReaper(grace=0.0)
+            with monkeypatch.context() as m:
+                m.setattr(pm, "Path", Fake)
+                assert reaper.sweep_once() == 0  # the pass proved nothing
+                assert orphan in self._our_zombie_map()
+            assert reaper.sweep_once() == 1  # fault cleared → it WAS eligible
+            assert orphan not in self._our_zombie_map()
+        finally:
+            os.close(held)
+            holder.terminate()
+            await holder.wait()
+
+    async def test_unreadable_pidfd_entry_blocks_the_pass(
+        self, tmp_path, monkeypatch
+    ):
+        """The unreadable half of blocker #2: an fdinfo read failing with
+        anything but ENOENT could be hiding a pidfd — prove nothing."""
+        from pathlib import Path as RealPath
+
+        import src.tools.process_manager as pm
+
+        orphan = await self._spawn_adopted(tmp_path)
+        start = await self._wait_zombie(orphan)
+        pm.register_reap_identity(orphan, start, source="test")
+
+        holder = await asyncio.create_subprocess_exec(
+            "sleep", "30",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        held = os.pidfd_open(holder.pid)
+        target = f"/proc/self/fdinfo/{held}"
+        try:
+
+            class Fake:
+                def __init__(self, path):
+                    self._p = RealPath(path)
+
+                def read_text(self):
+                    if str(self._p) == target:
+                        raise OSError("EIO reading fdinfo")
+                    return self._p.read_text()
+
+                def read_bytes(self):
+                    return self._p.read_bytes()
+
+            reaper = pm.AdoptedZombieReaper(grace=0.0)
+            with monkeypatch.context() as m:
+                m.setattr(pm, "Path", Fake)
+                assert reaper.sweep_once() == 0
+                assert orphan in self._our_zombie_map()
+            assert reaper.sweep_once() == 1
+        finally:
+            os.close(held)
+            holder.terminate()
+            await holder.wait()
+
+    async def test_unreadable_fd_table_reaps_nothing(self, tmp_path, monkeypatch):
+        """If we cannot enumerate our own fds we cannot prove abandonment
+        — even a registered, grace-expired REAL zombie stays."""
+        import src.tools.process_manager as pm
+
+        orphan = await self._spawn_adopted(tmp_path)
+        start = await self._wait_zombie(orphan)
+        pm.register_reap_identity(orphan, start, source="test")
+        real_listdir = os.listdir
+
+        def refuse(path):
+            if str(path) == "/proc/self/fd":
                 raise OSError("fd table unreadable")
             return real_listdir(path)
 
-        monkeypatch.setattr(pm.os, "listdir", selective)
-        assert pm._pidfd_owned_pids() is None
-        # An eligible zombie IS present and past the grace…
+        reaper = pm.AdoptedZombieReaper(grace=0.0)
+        with monkeypatch.context() as m:
+            m.setattr(pm.os, "listdir", refuse)
+            assert reaper.sweep_once() == 0
+            assert orphan in self._our_zombie_map()
+        assert reaper.sweep_once() == 1  # load-bearing: it WAS eligible
+
+    def test_incomplete_scan_never_prunes_or_reaps(self, monkeypatch):
+        """§3.4 both ways: an incomplete table neither authorizes a reap
+        nor infers absence; the same state on a COMPLETE table does
+        both."""
+        import src.tools.process_manager as pm
+
+        mypid = os.getpid()
+        zombie_entry = {4242: (mypid, 11, b"Z")}
+        pm.register_reap_identity(4242, 11, source="test")
+        reap_calls: list = []
         monkeypatch.setattr(
-            pm, "_zombie_children", lambda _p: {(4242, 111): None}
+            pm, "_reap_identity", lambda *a: reap_calls.append(a) or True
         )
-        waited: list[int] = []
+        monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
         monkeypatch.setattr(
-            pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
+            pm, "_scan_process_table", lambda: (dict(zombie_entry), False)
         )
         reaper = pm.AdoptedZombieReaper(grace=0.0)
-        assert reaper.sweep_once() == 0  # …and is still not reaped
-        assert waited == []
-
-    def test_registered_identity_is_skipped(self, monkeypatch):
-        import src.tools.process_manager as pm
-
-        identity = (4242, 111)
-        monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
-        monkeypatch.setattr(pm, "_zombie_children", lambda _p: {identity: None})
-        waited: list[int] = []
-        monkeypatch.setattr(
-            pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
-        )
-        reaper = pm.AdoptedZombieReaper(
-            grace=0.0, registered=lambda: frozenset({identity})
-        )
         assert reaper.sweep_once() == 0
-        assert waited == []
+        assert reap_calls == []  # not authorized
+        assert (4242, 11) in reaper._candidates  # observed and kept
+        # An identity ABSENT from an incomplete table is not pruned…
+        monkeypatch.setattr(pm, "_scan_process_table", lambda: ({}, False))
+        assert reaper.sweep_once() == 0
+        assert (4242, 11) in reaper._candidates
+        assert (4242, 11) in pm.registered_reap_identities()
+        # …and a COMPLETE table acts: present → reaped.
+        monkeypatch.setattr(
+            pm, "_scan_process_table", lambda: (dict(zombie_entry), True)
+        )
+        assert reaper.sweep_once() == 1
+        assert reap_calls and reap_calls[0][0] == 4242
+        assert (4242, 11) not in reaper._candidates
+        assert (4242, 11) not in pm.registered_reap_identities()
 
-    def test_identity_change_between_observations_is_dropped(self, monkeypatch):
-        """A pid whose incarnation changed between passes is not the
-        process we saw — it is dropped, never waited on."""
+    def test_complete_scan_prunes_vanished_and_reincarnated(self, monkeypatch):
+        """Identity change between observations is a DIFFERENT process:
+        the old identity is forgotten, never waited on."""
         import src.tools.process_manager as pm
 
+        mypid = os.getpid()
         monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
-        seq = [{(4242, 111): None}, {(4242, 999): None}]
-        monkeypatch.setattr(pm, "_zombie_children", lambda _p: seq[0])
+        seq = {"table": {4242: (mypid, 111, b"S")}}
+        monkeypatch.setattr(
+            pm, "_scan_process_table", lambda: (dict(seq["table"]), True)
+        )
         reaper = pm.AdoptedZombieReaper(grace=3600.0)
         reaper.sweep_once()
-        assert reaper.pending_zombies == 1
-        seq[0] = seq[1]  # pid reused by a different incarnation
+        assert (4242, 111) in reaper._candidates
+        seq["table"] = {4242: (mypid, 999, b"S")}  # pid reused
         reaper.sweep_once()
-        assert (4242, 111) not in reaper._first_seen  # old identity forgotten
+        assert (4242, 111) not in reaper._candidates
+        assert (4242, 999) in reaper._candidates
+
+    # -- grace semantics -----------------------------------------------------
+
+    async def test_grace_runs_from_zombie_observation_not_adoption(
+        self, tmp_path, monkeypatch
+    ):
+        """§3.2: time spent adopted-but-ALIVE must not pre-spend the
+        grace — otherwise a long-lived ControlPersist master would be
+        reaped the instant it died."""
+        import src.tools.process_manager as pm
+
+        orphan = await self._spawn_adopted(tmp_path, lifetime="300")
+        await self._wait_adopted_alive(orphan)
+        table, _complete = pm._scan_process_table()
+        start = table[orphan][1]
+        pm.register_reap_identity(orphan, start, source="test")
+
+        reaper = pm.AdoptedZombieReaper()  # real GRACE (30s)
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(pm.time, "monotonic", lambda: clock["now"])
+        reaper.sweep_once()  # tracked ALIVE at t=1000
+        clock["now"] = 1500.0
+        reaper.sweep_once()  # adopted-alive for 500 fake seconds
+        os.kill(orphan, 9)
+        for _ in range(200):
+            if orphan in self._our_zombie_map():
+                break
+            time.sleep(0.02)
+        assert reaper.sweep_once() == 0  # first seen AS ZOMBIE at t=1500
+        assert orphan in self._our_zombie_map()
+        clock["now"] = 1529.0
+        assert reaper.sweep_once() == 0  # 29s < GRACE
+        clock["now"] = 1531.0
+        assert reaper.sweep_once() == 1  # grace from the ZOMBIE sighting
+        assert orphan not in self._our_zombie_map()
+
+    # -- §3.5 identity-stable reaping ---------------------------------------
+
+    def test_pid_reuse_cannot_redirect_the_reap(self, monkeypatch):
+        """§3.6 pin: the identity is re-verified AFTER ``pidfd_open`` —
+        a stale snapshot naming a pid now occupied by a DIFFERENT
+        incarnation aborts before any waitid, and the live occupant is
+        untouched."""
+        import subprocess
+
+        import src.tools.process_manager as pm
+
+        occupant = subprocess.Popen(["sleep", "30"])
+        try:
+            table, _complete = pm._scan_process_table()
+            real_start = table[occupant.pid][1]
+            stale = real_start - 7  # the recorded incarnation is long gone
+            fake_table = {occupant.pid: (os.getpid(), stale, b"Z")}
+            monkeypatch.setattr(
+                pm, "_scan_process_table", lambda: (dict(fake_table), True)
+            )
+            monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
+            pm.register_reap_identity(occupant.pid, stale, source="test")
+            waited: list = []
+            monkeypatch.setattr(pm.os, "waitid", lambda *a: waited.append(a))
+            reaper = pm.AdoptedZombieReaper(grace=0.0)
+            assert reaper.sweep_once() == 0
+            assert waited == []  # nothing was ever consumed
+            assert (occupant.pid, stale) not in reaper._candidates  # pruned
+            assert occupant.poll() is None  # the occupant lives on
+        finally:
+            occupant.terminate()
+            assert occupant.wait() == -15  # its status reached its owner
+
+    async def test_reap_identity_verifies_incarnation_after_open(self, tmp_path):
+        """§3.5 step 3 in isolation: with a REAL zombie present, a
+        mismatched starttime aborts (the recorded incarnation is not the
+        current occupant) and consumes nothing; the true identity then
+        consumes it."""
+        import src.tools.process_manager as pm
+
+        orphan = await self._spawn_adopted(tmp_path)
+        start = await self._wait_zombie(orphan)
+        assert pm._reap_identity(orphan, start - 1, os.getpid()) is None
+        assert orphan in self._our_zombie_map()  # nothing was consumed
+        assert pm._reap_identity(orphan, start, os.getpid()) is True
+        assert orphan not in self._our_zombie_map()
+
+    def test_identity_gone_at_reap_time_is_pruned_without_waitid(
+        self, monkeypatch
+    ):
+        import src.tools.process_manager as pm
+
+        free_pid = next(
+            p
+            for p in range(4194000, 4194304)
+            if not os.path.exists(f"/proc/{p}")
+        )
+        mypid = os.getpid()
+        stale = {free_pid: (mypid, 11, b"Z")}
+        monkeypatch.setattr(
+            pm, "_scan_process_table", lambda: (dict(stale), True)
+        )
+        monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
+        pm.register_reap_identity(free_pid, 11, source="test")
+        waited: list = []
+        monkeypatch.setattr(pm.os, "waitid", lambda *a: waited.append(a))
+        reaper = pm.AdoptedZombieReaper(grace=0.0)
+        assert reaper.sweep_once() == 0
+        assert waited == []
+        assert (free_pid, 11) not in reaper._candidates  # provably gone
+
+    async def test_reap_identity_failure_arms(self, tmp_path, monkeypatch):
+        """§3.5 fault arms: every failure to PROVE aborts without
+        consuming — a failed pidfd_open, an unreadable, malformed or
+        vanished stat — and a LIVE process is never state-eligible."""
+        import subprocess
+        from pathlib import Path as RealPath
+
+        import src.tools.process_manager as pm
+
+        orphan = await self._spawn_adopted(tmp_path)
+        start = await self._wait_zombie(orphan)
+
+        with monkeypatch.context() as m:
+
+            def no_fd(_pid):
+                raise OSError("EMFILE")
+
+            m.setattr(pm.os, "pidfd_open", no_fd)
+            assert pm._reap_identity(orphan, start, os.getpid()) is False
+
+        def selective(effect):
+            class Fake:
+                def __init__(self, path):
+                    self._p = RealPath(path)
+
+                def read_text(self):
+                    return self._p.read_text()
+
+                def read_bytes(self):
+                    if str(self._p) == f"/proc/{orphan}/stat":
+                        return effect()
+                    return self._p.read_bytes()
+
+            return Fake
+
+        with monkeypatch.context() as m:
+            m.setattr(pm, "Path", selective(lambda: (_ for _ in ()).throw(OSError("EIO"))))
+            assert pm._reap_identity(orphan, start, os.getpid()) is False
+        with monkeypatch.context() as m:
+            m.setattr(pm, "Path", selective(lambda: b"1 (x) Z"))
+            assert pm._reap_identity(orphan, start, os.getpid()) is False
+        with monkeypatch.context() as m:
+            m.setattr(
+                pm,
+                "Path",
+                selective(lambda: (_ for _ in ()).throw(FileNotFoundError())),
+            )
+            assert pm._reap_identity(orphan, start, os.getpid()) is None
+        # None of the faults consumed it — the true identity still does.
+        assert pm._reap_identity(orphan, start, os.getpid()) is True
+        assert orphan not in self._our_zombie_map()
+
+        live = subprocess.Popen(["sleep", "30"])
+        try:
+            table, _c = pm._scan_process_table()
+            live_start = table[live.pid][1]
+            assert pm._reap_identity(live.pid, live_start, os.getpid()) is False
+            assert live.poll() is None  # untouched
+        finally:
+            live.terminate()
+            live.wait()
+
+    def test_scan_marks_unreadable_stat_incomplete(self, monkeypatch):
+        """A pid listed in /proc whose stat cannot be read (EACCES shape)
+        is a live process in an UNKNOWN state — the scan must admit it."""
+        from pathlib import Path as RealPath
+
+        import src.tools.process_manager as pm
+
+        victim = os.getpid()
+
+        class Refuse:
+            def __init__(self, path):
+                self._p = RealPath(path)
+
+            def read_text(self):
+                return self._p.read_text()
+
+            def read_bytes(self):
+                if str(self._p) == f"/proc/{victim}/stat":
+                    raise PermissionError("hidepid")
+                return self._p.read_bytes()
+
+        with monkeypatch.context() as m:
+            m.setattr(pm, "Path", Refuse)
+            table, complete = pm._scan_process_table()
+        assert victim not in table
+        assert complete is False
+
+    def test_drain_exhausts_attempts_on_a_replenishing_table(self, monkeypatch):
+        """A table that presents zombies faster than they settle bounds
+        the drain at four attempts, then reports honestly unverified."""
+        import src.tools.process_manager as pm
+
+        mypid = os.getpid()
+        monkeypatch.setattr(
+            pm, "_scan_process_table", lambda: ({4242: (mypid, 11, b"Z")}, True)
+        )
+        monkeypatch.setattr(pm, "_reap_identity", lambda *a: True)
+        reaper = pm.AdoptedZombieReaper()
+        drained, verified = reaper.drain_at_teardown()
+        assert drained == 4  # one per bounded attempt
+        assert verified is False  # the table never came clean
+
+    async def test_waitid_echild_is_not_counted(self, tmp_path, monkeypatch):
+        """Losing the race to another owner is not a reap."""
+        import src.tools.process_manager as pm
+
+        orphan = await self._spawn_adopted(tmp_path)
+        start = await self._wait_zombie(orphan)
+        pm.register_reap_identity(orphan, start, source="test")
+        reaper = pm.AdoptedZombieReaper(grace=0.0)
+        with monkeypatch.context() as m:
+
+            def echild(*_a):
+                raise ChildProcessError("not ours")
+
+            m.setattr(pm.os, "waitid", echild)
+            assert reaper.sweep_once() == 0
+            assert reaper.reaped_total == 0
+        pm.register_reap_identity(orphan, start, source="test")
+        assert reaper.sweep_once() == 1  # cleanly consumed once ours again
+
+    # -- bounded history -----------------------------------------------------
+
+    def test_candidate_cap_evicts_and_counts(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        mypid = os.getpid()
+        table = {
+            101: (mypid, 11, b"S"),
+            102: (mypid, 12, b"S"),
+            103: (mypid, 13, b"S"),
+        }
+        monkeypatch.setattr(
+            pm, "_scan_process_table", lambda: (dict(table), True)
+        )
+        monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
+        reaper = pm.AdoptedZombieReaper(grace=0.0)
+        reaper.MAX_TRACKED = 2
+        reaper.sweep_once()
+        assert len(reaper._candidates) == 2
+        assert reaper.evicted_total == 1
+        assert reaper.stats["evicted_total"] == 1
+
+    def test_age_bound_is_the_backstop_for_dead_proc(self, monkeypatch):
+        """When /proc goes dark the completeness-gated pruning never
+        runs; the age bound keeps history from growing forever. Eviction
+        only loses evidence."""
+        import src.tools.process_manager as pm
+
+        mypid = os.getpid()
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(pm.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(
+            pm, "_scan_process_table", lambda: ({4242: (mypid, 11, b"S")}, True)
+        )
+        monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
+        reaper = pm.AdoptedZombieReaper()
+        reaper.sweep_once()
+        assert (4242, 11) in reaper._candidates
+        monkeypatch.setattr(pm, "_scan_process_table", lambda: ({}, False))
+        clock["now"] = 1000.0 + reaper.MAX_AGE + 1
+        reaper.sweep_once()
+        assert (4242, 11) not in reaper._candidates
+        assert reaper.evicted_total == 1
+
+    def test_registry_cap_evicts_oldest_registration(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(pm, "_REAP_REGISTRY_CAP", 2)
+        pm.register_reap_identity(1, 1, source="a")
+        pm.register_reap_identity(2, 2, source="b")
+        pm.register_reap_identity(3, 3, source="c")
+        assert pm.registered_reap_identities() == frozenset({(2, 2), (3, 3)})
+        reaper = pm.AdoptedZombieReaper()
+        assert reaper.stats["registered_candidates"] == 2
+        assert reaper.stats["evicted_total"] == 1
+
+    # -- registration API ----------------------------------------------------
+
+    def test_register_candidate_verifies_against_proc(self):
+        import subprocess
+
+        import src.tools.process_manager as pm
+
+        live = subprocess.Popen(["sleep", "30"])
+        try:
+            start = pm.register_reap_candidate(live.pid, source="test")
+            assert start is not None
+            assert (live.pid, start) in pm.registered_reap_identities()
+        finally:
+            live.terminate()
+            live.wait()
+
+    def test_register_candidate_refuses_unidentifiable_pids(self):
+        import subprocess
+
+        import src.tools.process_manager as pm
+
+        gone = subprocess.Popen(["true"])
+        gone.wait()  # reaped — the pid names nothing now
+        assert pm.register_reap_candidate(gone.pid, source="test") is None
+        assert pm.registered_reap_identities() == frozenset()
+
+    def test_registration_prunes_when_identity_is_gone(self):
+        import subprocess
+
+        import src.tools.process_manager as pm
+
+        child = subprocess.Popen(["sleep", "30"])
+        reaper = pm.AdoptedZombieReaper()
+        try:
+            start = pm.register_reap_candidate(child.pid, source="test")
+            assert start is not None
+            reaper.sweep_once()  # complete scan, identity alive → retained
+            assert (child.pid, start) in pm.registered_reap_identities()
+        finally:
+            child.terminate()
+            child.wait()
+        reaper.sweep_once()  # complete scan, identity gone → pruned
+        assert (child.pid, start) not in pm.registered_reap_identities()
+
+    # -- teardown drain ------------------------------------------------------
+
+    async def test_drain_at_teardown_consumes_unobserved_zombies(self, tmp_path):
+        """Teardown rule: after every subprocess owner has stopped, every
+        remaining zombie child is ours — no history, no registration, no
+        grace required."""
+        import src.tools.process_manager as pm
+
+        orphan = await self._spawn_adopted(tmp_path)
+        await self._wait_zombie(orphan)
+        reaper = pm.AdoptedZombieReaper()  # never swept before
+        drained, verified = reaper.drain_at_teardown()
+        assert drained >= 1
+        assert verified is True
+        assert orphan not in self._our_zombie_map()
+
+    async def test_drain_ignores_pidfd_ownership(self, tmp_path):
+        """At teardown asyncio will never run its callbacks again: an
+        open pidfd is no longer a live status interest, and the zombie
+        must not survive into the exec'd image."""
+        import src.tools.process_manager as pm
+
+        orphan = await self._spawn_adopted(tmp_path)
+        await self._wait_zombie(orphan)
+        held = os.pidfd_open(orphan)
+        try:
+            reaper = pm.AdoptedZombieReaper()
+            drained, verified = reaper.drain_at_teardown()
+            assert drained >= 1
+            assert verified is True
+            assert orphan not in self._our_zombie_map()
+        finally:
+            os.close(held)
+
+    async def test_drain_unverified_when_a_zombie_cannot_be_consumed(
+        self, tmp_path, monkeypatch
+    ):
+        """§3.6 pin half 1: a failed final proof is LOUD — (…, False),
+        which the caller must treat as a re-exec veto."""
+        import src.tools.process_manager as pm
+
+        orphan = await self._spawn_adopted(tmp_path)
+        await self._wait_zombie(orphan)
+        reaper = pm.AdoptedZombieReaper()
+        with monkeypatch.context() as m:
+
+            def refuse(*_a):
+                raise OSError("waitid refused")
+
+            m.setattr(pm.os, "waitid", refuse)
+            drained, verified = reaper.drain_at_teardown()
+            assert drained == 0
+            assert verified is False
+        drained, verified = reaper.drain_at_teardown()
+        assert drained >= 1  # the zombie was real — fault, not phantom
+        assert verified is True
+
+    def test_drain_incomplete_scan_is_unverified(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(
+            pm, "_scan_process_table", lambda: ({}, False)
+        )
+        reaper = pm.AdoptedZombieReaper()
+        drained, verified = reaper.drain_at_teardown()
+        assert drained == 0
+        assert verified is False
+
+    # -- task machinery ------------------------------------------------------
 
     async def test_sweep_failure_does_not_kill_the_task(self, monkeypatch):
         import src.tools.process_manager as pm
@@ -2377,38 +3175,6 @@ class TestAdoptedZombieReaper:
         await reaper.stop()
         assert reaper._task is None
 
-    def test_stats_surface(self):
-        import src.tools.process_manager as pm
-
-        reaper = pm.AdoptedZombieReaper()
-        assert reaper.stats == {"pending_zombies": 0, "reaped_total": 0}
-
-    def test_pidfd_scan_tolerates_malformed_fdinfo(self, monkeypatch, tmp_path):
-        """A malformed or racing fdinfo entry is skipped, never raised."""
-        import src.tools.process_manager as pm
-
-        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["3", "4"])
-
-        class FakePath:
-            def __init__(self, path):
-                self.path = str(path)
-
-            def read_text(self):
-                if self.path.endswith("/3"):
-                    return "pos:\t0\nPid:\tnot-a-number\n"  # malformed
-                raise OSError("fd closed under us")  # racing close
-
-        monkeypatch.setattr(pm, "Path", FakePath)
-        assert pm._pidfd_owned_pids() == set()  # neither raised
-
-    def test_zombie_scan_tolerates_unreadable_proc(self, monkeypatch):
-        import src.tools.process_manager as pm
-
-        monkeypatch.setattr(
-            pm.os, "listdir", lambda _p: (_ for _ in ()).throw(OSError("gone"))
-        )
-        assert pm._zombie_children(os.getpid()) == {}
-
     async def test_stop_is_idempotent_without_a_task(self):
         import src.tools.process_manager as pm
 
@@ -2438,60 +3204,136 @@ class TestAdoptedZombieReaper:
         assert task.done() and task.cancelled()
         await reaper.stop()
 
-    def test_vanished_between_verify_and_reap_is_dropped(self, monkeypatch):
-        """The re-verification immediately before waitpid: an identity that
-        stopped being our zombie is dropped, never waited on."""
+    def test_stats_surface(self):
         import src.tools.process_manager as pm
 
-        identity = (4242, 111)
-        monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
-        calls = {"n": 0}
+        reaper = pm.AdoptedZombieReaper()
+        assert reaper.stats == {
+            "pending_zombies": 0,
+            "reaped_total": 0,
+            "tracked_candidates": 0,
+            "registered_candidates": 0,
+            "evicted_total": 0,
+        }
 
-        def zombies(_p):
-            calls["n"] += 1
-            return {identity: None} if calls["n"] == 1 else {}
 
-        monkeypatch.setattr(pm, "_zombie_children", zombies)
-        waited: list[int] = []
-        monkeypatch.setattr(
-            pm.os, "waitpid", lambda pid, _f: waited.append(pid) or (pid, 0)
+class TestReapRegistrationBridge:
+    """§3.1.2, ProcessRegistry side: an adopted descendant that the
+    ownership scan positively attributes is registered while alive, and
+    registration alone carries the reap after it dies."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_registry(self):
+        import src.tools.process_manager as pm
+
+        pm._reset_reap_registry()
+        yield
+        pm._reset_reap_registry()
+
+    async def test_job_descendant_registration_reaches_pidfd_reap(self, tmp_path):
+        import src.tools.process_manager as pm
+
+        job_token = "job-" + os.urandom(4).hex()
+        orphan = await TestAdoptedZombieReaper._spawn_adopted(
+            tmp_path,
+            lifetime="300",
+            env={pm.JOB_TOKEN_ENV: job_token},
         )
+        await TestAdoptedZombieReaper._wait_adopted_alive(orphan)
+        sink: set[tuple[int, int]] = set()
+        pinned, _complete = pm._scan_owned_members(
+            -12345,  # a session nothing belongs to
+            adopted_by=os.getpid(),
+            known_own_children=frozenset(),
+            job_token=job_token,
+            proc_token=os.environ.get(pm.PROC_TOKEN_ENV),
+            adopted_sink=sink,
+        )
+        pm._close_pinned(pinned)  # release our pins so no pidfd exclusion
+        table, _complete2 = pm._scan_process_table()
+        identity = (orphan, table[orphan][1])
+        assert identity in sink  # provenance proven while alive
+        assert identity in pm.registered_reap_identities()  # and REGISTERED
+        os.kill(orphan, 9)
+        start = await TestAdoptedZombieReaper._wait_zombie(orphan)
+        assert (orphan, start) == identity
         reaper = pm.AdoptedZombieReaper(grace=0.0)
-        assert reaper.sweep_once() == 0
-        assert waited == []  # re-verify said it was gone
-        assert reaper.pending_zombies == 0
+        assert reaper.sweep_once() >= 1
+        assert orphan not in TestAdoptedZombieReaper._our_zombie_map()
 
-    def test_waitpid_error_is_swallowed(self, monkeypatch):
-        """Losing the race to another owner is not an error."""
+    async def test_adopted_session_member_is_registered(self):
+        """The soak's job-shell ``sleep`` exactly: a session member whose
+        shell died is our direct child now — the ownership scan must
+        record it while ALIVE (session proof + adoption), because killed
+        or not, its zombie lands on us and only the recorded identity can
+        carry the reap."""
         import src.tools.process_manager as pm
 
-        identity = (4242, 111)
-        monkeypatch.setattr(pm, "_pidfd_owned_pids", lambda: set())
-        monkeypatch.setattr(pm, "_zombie_children", lambda _p: {identity: None})
-
-        def not_ours(_pid, _flags):
-            raise ChildProcessError("someone else took it")
-
-        monkeypatch.setattr(pm.os, "waitpid", not_ours)
+        # The sleeper's output must be detached from the pipe: a
+        # `&`-descendant holding stdout keeps communicate() from EOF —
+        # the PR #244 round-1 bug shape, live in this very test.
+        leader = await asyncio.create_subprocess_shell(
+            "sleep 300 >/dev/null 2>&1 & echo $!; exit 0",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        out, _err = await leader.communicate()
+        sleeper = int(out.strip())
+        try:
+            await TestAdoptedZombieReaper._wait_adopted_alive(sleeper)
+            sink: set[tuple[int, int]] = set()
+            pinned, _complete = pm._scan_owned_members(
+                leader.pid,  # the job session
+                leader_pid=leader.pid,
+                adopted_by=os.getpid(),
+                known_own_children=frozenset({leader.pid}),
+                job_token="job-x",
+                proc_token=os.environ.get(pm.PROC_TOKEN_ENV),
+                adopted_sink=sink,
+            )
+            pm._close_pinned(pinned)
+            table, _c = pm._scan_process_table()
+            identity = (sleeper, table[sleeper][1])
+            assert identity in sink
+            assert identity in pm.registered_reap_identities()
+        finally:
+            os.kill(sleeper, 9)
+        start = await TestAdoptedZombieReaper._wait_zombie(sleeper)
+        assert (sleeper, start) == identity
         reaper = pm.AdoptedZombieReaper(grace=0.0)
-        assert reaper.sweep_once() == 0
-        assert reaper.reaped_total == 0
+        assert reaper.sweep_once() >= 1
+        assert sleeper not in TestAdoptedZombieReaper._our_zombie_map()
 
-    def test_zombie_scan_skips_vanished_and_malformed_entries(self, monkeypatch):
-        """A process that exits mid-scan, or a truncated stat line, is
-        skipped rather than raising out of the sweep."""
+    async def test_teardown_scan_does_not_register(self, tmp_path):
+        """The teardown arm attributes by adoption alone — that evidence
+        must stay OUT of the runtime registry (the process is being
+        killed now, and adoption-alone is not the runtime bar)."""
         import src.tools.process_manager as pm
 
-        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["111", "222", "notapid"])
-
-        class FakePath:
-            def __init__(self, path):
-                self.path = str(path)
-
-            def read_bytes(self):
-                if "/111/" in self.path:
-                    raise FileNotFoundError()  # vanished mid-scan
-                return b"222 (x) Z"  # truncated — no fields after comm
-
-        monkeypatch.setattr(pm, "Path", FakePath)
-        assert pm._zombie_children(os.getpid()) == {}
+        job_token = "job-" + os.urandom(4).hex()
+        orphan = await TestAdoptedZombieReaper._spawn_adopted(
+            tmp_path,
+            lifetime="300",
+            env={pm.JOB_TOKEN_ENV: job_token},
+        )
+        await TestAdoptedZombieReaper._wait_adopted_alive(orphan)
+        try:
+            sink: set[tuple[int, int]] = set()
+            pinned, _complete = pm._scan_owned_members(
+                -12345,
+                adopted_by=os.getpid(),
+                known_own_children=frozenset(),
+                job_token=job_token,
+                proc_token=os.environ.get(pm.PROC_TOKEN_ENV),
+                adopted_sink=sink,
+                teardown=True,
+            )
+            pm._close_pinned(pinned)
+            assert any(pid == orphan for pid, _s in sink)
+            assert pm.registered_reap_identities() == frozenset()
+        finally:
+            os.kill(orphan, 9)
+            await TestAdoptedZombieReaper._wait_zombie(orphan)
+            reaper = pm.AdoptedZombieReaper()
+            reaper.drain_at_teardown()

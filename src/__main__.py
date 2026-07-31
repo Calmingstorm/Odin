@@ -122,6 +122,59 @@ def _enable_process_containment(log) -> bool:
     return False
 
 
+def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> None:
+    """Teardown tail in the exact round-15 §3.3 order.
+
+    Drain before close: cancel stragglers, then run the loop's async
+    generator and default-executor shutdown hooks — closing without this
+    destroys still-pending work mid-await, and an in-place restart would
+    exec over half-finished writes. Only AFTER that barrier has every
+    subprocess owner provably stopped, so only then may the final
+    no-grace zombie drain run (a drain any earlier could consume an exit
+    status a still-running owner legitimately awaits — round-15
+    blocker #1).
+
+    Failure anywhere on this path VETOES the in-place re-exec
+    (``restart.block_reexec``): exec'ing over an unverified process
+    table hands invisible survivors to the new image, while exiting
+    lets the supervisor start clean and PID 1 reap whatever remains.
+    """
+    owners_stopped = False
+    try:
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(
+                asyncio.gather(*pending, return_exceptions=True)
+            )
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.run_until_complete(loop.shutdown_default_executor())
+        owners_stopped = True
+    except Exception:
+        log.exception("Event-loop drain failed")
+    if owners_stopped:
+        try:
+            drained, verified = zombie_reaper.drain_at_teardown()
+            if drained:
+                log.info("Reaped %d adopted zombie(s) at teardown", drained)
+            if not verified:
+                restart.block_reexec(
+                    "final zombie drain could not verify a clean process "
+                    "table"
+                )
+        except Exception:
+            log.exception("adopted-zombie teardown drain error")
+            restart.block_reexec("final zombie drain failed")
+    else:
+        restart.block_reexec(
+            "event-loop drain failed — subprocess owners not proven "
+            "stopped, final zombie drain skipped"
+        )
+    loop.close()
+    log.info("Odin stopped")
+
+
 def main() -> None:
     # ``--version`` short-circuit
     if "--version" in sys.argv or "-V" in sys.argv:
@@ -289,6 +342,15 @@ def main() -> None:
 
     async def shutdown() -> None:
         log.info("Shutting down…")
+        # Teardown order (PR #244 round-15 §3.3, step 1): stop the periodic
+        # reaper FIRST. The final no-grace drain does NOT run here — it runs
+        # in _finalize_loop, after remaining tasks, async generators and the
+        # default executor have all stopped, because only then has every
+        # subprocess owner provably finished.
+        try:
+            await zombie_reaper.stop()
+        except Exception:
+            log.exception("zombie reaper stop error")
         for label, action in (
             # The getattr-and-call lambdas short-circuit on absent/None
             # managers; mypy can't relate the getattr probe to the direct
@@ -319,18 +381,6 @@ def main() -> None:
             await health.stop()
         except Exception:
             log.exception("health stop error")
-        # Containment reparents escaped descendants to US, so nothing else
-        # will ever wait on them. Stop the periodic reaper, then drain once
-        # without grace — every subprocess-owning subsystem has closed by
-        # here, so no legitimate future wait remains and no zombie can
-        # survive an in-place execve.
-        try:
-            await zombie_reaper.stop()
-            drained = zombie_reaper.drain_at_teardown()
-            if drained:
-                log.info("Reaped %d adopted zombie(s) at teardown", drained)
-        except Exception:
-            log.exception("adopted-zombie teardown drain error")
 
     try:
         loop.run_until_complete(run())
@@ -357,24 +407,7 @@ def main() -> None:
         except Exception:
             log.exception("Cleanup after fatal startup error failed")
     finally:
-        # Drain before close: cancel stragglers, then run the loop's async
-        # generator and default-executor shutdown hooks. Closing without this
-        # destroys still-pending work mid-await — and an in-place restart
-        # would exec over half-finished writes.
-        try:
-            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
-            for task in pending:
-                task.cancel()
-            if pending:
-                loop.run_until_complete(
-                    asyncio.gather(*pending, return_exceptions=True)
-                )
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.run_until_complete(loop.shutdown_default_executor())
-        except Exception:
-            log.exception("Event-loop drain failed")
-        loop.close()
-        log.info("Odin stopped")
+        _finalize_loop(loop, zombie_reaper, log)
 
     if restart.restart_requested():
         veto = restart.reexec_blocked()

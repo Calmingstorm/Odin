@@ -338,6 +338,13 @@ async def run_ssh_command(
                 output = stdout.decode("utf-8", errors="replace")
                 exit_code = proc.returncode or 0
 
+            if pool is not None:
+                # This command may have just forked a ControlPersist master
+                # (daemonized, so containment adopts it and its exit status
+                # becomes ours). Register its identity while it is alive —
+                # its zombie cannot be attributed later (PR #244).
+                await pool.ensure_master_registered(host, ssh_user)
+
             if exit_code == 0 or not _is_ssh_transient_failure(exit_code, output):
                 return exit_code, _truncate_output(output)
 
@@ -372,6 +379,11 @@ async def run_ssh_command(
             # next attempt.
             if proc is not None:
                 await terminate_process_tree(proc)
+            if pool is not None:
+                # Even a timed-out client may have established the master
+                # first — an unregistered master is exactly the zombie the
+                # soak found (PR #244).
+                await pool.ensure_master_registered(host, ssh_user)
             if attempt < max_retries - 1:
                 wait = compute_backoff(attempt, retry_base_delay, retry_max_delay)
                 log.warning(
