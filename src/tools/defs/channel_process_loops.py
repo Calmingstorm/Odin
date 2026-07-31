@@ -77,7 +77,10 @@ TOOLS_SECTION: list[dict] = [
         "description": (
             "Manages background processes (start/poll/write/kill/list). "
             "Start spawns a command, returns PID. Poll gets output. Write sends stdin. "
-            "Max 20 concurrent, auto-killed after 1hr."
+            "Max 20 concurrent, auto-killed after 1hr. When monitoring a "
+            "long-running process (build, test suite, download), poll with "
+            "wait_seconds (60 is a good default) — one call waits server-side "
+            "until exit or the deadline, instead of many rapid polls."
         ),
         "input_schema": {
             "type": "object",
@@ -102,6 +105,14 @@ TOOLS_SECTION: list[dict] = [
                 "input_text": {
                     "type": "string",
                     "description": "Text to send to stdin (required for write)",
+                },
+                "wait_seconds": {
+                    "type": "number",
+                    "description": (
+                        "Poll only: wait up to this many seconds (0-120) for "
+                        "the process to exit before reporting. 0 (default) "
+                        "reports immediately. Exit ends the wait early."
+                    ),
                 },
             },
             "required": ["action"],

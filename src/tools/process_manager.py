@@ -22,6 +22,10 @@ log = get_logger("process_manager")
 MAX_CONCURRENT = 20
 MAX_LIFETIME_SECONDS = 3600  # 1 hour
 OUTPUT_BUFFER_LINES = 500
+# Ceiling for one poll's server-side wait: comfortably under the executor's
+# 300s per-tool wall (an unbounded wait would die THERE as a tool error).
+# Monitoring longer work = chained poll calls, each ≤ this.
+MAX_POLL_WAIT_SECONDS = 120.0
 # Upper bound on awaiting an in-flight group reap at shutdown before giving up
 # and cancelling it — comfortably exceeds a reader's TERM-grace + KILL-grace so
 # a compliant descendant always finishes, while a wedged one can't hang re-exec.
@@ -41,6 +45,10 @@ class ProcessInfo:
     process: asyncio.subprocess.Process | None = None
     _reader_task: asyncio.Task | None = field(default=None, repr=False)
     exit_code: int | None = None
+    # Monotonic progress signal: total bytes ever read from the process,
+    # NOT bounded by the ring buffer — a full ring of repeated lines can
+    # look frozen while output is still arriving; this counter cannot.
+    total_output_bytes: int = 0
 
 
 class ProcessRegistry:
@@ -131,11 +139,38 @@ class ProcessRegistry:
         log.info("Started process PID %d: %s", pid, command[:80])
         return f"Process started (PID {pid}): {command[:120]}"
 
-    def poll(self, pid: int) -> str:
-        """Return recent output lines from a process."""
+    async def poll(self, pid: int, wait_seconds: float = 0.0) -> str:
+        """Return recent output lines from a process.
+
+        ``wait_seconds > 0`` waits server-side until the process EXITS or
+        the deadline elapses, then reports — never an error, never a wake
+        on intermediate output (early-output wakeup would return almost
+        immediately on a streaming build and defeat the purpose; design
+        settled with Odin, 2026-07-31). A terminal process reports
+        immediately. Cancellation aborts only this wait — the detached
+        process is never touched.
+        """
         info = self._processes.get(pid)
         if not info:
             return f"No process with PID {pid}."
+
+        if wait_seconds > 0 and info.status == "running" and info.process is not None:
+            try:
+                await asyncio.wait_for(info.process.wait(), timeout=wait_seconds)
+            except asyncio.TimeoutError:
+                pass  # deadline reached — report current state
+            else:
+                # The process exited during the wait: give the reader task a
+                # bounded moment to drain the tail and settle status/exit_code
+                # so the report reflects the terminal state, not a torn one.
+                # Shielded — OUR bound must not cancel the reader itself.
+                if info._reader_task is not None:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(info._reader_task), timeout=5.0
+                        )
+                    except asyncio.TimeoutError:
+                        pass
 
         lines = list(info.output_buffer)
         status_line = f"[PID {pid}] status={info.status}"
@@ -143,6 +178,7 @@ class ProcessRegistry:
             status_line += f" exit_code={info.exit_code}"
         elapsed = time.time() - info.start_time
         status_line += f" uptime={elapsed:.0f}s"
+        status_line += f" output_bytes={info.total_output_bytes}"
 
         if not lines:
             return f"{status_line}\n(no output yet)"
@@ -276,6 +312,7 @@ class ProcessRegistry:
                 line = await info.process.stdout.readline()
                 if not line:
                     break
+                info.total_output_bytes += len(line)
                 info.output_buffer.append(line.decode("utf-8", errors="replace"))
         except Exception:
             pass

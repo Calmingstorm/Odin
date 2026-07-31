@@ -93,45 +93,167 @@ class TestProcessRegistryStart:
 # ---------------------------------------------------------------------------
 
 class TestProcessRegistryPoll:
-    def test_poll_nonexistent(self):
+    async def test_poll_nonexistent(self):
         reg = ProcessRegistry()
-        result = reg.poll(99999)
+        result = await reg.poll(99999)
         assert "No process" in result
 
-    def test_poll_running_no_output(self):
+    async def test_poll_running_no_output(self):
         reg = ProcessRegistry()
         info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time())
         reg._processes[1] = info
-        result = reg.poll(1)
+        result = await reg.poll(1)
         assert "status=running" in result
         assert "no output yet" in result
 
-    def test_poll_with_output(self):
+    async def test_poll_with_output(self):
         reg = ProcessRegistry()
         info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time())
         info.output_buffer.append("hello world\n")
         info.output_buffer.append("second line\n")
         reg._processes[1] = info
-        result = reg.poll(1)
+        result = await reg.poll(1)
         assert "hello world" in result
         assert "second line" in result
 
-    def test_poll_shows_exit_code(self):
+    async def test_poll_shows_exit_code(self):
         reg = ProcessRegistry()
         info = ProcessInfo(
             pid=1, command="test", host="local",
             start_time=time.time(), status="completed", exit_code=0,
         )
         reg._processes[1] = info
-        result = reg.poll(1)
+        result = await reg.poll(1)
         assert "exit_code=0" in result
 
-    def test_poll_shows_uptime(self):
+    async def test_poll_shows_uptime(self):
         reg = ProcessRegistry()
         info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time() - 30)
         reg._processes[1] = info
-        result = reg.poll(1)
+        result = await reg.poll(1)
         assert "uptime=" in result
+
+    async def test_poll_reports_total_output_bytes(self):
+        reg = ProcessRegistry()
+        info = ProcessInfo(
+            pid=1, command="test", host="local", start_time=time.time(),
+            total_output_bytes=4096,
+        )
+        reg._processes[1] = info
+        result = await reg.poll(1)
+        assert "output_bytes=4096" in result
+
+
+class TestPollWaitSeconds:
+    """wait_seconds semantics (design settled with Odin, 2026-07-31):
+    terminal → immediate; running → wait until EXIT or deadline (never an
+    early-output wakeup); cancellation aborts only the wait."""
+
+    async def test_terminal_process_returns_immediately(self):
+        reg = ProcessRegistry()
+        info = ProcessInfo(
+            pid=1, command="test", host="local",
+            start_time=time.time(), status="completed", exit_code=0,
+        )
+        reg._processes[1] = info
+        start = time.monotonic()
+        result = await reg.poll(1, wait_seconds=60)
+        assert time.monotonic() - start < 1.0
+        assert "exit_code=0" in result
+
+    async def test_running_process_waits_until_deadline(self):
+        reg = ProcessRegistry()
+        proc = await asyncio.create_subprocess_shell(
+            "sleep 30", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        info = ProcessInfo(
+            pid=proc.pid, command="sleep 30", host="local",
+            start_time=time.time(), process=proc,
+        )
+        reg._processes[proc.pid] = info
+        try:
+            start = time.monotonic()
+            result = await reg.poll(proc.pid, wait_seconds=1.0)
+            elapsed = time.monotonic() - start
+            assert 0.9 <= elapsed < 5.0  # waited the deadline, not longer
+            assert "status=running" in result
+            assert proc.returncode is None  # wait never touched the process
+        finally:
+            proc.kill()
+            await proc.wait()
+
+    async def test_exit_during_wait_returns_early_with_terminal_state(self):
+        reg = ProcessRegistry()
+        result_start = await reg.start("localhost", "echo done-marker; exit 0")
+        pid = int(result_start.split("PID ")[1].split(")")[0])
+        start = time.monotonic()
+        result = await reg.poll(pid, wait_seconds=30)
+        elapsed = time.monotonic() - start
+        assert elapsed < 10.0  # exited long before the 30s deadline
+        assert "status=completed" in result
+        assert "exit_code=0" in result
+        assert "done-marker" in result  # reader drained before the report
+
+    async def test_handler_rejects_invalid_wait_seconds(self):
+        """Invalid wait_seconds is REJECTED, never clamped (the
+        reasoning-effort validation rule). bool is an int subtype and
+        must not slip through."""
+        from src.tools.handlers.system import SystemTools
+
+        reg = ProcessRegistry()
+        info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time())
+        reg._processes[1] = info
+        h = SystemTools.__new__(SystemTools)
+        h._process_registry = lambda: reg
+
+        for bad in (-1, 121, float("nan"), float("inf"), "60", True, None):
+            result = await h._handle_manage_process(
+                {"action": "poll", "pid": 1, "wait_seconds": bad}
+            )
+            assert isinstance(result, tuple) and result[1] == 1, bad
+            assert "wait_seconds must be" in result[0], bad
+
+    async def test_handler_accepts_valid_wait_and_defaults_to_zero(self):
+        from src.tools.handlers.system import SystemTools
+
+        reg = ProcessRegistry()
+        info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time())
+        reg._processes[1] = info
+        h = SystemTools.__new__(SystemTools)
+        h._process_registry = lambda: reg
+
+        # Omitted → default 0 → immediate report, exit 0.
+        out, code = await h._handle_manage_process({"action": "poll", "pid": 1})
+        assert code == 0 and "status=running" in out
+        # Boundary values accepted.
+        for ok in (0, 0.5, 120):
+            out, code = await h._handle_manage_process(
+                {"action": "poll", "pid": 1, "wait_seconds": ok}
+            )
+            assert code == 0, ok
+
+    async def test_cancellation_aborts_wait_not_process(self):
+        reg = ProcessRegistry()
+        proc = await asyncio.create_subprocess_shell(
+            "sleep 30", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        info = ProcessInfo(
+            pid=proc.pid, command="sleep 30", host="local",
+            start_time=time.time(), process=proc,
+        )
+        reg._processes[proc.pid] = info
+        try:
+            task = asyncio.create_task(reg.poll(proc.pid, wait_seconds=60))
+            await asyncio.sleep(0.2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert proc.returncode is None  # detached process untouched
+        finally:
+            proc.kill()
+            await proc.wait()
 
 
 # ---------------------------------------------------------------------------
