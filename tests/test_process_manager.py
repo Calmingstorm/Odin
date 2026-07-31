@@ -233,6 +233,34 @@ class TestPollWaitSeconds:
             )
             assert code == 0, ok
 
+    async def test_wedged_reader_never_wedges_the_poll(self):
+        """Process exits during the wait but the reader task hangs: the
+        bounded (shielded) drain gives up and the poll still reports —
+        a stuck reader must not turn a bounded wait into an unbounded one,
+        and the shield must not cancel the reader."""
+
+        class _ExitedProc:
+            async def wait(self):
+                return 0
+
+        reg = ProcessRegistry()
+        wedge = asyncio.Event()  # never set
+        reader = asyncio.create_task(wedge.wait())
+        info = ProcessInfo(
+            pid=1, command="test", host="local", start_time=time.time(),
+            process=_ExitedProc(),  # type: ignore[arg-type]
+        )
+        info._reader_task = reader
+        reg._processes[1] = info
+        try:
+            start = time.monotonic()
+            result = await reg.poll(1, wait_seconds=30)
+            assert time.monotonic() - start < 12.0  # drain bound, not 30s
+            assert "[PID 1]" in result
+            assert not reader.cancelled()  # shield held
+        finally:
+            reader.cancel()
+
     async def test_cancellation_aborts_wait_not_process(self):
         reg = ProcessRegistry()
         proc = await asyncio.create_subprocess_shell(
