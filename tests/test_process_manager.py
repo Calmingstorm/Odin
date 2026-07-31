@@ -6,6 +6,7 @@ shutdown, cleanup, concurrency limits, and lifetime enforcement.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections import deque
 from unittest.mock import AsyncMock, MagicMock
@@ -780,145 +781,194 @@ class TestRound3Blockers:
         assert "tail-marker" in result
 
 
-class TestHardKillGroup:
-    async def test_already_dead_group_is_the_goal_state(self):
+class TestRaceFreeGroupTermination:
+    """Round-5 blocker #2: every signal to a post-leader-exit group goes
+    through a pidfd pinned BEFORE membership verification, so pid reuse
+    between check and signal cannot misdirect it."""
+
+    async def test_pins_only_true_group_members(self):
+        from src.tools.process_manager import _close_pinned, _pinned_group_members
+
         proc = await asyncio.create_subprocess_shell(
-            "true", stdout=asyncio.subprocess.PIPE,
+            "sleep 5 & sleep 5", stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, start_new_session=True,
-        )
-        await proc.wait()
-        info = ProcessInfo(
-            pid=proc.pid, command="true", host="local",
-            start_time=time.time(), status="completed", process=proc,
-        )
-        ProcessRegistry._hard_kill_group(info)  # ProcessLookupError → pass
-
-    def test_no_process_is_a_noop(self):
-        info = ProcessInfo(pid=1, command="x", host="local", start_time=0.0)
-        ProcessRegistry._hard_kill_group(info)  # process=None → return
-
-    def test_unexpected_error_is_swallowed(self, monkeypatch):
-        import os as _os
-
-        def boom(pgid, sig):
-            raise PermissionError("nope")
-
-        monkeypatch.setattr(_os, "killpg", boom)
-        info = ProcessInfo(
-            pid=1, command="x", host="local", start_time=0.0,
-            process=type("P", (), {"pid": 4242})(),
-        )
-        ProcessRegistry._hard_kill_group(info)  # Exception arm → debug log
-
-
-class TestPgidRecycleGuard:
-    async def test_unreaped_leader_pins_the_pgid(self):
-        proc = await asyncio.create_subprocess_shell(
-            "sleep 5", stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
-        )
-        info = ProcessInfo(
-            pid=proc.pid, command="sleep 5", host="local",
-            start_time=time.time(), process=proc,
         )
         try:
-            assert ProcessRegistry._pgid_safe_to_signal(info) is True
+            await asyncio.sleep(0.4)
+            pinned = _pinned_group_members(proc.pid)
+            try:
+                pids = {pid for pid, _fd in pinned}
+                assert proc.pid in pids  # the leader
+                assert len(pids) >= 2  # plus descendants
+                # NOTHING outside the group: our own process is never pinned.
+                assert os.getpid() not in pids
+            finally:
+                _close_pinned(pinned)
         finally:
             proc.kill()
             await proc.wait()
 
-    async def test_reaped_leader_with_proc_entry_is_recycled(self):
-        """After reap, a PRESENT /proc/<pgid> can only be an unrelated
-        process that recycled the pid — never signalled (round-4)."""
-        import os as _os
+    async def test_reap_racefree_kills_term_immune_descendant(self):
+        from src.tools.process_manager import _reap_group_racefree
 
-        stub = type("P", (), {"pid": _os.getpid(), "returncode": 0})()
-        info = ProcessInfo(
-            pid=stub.pid, command="x", host="local",
-            start_time=0.0, process=stub,
-        )
-        assert ProcessRegistry._pgid_safe_to_signal(info) is False
-
-    async def test_reaped_and_gone_is_safe(self):
+        # A descendant that ignores SIGTERM: only the KILL escalation ends it.
         proc = await asyncio.create_subprocess_shell(
-            "true", stdout=asyncio.subprocess.PIPE,
+            "python3 -c \"import signal,time;"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN);time.sleep(30)\" & "
+            "exit 0",
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, start_new_session=True,
         )
-        await proc.wait()
-        info = ProcessInfo(
-            pid=proc.pid, command="true", host="local",
-            start_time=time.time(), status="completed", process=proc,
-        )
-        # /proc entry gone after reap: killpg reaches our surviving members
-        # or raises ESRCH — both safe.
-        assert ProcessRegistry._pgid_safe_to_signal(info) is True
+        pgid = proc.pid
+        try:
+            await asyncio.sleep(0.5)
+            await _reap_group_racefree(pgid, grace=0.5)
+            from src.tools.process_manager import _pinned_group_members
 
-    def test_no_process_is_never_safe(self):
-        info = ProcessInfo(pid=1, command="x", host="local", start_time=0.0)
-        assert ProcessRegistry._pgid_safe_to_signal(info) is False
+            for _ in range(30):
+                pinned = _pinned_group_members(pgid)
+                alive = len(pinned)
+                _close_pinned_local(pinned)
+                if alive == 0:
+                    break
+                await asyncio.sleep(0.2)
+            assert alive == 0  # TERM-immune descendant did NOT survive
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+
+    async def test_empty_group_is_a_noop(self):
+        from src.tools.process_manager import _kill_group_racefree_sync
+
+        assert _kill_group_racefree_sync(4_000_000) == 0
 
 
-class TestShutdownBarrierArms:
-    async def test_abandoned_reaper_error_is_swallowed(self):
-        """A reaper that dies with a non-cancel error when cancelled must
-        not break the shutdown barrier."""
+def _close_pinned_local(pinned):
+    from src.tools.process_manager import _close_pinned
+
+    _close_pinned(pinned)
+
+
+class TestShutdownBarrier:
+    async def test_cancellation_resistant_task_cannot_hang_shutdown(self):
+        """Round-5 blocker #1 (Odin's repro): a lifecycle task that
+        SWALLOWS cancellation must not hold shutdown — the barrier is
+        bounded by process state, never by awaiting the task."""
         reg = ProcessRegistry()
-        gate = asyncio.Event()
+        resist = True  # cleared at teardown so the loop can close
 
-        async def bad_reaper():
-            try:
-                await gate.wait()
-            except asyncio.CancelledError:
-                raise ValueError("reaper corrupted on cancel") from None
+        async def immortal():
+            while True:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    if not resist:
+                        raise
+                    continue  # refuses to die while under test
 
         proc = await asyncio.create_subprocess_shell(
-            "true", stdout=asyncio.subprocess.PIPE,
+            "sleep 30", stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, start_new_session=True,
         )
-        await proc.wait()
         info = ProcessInfo(
-            pid=proc.pid, command="true", host="local",
+            pid=proc.pid, command="sleep 30", host="local",
             start_time=time.time(), status="completed", exit_code=0,
             process=proc,
         )
-        info._exit_task = asyncio.create_task(bad_reaper())
+        task = asyncio.create_task(immortal())
+        info._exit_task = task
         reg._processes[proc.pid] = info
-        await reg.shutdown()  # must not raise
-        assert info._exit_task.done()
-
-    async def test_confirm_group_gone_warns_on_survivor(self):
-        """A group that outlives the confirmation window is logged loudly,
-        never silently abandoned."""
-        reg = ProcessRegistry()
-        proc = await asyncio.create_subprocess_shell(
-            "sleep 5", stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
-        )
-        info = ProcessInfo(
-            pid=proc.pid, command="sleep 5", host="local",
-            start_time=time.time(), process=proc,
-        )
         try:
-            await reg._confirm_group_gone(info, timeout=0.3)  # exhausts window
-        finally:
-            proc.kill()
-            await proc.wait()
+            start = time.monotonic()
+            await asyncio.wait_for(reg.shutdown(), timeout=SHUTDOWN_REAP_TIMEOUT + 15)
+            assert time.monotonic() - start < SHUTDOWN_REAP_TIMEOUT + 15
+            # Barrier held: leader reaped and the group provably gone
+            # BEFORE shutdown returned, despite the immortal task.
+            assert proc.returncode is not None
+            from src.tools.process_manager import _kill_group_racefree_sync
 
-    async def test_confirm_group_gone_tolerates_probe_errors(self, monkeypatch):
-        """A probe error (e.g. EPERM against a group we cannot signal)
-        ends the confirmation quietly — never raises out of shutdown."""
-        import os as _os
+            assert _kill_group_racefree_sync(proc.pid) == 0
+        finally:
+            resist = False
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+
+    async def test_kill_group_until_gone_reports_failure_loudly(self, monkeypatch):
+        """An unkillable survivor makes the barrier return False (the
+        caller's loud report), never a silent success."""
+        import src.tools.process_manager as pm
 
         reg = ProcessRegistry()
-
-        def eperm(pgid, sig):
-            raise PermissionError("operation not permitted")
-
-        monkeypatch.setattr(_os, "killpg", eperm)
-        stub = type("P", (), {"pid": 4242, "returncode": None})()
+        monkeypatch.setattr(pm, "_kill_group_racefree_sync", lambda pgid: 1)
+        stub = type("P", (), {"pid": 4242, "returncode": 0})()
         info = ProcessInfo(
             pid=4242, command="x", host="local", start_time=0.0, process=stub,
         )
-        start = time.monotonic()
-        await reg._confirm_group_gone(info, timeout=5.0)
-        assert time.monotonic() - start < 1.0  # returned on first probe error
+        assert await reg._kill_group_until_gone(info, timeout=0.3) is False
+
+    async def test_kill_group_until_gone_no_process_is_true(self):
+        reg = ProcessRegistry()
+        info = ProcessInfo(pid=1, command="x", host="local", start_time=0.0)
+        assert await reg._kill_group_until_gone(info) is True
+
+
+class TestRaceFreeHelperArms:
+    """Defensive arms of the pidfd machinery — every one is a fail-safe
+    path (skip the candidate / treat as exited), never a signal."""
+
+    def test_stat_fields_missing_process(self):
+        from src.tools.process_manager import _stat_fields
+
+        assert _stat_fields(4_000_000) is None
+
+    def test_stat_fields_malformed_stat(self, tmp_path, monkeypatch):
+        import src.tools.process_manager as pm
+
+        class FakePath:
+            def __init__(self, _p):
+                pass
+
+            def read_text(self):
+                return "1 (comm) S"  # too few fields after the parens
+
+        monkeypatch.setattr(pm, "Path", FakePath)
+        assert pm._stat_fields(1) is None
+
+    def test_pinned_members_survives_unreadable_proc(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        def boom(_path):
+            raise OSError("proc unavailable")
+
+        monkeypatch.setattr(pm.os, "listdir", boom)
+        assert pm._pinned_group_members(1234) == []
+
+    def test_close_pinned_tolerates_bad_fd(self):
+        from src.tools.process_manager import _close_pinned
+
+        _close_pinned([(1, 999_999)])  # already-closed fd → swallowed
+
+    def test_pidfd_exited_on_bad_fd_reports_exited(self, monkeypatch):
+        """An unusable fd must read as EXITED (fail-safe): the caller then
+        stops waiting on it rather than looping forever."""
+        import select as _select
+
+        from src.tools.process_manager import _pidfd_exited
+
+        def boom(*_a, **_k):
+            raise OSError("bad file descriptor")
+
+        monkeypatch.setattr(_select, "select", boom)
+        assert _pidfd_exited(999_999) is True
+
+    async def test_reap_racefree_returns_when_nothing_pinned(self):
+        from src.tools.process_manager import _reap_group_racefree
+
+        await _reap_group_racefree(4_000_000, grace=0.1)  # returns immediately

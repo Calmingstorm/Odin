@@ -66,6 +66,113 @@ def _utf8_boundary_split(buf: bytes) -> tuple[bytes, bytes]:
     return buf, b""
 
 
+
+def _stat_fields(pid: int) -> tuple[int, int] | None:
+    """(pgrp, session) from /proc/<pid>/stat, parsed after the comm parens
+    (comm may embed spaces/parens). None when the process vanished."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        rest = stat.rsplit(")", 1)[1].split()
+        return int(rest[2]), int(rest[3])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _pinned_group_members(pgid: int) -> list[tuple[int, int]]:
+    """Enumerate the group's members, each PINNED with a pidfd.
+
+    The pin happens BEFORE membership is verified, so the verification and
+    every later signal act on the exact process the fd names — pid reuse
+    between steps is structurally impossible (PR #244 round-5 blocker #2).
+    Membership = pgrp == pgid AND session == pgid: our leader was spawned
+    with start_new_session, its descendants inherit that session, and
+    setpgid cannot move a foreign process into it (same-session rule).
+    Candidates that cannot be pinned or verified are skipped — fail-safe.
+    Caller owns the returned fds.
+    """
+    pinned: list[tuple[int, int]] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return pinned
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            fd = os.pidfd_open(pid)
+        except OSError:
+            continue
+        fields = _stat_fields(pid)
+        if fields is not None and fields == (pgid, pgid):
+            pinned.append((pid, fd))
+        else:
+            os.close(fd)
+    return pinned
+
+
+def _signal_pinned(pinned: list[tuple[int, int]], sig: int) -> None:
+    for pid, fd in pinned:
+        try:
+            signal.pidfd_send_signal(fd, sig)
+        except OSError:
+            log.debug("pidfd signal %d to PID %d failed", sig, pid)
+
+
+def _close_pinned(pinned: list[tuple[int, int]]) -> None:
+    for _pid, fd in pinned:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+async def _reap_group_racefree(pgid: int, grace: float = 2.0) -> None:
+    """TERM → bounded grace → KILL for every surviving group member,
+    delivered exclusively through pinned pidfds. Replaces killpg for the
+    post-leader-exit sweeps, where a numeric pgid can go stale."""
+    pinned = _pinned_group_members(pgid)
+    if not pinned:
+        return
+    try:
+        _signal_pinned(pinned, signal.SIGTERM)
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            if all(_stat_fields(pid) is None or os.path.exists(f"/proc/{pid}") is False
+                   for pid, _fd in pinned):
+                break
+            # pidfds poll readable at exit; a cheap sleep-poll keeps this
+            # dependency-free and the bound tight.
+            await asyncio.sleep(0.1)
+            if all(_pidfd_exited(fd) for _pid, fd in pinned):
+                break
+        _signal_pinned(pinned, signal.SIGKILL)
+    finally:
+        _close_pinned(pinned)
+
+
+def _pidfd_exited(fd: int) -> bool:
+    """A pidfd polls readable exactly when its process has exited."""
+    import select
+
+    try:
+        r, _w, _x = select.select([fd], [], [], 0)
+        return bool(r)
+    except OSError:
+        return True
+
+
+def _kill_group_racefree_sync(pgid: int) -> int:
+    """Immediate SIGKILL of every pinned member — the synchronous
+    last-resort used by the shutdown barrier. Returns members signalled."""
+    pinned = _pinned_group_members(pgid)
+    try:
+        _signal_pinned(pinned, signal.SIGKILL)
+        return len(pinned)
+    finally:
+        _close_pinned(pinned)
+
+
 async def _wait_leader_exit(
     proc: asyncio.subprocess.Process, timeout: float | None = None
 ) -> bool:
@@ -283,9 +390,12 @@ class ProcessRegistry:
                 # Group-aware TERM → bounded grace → KILL → reap. Descendants
                 # of the managed shell die with it instead of leaking (they
                 # would otherwise outlive an in-place restart's exec).
-                # owned_pgid: start() spawns with start_new_session=True, so
-                # the group stays signallable after the leader exits.
-                await terminate_process_tree(info.process, grace=5.0, owned_pgid=info.process.pid)
+                # No owned_pgid (round-5 blocker #2): kill() runs only
+                # while status is running, so terminate_process_tree
+                # discovers and VERIFIES the group against the live leader
+                # rather than trusting a stale-capable number; the exit
+                # watcher's race-free pidfd sweep finishes any survivors.
+                await terminate_process_tree(info.process, grace=5.0)
             info.status = "failed"
             info.exit_code = -9
             log.info("Killed process PID %d", pid)
@@ -348,28 +458,17 @@ class ProcessRegistry:
                     )
                 except TimeoutError:
                     # A wedged async reap must not strand TERM-immune
-                    # descendants across re-exec (round-3 blocker #2) — but
-                    # the fallback may only signal a PGID that is provably
-                    # still ours (round-4 blocker #1), and must leave a
-                    # COMPLETION BARRIER behind: cancellation awaited, the
-                    # leader reaped, group disappearance confirmed.
+                    # descendants across re-exec. The BARRIER is ordered so
+                    # that the process state — not the task — decides when
+                    # shutdown may return (round-5 blocker #1): a
+                    # cancellation-resistant task can never hold us, because
+                    # we never await it unboundedly.
                     log.warning(
                         "Reaper for PID %d did not finish; hard-killing group "
                         "before abandoning", pid,
                     )
-                    if self._pgid_safe_to_signal(info):
-                        self._hard_kill_group(info)
-                    task.cancel()
-                    try:
-                        await asyncio.wait_for(task, timeout=2.0)
-                    except (TimeoutError, asyncio.CancelledError):
-                        pass
-                    except Exception:
-                        log.debug("abandoned reaper errored", exc_info=True)
-                    if info.process is not None and info.process.returncode is None:
-                        # Reap the leader so no zombie crosses the exec.
-                        await _wait_leader_exit(info.process, timeout=3.0)
-                    await self._confirm_group_gone(info)
+                    task.cancel()  # best effort; NEVER awaited unbounded
+                    await self._kill_group_until_gone(info)
                 except Exception:
                     log.debug(
                         "Reaper for PID %d errored during shutdown", pid, exc_info=True
@@ -408,72 +507,40 @@ class ProcessRegistry:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _pgid_safe_to_signal(info: ProcessInfo) -> bool:
-        """Whether ``info``'s recorded PGID still provably names OUR group.
+    async def _kill_group_until_gone(
+        self, info: ProcessInfo, timeout: float = 6.0
+    ) -> bool:
+        """Bounded, race-free termination of everything we still own.
 
-        An unreaped leader (``returncode is None``) pins its pid — the
-        value cannot be recycled while the process (or its zombie) exists.
-        After the leader is reaped, POSIX keeps the pgid VALUE unusable
-        while any group member survives, and a NEW group can only claim it
-        via a new leader process occupying exactly that pid — which would
-        appear in /proc. So: /proc/<pgid> PRESENT after reap ⇒ recycled ⇒
-        never signal; ABSENT ⇒ killpg reaches our surviving members or
-        raises ESRCH — both safe (round-4 blocker #1).
+        The shutdown completion barrier (round-4 #1, hardened round-5 #1):
+        repeatedly pin the surviving group members by pidfd, SIGKILL them,
+        and re-enumerate until the group is empty or the bound elapses —
+        every signal aimed at a process pinned BEFORE its membership was
+        verified, so pid reuse cannot misdirect one. The leader is reaped
+        in the same loop so no zombie crosses the exec.
+
+        Returns True when the group is provably gone. A False return is
+        LOUD (error, not debug) and is what the caller reports.
         """
         proc = info.process
         if proc is None:
-            return False
-        if proc.returncode is None:
             return True
-        return not Path(f"/proc/{proc.pid}").exists()
-
-    async def _confirm_group_gone(self, info: ProcessInfo, timeout: float = 3.0) -> None:
-        """Bounded confirmation that the owned group has dissolved.
-
-        Part of the shutdown completion barrier: signal-0 existence probes
-        (deliver nothing) until ESRCH or the bound — a still-present group
-        at the bound is LOGGED loudly rather than silently abandoned.
-        """
-        proc = info.process
-        if proc is None or not self._pgid_safe_to_signal(info):
-            return
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                os.killpg(proc.pid, 0)
-            except ProcessLookupError:
-                return
-            except Exception:
-                return
+        while True:
+            survivors = _kill_group_racefree_sync(proc.pid)
+            if proc.returncode is None:
+                # Reap the leader (bounded) so it cannot linger as a zombie.
+                await _wait_leader_exit(proc, timeout=0.5)
+            if survivors == 0 and proc.returncode is not None:
+                return True
+            if time.monotonic() >= deadline:
+                log.error(
+                    "Shutdown could not confirm PID %d's group is gone "
+                    "(%d member(s) still present, leader rc=%r)",
+                    info.pid, survivors, proc.returncode,
+                )
+                return False
             await asyncio.sleep(0.1)
-        log.warning(
-            "Process group %d still present after shutdown hard-kill window",
-            proc.pid,
-        )
-
-    @staticmethod
-    def _hard_kill_group(info: ProcessInfo) -> None:
-        """Synchronous last-resort SIGKILL of the OWNED process group.
-
-        Only ever called for a group our start() created with
-        start_new_session=True, so the leader pid IS the pgid. Same
-        signallable guard shape as terminate_process_tree: pgid must be
-        real (>1) and never our own group — a broadcast is impossible by
-        construction (the v3.59.1 rail).
-        """
-        proc = info.process
-        if proc is None:
-            return
-        pgid = proc.pid
-        try:
-            if pgid > 1 and pgid != os.getpgrp():
-                os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # group already gone — the goal state
-        except Exception:
-            log.debug("hard group kill for PID %d failed", info.pid, exc_info=True)
-
 
     async def _read_output(self, info: ProcessInfo) -> None:
         """Drain stdout into the ring buffer. Pure drainage — terminal
@@ -541,13 +608,12 @@ class ProcessRegistry:
                 info.status = "failed"
 
         # Reap while ownership is fresh: a non-empty group keeps the leader
-        # pid from being recycled, so owned_pgid still uniquely names OUR
-        # group. After this, shutdown() need not (and must not) signal a
-        # stale, possibly-recycled pgid for an already-terminal record.
-        from ..tools.ssh import terminate_process_tree
-
+        # pid from being recycled — but ONLY while a member survives, so a
+        # numeric pgid is stale-capable here (round-5 blocker #2). Every
+        # signal now goes through pidfds pinned BEFORE membership
+        # verification: TERM, bounded grace, then KILL for survivors.
         try:
-            await terminate_process_tree(info.process, grace=2.0, owned_pgid=info.process.pid)
+            await _reap_group_racefree(info.process.pid, grace=2.0)
         except Exception:
             log.debug("group reap after PID %d exit failed", info.pid, exc_info=True)
 

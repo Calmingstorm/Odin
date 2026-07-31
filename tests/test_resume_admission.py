@@ -1097,20 +1097,46 @@ class TestRestoredTrackerJudgedBeforeGeneration:
 
 
 class TestLegacyCheckpointCompatibility:
-    async def test_pre_pr244_checkpoint_resumes_with_default_pending(self, tmp_path):
+    async def test_pre_pr244_v1_checkpoint_resumes_with_default_pending(self, tmp_path):
         """PR #244 round-4 blocker #2: suspended checkpoints written by
-        v3.67.0 (no wait_judgment_pending, same CODEC_VERSION) must resume
-        after upgrade — the field defaults to False during validation,
-        AFTER the store's digest verification."""
+        v3.67.0 (codec v1, no wait_judgment_pending) must resume after
+        upgrade — the field defaults to False during validation, AFTER
+        the store's digest verification."""
         h, original = await suspend_turn(tmp_path)
         heal_capacity(h, text_response("resumed a legacy checkpoint"))
         make_breaker_probe_ready(h)
         (payload_text,) = h.store._conn.execute("SELECT payload FROM turns").fetchone()
         payload = json.loads(payload_text)
         del payload["fields"]["wait_judgment_pending"]  # the v3.67.0 shape
+        payload["codec_version"] = 1  # written by the older codec
         rewrite_payload_with_valid_digest(h.store, json.dumps(payload, sort_keys=True))
 
         result = await h.manager.try_explicit_resume(resume_msg(original))
         assert result is not None
         assert result[0] == "resumed a legacy checkpoint"
         assert h.row()[0] == TurnStatus.TERMINAL_COMPLETED
+
+    async def test_new_writers_emit_v2(self, tmp_path):
+        h, _original = await suspend_turn(tmp_path)
+        payload = json.loads(h.row()[1])
+        assert payload["codec_version"] == 2
+
+    async def test_v2_payload_missing_the_field_is_malformed(self, tmp_path):
+        """Round-5 blocker #3: version scoping makes the two cases
+        distinguishable — a CURRENT payload missing the field is corrupt
+        and must still be rejected, never silently defaulted."""
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("must never generate"))
+        make_breaker_probe_ready(h)
+        (payload_text,) = h.store._conn.execute("SELECT payload FROM turns").fetchone()
+        payload = json.loads(payload_text)
+        assert payload["codec_version"] == 2
+        del payload["fields"]["wait_judgment_pending"]
+        rewrite_payload_with_valid_digest(h.store, json.dumps(payload, sort_keys=True))
+        calls_before = len(h.fake.calls)
+
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        assert "could not be restored" in result[0]
+        assert len(h.fake.calls) == calls_before  # ZERO generation
+        assert h.row()[0] == TurnStatus.TERMINAL_REJECTED
