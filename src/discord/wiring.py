@@ -817,6 +817,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             fetch_message=_fetch_message,
             auto_resume_enabled=bot.config.turn_state.auto_resume,
             resume_ttl_hours=bot.config.turn_state.resume_ttl_hours,
+            get_bot_user=lambda: bot.user,
         )
         # Late instance-attr wiring: the runner exists before the manager
         # (the manager needs the runner), so the suspension callback is

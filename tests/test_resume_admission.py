@@ -663,6 +663,96 @@ class TestMonotonicSessionFence:
         assert sess.mutation_revision("chX") == 3  # removal GROWS the watermark
 
 
+class _FakeBotUser:
+    def __init__(self, id: int) -> None:
+        self.id = id
+
+
+class TestMentionAnchoredResumeTrigger:
+    """Tag-mode channels force `@bot resume` — ONE leading anchored bot
+    mention is stripped before trigger matching. Anchored only; the exact
+    bare-command contract (trailing `!`/`.` tolerance included) is
+    otherwise unchanged."""
+
+    BOT_ID = 424242
+
+    def _arm(self, h):
+        h.manager._get_bot_user = lambda: _FakeBotUser(self.BOT_ID)
+
+    async def test_leading_mention_resume_triggers(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        self._arm(h)
+        heal_capacity(h, text_response("resumed output"))
+        make_breaker_probe_ready(h)
+        result = await h.manager.try_explicit_resume(
+            resume_msg(original, content=f"<@{self.BOT_ID}> resume")
+        )
+        assert result is not None  # recognized as the resume command
+        assert h.row()[0] != TurnStatus.SUSPENDED  # it acted on the turn
+
+    async def test_nickname_mention_form_triggers(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        self._arm(h)
+        heal_capacity(h, text_response("resumed output"))
+        make_breaker_probe_ready(h)
+        result = await h.manager.try_explicit_resume(
+            resume_msg(original, content=f"<@!{self.BOT_ID}> resume!")
+        )
+        assert result is not None  # <@!id> form + trailing-! contract intact
+
+    async def test_trailing_mention_is_not_a_command(self, tmp_path):
+        """`resume @bot` must run as a normal message — the strip is
+        anchored, never intake's strip-anywhere cleaning."""
+        h, original = await suspend_turn(tmp_path)
+        self._arm(h)
+        result = await h.manager.try_explicit_resume(
+            resume_msg(original, content=f"resume <@{self.BOT_ID}>")
+        )
+        assert result is None
+        assert h.row()[0] == TurnStatus.SUSPENDED  # untouched
+
+    async def test_mention_plus_sentence_is_not_a_command(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        self._arm(h)
+        result = await h.manager.try_explicit_resume(
+            resume_msg(
+                original,
+                content=f"<@{self.BOT_ID}> resume what you were doing",
+            )
+        )
+        assert result is None
+        assert h.row()[0] == TurnStatus.SUSPENDED
+
+    async def test_foreign_mention_is_not_stripped(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        self._arm(h)
+        result = await h.manager.try_explicit_resume(
+            resume_msg(original, content="<@777> resume")
+        )
+        assert result is None  # someone ELSE's mention is ordinary text
+
+    async def test_mention_recognized_trigger_still_fails_closed(self, tmp_path):
+        """The no-raise boundary anchors on CANDIDATE recognition: a store
+        read failure after a mention-form trigger refuses, never falls
+        through to a fresh turn."""
+        h, original = await suspend_turn(tmp_path)
+        self._arm(h)
+        heal_capacity(h, text_response("fresh turn that must never run"))
+        calls_before = len(h.fake.calls)
+
+        def boom(source=None):
+            raise OSError("forced read failure")
+
+        h.store.list_suspended_sync = boom
+        result = await h.manager.try_explicit_resume(
+            resume_msg(original, content=f"<@{self.BOT_ID}> resume")
+        )
+        assert result is not None
+        assert "Nothing was resumed or started fresh" in result[0]
+        assert len(h.fake.calls) == calls_before
+        assert h.row()[0] == TurnStatus.SUSPENDED
+
+
 class TestResumeLookupFailureFailClosed:
     async def test_first_store_read_failure_refuses_before_fresh_generation(
         self, tmp_path
