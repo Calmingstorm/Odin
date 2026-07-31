@@ -308,6 +308,13 @@ def _scan_owned_members(
                     # alive (round-11 #1). Fail closed.
                     return None
                 token = tokens.get(JOB_TOKEN_ENV)
+                if token is None:
+                    # Process marker present but the JOB token deleted —
+                    # selective erasure (round-12). Every legitimate Odin
+                    # child inherits a job token (a default one is stamped
+                    # at startup), so its absence is evidence of tampering,
+                    # not of foreign ownership. Fail closed.
+                    return None
                 if token == job_token:
                     # Record provenance NOW: a zombie has no address
                     # space, so /proc/<pid>/environ becomes unreadable the
@@ -345,6 +352,11 @@ JOB_TOKEN_ENV = "ODIN_BG_JOB"
 # environment lacks it, and that is exactly the case that must fail
 # closed (round-11 #1).
 PROC_TOKEN_ENV = "ODIN_PROC"
+# Default job token stamped at startup so EVERY Odin child carries one.
+# It is what makes another subsystem's child DECIDABLE (its token differs
+# from the background job's) while a child that deleted its job token is
+# evidence of tampering and must fail closed (round-12).
+DEFAULT_JOB_TOKEN = "odin-main"
 
 
 def _read_env_tokens(pid: int) -> dict[str, str] | None | object:

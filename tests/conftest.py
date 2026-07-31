@@ -245,9 +245,15 @@ def _process_containment():
     import os
     import secrets
 
-    from src.tools.process_manager import PROC_TOKEN_ENV, set_child_subreaper
+    from src.tools.process_manager import (
+        DEFAULT_JOB_TOKEN,
+        JOB_TOKEN_ENV,
+        PROC_TOKEN_ENV,
+        set_child_subreaper,
+    )
 
     previous = set_child_subreaper(True)
     os.environ.setdefault(PROC_TOKEN_ENV, secrets.token_hex(8))
+    os.environ.setdefault(JOB_TOKEN_ENV, DEFAULT_JOB_TOKEN)
     yield
     set_child_subreaper(previous)

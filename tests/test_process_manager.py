@@ -1997,3 +1997,80 @@ class TestPidReuseSafety:
         recorded = {(4242, 111)}
         assert pm.reap_adopted_zombies(recorded) == 0
         assert recorded == set()
+
+
+class TestSelectiveProvenanceErasure:
+    """Round-12: deleting only the JOB token (keeping the process marker)
+    must not read as 'another subsystem's child'."""
+
+    def test_absent_job_token_is_ambiguous(self, monkeypatch):
+        import src.tools.process_manager as pm
+
+        mypid = os.getpid()
+        monkeypatch.setattr(pm.os, "listdir", lambda _p: ["4242"])
+        monkeypatch.setattr(
+            pm.os, "pidfd_open", lambda _pid: os.open("/dev/null", os.O_RDONLY)
+        )
+        monkeypatch.setattr(pm, "_proc_ids", lambda _pid: (mypid, 999))
+        # Process marker kept, job token deleted — selective erasure.
+        monkeypatch.setattr(
+            pm, "_read_env_tokens", lambda _pid: {pm.PROC_TOKEN_ENV: "P"}
+        )
+        pinned, complete = pm._scan_owned_members(
+            7, leader_pid=7, adopted_by=mypid, job_token="tok", proc_token="P"
+        )
+        pm._close_pinned(pinned)
+        assert pinned == []  # never killed on a guess
+        assert complete is False  # and emptiness is NOT affirmed
+
+    async def test_selective_erasure_escapee_blocks_affirmative_cleanup(self):
+        """Odin's exact repro through the real start() path: an escapee
+        that keeps ODIN_PROC but deletes ODIN_BG_JOB must prevent
+        confirmed-empty while it is alive."""
+        import src.tools.process_manager as pm
+
+        previously = pm.child_subreaper_active()
+        pm.set_child_subreaper(True)
+        reg = ProcessRegistry()
+        escaped_pid = None
+        try:
+            escape = (
+                "import os,signal,sys,time\n"
+                "if os.fork()==0:\n"
+                " os.setsid()\n"
+                " os.environ.pop('ODIN_BG_JOB', None)\n"
+                " os.execve(sys.executable, [sys.executable, '-c',"
+                " 'import signal,time;"
+                " signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+                " time.sleep(45)'], os.environ)\n"
+                "sys.exit(0)\n"
+            )
+            started = await reg.start("localhost", f'python3 -c "exec({escape!r})"')
+            pid = int(started.split("PID ")[1].split(")")[0])
+            await asyncio.sleep(1.2)
+            info = reg._processes[pid]
+            gone = await reg._kill_group_until_gone(info, timeout=6.0)
+            # The escapee is alive with erased job provenance: cleanup must
+            # NOT claim success.
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                ids = pm._proc_ids(int(entry))
+                if (
+                    isinstance(ids, tuple)
+                    and ids[0] == os.getpid()
+                    and int(entry) not in reg._own_children
+                    and pm._read_job_token(int(entry)) is None
+                ):
+                    escaped_pid = int(entry)
+                    break
+            if escaped_pid is not None:
+                assert gone is False  # ambiguity ⇒ no affirmative emptiness
+        finally:
+            if escaped_pid is not None:
+                try:
+                    os.kill(escaped_pid, 9)
+                except ProcessLookupError:
+                    pass
+            await reg.shutdown()
+            pm.set_child_subreaper(previously)

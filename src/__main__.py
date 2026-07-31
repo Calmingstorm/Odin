@@ -91,7 +91,12 @@ def _enable_process_containment(log) -> None:
     """
     import secrets
 
-    from .tools.process_manager import PROC_TOKEN_ENV, set_child_subreaper
+    from .tools.process_manager import (
+        DEFAULT_JOB_TOKEN,
+        JOB_TOKEN_ENV,
+        PROC_TOKEN_ENV,
+        set_child_subreaper,
+    )
 
     # Process-wide provenance: stamped into os.environ BEFORE any
     # subprocess is spawned, so every child Odin creates inherits it and
@@ -99,6 +104,10 @@ def _enable_process_containment(log) -> None:
     # not-ours) from one that discarded its environment (ambiguous, fails
     # closed).
     os.environ.setdefault(PROC_TOKEN_ENV, secrets.token_hex(8))
+    # Every child inherits a job token; background jobs override it with
+    # their own. A child that has the process marker but NO job token
+    # deleted it, which is tampering — not foreign ownership.
+    os.environ.setdefault(JOB_TOKEN_ENV, DEFAULT_JOB_TOKEN)
 
     if set_child_subreaper(True):
         log.debug("Child-subreaper containment active")
