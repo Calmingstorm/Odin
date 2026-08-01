@@ -71,7 +71,7 @@ openai_codex:
   enabled: true
   model: gpt-5.5                 # ChatGPT subscription path
   max_tokens: 4096
-  reasoning_effort: medium       # none | low | medium | high | xhigh
+  reasoning_effort: medium       # none | low | medium | high | xhigh | max
   agent_reasoning_effort: null   # spawned agents; null = inherit, "auto" = per-spawn choice
   agent_model: null              # spawned agents; null = inherit, "auto" = per-spawn choice
   credentials_path: ./data/codex_auth.json
@@ -89,6 +89,13 @@ openai_codex:
     enabled: false
     model: gpt-5.6-luna
 ```
+
+Reasoning effort `max` is served only by the gpt-5.6 family (sol/terra/luna);
+gpt-5.5 rejects it per-request. Odin refuses a known-incompatible model/effort
+pair everywhere it can be introduced — config load, the admin API, per-spawn
+agent overrides, and final request construction — naming the pair and the
+efforts that model does accept. Unknown model strings pass through unchecked
+(the server stays the authority).
 
 The **auxiliary** model is an optional cheaper Codex model that runs the fixed
 background jobs — compaction, reflection, consolidation, and background

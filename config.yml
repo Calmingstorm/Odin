@@ -17,7 +17,9 @@ openai_codex:
   model: gpt-5.5
   max_tokens: 4096
   # Reasoning effort sent with every main-provider request:
-  # none | low | medium | high | xhigh (backend default: medium)
+  # none | low | medium | high | xhigh | max (backend default: medium).
+  # "max" is gpt-5.6-family only — config load rejects a known-incompatible
+  # model/effort pair (e.g. gpt-5.5 + max) rather than 400 on every request.
   reasoning_effort: medium
   # Effort for spawned-agent iterations only. Unset/null = inherit
   # reasoning_effort ("none" is a real effort level, not inherit). Set to
