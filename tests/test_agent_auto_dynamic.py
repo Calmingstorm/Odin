@@ -147,3 +147,88 @@ def test_policy_never_mutates_static_defs():
     ]:
         apply_agent_axis_policy(get_tool_definitions(), _cfg(m, e))
     assert get_tool_definitions() == before
+
+
+class TestEffortCatalogueFiltering:
+    """Capability-filtered effort catalogue: with the effort axis auto and the
+    model axis NOT auto, every spawn runs one concrete config-resolved model
+    (per-spawn model overrides are hard-rejected on a non-auto axis), so the
+    exposed enum + clause offer only efforts that model can serve. Model axis
+    auto keeps the full catalogue — the spawner picks the model and the spawn
+    boundary owns the pair."""
+
+    @staticmethod
+    def _effort_schema(cfg, name):
+        defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
+        props, desc = _spawn_props(defs, name)
+        return props.get("reasoning_effort"), desc
+
+    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
+    def test_fixed_excluded_model_drops_max(self, name):
+        from src.tools.defs.agents import spawn_effort_clause
+
+        field, desc = self._effort_schema(_cfg("gpt-5.5", "auto"), name)
+        assert field["enum"] == ["none", "low", "medium", "high", "xhigh"]
+        assert "max" not in desc
+        # clause text matches the filtered enum exactly (one renderer)
+        assert spawn_effort_clause(field["enum"]) in desc
+
+    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
+    def test_inherited_excluded_main_model_drops_max(self, name):
+        field, desc = self._effort_schema(
+            _cfg(None, "auto", main_model="gpt-5.5"), name)
+        assert field["enum"] == ["none", "low", "medium", "high", "xhigh"]
+        assert "max" not in desc
+
+    @pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-5.6-luna", "brand-new-model"])
+    def test_capable_and_unknown_models_keep_full_ordered_enum(self, model):
+        field, desc = self._effort_schema(_cfg(model, "auto"), "spawn_agent")
+        assert field["enum"] == ["none", "low", "medium", "high", "xhigh", "max"]
+        assert "max" in desc
+
+    def test_inherited_capable_main_model_keeps_full_enum(self):
+        field, _ = self._effort_schema(
+            _cfg(None, "auto", main_model="gpt-5.6-sol"), "spawn_agent")
+        assert field["enum"] == ["none", "low", "medium", "high", "xhigh", "max"]
+
+    def test_model_axis_auto_never_filters(self):
+        # Even with an excluded MAIN model, auto model axis = spawner's choice.
+        field, desc = self._effort_schema(
+            _cfg("auto", "auto", main_model="gpt-5.5"), "spawn_agent")
+        assert field["enum"] == ["none", "low", "medium", "high", "xhigh", "max"]
+
+    def test_both_auto_returns_identity(self):
+        defs = get_tool_definitions()
+        assert apply_agent_axis_policy(defs, _cfg("auto", "auto")) is defs
+
+    def test_static_definitions_never_mutated(self):
+        # The filter works on deep clones — the shared static defs (and the
+        # canonical exposed form) must keep the full enum after policy calls.
+        apply_agent_axis_policy(get_tool_definitions(), _cfg("gpt-5.5", "auto"))
+        static_props, static_desc = _spawn_props(get_tool_definitions(), "spawn_agent")
+        assert static_props["reasoning_effort"]["enum"][-1] == "max"
+        assert "max" in static_desc
+
+    def test_empty_filter_omits_field_and_clause(self, monkeypatch):
+        # Defensive edge: capability data filtering EVERY effort must omit the
+        # property + clause, never emit an unsatisfiable empty enum.
+        from src.config import schema as schema_mod
+        from src.tools.defs.agents import SPAWN_EFFORT_OPTIONS
+
+        monkeypatch.setitem(
+            schema_mod.CODEX_MODEL_UNSUPPORTED_EFFORTS,
+            "gpt-5.5",
+            frozenset(SPAWN_EFFORT_OPTIONS),
+        )
+        field, desc = self._effort_schema(_cfg("gpt-5.5", "auto"), "spawn_agent")
+        assert field is None
+        assert "reasoning_effort" not in desc
+
+    def test_clause_renderer_is_the_static_source(self):
+        from src.tools.defs.agents import (
+            SPAWN_EFFORT_CLAUSE,
+            SPAWN_EFFORT_OPTIONS,
+            spawn_effort_clause,
+        )
+        # byte-identical static output — one wording template everywhere
+        assert spawn_effort_clause(SPAWN_EFFORT_OPTIONS) == SPAWN_EFFORT_CLAUSE

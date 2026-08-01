@@ -34,10 +34,23 @@ SPAWN_MODEL_CLAUSE = (
 # the spawn boundary rejects known-incompatible model/effort pairs.
 SPAWN_EFFORT_OPTIONS: list[str] = ["none", "low", "medium", "high", "xhigh", "max"]
 
-SPAWN_EFFORT_CLAUSE = (
-    " Set 'reasoning_effort' (" + "/".join(SPAWN_EFFORT_OPTIONS) + ") for THIS agent — "
-    "higher is more thorough but slower/costlier. Omit to use the configured agent effort."
-)
+
+def spawn_effort_clause(options: list[str]) -> str:
+    """Render the effort clause for an ordered option list.
+
+    ONE wording template for both the static catalogue and the policy layer's
+    capability-filtered clones (a filtered enum with an unfiltered clause
+    would advertise efforts the schema no longer offers). Callers pass a
+    subsequence of ``SPAWN_EFFORT_OPTIONS`` — never a sorted set, which would
+    scramble the intentional escalation order.
+    """
+    return (
+        " Set 'reasoning_effort' (" + "/".join(options) + ") for THIS agent — "
+        "higher is more thorough but slower/costlier. Omit to use the configured agent effort."
+    )
+
+
+SPAWN_EFFORT_CLAUSE = spawn_effort_clause(SPAWN_EFFORT_OPTIONS)
 
 TOOLS_SECTION: list[dict] = [
     # --- Agent orchestration ---
