@@ -27,6 +27,7 @@ from .defs.agents import (
     SPAWN_LOOP_BASE_DESC,
     SPAWN_MODEL_CLAUSE,
     spawn_effort_clause,
+    spawn_effort_property_desc,
 )
 
 _SPAWN_TOOLS = ("spawn_agent", "spawn_loop_agents")
@@ -118,6 +119,11 @@ def _condition_spawn_tool(
             if "reasoning_effort" not in required:
                 required.append("reasoning_effort")
             schema_obj["required"] = required
+            # The FIELD-level description must agree with the required list
+            # and the tool clause — the model reads all three while choosing.
+            props["reasoning_effort"]["description"] = spawn_effort_property_desc(
+                tool["name"], required=True
+            )
 
 
 def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:

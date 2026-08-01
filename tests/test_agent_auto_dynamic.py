@@ -307,3 +307,55 @@ class TestUnservableOmission:
         schema, desc = self._schema_obj(get_tool_definitions(), "spawn_agent")
         assert schema["required"] == ["label", "goal"]
         assert "Omit to use the configured agent effort" in desc
+
+
+class TestPropertyDescriptionTruthfulness:
+    """PR #246 round 2: the FIELD-level description must agree with the
+    required list and the tool clause — all three render from shared sources
+    (SPAWN_EFFORT_REQUIRED_TAIL / spawn_effort_property_desc), so no
+    catalogue surface can call the field optional while the schema requires
+    it, or advertise the guaranteed-failure omission inside the field."""
+
+    _CFG = None  # built per test via TestUnservableOmission's helper
+
+    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
+    def test_required_state_rewrites_property_description(self, name):
+        from src.tools.defs.agents import SPAWN_EFFORT_REQUIRED_TAIL
+
+        cfg = TestUnservableOmission._cfg_main_effort(
+            "gpt-5.5", "auto", main_effort="max")
+        defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
+        props, desc = _spawn_props(defs, name)
+        pd = props["reasoning_effort"]["description"]
+        assert SPAWN_EFFORT_REQUIRED_TAIL in pd
+        assert "Optional" not in pd
+        assert "Omit to inherit" not in pd
+        # the tool clause carries the SAME shared tail — one source
+        assert SPAWN_EFFORT_REQUIRED_TAIL in desc
+
+    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
+    def test_optional_state_keeps_static_property_description(self, name):
+        cfg = TestUnservableOmission._cfg_main_effort(
+            "gpt-5.5", "auto", main_effort="xhigh")
+        defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
+        props, _ = _spawn_props(defs, name)
+        static_props, _ = _spawn_props(get_tool_definitions(), name)
+        assert (props["reasoning_effort"]["description"]
+                == static_props["reasoning_effort"]["description"])
+        assert "Omit to inherit" in props["reasoning_effort"]["description"]
+
+    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
+    def test_renderer_is_the_static_property_source(self, name):
+        from src.tools.defs.agents import spawn_effort_property_desc
+
+        static_props, _ = _spawn_props(get_tool_definitions(), name)
+        assert (spawn_effort_property_desc(name)
+                == static_props["reasoning_effort"]["description"])
+
+    def test_static_property_descriptions_untouched_after_required_render(self):
+        cfg = TestUnservableOmission._cfg_main_effort(
+            "gpt-5.5", "auto", main_effort="max")
+        apply_agent_axis_policy(get_tool_definitions(), cfg)
+        for name in ("spawn_agent", "spawn_loop_agents"):
+            static_props, _ = _spawn_props(get_tool_definitions(), name)
+            assert "Optional" in static_props["reasoning_effort"]["description"]

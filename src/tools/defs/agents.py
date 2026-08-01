@@ -35,6 +35,15 @@ SPAWN_MODEL_CLAUSE = (
 SPAWN_EFFORT_OPTIONS: list[str] = ["none", "low", "medium", "high", "xhigh", "max"]
 
 
+# The ONE load-bearing required-wording tail, shared by the tool-level clause
+# AND the field-level property descriptions — a single source so no catalogue
+# surface can ever disagree about whether omission is a valid spelling.
+SPAWN_EFFORT_REQUIRED_TAIL = (
+    "REQUIRED here: the configured default effort is not supported by the "
+    "configured agent model, so pick a compatible effort explicitly."
+)
+
+
 def spawn_effort_clause(options: list[str], *, required: bool = False) -> str:
     """Render the effort clause for an ordered option list.
 
@@ -47,16 +56,35 @@ def spawn_effort_clause(options: list[str], *, required: bool = False) -> str:
     agent model cannot serve the inherited default, omission would be an
     unservable spelling and must not be advertised.
     """
-    tail = (
-        "REQUIRED here: the configured default effort is not supported by the "
-        "configured agent model, so pick a compatible effort explicitly."
-        if required
-        else "Omit to use the configured agent effort."
-    )
+    tail = SPAWN_EFFORT_REQUIRED_TAIL if required else "Omit to use the configured agent effort."
     return (
         " Set 'reasoning_effort' (" + "/".join(options) + ") for THIS agent — "
         "higher is more thorough but slower/costlier. " + tail
     )
+
+
+def spawn_effort_property_desc(tool_name: str, *, required: bool = False) -> str:
+    """Render the ``reasoning_effort`` PROPERTY description — the field-level
+    twin of ``spawn_effort_clause``. The static definitions below use the
+    optional form (byte-identical to the historical text); the policy layer
+    re-renders the required form onto clones, sharing
+    ``SPAWN_EFFORT_REQUIRED_TAIL`` so the property description, the tool
+    clause, and the required list can never contradict each other.
+    """
+    if tool_name == "spawn_loop_agents":
+        required_lead = "Reasoning effort (higher = more thorough, slower)."
+        optional_lead = "Optional reasoning effort (higher = more thorough, slower)."
+    else:
+        required_lead = (
+            "Reasoning effort for this agent — higher is more thorough but slower/costlier."
+        )
+        optional_lead = (
+            "Optional reasoning effort for this agent — higher is more thorough but "
+            "slower/costlier."
+        )
+    if required:
+        return required_lead + " " + SPAWN_EFFORT_REQUIRED_TAIL
+    return optional_lead + " Omit to inherit the configured agent effort."
 
 
 SPAWN_EFFORT_CLAUSE = spawn_effort_clause(SPAWN_EFFORT_OPTIONS)
@@ -84,10 +112,7 @@ TOOLS_SECTION: list[dict] = [
                 "reasoning_effort": {
                     "type": "string",
                     "enum": SPAWN_EFFORT_OPTIONS,
-                    "description": (
-                        "Optional reasoning effort for this agent — higher is more thorough but "
-                        "slower/costlier. Omit to inherit the configured agent effort."
-                    ),
+                    "description": spawn_effort_property_desc("spawn_agent"),
                 },
                 "parent_id": {
                     "type": "string",
@@ -199,10 +224,7 @@ TOOLS_SECTION: list[dict] = [
                             "reasoning_effort": {
                                 "type": "string",
                                 "enum": SPAWN_EFFORT_OPTIONS,
-                                "description": (
-                                    "Optional reasoning effort (higher = more thorough, "
-                                    "slower). Omit to inherit the configured agent effort."
-                                ),
+                                "description": spawn_effort_property_desc("spawn_loop_agents"),
                             },
                         },
                         "required": ["label", "goal"],
