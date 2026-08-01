@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1209,57 +1208,70 @@ class TestForegroundMasterLifecycle:
         assert pool._total_opened == 1
         assert pool._total_reused == 0
 
-    async def test_real_controlmaster_is_foreground_and_reaped_without_orphan(
-        self, tmp_path
+    async def test_process_level_master_stays_direct_and_is_reaped(
+        self, tmp_path, monkeypatch
     ):
-        """Load-bearing process pin for the soak's exact structural defect.
+        """Process-level pin for the soak's fast-double-fork class.
 
-        A real OpenSSH client substitutes for the remote handshake endpoint:
-        the test does not need network access to prove lifecycle topology.
-        The master pid returned by create_subprocess_exec remains the direct,
-        waitable child until close_host() terminates and reaps it; no adopted
-        zombie can be created because neither argv contains daemonizing
-        ControlPersist.
+        The fake ssh deliberately models the relevant OpenSSH boundary: a
+        master with ``ControlPersist=no`` remains the direct process and can
+        be signalled through ``-O exit``; any other value exits before making
+        a usable socket. Thus changing either master or command argv back to
+        daemonizing persistence fails this pin instead of blessing the leak.
         """
-        import shutil
-
-        ssh = shutil.which("ssh")
-        assert ssh is not None
-        pool = SSHConnectionPool(control_persist=60, socket_dir=str(tmp_path))
-        socket = pool.get_socket_path("h1", "root")
-        process = await asyncio.create_subprocess_exec(
-            ssh,
-            "-o",
-            f"ControlPath={socket}",
-            "-o",
-            "ControlMaster=yes",
-            "-o",
-            "ControlPersist=no",
-            "-N",
-            "-F",
-            "/dev/null",
-            "-o",
-            "ProxyCommand=sleep 300",
-            "root@invalid",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+        fake_ssh = tmp_path / "ssh"
+        fake_ssh.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, signal, sys, time\n"
+            "args = sys.argv[1:]\n"
+            "path = next(a.split('=', 1)[1] for a in args "
+            "if a.startswith('ControlPath='))\n"
+            "if '-O' in args:\n"
+            "    try:\n"
+            "        pid = int(open(path + '.pid').read())\n"
+            "        os.kill(pid, signal.SIGTERM)\n"
+            "    except (OSError, ValueError):\n"
+            "        pass\n"
+            "    raise SystemExit(0)\n"
+            "persist = next(a.split('=', 1)[1] for a in args "
+            "if a.startswith('ControlPersist='))\n"
+            "if persist != 'no':\n"
+            "    raise SystemExit(42)\n"
+            "open(path, 'w').close()\n"
+            "with open(path + '.pid', 'w') as fh:\n"
+            "    fh.write(str(os.getpid()))\n"
+            "signal.signal(signal.SIGTERM, lambda *_: raise_exit())\n"
+            "def never_called():\n"
+            "    return None\n"
+            "time.sleep(300)\n"
         )
-        key = "root@h1"
-        pool._masters[key] = process
-        pool._connections[key] = time.monotonic()
-        try:
-            await asyncio.sleep(0.1)
-            assert process.returncode is None
-            raw = open(f"/proc/{process.pid}/stat", "rb").read()
-            rest = raw.rsplit(b")", 1)[1].split()
-            assert int(rest[1]) == os.getpid()  # direct child, never adopted
-            assert await pool.close_host("h1", "root") is True
-            assert process.returncode is not None
-            assert not os.path.exists(f"/proc/{process.pid}")
-        finally:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
+        # Replace the forward-referenced signal handler with a definition
+        # before installation while keeping the generated script readable.
+        text = fake_ssh.read_text().replace(
+            "signal.signal(signal.SIGTERM, lambda *_: raise_exit())\n"
+            "def never_called():\n"
+            "    return None\n",
+            "def raise_exit():\n"
+            "    raise SystemExit(0)\n"
+            "signal.signal(signal.SIGTERM, lambda *_: raise_exit())\n",
+        )
+        fake_ssh.write_text(text)
+        fake_ssh.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+
+        pool = SSHConnectionPool(control_persist=0, socket_dir=str(tmp_path / "s"))
+        assert await pool.acquire("h1", "/k", "/kh") is True
+        master = pool._masters["root@h1"]
+        assert master.returncode is None
+        raw = open(f"/proc/{master.pid}/stat", "rb").read()
+        rest = raw.rsplit(b")", 1)[1].split()
+        assert int(rest[1]) == os.getpid()
+
+        pool.release("h1")
+        await asyncio.wait_for(pool._expiry_tasks["root@h1"], timeout=2)
+        assert master.returncode == 0
+        assert not os.path.exists(f"/proc/{master.pid}")
+
 
 class TestRunSSHCommandMasterRegistration:
     """run_ssh_command must attempt master registration after every pooled
