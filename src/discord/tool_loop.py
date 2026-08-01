@@ -38,7 +38,7 @@ import discord
 
 from ..llm import CircuitOpenError
 from ..llm.errors import LLMCapacityError
-from ..llm.recovery import generate_with_recovery
+from ..llm.recovery import generate_with_recovery, preflight_incompatible_effort
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
@@ -878,6 +878,10 @@ class ToolLoopRunner:
         interrupts any recovery wait immediately.
         """
         _channel_id = str(st.message.channel.id)
+        # Pre-admission: a known-incompatible live pair fails fast — never
+        # deadline-wait on (or count against) a breaker for a request that
+        # could not legally be sent.
+        preflight_incompatible_effort(self._llm_gateway.active_client)
         breaker = self._llm_gateway.capacity_breaker_for()
         policy = self._llm_gateway.recovery_policy()
 
@@ -1978,6 +1982,12 @@ class ToolLoopRunner:
             )
 
         try:
+            # Pre-admission fast-fail, same contract as the chat path — and
+            # INSIDE the try, so LLMRequestError completes the loop through
+            # _finish_loop (trajectory + reflection finalization) exactly
+            # like any other failed generation instead of escaping
+            # run_autonomous().
+            preflight_incompatible_effort(self._llm_gateway.active_client)
             response = await generate_with_recovery(
                 _attempt,
                 policy=policy,

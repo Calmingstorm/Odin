@@ -105,3 +105,48 @@ class TestSpawnLoopAgentsConfigPath:
         )
         assert captured["iteration_timeout"] == bot.config.agents.iteration_timeout_seconds
         assert captured["max_lifetime"] == bot.config.agents.max_lifetime_seconds
+
+
+class TestSpawnLoopPairValidation:
+    """Spawn boundary for the batch: ONE known-incompatible model/effort pair
+    rejects the WHOLE batch before anything spawns (atomic — a partial fleet
+    silently running the wrong policy is worse than a clean retry)."""
+
+    async def test_one_bad_pair_rejects_whole_batch(self):
+        bot, captured = _bot_with_running_loop()
+        bot.config.openai_codex.model = "gpt-5.6-sol"
+        bot.config.openai_codex.agent_model = "auto"
+        bot.config.openai_codex.agent_reasoning_effort = "auto"
+        # make the fake client codex-shaped so the policy resolves models
+        bot.llm_gateway.active_client.reasoning_effort = "medium"
+        bot.llm_gateway.active_client.model = "gpt-5.6-sol"
+        result = await bot.agent_task_tools._handle_spawn_loop_agents(
+            FakeMessage("go", channel=FakeChannel(id=777)),
+            {"loop_id": "loop-1", "tasks": [
+                {"label": "fine", "goal": "a", "reasoning_effort": "max"},
+                {"label": "doomed", "goal": "b",
+                 "model": "gpt-5.5", "reasoning_effort": "max"},
+            ]},
+        )
+        assert "Error" in result and "doomed" in result
+        assert "gpt-5.5" in result and "'max'" in result
+        assert captured == {}  # nothing spawned — the batch is atomic
+
+    async def test_all_good_max_batch_spawns(self):
+        bot, captured = _bot_with_running_loop()
+        bot.config.openai_codex.model = "gpt-5.6-sol"
+        bot.config.openai_codex.agent_model = "auto"
+        bot.config.openai_codex.agent_reasoning_effort = "auto"
+        bot.llm_gateway.active_client.reasoning_effort = "medium"
+        bot.llm_gateway.active_client.model = "gpt-5.6-sol"
+        result = await bot.agent_task_tools._handle_spawn_loop_agents(
+            FakeMessage("go", channel=FakeChannel(id=777)),
+            {"loop_id": "loop-1", "tasks": [
+                {"label": "a", "goal": "x", "reasoning_effort": "max"},
+                {"label": "b", "goal": "y",
+                 "model": "gpt-5.6-luna", "reasoning_effort": "max"},
+            ]},
+        )
+        assert "Error" not in result
+        assert captured["tasks"][0]["reasoning_effort_override"] == "max"
+        assert captured["tasks"][1]["model_override"] == "gpt-5.6-luna"

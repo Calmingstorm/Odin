@@ -28,9 +28,15 @@ SPAWN_MODEL_CLAUSE = (
     "gpt-5.6-luna (fastest, for simple/mechanical work); match the tier to the task. "
     "Omit to use the configured agent model."
 )
+# One ordered constant drives every per-spawn effort enum and clause below —
+# kept in lockstep with config.schema.CODEX_REASONING_EFFORTS by a sync test
+# (this module stays deliberately import-free). "max" is gpt-5.6-family only;
+# the spawn boundary rejects known-incompatible model/effort pairs.
+SPAWN_EFFORT_OPTIONS: list[str] = ["none", "low", "medium", "high", "xhigh", "max"]
+
 SPAWN_EFFORT_CLAUSE = (
-    " Set 'reasoning_effort' (none/low/medium/high/xhigh) for THIS agent — higher is "
-    "more thorough but slower/costlier. Omit to use the configured agent effort."
+    " Set 'reasoning_effort' (" + "/".join(SPAWN_EFFORT_OPTIONS) + ") for THIS agent — "
+    "higher is more thorough but slower/costlier. Omit to use the configured agent effort."
 )
 
 TOOLS_SECTION: list[dict] = [
@@ -55,7 +61,7 @@ TOOLS_SECTION: list[dict] = [
                 },
                 "reasoning_effort": {
                     "type": "string",
-                    "enum": ["none", "low", "medium", "high", "xhigh"],
+                    "enum": SPAWN_EFFORT_OPTIONS,
                     "description": (
                         "Optional reasoning effort for this agent — higher is more thorough but "
                         "slower/costlier. Omit to inherit the configured agent effort."
@@ -170,7 +176,7 @@ TOOLS_SECTION: list[dict] = [
                             },
                             "reasoning_effort": {
                                 "type": "string",
-                                "enum": ["none", "low", "medium", "high", "xhigh"],
+                                "enum": SPAWN_EFFORT_OPTIONS,
                                 "description": (
                                     "Optional reasoning effort (higher = more thorough, "
                                     "slower). Omit to inherit the configured agent effort."

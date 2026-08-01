@@ -113,7 +113,8 @@ export default {
               <label class="text-xs text-gray-400 block">Model
               <select v-model="codexForm.model" @change="saveCodexConfigDebounced"
                       class="hm-input">
-                <option v-for="m in codexModelOptions" :key="m" :value="m">{{ m }}</option>
+                <option v-for="m in codexModelOptions" :key="m" :value="m"
+                        :disabled="mainModelOptionDisabled(m)">{{ m }}</option>
               </select>
               </label>
             </div>
@@ -123,7 +124,8 @@ export default {
                       class="hm-input">
                 <option value="">Inherit chat model</option>
                 <option value="auto">Auto — choose per spawn</option>
-                <option v-for="m in codexAgentModelOptions" :key="m" :value="m">{{ m }}</option>
+                <option v-for="m in codexAgentModelOptions" :key="m" :value="m"
+                        :disabled="agentModelOptionDisabled(m)">{{ m }}</option>
               </select>
               </label>
             </div>
@@ -136,6 +138,7 @@ export default {
                 <option value="medium">Medium</option>
                 <option value="high">High</option>
                 <option value="xhigh">Extra High</option>
+                <option v-if="mainMaxAllowed" value="max">Max</option>
               </select>
               </label>
             </div>
@@ -150,6 +153,7 @@ export default {
                 <option value="medium">Medium</option>
                 <option value="high">High</option>
                 <option value="xhigh">Extra High</option>
+                <option v-if="agentMaxAllowed" value="max">Max</option>
               </select>
               </label>
             </div>
@@ -433,6 +437,39 @@ export default {
       // inject them as a temporary/unknown option, which would duplicate them.
       return v && v !== 'auto' && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
     });
+    // "max" is gpt-5.6-family only (mirrors config.schema
+    // CODEX_MODEL_UNSUPPORTED_EFFORTS; the server 400s the pair). Both
+    // directions are guarded here because the full-form debounced save would
+    // otherwise carry a hidden-but-still-selected invalid value: the Max
+    // option hides when its governing model can't serve it, AND an excluded
+    // model can't be selected while "max" is (or would become) that axis's
+    // effective effort. Agent Model "auto" always offers Max — the per-spawn
+    // pair is validated at execution.
+    const MAX_EXCLUDED_MODELS = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'];
+    const mainMaxAllowed = computed(() =>
+      !MAX_EXCLUDED_MODELS.includes(codexForm.value.model)
+      // A fixed excluded agent model inheriting the chat effort would turn
+      // "max" here into an invalid agent pair — hide Max then too.
+      && !(MAX_EXCLUDED_MODELS.includes(codexForm.value.agent_model)
+           && codexForm.value.agent_reasoning_effort === ''));
+    const agentMaxAllowed = computed(() => {
+      const am = codexForm.value.agent_model;
+      if (am === 'auto') return true;
+      return !MAX_EXCLUDED_MODELS.includes(am || codexForm.value.model);
+    });
+    const agentEffortEffectiveMax = computed(() => {
+      const ae = codexForm.value.agent_reasoning_effort;
+      if (ae === 'auto') return false;
+      return (ae || codexForm.value.reasoning_effort) === 'max';
+    });
+    const mainModelOptionDisabled = (m) =>
+      MAX_EXCLUDED_MODELS.includes(m)
+      && (codexForm.value.reasoning_effort === 'max'
+          // Inherit-chain: agents inheriting this model while their effective
+          // effort is max would become an invalid pair.
+          || (codexForm.value.agent_model === '' && agentEffortEffectiveMax.value));
+    const agentModelOptionDisabled = (m) =>
+      MAX_EXCLUDED_MODELS.includes(m) && agentEffortEffectiveMax.value;
     // --- Auxiliary (cheap-model) ---
     const auxForm = ref({ enabled: false, model: 'gpt-5.6-luna' });
     const auxData = ref({ unavailable_reason: null });
@@ -857,6 +894,7 @@ export default {
     return {
       loading, llmStatus, selectedProvider, switching,
       codexForm, codexModelOptions, codexAgentModelOptions,
+      mainMaxAllowed, agentMaxAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
       auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
       ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,

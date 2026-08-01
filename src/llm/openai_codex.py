@@ -5,6 +5,7 @@ import json
 
 import aiohttp
 
+from ..config.schema import effort_incompatibility_error
 from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
@@ -20,6 +21,18 @@ from .errors import (
 from .types import LLMResponse, ToolCall
 
 log = get_logger("codex")
+
+
+def _reject_known_bad_pair(model: str | None, effort: str | None) -> None:
+    """Request-construction boundary: a KNOWN-incompatible model/effort pair
+    fails locally before any HTTP — no retry, no account rotation, and the
+    capacity breaker never sees a request that was never sent. Catches the
+    drift case no earlier boundary can: an agent holding a fixed model
+    override while its non-overridden effort tracks live config (or vice
+    versa) can only become invalid at call time."""
+    err = effort_incompatibility_error(model, effort)
+    if err:
+        raise LLMRequestError(err)
 
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
 
@@ -248,6 +261,7 @@ class CodexChatClient:
             max_tokens: Per-call token limit override. Falls back to
                         ``self.max_tokens`` when *None*.
         """
+        _reject_known_bad_pair(self.model, self.reasoning_effort)
         body = {
             "model": self.model,
             "instructions": system,
@@ -525,6 +539,7 @@ class CodexChatClient:
         # the trajectory stamp diverge from what was actually sent.
         effort = reasoning_effort if reasoning_effort is not None else self.reasoning_effort
         resolved_model = model if model else self.model
+        _reject_known_bad_pair(resolved_model, effort)
         body = {
             "model": resolved_model,
             "instructions": system,

@@ -134,8 +134,9 @@ class TestCodexReasoningEffort:
         from src.config.schema import CODEX_REASONING_EFFORTS, OpenAICodexConfig
         # "minimal" is deliberately excluded — every Codex model on this auth
         # path rejects it per-request despite it appearing in the API's
-        # generic parameter enum.
-        assert CODEX_REASONING_EFFORTS == {"none", "low", "medium", "high", "xhigh"}
+        # generic parameter enum. "max" is real but gpt-5.6-family-only (the
+        # pair boundaries in test_max_reasoning_effort own that dimension).
+        assert CODEX_REASONING_EFFORTS == {"none", "low", "medium", "high", "xhigh", "max"}
         for value in CODEX_REASONING_EFFORTS:
             assert OpenAICodexConfig(reasoning_effort=value).reasoning_effort == value
 

@@ -1226,3 +1226,102 @@ class TestLegacyPersistConfig:
         bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(None, True))
         with pytest.raises(asyncio.CancelledError):
             await _persist_config(bot)
+
+
+class TestCodexMaxEffortPairValidation:
+    """Merged-desired-state boundary: the PUT accepts partial bodies, so an
+    incompatible model/effort pair must be caught on the RESULT of the update
+    — in either direction, on both axes, before any mutation or reload."""
+
+    @pytest.mark.asyncio
+    async def test_max_accepted_on_capable_model(self):
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"model": "gpt-5.6-sol", "reasoning_effort": "max"})
+            assert r.status == 200
+        assert bot.config.openai_codex.reasoning_effort == "max"
+        gw.reload_codex_inner.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_effort_direction_rejected_with_allowed_list(self):
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        bot.config.openai_codex.model = "gpt-5.5"
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json={"reasoning_effort": "max"})
+            assert r.status == 400
+            data = await r.json()
+            assert "gpt-5.5" in data["error"] and "'max'" in data["error"]
+            assert "max" not in data["allowed"] and "xhigh" in data["allowed"]
+        # nothing mutated, nothing reloaded
+        assert bot.config.openai_codex.reasoning_effort == "medium"
+        gw.reload_codex_inner.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_model_direction_rejected(self):
+        """Changing ONLY the model under a persisted max is the same 400."""
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        bot.config.openai_codex.model = "gpt-5.6-sol"
+        bot.config.openai_codex.reasoning_effort = "max"
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json={"model": "gpt-5.5"})
+            assert r.status == 400
+        assert bot.config.openai_codex.model == "gpt-5.6-sol"
+        gw.reload_codex_inner.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_agent_model_direction_rejected(self):
+        """Agent axes inheriting the main max: fixing agent_model to gpt-5.5
+        breaks the effective agent pair even though neither field is 'wrong'
+        alone."""
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.config.openai_codex.model = "gpt-5.6-sol"
+        bot.config.openai_codex.reasoning_effort = "max"
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json={"agent_model": "gpt-5.5"})
+            assert r.status == 400
+            assert "agent settings" in (await r.json())["error"]
+        assert bot.config.openai_codex.agent_model is None
+
+    @pytest.mark.asyncio
+    async def test_agent_effort_direction_rejected(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.config.openai_codex.agent_model = "gpt-5.5"
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"agent_reasoning_effort": "max"})
+            assert r.status == 400
+        assert bot.config.openai_codex.agent_reasoning_effort is None
+
+    @pytest.mark.asyncio
+    async def test_combined_valid_switch_in_one_put_accepted(self):
+        """Leaving a bad-pair state by changing BOTH fields at once must work
+        (the merged result is what's validated, not the transition)."""
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.config.openai_codex.model = "gpt-5.6-sol"
+        bot.config.openai_codex.reasoning_effort = "max"
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"model": "gpt-5.5", "reasoning_effort": "xhigh"})
+            assert r.status == 200
+        assert bot.config.openai_codex.model == "gpt-5.5"
+        assert bot.config.openai_codex.reasoning_effort == "xhigh"
+
+    @pytest.mark.asyncio
+    async def test_auto_axis_exempt(self):
+        """'auto' on an agent axis defers pair validation to the spawn and
+        request-construction boundaries."""
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.config.openai_codex.model = "gpt-5.5"
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config",
+                            json={"agent_model": "auto", "agent_reasoning_effort": "max"})
+            assert r.status == 200
+        assert bot.config.openai_codex.agent_reasoning_effort == "max"

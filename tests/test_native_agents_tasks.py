@@ -353,7 +353,11 @@ class TestAgentReasoningEffortCallback:
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
         out = await cb([{"role": "user", "content": "x"}], "sys", [])
-        assert client.captured["reasoning_effort"] is None  # client applies its own
+        # Since the round-2 snapshot contract, the inherited effort is pinned
+        # per generation and travels EXPLICITLY on the wire (preflight and the
+        # outbound request must agree) — same effective request as the old
+        # "None = client applies its own", now immune to mid-generation drift.
+        assert client.captured["reasoning_effort"] == "high"
         assert out["reasoning_effort"] == "high"            # stamp = inherited value
 
     async def test_callback_reads_config_at_call_time(self):
@@ -368,7 +372,9 @@ class TestAgentReasoningEffortCallback:
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
         await cb([{"role": "user", "content": "x"}], "sys", [])
-        assert client.captured["reasoning_effort"] is None
+        # inherit resolves to the client's own effort, snapshotted per
+        # generation (round-2 contract) — explicit on the wire, not None
+        assert client.captured["reasoning_effort"] == "high"
         cfg.openai_codex.agent_reasoning_effort = "xhigh"  # live WebUI change
         await cb([{"role": "user", "content": "x"}], "sys", [])
         assert client.captured["reasoning_effort"] == "xhigh"
@@ -883,3 +889,178 @@ class TestBackgroundFollowupRouting:
         cb = await self._capture_cb(gateway)
         assert await cb([], "s", 200) == "strong"
         active.chat.assert_awaited_once()
+
+
+class TestSpawnPairValidation:
+    """Spawn boundary (3 of 4): the pair a spawn would run RIGHT NOW —
+    override beats fixed config beats inherited-main — must not be a
+    known-incompatible model/effort combination. Rejected before anything
+    spawns, through the same policy resolution the iteration callbacks use."""
+
+    @staticmethod
+    def _codex_cfg(model="gpt-5.6-sol", agent_model=None, agent_effort=None):
+        base = _cfg()
+        base.openai_codex = SimpleNamespace(
+            model=model, agent_model=agent_model, agent_reasoning_effort=agent_effort)
+        return base
+
+    @staticmethod
+    def _codex_client(model="gpt-5.6-sol", effort="medium"):
+        return SimpleNamespace(model=model, reasoning_effort=effort)
+
+    async def test_fixed_config_bad_pair_rejected(self):
+        cfg = self._codex_cfg(agent_model="gpt-5.5", agent_effort="max")
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=_fake_gateway(self._codex_client()))
+        out = await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        assert "Error" in out and "gpt-5.5" in out and "'max'" in out
+        assert "allowed for this model" in out
+        t._agent_manager.spawn.assert_not_called()
+
+    async def test_override_bad_pair_rejected(self):
+        cfg = self._codex_cfg(agent_model="auto", agent_effort="auto")
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=_fake_gateway(self._codex_client()))
+        out = await t._handle_spawn_agent(
+            _message(),
+            {"label": "w", "goal": "g", "model": "gpt-5.5", "reasoning_effort": "max"})
+        assert "Error" in out and "gpt-5.5" in out
+        t._agent_manager.spawn.assert_not_called()
+
+    async def test_model_override_meets_inherited_live_max(self):
+        """Effort inherits the LIVE client's max; an explicit gpt-5.5 model
+        override makes the resolved pair invalid even though the task itself
+        never mentions an effort."""
+        cfg = self._codex_cfg(agent_model="auto", agent_effort=None)
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=_fake_gateway(self._codex_client(effort="max")))
+        out = await t._handle_spawn_agent(
+            _message(), {"label": "w", "goal": "g", "model": "gpt-5.5"})
+        assert "Error" in out and "'max'" in out
+        t._agent_manager.spawn.assert_not_called()
+
+    async def test_good_max_pair_spawns(self):
+        cfg = self._codex_cfg(agent_model="auto", agent_effort="auto")
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=_fake_gateway(self._codex_client()))
+        t._agent_manager.spawn.return_value = "agent-1"
+        t._agent_manager._agents = {}
+        out = await t._handle_spawn_agent(
+            _message(),
+            {"label": "w", "goal": "g",
+             "model": "gpt-5.6-luna", "reasoning_effort": "max"})
+        assert "spawned" in out
+
+    async def test_non_codex_client_unaffected(self):
+        """A provider without effort semantics (no reasoning_effort attr)
+        never trips the pair check regardless of config."""
+        cfg = self._codex_cfg(agent_model="gpt-5.5", agent_effort="max")
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=_fake_gateway(SimpleNamespace(model="llama3.1:8b")))
+        t._agent_manager.spawn.return_value = "agent-1"
+        t._agent_manager._agents = {}
+        out = await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        assert "spawned" in out
+
+
+class TestAgentGeneratePreflight:
+    """Review round 1 (High), agent path: an in-flight agent whose resolved
+    pair is invalid must fail fast as LLMRequestError BEFORE breaker
+    admission — even (especially) while that model's breaker is OPEN — and
+    must not move the breaker's failure count."""
+
+    async def test_bad_pair_fails_fast_with_open_breaker(self):
+        import pytest
+
+        from src.llm.errors import LLMRequestError
+
+        client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="medium")
+        gw = _fake_gateway(client)
+        breaker = gw.capacity_breaker_for("gpt-5.5")
+        # open it: default threshold, drive failures until open
+        while breaker.snapshot()["state"] != "open":
+            breaker.record_generation_failure()
+        failures_before = breaker.snapshot()["failed_generations"]
+        t = _tools(llm_gateway=gw)
+        with pytest.raises(LLMRequestError) as ei:
+            await t._agent_generate(
+                client,
+                messages=[{"role": "user", "content": "hi"}],
+                sys_prompt="sys",
+                tool_defs=[],
+                agent_effort="max",
+                resolved_model="gpt-5.5",
+            )
+        assert "gpt-5.5" in str(ei.value) and "'max'" in str(ei.value)
+        assert breaker.snapshot()["failed_generations"] == failures_before
+        assert breaker.snapshot()["state"] == "open"
+
+    async def test_inherited_client_effort_pair_fails_fast(self):
+        """agent_effort None inherits the client's live effort at preflight —
+        the drift shape: fixed gpt-5.5 model override + live effort now max."""
+        import pytest
+
+        from src.llm.errors import LLMRequestError
+
+        client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="max")
+        t = _tools(llm_gateway=_fake_gateway(client))
+        with pytest.raises(LLMRequestError):
+            await t._agent_generate(
+                client, messages=[], sys_prompt="s", tool_defs=[],
+                agent_effort=None, resolved_model="gpt-5.5",
+            )
+
+
+class TestSpawnPairNonCodexCollision:
+    """Review round 1 (Medium): a non-Codex provider whose model NAME
+    collides with the exception map must not trip Codex capability rules —
+    those providers accept-and-ignore Codex reasoning effort."""
+
+    async def test_kimi_shaped_client_named_gpt55_spawns_under_max_config(self):
+        cfg = _cfg()
+        cfg.openai_codex = SimpleNamespace(
+            model="gpt-5.6-sol", agent_model=None, agent_reasoning_effort="max")
+        # kimi/ollama-shaped: has .model, has NO .reasoning_effort
+        client = SimpleNamespace(model="gpt-5.5")
+        t = _tools(get_config=lambda: cfg, llm_gateway=_fake_gateway(client))
+        t._agent_manager.spawn.return_value = "agent-1"
+        t._agent_manager._agents = {}
+        out = await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        assert "spawned" in out
+
+
+class TestAgentEffortSnapshot:
+    """Review round 2 (High): the inherited agent effort is snapshotted ONCE
+    per generation — preflight approves the SAME immutable value every
+    attempt carries. A legal live effort change mid-generation (during an
+    open-breaker or transport-retry wait) must not rewrite the outbound
+    request; it reaches the agent on its next iteration."""
+
+    async def test_attempts_carry_the_snapshot_across_retries(self):
+        from src.llm.errors import LLMTransportError
+
+        calls = []
+
+        class _Client:
+            model = "gpt-5.6-sol"
+            reasoning_effort = "xhigh"
+
+            async def chat_with_tools(self, *, reasoning_effort=None, model=None, **kw):
+                calls.append(reasoning_effort)
+                if len(calls) == 1:
+                    # a live PUT lands mid-generation: xhigh -> max
+                    self.reasoning_effort = "max"
+                    raise LLMTransportError("blip")
+                return SimpleNamespace(
+                    text="ok", tool_calls=[], provenance_provider="codex")
+
+        client = _Client()
+        t = _tools(llm_gateway=_fake_gateway(client))
+        resp = await t._agent_generate(
+            client, messages=[], sys_prompt="s", tool_defs=[],
+            agent_effort=None, resolved_model="gpt-5.5",
+        )
+        # both attempts carried the PRE-CHANGE snapshot, never None and never
+        # the mid-generation "max" (which would 400 against gpt-5.5)
+        assert calls == ["xhigh", "xhigh"]
+        assert resp.text == "ok"

@@ -20,6 +20,8 @@ from ...config.schema import (
     AGENT_SETTING_AUTO,
     CODEX_REASONING_EFFORTS,
     active_config_path,
+    allowed_efforts_for_model,
+    effort_incompatibility_error,
 )
 from ...odin_log import get_logger
 
@@ -476,6 +478,51 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 agent_model = body.get("agent_model")
                 if agent_model is not None:
                     agent_model = str(agent_model).strip() or None
+                # Merged desired state (PUT boundary): partial bodies mean an
+                # incompatible pair must be caught on the RESULT of the update
+                # — changing only model to gpt-5.5 under a persisted "max" is
+                # as invalid as changing only the effort. Checked before any
+                # mutation, in either update direction, on both axes.
+                desired_model = (
+                    str(body["model"]) if ("model" in body and body["model"]) else cfg.model
+                )
+                desired_effort = str(effort) if effort is not None else cfg.reasoning_effort
+                pair_err = effort_incompatibility_error(desired_model, desired_effort)
+                if pair_err:
+                    return web.json_response(
+                        {
+                            "error": pair_err,
+                            "allowed": sorted(allowed_efforts_for_model(desired_model)),
+                        },
+                        status=400,
+                    )
+                desired_agent_model = (
+                    agent_model if agent_model_present else cfg.agent_model
+                )
+                desired_agent_effort = (
+                    (None if agent_effort is None else str(agent_effort))
+                    if agent_effort_present
+                    else cfg.agent_reasoning_effort
+                )
+                # "auto" on either agent axis defers to the spawn-time and
+                # request-construction boundaries; concrete axes resolve here
+                # (None inherits the main setting being saved).
+                if AGENT_SETTING_AUTO not in (desired_agent_model, desired_agent_effort):
+                    eff_model = (
+                        desired_agent_model if desired_agent_model else desired_model
+                    )
+                    eff_effort = (
+                        desired_agent_effort if desired_agent_effort else desired_effort
+                    )
+                    pair_err = effort_incompatibility_error(eff_model, eff_effort)
+                    if pair_err:
+                        return web.json_response(
+                            {
+                                "error": f"agent settings: {pair_err}",
+                                "allowed": sorted(allowed_efforts_for_model(eff_model)),
+                            },
+                            status=400,
+                        )
                 changed = False
                 # Agent effort is read from config at call time by the agent
                 # iteration callbacks — persisting it must NOT trigger a codex

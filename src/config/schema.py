@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal, get_args
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
@@ -331,13 +331,63 @@ class AuxiliaryLLMConfig(BaseModel):
 
 # "minimal" is deliberately absent: it sits in the Codex API's generic
 # parameter enum but every model on the ChatGPT-auth path rejects it at the
-# per-model capability layer ("Unsupported value ... Supported values are:
-# 'none', 'low', 'medium', 'high', and 'xhigh'"), which turns a saved value
-# into a deterministic per-request 400.
-ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh"]
+# per-model capability layer, which turns a saved value into a deterministic
+# per-request 400. "ultra" (catalog-listed on some 5.6 models) is likewise
+# absent: it is a Codex-app client feature, not a legal request value — the
+# server rejects it outright. "max" is real but per-model (see below).
+ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
 # Single source of truth for runtime validation (Literal does not validate
 # direct attribute assignment — the web admin layer checks against this set).
 CODEX_REASONING_EFFORTS: frozenset[str] = frozenset(get_args(ReasoningEffort))
+
+# Per-model capability exceptions at the effort layer. "max" is served only by
+# the gpt-5.6 family: the older models accept the value in the generic
+# parameter enum but reject it per-model ("Unsupported value: 'max' is not
+# supported with the 'gpt-5.5' model"), so a persisted combination would 400
+# on every request (the 'minimal' incident class). Known model names only —
+# unknown free-string models pass through and the server stays the authority.
+# Live-verified 2026-08-01: max serves on sol/terra/luna, 400s on gpt-5.5.
+CODEX_MODEL_UNSUPPORTED_EFFORTS: dict[str, frozenset[str]] = {
+    "gpt-5.5": frozenset({"max"}),
+    "gpt-5.4": frozenset({"max"}),
+    "gpt-5.4-mini": frozenset({"max"}),
+}
+
+
+def allowed_efforts_for_model(model: str | None) -> frozenset[str]:
+    """The effort values ``model`` is known to accept (all, for unknown models)."""
+    unsupported = CODEX_MODEL_UNSUPPORTED_EFFORTS.get(str(model or "").strip(), frozenset())
+    return CODEX_REASONING_EFFORTS - unsupported
+
+
+def model_rejects_effort(model: str | None, effort: str | None) -> bool:
+    """True when ``model`` is KNOWN to reject ``effort`` per-request.
+
+    The shared validator behind every enforcement boundary (config load, admin
+    PUT, per-spawn overrides, final request construction) — never scatter
+    per-model comparisons. Unknown models and absent values return False.
+    """
+    if not model or not effort:
+        return False
+    unsupported = CODEX_MODEL_UNSUPPORTED_EFFORTS.get(str(model).strip(), frozenset())
+    return str(effort) in unsupported
+
+
+def effort_incompatibility_error(model: str | None, effort: str | None) -> str | None:
+    """Canonical human-readable rejection for an incompatible model/effort pair.
+
+    Every boundary emits THIS text (naming the pair and the efforts the model
+    does accept) so the failure reads identically in config validation, the
+    admin API, spawn errors, and request-construction errors. None when the
+    pair is fine.
+    """
+    if not model_rejects_effort(model, effort):
+        return None
+    allowed = ", ".join(sorted(allowed_efforts_for_model(model)))
+    return (
+        f"reasoning effort {str(effort)!r} is not supported by model "
+        f"{str(model).strip()!r} (allowed for this model: {allowed})"
+    )
 
 # Sentinel for the agent model/effort config axes meaning "let the spawner pick
 # per-spawn from the exposed catalogue". Deliberately NOT a member of
@@ -436,6 +486,29 @@ class OpenAICodexConfig(BaseModel):
     connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()
     auxiliary: AuxiliaryLLMConfig = AuxiliaryLLMConfig()
     context_compression: ContextCompressionConfig = ContextCompressionConfig()
+
+    @model_validator(mode="after")
+    def _validate_effort_model_pairs(self):
+        # Load boundary (1 of 4): a persisted incompatible model/effort pair
+        # fails loudly at startup, exactly like any other invalid config
+        # value — never boot into deterministic per-request 400s. No clamp.
+        err = effort_incompatibility_error(self.model, self.reasoning_effort)
+        if err:
+            raise ValueError(f"openai_codex: {err}")
+        # The agent axes resolve to a concrete pair here only when neither
+        # axis is "auto" (per-spawn selection defers to the spawn-time and
+        # request-construction boundaries). None inherits the main setting.
+        if AGENT_SETTING_AUTO not in (self.agent_model, self.agent_reasoning_effort):
+            eff_model = self.agent_model if self.agent_model else self.model
+            eff_effort = (
+                self.agent_reasoning_effort
+                if self.agent_reasoning_effort
+                else self.reasoning_effort
+            )
+            err = effort_incompatibility_error(eff_model, eff_effort)
+            if err:
+                raise ValueError(f"openai_codex agent settings: {err}")
+        return self
 
 
 class OllamaConfig(BaseModel):

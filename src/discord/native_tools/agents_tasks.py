@@ -22,7 +22,7 @@ import discord
 
 from ...agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ...async_utils import fire_and_forget
-from ...llm.recovery import generate_with_recovery
+from ...llm.recovery import generate_with_recovery, preflight_incompatible_effort
 from ...odin_log import get_logger
 from ..background_task import (
     MAX_STEPS,
@@ -136,6 +136,33 @@ def _parse_spawn_overrides(
         allowed = ", ".join(sorted(CODEX_REASONING_EFFORTS))
         return None, None, f"invalid reasoning_effort {effort!r} (allowed: {allowed})"
     return model_override, effort, None
+
+
+def _spawn_pair_error(
+    config: object, client: object, model_override: str | None, effort_override: str | None
+) -> str | None:
+    """Spawn boundary: the model/effort pair this spawn would run RIGHT NOW
+    (override beats fixed config beats inherited-main) must not be a
+    known-incompatible combination — e.g. an explicit ``model=gpt-5.5`` task
+    under a ``max`` effort config. Resolved through the same policy helper the
+    iteration callbacks use, so the validated pair IS the pair the first
+    iteration would request. Live-config drift after spawn is caught by the
+    request-construction boundary in the provider."""
+    from ...config.schema import effort_incompatibility_error
+
+    if not hasattr(client, "reasoning_effort"):
+        # Non-Codex providers accept-and-ignore Codex effort semantics — a
+        # model-name collision (e.g. an Ollama model tagged "gpt-5.5") must
+        # not trip Codex capability rules.
+        return None
+    agent_effort, resolved_model = _agent_llm_policy(
+        config, client, model_override=model_override, effort_override=effort_override
+    )
+    effort_now = (
+        agent_effort if agent_effort is not None else getattr(client, "reasoning_effort", None)
+    )
+    model_now = resolved_model if resolved_model else getattr(client, "model", None)
+    return effort_incompatibility_error(model_now, effort_now)
 
 
 def _provenance_stamp(resp: object, client: object) -> dict:
@@ -484,6 +511,23 @@ class AgentTaskTools:
         iteration wall (wait_for) hard-bounds this call INCLUDING recovery
         waits; cancellation propagates and releases any held probe.
         """
+        # ONE immutable effective effort per generation: the value preflight
+        # approves IS the value every attempt of this generation carries (an
+        # inherited None used to re-resolve the client's live effort inside
+        # each attempt, so a legal live change during an open-breaker wait —
+        # xhigh→max — could turn an approved gpt-5.5@xhigh into a rejected
+        # gpt-5.5@max at request build). Live config still reaches agents on
+        # their NEXT iteration, the contract these callbacks document.
+        effective_effort = (
+            agent_effort
+            if agent_effort is not None
+            else getattr(client, "reasoning_effort", None)
+        )
+        # Pre-admission: validate the exact pair this generation will request
+        # before touching the breaker — never wait out an open breaker's
+        # deadline (or count a capacity failure) for a request that could not
+        # legally be sent.
+        preflight_incompatible_effort(client, model=resolved_model, effort=effective_effort)
         breaker = self._llm_gateway.capacity_breaker_for(resolved_model)
         policy = self._llm_gateway.recovery_policy()
 
@@ -492,7 +536,7 @@ class AgentTaskTools:
                 messages=messages,
                 system=sys_prompt,
                 tools=tool_defs,
-                reasoning_effort=agent_effort,
+                reasoning_effort=effective_effort,
                 model=resolved_model,
             )
 
@@ -531,6 +575,12 @@ class AgentTaskTools:
 
         if not self._llm_gateway.active_client:
             return "Error: LLM provider not available."
+
+        pair_err = _spawn_pair_error(
+            self._get_config(), self._llm_gateway.active_client, model_override, effort_override
+        )
+        if pair_err:
+            return f"Error: {pair_err}"
 
         channel = getattr(message, "channel", message)
         author = getattr(message, "author", None)
@@ -873,6 +923,11 @@ class AgentTaskTools:
             )
             if err:
                 return f"Error: task '{t.get('label', '?')}': {err}"
+            pair_err = _spawn_pair_error(
+                self._get_config(), self._llm_gateway.active_client, mo, eo
+            )
+            if pair_err:
+                return f"Error: task '{t.get('label', '?')}': {pair_err}"
             validated_tasks.append({
                 "label": t.get("label", ""),
                 "goal": t.get("goal", ""),
