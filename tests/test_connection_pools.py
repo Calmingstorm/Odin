@@ -10,7 +10,10 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from src.config.schema import (
     Config,
@@ -179,7 +182,10 @@ class TestSSHPoolGetArgs:
             args = pool.get_ssh_args("host1", "ls", "/key", "/known", "root")
             assert "-o" in args
             assert "ControlMaster=auto" in args
-            assert "ControlPersist=90" in args
+            # Idle persistence is owned by the pool; command-side OpenSSH
+            # must never daemonize a master under subreaper containment.
+            assert "ControlPersist=no" in args
+            assert "ControlPersist=90" not in args
             assert f"ControlPath={td}/root@host1" in args
 
     def test_includes_standard_ssh_options(self):
@@ -226,6 +232,17 @@ class TestSSHPoolGetArgs:
 # ---------------------------------------------------------------------------
 
 class TestSSHPoolClose:
+    async def test_close_all_reaps_foreground_master_without_socket(self):
+        with tempfile.TemporaryDirectory() as td:
+            pool = SSHConnectionPool(socket_dir=td)
+            master = AsyncMock(returncode=None)
+            master.wait.side_effect = lambda: setattr(master, "returncode", 0) or 0
+            pool._masters["root@host1"] = master
+            pool._connections["root@host1"] = 1.0
+            assert await pool.close_all() == 1
+            master.wait.assert_awaited()
+            assert pool._masters == {}
+
     async def test_close_host_no_socket(self):
         with tempfile.TemporaryDirectory() as td:
             pool = SSHConnectionPool(socket_dir=td)
@@ -274,7 +291,7 @@ class TestSSHPoolClose:
 
             with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
                 result = await pool.close_host("host1", "root")
-            assert result is False
+            assert result is True
             mock_proc.kill.assert_called_once()
             assert "root@host1" not in pool._connections
 
@@ -360,7 +377,8 @@ class TestSSHCommandWithPool:
                 call_args = mock_exec.call_args[0]
                 # Should include ControlMaster options
                 assert "ControlMaster=auto" in call_args
-                assert "ControlPersist=120" in call_args
+                assert "ControlPersist=no" in call_args
+                assert "ControlPersist=120" not in call_args
 
     async def test_no_pool_no_control_master(self):
         with patch("src.tools.ssh.asyncio.create_subprocess_exec") as mock_exec:
@@ -980,6 +998,269 @@ class TestEnsureMasterRegistered:
             assert "root@h1" not in pool._registered_masters
 
 
+class TestForegroundMasterLifecycle:
+    """The fast-double-fork leak is prevented by construction.
+
+    A pooled master remains an asyncio-owned foreground child. Command-side
+    OpenSSH has ControlPersist disabled, so neither process can daemonize and
+    produce the already-adopted intermediate that runtime evidence cannot
+    identify safely.
+    """
+
+    async def test_acquire_starts_direct_master_and_idle_expiry_reaps_it(
+        self, tmp_path, monkeypatch
+    ):
+        pool = SSHConnectionPool(control_persist=0, socket_dir=str(tmp_path))
+        socket = pool.get_socket_path("h1", "root")
+        spawned: list[tuple[tuple, AsyncMock]] = []
+
+        async def fake_exec(*argv, **_kwargs):
+            proc = AsyncMock()
+            proc.returncode = None
+            proc.wait.side_effect = lambda: setattr(proc, "returncode", 0) or 0
+            spawned.append((argv, proc))
+            open(socket, "w").close()
+            return proc
+
+        monkeypatch.setattr(
+            "src.tools.ssh_pool.asyncio.create_subprocess_exec", fake_exec
+        )
+        assert await pool.acquire("h1", "/key", "/known", "root") is True
+        argv, master = spawned[0]
+        assert "ControlMaster=yes" in argv
+        assert "ControlPersist=no" in argv
+        assert "-N" in argv
+        assert pool._masters["root@h1"] is master
+
+        pool.release("h1", "root")
+        await asyncio.wait_for(pool._expiry_tasks["root@h1"], timeout=1)
+        assert "root@h1" not in pool._masters
+        master.wait.assert_awaited()
+
+    async def test_acquire_reuses_live_direct_master(self, tmp_path):
+        pool = SSHConnectionPool(socket_dir=str(tmp_path))
+        socket = pool.get_socket_path("h1", "root")
+        open(socket, "w").close()
+        master = AsyncMock(returncode=None)
+        master.wait.side_effect = lambda: setattr(master, "returncode", 0) or 0
+        pool._masters["root@h1"] = master
+        assert await pool.acquire("h1", "/k", "/kh") is True
+        assert pool._active_leases["root@h1"] == 1
+        pool.release("h1")
+        await pool.close_all()
+
+    async def test_failed_master_exits_without_lease(self, tmp_path, monkeypatch):
+        pool = SSHConnectionPool(socket_dir=str(tmp_path))
+        proc = AsyncMock(returncode=255)
+        proc.wait.return_value = 255
+        monkeypatch.setattr(
+            "src.tools.ssh_pool.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        )
+        assert await pool.acquire("h1", "/k", "/kh") is False
+        assert pool._active_leases == {}
+        proc.wait.assert_awaited()
+
+    async def test_master_start_cancellation_reaps_child(
+        self, tmp_path, monkeypatch
+    ):
+        pool = SSHConnectionPool(socket_dir=str(tmp_path))
+        proc = AsyncMock(returncode=None)
+        proc.wait.return_value = 0
+        proc.terminate = MagicMock()
+        proc.kill = MagicMock()
+        monkeypatch.setattr(
+            "src.tools.ssh_pool.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        )
+        monkeypatch.setattr(
+            "src.tools.ssh_pool.asyncio.sleep",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await pool.acquire("h1", "/k", "/kh")
+        proc.terminate.assert_called_once()
+        proc.wait.assert_awaited()
+
+    async def test_stop_process_tolerates_signal_and_final_wait_failures(self):
+        pool = SSHConnectionPool()
+        proc = MagicMock(returncode=None)
+        proc.terminate.side_effect = ProcessLookupError()
+        proc.kill.side_effect = OSError("gone")
+        proc.wait = AsyncMock(side_effect=[TimeoutError(), OSError("gone")])
+        await pool._stop_process(proc)
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+
+    async def test_stale_direct_master_is_reaped_before_replacement(
+        self, tmp_path, monkeypatch
+    ):
+        pool = SSHConnectionPool(socket_dir=str(tmp_path))
+        stale = AsyncMock(returncode=0)
+        pool._masters["root@h1"] = stale
+        fresh = AsyncMock(returncode=None)
+        fresh.wait.return_value = 0
+        fresh.terminate = MagicMock()
+        monkeypatch.setattr(
+            "src.tools.ssh_pool.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=fresh),
+        )
+        socket = pool.get_socket_path("h1", "root")
+
+        async def create_socket(_delay):
+            open(socket, "w").close()
+
+        monkeypatch.setattr("src.tools.ssh_pool.asyncio.sleep", create_socket)
+        assert await pool.acquire("h1", "/k", "/kh") is True
+        stale.wait.assert_awaited()
+        assert pool._masters["root@h1"] is fresh
+        pool.release("h1")
+        await pool.close_all()
+
+    async def test_master_socket_deadline_returns_false(self, tmp_path, monkeypatch):
+        pool = SSHConnectionPool(socket_dir=str(tmp_path))
+        proc = AsyncMock(returncode=None)
+        proc.wait.return_value = 0
+        proc.terminate = MagicMock()
+        proc.kill = MagicMock()
+        monkeypatch.setattr(
+            "src.tools.ssh_pool.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        )
+        clock = iter((0.0, 13.0))
+        loop = MagicMock()
+        loop.time.side_effect = lambda: next(clock)
+        monkeypatch.setattr(
+            "src.tools.ssh_pool.asyncio.get_running_loop", lambda: loop
+        )
+        assert await pool.acquire("h1", "/k", "/kh") is False
+        proc.terminate.assert_called_once()
+        proc.wait.assert_awaited()
+
+    async def test_stop_process_escalates_after_wait_timeout(self):
+        pool = SSHConnectionPool()
+        proc = MagicMock(returncode=None)
+        proc.wait = AsyncMock(side_effect=[TimeoutError(), 0])
+        await pool._stop_process(proc)
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+        assert proc.wait.await_count == 2
+
+    async def test_two_leases_expire_only_after_last_release(
+        self, tmp_path, monkeypatch
+    ):
+        pool = SSHConnectionPool(control_persist=0, socket_dir=str(tmp_path))
+        socket = pool.get_socket_path("h1", "root")
+        open(socket, "w").close()
+        master = AsyncMock(returncode=None)
+        master.wait.side_effect = lambda: setattr(master, "returncode", 0) or 0
+        pool._masters["root@h1"] = master
+        assert await pool.acquire("h1", "/k", "/kh") is True
+        assert await pool.acquire("h1", "/k", "/kh") is True
+        pool.release("h1")
+        assert pool._active_leases["root@h1"] == 1
+        assert pool._expiry_tasks == {}
+        pool.release("h1")
+        await asyncio.wait_for(pool._expiry_tasks["root@h1"], timeout=1)
+        assert "root@h1" not in pool._masters
+
+    async def test_expiry_cancellation_propagates_and_clears_record(
+        self, tmp_path
+    ):
+        pool = SSHConnectionPool(control_persist=60, socket_dir=str(tmp_path))
+        task = asyncio.create_task(pool._expire_after_idle("h1", "root"))
+        pool._expiry_tasks["root@h1"] = task
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert "root@h1" not in pool._expiry_tasks
+
+    async def test_expiry_failure_is_contained_and_task_record_cleared(
+        self, tmp_path, monkeypatch
+    ):
+        pool = SSHConnectionPool(control_persist=0, socket_dir=str(tmp_path))
+        pool._active_leases["root@h1"] = 1
+        pool.release("h1")
+        monkeypatch.setattr(
+            pool, "close_host", AsyncMock(side_effect=RuntimeError("boom"))
+        )
+        await asyncio.wait_for(pool._expiry_tasks["root@h1"], timeout=1)
+        assert "root@h1" not in pool._expiry_tasks
+
+    async def test_command_never_enables_openssh_daemonization(self):
+        with tempfile.TemporaryDirectory() as td:
+            pool = SSHConnectionPool(control_persist=60, socket_dir=td)
+            args = pool.get_ssh_args("h1", "true", "/k", "/kh")
+            assert "ControlMaster=auto" in args
+            assert "ControlPersist=no" in args
+            assert not any(
+                str(arg).startswith("ControlPersist=")
+                and arg != "ControlPersist=no"
+                for arg in args
+            )
+
+    def test_pre_acquire_state_preserves_opened_metric(self, tmp_path):
+        pool = SSHConnectionPool(socket_dir=str(tmp_path))
+        open(pool.get_socket_path("h1", "root"), "w").close()
+        pool.get_ssh_args(
+            "h1", "true", "/k", "/kh", was_connected=False
+        )
+        assert pool._total_opened == 1
+        assert pool._total_reused == 0
+
+    async def test_real_controlmaster_is_foreground_and_reaped_without_orphan(
+        self, tmp_path
+    ):
+        """Load-bearing process pin for the soak's exact structural defect.
+
+        A real OpenSSH client substitutes for the remote handshake endpoint:
+        the test does not need network access to prove lifecycle topology.
+        The master pid returned by create_subprocess_exec remains the direct,
+        waitable child until close_host() terminates and reaps it; no adopted
+        zombie can be created because neither argv contains daemonizing
+        ControlPersist.
+        """
+        import shutil
+
+        ssh = shutil.which("ssh")
+        assert ssh is not None
+        pool = SSHConnectionPool(control_persist=60, socket_dir=str(tmp_path))
+        socket = pool.get_socket_path("h1", "root")
+        process = await asyncio.create_subprocess_exec(
+            ssh,
+            "-o",
+            f"ControlPath={socket}",
+            "-o",
+            "ControlMaster=yes",
+            "-o",
+            "ControlPersist=no",
+            "-N",
+            "-F",
+            "/dev/null",
+            "-o",
+            "ProxyCommand=sleep 300",
+            "root@invalid",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        key = "root@h1"
+        pool._masters[key] = process
+        pool._connections[key] = time.monotonic()
+        try:
+            await asyncio.sleep(0.1)
+            assert process.returncode is None
+            raw = open(f"/proc/{process.pid}/stat", "rb").read()
+            rest = raw.rsplit(b")", 1)[1].split()
+            assert int(rest[1]) == os.getpid()  # direct child, never adopted
+            assert await pool.close_host("h1", "root") is True
+            assert process.returncode is not None
+            assert not os.path.exists(f"/proc/{process.pid}")
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+
 class TestRunSSHCommandMasterRegistration:
     """run_ssh_command must attempt master registration after every pooled
     attempt — success, failure, or timeout — because the FIRST pooled
@@ -1002,6 +1283,16 @@ class TestRunSSHCommandMasterRegistration:
                 mock_exec.return_value = proc
                 await run_ssh_command("h1", "ls", "/k", "/kh", pool=pool)
             assert seen == [("h1", "root")]
+
+    async def test_acquire_exception_becomes_bounded_ssh_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            pool = SSHConnectionPool(socket_dir=td)
+            pool.acquire = AsyncMock(side_effect=OSError("cannot spawn"))  # type: ignore[method-assign]
+            code, out = await run_ssh_command(
+                "h1", "ls", "/k", "/kh", pool=pool
+            )
+            assert code == 1
+            assert out == "SSH error: cannot spawn"
 
     async def test_unpooled_command_has_no_pool_to_register(self):
         with patch("src.tools.ssh.asyncio.create_subprocess_exec") as mock_exec:
