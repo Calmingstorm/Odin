@@ -375,6 +375,8 @@ class TestCallSitesSurviveTypingFailure:
             call_with_tools=_cwt,
             capacity_breaker_for=lambda model=None: registry.for_model("codex", "m"),
             recovery_policy=RecoveryPolicy,
+            # consumed by the pre-admission effort preflight (no-op for None)
+            active_client=None,
         )
         kind, val = await runner._call_llm(st)
         assert (kind, val) == ("ok", resp)

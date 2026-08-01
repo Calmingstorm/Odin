@@ -170,3 +170,96 @@ class TestSpawnSchemaSync:
     def test_spawn_options_order(self):
         # Order is prompt/UI behavior: escalating depth, max last.
         assert SPAWN_EFFORT_OPTIONS == ["none", "low", "medium", "high", "xhigh", "max"]
+
+
+class TestPreflightBeforeAdmission:
+    """Review round 1 (High): the pair must be validated BEFORE model-breaker
+    admission on every generation path. With that breaker OPEN, a doomed pair
+    used to deadline-wait through recovery and count a capacity failure for a
+    request that could never legally be sent; it must instead return the
+    local LLMRequestError immediately, leaving the breaker untouched."""
+
+    @staticmethod
+    def _codex_client(model="gpt-5.6-sol", effort="medium"):
+        from types import SimpleNamespace
+        return SimpleNamespace(model=model, reasoning_effort=effort)
+
+    # --- the shared preflight itself ---
+    def test_bad_pair_raises_with_canonical_text(self):
+        from src.llm.errors import LLMRequestError
+        from src.llm.recovery import preflight_incompatible_effort
+        with pytest.raises(LLMRequestError) as ei:
+            preflight_incompatible_effort(self._codex_client("gpt-5.5", "max"))
+        assert "gpt-5.5" in str(ei.value) and "'max'" in str(ei.value)
+        assert "allowed for this model" in str(ei.value)
+
+    def test_overrides_beat_client_values(self):
+        from src.llm.errors import LLMRequestError
+        from src.llm.recovery import preflight_incompatible_effort
+        healthy = self._codex_client()  # sol@medium
+        with pytest.raises(LLMRequestError):
+            preflight_incompatible_effort(healthy, model="gpt-5.5", effort="max")
+        # override to a GOOD pair over a client whose own pair is irrelevant
+        preflight_incompatible_effort(
+            self._codex_client("gpt-5.5", "xhigh"), model="gpt-5.6-luna", effort="max")
+
+    def test_effort_none_inherits_client_effort(self):
+        from src.llm.errors import LLMRequestError
+        from src.llm.recovery import preflight_incompatible_effort
+        with pytest.raises(LLMRequestError):
+            preflight_incompatible_effort(
+                self._codex_client(effort="max"), model="gpt-5.5", effort=None)
+
+    def test_non_codex_and_absent_clients_no_op(self):
+        from types import SimpleNamespace
+
+        from src.llm.recovery import preflight_incompatible_effort
+        preflight_incompatible_effort(None)
+        # a non-Codex provider whose model NAME collides with the exception
+        # map (review round 1, Medium) ignores Codex effort semantics
+        preflight_incompatible_effort(SimpleNamespace(model="gpt-5.5"), effort="max")
+
+    def test_good_and_unknown_pairs_pass(self):
+        from src.llm.recovery import preflight_incompatible_effort
+        preflight_incompatible_effort(self._codex_client("gpt-5.6-sol", "max"))
+        preflight_incompatible_effort(self._codex_client("gpt-7-future", "max"))
+
+    # --- production entry: the chat pipeline's _call_llm ---
+    async def test_call_llm_fails_fast_with_open_breaker(self):
+        """Odin's exact-head repro inverted: breaker OPEN + invalid live pair
+        must raise LLMRequestError immediately — never LLMCapacityError from
+        an exhausted recovery deadline — and must not move the breaker's
+        failure count. (A regression here fails as LLMCapacityError via the
+        short deadline below, not as a hang.)"""
+        from types import SimpleNamespace
+
+        from src.llm.errors import LLMRequestError
+        from src.llm.model_breaker import ModelBreakerRegistry
+        from src.llm.recovery import RecoveryPolicy
+
+        # reuse the established real-_call_llm harness
+        from tests.test_typing_resilience import FakeChannel, _make_runner, _stub_state
+
+        runner, _saved, _cleared = _make_runner()
+        st = _stub_state(channel=FakeChannel())
+        registry = ModelBreakerRegistry(generation_threshold=1)
+        breaker = registry.for_model("codex", "gpt-5.5")
+        breaker.record_generation_failure()  # threshold 1 → OPEN
+        assert breaker.snapshot()["state"] == "open"
+        failures_before = breaker.snapshot()["failed_generations"]
+
+        async def _cwt(**kwargs):  # must never run
+            raise AssertionError("transport reached despite doomed pair")
+
+        runner._llm_gateway = SimpleNamespace(
+            call_with_tools=_cwt,
+            capacity_breaker_for=lambda model=None: breaker,
+            recovery_policy=lambda: RecoveryPolicy(
+                deadline_seconds=0.3, backoff_base=0.01,
+                backoff_cap=0.02, retry_after_cap=0.05),
+            active_client=self._codex_client("gpt-5.5", "max"),
+        )
+        with pytest.raises(LLMRequestError):
+            await runner._call_llm(st)
+        assert breaker.snapshot()["failed_generations"] == failures_before
+        assert breaker.snapshot()["state"] == "open"  # untouched, not probed

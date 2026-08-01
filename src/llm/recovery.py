@@ -48,6 +48,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
+from ..config.schema import effort_incompatibility_error
 from ..odin_log import get_logger
 from .backoff import compute_backoff
 from .circuit_breaker import CircuitOpenError
@@ -61,6 +62,26 @@ from .errors import (
 from .model_breaker import AdmissionToken, ModelCapacityBreaker
 
 log = get_logger("llm_recovery")
+
+
+def preflight_incompatible_effort(client, *, model=None, effort=None) -> None:
+    """Pre-admission boundary: a KNOWN-incompatible model/effort pair fails
+    fast as ``LLMRequestError`` BEFORE breaker admission — an open breaker
+    must never deadline-wait, probe, or count a generation that could not
+    legally be sent. Runs on the LIVE resolved values at the call site
+    (``model``/``effort`` override the client's own when given, matching the
+    request the attempt would build); the provider's request-construction
+    guard stays the final outbound backstop for the exact request locals.
+    Codex-shaped clients only — other providers accept-and-ignore Codex
+    effort semantics, so a model-name collision must not trip Codex rules.
+    """
+    if client is None or not hasattr(client, "reasoning_effort"):
+        return
+    eff_model = model if model else getattr(client, "model", None)
+    eff_effort = effort if effort is not None else client.reasoning_effort
+    err = effort_incompatibility_error(eff_model, eff_effort)
+    if err:
+        raise LLMRequestError(err)
 
 T = TypeVar("T")
 

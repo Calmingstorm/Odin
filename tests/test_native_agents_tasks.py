@@ -955,3 +955,69 @@ class TestSpawnPairValidation:
         t._agent_manager._agents = {}
         out = await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         assert "spawned" in out
+
+
+class TestAgentGeneratePreflight:
+    """Review round 1 (High), agent path: an in-flight agent whose resolved
+    pair is invalid must fail fast as LLMRequestError BEFORE breaker
+    admission — even (especially) while that model's breaker is OPEN — and
+    must not move the breaker's failure count."""
+
+    async def test_bad_pair_fails_fast_with_open_breaker(self):
+        import pytest
+
+        from src.llm.errors import LLMRequestError
+
+        client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="medium")
+        gw = _fake_gateway(client)
+        breaker = gw.capacity_breaker_for("gpt-5.5")
+        # open it: default threshold, drive failures until open
+        while breaker.snapshot()["state"] != "open":
+            breaker.record_generation_failure()
+        failures_before = breaker.snapshot()["failed_generations"]
+        t = _tools(llm_gateway=gw)
+        with pytest.raises(LLMRequestError) as ei:
+            await t._agent_generate(
+                client,
+                messages=[{"role": "user", "content": "hi"}],
+                sys_prompt="sys",
+                tool_defs=[],
+                agent_effort="max",
+                resolved_model="gpt-5.5",
+            )
+        assert "gpt-5.5" in str(ei.value) and "'max'" in str(ei.value)
+        assert breaker.snapshot()["failed_generations"] == failures_before
+        assert breaker.snapshot()["state"] == "open"
+
+    async def test_inherited_client_effort_pair_fails_fast(self):
+        """agent_effort None inherits the client's live effort at preflight —
+        the drift shape: fixed gpt-5.5 model override + live effort now max."""
+        import pytest
+
+        from src.llm.errors import LLMRequestError
+
+        client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="max")
+        t = _tools(llm_gateway=_fake_gateway(client))
+        with pytest.raises(LLMRequestError):
+            await t._agent_generate(
+                client, messages=[], sys_prompt="s", tool_defs=[],
+                agent_effort=None, resolved_model="gpt-5.5",
+            )
+
+
+class TestSpawnPairNonCodexCollision:
+    """Review round 1 (Medium): a non-Codex provider whose model NAME
+    collides with the exception map must not trip Codex capability rules —
+    those providers accept-and-ignore Codex reasoning effort."""
+
+    async def test_kimi_shaped_client_named_gpt55_spawns_under_max_config(self):
+        cfg = _cfg()
+        cfg.openai_codex = SimpleNamespace(
+            model="gpt-5.6-sol", agent_model=None, agent_reasoning_effort="max")
+        # kimi/ollama-shaped: has .model, has NO .reasoning_effort
+        client = SimpleNamespace(model="gpt-5.5")
+        t = _tools(get_config=lambda: cfg, llm_gateway=_fake_gateway(client))
+        t._agent_manager.spawn.return_value = "agent-1"
+        t._agent_manager._agents = {}
+        out = await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        assert "spawned" in out

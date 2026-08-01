@@ -22,7 +22,7 @@ import discord
 
 from ...agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ...async_utils import fire_and_forget
-from ...llm.recovery import generate_with_recovery
+from ...llm.recovery import generate_with_recovery, preflight_incompatible_effort
 from ...odin_log import get_logger
 from ..background_task import (
     MAX_STEPS,
@@ -150,6 +150,11 @@ def _spawn_pair_error(
     request-construction boundary in the provider."""
     from ...config.schema import effort_incompatibility_error
 
+    if not hasattr(client, "reasoning_effort"):
+        # Non-Codex providers accept-and-ignore Codex effort semantics — a
+        # model-name collision (e.g. an Ollama model tagged "gpt-5.5") must
+        # not trip Codex capability rules.
+        return None
     agent_effort, resolved_model = _agent_llm_policy(
         config, client, model_override=model_override, effort_override=effort_override
     )
@@ -506,6 +511,12 @@ class AgentTaskTools:
         iteration wall (wait_for) hard-bounds this call INCLUDING recovery
         waits; cancellation propagates and releases any held probe.
         """
+        # Pre-admission: validate the pair THIS generation would request
+        # (override values beat the client's own) before touching the
+        # breaker — a fixed model override meeting a live effort change must
+        # fail fast as a request error, not wait out an open breaker's
+        # deadline and count a capacity failure.
+        preflight_incompatible_effort(client, model=resolved_model, effort=agent_effort)
         breaker = self._llm_gateway.capacity_breaker_for(resolved_model)
         policy = self._llm_gateway.recovery_policy()
 
