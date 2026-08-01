@@ -528,6 +528,13 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 # iteration callbacks — persisting it must NOT trigger a codex
                 # client reload (auth-pool refresh) when nothing else changed.
                 needs_reload = False
+                # The spawn-tool effort catalogue depends on the MAIN model
+                # (an inherit-model agent axis resolves through it) AND the
+                # main effort (the inherited default whose servability decides
+                # required-ness), so either change must refresh the cached
+                # catalog exactly like an axis change.
+                model_changed = False
+                effort_changed = False
                 if "enabled" in body:
                     cfg.enabled = bool(body["enabled"])
                     changed = True
@@ -536,6 +543,7 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     cfg.model = str(body["model"])
                     changed = True
                     needs_reload = True
+                    model_changed = True
                 if "max_tokens" in body:
                     cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
                     changed = True
@@ -544,6 +552,10 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     cfg.reasoning_effort = str(effort)
                     changed = True
                     needs_reload = True
+                    # The main effort is the INHERITED default an omitted
+                    # per-spawn effort resolves to — the catalogue's
+                    # required-ness depends on it (see agent_tool_policy).
+                    effort_changed = True
                 axis_changed = False
                 if agent_effort_present:
                     cfg.agent_reasoning_effort = (
@@ -557,11 +569,13 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     cfg.agent_model = agent_model
                     changed = True
                     axis_changed = True
-                # An axis change mutates live cfg immediately, and the per-spawn
-                # tool schema depends on it — invalidate NOW (before reload /
-                # persist) so a later reload/persist failure can never leave the
-                # catalog cached against the old schema while cfg already moved.
-                if axis_changed and getattr(bot, "tool_catalog", None):
+                # An axis or model change mutates live cfg immediately, and the
+                # per-spawn tool schema depends on both — invalidate NOW
+                # (before reload / persist) so a later reload/persist failure
+                # can never leave the catalog cached against the old schema
+                # while cfg already moved.
+                catalog_changed = axis_changed or model_changed or effort_changed
+                if catalog_changed and getattr(bot, "tool_catalog", None):
                     bot.tool_catalog.invalidate()
                 if changed:
                     if needs_reload:

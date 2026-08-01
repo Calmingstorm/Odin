@@ -1325,3 +1325,74 @@ class TestCodexMaxEffortPairValidation:
                             json={"agent_model": "auto", "agent_reasoning_effort": "max"})
             assert r.status == 200
         assert bot.config.openai_codex.agent_reasoning_effort == "max"
+
+
+class TestCatalogInvalidationOnModelChange:
+    """The spawn-tool effort catalogue depends on the MAIN model (an
+    inherit-model agent axis resolves through it), so a model-only PUT must
+    refresh the cached catalog exactly like an axis change — and a rejected
+    PUT must refresh (and mutate) nothing."""
+
+    @pytest.mark.asyncio
+    async def test_model_only_change_invalidates(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.tool_catalog = MagicMock()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json={"model": "gpt-5.6-terra"})
+            assert r.status == 200
+        bot.tool_catalog.invalidate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_fixed_agent_model_swap_invalidates(self):
+        # fixed→fixed (5.6→5.5): the axis MODE doesn't change, but the value
+        # feeds the filtered enum — presence-based axis_changed covers it.
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.config.openai_codex.agent_model = "gpt-5.6-sol"
+        bot.tool_catalog = MagicMock()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json={"agent_model": "gpt-5.5"})
+            assert r.status == 200
+        bot.tool_catalog.invalidate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_rejected_put_invalidates_nothing(self):
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        bot.config.openai_codex.model = "gpt-5.6-sol"
+        bot.config.openai_codex.reasoning_effort = "max"
+        bot.tool_catalog = MagicMock()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json={"model": "gpt-5.5"})
+            assert r.status == 400
+        bot.tool_catalog.invalidate.assert_not_called()
+        gw.reload_codex_inner.assert_not_awaited()
+        assert bot.config.openai_codex.model == "gpt-5.6-sol"
+
+    @pytest.mark.asyncio
+    async def test_non_catalog_change_does_not_invalidate(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.tool_catalog = MagicMock()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json={"max_tokens": 8192})
+            assert r.status == 200
+        bot.tool_catalog.invalidate.assert_not_called()
+
+
+class TestCatalogInvalidationOnEffortChange:
+    """PR #246 round 1 follow-through: the required-ness of the exposed
+    effort field depends on the MAIN effort (the inherited default), so an
+    effort-only PUT must refresh the cached catalog too."""
+
+    @pytest.mark.asyncio
+    async def test_effort_only_change_invalidates(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.config.openai_codex.model = "gpt-5.6-sol"
+        bot.tool_catalog = MagicMock()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json={"reasoning_effort": "max"})
+            assert r.status == 200
+        bot.tool_catalog.invalidate.assert_called_once()
