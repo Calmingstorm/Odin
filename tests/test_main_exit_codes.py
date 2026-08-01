@@ -658,6 +658,7 @@ class TestUncleanBarrierExit:
         script = tmp_path / f"blocked_worker_{sink}.py"
         script.write_text(
             "import asyncio\n"
+            "import ctypes\n"
             "import logging\n"
             "import sys\n"
             "import threading\n"
@@ -1263,6 +1264,190 @@ class TestUncleanBarrierExit:
         entry._emergency_exit(logging.getLogger("t"), 5, "test reason")
         assert calls == [1, 5]
         assert time.monotonic() - start < 3.0  # bounded by the scribe join
+
+
+class TestFinalizeHardDeadline:
+    """Round-23: finalization needs a non-cooperative wall-clock bound.
+
+    Asyncio timeouts cannot fire while synchronous code owns the event-loop
+    thread. These process-level pins put hostile code in each of the three
+    reproduced locations and prove the pre-armed watchdog still reaches
+    os._exit. The marker proves the adversarial path executed; prompt nonzero
+    process exit proves it could not hold teardown.
+    """
+
+    @staticmethod
+    def _run_repro(tmp_path, name: str, body: str, marker: bytes):
+        import subprocess
+        import time
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        script = tmp_path / (name + ".py")
+        script.write_text(
+            "import asyncio\n"
+            "import ctypes\n"
+            "import logging\n"
+            "import sys\n"
+            "import threading\n"
+            "import src.__main__ as entry\n"
+            "from src.tools.process_manager import AdoptedZombieReaper\n"
+            "entry._FINALIZE_WATCHDOG_TIMEOUT = 1.0\n"
+            "loop = asyncio.new_event_loop()\n"
+            + body
+            + "\nprint('FINALIZE_ENTER', file=sys.stderr, flush=True)\n"
+            "entry._finalize_and_exit(\n"
+            "    loop, reaper, logging.getLogger('repro'), 0\n"
+            ")\n"
+            "print('UNREACHABLE', file=sys.stderr, flush=True)\n"
+        )
+        started = time.monotonic()
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=repo_root,
+            capture_output=True,
+            timeout=8,
+        )
+        import signal
+
+        elapsed = time.monotonic() - started
+        assert proc.returncode == -signal.SIGKILL
+        assert elapsed < 5.0
+        assert b"FINALIZE_ENTER" in proc.stderr
+        assert marker in proc.stderr  # proves the adversarial path executed
+        assert b"UNREACHABLE" not in proc.stderr  # watchdog used os._exit
+
+    def test_failed_drain_cannot_drop_completed_task_frame(self, tmp_path):
+        """Dropping successful-barrier task frames before emergency exit
+        used to run a frame-local __del__ and wedge the main thread."""
+        body = (
+            "class BlockingFrameLocal:\n"
+            "    def __del__(self):\n"
+            "        print('BLOCKING_FRAME_LOCAL_DEL_ENTER', "
+            "file=sys.__stderr__, flush=True)\n"
+            "        threading.Event().wait()\n"
+            "async def owner():\n"
+            "    local = BlockingFrameLocal()\n"
+            "    try:\n"
+            "        await asyncio.Event().wait()\n"
+            "    except asyncio.CancelledError:\n"
+            "        return local\n"
+            "loop.create_task(owner())\n"
+            "loop.run_until_complete(asyncio.sleep(0))\n"
+            "reaper = AdoptedZombieReaper()\n"
+            "reaper.drain_at_teardown = lambda: (0, False)\n"
+        )
+        self._run_repro(
+            tmp_path,
+            "blocked_frame_local",
+            body,
+            b"BLOCKING_FRAME_LOCAL_DEL_ENTER",
+        )
+
+    def test_cancellation_finally_cannot_defeat_wall_clock(self, tmp_path):
+        """A synchronous cancellation finally blocks the event loop itself,
+        so asyncio.wait(timeout=...) never gets a chance to return."""
+        body = (
+            "async def owner():\n"
+            "    try:\n"
+            "        await asyncio.Event().wait()\n"
+            "    finally:\n"
+            "        print('CANCEL_FINALLY_ENTER', "
+            "file=sys.__stderr__, flush=True)\n"
+            "        entry.os._exit = lambda code: None\n"
+            "        ctypes.PyDLL(None).sleep(10)\n"
+            "loop.create_task(owner())\n"
+            "loop.run_until_complete(asyncio.sleep(0))\n"
+            "reaper = AdoptedZombieReaper()\n"
+        )
+        self._run_repro(
+            tmp_path,
+            "blocked_cancel_finally",
+            body,
+            b"CANCEL_FINALLY_ENTER",
+        )
+
+    def test_loop_close_finalizer_cannot_defeat_wall_clock(self, tmp_path):
+        """loop.close() clears delayed handles synchronously; hostile handle
+        arguments must not be able to strand an otherwise-clean shutdown."""
+        body = (
+            "class BlockingHandleArg:\n"
+            "    def __del__(self):\n"
+            "        print('HANDLE_ARG_DEL_ENTER', "
+            "file=sys.__stderr__, flush=True)\n"
+            "        threading.Event().wait()\n"
+            "arg = BlockingHandleArg()\n"
+            "loop.call_later(3600, lambda value: None, arg)\n"
+            "del arg\n"
+            "reaper = AdoptedZombieReaper()\n"
+        )
+        self._run_repro(
+            tmp_path,
+            "blocked_loop_close",
+            body,
+            b"HANDLE_ARG_DEL_ENTER",
+        )
+
+    def test_armed_deadline_is_captured_immutably(self, tmp_path):
+        """Changing the module setting after READY cannot postpone an armed
+        helper. A late global read made the deadline user-mutable."""
+        body = (
+            "async def owner():\n"
+            "    try:\n"
+            "        await asyncio.Event().wait()\n"
+            "    finally:\n"
+            "        print('CAPTURED_DEADLINE_ENTER', "
+            "file=sys.__stderr__, flush=True)\n"
+            "        entry._FINALIZE_WATCHDOG_TIMEOUT = 3600\n"
+            "        ctypes.PyDLL(None).sleep(10)\n"
+            "loop.create_task(owner())\n"
+            "loop.run_until_complete(asyncio.sleep(0))\n"
+            "reaper = AdoptedZombieReaper()\n"
+        )
+        self._run_repro(
+            tmp_path,
+            "captured_deadline",
+            body,
+            b"CAPTURED_DEADLINE_ENTER",
+        )
+
+    def test_watchdog_helper_is_not_attributed_as_an_adopted_orphan(self):
+        import os
+
+        import src.__main__ as entry
+        import src.tools.process_manager as pm
+
+        watchdog = entry._arm_finalize_watchdog(0)
+        reaper = pm.AdoptedZombieReaper()
+        reaper.drain_at_teardown()
+        waited, _ = watchdog.waitpid(watchdog.pid, os.WNOHANG)
+        assert waited == 0  # final drain did not consume/kill the live helper
+        entry._disarm_finalize_watchdog(watchdog, 0)
+
+    def test_clean_finalize_disarms_watchdog(self, monkeypatch):
+        import logging
+
+        import src.__main__ as entry
+        import src.tools.process_manager as pm
+
+        monkeypatch.setattr(entry, "_FINALIZE_WATCHDOG_TIMEOUT", 5.0)
+        calls: list[int] = []
+        monkeypatch.setattr(entry.os, "_exit", lambda code: calls.append(code))
+        real_disarm = entry._disarm_finalize_watchdog
+        disarmed: list[int] = []
+
+        def capture(watchdog, code):
+            real_disarm(watchdog, code)
+            disarmed.append(watchdog.pid)
+
+        monkeypatch.setattr(entry, "_disarm_finalize_watchdog", capture)
+        loop = asyncio.new_event_loop()
+        entry._finalize_and_exit(
+            loop, pm.AdoptedZombieReaper(), logging.getLogger("test"), 0
+        )
+        assert len(disarmed) == 1
+        assert calls == []
+        assert loop.is_closed()
 
 
 class TestVetoedReexec:

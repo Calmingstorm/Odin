@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import select
 import signal
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 from src import restart
 from src.tools.process_manager import AdoptedZombieReaper
@@ -122,14 +126,21 @@ def _enable_process_containment(log) -> bool:
     return False
 
 
-# Per-step ceiling for the finalize barrier. Every await in
-# _finalize_loop is bounded by it: a cancellation-resistant task (or a
-# wedged executor thread) must never be able to hold teardown hostage —
-# an unbounded wait here made the final drain and the re-exec veto
-# UNREACHABLE (round-16 #2), which is the v3.62.3 shutdown-hang class
-# reinvented at the last barrier. Bounds only bite in that pathological
-# case; the normal path completes in milliseconds.
+# Cooperative per-step ceiling for the ordinary finalize barrier. It keeps
+# well-behaved async work bounded, but it is NOT a hard wall-clock guarantee:
+# cancellation may enter synchronous user code and prevent the loop from ever
+# servicing asyncio.wait()'s timeout (round-23 #2).
 _FINALIZE_STEP_TIMEOUT = 3.0
+
+# Hard process-level ceiling, armed in an isolated helper process BEFORE
+# finalization begins. The ordinary barrier has at most three cooperative 3s
+# phases (task drain, async generators, default executor); the remaining margin
+# covers the final zombie proof and clean close. If the main process blocks
+# anywhere — including with the GIL retained in cancellation/finalization or in
+# loop.close() — the helper SIGKILLs that exact incarnation via pidfd. This is
+# deliberately out-of-process: once teardown starts, no code in Odin's process
+# is trusted to make progress.
+_FINALIZE_WATCHDOG_TIMEOUT = 12.0
 
 
 # Objects caught on the emergency path are parked here FOREVER — the
@@ -175,9 +186,11 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
     status a still-running owner legitimately awaits — round-15
     blocker #1).
 
-    Every step is BOUNDED (``asyncio.wait`` returns at its timeout no
-    matter how cancellation-resistant a task is — ``gather`` does not),
-    and failure anywhere on this path VETOES the in-place re-exec
+    Cooperative steps use bounded ``asyncio.wait`` calls. They are backed by
+    the process-level watchdog armed by :func:`_finalize_and_exit`, because no
+    event-loop timeout can fire while cancellation/finalization is executing
+    blocking synchronous code (round-23). Failure anywhere on this path VETOES
+    the in-place re-exec
     (``restart.block_reexec``): exec'ing over an unverified process
     table hands invisible survivors to the new image, while exiting
     lets the supervisor start clean and PID 1 reap whatever remains.
@@ -268,22 +281,150 @@ def _finalize_loop(loop, zombie_reaper: AdoptedZombieReaper, log) -> str | None:
     return None
 
 
+_FINALIZE_WATCHDOG_PROGRAM = r"""
+import os
+import select
+import signal
+import sys
+
+control_fd = int(sys.argv[1])
+ready_fd = int(sys.argv[2])
+parent_pidfd = int(sys.argv[3])
+deadline = float(sys.argv[4])
+try:
+    os.write(ready_fd, b"R")
+    os.close(ready_fd)
+    readable, _, _ = select.select([control_fd], [], [], deadline)
+    if not readable:
+        signal.pidfd_send_signal(parent_pidfd, signal.SIGKILL)
+finally:
+    os._exit(0)
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class _FinalizeWatchdog:
+    """Kernel-backed finalization deadline and captured disarm primitives."""
+
+    control_fd: int
+    pid: int
+    hard_exit: Callable[[int], NoReturn]
+    write: Callable[[int, bytes], int]
+    close: Callable[[int], None]
+    waitpid: Callable[[int, int], tuple[int, int]]
+
+
+def _arm_finalize_watchdog(exit_code: int) -> _FinalizeWatchdog:
+    """Arm an out-of-process, GIL-independent finalization deadline.
+
+    A Python thread cannot be a hard wall-clock boundary: synchronous teardown
+    can retain the GIL forever. The isolated helper process owns a pidfd for
+    this exact parent incarnation and sends SIGKILL if the control pipe is not
+    disarmed before the deadline. The helper acknowledges startup before this
+    function returns, so finalize never begins without an active guard.
+
+    The helper does no logging or cleanup at expiry. Its signal is deliberately
+    uncatchable and pidfd-targeted, so user callbacks cannot intercept it and
+    PID reuse cannot redirect it. Arm failure exits immediately rather than
+    attempting unguarded finalization.
+    """
+    code = exit_code or 1
+    # Capture every primitive before teardown can run arbitrary callbacks.
+    hard_exit = os._exit
+    pipe = os.pipe
+    close = os.close
+    read = os.read
+    write = os.write
+    waitpid = os.waitpid
+    set_inheritable = os.set_inheritable
+    pidfd_open = os.pidfd_open
+    spawn = os.posix_spawn
+    select_ready = select.select
+    control_r = control_w = ready_r = ready_w = parent_pidfd = -1
+    try:
+        control_r, control_w = pipe()
+        ready_r, ready_w = pipe()
+        parent_pidfd = pidfd_open(os.getpid())
+        for fd in (control_r, ready_w, parent_pidfd):
+            set_inheritable(fd, True)
+        argv = (
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            _FINALIZE_WATCHDOG_PROGRAM,
+            str(control_r),
+            str(ready_w),
+            str(parent_pidfd),
+            str(_FINALIZE_WATCHDOG_TIMEOUT),
+        )
+        pid = spawn(sys.executable, argv, os.environ)
+        for fd in (control_r, ready_w, parent_pidfd):
+            close(fd)
+        control_r = ready_w = parent_pidfd = -1
+
+        readable, _, _ = select_ready([ready_r], [], [], 2.0)
+        if not readable or read(ready_r, 1) != b"R":
+            hard_exit(code)
+            raise AssertionError("os._exit returned")  # test doubles only
+        close(ready_r)
+        ready_r = -1
+        return _FinalizeWatchdog(
+            control_fd=control_w,
+            pid=pid,
+            hard_exit=hard_exit,
+            write=write,
+            close=close,
+            waitpid=waitpid,
+        )
+    except BaseException:  # noqa: BLE001 — no unguarded finalize is allowed
+        for fd in (control_r, control_w, ready_r, ready_w, parent_pidfd):
+            if fd >= 0:
+                try:
+                    close(fd)
+                except BaseException:
+                    pass
+        hard_exit(code)
+        raise AssertionError("os._exit returned")  # test doubles only
+
+
+def _disarm_finalize_watchdog(
+    watchdog: _FinalizeWatchdog, exit_code: int
+) -> None:
+    """Disarm and reap the helper after fully clean finalization.
+
+    Only captured C-backed primitives run here. Any failure is unsafe: a live
+    helper or uncertain child status must not be carried into ordinary exit or
+    in-place exec, so the already-captured hard exit is used.
+    """
+    try:
+        if watchdog.write(watchdog.control_fd, b"D") != 1:
+            watchdog.hard_exit(exit_code or 1)
+        watchdog.close(watchdog.control_fd)
+        waited, status = watchdog.waitpid(watchdog.pid, 0)
+        if waited != watchdog.pid or status != 0:
+            watchdog.hard_exit(exit_code or 1)
+    except BaseException:  # noqa: BLE001 — clean completion is now unprovable
+        watchdog.hard_exit(exit_code or 1)
+
+
 def _finalize_and_exit(
     loop, zombie_reaper: AdoptedZombieReaper, log, exit_code: int
 ) -> None:
-    """Run the finalize barrier; on unproven owners, LEAVE immediately.
+    """Run the finalize barrier under a pre-armed hard deadline.
 
     A genuinely blocked default-executor worker is a NON-DAEMON thread:
-    the bounded barrier correctly returns and vetoes re-exec, but
-    ordinary interpreter shutdown then joins that thread forever —
-    ``sys.exit`` never reaches the supervisor and systemd has to
-    SIGKILL (round-17, real-process repro RC=124). Skipping atexit is
-    the point — nothing behind an unproven barrier can be trusted to
-    finish.
+    ordinary interpreter shutdown joins it forever. More generally, arbitrary
+    finalizers may run while cancellation frames, completed task frames, or
+    loop callback handles are released. Those callbacks can block before the
+    cooperative barrier returns (round-23). The external watchdog is therefore
+    armed *before* any finalize work and remains armed until the entire clean
+    barrier has returned. It does not depend on event-loop progress.
 
-    Returns normally when the barrier completed; the caller then owns
-    the ordinary restart/exit tail.
+    Returns normally only when the complete barrier finished cleanly; the
+    caller then owns the ordinary restart/exit tail.
     """
+    watchdog = _arm_finalize_watchdog(exit_code)
     try:
         failure = _finalize_loop(loop, zombie_reaper, log)
     except BaseException as exc:  # noqa: BLE001 — nothing may escape this path
@@ -296,11 +437,21 @@ def _finalize_and_exit(
         _PARKED_FOR_EXIT.append(exc)
         failure = "finalize crashed: " + _safe_repr(exc)
     if failure is None:
+        _disarm_finalize_watchdog(watchdog, exit_code)
         return
-    _emergency_exit(log, exit_code, failure)
+    _emergency_exit(log, exit_code, failure, hard_exit=watchdog.hard_exit)
+    # os._exit never returns in production. Test doubles do; disarm there so a
+    # unit test cannot inherit a live watchdog that fires in a later test.
+    _disarm_finalize_watchdog(watchdog, exit_code)
 
 
-def _emergency_exit(log, exit_code: int, reason: str) -> None:
+def _emergency_exit(
+    log,
+    exit_code: int,
+    reason: str,
+    *,
+    hard_exit: Callable[[int], NoReturn] | None = None,
+) -> None:
     """Leave NOW, depending on no ordinary I/O whatsoever (round-18/19).
 
     Behind an unproven barrier even the last words are best-effort: a
@@ -315,6 +466,11 @@ def _emergency_exit(log, exit_code: int, reason: str) -> None:
     """
     import logging
     import threading
+
+    # Direct unit callers use the current function so their test double still
+    # works. _finalize_and_exit passes the pre-finalize captured C function,
+    # which hostile teardown callbacks cannot replace.
+    exit_now = hard_exit if hard_exit is not None else os._exit
 
     def _last_words() -> None:
         try:
@@ -352,7 +508,7 @@ def _emergency_exit(log, exit_code: int, reason: str) -> None:
         scribe.join(timeout=1.0)
     except BaseException as exc:  # noqa: BLE001 — os._exit is unconditional
         _PARKED_FOR_EXIT.append(exc)
-    os._exit(exit_code or 1)
+    exit_now(exit_code or 1)
 
 
 def main() -> None:
