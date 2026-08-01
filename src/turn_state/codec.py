@@ -29,7 +29,7 @@ from ..odin_log import get_logger
 
 log = get_logger("turn_state")
 
-CODEC_VERSION = 1
+CODEC_VERSION = 2
 
 # ── The classification (census-pinned) ───────────────────────────────
 
@@ -52,6 +52,7 @@ PERSISTED_FIELDS: frozenset[str] = frozenset({
     "hedging_retried",
     "code_hedging_retried",
     "premature_failure_retried",
+    "wait_judgment_pending",
     "pending_image_blocks",  # blob-externalized
     "_op_tool_details",
     "_pending_validations",
@@ -391,6 +392,7 @@ def snapshot_chat_turn(st, *, store_blob, generation_seq: int, extra: dict | Non
             "hedging_retried": st.hedging_retried,
             "code_hedging_retried": st.code_hedging_retried,
             "premature_failure_retried": st.premature_failure_retried,
+            "wait_judgment_pending": st.wait_judgment_pending,
             "pending_image_blocks": _externalize_blocks(
                 list(st.pending_image_blocks), store_blob
             ),
@@ -426,7 +428,7 @@ class CheckpointInvalidError(ValueError):
 _GUARD_FLAG_FIELDS = (
     "fabrication_retried", "promise_retried", "unavail_retried",
     "hedging_retried", "code_hedging_retried", "premature_failure_retried",
-    "_validation_required",
+    "_validation_required", "wait_judgment_pending",
 )
 _NON_NEGATIVE_INT_FIELDS = (
     "iteration", "continuation_count", "max_continuations",
@@ -481,6 +483,15 @@ def validate_payload(payload: Any) -> None:
     fields = payload.get("fields")
     if not isinstance(fields, dict):
         raise CheckpointInvalidError("missing fields envelope")
+    # Legacy normalization, VERSION-SCOPED (round-5 blocker #3): only a
+    # v1 payload — written before wait_judgment_pending existed — may
+    # default the field. New writers emit v2, so a v2 payload missing it
+    # is malformed and still rejected; the two cases are distinguishable.
+    # Runs AFTER the store's digest verification (load_resumable_sync
+    # rejects tampered payloads before any caller sees them), so
+    # normalization can never launder an edit.
+    if version == 1 and "wait_judgment_pending" not in fields:
+        fields["wait_judgment_pending"] = False
     missing = PERSISTED_FIELDS - fields.keys()
     if missing:
         raise CheckpointInvalidError(f"missing persisted fields: {sorted(missing)}")

@@ -455,18 +455,23 @@ class TestProductionPipelinePath:
         assert h2.row()[0] == TurnStatus.SUSPENDED
 
         heal_capacity(h2, text_response("Pipeline auto-finish."))
-        # Wait for a TERMINAL status — the row passes through ACTIVE while
-        # the auto-resume runs (breaking on first non-SUSPENDED raced the
-        # in-flight resume under coverage instrumentation).
+
+        def delivered() -> bool:
+            return any(
+                "Pipeline auto-finish." in (r["content"] or "")
+                for r in original.replies
+            )
+
+        # Wait for the USER-VISIBLE outcome, not just the row status: the
+        # turn settles TERMINAL a moment before delivery completes, and
+        # asserting on the status alone raced the reply under coverage
+        # instrumentation on CI.
         for _ in range(600):
             await asyncio.sleep(0.05)
-            if h2.row()[0] in TurnStatus.TERMINAL:
+            if h2.row()[0] in TurnStatus.TERMINAL and delivered():
                 break
         assert h2.row()[0] == TurnStatus.TERMINAL_COMPLETED
-        assert any(
-            "Pipeline auto-finish." in (r["content"] or "")
-            for r in original.replies
-        )
+        assert delivered()
         for task in list(h2.manager._waiters.values()):
             task.cancel()
 
@@ -661,6 +666,96 @@ class TestMonotonicSessionFence:
         assert sess.mutation_revision("chX") == 2
         sess.remove_last_message("chX", "assistant")
         assert sess.mutation_revision("chX") == 3  # removal GROWS the watermark
+
+
+class _FakeBotUser:
+    def __init__(self, id: int) -> None:
+        self.id = id
+
+
+class TestMentionAnchoredResumeTrigger:
+    """Tag-mode channels force `@bot resume` — ONE leading anchored bot
+    mention is stripped before trigger matching. Anchored only; the exact
+    bare-command contract (trailing `!`/`.` tolerance included) is
+    otherwise unchanged."""
+
+    BOT_ID = 424242
+
+    def _arm(self, h):
+        h.manager._get_bot_user = lambda: _FakeBotUser(self.BOT_ID)
+
+    async def test_leading_mention_resume_triggers(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        self._arm(h)
+        heal_capacity(h, text_response("resumed output"))
+        make_breaker_probe_ready(h)
+        result = await h.manager.try_explicit_resume(
+            resume_msg(original, content=f"<@{self.BOT_ID}> resume")
+        )
+        assert result is not None  # recognized as the resume command
+        assert h.row()[0] != TurnStatus.SUSPENDED  # it acted on the turn
+
+    async def test_nickname_mention_form_triggers(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        self._arm(h)
+        heal_capacity(h, text_response("resumed output"))
+        make_breaker_probe_ready(h)
+        result = await h.manager.try_explicit_resume(
+            resume_msg(original, content=f"<@!{self.BOT_ID}> resume!")
+        )
+        assert result is not None  # <@!id> form + trailing-! contract intact
+
+    async def test_trailing_mention_is_not_a_command(self, tmp_path):
+        """`resume @bot` must run as a normal message — the strip is
+        anchored, never intake's strip-anywhere cleaning."""
+        h, original = await suspend_turn(tmp_path)
+        self._arm(h)
+        result = await h.manager.try_explicit_resume(
+            resume_msg(original, content=f"resume <@{self.BOT_ID}>")
+        )
+        assert result is None
+        assert h.row()[0] == TurnStatus.SUSPENDED  # untouched
+
+    async def test_mention_plus_sentence_is_not_a_command(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        self._arm(h)
+        result = await h.manager.try_explicit_resume(
+            resume_msg(
+                original,
+                content=f"<@{self.BOT_ID}> resume what you were doing",
+            )
+        )
+        assert result is None
+        assert h.row()[0] == TurnStatus.SUSPENDED
+
+    async def test_foreign_mention_is_not_stripped(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        self._arm(h)
+        result = await h.manager.try_explicit_resume(
+            resume_msg(original, content="<@777> resume")
+        )
+        assert result is None  # someone ELSE's mention is ordinary text
+
+    async def test_mention_recognized_trigger_still_fails_closed(self, tmp_path):
+        """The no-raise boundary anchors on CANDIDATE recognition: a store
+        read failure after a mention-form trigger refuses, never falls
+        through to a fresh turn."""
+        h, original = await suspend_turn(tmp_path)
+        self._arm(h)
+        heal_capacity(h, text_response("fresh turn that must never run"))
+        calls_before = len(h.fake.calls)
+
+        def boom(source=None):
+            raise OSError("forced read failure")
+
+        h.store.list_suspended_sync = boom
+        result = await h.manager.try_explicit_resume(
+            resume_msg(original, content=f"<@{self.BOT_ID}> resume")
+        )
+        assert result is not None
+        assert "Nothing was resumed or started fresh" in result[0]
+        assert len(h.fake.calls) == calls_before
+        assert h.row()[0] == TurnStatus.SUSPENDED
 
 
 class TestResumeLookupFailureFailClosed:
@@ -890,4 +985,163 @@ class TestCheckpointIntegrityRejectsSameTypeTampering:
         assert result is not None
         assert "no longer resumable" in result[0]
         assert len(h.fake.calls) == calls_before
+        assert h.row()[0] == TurnStatus.TERMINAL_REJECTED
+
+
+class TestRestoredTrackerJudgedBeforeGeneration:
+    """PR #244 round-2 blocker #2: the wait fingerprint survives WI-4, so
+    its pending judgment must survive too — a crash between checkpoint and
+    judgment must not buy the resumed turn a free generation-plus-poll."""
+
+    @staticmethod
+    def _trip_tracker(h, *, warned: bool, fp: str = "wait:mp:77:running::500",
+                      pending: bool = True):
+        (payload_text,) = h.store._conn.execute(
+            "SELECT payload FROM turns"
+        ).fetchone()
+        payload = json.loads(payload_text)
+        payload["fields"]["stuck_tracker"]["fingerprints"] = [fp, fp, fp]
+        payload["fields"]["stuck_tracker"]["warned"] = warned
+        # The crash window this class models: the fingerprint's WI-4 landed
+        # but its judgment never ran — the EXPLICIT persisted phase
+        # (round-3 blocker #1), never inferred from fingerprints.
+        payload["fields"]["wait_judgment_pending"] = pending
+        rewrite_payload_with_valid_digest(
+            h.store, json.dumps(payload, sort_keys=True)
+        )
+
+    async def test_unconsumed_warning_nudges_before_first_generation(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("acted on the nudge"))
+        make_breaker_probe_ready(h)
+        self._trip_tracker(h, warned=False)
+        calls_before = len(h.fake.calls)
+
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+
+        assert result is not None and result[0] == "acted on the nudge"
+        assert len(h.fake.calls) == calls_before + 1  # exactly one generation
+        # The FIRST resumed generation already carried the wait nudge.
+        devs = h.fake.developer_messages_of_call(calls_before)
+        assert any("wait_seconds" in d for d in devs)
+
+    async def test_consumed_warning_terminates_with_zero_generations(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("must never generate"))
+        make_breaker_probe_ready(h)
+        self._trip_tracker(h, warned=True)
+        calls_before = len(h.fake.calls)
+
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+
+        assert result is not None
+        assert "already" in result[0] and "not touched" in result[0]
+        assert len(h.fake.calls) == calls_before  # ZERO generations
+
+    async def test_restored_agents_fp_gets_agents_nudge(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("adjusted the wait"))
+        make_breaker_probe_ready(h)
+        self._trip_tracker(h, warned=False, fp="wait:agents:a1,a2:deadbeef")
+        calls_before = len(h.fake.calls)
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None and result[0] == "adjusted the wait"
+        devs = h.fake.developer_messages_of_call(calls_before)
+        assert any("get_agent_results" in d for d in devs)
+
+    async def test_restored_terminal_target_fp_gets_ordinary_guidance(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("acted on it"))
+        make_breaker_probe_ready(h)
+        self._trip_tracker(h, warned=False, fp="wait:mp:77:completed:0:500")
+        calls_before = len(h.fake.calls)
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        devs = h.fake.developer_messages_of_call(calls_before)
+        assert any("finished or missing target" in d for d in devs)
+
+    async def test_delivered_nudge_is_never_rejudged_on_resume(self, tmp_path):
+        """PR #244 round-3 blocker #1 (tampered form): a tripped tracker
+        with warned=True but NO pending judgment is a nudge that was
+        already delivered — the resumed turn gets its post-nudge
+        generation, never a zero-generation kill."""
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("acted on the earlier nudge"))
+        make_breaker_probe_ready(h)
+        self._trip_tracker(h, warned=True, pending=False)
+        calls_before = len(h.fake.calls)
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None and result[0] == "acted on the earlier nudge"
+        assert len(h.fake.calls) == calls_before + 1  # generation GRANTED
+
+    async def test_real_nudge_then_suspension_resumes_into_generation(self, tmp_path):
+        """PR #244 round-3 blocker #1 (Odin's exact repro, no tamper):
+        frozen polls → nudge delivered in-turn (WI-5) → capacity failure
+        suspends → resume must generate, not terminate."""
+        h, original = await suspend_turn(
+            tmp_path,
+            script=[
+                tool_call_response(("manage_process", {"action": "poll", "pid": 9})),
+                tool_call_response(("manage_process", {"action": "poll", "pid": 9})),
+                tool_call_response(("manage_process", {"action": "poll", "pid": 9})),
+                # 4th generation (post-nudge) hits capacity → suspends
+            ],
+        )
+        # Suspension happened AFTER the nudge: warned consumed, judgment
+        # NOT pending (it completed by delivering the nudge).
+        payload = json.loads(h.row()[1])
+        assert payload["fields"]["stuck_tracker"]["warned"] is True
+        assert payload["fields"]["wait_judgment_pending"] is False
+
+        heal_capacity(h, text_response("resumed and acted on the nudge"))
+        calls_before = len(h.fake.calls)
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        assert result[0] == "resumed and acted on the nudge"
+        assert len(h.fake.calls) == calls_before + 1  # generation GRANTED
+
+
+class TestLegacyCheckpointCompatibility:
+    async def test_pre_pr244_v1_checkpoint_resumes_with_default_pending(self, tmp_path):
+        """PR #244 round-4 blocker #2: suspended checkpoints written by
+        v3.67.0 (codec v1, no wait_judgment_pending) must resume after
+        upgrade — the field defaults to False during validation, AFTER
+        the store's digest verification."""
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("resumed a legacy checkpoint"))
+        make_breaker_probe_ready(h)
+        (payload_text,) = h.store._conn.execute("SELECT payload FROM turns").fetchone()
+        payload = json.loads(payload_text)
+        del payload["fields"]["wait_judgment_pending"]  # the v3.67.0 shape
+        payload["codec_version"] = 1  # written by the older codec
+        rewrite_payload_with_valid_digest(h.store, json.dumps(payload, sort_keys=True))
+
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        assert result[0] == "resumed a legacy checkpoint"
+        assert h.row()[0] == TurnStatus.TERMINAL_COMPLETED
+
+    async def test_new_writers_emit_v2(self, tmp_path):
+        h, _original = await suspend_turn(tmp_path)
+        payload = json.loads(h.row()[1])
+        assert payload["codec_version"] == 2
+
+    async def test_v2_payload_missing_the_field_is_malformed(self, tmp_path):
+        """Round-5 blocker #3: version scoping makes the two cases
+        distinguishable — a CURRENT payload missing the field is corrupt
+        and must still be rejected, never silently defaulted."""
+        h, original = await suspend_turn(tmp_path)
+        heal_capacity(h, text_response("must never generate"))
+        make_breaker_probe_ready(h)
+        (payload_text,) = h.store._conn.execute("SELECT payload FROM turns").fetchone()
+        payload = json.loads(payload_text)
+        assert payload["codec_version"] == 2
+        del payload["fields"]["wait_judgment_pending"]
+        rewrite_payload_with_valid_digest(h.store, json.dumps(payload, sort_keys=True))
+        calls_before = len(h.fake.calls)
+
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        assert "could not be restored" in result[0]
+        assert len(h.fake.calls) == calls_before  # ZERO generation
         assert h.row()[0] == TurnStatus.TERMINAL_REJECTED

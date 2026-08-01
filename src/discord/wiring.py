@@ -48,6 +48,7 @@ from ..search import LocalEmbedder, SessionVectorStore
 from ..sessions import SessionManager
 from ..tools import SkillManager, ToolExecutor
 from ..tools.autonomous_loop import LoopManager
+from ..tools.process_manager import ProcessCleanupError
 from ..tools.workspace import DEFAULT_MEMORY_PATH
 from ..trajectories.saver import TrajectorySaver
 from ..turn_state import TurnStateStore
@@ -817,6 +818,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             fetch_message=_fetch_message,
             auto_resume_enabled=bot.config.turn_state.auto_resume,
             resume_ttl_hours=bot.config.turn_state.resume_ttl_hours,
+            get_bot_user=lambda: bot.user,
         )
         # Late instance-attr wiring: the runner exists before the manager
         # (the manager needs the runner), so the suspension callback is
@@ -912,8 +914,24 @@ async def shutdown_services(bot) -> None:
     if process_registry is not None:
         try:
             await process_registry.shutdown()
-        except Exception:
-            log.exception("Error shutting down process_registry")
+        except Exception as cleanup_err:
+            # ANY process-registry teardown failure vetoes the in-place
+            # re-exec (round-9 #2): an unexpected error is exactly as
+            # unproven as an explicit ProcessCleanupError, and exec would
+            # hand survivors to the new image invisibly. The rest of
+            # teardown still runs.
+            log.exception(
+                "Process cleanup could not be verified — surviving "
+                "descendants may outlive this process"
+            )
+            from ..restart import block_reexec
+
+            detail = (
+                str(cleanup_err)
+                if isinstance(cleanup_err, ProcessCleanupError)
+                else f"{type(cleanup_err).__name__}: {cleanup_err}"
+            )
+            block_reexec(f"process cleanup unverified: {detail}")
 
     knowledge = getattr(bot, "knowledge", None)
     if knowledge is not None:

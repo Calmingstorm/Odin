@@ -66,6 +66,7 @@ class TurnResumeManager:
         fetch_message: Callable,
         auto_resume_enabled: bool = True,
         resume_ttl_hours: float = 24.0,
+        get_bot_user: Callable | None = None,
     ) -> None:
         self._store = store
         self._tool_loop = tool_loop
@@ -79,6 +80,8 @@ class TurnResumeManager:
         self._fetch_message = fetch_message  # async (channel_id, message_id) -> msg|None
         self._auto_resume_enabled = auto_resume_enabled
         self._resume_ttl_hours = resume_ttl_hours
+        # Live root (None-tolerant): the bot user exists only after login.
+        self._get_bot_user = get_bot_user
         self._waiters: dict[TurnKey, asyncio.Task] = {}
 
     # ── queries ──────────────────────────────────────────────────────
@@ -252,7 +255,29 @@ class TurnResumeManager:
 
     @staticmethod
     def is_resume_trigger(content: str) -> bool:
+        # Deliberately exact: the bare command word, tolerating only trailing
+        # `!`/`.` — sentences containing "resume"/"continue" are never
+        # commands. This contract predates the mention tolerance below and
+        # is preserved unchanged.
         return (content or "").strip().lower().rstrip("!.") in RESUME_TRIGGERS
+
+    def _resume_candidate(self, raw: str) -> str:
+        """The lexical text a resume trigger is recognized against.
+
+        Mention-required channels force ``@bot resume``, so ONE leading
+        anchored bot mention is stripped before matching. Anchored only:
+        ``resume @bot`` (mention elsewhere) must NOT become a command, which
+        is why this never reuses intake's strip-anywhere cleaned content.
+        Identity/admission checks elsewhere keep the raw message untouched.
+        """
+        user = self._get_bot_user() if self._get_bot_user is not None else None
+        if user is None:
+            return raw
+        stripped = raw.lstrip()
+        for mention in (f"<@{user.id}>", f"<@!{user.id}>"):
+            if stripped.startswith(mention):
+                return stripped[len(mention):]
+        return raw
 
     @staticmethod
     def _unresolved_ops(row: dict) -> list[dict]:
@@ -284,7 +309,7 @@ class TurnResumeManager:
         normal turn.
         """
         content = getattr(message, "content", "") or ""
-        if not self.is_resume_trigger(content):
+        if not self.is_resume_trigger(self._resume_candidate(content)):
             return None
         # From lexical trigger recognition onward, every store read lives
         # inside this no-raise boundary. In particular, failure of the

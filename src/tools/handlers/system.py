@@ -19,6 +19,7 @@ import os
 import shlex
 
 from ..branch_freshness import is_test_command, is_test_failure
+from ..process_manager import MAX_POLL_WAIT_SECONDS
 from ..tool_text import _ERROR_RESULT_PREFIXES, _truncate_lines
 from .deps import HandlerBase
 
@@ -264,7 +265,24 @@ class SystemTools(HandlerBase):
             pid = inp.get("pid")
             if pid is None:
                 return "pid is required for poll action.", 1
-            result = registry.poll(int(pid))
+            wait_raw = inp.get("wait_seconds", 0)
+            # Reject invalid values rather than clamping — a silently-moved
+            # wait surprises the caller (same rule as reasoning-effort
+            # validation). bool is an int subtype and is nonsense here.
+            if (
+                isinstance(wait_raw, bool)
+                or not isinstance(wait_raw, (int, float))
+                or wait_raw != wait_raw  # NaN
+                or wait_raw in (float("inf"), float("-inf"))
+                or wait_raw < 0
+                or wait_raw > MAX_POLL_WAIT_SECONDS
+            ):
+                return (
+                    f"wait_seconds must be a number between 0 and "
+                    f"{MAX_POLL_WAIT_SECONDS}, got {wait_raw!r}.",
+                    1,
+                )
+            result = await registry.poll(int(pid), wait_seconds=float(wait_raw))
             if result.startswith("No process with PID"):
                 return result, 1
             return result, 0

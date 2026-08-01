@@ -374,3 +374,161 @@ class TestScrubOutputSecrets:
         # Short strings starting with "eyJ" should NOT be scrubbed
         text = "The eyJump module is loaded."
         assert scrub_output_secrets(text) == text
+
+
+# ---------------------------------------------------------------------------
+# Wait-class iterations (result-aware stuck detection)
+# ---------------------------------------------------------------------------
+
+from src.discord.response_guards import (  # noqa: E402
+    StuckLoopTracker,
+    _fingerprint_tool_calls,
+    is_wait_iteration,
+    wait_iteration_fingerprint,
+    wait_target_alive,
+)
+
+
+def _mp_render(pid=77, status="running", exit_code=None, uptime=3, out_bytes=100):
+    line = f"[PID {pid}] status={status}"
+    if exit_code is not None:
+        line += f" exit_code={exit_code}"
+    line += f" uptime={uptime}s output_bytes={out_bytes}"
+    return line + "\nsome build output\n"
+
+
+class TestIsWaitIteration:
+    def test_single_poll_is_wait(self):
+        calls = [{"name": "manage_process", "input": {"action": "poll", "pid": 1}}]
+        assert is_wait_iteration(calls) is True
+
+    def test_single_wait_for_agents_is_wait(self):
+        calls = [{"name": "wait_for_agents", "input": {"agent_ids": ["a"]}}]
+        assert is_wait_iteration(calls) is True
+
+    def test_manage_process_start_is_not_wait(self):
+        calls = [{"name": "manage_process", "input": {"action": "start", "command": "x"}}]
+        assert is_wait_iteration(calls) is False
+
+    def test_mixed_batch_is_never_wait(self):
+        """A changing poll result must never bless a repeated side-effecting
+        call riding beside it — two calls is a mixed batch, full stop."""
+        calls = [
+            {"name": "manage_process", "input": {"action": "poll", "pid": 1}},
+            {"name": "run_command", "input": {"command": "date"}},
+        ]
+        assert is_wait_iteration(calls) is False
+        assert is_wait_iteration([]) is False
+
+
+class TestWaitIterationFingerprint:
+    def test_uptime_is_excluded(self):
+        """Two polls differing ONLY in uptime are the SAME signature —
+        hashing elapsed time would make a hung process immortal."""
+        a = wait_iteration_fingerprint(
+            "manage_process", {"action": "poll", "pid": 77}, _mp_render(uptime=3)
+        )
+        b = wait_iteration_fingerprint(
+            "manage_process", {"action": "poll", "pid": 77}, _mp_render(uptime=120)
+        )
+        assert a == b
+
+    def test_output_bytes_growth_is_progress(self):
+        a = wait_iteration_fingerprint(
+            "manage_process", {}, _mp_render(out_bytes=100)
+        )
+        b = wait_iteration_fingerprint(
+            "manage_process", {}, _mp_render(out_bytes=200)
+        )
+        assert a != b
+
+    def test_status_transition_is_progress(self):
+        """running → completed with no new output is REAL progress."""
+        a = wait_iteration_fingerprint("manage_process", {}, _mp_render())
+        b = wait_iteration_fingerprint(
+            "manage_process", {}, _mp_render(status="completed", exit_code=0)
+        )
+        assert a != b
+
+    def test_different_pid_is_different_signature(self):
+        a = wait_iteration_fingerprint("manage_process", {}, _mp_render(pid=1))
+        b = wait_iteration_fingerprint("manage_process", {}, _mp_render(pid=2))
+        assert a != b
+
+    def test_non_report_results_are_stable(self):
+        """'No process with PID …' repeating identically must trip."""
+        a = wait_iteration_fingerprint("manage_process", {}, "No process with PID 5.")
+        b = wait_iteration_fingerprint("manage_process", {}, "No process with PID 5.")
+        assert a == b
+
+    def test_agents_signature_tracks_text_and_ids(self):
+        inp = {"agent_ids": ["a1", "a2"]}
+        r1 = "**x** (`a1`): running\n(no output)"
+        r2 = "**x** (`a1`): completed\nresult text"
+        assert wait_iteration_fingerprint("wait_for_agents", inp, r1) == \
+            wait_iteration_fingerprint("wait_for_agents", inp, r1)
+        assert wait_iteration_fingerprint("wait_for_agents", inp, r1) != \
+            wait_iteration_fingerprint("wait_for_agents", inp, r2)
+        assert wait_iteration_fingerprint(
+            "wait_for_agents", {"agent_ids": ["other"]}, r1
+        ) != wait_iteration_fingerprint("wait_for_agents", inp, r1)
+
+    def test_wait_prefix_disjoint_from_argument_fingerprints(self):
+        """A wait fingerprint can never equal an argument fingerprint —
+        the families share one window and must stay unambiguous."""
+        wf = wait_iteration_fingerprint("manage_process", {}, _mp_render())
+        assert wf.startswith("wait:")
+        af = _fingerprint_tool_calls(
+            [{"name": "manage_process", "input": {"action": "poll", "pid": 77}}]
+        )
+        assert not af.startswith("wait:")
+
+
+class TestWaitTargetAlive:
+    def test_running_process(self):
+        assert wait_target_alive("manage_process", _mp_render()) is True
+
+    def test_completed_process(self):
+        assert wait_target_alive(
+            "manage_process", _mp_render(status="completed", exit_code=0)
+        ) is False
+
+    def test_missing_process(self):
+        assert wait_target_alive("manage_process", "No process with PID 5.") is False
+
+    def test_running_agents(self):
+        assert wait_target_alive("wait_for_agents", "**x** (`a1`): running\n…") is True
+        assert wait_target_alive("wait_for_agents", "**x** (`a1`): completed\nok") is False
+
+
+class TestRecordFingerprintWindow:
+    def test_shared_window_and_order(self):
+        """record() and record_fingerprint() feed ONE window; three
+        identical wait fingerprints trip exactly like argument repeats."""
+        t = StuckLoopTracker()
+        fp = wait_iteration_fingerprint("manage_process", {}, _mp_render())
+        for _ in range(3):
+            t.record_fingerprint(fp)
+        assert t.check() is True
+
+    def test_progressing_wait_never_trips(self):
+        t = StuckLoopTracker()
+        for n in (100, 200, 300, 400, 500, 600):
+            t.record_fingerprint(
+                wait_iteration_fingerprint("manage_process", {}, _mp_render(out_bytes=n))
+            )
+        assert t.check() is False
+
+    def test_mixed_family_cycle_still_detected(self):
+        """A frozen poll interleaved with an identical spacer call is a
+        cycle-length-2 repeat — spacing polls does not hide a dead build."""
+        t = StuckLoopTracker()
+        wf = wait_iteration_fingerprint("manage_process", {}, _mp_render())
+        af = _fingerprint_tool_calls([{"name": "run_command", "input": {"command": "sleep 30"}}])
+        for _ in range(3):
+            t.record_fingerprint(wf)
+            t.record(
+                [{"name": "run_command", "input": {"command": "sleep 30"}}]
+            )
+        assert af  # sanity: spacer has a real fingerprint
+        assert t.check() is True

@@ -72,13 +72,18 @@ from .response_guards import (
     _HEDGING_RETRY_MSG,
     _PROMISE_RETRY_MSG,
     _TOOL_UNAVAIL_RETRY_MSG,
+    _WAIT_AGENTS_NUDGE,
+    _WAIT_PROCESS_NUDGE,
     detect_code_hedging,
     detect_fabrication,
     detect_hedging,
     detect_premature_failure,
     detect_promise_without_action,
     detect_tool_unavailable,
+    is_wait_iteration,
     truncate_tool_output,
+    wait_iteration_fingerprint,
+    wait_target_alive,
 )
 from .tool_loop_helpers import (
     _ALLOWED_WEBHOOK_IDS,
@@ -319,6 +324,13 @@ class _ChatTurn:
     hedging_retried: bool = False
     code_hedging_retried: bool = False
     premature_failure_retried: bool = False
+    # True between a wait-class fingerprint's WI-4 (recorded) and its
+    # judgment (nudge/kill/clear). Persisted: a crash in that window must
+    # resume INTO the judgment — while a nudge already delivered before a
+    # later suspension must NOT be re-judged into a zero-generation kill
+    # (PR #244 round-3 blocker #1: the phase is explicit, never inferred
+    # from historical fingerprints).
+    wait_judgment_pending: bool = False
     pending_image_blocks: list = field(default_factory=list)
     _op_tool_details: list = field(default_factory=list)
     _pending_validations: list = field(default_factory=list)
@@ -543,6 +555,14 @@ class ToolLoopRunner:
         Starts from ``st.iteration``: 0 for a fresh turn (unchanged), the
         interrupted generation's index for a resumed one — the restored
         transcript already carries everything before it."""
+        entry_outcome = await self._judge_entry_stuck(st)
+        if entry_outcome is not None:
+            kind, val = entry_outcome
+            if kind == "done":
+                return val
+            # WI-5: the entry nudge + consumed warned flag go durable
+            # before the first generation consumes them.
+            await st.durability.on_guard_injection(st)
         for iteration in range(st.iteration, st.chat_cap):
             st.iteration = iteration
             if st._cancel.is_set():
@@ -593,9 +613,27 @@ class ToolLoopRunner:
 
             tool_results = await self._execute_tool_calls(st, tool_calls)
 
+            # Wait-class fingerprints record BEFORE WI-4 so the checkpoint
+            # carries the stuck observation with the result it observed;
+            # judgment (nudge/kill) runs only AFTER WI-4 succeeded — a
+            # confirmed-frozen kill never discards the result that proved
+            # the freeze, and a crash never forgets it (PR #244 round-1).
+            wait_iteration = self._record_wait_fingerprint(st, tool_calls, tool_results)
+
             outcome = await self._post_iteration(st, tool_calls, tool_results)
             if outcome is not None:
                 return outcome[1]
+
+            if wait_iteration:
+                outcome = await self._judge_wait_stuck(st, tool_calls, tool_results)
+                if outcome is not None:
+                    kind, val = outcome
+                    if kind == "done":
+                        return val
+                    # WI-5: the wait-aware nudge + consumed warned flag go
+                    # durable before the retry generation.
+                    await st.durability.on_guard_injection(st)
+                    continue
 
             handoff = self._check_skill_handoff(st, tool_calls, tool_results)
             if handoff is not None:
@@ -979,6 +1017,14 @@ class ToolLoopRunner:
                 reasoning_effort=getattr(llm_resp, "provenance_reasoning_effort", None),
             )
         )
+        if is_wait_iteration(iter_tool_calls):
+            # Deferred judgment (design settled with Odin, 2026-07-31):
+            # identical wait-polls are the CORRECT shape while the target
+            # progresses, and results do not exist yet at this point.
+            # _check_wait_stuck records a result-aware fingerprint for this
+            # iteration AFTER execution — exactly one record per iteration,
+            # same window, same order. Mixed batches never take this path.
+            return None
         st.stuck_tracker.record(iter_tool_calls)
         if st.stuck_tracker.check():
             if st.stuck_tracker.warned:
@@ -1021,6 +1067,179 @@ class ToolLoopRunner:
                 )
                 return ("retry", None)
         return None
+
+    async def _judge_entry_stuck(self, st: _ChatTurn):
+        """Complete a PENDING wait judgment at loop entry.
+
+        The wait fingerprint is recorded before WI-4 but judged after it —
+        a crash in that window restores a tripped tracker whose judgment
+        never ran (round-2 blocker #2). The pending phase is EXPLICIT
+        persisted state, never inferred from historical fingerprints
+        (round-3 blocker #1): a nudge already delivered before a later
+        suspension resumes with the phase clear and gets its post-nudge
+        generation — only a genuinely undelivered judgment is completed
+        here. ``warned`` semantics are identical to in-turn judgment:
+        consumed flag → terminate with zero generations; unconsumed →
+        nudge before the first generation.
+        """
+        if not st.wait_judgment_pending:
+            return None
+        st.wait_judgment_pending = False
+        if not st.stuck_tracker.check():
+            return None
+        last_fp = st.stuck_tracker.last_fingerprint
+        if st.stuck_tracker.warned:
+            log.warning(
+                "Restored tracker already confirmed-stuck — terminating before generation"
+            )
+            await self._turn_recorder._save_turn_trajectory(st._trajectory, trace=st.trace)
+            await self._turn_recorder._emit_lifecycle_event(
+                "loop.stuck",
+                {
+                    "channel_id": str(st.message.channel.id),
+                    "iteration": st.iteration,
+                    "tools_used": st.tools_used_in_loop,
+                },
+            )
+            self._clear_active(st)
+            return (
+                "done",
+                (
+                    (
+                        "Stopped on resume: the preserved iterations were already "
+                        "repeating with no observable progress and the warning was "
+                        "already consumed. The background work itself was not touched."
+                    ),
+                    False,
+                    True,
+                    st.tools_used_in_loop,
+                    False,
+                ),
+            )
+        st.stuck_tracker.warned = True
+        if last_fp.startswith("wait:mp"):
+            # Alive-ness rides IN the fingerprint (wait:mp:<pid>:<status>:…).
+            parts = last_fp.split(":")
+            alive = len(parts) > 3 and parts[3] == "running"
+            nudge = dict(_WAIT_PROCESS_NUDGE) if alive else {
+                "role": "developer",
+                "content": (
+                    "You are repeating the same call against a finished or "
+                    "missing target and getting the same result. Act on the "
+                    "result you already have, or report and stop."
+                ),
+            }
+        else:
+            # Pending is set only by wait iterations, so the last
+            # fingerprint is always wait:* — mp handled above, agents here.
+            nudge = dict(_WAIT_AGENTS_NUDGE)
+        log.info("Pending wait judgment tripped at entry — injecting nudge before generation")
+        st.messages.append(nudge)
+        return ("retry", None)
+
+    @staticmethod
+    def _wait_result_text(tool_calls, tool_results) -> str:
+        tc = tool_calls[0]
+        for r in tool_results:
+            if isinstance(r, dict) and r.get("tool_use_id") == tc.id:
+                return str(r.get("content", ""))
+        return ""
+
+    def _record_wait_fingerprint(self, st: _ChatTurn, tool_calls, tool_results) -> bool:
+        """Record (ONLY record) the result-aware fingerprint for a
+        wait-class iteration. Runs BEFORE WI-4 so the checkpoint carries
+        the stuck observation — a crash after the settled batch must not
+        restore the result while forgetting what it proved (PR #244
+        round-1 blocker #1). Judgment and termination are deferred to
+        ``_judge_wait_stuck``, which runs only after WI-4 succeeded.
+
+        Returns True iff this was a wait-class iteration.
+        """
+        iter_tool_calls = [
+            {"id": tc.id, "name": tc.name, "input": tc.input} for tc in tool_calls
+        ]
+        if not is_wait_iteration(iter_tool_calls):
+            return False
+        tc = tool_calls[0]
+        st.stuck_tracker.record_fingerprint(
+            wait_iteration_fingerprint(
+                tc.name, tc.input or {}, self._wait_result_text(tool_calls, tool_results)
+            )
+        )
+        # Explicit pending-judgment phase (round-3 blocker #1): rides the
+        # same WI-4 as the fingerprint; cleared by the judgment itself.
+        st.wait_judgment_pending = True
+        return True
+
+    async def _judge_wait_stuck(self, st: _ChatTurn, tool_calls, tool_results):
+        """Post-checkpoint stuck judgment for a wait-class iteration whose
+        fingerprint ``_record_wait_fingerprint`` already recorded.
+
+        Status transitions and output-byte growth are progress; a frozen
+        signature walks the same warn-once-then-terminate ladder.
+        ``warned`` stays one-shot: later progress never re-arms it.
+
+        Returns None to proceed, ("retry", None) after the wait-aware
+        nudge, or ("done", <run() return tuple>) on confirmed frozen
+        repetition.
+        """
+        tc = tool_calls[0]
+        result_text = self._wait_result_text(tool_calls, tool_results)
+        # Judgment is happening NOW — the pending phase ends whatever the
+        # outcome (the retry path persists this via WI-5; the no-trip path
+        # via the next WI-4; the kill is terminal).
+        st.wait_judgment_pending = False
+        if not st.stuck_tracker.check():
+            return None
+        if st.stuck_tracker.warned:
+            log.warning(
+                "Frozen wait repetition confirmed after warning — terminating tool loop"
+            )
+            await self._turn_recorder._save_turn_trajectory(st._trajectory, trace=st.trace)
+            await self._turn_recorder._emit_lifecycle_event(
+                "loop.stuck",
+                {
+                    "channel_id": str(st.message.channel.id),
+                    "iteration": st.iteration,
+                    "tools_used": st.tools_used_in_loop,
+                },
+            )
+            self._clear_active(st)
+            return (
+                "done",
+                (
+                    (
+                        f"Stopped after {st.iteration + 1} iterations: repeated "
+                        f"waiting on {tc.name} with no observable progress "
+                        f"(no status change, no new output). The background "
+                        f"work itself was not touched."
+                    ),
+                    False,
+                    True,
+                    st.tools_used_in_loop,
+                    False,
+                ),
+            )
+        st.stuck_tracker.warned = True
+        if wait_target_alive(tc.name, result_text):
+            nudge = (
+                _WAIT_PROCESS_NUDGE if tc.name == "manage_process" else _WAIT_AGENTS_NUDGE
+            )
+            log.info("Frozen wait pattern detected (target alive) — injecting wait nudge")
+        else:
+            # Terminal/error results repeating: the target is NOT alive, so
+            # the wait-specific advice would be a lie — ordinary guidance.
+            nudge = {
+                "role": "developer",
+                "content": (
+                    "You are repeating the same call against a finished or "
+                    "missing target and getting the same result. Act on the "
+                    "result you already have, or report and stop."
+                ),
+            }
+            log.info("Frozen wait pattern detected (target not alive) — injecting nudge")
+        st.messages.append(dict(nudge))
+        return ("retry", None)
 
     async def _finalize_or_retry(self, st: _ChatTurn, llm_resp):
         """The text-only-response branch: validation enforcement, the

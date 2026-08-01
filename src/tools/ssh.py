@@ -288,13 +288,7 @@ async def run_ssh_command(
     command itself) are NOT retried — they represent valid remote results.
     """
     if pool is not None:
-        ssh_args = pool.get_ssh_args(
-            host,
-            command,
-            ssh_key_path,
-            known_hosts_path,
-            ssh_user,
-        )
+        ssh_args: list[str] = []
     else:
         ssh_args = [
             "ssh",
@@ -318,7 +312,24 @@ async def run_ssh_command(
 
     for attempt in range(max_retries):
         proc: asyncio.subprocess.Process | None = None
+        pool_acquired = False
         try:
+            if pool is not None:
+                # Establish a foreground, asyncio-owned master before the
+                # command. The lease survives every return/exception arm via
+                # finally; release starts the configured idle-expiry timer.
+                was_connected = pool.is_connected(host, ssh_user)
+                pool_acquired = await pool.acquire(
+                    host, ssh_key_path, known_hosts_path, ssh_user
+                )
+                ssh_args = pool.get_ssh_args(
+                    host,
+                    command,
+                    ssh_key_path,
+                    known_hosts_path,
+                    ssh_user,
+                    was_connected=was_connected,
+                )
             # The ssh client is a direct child (no new session: killing the
             # client is sufficient — the remote side is ssh's own domain, and
             # ControlMaster mux masters must stay untouched).
@@ -337,6 +348,12 @@ async def run_ssh_command(
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                 output = stdout.decode("utf-8", errors="replace")
                 exit_code = proc.returncode or 0
+
+            if pool is not None:
+                # Compatibility with a live socket inherited from the old
+                # daemonizing pool during an in-place update. New explicit
+                # masters are direct asyncio children and return immediately.
+                await pool.ensure_master_registered(host, ssh_user)
 
             if exit_code == 0 or not _is_ssh_transient_failure(exit_code, output):
                 return exit_code, _truncate_output(output)
@@ -372,6 +389,10 @@ async def run_ssh_command(
             # next attempt.
             if proc is not None:
                 await terminate_process_tree(proc)
+            if pool is not None:
+                # A legacy socket may still name a detached master; preserve
+                # its positive registration evidence until it is replaced.
+                await pool.ensure_master_registered(host, ssh_user)
             if attempt < max_retries - 1:
                 wait = compute_backoff(attempt, retry_base_delay, retry_max_delay)
                 log.warning(
@@ -395,6 +416,9 @@ async def run_ssh_command(
         except Exception as e:
             log.error("SSH command failed: %s", e)
             return 1, f"SSH error: {e}"
+        finally:
+            if pool is not None and pool_acquired:
+                pool.release(host, ssh_user)
 
     return last_exit_code, _truncate_output(last_output)
 

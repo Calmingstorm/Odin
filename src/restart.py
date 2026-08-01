@@ -17,8 +17,13 @@ import os
 import sys
 from typing import NoReturn
 
+from .odin_log import get_logger
+
+log = get_logger("restart")
+
 _requested: bool = False
 _env_overrides: dict[str, str] = {}
+_reexec_blocked: str | None = None
 
 
 def request_restart(env_overrides: dict[str, str] | None = None) -> None:
@@ -41,6 +46,24 @@ def restart_requested() -> bool:
     return _requested
 
 
+def block_reexec(reason: str) -> None:
+    """Veto the in-place restart (PR #244 round-8 #3).
+
+    Teardown that cannot PROVE it terminated everything it owned must not
+    be followed by ``execve``: the new image would inherit surviving
+    descendants of the old one with no record of them. The process exits
+    instead, so the supervisor starts a clean image.
+    """
+    global _reexec_blocked
+    _reexec_blocked = reason
+    log.error("In-place restart vetoed: %s", reason)
+
+
+def reexec_blocked() -> str | None:
+    """The veto reason, or None when re-exec may proceed."""
+    return _reexec_blocked
+
+
 def pending_env_overrides() -> dict[str, str]:
     """Copy of the exec-time environment overrides (inspection/test hook)."""
     return dict(_env_overrides)
@@ -48,8 +71,9 @@ def pending_env_overrides() -> dict[str, str]:
 
 def reset() -> None:
     """Clear restart state (test hygiene)."""
-    global _requested
+    global _requested, _reexec_blocked
     _requested = False
+    _reexec_blocked = None
     _env_overrides.clear()
 
 

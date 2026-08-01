@@ -80,3 +80,56 @@ class TestReexec:
         with patch("os.execve", side_effect=OSError("bad interpreter")):
             with pytest.raises(OSError):
                 restart.reexec()
+
+
+class TestReexecVetoInMain:
+    """PR #244 round-8 #3: teardown that could not prove it terminated
+    everything it owned must PREVENT the in-place exec — the new image
+    would otherwise inherit survivors invisibly."""
+
+    def test_veto_state_round_trips(self):
+        restart.reset()
+        assert restart.reexec_blocked() is None
+        restart.block_reexec("process cleanup unverified: PID [4242]")
+        assert "4242" in (restart.reexec_blocked() or "")
+
+    def test_main_exits_instead_of_execing_when_vetoed(self, monkeypatch):
+        """The real tail of main(): restart requested AND vetoed → exit,
+        never execve."""
+        import src.__main__ as main_mod
+
+        restart.reset()
+        restart.request_restart()
+        restart.block_reexec("process cleanup unverified: PID [4242]")
+
+        # Drive only the post-loop tail by faking the run phase.
+        monkeypatch.setattr(main_mod.asyncio, "new_event_loop", lambda: _StubLoop())
+        monkeypatch.setattr(main_mod.asyncio, "set_event_loop", lambda _l: None)
+        monkeypatch.setattr(main_mod.asyncio, "all_tasks", lambda _l: [])
+        with patch("os.execve") as execve, patch.object(
+            main_mod.restart, "reexec", side_effect=AssertionError("must not exec")
+        ):
+            with pytest.raises(SystemExit) as exit_info:
+                main_mod.main()
+            assert exit_info.value.code != 0
+            execve.assert_not_called()
+        restart.reset()
+
+
+class _StubLoop:
+    """Minimal event loop stand-in: main() only needs run_until_complete,
+    close, and the drain hooks for the tail under test."""
+
+    def run_until_complete(self, coro):
+        if hasattr(coro, "close"):
+            coro.close()
+        return None
+
+    def close(self):
+        return None
+
+    def shutdown_asyncgens(self):
+        return None
+
+    def shutdown_default_executor(self):
+        return None

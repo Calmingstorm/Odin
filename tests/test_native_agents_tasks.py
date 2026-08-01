@@ -767,6 +767,26 @@ class TestAgentHandlers:
         out = await t._handle_wait_for_agents({"agent_ids": ["a1"], "timeout": 10})
         assert "`a1`" in out and "..." in out  # long content truncated at 800
 
+    async def test_wait_render_carries_iteration_count_not_runtime(self):
+        """PR #244 round-1 blocker #4: iteration_count is the stable
+        progress marker for the wait-class stuck signature — a silently
+        progressing agent must not render identically to a hung one.
+        Runtime stays excluded (it would make a hung agent immortal)."""
+        t = _tools()
+        t._agent_manager.wait_for_agents = AsyncMock(return_value={
+            "a1": {"status": "running", "label": "w", "iteration_count": 7,
+                   "runtime_seconds": 123.4, "result": ""}})
+        out = await t._handle_wait_for_agents({"agent_ids": ["a1"], "timeout": 10})
+        assert "[iterations=7]" in out
+        assert "123" not in out  # runtime never rendered
+        # Progressing iterations change the render (and therefore the
+        # wait signature); a frozen count repeats identically.
+        t._agent_manager.wait_for_agents = AsyncMock(return_value={
+            "a1": {"status": "running", "label": "w", "iteration_count": 8,
+                   "runtime_seconds": 200.0, "result": ""}})
+        out2 = await t._handle_wait_for_agents({"agent_ids": ["a1"], "timeout": 10})
+        assert out2 != out and "[iterations=8]" in out2
+
     async def test_collect_agent_result_helper(self):
         t = _tools()
         t._agent_manager.wait_for_agents = AsyncMock(return_value={

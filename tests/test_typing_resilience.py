@@ -241,11 +241,14 @@ def _make_runner(recorder_save=None):
 
 
 def _stub_state(channel=None):
+    from src.discord.response_guards import StuckLoopTracker
     from src.turn_state.durability import TurnDurability
 
     return SimpleNamespace(
         chat_cap=3,
         iteration=0,
+        stuck_tracker=StuckLoopTracker(),
+        wait_judgment_pending=False,
         _cancel=asyncio.Event(),
         _trajectory=SimpleNamespace(),
         trace=None,

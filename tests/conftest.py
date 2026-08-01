@@ -232,3 +232,28 @@ def _test_local_workspace(tmp_path_factory):
     yield workspace
     field.default = original
     ToolsConfig.model_rebuild(force=True)
+
+@pytest.fixture(scope="session", autouse=True)
+def _process_containment():
+    """Run the suite as a child subreaper, exactly like production.
+
+    ``src/__main__`` enables this at startup so escaped background
+    descendants stay attributable (PR #244). Without it here, cleanup
+    correctly refuses to claim success and every shutdown path raises —
+    tests would be exercising a mode production never runs in.
+    """
+    import os
+    import secrets
+
+    from src.tools.process_manager import (
+        DEFAULT_JOB_TOKEN,
+        JOB_TOKEN_ENV,
+        PROC_TOKEN_ENV,
+        set_child_subreaper,
+    )
+
+    previous = set_child_subreaper(True)
+    os.environ.setdefault(PROC_TOKEN_ENV, secrets.token_hex(8))
+    os.environ.setdefault(JOB_TOKEN_ENV, DEFAULT_JOB_TOKEN)
+    yield
+    set_child_subreaper(previous)

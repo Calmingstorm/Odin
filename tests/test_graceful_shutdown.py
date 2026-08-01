@@ -331,3 +331,30 @@ class TestProcessRegistryShutdown:
         registry._processes[4] = info
 
         await registry.shutdown()  # must not propagate
+
+
+class TestUnprovenCleanupEscalation:
+    """PR #244 round-7 #3: unprovable cleanup must reach the caller — the
+    re-exec decision belongs there, not to a swallowed log line."""
+
+    @pytest.mark.asyncio
+    async def test_wiring_reports_cleanup_error_without_raising(self, caplog):
+        from types import SimpleNamespace
+
+        from src.discord.wiring import shutdown_services
+        from src.tools.process_manager import ProcessCleanupError
+
+        registry = SimpleNamespace(
+            shutdown=AsyncMock(side_effect=ProcessCleanupError("PID [4242] unproven"))
+        )
+        bot = SimpleNamespace(
+            tool_executor=SimpleNamespace(_process_registry=registry)
+        )
+        with caplog.at_level("ERROR"):
+            await shutdown_services(bot)  # teardown continues
+        registry.shutdown.assert_awaited_once()
+        assert any(
+            "cleanup could not be verified" in r.message.lower()
+            or "cleanup could not be verified" in r.getMessage().lower()
+            for r in caplog.records
+        )
