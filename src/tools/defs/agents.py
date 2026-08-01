@@ -35,18 +35,27 @@ SPAWN_MODEL_CLAUSE = (
 SPAWN_EFFORT_OPTIONS: list[str] = ["none", "low", "medium", "high", "xhigh", "max"]
 
 
-def spawn_effort_clause(options: list[str]) -> str:
+def spawn_effort_clause(options: list[str], *, required: bool = False) -> str:
     """Render the effort clause for an ordered option list.
 
     ONE wording template for both the static catalogue and the policy layer's
     capability-filtered clones (a filtered enum with an unfiltered clause
     would advertise efforts the schema no longer offers). Callers pass a
     subsequence of ``SPAWN_EFFORT_OPTIONS`` — never a sorted set, which would
-    scramble the intentional escalation order.
+    scramble the intentional escalation order. ``required`` swaps the
+    omit-to-inherit tail for explicit-choice wording: when the configured
+    agent model cannot serve the inherited default, omission would be an
+    unservable spelling and must not be advertised.
     """
+    tail = (
+        "REQUIRED here: the configured default effort is not supported by the "
+        "configured agent model, so pick a compatible effort explicitly."
+        if required
+        else "Omit to use the configured agent effort."
+    )
     return (
         " Set 'reasoning_effort' (" + "/".join(options) + ") for THIS agent — "
-        "higher is more thorough but slower/costlier. Omit to use the configured agent effort."
+        "higher is more thorough but slower/costlier. " + tail
     )
 
 

@@ -529,10 +529,12 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 # client reload (auth-pool refresh) when nothing else changed.
                 needs_reload = False
                 # The spawn-tool effort catalogue depends on the MAIN model
-                # too (an inherit-model agent axis resolves through it), so a
-                # model change must refresh the cached catalog exactly like an
-                # axis change.
+                # (an inherit-model agent axis resolves through it) AND the
+                # main effort (the inherited default whose servability decides
+                # required-ness), so either change must refresh the cached
+                # catalog exactly like an axis change.
                 model_changed = False
+                effort_changed = False
                 if "enabled" in body:
                     cfg.enabled = bool(body["enabled"])
                     changed = True
@@ -550,6 +552,10 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     cfg.reasoning_effort = str(effort)
                     changed = True
                     needs_reload = True
+                    # The main effort is the INHERITED default an omitted
+                    # per-spawn effort resolves to — the catalogue's
+                    # required-ness depends on it (see agent_tool_policy).
+                    effort_changed = True
                 axis_changed = False
                 if agent_effort_present:
                     cfg.agent_reasoning_effort = (
@@ -568,7 +574,7 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 # (before reload / persist) so a later reload/persist failure
                 # can never leave the catalog cached against the old schema
                 # while cfg already moved.
-                catalog_changed = axis_changed or model_changed
+                catalog_changed = axis_changed or model_changed or effort_changed
                 if catalog_changed and getattr(bot, "tool_catalog", None):
                     bot.tool_catalog.invalidate()
                 if changed:

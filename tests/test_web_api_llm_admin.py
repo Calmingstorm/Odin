@@ -1379,3 +1379,20 @@ class TestCatalogInvalidationOnModelChange:
             r = await c.put("/api/llm/codex/config", json={"max_tokens": 8192})
             assert r.status == 200
         bot.tool_catalog.invalidate.assert_not_called()
+
+
+class TestCatalogInvalidationOnEffortChange:
+    """PR #246 round 1 follow-through: the required-ness of the exposed
+    effort field depends on the MAIN effort (the inherited default), so an
+    effort-only PUT must refresh the cached catalog too."""
+
+    @pytest.mark.asyncio
+    async def test_effort_only_change_invalidates(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.config.openai_codex.model = "gpt-5.6-sol"
+        bot.tool_catalog = MagicMock()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json={"reasoning_effort": "max"})
+            assert r.status == 200
+        bot.tool_catalog.invalidate.assert_called_once()

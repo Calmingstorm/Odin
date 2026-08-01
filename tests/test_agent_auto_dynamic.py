@@ -232,3 +232,78 @@ class TestEffortCatalogueFiltering:
         )
         # byte-identical static output — one wording template everywhere
         assert spawn_effort_clause(SPAWN_EFFORT_OPTIONS) == SPAWN_EFFORT_CLAUSE
+
+
+class TestUnservableOmission:
+    """PR #246 round 1: filtering the enum is not enough — omission inherits
+    the MAIN effort at spawn, so when the concrete agent model rejects that
+    inherited default, omission itself is an unservable, advertised spelling.
+    The field becomes REQUIRED with explicit-choice clause wording; it stays
+    optional whenever the inherited default is servable. Runtime semantics
+    unchanged."""
+
+    @staticmethod
+    def _cfg_main_effort(model, effort, main_model="gpt-5.6-sol", main_effort="medium"):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            openai_codex=SimpleNamespace(
+                agent_model=model, agent_reasoning_effort=effort,
+                model=main_model, reasoning_effort=main_effort,
+            )
+        )
+
+    @staticmethod
+    def _schema_obj(defs, name):
+        tool = next(x for x in defs if x["name"] == name)
+        if name == "spawn_loop_agents":
+            return tool["input_schema"]["properties"]["tasks"]["items"], tool["description"]
+        return tool["input_schema"], tool["description"]
+
+    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
+    def test_unservable_inherited_default_makes_effort_required(self, name):
+        # Odin's exact repro: main sol@max, fixed agent gpt-5.5, effort auto.
+        cfg = self._cfg_main_effort("gpt-5.5", "auto", main_effort="max")
+        defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
+        schema, desc = self._schema_obj(defs, name)
+        assert "reasoning_effort" in schema["required"]
+        assert "REQUIRED here" in desc
+        assert "Omit to use the configured agent effort" not in desc
+        # enum still filtered alongside
+        props, _ = _spawn_props(defs, name)
+        assert props["reasoning_effort"]["enum"] == [
+            "none", "low", "medium", "high", "xhigh"]
+
+    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
+    def test_servable_inherited_default_stays_optional(self, name):
+        cfg = self._cfg_main_effort("gpt-5.5", "auto", main_effort="xhigh")
+        defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
+        schema, desc = self._schema_obj(defs, name)
+        assert "reasoning_effort" not in schema.get("required", [])
+        assert "Omit to use the configured agent effort" in desc
+
+    def test_capable_model_never_required(self):
+        cfg = self._cfg_main_effort("gpt-5.6-luna", "auto", main_effort="max")
+        defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
+        schema, desc = self._schema_obj(defs, "spawn_agent")
+        assert "reasoning_effort" not in schema.get("required", [])
+        # full enum, static clause
+        props, _ = _spawn_props(defs, "spawn_agent")
+        assert props["reasoning_effort"]["enum"][-1] == "max"
+
+    def test_inherited_main_model_unservable_default_required(self):
+        # model axis INHERIT resolving to gpt-5.5 with main effort max is
+        # load-rejected as a config (main pair 5.5+max is invalid), so the
+        # reachable inherit case is: main 5.5 + main effort xhigh = servable →
+        # optional. Pin that reachable shape.
+        cfg = self._cfg_main_effort(None, "auto", main_model="gpt-5.5",
+                                    main_effort="xhigh")
+        defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
+        schema, _ = self._schema_obj(defs, "spawn_agent")
+        assert "reasoning_effort" not in schema.get("required", [])
+
+    def test_static_required_lists_untouched(self):
+        cfg = self._cfg_main_effort("gpt-5.5", "auto", main_effort="max")
+        apply_agent_axis_policy(get_tool_definitions(), cfg)
+        schema, desc = self._schema_obj(get_tool_definitions(), "spawn_agent")
+        assert schema["required"] == ["label", "goal"]
+        assert "Omit to use the configured agent effort" in desc
