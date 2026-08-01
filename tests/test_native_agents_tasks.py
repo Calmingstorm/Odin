@@ -353,7 +353,11 @@ class TestAgentReasoningEffortCallback:
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
         out = await cb([{"role": "user", "content": "x"}], "sys", [])
-        assert client.captured["reasoning_effort"] is None  # client applies its own
+        # Since the round-2 snapshot contract, the inherited effort is pinned
+        # per generation and travels EXPLICITLY on the wire (preflight and the
+        # outbound request must agree) — same effective request as the old
+        # "None = client applies its own", now immune to mid-generation drift.
+        assert client.captured["reasoning_effort"] == "high"
         assert out["reasoning_effort"] == "high"            # stamp = inherited value
 
     async def test_callback_reads_config_at_call_time(self):
@@ -368,7 +372,9 @@ class TestAgentReasoningEffortCallback:
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
         await cb([{"role": "user", "content": "x"}], "sys", [])
-        assert client.captured["reasoning_effort"] is None
+        # inherit resolves to the client's own effort, snapshotted per
+        # generation (round-2 contract) — explicit on the wire, not None
+        assert client.captured["reasoning_effort"] == "high"
         cfg.openai_codex.agent_reasoning_effort = "xhigh"  # live WebUI change
         await cb([{"role": "user", "content": "x"}], "sys", [])
         assert client.captured["reasoning_effort"] == "xhigh"
@@ -1021,3 +1027,40 @@ class TestSpawnPairNonCodexCollision:
         t._agent_manager._agents = {}
         out = await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         assert "spawned" in out
+
+
+class TestAgentEffortSnapshot:
+    """Review round 2 (High): the inherited agent effort is snapshotted ONCE
+    per generation — preflight approves the SAME immutable value every
+    attempt carries. A legal live effort change mid-generation (during an
+    open-breaker or transport-retry wait) must not rewrite the outbound
+    request; it reaches the agent on its next iteration."""
+
+    async def test_attempts_carry_the_snapshot_across_retries(self):
+        from src.llm.errors import LLMTransportError
+
+        calls = []
+
+        class _Client:
+            model = "gpt-5.6-sol"
+            reasoning_effort = "xhigh"
+
+            async def chat_with_tools(self, *, reasoning_effort=None, model=None, **kw):
+                calls.append(reasoning_effort)
+                if len(calls) == 1:
+                    # a live PUT lands mid-generation: xhigh -> max
+                    self.reasoning_effort = "max"
+                    raise LLMTransportError("blip")
+                return SimpleNamespace(
+                    text="ok", tool_calls=[], provenance_provider="codex")
+
+        client = _Client()
+        t = _tools(llm_gateway=_fake_gateway(client))
+        resp = await t._agent_generate(
+            client, messages=[], sys_prompt="s", tool_defs=[],
+            agent_effort=None, resolved_model="gpt-5.5",
+        )
+        # both attempts carried the PRE-CHANGE snapshot, never None and never
+        # the mid-generation "max" (which would 400 against gpt-5.5)
+        assert calls == ["xhigh", "xhigh"]
+        assert resp.text == "ok"

@@ -263,3 +263,37 @@ class TestPreflightBeforeAdmission:
             await runner._call_llm(st)
         assert breaker.snapshot()["failed_generations"] == failures_before
         assert breaker.snapshot()["state"] == "open"  # untouched, not probed
+
+
+class TestAutonomousPreflightCompletion:
+    """Review round 2 (Medium): the autonomous-loop preflight lives INSIDE
+    _call_loop_llm's try — LLMRequestError must complete the loop through
+    _finish_loop (trajectory + reflection finalization) like any other
+    failed generation, never escape run_autonomous()."""
+
+    async def test_bad_pair_finishes_loop_instead_of_raising(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from src.llm.model_breaker import ModelBreakerRegistry
+        from src.llm.recovery import RecoveryPolicy
+        from tests.test_typing_resilience import _make_runner
+
+        runner, _saved, _cleared = _make_runner()
+        registry = ModelBreakerRegistry()
+        runner._llm_gateway = SimpleNamespace(
+            capacity_breaker_for=lambda model=None: registry.for_model("codex", "m"),
+            recovery_policy=lambda: RecoveryPolicy(
+                deadline_seconds=0.3, backoff_base=0.01,
+                backoff_cap=0.02, retry_after_cap=0.05),
+            active_client=SimpleNamespace(model="gpt-5.5", reasoning_effort="max"),
+        )
+        runner._finish_loop = AsyncMock(return_value="FINISHED")
+        st = SimpleNamespace(messages=[], system_prompt="s", tools=[])
+        kind, val = await runner._call_loop_llm(st)
+        assert (kind, val) == ("done", "FINISHED")
+        call = runner._finish_loop.await_args
+        assert call.kwargs.get("is_error") is True
+        # the finalized loop error carries the canonical pair text
+        joined = " ".join(str(a) for a in call.args) + str(call.kwargs)
+        assert "gpt-5.5" in joined and "'max'" in joined

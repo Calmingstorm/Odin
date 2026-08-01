@@ -511,12 +511,23 @@ class AgentTaskTools:
         iteration wall (wait_for) hard-bounds this call INCLUDING recovery
         waits; cancellation propagates and releases any held probe.
         """
-        # Pre-admission: validate the pair THIS generation would request
-        # (override values beat the client's own) before touching the
-        # breaker — a fixed model override meeting a live effort change must
-        # fail fast as a request error, not wait out an open breaker's
-        # deadline and count a capacity failure.
-        preflight_incompatible_effort(client, model=resolved_model, effort=agent_effort)
+        # ONE immutable effective effort per generation: the value preflight
+        # approves IS the value every attempt of this generation carries (an
+        # inherited None used to re-resolve the client's live effort inside
+        # each attempt, so a legal live change during an open-breaker wait —
+        # xhigh→max — could turn an approved gpt-5.5@xhigh into a rejected
+        # gpt-5.5@max at request build). Live config still reaches agents on
+        # their NEXT iteration, the contract these callbacks document.
+        effective_effort = (
+            agent_effort
+            if agent_effort is not None
+            else getattr(client, "reasoning_effort", None)
+        )
+        # Pre-admission: validate the exact pair this generation will request
+        # before touching the breaker — never wait out an open breaker's
+        # deadline (or count a capacity failure) for a request that could not
+        # legally be sent.
+        preflight_incompatible_effort(client, model=resolved_model, effort=effective_effort)
         breaker = self._llm_gateway.capacity_breaker_for(resolved_model)
         policy = self._llm_gateway.recovery_policy()
 
@@ -525,7 +536,7 @@ class AgentTaskTools:
                 messages=messages,
                 system=sys_prompt,
                 tools=tool_defs,
-                reasoning_effort=agent_effort,
+                reasoning_effort=effective_effort,
                 model=resolved_model,
             )
 
