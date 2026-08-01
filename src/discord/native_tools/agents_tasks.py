@@ -138,6 +138,28 @@ def _parse_spawn_overrides(
     return model_override, effort, None
 
 
+def _spawn_pair_error(
+    config: object, client: object, model_override: str | None, effort_override: str | None
+) -> str | None:
+    """Spawn boundary: the model/effort pair this spawn would run RIGHT NOW
+    (override beats fixed config beats inherited-main) must not be a
+    known-incompatible combination — e.g. an explicit ``model=gpt-5.5`` task
+    under a ``max`` effort config. Resolved through the same policy helper the
+    iteration callbacks use, so the validated pair IS the pair the first
+    iteration would request. Live-config drift after spawn is caught by the
+    request-construction boundary in the provider."""
+    from ...config.schema import effort_incompatibility_error
+
+    agent_effort, resolved_model = _agent_llm_policy(
+        config, client, model_override=model_override, effort_override=effort_override
+    )
+    effort_now = (
+        agent_effort if agent_effort is not None else getattr(client, "reasoning_effort", None)
+    )
+    model_now = resolved_model if resolved_model else getattr(client, "model", None)
+    return effort_incompatibility_error(model_now, effort_now)
+
+
 def _provenance_stamp(resp: object, client: object) -> dict:
     """Execution-provenance fields for an iteration record, from the response.
 
@@ -532,6 +554,12 @@ class AgentTaskTools:
         if not self._llm_gateway.active_client:
             return "Error: LLM provider not available."
 
+        pair_err = _spawn_pair_error(
+            self._get_config(), self._llm_gateway.active_client, model_override, effort_override
+        )
+        if pair_err:
+            return f"Error: {pair_err}"
+
         channel = getattr(message, "channel", message)
         author = getattr(message, "author", None)
         user_id = str(getattr(author, "id", "0"))
@@ -873,6 +901,11 @@ class AgentTaskTools:
             )
             if err:
                 return f"Error: task '{t.get('label', '?')}': {err}"
+            pair_err = _spawn_pair_error(
+                self._get_config(), self._llm_gateway.active_client, mo, eo
+            )
+            if pair_err:
+                return f"Error: task '{t.get('label', '?')}': {pair_err}"
             validated_tasks.append({
                 "label": t.get("label", ""),
                 "goal": t.get("goal", ""),

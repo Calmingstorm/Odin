@@ -883,3 +883,75 @@ class TestBackgroundFollowupRouting:
         cb = await self._capture_cb(gateway)
         assert await cb([], "s", 200) == "strong"
         active.chat.assert_awaited_once()
+
+
+class TestSpawnPairValidation:
+    """Spawn boundary (3 of 4): the pair a spawn would run RIGHT NOW —
+    override beats fixed config beats inherited-main — must not be a
+    known-incompatible model/effort combination. Rejected before anything
+    spawns, through the same policy resolution the iteration callbacks use."""
+
+    @staticmethod
+    def _codex_cfg(model="gpt-5.6-sol", agent_model=None, agent_effort=None):
+        base = _cfg()
+        base.openai_codex = SimpleNamespace(
+            model=model, agent_model=agent_model, agent_reasoning_effort=agent_effort)
+        return base
+
+    @staticmethod
+    def _codex_client(model="gpt-5.6-sol", effort="medium"):
+        return SimpleNamespace(model=model, reasoning_effort=effort)
+
+    async def test_fixed_config_bad_pair_rejected(self):
+        cfg = self._codex_cfg(agent_model="gpt-5.5", agent_effort="max")
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=_fake_gateway(self._codex_client()))
+        out = await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        assert "Error" in out and "gpt-5.5" in out and "'max'" in out
+        assert "allowed for this model" in out
+        t._agent_manager.spawn.assert_not_called()
+
+    async def test_override_bad_pair_rejected(self):
+        cfg = self._codex_cfg(agent_model="auto", agent_effort="auto")
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=_fake_gateway(self._codex_client()))
+        out = await t._handle_spawn_agent(
+            _message(),
+            {"label": "w", "goal": "g", "model": "gpt-5.5", "reasoning_effort": "max"})
+        assert "Error" in out and "gpt-5.5" in out
+        t._agent_manager.spawn.assert_not_called()
+
+    async def test_model_override_meets_inherited_live_max(self):
+        """Effort inherits the LIVE client's max; an explicit gpt-5.5 model
+        override makes the resolved pair invalid even though the task itself
+        never mentions an effort."""
+        cfg = self._codex_cfg(agent_model="auto", agent_effort=None)
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=_fake_gateway(self._codex_client(effort="max")))
+        out = await t._handle_spawn_agent(
+            _message(), {"label": "w", "goal": "g", "model": "gpt-5.5"})
+        assert "Error" in out and "'max'" in out
+        t._agent_manager.spawn.assert_not_called()
+
+    async def test_good_max_pair_spawns(self):
+        cfg = self._codex_cfg(agent_model="auto", agent_effort="auto")
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=_fake_gateway(self._codex_client()))
+        t._agent_manager.spawn.return_value = "agent-1"
+        t._agent_manager._agents = {}
+        out = await t._handle_spawn_agent(
+            _message(),
+            {"label": "w", "goal": "g",
+             "model": "gpt-5.6-luna", "reasoning_effort": "max"})
+        assert "spawned" in out
+
+    async def test_non_codex_client_unaffected(self):
+        """A provider without effort semantics (no reasoning_effort attr)
+        never trips the pair check regardless of config."""
+        cfg = self._codex_cfg(agent_model="gpt-5.5", agent_effort="max")
+        t = _tools(get_config=lambda: cfg,
+                   llm_gateway=_fake_gateway(SimpleNamespace(model="llama3.1:8b")))
+        t._agent_manager.spawn.return_value = "agent-1"
+        t._agent_manager._agents = {}
+        out = await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        assert "spawned" in out

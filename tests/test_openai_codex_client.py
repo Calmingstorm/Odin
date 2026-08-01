@@ -663,3 +663,100 @@ class TestTransportTimeouts:
         assert t.total == 1234
         assert t.sock_read == 56
         assert t.sock_connect == 30
+
+
+class TestKnownBadPairGuard:
+    """Request-construction boundary (4 of 4): a KNOWN-incompatible
+    model/effort pair raises LLMRequestError with NO HTTP attempt — the retry
+    engine, account rotation, and capacity breaker never see a request that
+    was never sent. This is the only boundary that can catch live-config
+    drift: an agent holding a fixed model override while its non-overridden
+    effort tracks live config (or vice versa)."""
+
+    _TOOLS = [{"name": "t", "description": "d",
+               "input_schema": {"type": "object", "properties": {}}}]
+    _MSGS = [{"role": "user", "content": "hi"}]
+
+    @staticmethod
+    def _arm_transport(client):
+        """Record any transport call — the guard must fire before either."""
+        calls = []
+
+        async def fake_chat_stream(body):
+            calls.append(("chat", body))
+            return "ok"
+
+        async def fake_tool_stream(body):
+            calls.append(("tools", body))
+            return SimpleNamespace(text="ok", tool_calls=[], stop_reason="end")
+
+        client._stream_request = fake_chat_stream
+        client._stream_tool_request = fake_tool_stream
+        return calls
+
+    async def test_chat_rejects_before_transport(self):
+        from src.llm.errors import LLMRequestError
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5",
+                                 max_tokens=1000, reasoning_effort="max")
+        calls = self._arm_transport(client)
+        with pytest.raises(LLMRequestError) as ei:
+            await client.chat(self._MSGS, "sys")
+        assert "gpt-5.5" in str(ei.value) and "'max'" in str(ei.value)
+        assert "allowed for this model" in str(ei.value)
+        assert calls == []
+
+    async def test_chat_with_tools_rejects_before_transport(self):
+        from src.llm.errors import LLMRequestError
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5",
+                                 max_tokens=1000, reasoning_effort="max")
+        calls = self._arm_transport(client)
+        with pytest.raises(LLMRequestError):
+            await client.chat_with_tools(self._MSGS, "sys", self._TOOLS)
+        assert calls == []
+
+    async def test_per_call_override_pair_rejected(self):
+        # A healthy sol@medium client asked for (gpt-5.5, max) for ONE call —
+        # the drift shape the earlier boundaries cannot see.
+        from src.llm.errors import LLMRequestError
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-sol",
+                                 max_tokens=1000, reasoning_effort="medium")
+        calls = self._arm_transport(client)
+        with pytest.raises(LLMRequestError):
+            await client.chat_with_tools(
+                self._MSGS, "sys", self._TOOLS,
+                model="gpt-5.5", reasoning_effort="max")
+        assert calls == []
+        # client state untouched; the next healthy call proceeds normally
+        resp = await client.chat_with_tools(self._MSGS, "sys", self._TOOLS)
+        assert resp.text == "ok"
+        assert calls and calls[0][1]["model"] == "gpt-5.6-sol"
+
+    async def test_override_effort_onto_bad_configured_model_rejected(self):
+        # Configured gpt-5.5 client + per-call effort=max only.
+        from src.llm.errors import LLMRequestError
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5",
+                                 max_tokens=1000, reasoning_effort="medium")
+        calls = self._arm_transport(client)
+        with pytest.raises(LLMRequestError):
+            await client.chat_with_tools(
+                self._MSGS, "sys", self._TOOLS, reasoning_effort="max")
+        assert calls == []
+
+    async def test_unknown_model_with_max_passes_through(self):
+        # The server stays the authority for models the map doesn't know.
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-7-future",
+                                 max_tokens=1000, reasoning_effort="max")
+        calls = self._arm_transport(client)
+        await client.chat(self._MSGS, "sys")
+        assert calls[0][1]["reasoning"] == {"effort": "max"}
+
+    async def test_max_serializes_on_capable_model_both_paths(self):
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-sol",
+                                 max_tokens=1000, reasoning_effort="max")
+        calls = self._arm_transport(client)
+        await client.chat(self._MSGS, "sys")
+        resp = await client.chat_with_tools(self._MSGS, "sys", self._TOOLS)
+        assert calls[0][1]["reasoning"] == {"effort": "max"}
+        assert calls[1][1]["reasoning"] == {"effort": "max"}
+        # provenance carries the effort that was actually requested
+        assert resp.provenance_reasoning_effort == "max"
