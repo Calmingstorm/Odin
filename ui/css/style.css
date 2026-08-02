@@ -2494,9 +2494,15 @@ textarea.hm-input {
 }
 .ag-policy-effort { color: var(--hm-accent); border-color: rgba(197,139,50,.28); }
 
-/* Card as an activation target for the detail modal */
-.ag-card-clickable { cursor: pointer; transition: border-color .12s ease, background .12s ease; }
-.ag-card-clickable:hover { border-color: var(--hm-border-strong, var(--hm-border)); background: var(--hm-surface-hover); }
+/* The card body is the activation target for the detail modal; Kill lives
+   outside it as a sibling control. The body inherits the card's own column
+   layout so splitting the markup changed no visual spacing. */
+.ag-card-body {
+  display: flex; flex-direction: column; gap: var(--hm-space-2);
+  text-align: left; border-radius: var(--hm-radius-md);
+}
+.ag-card-clickable { cursor: pointer; transition: background .12s ease, box-shadow .12s ease; }
+.ag-card-clickable:hover { background: var(--hm-surface-hover); }
 .ag-card-clickable:focus-visible { outline: 2px solid var(--hm-accent); outline-offset: 2px; }
 
 /* Detail modal */

@@ -250,6 +250,7 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
             "model_override": getattr(info, "model_override", None),
             "reasoning_effort_override": getattr(info, "reasoning_effort_override", None),
             "last_provider": getattr(info, "last_provider", ""),
+            "has_executed": bool(getattr(info, "has_executed", False)),
             **agent_display_policy(info, bot),
             # Diagnostics: available for a future surface, not rendered as
             # primary modal content.

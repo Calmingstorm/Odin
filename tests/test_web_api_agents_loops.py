@@ -48,7 +48,7 @@ def _agent_info(**kw):
                 created_at=1.0, ended_at=None, result="", error="",
                 recovery_attempts=0, depth=0, parent_id=None, children_ids=[],
                 max_iterations=120, model_override=None, reasoning_effort_override=None,
-                last_provider="", last_model="", last_reasoning_effort=None,
+                last_provider="", last_model="", last_reasoning_effort=None, has_executed=False,
                 _sm=SimpleNamespace(history_as_dicts=lambda: []))
     base.update(kw)
     return SimpleNamespace(**base)
@@ -281,7 +281,8 @@ class TestAgentDisplayPolicy:
 
     @pytest.mark.asyncio
     async def test_executed_provenance_wins(self):
-        agent = _agent_info(last_model="gpt-5.6-luna", last_reasoning_effort="max",
+        agent = _agent_info(has_executed=True, last_model="gpt-5.6-luna",
+                            last_reasoning_effort="max",
                             last_provider="codex", model_override="gpt-5.5")
         bot = _display_bot(agent)
         async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
@@ -336,8 +337,8 @@ class TestAgentDisplayPolicy:
 
     @pytest.mark.asyncio
     async def test_executed_without_effort_reports_na(self):
-        agent = _agent_info(last_model="qwen3:14b", last_reasoning_effort=None,
-                            last_provider="ollama")
+        agent = _agent_info(has_executed=True, last_model="qwen3:14b",
+                            last_reasoning_effort=None, last_provider="ollama")
         bot = _display_bot(agent, provider="ollama")
         async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
             row = (await (await c.get("/api/agents")).json())[0]
@@ -398,7 +399,8 @@ class TestAgentDetail:
     @pytest.mark.asyncio
     async def test_detail_carries_overrides_separately_from_execution(self):
         agent = _agent_info(model_override="gpt-5.5", reasoning_effort_override="low",
-                            last_model="gpt-5.5", last_reasoning_effort="low")
+                            has_executed=True, last_model="gpt-5.5",
+                            last_reasoning_effort="low")
         bot = _display_bot(agent)
         async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
             body = await (await c.get("/api/agents/A1")).json()
@@ -418,3 +420,107 @@ class TestAgentDetail:
         bot.agent_manager._agents = "not-a-dict"
         async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
             assert (await c.get("/api/agents/A1")).status == 404
+
+
+class TestDisplayPolicyProviderAwareness:
+    """PR #247 round 1: the policy assumed Codex config regardless of the
+    ACTIVE provider, so a pending Ollama/Kimi agent advertised a Codex model
+    (and Codex overrides) that execution would never use."""
+
+    @pytest.mark.asyncio
+    async def test_pending_ollama_reports_ollama_model(self):
+        bot = _display_bot(_agent_info(), provider="ollama")
+        bot.config.ollama = SimpleNamespace(model="qwen3:14b")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_model"] == "qwen3:14b"
+        assert row["display_reasoning_effort"] == "N/A"
+        assert row["display_source"] == "current_inheritance"
+
+    @pytest.mark.asyncio
+    async def test_pending_kimi_reports_kimi_model(self):
+        bot = _display_bot(_agent_info(), provider="kimi")
+        bot.config.kimi = SimpleNamespace(model="kimi-k3")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_model"] == "kimi-k3"
+
+    @pytest.mark.asyncio
+    async def test_codex_overrides_inert_under_non_codex_provider(self):
+        # The overrides exist but execution ignores them — showing them would
+        # advertise a policy that will not happen.
+        agent = _agent_info(model_override="gpt-5.6-luna", reasoning_effort_override="max")
+        bot = _display_bot(agent, provider="ollama")
+        bot.config.ollama = SimpleNamespace(model="qwen3:14b")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_model"] == "qwen3:14b"
+        assert row["display_source"] == "current_inheritance"
+
+
+class TestDisplayPolicyPerAxisSources:
+    """Each axis reports its OWN source: pinning one axis must not make the
+    other's inherited value look pinned."""
+
+    @pytest.mark.asyncio
+    async def test_model_only_override_leaves_effort_inherited(self):
+        agent = _agent_info(model_override="gpt-5.6-terra")
+        bot = _display_bot(agent, effort="xhigh")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_model"] == "gpt-5.6-terra"
+        assert row["display_model_source"] == "spawn_override_pending"
+        assert row["display_reasoning_effort"] == "xhigh"
+        assert row["display_reasoning_effort_source"] == "current_inheritance"
+
+    @pytest.mark.asyncio
+    async def test_effort_only_override_leaves_model_inherited(self):
+        agent = _agent_info(reasoning_effort_override="low")
+        bot = _display_bot(agent, model="gpt-5.6-sol")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_reasoning_effort_source"] == "spawn_override_pending"
+        assert row["display_model"] == "gpt-5.6-sol"
+        assert row["display_model_source"] == "current_inheritance"
+
+
+class TestDisplayPolicyExecutionTruth:
+    """An executed agent reports execution — including what the provider did
+    NOT tell us. Missing provenance is unknown, never live config, and never
+    N/A (which would claim the concept does not apply)."""
+
+    @pytest.mark.asyncio
+    async def test_executed_without_provenance_is_unknown_not_config(self):
+        agent = _agent_info(has_executed=True, last_model="", last_provider="",
+                            last_reasoning_effort=None)
+        bot = _display_bot(agent, model="gpt-5.6-sol", effort="xhigh")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_source"] == "last_execution"
+        assert row["display_model"] == ""          # unknown, NOT gpt-5.6-sol
+        assert row["display_reasoning_effort"] == ""   # unknown, NOT "N/A"
+
+    @pytest.mark.asyncio
+    async def test_executed_codex_without_effort_is_unknown(self):
+        agent = _agent_info(has_executed=True, last_model="gpt-5.6-sol",
+                            last_provider="codex", last_reasoning_effort=None)
+        bot = _display_bot(agent)
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_reasoning_effort"] == ""
+
+    @pytest.mark.asyncio
+    async def test_executed_effortless_provider_is_na(self):
+        agent = _agent_info(has_executed=True, last_model="qwen3:14b",
+                            last_provider="ollama", last_reasoning_effort=None)
+        bot = _display_bot(agent, provider="ollama")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_reasoning_effort"] == "N/A"
+
+    @pytest.mark.asyncio
+    async def test_not_executed_never_claims_execution(self):
+        bot = _display_bot(_agent_info(has_executed=False))
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_source"] != "last_execution"

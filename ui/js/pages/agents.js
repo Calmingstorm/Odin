@@ -73,12 +73,16 @@ export default {
 
       <!-- Agent cards -->
       <div v-else class="ag-card-grid" role="list" aria-label="Agent list">
-        <div v-for="agent in filteredAgents" :key="agent.id"
-             class="ag-card ag-card-clickable" :class="'ag-card-' + agent.status" role="listitem"
-             tabindex="0" :aria-label="'Open details for agent ' + agent.label"
-             @click="openDetail(agent)"
-             @keydown.enter.prevent="openDetail(agent)"
-             @keydown.space.prevent="openDetail(agent)">
+        <!-- The list ITEM is the semantic container; the actionable body is a
+             button inside it, with Kill as a SIBLING — nesting a control
+             inside a control is what the previous markup did. -->
+        <div v-for="agent in filteredAgents" :key="agent.id" role="listitem"
+             class="ag-card" :class="'ag-card-' + agent.status">
+          <div class="ag-card-body ag-card-clickable" role="button" tabindex="0"
+               :aria-label="'Open details for agent ' + agent.label"
+               @click="openDetail(agent)"
+               @keydown.enter.prevent="openDetail(agent)"
+               @keydown.space.prevent="openDetail(agent)">
           <!-- Card header -->
           <div class="ag-card-header">
             <div class="ag-card-title-row">
@@ -102,6 +106,8 @@ export default {
           <div v-if="agent.status === 'running' && hasProgress(agent)" class="ag-progress-bar"
                role="progressbar" :aria-valuenow="agent.iteration_count"
                :aria-valuemin="0" :aria-valuemax="agent.max_iterations"
+               aria-label="Agent iteration progress"
+               :aria-valuetext="agent.iteration_count + ' of ' + agent.max_iterations + ' iterations'"
                :title="agent.iteration_count + ' of ' + agent.max_iterations + ' iterations'">
             <div class="ag-progress-fill" :style="{ width: progressPercent(agent) + '%' }"></div>
           </div>
@@ -142,11 +148,13 @@ export default {
             <div class="ag-result-text text-red-400">{{ agent.error }}</div>
           </div>
 
-          <!-- Kill button (running only) — a separate action: it must never
-               open the detail modal on its way through. -->
+          </div><!-- /ag-card-body -->
+
+          <!-- Kill is a SIBLING of the actionable body, never nested inside
+               it: a control within a control is neither valid nor operable. -->
           <div v-if="agent.status === 'running'" class="ag-card-actions">
-            <button @click.stop="killAgent(agent.id)" @keydown.enter.stop @keydown.space.stop
-                    class="btn btn-danger text-xs" :disabled="killing === agent.id">
+            <button @click="killAgent(agent.id)" class="btn btn-danger text-xs"
+                    :disabled="killing === agent.id">
               {{ killing === agent.id ? 'Killing...' : 'Kill Agent' }}
             </button>
           </div>
@@ -310,19 +318,23 @@ export default {
       return (Number(agent.max_iterations) || 0) > 0;
     }
 
-    // "inherit (currently X)" wording is applied ONLY where the value comes
-    // from live config — never where it reports what actually executed.
+    // "inherit (currently X)" is applied PER AXIS, from that axis's own
+    // source — a spawn that pinned only the model must not make its inherited
+    // effort look pinned too.
+    function _axisText(value, source) {
+      if (!value) return 'unknown';
+      if (value === 'N/A') return 'N/A';
+      return source === 'current_inheritance' ? `inherit (currently ${value})` : value;
+    }
+
     function displayModelText(agent) {
-      const m = agent.display_model || '';
-      if (!m) return 'unknown';
-      return agent.display_source === 'current_inheritance' ? `inherit (currently ${m})` : m;
+      return _axisText(agent.display_model,
+                       agent.display_model_source || agent.display_source);
     }
 
     function displayEffortText(agent) {
-      const e = agent.display_reasoning_effort || '';
-      if (!e) return 'unknown';
-      if (e === 'N/A') return 'N/A';
-      return agent.display_source === 'current_inheritance' ? `inherit (currently ${e})` : e;
+      return _axisText(agent.display_reasoning_effort,
+                       agent.display_reasoning_effort_source || agent.display_source);
     }
 
     function displaySourceLabel(source) {
@@ -341,23 +353,34 @@ export default {
     const detailError = ref(null);
     const copied = ref('');
 
+    // Every request carries the generation that owns the modal. A slow
+    // response for a CLOSED or REPLACED agent must be discarded, or agent A's
+    // request/result can land under agent B's header.
+    let detailGeneration = 0;
+
     async function openDetail(agent) {
+      const gen = ++detailGeneration;
       detailId.value = agent.id;
       detail.value = null;
       detailError.value = null;
       detailLoading.value = true;
       try {
-        detail.value = await api.get(`/api/agents/${encodeURIComponent(agent.id)}`);
+        const data = await api.get(`/api/agents/${encodeURIComponent(agent.id)}`);
+        if (gen !== detailGeneration) return;   // superseded
+        detail.value = data;
       } catch (e) {
+        if (gen !== detailGeneration) return;
         detailError.value = e.message || 'Failed to load agent detail';
       }
-      detailLoading.value = false;
+      if (gen === detailGeneration) detailLoading.value = false;
     }
 
     function closeDetail() {
+      detailGeneration++;                       // orphan any in-flight request
       detailId.value = null;
       detail.value = null;
       detailError.value = null;
+      detailLoading.value = false;
       copied.value = '';
     }
 
@@ -365,8 +388,11 @@ export default {
     // result appears the moment the agent finishes — without a manual reopen.
     async function refreshDetail() {
       if (!detailId.value) return;
+      const gen = detailGeneration;
       try {
-        detail.value = await api.get(`/api/agents/${encodeURIComponent(detailId.value)}`);
+        const data = await api.get(`/api/agents/${encodeURIComponent(detailId.value)}`);
+        if (gen !== detailGeneration) return;   // modal moved on mid-flight
+        detail.value = data;
       } catch { /* transient: keep showing the last good record */ }
     }
 

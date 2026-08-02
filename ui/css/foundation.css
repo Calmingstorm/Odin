@@ -6,6 +6,10 @@
      overflow around internally-scrolling views like Chat and Logs). The
      mobile breakpoint overrides the token, never the consumers. */
   --hm-topbar-h: 76px;
+  /* Section tab strip height. A page nested INSIDE a tabbed section (Logs
+     under System) must subtract both this and the top bar; subtracting only
+     the top bar left exactly one tab-strip of page-level overflow. */
+  --hm-section-tabs-h: 48px;
   --hm-bg: #07090d;
   --hm-bg-raised: #0b0e14;
   --hm-surface: #10141c;
@@ -137,7 +141,7 @@ kbd { padding: 2px 5px; color: #818b99; background: #090c11; border: 1px solid #
 
 .section-shell { min-height: calc(100vh - var(--hm-topbar-h)); }
 .section-tabs-wrap { position: sticky; top: var(--hm-topbar-h); z-index: 20; padding: 0 24px; background: rgba(9,12,17,.92); border-bottom: 1px solid var(--hm-border-subtle); backdrop-filter: blur(16px); }
-.section-tabs { display: flex; align-items: stretch; gap: 2px; min-height: 48px; overflow-x: auto; }
+.section-tabs { display: flex; align-items: stretch; gap: 2px; min-height: var(--hm-section-tabs-h); overflow-x: auto; }
 .section-tab { position: relative; padding: 0 13px; white-space: nowrap; color: #7f8998; background: transparent; border: 0; font-size: .72rem; font-weight: 550; cursor: pointer; }
 .section-tab:hover { color: #c8ced7; }
 .section-tab.active { color: #e9ca8e; }

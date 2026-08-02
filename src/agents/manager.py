@@ -277,6 +277,11 @@ class AgentInfo:
     last_provider: str = ""
     last_model: str = ""
     last_reasoning_effort: str | None = None
+    # Set once a generation has actually completed, INDEPENDENT of whether the
+    # response carried provenance: a missing model must read as "executed,
+    # provider didn't say" rather than "never ran" (which would let a display
+    # fall back to live config and present it as history).
+    has_executed: bool = False
     # The iteration cap this agent actually runs under, snapshotted at spawn
     # (chat/scheduled/hard limits differ) so progress can be computed honestly
     # instead of against a hardcoded guess.
@@ -953,6 +958,7 @@ async def _run_agent(
             # rides every trajectory record). Operator surfaces can then show
             # what actually ran without reading trajectory files during page
             # rendering, and stay truthful when live config changes mid-agent.
+            agent.has_executed = True
             agent.last_provider = response.get("provider", "") or ""
             agent.last_model = response.get("model", "") or ""
             agent.last_reasoning_effort = response.get("reasoning_effort")

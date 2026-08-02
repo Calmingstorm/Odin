@@ -30,7 +30,8 @@ const SEARCH_LIMITS = [50, 100, 200, 500];
 
 export default {
   template: `
-    <div class="p-6 page-fade-in flex flex-col" style="height: calc(100vh - var(--hm-topbar-h));">
+    <div class="p-6 page-fade-in flex flex-col"
+         style="height: calc(100vh - var(--hm-topbar-h) - var(--hm-section-tabs-h));">
       <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div>
           <h1 class="text-xl font-semibold">Logs</h1>
@@ -176,7 +177,8 @@ export default {
         <div class="relative flex-1" style="min-height:200px;">
           <div ref="logContainer" @scroll="onScroll"
                @wheel="onUserScrollIntent" @touchmove="onUserScrollIntent"
-               @mousedown="onUserScrollIntent" @keydown="onUserScrollKey"
+               @pointerdown="onPointerDown" @keydown="onUserScrollKey"
+               tabindex="0" role="region" aria-label="Log output"
                class="absolute inset-0 overflow-y-auto bg-gray-950 border border-gray-800 rounded p-3 font-mono text-xs">
             <div v-if="filteredLogs.length === 0" class="empty-state" style="padding:2rem 0;">
               <span class="empty-state-icon"><odin-icon :name="logs.length === 0 ? 'file' : 'search'" :size="23" /></span>
@@ -670,27 +672,47 @@ export default {
       // While auto-scroll is armed, intermediate frames must not flash the
       // jump button; an armed view is by definition heading to the bottom.
       showJumpBottom.value = !autoScroll.value && !atBottom && logs.value.length > 0;
+      // During a scrollbar drag the user OWNS every scroll event, so this is
+      // the one path where a scroll event legitimately signals intent.
+      if (draggingScrollbar.value) _disarmIfAwayFromBottom();
+    }
+
+    function _disarmIfAwayFromBottom() {
+      const cur = logContainer.value;
+      if (!cur || !autoScroll.value) return;
+      if (cur.scrollHeight - cur.scrollTop - cur.clientHeight >= 40) {
+        autoScroll.value = false;
+        showJumpBottom.value = logs.value.length > 0;
+      }
     }
 
     function onUserScrollIntent() {
       if (!autoScroll.value) return;
-      const el = logContainer.value;
-      if (!el) return;
-      // Disarm only when the user's action actually left the bottom region.
-      // rAF: the wheel/touch/key event fires BEFORE the browser applies its
-      // scroll, so the position must be read on the next frame.
-      requestAnimationFrame(() => {
-        const cur = logContainer.value;
-        if (!cur || !autoScroll.value) return;
-        if (cur.scrollHeight - cur.scrollTop - cur.clientHeight >= 40) {
-          autoScroll.value = false;
-          showJumpBottom.value = logs.value.length > 0;
-        }
-      });
+      // rAF: wheel/touch/key events fire BEFORE the browser applies their
+      // scroll, so position must be read on the next frame.
+      requestAnimationFrame(_disarmIfAwayFromBottom);
     }
 
     function onUserScrollKey(e) {
       if (_SCROLL_KEYS.has(e.key)) onUserScrollIntent();
+    }
+
+    // A scrollbar-thumb DRAG moves long after mousedown, so a single
+    // next-frame check misses it entirely and the next incoming line yanks
+    // the operator back to the bottom. Intent is owned for the whole drag:
+    // every scroll during it is the user's, until pointer release.
+    const draggingScrollbar = ref(false);
+
+    function onPointerDown() {
+      if (!autoScroll.value) return;
+      draggingScrollbar.value = true;
+      requestAnimationFrame(_disarmIfAwayFromBottom);
+    }
+
+    function onPointerUp() {
+      if (!draggingScrollbar.value) return;
+      draggingScrollbar.value = false;
+      _disarmIfAwayFromBottom();
     }
 
     // Re-arming the checkbox snaps to the bottom immediately, so the option
@@ -970,10 +992,21 @@ export default {
       prevStateHandler = null;
     }
 
-    onMounted(loadCustomLogPresets);
+    // A scrollbar drag routinely ENDS outside the log element (and outside
+    // the window), so release is observed globally — otherwise intent stays
+    // latched and the next drag's state is wrong.
+    onMounted(() => {
+      loadCustomLogPresets();
+      window.addEventListener('pointerup', onPointerUp);
+      window.addEventListener('pointercancel', onPointerUp);
+    });
     onActivated(activateLogStream);
     onDeactivated(deactivateLogStream);
-    onUnmounted(deactivateLogStream);
+    onUnmounted(() => {
+      deactivateLogStream();
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+    });
 
     return {
       mode,
@@ -989,6 +1022,7 @@ export default {
       togglePause, clearLogs, exportLogs, logLineClass, levelClass,
       levelChipClass, toggleLevel, copyLine, jumpToBottom, onScroll,
       onUserScrollIntent, onUserScrollKey, onAutoScrollToggle,
+      onPointerDown,
       applyLogPreset, applyCustomLogPreset,
       saveLogCustomPreset, removeLogCustomPreset,
       segmentHeight, jumpToTimelineBucket,
