@@ -123,6 +123,25 @@ class TestFindByLoopId:
         found = await saver.find_by_loop_id("a", limit=1)
         assert len(found) == 1 and found[0]["loop_iteration"] == 1
 
+    async def test_skips_blank_malformed_and_other_loop_records(self, saver):
+        import json
+        file = saver.directory / "2020-03-03.jsonl"
+        file.write_text(
+            "\nnot-json\n"
+            + json.dumps({"source": "loop", "loop_id": "other"})
+            + "\n"
+            + json.dumps({"source": "loop", "loop_id": "a", "loop_iteration": 3})
+            + "\n"
+        )
+        found = await saver.find_by_loop_id("a")
+        assert [entry["loop_iteration"] for entry in found] == [3]
+
+    async def test_read_failure_skips_partition(self, saver):
+        file = saver.directory / "2020-03-04.jsonl"
+        file.write_text('{}\n')
+        with patch("aiofiles.open", side_effect=OSError("unreadable")):
+            assert await saver.find_by_loop_id("a") == []
+
     async def test_limit_and_empty_id(self, saver):
         import json
         file = saver.directory / "2020-03-03.jsonl"
