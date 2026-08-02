@@ -12,6 +12,14 @@
      `-inner` is the tab row's own min-height; `-h` is the OUTER footprint
      including the wrapper's 1px bottom border, and is what viewport
      calculations must use (subtracting the inner value left 1px behind). */
+  /* The bottom RAIL. The sidebar footer's separator and the chat composer's
+     top border sit on the same horizontal line, and the eye reads them as one
+     rule crossing the sidebar boundary — so a few pixels of difference looks
+     like a mistake. Both consume this token instead of each computing its own
+     height from its own content. Derived from the sidebar footer's recipe:
+     12 padding + 42 connection card + 8 gap + 32 shortcut row + 12 padding
+     + 1 border. */
+  --hm-rail-h: 107px;
   --hm-section-tabs-inner-h: 48px;
   --hm-section-tabs-border: 1px;
   --hm-section-tabs-h: calc(var(--hm-section-tabs-inner-h) + var(--hm-section-tabs-border));
@@ -111,7 +119,7 @@ button, input, select, textarea { font: inherit; }
 .hm-sidebar.collapsed .nav-item { padding: 0; justify-content: center; }
 .hm-sidebar.collapsed .nav-item.active::after { right: 5px; }
 
-.sidebar-footer { padding: 12px; border-top: 1px solid var(--hm-border-subtle); display: grid; gap: 8px; }
+.sidebar-footer { min-height: var(--hm-rail-h); padding: 12px; border-top: 1px solid var(--hm-border-subtle); display: grid; gap: 8px; align-content: center; }
 .connection-card { min-height: 42px; padding: 8px 10px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--hm-border-subtle); background: rgba(0,0,0,.14); border-radius: 8px; }
 .connection-copy { min-width: 0; display: flex; flex: 1; justify-content: space-between; align-items: baseline; gap: 8px; }
 .connection-label { font-size: .7rem; color: var(--hm-text-muted); }

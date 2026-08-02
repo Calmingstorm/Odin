@@ -795,6 +795,13 @@ textarea.hm-input {
   border-top: 1px solid var(--hm-border);
   background: var(--hm-surface);
   padding: var(--hm-space-4) var(--hm-space-5);
+  /* Share the bottom-rail baseline with the sidebar footer so the two top
+     borders form ONE continuous line across the sidebar divider. The composer
+     centres in the rail and still grows past it as the textarea expands. */
+  min-height: var(--hm-rail-h);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 .chat-input-row,
 .chat-input-hint {
