@@ -11,6 +11,7 @@ on:
       - 'tailwind.config.mjs'
       - 'postcss.config.mjs'
       - 'scripts/check-vue-templates.mjs'
+      - 'scripts/check-modal-race.mjs'
       - '.github/workflows/ui.yml'
   pull_request:
     paths:
@@ -21,6 +22,7 @@ on:
       - 'tailwind.config.mjs'
       - 'postcss.config.mjs'
       - 'scripts/check-vue-templates.mjs'
+      - 'scripts/check-modal-race.mjs'
       - '.github/workflows/ui.yml'
 
 jobs:
@@ -33,10 +35,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Strict template validation
-        run: npm run check:templates
-      - name: Build
-        run: npm run build
+      - name: WebUI checks and build
+        run: npm run check
       - name: Committed dist must match source
         run: |
           git diff --exit-code ui/dist || {

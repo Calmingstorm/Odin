@@ -6,7 +6,8 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatTs, formatDuration } from '../utils.js';
-import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
+import { createAgentAutoRefresh, createAgentDetailController } from '../agent-detail-state.js';
 
 
 export default {
@@ -283,7 +284,7 @@ export default {
     const killing = ref(null);
     const autoRefresh = ref(true);
     const statusFilter = ref('all');
-    let refreshInterval = null;
+    let pageActive = false;
 
     const runningCount = computed(() => agents.value.filter(a => a.status === 'running').length);
     const completedCount = computed(() => agents.value.filter(a => a.status === 'completed').length);
@@ -353,74 +354,44 @@ export default {
     const detailError = ref(null);
     const copied = ref('');
 
-    // ONE primitive owns every modal fetch, because counters kept producing
-    // new instances of the same defect: a superseded response touching modal
-    // state. A request may write ANYTHING — data, error, loading — only while
-    // it is still THE latest issued request for the open modal. Identity
-    // comparison, so "superseded" needs no arithmetic and cannot drift.
-    // Losers return having touched nothing.
-    //
-    // Commits are also ATOMIC: fresh data always clears a stale error, so a
-    // failed request followed by a successful one can never leave the modal
-    // showing an obsolete failure over live data.
-    let activeRequest = null;
-
-    async function loadDetail(agentId, { initial }) {
-      const token = {};
-      activeRequest = token;
-      if (initial) {
-        detail.value = null;
-        detailError.value = null;
-        detailLoading.value = true;
-      }
-      let data = null;
-      let failure = null;
-      try {
-        data = await api.get(`/api/agents/${encodeURIComponent(agentId)}`);
-      } catch (e) {
-        failure = e;
-      }
-      if (activeRequest !== token) return;   // superseded — touch nothing
-      activeRequest = null;
-      if (failure) {
-        // Keep the last good record on a refresh failure — but the condition
-        // is whether the modal HAS something to show, not whether this
-        // request happened to be the initial one. A refresh that supersedes
-        // an in-flight initial load inherits responsibility for resolving it:
-        // with nothing to fall back on, staying silent left the modal with no
-        // skeleton, no error and no content at all.
-        if (detail.value === null) {
-          detailError.value = failure.message || 'Failed to load agent detail';
-        }
-      } else {
-        detail.value = data;
-        detailError.value = null;
-      }
-      detailLoading.value = false;
-    }
+    // The modal state machine lives in a standalone production module so the
+    // async contract is exercised directly by the WebUI regression check.
+    // Opens may supersede opens; periodic refreshes coalesce onto an existing
+    // flight and every flight is bounded, preventing both stale writes and
+    // timer-driven starvation on slow or hung requests.
+    const detailState = {
+      get detail() { return detail.value; },
+      set detail(value) { detail.value = value; },
+      get detailId() { return detailId.value; },
+      set detailId(value) { detailId.value = value; },
+      get detailLoading() { return detailLoading.value; },
+      set detailLoading(value) { detailLoading.value = value; },
+      get detailError() { return detailError.value; },
+      set detailError(value) { detailError.value = value; },
+    };
+    const detailController = createAgentDetailController({
+      state: detailState,
+      requestDetail: (agentId, { signal }) => api.get(
+        `/api/agents/${encodeURIComponent(agentId)}`,
+        { signal },
+      ),
+    });
 
     async function openDetail(agent) {
-      detailId.value = agent.id;
       copied.value = '';
-      // The id is PASSED, never read from state at await-time, so switching
-      // agents mid-flight cannot retarget an in-flight request.
-      await loadDetail(agent.id, { initial: true });
+      await detailController.open(agent.id);
     }
 
     function closeDetail() {
-      activeRequest = null;                     // orphan any in-flight request
-      detailId.value = null;
-      detail.value = null;
-      detailError.value = null;
-      detailLoading.value = false;
+      detailController.close();
       copied.value = '';
     }
 
     // A running agent's modal follows the same 5s cadence as the list, so a
-    // result appears the moment the agent finishes — without a manual reopen.
+    // result appears when the agent finishes. The controller makes this call
+    // single-flight and gives a hung request a bounded timeout/retry path.
     async function refreshDetail() {
-      if (!detailId.value) return;
-      await loadDetail(detailId.value, { initial: false });
+      await detailController.refresh();
     }
 
     async function copyText(kind, text) {
@@ -466,40 +437,49 @@ export default {
       killing.value = null;
     }
 
+    const autoRefreshController = createAgentAutoRefresh({
+      isEnabled: () => autoRefresh.value && pageActive,
+      refreshList: () => fetchAgents(true),
+      hasOpenDetail: () => Boolean(detailId.value),
+      refreshDetail,
+    });
+
     function startAutoRefresh() {
-      stopAutoRefresh();
-      if (autoRefresh.value) {
-        refreshInterval = setInterval(() => {
-          if (autoRefresh.value) {
-            fetchAgents(true);
-            // Keep an open modal live alongside the list.
-            if (detailId.value) refreshDetail();
-          }
-        }, 5000);
-      }
+      autoRefreshController.start();
     }
 
     function stopAutoRefresh() {
-      if (refreshInterval) {
-        clearInterval(refreshInterval);
-        refreshInterval = null;
-      }
+      autoRefreshController.stop();
     }
+
+    // The page is kept alive between tab visits. A direct watcher keeps the
+    // checkbox and timer truthful after every disable/deactivate/reactivate
+    // ordering instead of relying on lifecycle hooks alone.
+    watch(autoRefresh, () => autoRefreshController.sync());
 
     // Under <keep-alive> a hidden tab stays MOUNTED, so mount-scoped polling
     // never stops — and this page's interval now also refreshes an open
     // modal. Polling is therefore tied to ACTIVATION (the pattern logs.js
     // already uses): a backgrounded Agents tab costs nothing.
     onMounted(() => {
+      pageActive = true;
       fetchAgents();
       startAutoRefresh();
     });
     onActivated(() => {
+      pageActive = true;
       fetchAgents(true);
       startAutoRefresh();
     });
-    onDeactivated(stopAutoRefresh);
-    onUnmounted(stopAutoRefresh);
+    onDeactivated(() => {
+      pageActive = false;
+      stopAutoRefresh();
+    });
+    onUnmounted(() => {
+      pageActive = false;
+      stopAutoRefresh();
+      detailController.close();
+    });
 
     return {
       agents, loading, error, killing, autoRefresh, statusFilter,

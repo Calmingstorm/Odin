@@ -1,167 +1,414 @@
-// Guard for the agent-detail modal's async-response class (PR #247, review
-// rounds 1-4). Two layers:
-//
-//   1. Named regressions — one per defect an actual review round found, so
-//      each stays pinned with its story.
-//   2. EXHAUSTIVE enumeration — every interleaving of up to three concurrent
-//      requests (outcomes x resolution orders) checked against the modal's
-//      coherence invariant. Rounds 1-3 each added one hand-picked case and
-//      round 4 still found an ordering nobody had written down; enumerating
-//      the space is what actually closes that class.
-//
-// THE INVARIANT: while the modal is open it must never present nothing at
-// all — no content, no error, and not loading — because the operator then
-// sees an empty box with no indication that anything is wrong or pending.
-//
-// The primitive below mirrors loadDetail() in ui/js/pages/agents.js; if that
-// changes shape, update this transcription and keep every case passing.
-// Runs in `npm run check`.
+// Regression boundary for the PRODUCTION agent-detail modal state machine.
+// This script imports the exact controller and polling primitive used by
+// ui/js/pages/agents.js. It covers stale-response coherence plus real
+// timer-driven overlap, coalescing, timeout recovery, and interval lifecycle.
 
-function makeModal(apiGet) {
-  const S = { detail: null, error: null, loading: false, id: null, copied: '' };
-  let activeRequest = null;
+import {
+  createAgentAutoRefresh,
+  createAgentDetailController,
+  createAgentDetailState,
+} from '../ui/js/agent-detail-state.js';
 
-  async function loadDetail(agentId, { initial }) {
-    const token = {};
-    activeRequest = token;
-    if (initial) { S.detail = null; S.error = null; S.loading = true; }
-    let data = null, failure = null;
-    try { data = await apiGet(agentId); } catch (e) { failure = e; }
-    if (activeRequest !== token) return;       // superseded — touch nothing
-    activeRequest = null;
-    if (failure) {
-      // Fall back to the last good record only when there IS one.
-      if (S.detail === null) S.error = failure.message;
-    } else {
-      S.detail = data;
-      S.error = null;
-    }
-    S.loading = false;
-  }
-  return {
-    S,
-    open: (id) => { S.id = id; S.copied = ''; return loadDetail(id, { initial: true }); },
-    refresh: () => (S.id ? loadDetail(S.id, { initial: false }) : Promise.resolve()),
-    close: () => { activeRequest = null; S.id = null; S.detail = null; S.error = null; S.loading = false; },
-  };
-}
-
-const defer = () => { let r, j; const p = new Promise((res, rej) => { r = res; j = rej; }); return { p, r, j }; };
-const tick = () => new Promise((r) => setTimeout(r, 0));
-
-let fail = 0, pass = 0;
-const check = (name, cond, detail = '') => {
-  if (cond) { pass++; } else { fail++; console.log(`  FAIL  ${name} ${detail}`); }
+const defer = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 };
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-// The coherence invariant, asserted after every scenario.
-function assertCoherent(name, S) {
-  const blank = S.id !== null && S.detail === null && S.error === null && !S.loading;
-  check(`${name}: modal never blank while open`, !blank, JSON.stringify(S));
+let failed = 0;
+let passed = 0;
+function check(name, condition, detail = '') {
+  if (condition) passed++;
+  else {
+    failed++;
+    console.log(`  FAIL  ${name} ${detail}`);
+  }
 }
-
-// --- Layer 1: named regressions -------------------------------------------
-{ // Round 1 — stale AGENT response must not land under a different agent
-  const dA = defer(), dB = defer();
-  const m = makeModal((id) => (id === 'A' ? dA.p : dB.p));
-  m.open('A'); m.close(); m.open('B');
-  dB.r({ id: 'B' }); await tick();
-  dA.r({ id: 'A' }); await tick();
-  check('R1 stale agent response discarded', m.S.detail?.id === 'B');
-  assertCoherent('R1', m.S);
+function snapshot(state) {
+  return JSON.stringify(state);
 }
-{ // Round 2 — same agent: a slow initial must not overwrite a newer refresh
-  const dInit = defer(), dRef = defer(); let n = 0;
-  const m = makeModal(() => (++n === 1 ? dInit.p : dRef.p));
-  m.open('A'); m.refresh();
-  dRef.r({ v: 'fresh' }); await tick();
-  dInit.r({ v: 'stale' }); await tick();
-  check('R2 slow initial cannot overwrite newer refresh', m.S.detail?.v === 'fresh');
-  assertCoherent('R2', m.S);
+function assertCoherent(name, state) {
+  const blank = state.detailId !== null
+    && state.detail === null
+    && state.detailError === null
+    && !state.detailLoading;
+  check(`${name}: modal never blank while open`, !blank, snapshot(state));
+  check(
+    `${name}: error never hides live content`,
+    !(state.detailError !== null && state.detail !== null),
+    snapshot(state),
+  );
 }
-{ // Round 3 — an initial failure must not persist over a newer success
-  const dInit = defer(), dRef = defer(); let n = 0;
-  const m = makeModal(() => (++n === 1 ? dInit.p : dRef.p));
-  const openP = m.open('A');
-  dInit.j(new Error('down')); await openP;
-  check('R3 initial failure surfaces', m.S.error === 'down');
-  const refP = m.refresh();
-  dRef.r({ v: 'recovered' }); await refP;
-  check('R3 later success clears stale error', m.S.error === null && m.S.detail?.v === 'recovered');
-  assertCoherent('R3', m.S);
-}
-{ // Round 4 — refresh supersedes an in-flight initial, then FAILS with no
-  // last-good record; the initial's success is correctly discarded. The
-  // modal used to end up entirely blank.
-  const dInit = defer(), dRef = defer(); let n = 0;
-  const m = makeModal(() => (++n === 1 ? dInit.p : dRef.p));
-  m.open('A'); m.refresh();
-  dRef.j(new Error('refresh failed')); await tick();
-  dInit.r({ v: 'too late' }); await tick();
-  check('R4 refresh failure with no fallback surfaces an error', m.S.error !== null, JSON.stringify(m.S));
-  assertCoherent('R4', m.S);
-}
-{ // Refresh failure WITH a last-good record still keeps it (intended)
-  const dInit = defer(), dRef = defer(); let n = 0;
-  const m = makeModal(() => (++n === 1 ? dInit.p : dRef.p));
-  const openP = m.open('A');
-  dInit.r({ v: 'good' }); await openP;
-  const refP = m.refresh();
-  dRef.j(new Error('blip')); await refP;
-  check('refresh failure keeps last good record', m.S.detail?.v === 'good' && m.S.error === null);
-  assertCoherent('refresh-failure-with-fallback', m.S);
-}
-{ // Close during flight leaves the modal fully clean
-  const d = defer();
-  const m = makeModal(() => d.p);
-  m.open('A'); m.close();
-  d.r({ v: 'late' }); await tick();
-  check('close orphans in-flight request',
-    m.S.detail === null && !m.S.loading && m.S.id === null);
-}
-
-// --- Layer 2: exhaustive interleavings ------------------------------------
-// Every combination of: request count (2-3), each request's outcome
-// (success | failure), and every resolution ORDER of those requests.
-function permutations(xs) {
-  if (xs.length <= 1) return [xs];
-  const out = [];
-  xs.forEach((x, i) => {
-    const rest = [...xs.slice(0, i), ...xs.slice(i + 1)];
-    permutations(rest).forEach((p) => out.push([x, ...p]));
+function makeController(requestDetail, options = {}) {
+  const state = createAgentDetailState();
+  const controller = createAgentDetailController({
+    state,
+    requestDetail,
+    timeoutMs: 1000,
+    ...options,
   });
-  return out;
+  return { state, controller };
+}
+
+// Stale agent response cannot land after a modal switch.
+{
+  const a = defer();
+  const b = defer();
+  const { state, controller } = makeController(
+    (id) => (id === 'A' ? a.promise : b.promise),
+  );
+  controller.open('A');
+  controller.open('B');
+  b.resolve({ id: 'B' });
+  await tick();
+  a.resolve({ id: 'A' });
+  await tick();
+  check('switch: stale agent response discarded', state.detail?.id === 'B');
+  assertCoherent('switch', state);
+}
+
+// A manual open is allowed to supersede an earlier open for the same agent.
+{
+  const oldRequest = defer();
+  const freshRequest = defer();
+  let calls = 0;
+  const { state, controller } = makeController(
+    () => (++calls === 1 ? oldRequest.promise : freshRequest.promise),
+  );
+  controller.open('A');
+  controller.open('A');
+  freshRequest.resolve({ version: 'fresh' });
+  await tick();
+  oldRequest.resolve({ version: 'stale' });
+  await tick();
+  check('open: latest issued request wins', state.detail?.version === 'fresh');
+  assertCoherent('open-latest-wins', state);
+}
+
+// A later successful open clears a prior visible failure atomically.
+{
+  const first = defer();
+  const second = defer();
+  let calls = 0;
+  const { state, controller } = makeController(
+    () => (++calls === 1 ? first.promise : second.promise),
+  );
+  const firstOpen = controller.open('A');
+  first.reject(new Error('down'));
+  await firstOpen;
+  check('recovery: initial failure surfaces', state.detailError === 'down');
+  const retry = controller.open('A');
+  second.resolve({ version: 'recovered' });
+  await retry;
+  check(
+    'recovery: fresh data clears stale error',
+    state.detail?.version === 'recovered' && state.detailError === null,
+  );
+  assertCoherent('recovery', state);
+}
+
+// Exhaustively enumerate two and three superseding manual opens through the
+// production controller. Refresh overlap is intentionally handled separately
+// below because refresh now coalesces rather than supersedes.
+function permutations(values) {
+  if (values.length <= 1) return [values];
+  const result = [];
+  values.forEach((value, index) => {
+    const rest = [...values.slice(0, index), ...values.slice(index + 1)];
+    permutations(rest).forEach((permutation) => {
+      result.push([value, ...permutation]);
+    });
+  });
+  return result;
 }
 
 let enumerated = 0;
 for (const count of [2, 3]) {
-  const outcomeSets = [];
   for (let mask = 0; mask < (1 << count); mask++) {
-    outcomeSets.push(Array.from({ length: count }, (_, i) => Boolean(mask & (1 << i))));
-  }
-  for (const outcomes of outcomeSets) {
-    for (const order of permutations(Array.from({ length: count }, (_, i) => i))) {
-      const defs = Array.from({ length: count }, () => defer());
+    const outcomes = Array.from(
+      { length: count },
+      (_, index) => Boolean(mask & (1 << index)),
+    );
+    for (const order of permutations(
+      Array.from({ length: count }, (_, index) => index),
+    )) {
+      const requests = Array.from({ length: count }, () => defer());
       let issued = 0;
-      const m = makeModal(() => defs[issued++].p);
-      m.open('A');                                   // request 0 = initial
-      for (let i = 1; i < count; i++) m.refresh();   // the rest = refreshes
-      for (const idx of order) {
-        if (outcomes[idx]) defs[idx].r({ v: `d${idx}` });
-        else defs[idx].j(new Error(`e${idx}`));
+      const { state, controller } = makeController(() => requests[issued++].promise);
+      for (let index = 0; index < count; index++) controller.open('A');
+      const label = `enum n=${count} outcomes=${outcomes.map((v) => (v ? 'S' : 'F')).join('')} order=${order.join('')}`;
+      for (const index of order) {
+        if (outcomes[index]) requests[index].resolve({ version: index });
+        else requests[index].reject(new Error(`failure-${index}`));
         await tick();
+        assertCoherent(`${label} after request ${index}`, state);
       }
-      await tick();
+      assertCoherent(label, state);
+      // Only the latest-issued request may commit, independent of completion
+      // order. Its outcome therefore determines the final visible state.
+      const latest = count - 1;
+      check(
+        `${label}: latest issued outcome owns state`,
+        outcomes[latest]
+          ? state.detail?.version === latest && state.detailError === null
+          : state.detail === null && state.detailError === `failure-${latest}`,
+        snapshot(state),
+      );
       enumerated++;
-      const label = `enum n=${count} outcomes=${outcomes.map((o) => (o ? 'S' : 'F')).join('')} order=${order.join('')}`;
-      assertCoherent(label, m.S);
-      // A modal showing an error must not also be showing content: the
-      // template prioritises the error, so that combination hides live data.
-      check(`${label}: no error over content`,
-        !(m.S.error !== null && m.S.detail !== null), JSON.stringify(m.S));
     }
   }
 }
+check('enumeration: all supersession interleavings covered', enumerated === 56);
 
-console.log(`modal-race: ${pass} assertions passed, ${fail} failed (${enumerated} enumerated interleavings)`);
-process.exit(fail ? 1 : 0);
+// Periodic refresh is single-flight. Timer ticks during a slow initial request
+// coalesce rather than superseding it, so a response slower than the cadence
+// still commits and no unbounded stack of HTTP requests is created.
+{
+  const slow = defer();
+  let calls = 0;
+  const { state, controller } = makeController(() => {
+    calls++;
+    return slow.promise;
+  });
+  controller.open('A');
+  const refreshA = controller.refresh();
+  const refreshB = controller.refresh();
+  check('single-flight: overlap issues one transport request', calls === 1);
+  await tick();
+  check('single-flight: request remains single after microtasks', calls === 1);
+  check('single-flight: refresh callers coalesce', refreshA === refreshB);
+  slow.resolve({ version: 'slow but valid' });
+  await refreshA;
+  check('single-flight: slow response commits', state.detail?.version === 'slow but valid');
+  assertCoherent('single-flight', state);
+}
+
+// A refresh failure keeps a last-good record; without one it must render an
+// error rather than leaving an empty modal.
+{
+  const good = defer();
+  const failedRefresh = defer();
+  let calls = 0;
+  const { state, controller } = makeController(
+    () => (++calls === 1 ? good.promise : failedRefresh.promise),
+  );
+  const initial = controller.open('A');
+  good.resolve({ version: 'good' });
+  await initial;
+  const refresh = controller.refresh();
+  failedRefresh.reject(new Error('blip'));
+  await refresh;
+  check(
+    'refresh failure: keeps last good record',
+    state.detail?.version === 'good' && state.detailError === null,
+  );
+  assertCoherent('refresh-with-fallback', state);
+}
+{
+  const request = defer();
+  const { state, controller } = makeController(() => request.promise);
+  const refresh = controller.open('A');
+  request.reject(new Error('no data'));
+  await refresh;
+  check('failure without fallback surfaces', state.detailError === 'no data');
+  assertCoherent('failure-without-fallback', state);
+}
+
+// The shared API client returns null when a successful response has an empty
+// or malformed JSON body. Null is not renderable detail: initial load must
+// surface it, while refresh must preserve an existing last-good record.
+{
+  const { state, controller } = makeController(async () => null);
+  await controller.open('A');
+  check(
+    'invalid payload: initial null surfaces',
+    state.detail === null
+      && state.detailError === 'Agent detail response was empty or invalid'
+      && !state.detailLoading,
+  );
+  assertCoherent('invalid-initial-payload', state);
+}
+{
+  let calls = 0;
+  const { state, controller } = makeController(async () => (
+    ++calls === 1 ? { version: 'good' } : null
+  ));
+  await controller.open('A');
+  await controller.refresh();
+  check(
+    'invalid payload: refresh keeps last good record',
+    state.detail?.version === 'good' && state.detailError === null,
+  );
+  assertCoherent('invalid-refresh-payload', state);
+}
+
+// A refresh can be the first request responsible for content (for example,
+// after state restoration). Its failure must surface when no last-good record
+// exists, preserving the same coherence contract as an initial open.
+{
+  const request = defer();
+  const { state, controller } = makeController(() => request.promise);
+  state.detailId = 'A';
+  const refresh = controller.refresh();
+  request.reject(new Error('refresh has no fallback'));
+  await refresh;
+  check(
+    'refresh without fallback surfaces',
+    state.detailError === 'refresh has no fallback' && !state.detailLoading,
+  );
+  assertCoherent('refresh-without-fallback', state);
+}
+
+// Close orphans the transport and late completion cannot dirty modal state.
+{
+  const request = defer();
+  const { state, controller } = makeController(() => request.promise);
+  controller.open('A');
+  await tick();
+  controller.close();
+  request.resolve({ version: 'late' });
+  await tick();
+  check(
+    'close: late response touches nothing',
+    state.detailId === null
+      && state.detail === null
+      && state.detailError === null
+      && !state.detailLoading,
+  );
+}
+
+// Fake timeout clock: a hung request reaches a bounded failure, releases the
+// single flight, and a later periodic tick can issue and commit a retry.
+{
+  const timers = [];
+  const scheduleTimeout = (callback, delay) => {
+    const timer = { callback, delay, cancelled: false };
+    timers.push(timer);
+    return timer;
+  };
+  const cancelTimeout = (timer) => { timer.cancelled = true; };
+  const hung = defer();
+  const recovered = defer();
+  let calls = 0;
+  let timeoutSignal = null;
+  const { state, controller } = makeController(
+    (_agentId, { signal }) => {
+      timeoutSignal = signal;
+      return ++calls === 1 ? hung.promise : recovered.promise;
+    },
+    { timeoutMs: 15000, scheduleTimeout, cancelTimeout },
+  );
+  const initial = controller.open('A');
+  await tick();
+  check('timeout: deadline is bounded', timers[0]?.delay === 15000);
+  timers[0].callback();
+  await initial;
+  check('timeout: aborts underlying transport', timeoutSignal?.aborted === true);
+  check(
+    'timeout: hung initial surfaces',
+    state.detailError === 'Agent detail request timed out after 15s'
+      && !controller.hasInFlight(),
+    snapshot(state),
+  );
+  const retry = controller.refresh();
+  await tick();
+  check('timeout: later tick starts a retry', calls === 2);
+  recovered.resolve({ version: 'after timeout' });
+  await retry;
+  check(
+    'timeout: retry commits and clears error',
+    state.detail?.version === 'after timeout' && state.detailError === null,
+  );
+  assertCoherent('timeout-recovery', state);
+}
+
+// Drive the PRODUCTION interval callback through timer overlap. Multiple 5s
+// ticks while detail is slow still issue one request, then the next tick after
+// completion starts the next refresh.
+{
+  const intervals = [];
+  const scheduleInterval = (callback, delay) => {
+    const timer = { callback, delay, cancelled: false };
+    intervals.push(timer);
+    return timer;
+  };
+  const cancelInterval = (timer) => { timer.cancelled = true; };
+  const first = defer();
+  const second = defer();
+  let detailCalls = 0;
+  let listCalls = 0;
+  const { state, controller } = makeController(
+    () => (++detailCalls === 1 ? first.promise : second.promise),
+  );
+  state.detailId = 'A';
+  const polling = createAgentAutoRefresh({
+    isEnabled: () => true,
+    refreshList: () => { listCalls++; },
+    hasOpenDetail: () => state.detailId !== null,
+    refreshDetail: controller.refresh,
+    scheduleInterval,
+    cancelInterval,
+  });
+  polling.start();
+  check('polling: configured at 5 seconds', intervals[0]?.delay === 5000);
+  intervals[0].callback();
+  intervals[0].callback();
+  intervals[0].callback();
+  await tick();
+  check('polling: every timer tick refreshes list', listCalls === 3);
+  check('polling: overlapping detail ticks coalesce', detailCalls === 1);
+  first.resolve({ version: 'one' });
+  await tick();
+  intervals[0].callback();
+  await tick();
+  check('polling: post-completion tick starts next flight', detailCalls === 2);
+  second.resolve({ version: 'two' });
+  await tick();
+  check('polling: second timer result commits', state.detail?.version === 'two');
+  polling.stop();
+  check('polling: stop cancels interval', intervals[0].cancelled && !polling.isRunning());
+  assertCoherent('timer-overlap', state);
+}
+
+// Checkbox/lifecycle contract: disabling stops the timer, re-enabling starts
+// one again, including after a deactivated page had already stopped it.
+{
+  const intervals = [];
+  let enabled = true;
+  let active = true;
+  const polling = createAgentAutoRefresh({
+    isEnabled: () => enabled && active,
+    refreshList: () => {},
+    hasOpenDetail: () => false,
+    refreshDetail: () => {},
+    scheduleInterval: (callback, delay) => {
+      const timer = { callback, delay, cancelled: false };
+      intervals.push(timer);
+      return timer;
+    },
+    cancelInterval: (timer) => { timer.cancelled = true; },
+  });
+  polling.sync();
+  enabled = false;
+  polling.sync();
+  check('toggle: disabling stops interval', !polling.isRunning() && intervals[0].cancelled);
+  // Deactivation is another idempotent stop. Re-enabling while inactive
+  // cannot start background polling; activation starts it immediately.
+  active = false;
+  polling.stop();
+  enabled = true;
+  polling.sync();
+  check('toggle: re-enable stays stopped while inactive', !polling.isRunning());
+  active = true;
+  polling.start();
+  check(
+    'toggle: activation with enabled checkbox restarts interval',
+    polling.isRunning() && intervals.length === 2 && !intervals[1].cancelled,
+  );
+  polling.stop();
+}
+
+console.log(`modal-race: ${passed} assertions passed, ${failed} failed`);
+process.exit(failed ? 1 : 0);
