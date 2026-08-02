@@ -662,7 +662,7 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
           <div class="ag-card-header">
             <div class="ag-card-title-row">
               <span class="ag-status-dot" :class="'ag-dot-' + agent.status" role="img" :aria-label="'Status: ' + agent.status"></span>
-              <span class="ag-card-label">{{ agent.label }}</span>
+              <span class="ag-card-label" :title="agent.label">{{ agent.label }}</span>
               <span class="ag-card-id">{{ agent.id }}</span>
             </div>
             <span class="ag-status-badge" :class="'ag-badge-' + agent.status">{{ agent.status }}</span>
@@ -671,9 +671,11 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
           <!-- Model / reasoning provenance — directly under the identity row
                so it sits at the SAME height in every card and reads as a
                property of the agent, not as a tag on its request text. -->
-          <div class="ag-card-policy" :title="displaySourceLabel(agent.display_source)">
-            <span class="ag-policy-chip">{{ displayModelText(agent) }}</span>
-            <span class="ag-policy-chip ag-policy-effort">{{ displayEffortText(agent) }}</span>
+          <div class="ag-card-policy">
+            <span class="ag-policy-chip"
+                  :title="displayModelText(agent) + ' — ' + displaySourceLabel(agent.display_source)">{{ displayModelText(agent) }}</span>
+            <span class="ag-policy-chip ag-policy-effort"
+                  :title="displayEffortText(agent) + ' — ' + displaySourceLabel(agent.display_source)">{{ displayEffortText(agent) }}</span>
           </div>
 
           <!-- Goal (reserved height, faded overflow — variable goal lengths

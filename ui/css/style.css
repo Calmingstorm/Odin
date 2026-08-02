@@ -410,14 +410,17 @@ textarea.hm-input {
   max-width: var(--chat-reading-lane);
   margin-inline: auto;
 }
-/* Genuinely wide material breaks out to the work lane rather than being
-   squeezed into a prose measure. Matched on REAL elements that marked(gfm)
-   emits — code fences and tables — never on invented class names. Where
-   :has() is unsupported the rule is simply skipped and the content keeps
-   its own internal overflow-x scroll, so the degradation is graceful. */
-.chat-messages > .chat-message:has(pre),
-.chat-messages > .chat-message:has(table) {
-  max-width: var(--chat-work-lane);
+/* Wide material gets room WITHOUT moving the speaker. Widening the whole row
+   to the work lane shifted the avatar ~260px left on an ultrawide merely
+   because a message contained a code block — the conversation axis must stay
+   put. So the row keeps the reading lane and only the BUBBLE relaxes its 75%
+   prose cap; code and tables also keep their own overflow-x scroll. Matched
+   on REAL elements marked(gfm) emits — never invented class names — and
+   simply skipped where :has() is unsupported. */
+.chat-messages > .chat-message:has(pre) .chat-bubble-wrap,
+.chat-messages > .chat-message:has(table) .chat-bubble-wrap {
+  max-width: 100%;
+  width: 100%;
 }
 
 /* --- Welcome / empty state --- */
@@ -636,11 +639,18 @@ textarea.hm-input {
   color: var(--hm-accent-hover);
   text-decoration: underline;
 }
+/* A GFM table must SCROLL rather than crush: at 390px the browser was
+   breaking headers mid-word into fragments like "Servi/ce" and "Late/ncy".
+   display:block + max-content gives the table its natural width inside a
+   horizontal scroll boundary, so cells stay readable at any viewport. */
 .chat-markdown table {
   border-collapse: collapse;
   margin: var(--hm-space-2) 0;
   font-size: var(--hm-text-sm);
-  width: 100%;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
 }
 .chat-markdown th, .chat-markdown td {
   border: 1px solid var(--hm-border);
@@ -2465,9 +2475,15 @@ textarea.hm-input {
 
 /* Card header */
 .ag-card-header { display: flex; align-items: center; justify-content: space-between; }
-.ag-card-title-row { display: flex; align-items: center; gap: var(--hm-space-2); }
-.ag-card-label { font-weight: 600; font-size: var(--hm-text-sm); }
-.ag-card-id { font-family: var(--hm-font-mono); font-size: var(--hm-text-xs); color: var(--hm-text-dim); }
+/* Identity is ONE reserved row: a long agent label truncates rather than
+   wrapping and pushing every band below it down — which is the drift the
+   provenance move exists to eliminate. */
+.ag-card-title-row { display: flex; align-items: center; gap: var(--hm-space-2); min-width: 0; flex-wrap: nowrap; }
+.ag-card-label {
+  font-weight: 600; font-size: var(--hm-text-sm);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ag-card-id { font-family: var(--hm-font-mono); font-size: var(--hm-text-xs); color: var(--hm-text-dim); flex: none; }
 
 /* Status dot + badge */
 .ag-status-dot {
@@ -2537,13 +2553,22 @@ textarea.hm-input {
   border: 1px solid var(--hm-border-subtle);
 }
 
-/* Model / reasoning provenance on the card */
-.ag-card-policy { display: flex; flex-wrap: wrap; gap: 4px; }
+/* Provenance is ONE reserved row too. "inherit (currently gpt-5.6-sol)" plus
+   its effort twin wrap at ordinary card widths, which moved the goal and
+   every later band down ~23px — the exact drift this row was introduced to
+   remove. Chips truncate instead; full values live in their title attribute
+   and in the modal, which stays authoritative. */
+.ag-card-policy { display: flex; flex-wrap: nowrap; gap: 4px; min-width: 0; }
 .ag-policy-chip {
   font-family: var(--hm-font-mono); font-size: 0.62rem; padding: 1px 7px;
   color: var(--hm-text-muted); background: var(--hm-surface-elevated);
   border: 1px solid var(--hm-border); border-radius: 3px;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* The model can surrender width first; the effort value is short and should
+   stay fully legible. */
+.ag-policy-chip:not(.ag-policy-effort) { flex: 0 1 auto; }
+.ag-policy-effort { flex: 0 0 auto; }
 .ag-policy-effort { color: var(--hm-accent); border-color: rgba(197,139,50,.28); }
 
 /* The card body is the activation target for the detail modal; Kill lives
@@ -3176,7 +3201,11 @@ a:focus-visible {
   /* Chat: wider bubbles, smaller avatars */
   .chat-bubble-wrap { max-width: 90%; }
   .chat-avatar { width: 24px; height: 24px; }
-  .chat-input-row { flex-direction: column; }
+  /* Stacking flips the cross axis, so the inherited align-items:flex-end was
+     right-aligning the children: the textarea collapsed to ~216px beside a
+     full-width send button. Stretch makes the field fill the mobile lane. */
+  .chat-input-row { flex-direction: column; align-items: stretch; }
+  .chat-input { width: 100%; }
   .chat-send-btn { width: 100%; min-width: unset; }
   .chat-suggestions { flex-direction: column; }
   .chat-suggestion { width: 100%; }
