@@ -652,10 +652,17 @@ textarea.hm-input {
   max-width: 100%;
   overflow-x: auto;
 }
+/* Cells must NOT inherit the bubble's break-word: with it, they collapse to
+   whatever width is available, so max-content equalled the client width and
+   there was nothing to scroll — the table just fragmented headers instead
+   ("Oper/ation/al Statu/s"). Holding cells on one line gives the table a real
+   intrinsic width, which is what makes the scroll boundary above work. */
 .chat-markdown th, .chat-markdown td {
   border: 1px solid var(--hm-border);
   padding: var(--hm-space-2) var(--hm-space-3);
   text-align: left;
+  white-space: nowrap;
+  word-break: normal;
 }
 .chat-markdown th {
   background: rgba(0, 0, 0, 0.2);

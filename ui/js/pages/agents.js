@@ -97,11 +97,16 @@ export default {
           <!-- Model / reasoning provenance — directly under the identity row
                so it sits at the SAME height in every card and reads as a
                property of the agent, not as a tag on its request text. -->
+          <!-- Each tooltip reports ITS OWN axis source. Using the summary
+               field made the effort chip claim it was requested at spawn
+               while correctly displaying an inherited value — the precise
+               kind of confident mislabelling this provenance work exists to
+               prevent. -->
           <div class="ag-card-policy">
             <span class="ag-policy-chip"
-                  :title="displayModelText(agent) + ' — ' + displaySourceLabel(agent.display_source)">{{ displayModelText(agent) }}</span>
+                  :title="displayModelText(agent) + ' — ' + displaySourceLabel(agent.display_model_source || agent.display_source)">{{ displayModelText(agent) }}</span>
             <span class="ag-policy-chip ag-policy-effort"
-                  :title="displayEffortText(agent) + ' — ' + displaySourceLabel(agent.display_source)">{{ displayEffortText(agent) }}</span>
+                  :title="displayEffortText(agent) + ' — ' + displaySourceLabel(agent.display_reasoning_effort_source || agent.display_source)">{{ displayEffortText(agent) }}</span>
           </div>
 
           <!-- Goal (reserved height, faded overflow — variable goal lengths
