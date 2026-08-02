@@ -383,9 +383,13 @@ export default {
       if (activeRequest !== token) return;   // superseded — touch nothing
       activeRequest = null;
       if (failure) {
-        // A background refresh failure is transient: keep the last good
-        // record rather than replacing it with an error.
-        if (initial) {
+        // Keep the last good record on a refresh failure — but the condition
+        // is whether the modal HAS something to show, not whether this
+        // request happened to be the initial one. A refresh that supersedes
+        // an in-flight initial load inherits responsibility for resolving it:
+        // with nothing to fall back on, staying silent left the modal with no
+        // skeleton, no error and no content at all.
+        if (detail.value === null) {
           detailError.value = failure.message || 'Failed to load agent detail';
         }
       } else {
