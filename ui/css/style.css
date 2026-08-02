@@ -2505,8 +2505,17 @@ textarea.hm-input {
 .ag-card-clickable:hover { background: var(--hm-surface-hover); }
 .ag-card-clickable:focus-visible { outline: 2px solid var(--hm-accent); outline-offset: 2px; }
 
-/* Detail modal */
-.ag-detail-modal { width: min(1000px, 94vw); max-height: 88vh; display: flex; flex-direction: column; gap: var(--hm-space-3); overflow-y: auto; }
+/* Detail modal.
+   Compound selector ON PURPOSE: the shared .modal-content sizing (width
+   min(92vw,520px), max-width 600px) is defined in foundation.css, which
+   loads AFTER this file — at equal specificity it would win on source order
+   and squeeze the request/result panes into a 520px column. (0,2,0) beats
+   every .modal-content rule regardless of order. max-width is restated for
+   the same reason: the shared 600px cap would otherwise survive. */
+.modal-content.ag-detail-modal {
+  width: min(1000px, 94vw); max-width: min(1000px, 94vw); max-height: 88vh;
+  display: flex; flex-direction: column; gap: var(--hm-space-3); overflow-y: auto;
+}
 .ag-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--hm-space-3); }
 .ag-detail-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--hm-space-2); min-width: 0; }
 .ag-detail-title { margin: 0; font-size: 1rem; font-weight: 650; letter-spacing: -.015em; color: #f2f3f6; }
@@ -2526,7 +2535,7 @@ textarea.hm-input {
 }
 .ag-detail-pending { margin: 0; font-size: var(--hm-text-xs); color: var(--hm-text-dim); }
 @media (max-width: 640px) {
-  .ag-detail-modal { width: 96vw; max-height: 92vh; }
+  .modal-content.ag-detail-modal { width: 96vw; max-width: 96vw; max-height: 92vh; }
   .ag-detail-text { max-height: 40vh; }
 }
 
