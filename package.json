@@ -9,7 +9,8 @@
     "build": "vite build --config vite.config.mjs",
     "preview": "vite preview --config vite.config.mjs",
     "check:templates": "node scripts/check-vue-templates.mjs",
-    "check": "npm run check:templates && npm run build"
+    "check:modal-race": "node scripts/check-modal-race.mjs",
+    "check": "npm run check:templates && npm run check:modal-race && npm run build"
   },
   "dependencies": {
     "dompurify": "^3.2.0",

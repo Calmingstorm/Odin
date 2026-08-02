@@ -353,44 +353,58 @@ export default {
     const detailError = ref(null);
     const copied = ref('');
 
-    // TWO counters, because there are two distinct races:
-    //   generation — which agent owns the modal (open / close / switch), and
-    //   sequence    — which REQUEST is newest for that same agent. Without
-    //                 the sequence, a slow initial load and a fast refresh
-    //                 share a generation, and the stale one can land last.
-    // A response commits only if it is both current-generation AND the
-    // latest request issued.
-    let detailGeneration = 0;
-    let detailSeq = 0;
-    let detailCommittedSeq = 0;
+    // ONE primitive owns every modal fetch, because counters kept producing
+    // new instances of the same defect: a superseded response touching modal
+    // state. A request may write ANYTHING — data, error, loading — only while
+    // it is still THE latest issued request for the open modal. Identity
+    // comparison, so "superseded" needs no arithmetic and cannot drift.
+    // Losers return having touched nothing.
+    //
+    // Commits are also ATOMIC: fresh data always clears a stale error, so a
+    // failed request followed by a successful one can never leave the modal
+    // showing an obsolete failure over live data.
+    let activeRequest = null;
 
-    function _detailCommittable(gen, seq) {
-      return gen === detailGeneration && seq > detailCommittedSeq;
+    async function loadDetail(agentId, { initial }) {
+      const token = {};
+      activeRequest = token;
+      if (initial) {
+        detail.value = null;
+        detailError.value = null;
+        detailLoading.value = true;
+      }
+      let data = null;
+      let failure = null;
+      try {
+        data = await api.get(`/api/agents/${encodeURIComponent(agentId)}`);
+      } catch (e) {
+        failure = e;
+      }
+      if (activeRequest !== token) return;   // superseded — touch nothing
+      activeRequest = null;
+      if (failure) {
+        // A background refresh failure is transient: keep the last good
+        // record rather than replacing it with an error.
+        if (initial) {
+          detailError.value = failure.message || 'Failed to load agent detail';
+        }
+      } else {
+        detail.value = data;
+        detailError.value = null;
+      }
+      detailLoading.value = false;
     }
 
     async function openDetail(agent) {
-      const gen = ++detailGeneration;
-      const seq = ++detailSeq;
-      detailCommittedSeq = 0;   // new agent: nothing committed for it yet
       detailId.value = agent.id;
-      detail.value = null;
-      detailError.value = null;
-      detailLoading.value = true;
-      try {
-        const data = await api.get(`/api/agents/${encodeURIComponent(agent.id)}`);
-        if (!_detailCommittable(gen, seq)) return;
-        detailCommittedSeq = seq;
-        detail.value = data;
-      } catch (e) {
-        if (!_detailCommittable(gen, seq)) return;
-        detailCommittedSeq = seq;
-        detailError.value = e.message || 'Failed to load agent detail';
-      }
-      if (gen === detailGeneration) detailLoading.value = false;
+      copied.value = '';
+      // The id is PASSED, never read from state at await-time, so switching
+      // agents mid-flight cannot retarget an in-flight request.
+      await loadDetail(agent.id, { initial: true });
     }
 
     function closeDetail() {
-      detailGeneration++;                       // orphan any in-flight request
+      activeRequest = null;                     // orphan any in-flight request
       detailId.value = null;
       detail.value = null;
       detailError.value = null;
@@ -402,14 +416,7 @@ export default {
     // result appears the moment the agent finishes — without a manual reopen.
     async function refreshDetail() {
       if (!detailId.value) return;
-      const gen = detailGeneration;
-      const seq = ++detailSeq;
-      try {
-        const data = await api.get(`/api/agents/${encodeURIComponent(detailId.value)}`);
-        if (!_detailCommittable(gen, seq)) return;  // superseded or stale
-        detailCommittedSeq = seq;
-        detail.value = data;
-      } catch { /* transient: keep showing the last good record */ }
+      await loadDetail(detailId.value, { initial: false });
     }
 
     async function copyText(kind, text) {
