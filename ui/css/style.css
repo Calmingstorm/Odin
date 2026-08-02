@@ -394,7 +394,7 @@ textarea.hm-input {
 .page-viewport .chat-container.page-fade-in {
   max-width: none;
   margin-inline: 0;
-  --chat-work-lane: 1600px;
+  --chat-work-lane: 1400px;
   --chat-reading-lane: 1080px;
 }
 .chat-messages {
