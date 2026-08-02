@@ -6,10 +6,15 @@
      overflow around internally-scrolling views like Chat and Logs). The
      mobile breakpoint overrides the token, never the consumers. */
   --hm-topbar-h: 76px;
-  /* Section tab strip height. A page nested INSIDE a tabbed section (Logs
-     under System) must subtract both this and the top bar; subtracting only
-     the top bar left exactly one tab-strip of page-level overflow. */
-  --hm-section-tabs-h: 48px;
+  /* Section tab strip. A page nested INSIDE a tabbed section (Logs under
+     System) must subtract this AND the top bar — subtracting only the top
+     bar left exactly one tab-strip of page-level overflow.
+     `-inner` is the tab row's own min-height; `-h` is the OUTER footprint
+     including the wrapper's 1px bottom border, and is what viewport
+     calculations must use (subtracting the inner value left 1px behind). */
+  --hm-section-tabs-inner-h: 48px;
+  --hm-section-tabs-border: 1px;
+  --hm-section-tabs-h: calc(var(--hm-section-tabs-inner-h) + var(--hm-section-tabs-border));
   --hm-bg: #07090d;
   --hm-bg-raised: #0b0e14;
   --hm-surface: #10141c;
@@ -140,8 +145,8 @@ kbd { padding: 2px 5px; color: #818b99; background: #090c11; border: 1px solid #
 .icon-btn-danger:hover { color: #f08a8a; background: rgba(224,100,100,.1); border-color: rgba(224,100,100,.24); }
 
 .section-shell { min-height: calc(100vh - var(--hm-topbar-h)); }
-.section-tabs-wrap { position: sticky; top: var(--hm-topbar-h); z-index: 20; padding: 0 24px; background: rgba(9,12,17,.92); border-bottom: 1px solid var(--hm-border-subtle); backdrop-filter: blur(16px); }
-.section-tabs { display: flex; align-items: stretch; gap: 2px; min-height: var(--hm-section-tabs-h); overflow-x: auto; }
+.section-tabs-wrap { position: sticky; top: var(--hm-topbar-h); z-index: 20; padding: 0 24px; background: rgba(9,12,17,.92); border-bottom: var(--hm-section-tabs-border) solid var(--hm-border-subtle); backdrop-filter: blur(16px); }
+.section-tabs { display: flex; align-items: stretch; gap: 2px; min-height: var(--hm-section-tabs-inner-h); overflow-x: auto; }
 .section-tab { position: relative; padding: 0 13px; white-space: nowrap; color: #7f8998; background: transparent; border: 0; font-size: .72rem; font-weight: 550; cursor: pointer; }
 .section-tab:hover { color: #c8ced7; }
 .section-tab.active { color: #e9ca8e; }

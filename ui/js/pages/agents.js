@@ -6,7 +6,7 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatTs, formatDuration } from '../utils.js';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 
 
 export default {
@@ -353,23 +353,37 @@ export default {
     const detailError = ref(null);
     const copied = ref('');
 
-    // Every request carries the generation that owns the modal. A slow
-    // response for a CLOSED or REPLACED agent must be discarded, or agent A's
-    // request/result can land under agent B's header.
+    // TWO counters, because there are two distinct races:
+    //   generation — which agent owns the modal (open / close / switch), and
+    //   sequence    — which REQUEST is newest for that same agent. Without
+    //                 the sequence, a slow initial load and a fast refresh
+    //                 share a generation, and the stale one can land last.
+    // A response commits only if it is both current-generation AND the
+    // latest request issued.
     let detailGeneration = 0;
+    let detailSeq = 0;
+    let detailCommittedSeq = 0;
+
+    function _detailCommittable(gen, seq) {
+      return gen === detailGeneration && seq > detailCommittedSeq;
+    }
 
     async function openDetail(agent) {
       const gen = ++detailGeneration;
+      const seq = ++detailSeq;
+      detailCommittedSeq = 0;   // new agent: nothing committed for it yet
       detailId.value = agent.id;
       detail.value = null;
       detailError.value = null;
       detailLoading.value = true;
       try {
         const data = await api.get(`/api/agents/${encodeURIComponent(agent.id)}`);
-        if (gen !== detailGeneration) return;   // superseded
+        if (!_detailCommittable(gen, seq)) return;
+        detailCommittedSeq = seq;
         detail.value = data;
       } catch (e) {
-        if (gen !== detailGeneration) return;
+        if (!_detailCommittable(gen, seq)) return;
+        detailCommittedSeq = seq;
         detailError.value = e.message || 'Failed to load agent detail';
       }
       if (gen === detailGeneration) detailLoading.value = false;
@@ -389,9 +403,11 @@ export default {
     async function refreshDetail() {
       if (!detailId.value) return;
       const gen = detailGeneration;
+      const seq = ++detailSeq;
       try {
         const data = await api.get(`/api/agents/${encodeURIComponent(detailId.value)}`);
-        if (gen !== detailGeneration) return;   // modal moved on mid-flight
+        if (!_detailCommittable(gen, seq)) return;  // superseded or stale
+        detailCommittedSeq = seq;
         detail.value = data;
       } catch { /* transient: keep showing the last good record */ }
     }
@@ -459,14 +475,20 @@ export default {
       }
     }
 
+    // Under <keep-alive> a hidden tab stays MOUNTED, so mount-scoped polling
+    // never stops — and this page's interval now also refreshes an open
+    // modal. Polling is therefore tied to ACTIVATION (the pattern logs.js
+    // already uses): a backgrounded Agents tab costs nothing.
     onMounted(() => {
       fetchAgents();
       startAutoRefresh();
     });
-
-    onUnmounted(() => {
-      stopAutoRefresh();
+    onActivated(() => {
+      fetchAgents(true);
+      startAutoRefresh();
     });
+    onDeactivated(stopAutoRefresh);
+    onUnmounted(stopAutoRefresh);
 
     return {
       agents, loading, error, killing, autoRefresh, statusFilter,
