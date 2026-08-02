@@ -668,14 +668,17 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
             <span class="ag-status-badge" :class="'ag-badge-' + agent.status">{{ agent.status }}</span>
           </div>
 
-          <!-- Goal -->
-          <div class="ag-card-goal">{{ agent.goal }}</div>
-
-          <!-- Model / reasoning provenance -->
+          <!-- Model / reasoning provenance — directly under the identity row
+               so it sits at the SAME height in every card and reads as a
+               property of the agent, not as a tag on its request text. -->
           <div class="ag-card-policy" :title="displaySourceLabel(agent.display_source)">
             <span class="ag-policy-chip">{{ displayModelText(agent) }}</span>
             <span class="ag-policy-chip ag-policy-effort">{{ displayEffortText(agent) }}</span>
           </div>
+
+          <!-- Goal (reserved height, faded overflow — variable goal lengths
+               used to push everything below them out of alignment) -->
+          <div class="ag-card-goal">{{ agent.goal }}</div>
 
           <!-- Progress bar (running agents, honest cap only) -->
           <div v-if="agent.status === 'running' && hasProgress(agent)" class="ag-progress-bar"

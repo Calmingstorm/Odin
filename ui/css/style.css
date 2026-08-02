@@ -379,15 +379,45 @@ textarea.hm-input {
    max bubbles; laptops still use their full width; mobile rules unchanged.
    Specificity (0,3,0) beats foundation's .page-viewport .page-fade-in
    left-anchor regardless of stylesheet order. */
+/* Three nested layers (settled with Odin after the centred-1200 attempt was
+   rejected on sight). The defect there was never the reading width — it was
+   that the application CHROME stopped halfway across the workspace, leaving
+   the composer as an island floating over an unfinished page.
+     stage   — the full post-sidebar width: scroll surface, dock, borders, so
+               the page actually has edges at any window size.
+     work    — <=1600, matching the console canvas: composer, and wide content
+               (code, tool output, tables) that legitimately needs room.
+     reading — <=1080 for prose, keeping ~75-85ch AND keeping both speakers
+               near each other instead of at opposite ends of an ultrawide.
+   Below the work cap everything collapses to full width with normal gutters,
+   so laptops and phones are untouched. */
 .page-viewport .chat-container.page-fade-in {
-  max-width: 1200px;
-  margin-inline: auto;
+  max-width: none;
+  margin-inline: 0;
+  --chat-work-lane: 1600px;
+  --chat-reading-lane: 1080px;
 }
 .chat-messages {
   flex: 1;
   overflow-y: auto;
   padding: var(--hm-space-5) var(--hm-space-5) var(--hm-space-3);
   scroll-behavior: smooth;
+}
+/* Prose rides the reading lane; the scroll surface itself stays full-bleed.
+   The empty state is deliberately excluded — it centres in the whole stage. */
+.chat-messages > .chat-message,
+.chat-messages > .chat-date-sep {
+  max-width: var(--chat-reading-lane);
+  margin-inline: auto;
+}
+/* Genuinely wide material breaks out to the work lane rather than being
+   squeezed into a prose measure. Matched on REAL elements that marked(gfm)
+   emits — code fences and tables — never on invented class names. Where
+   :has() is unsupported the rule is simply skipped and the content keeps
+   its own internal overflow-x scroll, so the degradation is graceful. */
+.chat-messages > .chat-message:has(pre),
+.chat-messages > .chat-message:has(table) {
+  max-width: var(--chat-work-lane);
 }
 
 /* --- Welcome / empty state --- */
@@ -741,10 +771,18 @@ textarea.hm-input {
 }
 
 /* --- Input area --- */
+/* The DOCK spans the full stage — its background and top border reach the
+   window edges so the composer reads as part of the application. Only the
+   controls inside it are laned. */
 .chat-input-area {
   border-top: 1px solid var(--hm-border);
   background: var(--hm-surface);
   padding: var(--hm-space-4) var(--hm-space-5);
+}
+.chat-input-row,
+.chat-input-hint {
+  max-width: var(--chat-work-lane);
+  margin-inline: auto;
 }
 .chat-input-row {
   display: flex;
@@ -2452,9 +2490,23 @@ textarea.hm-input {
 .ag-badge-killed { background: rgba(156, 163, 175, 0.15); color: var(--hm-text-dim); }
 
 /* Goal */
+/* RESERVED height, not just a max: every card keeps the same rhythm whether
+   its goal is one line or ten, so the rows beneath line up across the grid.
+   The fade replaces a hard mid-word clip (the modal has the full text). */
 .ag-card-goal {
   font-size: var(--hm-text-sm); color: var(--hm-text-muted); line-height: 1.4;
-  max-height: 3.5rem; overflow: hidden;
+  height: 3.5rem; overflow: hidden; position: relative;
+}
+.ag-card-goal::after {
+  content: ""; position: absolute; inset: auto 0 0 0; height: 1.5rem;
+  background: linear-gradient(transparent, var(--hm-surface));
+  pointer-events: none;
+}
+/* The hover background lives on .ag-card-clickable (the actionable body), so
+   the fade must key off the SAME element or it would blend into the wrong
+   colour on hover. */
+.ag-card-clickable:hover .ag-card-goal::after {
+  background: linear-gradient(transparent, var(--hm-surface-hover));
 }
 
 /* Progress bar */
