@@ -79,9 +79,9 @@ class OdinAPI {
     return h;
   }
 
-  async _request(method, path, body = null) {
+  async _request(method, path, body = null, { signal } = {}) {
     this._lastActivity = Date.now();
-    const opts = { method, headers: this._headers() };
+    const opts = { method, headers: this._headers(), signal };
     if (body !== null) opts.body = JSON.stringify(body);
     const resp = await fetch(path, opts);
     if (resp.status === 401) {
@@ -95,7 +95,7 @@ class OdinAPI {
     return data;
   }
 
-  get(path) { return this._request('GET', path); }
+  get(path, options = {}) { return this._request('GET', path, null, options); }
   post(path, data) { return this._request('POST', path, data); }
   put(path, data) { return this._request('PUT', path, data); }
   del(path) { return this._request('DELETE', path); }

@@ -270,6 +270,22 @@ class AgentInfo:
     # the actual request policy is resolved by the iteration callback.
     model_override: str | None = None
     reasoning_effort_override: str | None = None
+    # LAST EXECUTED provenance, stamped from each LLM response (the same
+    # values the trajectory records). Empty until the first generation
+    # completes — operator surfaces must then qualify what they show as the
+    # REQUESTED policy rather than presenting it as execution truth.
+    last_provider: str = ""
+    last_model: str = ""
+    last_reasoning_effort: str | None = None
+    # Set once a generation has actually completed, INDEPENDENT of whether the
+    # response carried provenance: a missing model must read as "executed,
+    # provider didn't say" rather than "never ran" (which would let a display
+    # fall back to live config and present it as history).
+    has_executed: bool = False
+    # The iteration cap this agent actually runs under, snapshotted at spawn
+    # (chat/scheduled/hard limits differ) so progress can be computed honestly
+    # instead of against a hardcoded guess.
+    max_iterations: int = MAX_AGENT_ITERATIONS
     depth: int = 0
     parent_id: str | None = None
     children_ids: list[str] = field(default_factory=list)
@@ -389,6 +405,7 @@ class AgentManager:
             max_lifetime=max_lifetime or MAX_AGENT_LIFETIME,
             model_override=model_override,
             reasoning_effort_override=reasoning_effort_override,
+            max_iterations=max_iterations or MAX_AGENT_ITERATIONS,
         )
 
         # Register as child of parent
@@ -424,8 +441,10 @@ class AgentManager:
         # Seed messages with the goal
         agent.messages = [{"role": "user", "content": goal}]
 
-        # Start the async task
-        effective_max_iter = max_iterations or MAX_AGENT_ITERATIONS
+        # Start the async task. The cap the worker enforces IS the value
+        # snapshotted on the agent — one source, so a progress display can
+        # never drift from the limit actually in force.
+        effective_max_iter = agent.max_iterations
         task = asyncio.ensure_future(
             _run_agent(
                 agent=agent,
@@ -934,6 +953,15 @@ async def _run_agent(
             if response is None:
                 # Terminal state already set by recovery logic
                 return
+
+            # Retain the LATEST execution provenance in memory (it already
+            # rides every trajectory record). Operator surfaces can then show
+            # what actually ran without reading trajectory files during page
+            # rendering, and stay truthful when live config changes mid-agent.
+            agent.has_executed = True
+            agent.last_provider = response.get("provider", "") or ""
+            agent.last_model = response.get("model", "") or ""
+            agent.last_reasoning_effort = response.get("reasoning_effort")
 
             text = response.get("text", "")
             tool_calls = response.get("tool_calls", [])

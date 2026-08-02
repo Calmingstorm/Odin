@@ -370,14 +370,57 @@ textarea.hm-input {
 .chat-container {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 48px);
+  height: calc(100vh - var(--hm-topbar-h));
   overflow: hidden;
+}
+/* Chat-only centered shell (Aaron + Odin, 2026-08-02): conversation reading
+   width caps at 1200px and CENTERS — the one deliberate exception to the
+   left-anchored console canvas. With the 75% bubble limit this yields ~900px
+   max bubbles; laptops still use their full width; mobile rules unchanged.
+   Specificity (0,3,0) beats foundation's .page-viewport .page-fade-in
+   left-anchor regardless of stylesheet order. */
+/* Three nested layers (settled with Odin after the centred-1200 attempt was
+   rejected on sight). The defect there was never the reading width — it was
+   that the application CHROME stopped halfway across the workspace, leaving
+   the composer as an island floating over an unfinished page.
+     stage   — the full post-sidebar width: scroll surface, dock, borders, so
+               the page actually has edges at any window size.
+     work    — <=1600, matching the console canvas: composer, and wide content
+               (code, tool output, tables) that legitimately needs room.
+     reading — <=1080 for prose, keeping ~75-85ch AND keeping both speakers
+               near each other instead of at opposite ends of an ultrawide.
+   Below the work cap everything collapses to full width with normal gutters,
+   so laptops and phones are untouched. */
+.page-viewport .chat-container.page-fade-in {
+  max-width: none;
+  margin-inline: 0;
+  --chat-work-lane: 1400px;
+  --chat-reading-lane: 1080px;
 }
 .chat-messages {
   flex: 1;
   overflow-y: auto;
   padding: var(--hm-space-5) var(--hm-space-5) var(--hm-space-3);
   scroll-behavior: smooth;
+}
+/* Prose rides the reading lane; the scroll surface itself stays full-bleed.
+   The empty state is deliberately excluded — it centres in the whole stage. */
+.chat-messages > .chat-message,
+.chat-messages > .chat-date-sep {
+  max-width: var(--chat-reading-lane);
+  margin-inline: auto;
+}
+/* Wide material gets room WITHOUT moving the speaker. Widening the whole row
+   to the work lane shifted the avatar ~260px left on an ultrawide merely
+   because a message contained a code block — the conversation axis must stay
+   put. So the row keeps the reading lane and only the BUBBLE relaxes its 75%
+   prose cap; code and tables also keep their own overflow-x scroll. Matched
+   on REAL elements marked(gfm) emits — never invented class names — and
+   simply skipped where :has() is unsupported. */
+.chat-messages > .chat-message:has(pre) .chat-bubble-wrap,
+.chat-messages > .chat-message:has(table) .chat-bubble-wrap {
+  max-width: 100%;
+  width: 100%;
 }
 
 /* --- Welcome / empty state --- */
@@ -596,16 +639,30 @@ textarea.hm-input {
   color: var(--hm-accent-hover);
   text-decoration: underline;
 }
+/* A GFM table must SCROLL rather than crush: at 390px the browser was
+   breaking headers mid-word into fragments like "Servi/ce" and "Late/ncy".
+   display:block + max-content gives the table its natural width inside a
+   horizontal scroll boundary, so cells stay readable at any viewport. */
 .chat-markdown table {
   border-collapse: collapse;
   margin: var(--hm-space-2) 0;
   font-size: var(--hm-text-sm);
-  width: 100%;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
 }
+/* Cells must NOT inherit the bubble's break-word: with it, they collapse to
+   whatever width is available, so max-content equalled the client width and
+   there was nothing to scroll — the table just fragmented headers instead
+   ("Oper/ation/al Statu/s"). Holding cells on one line gives the table a real
+   intrinsic width, which is what makes the scroll boundary above work. */
 .chat-markdown th, .chat-markdown td {
   border: 1px solid var(--hm-border);
   padding: var(--hm-space-2) var(--hm-space-3);
   text-align: left;
+  white-space: nowrap;
+  word-break: normal;
 }
 .chat-markdown th {
   background: rgba(0, 0, 0, 0.2);
@@ -731,10 +788,31 @@ textarea.hm-input {
 }
 
 /* --- Input area --- */
+/* The DOCK spans the full stage — its background and top border reach the
+   window edges so the composer reads as part of the application. Only the
+   controls inside it are laned. */
 .chat-input-area {
   border-top: 1px solid var(--hm-border);
   background: var(--hm-surface);
   padding: var(--hm-space-4) var(--hm-space-5);
+  /* Share the bottom-rail baseline with the sidebar footer so the two top
+     borders form ONE continuous line across the sidebar divider. The composer
+     centres in the rail and still grows past it as the textarea expands. */
+  min-height: var(--hm-rail-h);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+/* width:100% is load-bearing, not redundant: .chat-input-area is a flex
+   column, and in a flex formatting context `margin-inline: auto` absorbs the
+   free space and shrink-wraps the item to its content instead of centring a
+   full-width box. Without an explicit width the composer collapsed to about
+   130px. */
+.chat-input-row,
+.chat-input-hint {
+  width: 100%;
+  max-width: var(--chat-work-lane);
+  margin-inline: auto;
 }
 .chat-input-row {
   display: flex;
@@ -2417,9 +2495,15 @@ textarea.hm-input {
 
 /* Card header */
 .ag-card-header { display: flex; align-items: center; justify-content: space-between; }
-.ag-card-title-row { display: flex; align-items: center; gap: var(--hm-space-2); }
-.ag-card-label { font-weight: 600; font-size: var(--hm-text-sm); }
-.ag-card-id { font-family: var(--hm-font-mono); font-size: var(--hm-text-xs); color: var(--hm-text-dim); }
+/* Identity is ONE reserved row: a long agent label truncates rather than
+   wrapping and pushing every band below it down — which is the drift the
+   provenance move exists to eliminate. */
+.ag-card-title-row { display: flex; align-items: center; gap: var(--hm-space-2); min-width: 0; flex-wrap: nowrap; }
+.ag-card-label {
+  font-weight: 600; font-size: var(--hm-text-sm);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ag-card-id { font-family: var(--hm-font-mono); font-size: var(--hm-text-xs); color: var(--hm-text-dim); flex: none; }
 
 /* Status dot + badge */
 .ag-status-dot {
@@ -2442,9 +2526,23 @@ textarea.hm-input {
 .ag-badge-killed { background: rgba(156, 163, 175, 0.15); color: var(--hm-text-dim); }
 
 /* Goal */
+/* RESERVED height, not just a max: every card keeps the same rhythm whether
+   its goal is one line or ten, so the rows beneath line up across the grid.
+   The fade replaces a hard mid-word clip (the modal has the full text). */
 .ag-card-goal {
   font-size: var(--hm-text-sm); color: var(--hm-text-muted); line-height: 1.4;
-  max-height: 3.5rem; overflow: hidden;
+  height: 3.5rem; overflow: hidden; position: relative;
+}
+.ag-card-goal::after {
+  content: ""; position: absolute; inset: auto 0 0 0; height: 1.5rem;
+  background: linear-gradient(transparent, var(--hm-surface));
+  pointer-events: none;
+}
+/* The hover background lives on .ag-card-clickable (the actionable body), so
+   the fade must key off the SAME element or it would blend into the wrong
+   colour on hover. */
+.ag-card-clickable:hover .ag-card-goal::after {
+  background: linear-gradient(transparent, var(--hm-surface-hover));
 }
 
 /* Progress bar */
@@ -2466,12 +2564,76 @@ textarea.hm-input {
 .ag-card-stat-label { display: block; font-size: 0.6rem; color: var(--hm-text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
 .ag-card-stat-value { display: block; font-family: var(--hm-font-mono); font-size: var(--hm-text-sm); font-weight: 600; }
 
-/* Tool chips */
+/* Tool chips (retained for other surfaces; agent cards show a count instead —
+   the chip list added length without telling the operator anything). */
 .ag-card-tools { display: flex; flex-wrap: wrap; gap: 4px; }
 .ag-tool-chip {
   font-family: var(--hm-font-mono); font-size: 0.6rem; padding: 1px 6px;
   background: var(--hm-gold-dim); color: var(--hm-text-muted); border-radius: 3px;
   border: 1px solid var(--hm-border-subtle);
+}
+
+/* Provenance is ONE reserved row too. "inherit (currently gpt-5.6-sol)" plus
+   its effort twin wrap at ordinary card widths, which moved the goal and
+   every later band down ~23px — the exact drift this row was introduced to
+   remove. Chips truncate instead; full values live in their title attribute
+   and in the modal, which stays authoritative. */
+.ag-card-policy { display: flex; flex-wrap: nowrap; gap: 4px; min-width: 0; }
+.ag-policy-chip {
+  font-family: var(--hm-font-mono); font-size: 0.62rem; padding: 1px 7px;
+  color: var(--hm-text-muted); background: var(--hm-surface-elevated);
+  border: 1px solid var(--hm-border); border-radius: 3px;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* The model can surrender width first; the effort value is short and should
+   stay fully legible. */
+.ag-policy-chip:not(.ag-policy-effort) { flex: 0 1 auto; }
+.ag-policy-effort { flex: 0 0 auto; }
+.ag-policy-effort { color: var(--hm-accent); border-color: rgba(197,139,50,.28); }
+
+/* The card body is the activation target for the detail modal; Kill lives
+   outside it as a sibling control. The body inherits the card's own column
+   layout so splitting the markup changed no visual spacing. */
+.ag-card-body {
+  display: flex; flex-direction: column; gap: var(--hm-space-2);
+  text-align: left; border-radius: var(--hm-radius-md);
+}
+.ag-card-clickable { cursor: pointer; transition: background .12s ease, box-shadow .12s ease; }
+.ag-card-clickable:hover { background: var(--hm-surface-hover); }
+.ag-card-clickable:focus-visible { outline: 2px solid var(--hm-accent); outline-offset: 2px; }
+
+/* Detail modal.
+   Compound selector ON PURPOSE: the shared .modal-content sizing (width
+   min(92vw,520px), max-width 600px) is defined in foundation.css, which
+   loads AFTER this file — at equal specificity it would win on source order
+   and squeeze the request/result panes into a 520px column. (0,2,0) beats
+   every .modal-content rule regardless of order. max-width is restated for
+   the same reason: the shared 600px cap would otherwise survive. */
+.modal-content.ag-detail-modal {
+  width: min(1000px, 94vw); max-width: min(1000px, 94vw); max-height: 88vh;
+  display: flex; flex-direction: column; gap: var(--hm-space-3); overflow-y: auto;
+}
+.ag-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--hm-space-3); }
+.ag-detail-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--hm-space-2); min-width: 0; }
+.ag-detail-title { margin: 0; font-size: 1rem; font-weight: 650; letter-spacing: -.015em; color: #f2f3f6; }
+.ag-detail-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--hm-space-2) var(--hm-space-3); }
+.ag-detail-meta-item { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ag-detail-meta-label { font-size: 0.6rem; color: var(--hm-text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+.ag-detail-meta-value { font-family: var(--hm-font-mono); font-size: var(--hm-text-xs); color: var(--hm-text); word-break: break-word; }
+.ag-detail-source { margin: 0; font-size: 0.66rem; color: var(--hm-text-dim); font-style: italic; }
+.ag-detail-section { display: flex; flex-direction: column; gap: 4px; }
+.ag-detail-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--hm-space-2); }
+/* Each region scrolls INDEPENDENTLY so a huge request cannot bury the result. */
+.ag-detail-text {
+  margin: 0; padding: var(--hm-space-2); max-height: 34vh; overflow: auto;
+  font-family: var(--hm-font-mono); font-size: var(--hm-text-xs); line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word; color: var(--hm-text-muted);
+  background: var(--hm-bg); border: 1px solid var(--hm-border); border-radius: var(--hm-radius-md);
+}
+.ag-detail-pending { margin: 0; font-size: var(--hm-text-xs); color: var(--hm-text-dim); }
+@media (max-width: 640px) {
+  .modal-content.ag-detail-modal { width: 96vw; max-width: 96vw; max-height: 92vh; }
+  .ag-detail-text { max-height: 40vh; }
 }
 
 /* Meta */
@@ -3059,7 +3221,11 @@ a:focus-visible {
   /* Chat: wider bubbles, smaller avatars */
   .chat-bubble-wrap { max-width: 90%; }
   .chat-avatar { width: 24px; height: 24px; }
-  .chat-input-row { flex-direction: column; }
+  /* Stacking flips the cross axis, so the inherited align-items:flex-end was
+     right-aligning the children: the textarea collapsed to ~216px beside a
+     full-width send button. Stretch makes the field fill the mobile lane. */
+  .chat-input-row { flex-direction: column; align-items: stretch; }
+  .chat-input { width: 100%; }
   .chat-send-btn { width: 100%; min-width: unset; }
   .chat-suggestions { flex-direction: column; }
   .chat-suggestion { width: 100%; }

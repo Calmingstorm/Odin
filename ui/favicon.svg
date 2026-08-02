@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- The sidebar brand mark, rebuilt as a favicon: the same rounded tile
+       (.brand-mark, bronze gradient with an accent border) carrying the same
+       glyph and stroke treatment the odin-icon component renders (24-unit
+       grid, fill none, round caps and joins). Colours are literal token
+       values because a favicon cannot read CSS variables: accent-hover
+       #dda84f on the #07090d page ground.
+       NB: no double hyphens in this comment. XML forbids them, and an
+       invalid comment makes the whole file unparseable, which silently
+       yields no favicon at all rather than an error. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#c58b32" stop-opacity="0.30"/>
+      <stop offset="100%" stop-color="#c58b32" stop-opacity="0.07"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="32" height="32" rx="8" fill="#07090d"/>
+  <rect x="1" y="1" width="30" height="30" rx="7.5" fill="url(#tile)"
+        stroke="#c58b32" stroke-opacity="0.42" stroke-width="1"/>
+  <!-- Glyph inset 4 units on the 32-unit tile, keeping the icon's own
+       proportions with a slightly heavier stroke so it holds at 16px. -->
+  <g transform="translate(4 4)" fill="none" stroke="#dda84f" stroke-width="1.7"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3 4.5 8v8L12 21l7.5-5V8L12 3Zm0 4.2 4.6 3.1L12 16.8l-4.6-6.5L12 7.2Zm0 3.3v3.7"/>
+  </g>
+</svg>

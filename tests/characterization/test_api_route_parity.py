@@ -3,7 +3,7 @@
 The load-bearing contract for the api.py domain carve. Pins, BEFORE any
 handler moves:
 
-1. The exact ordered list of (method, path, handler_name) for all 183
+1. The exact ordered list of (method, path, handler_name) for all 184
    routes — the carve cannot lose, rename, reorder, or duplicate a route.
    ORDER is behavior: aiohttp resolves overlapping static/variable paths
    by registration order.
@@ -132,6 +132,7 @@ EXPECTED_ROUTES = [
     ("DELETE", "/api/loops/{loop_id}", "stop_loop"),
     ("POST", "/api/loops/{loop_id}/restart", "restart_loop"),
     ("GET", "/api/agents", "list_agents"),
+    ("GET", "/api/agents/{agent_id}", "agent_detail"),
     ("DELETE", "/api/agents/{agent_id}", "kill_agent"),
     ("GET", "/api/agents/{agent_id}/children", "get_agent_children"),
     ("GET", "/api/agents/{agent_id}/lineage", "get_agent_lineage"),
@@ -230,7 +231,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 183
+        assert len(actual) == len(expected) == 184
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

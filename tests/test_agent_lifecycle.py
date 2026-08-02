@@ -1770,3 +1770,125 @@ class TestHardDeadlineDuringToolsAndSleep:
         turn = saved["turn"]
         assert len(turn.iterations) == 1
         assert "timed out" in turn.iterations[0].tool_results[0]["result"]
+
+
+class TestExecutionProvenanceRetention:
+    """The manager already receives per-iteration provenance in every LLM
+    response and writes it to trajectories. It must ALSO retain the latest
+    values in memory, so operator surfaces can show what actually ran without
+    reading trajectory files — and stay truthful when live config moves
+    mid-agent."""
+
+    async def test_last_execution_fields_retained_from_response(self):
+        mgr = AgentManager()
+        iter_cb = AsyncMock(return_value={
+            "text": "done", "tool_calls": [], "stop_reason": "end_turn",
+            "provider": "codex", "model": "gpt-5.6-luna", "reasoning_effort": "max",
+        })
+        tool_cb = AsyncMock(return_value="ok")
+        aid = mgr.spawn(
+            label="t", goal="test", channel_id="c1",
+            requester_id="u1", requester_name="user",
+            iteration_callback=iter_cb, tool_executor_callback=tool_cb,
+        )
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if mgr._agents[aid].last_model:
+                break
+        agent = mgr._agents[aid]
+        assert agent.last_provider == "codex"
+        assert agent.last_model == "gpt-5.6-luna"
+        assert agent.last_reasoning_effort == "max"
+        mgr.kill(aid)
+
+    async def test_fields_empty_before_first_generation(self):
+        # A fresh AgentInfo must NOT claim execution that never happened.
+        agent = AgentInfo(id="A", label="t", goal="g", channel_id="c",
+                          requester_id="u", requester_name="user")
+        assert agent.last_model == ""
+        assert agent.last_provider == ""
+        assert agent.last_reasoning_effort is None
+
+    async def test_latest_response_wins_across_iterations(self):
+        mgr = AgentManager()
+        seen = {"n": 0}
+
+        async def _cb(*_a, **_k):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return {"text": "", "tool_calls": [{"id": "1", "name": "noop", "input": {}}],
+                        "stop_reason": "tool_use", "provider": "codex",
+                        "model": "gpt-5.6-terra", "reasoning_effort": "high"}
+            return {"text": "done", "tool_calls": [], "stop_reason": "end_turn",
+                    "provider": "codex", "model": "gpt-5.6-sol", "reasoning_effort": "xhigh"}
+
+        aid = mgr.spawn(
+            label="t", goal="test", channel_id="c1",
+            requester_id="u1", requester_name="user",
+            iteration_callback=_cb, tool_executor_callback=AsyncMock(return_value="ok"),
+        )
+        for _ in range(60):
+            await asyncio.sleep(0.05)
+            if mgr._agents[aid].last_model == "gpt-5.6-sol":
+                break
+        # the SECOND generation's provenance is what a surface must show
+        assert mgr._agents[aid].last_model == "gpt-5.6-sol"
+        assert mgr._agents[aid].last_reasoning_effort == "xhigh"
+        mgr.kill(aid)
+
+
+class TestIterationCapSnapshot:
+    """Progress must be computed against the cap actually in force, so the
+    agent carries it (the UI previously hardcoded 30 while real caps are
+    120/180/300)."""
+
+    async def test_explicit_cap_snapshotted(self):
+        mgr = AgentManager()
+        aid = mgr.spawn(
+            label="t", goal="test", channel_id="c1",
+            requester_id="u1", requester_name="user",
+            iteration_callback=AsyncMock(return_value={
+                "text": "done", "tool_calls": [], "stop_reason": "end_turn"}),
+            tool_executor_callback=AsyncMock(return_value="ok"),
+            max_iterations=180,
+        )
+        assert mgr._agents[aid].max_iterations == 180
+        mgr.kill(aid)
+
+    async def test_default_cap_snapshotted(self):
+        from src.agents.manager import MAX_AGENT_ITERATIONS
+        mgr = AgentManager()
+        aid = mgr.spawn(
+            label="t", goal="test", channel_id="c1",
+            requester_id="u1", requester_name="user",
+            iteration_callback=AsyncMock(return_value={
+                "text": "done", "tool_calls": [], "stop_reason": "end_turn"}),
+            tool_executor_callback=AsyncMock(return_value="ok"),
+        )
+        assert mgr._agents[aid].max_iterations == MAX_AGENT_ITERATIONS
+        mgr.kill(aid)
+
+    async def test_snapshot_matches_enforced_cap(self):
+        """The worker's enforced cap and the displayed cap are ONE value —
+        a display that disagrees with the real limit is the original bug."""
+        mgr = AgentManager()
+        calls = {"n": 0}
+
+        async def _cb(*_a, **_k):
+            calls["n"] += 1
+            return {"text": "", "tool_calls": [{"id": "1", "name": "noop", "input": {}}],
+                    "stop_reason": "tool_use"}
+
+        aid = mgr.spawn(
+            label="t", goal="test", channel_id="c1",
+            requester_id="u1", requester_name="user",
+            iteration_callback=_cb, tool_executor_callback=AsyncMock(return_value="ok"),
+            max_iterations=3,
+        )
+        for _ in range(60):
+            await asyncio.sleep(0.05)
+            if mgr._agents[aid].status != "running":
+                break
+        assert mgr._agents[aid].max_iterations == 3
+        assert calls["n"] <= 3  # never exceeded the snapshotted cap
+        mgr.kill(aid)
