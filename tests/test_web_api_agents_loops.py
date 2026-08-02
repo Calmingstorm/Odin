@@ -47,6 +47,8 @@ def _agent_info(**kw):
                 requester_name="U", iteration_count=1, tools_used=["grep"],
                 created_at=1.0, ended_at=None, result="", error="",
                 recovery_attempts=0, depth=0, parent_id=None, children_ids=[],
+                max_iterations=120, model_override=None, reasoning_effort_override=None,
+                last_provider="", last_model="", last_reasoning_effort=None,
                 _sm=SimpleNamespace(history_as_dicts=lambda: []))
     base.update(kw)
     return SimpleNamespace(**base)
@@ -256,3 +258,163 @@ class TestProcesses:
         bot.tool_executor._process_registry = None
         async with TestClient(TestServer(_app(register_processes, bot=bot))) as c:
             assert (await c.delete("/api/processes/5")).status == 404
+
+
+def _display_bot(agent, *, model="gpt-5.6-sol", effort="xhigh",
+                 agent_model=None, agent_effort=None, provider="codex"):
+    """Bot whose live config drives the display policy."""
+    bot = MagicMock()
+    bot.agent_manager._agents = {"A1": agent}
+    bot.config = SimpleNamespace(
+        openai_codex=SimpleNamespace(
+            model=model, reasoning_effort=effort,
+            agent_model=agent_model, agent_reasoning_effort=agent_effort),
+        llm_provider=SimpleNamespace(active_provider=provider),
+    )
+    return bot
+
+
+class TestAgentDisplayPolicy:
+    """Model/effort shown for an agent must say WHICH truth it is: what
+    executed, what the spawn requested, or what live config would give an
+    inheriting agent. Never present config as execution history."""
+
+    @pytest.mark.asyncio
+    async def test_executed_provenance_wins(self):
+        agent = _agent_info(last_model="gpt-5.6-luna", last_reasoning_effort="max",
+                            last_provider="codex", model_override="gpt-5.5")
+        bot = _display_bot(agent)
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_model"] == "gpt-5.6-luna"
+        assert row["display_reasoning_effort"] == "max"
+        assert row["display_source"] == "last_execution"
+
+    @pytest.mark.asyncio
+    async def test_override_before_execution_is_pending(self):
+        agent = _agent_info(model_override="gpt-5.6-terra", reasoning_effort_override="high")
+        bot = _display_bot(agent)
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_model"] == "gpt-5.6-terra"
+        assert row["display_reasoning_effort"] == "high"
+        assert row["display_source"] == "spawn_override_pending"
+
+    @pytest.mark.asyncio
+    async def test_inheritance_reports_live_config(self):
+        bot = _display_bot(_agent_info(), model="gpt-5.6-sol", effort="xhigh")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_model"] == "gpt-5.6-sol"
+        assert row["display_reasoning_effort"] == "xhigh"
+        assert row["display_source"] == "current_inheritance"
+
+    @pytest.mark.asyncio
+    async def test_auto_axes_resolve_to_main_settings(self):
+        bot = _display_bot(_agent_info(), agent_model="auto", agent_effort="auto")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        # "auto" is spawn-time policy, never a displayable model/effort value
+        assert row["display_model"] == "gpt-5.6-sol"
+        assert row["display_reasoning_effort"] == "xhigh"
+
+    @pytest.mark.asyncio
+    async def test_fixed_agent_axes_win_over_main(self):
+        bot = _display_bot(_agent_info(), agent_model="gpt-5.6-luna", agent_effort="low")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_model"] == "gpt-5.6-luna"
+        assert row["display_reasoning_effort"] == "low"
+
+    @pytest.mark.asyncio
+    async def test_non_codex_provider_reports_na_effort(self):
+        bot = _display_bot(_agent_info(), provider="ollama")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        # N/A, never "unknown": the provider has no effort semantics at all
+        assert row["display_reasoning_effort"] == "N/A"
+
+    @pytest.mark.asyncio
+    async def test_executed_without_effort_reports_na(self):
+        agent = _agent_info(last_model="qwen3:14b", last_reasoning_effort=None,
+                            last_provider="ollama")
+        bot = _display_bot(agent, provider="ollama")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_model"] == "qwen3:14b"
+        assert row["display_reasoning_effort"] == "N/A"
+        assert row["display_source"] == "last_execution"
+
+
+class TestAgentListCorrections:
+    @pytest.mark.asyncio
+    async def test_tool_count_is_full_not_preview_slice(self):
+        # tools_used is previewed as the last 10; the COUNT must be the total
+        # (the old UI reported the slice length and understated every agent
+        # past ten tools).
+        agent = _agent_info(tools_used=[f"t{i}" for i in range(25)])
+        bot = _display_bot(agent)
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["tools_used_count"] == 25
+        assert len(row["tools_used"]) == 10
+
+    @pytest.mark.asyncio
+    async def test_max_iterations_exposed_for_honest_progress(self):
+        bot = _display_bot(_agent_info(max_iterations=180))
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["max_iterations"] == 180
+
+
+class TestAgentDetail:
+    @pytest.mark.asyncio
+    async def test_detail_returns_untruncated_fields(self):
+        long_goal = "g" * 900
+        long_result = "r" * 900
+        agent = _agent_info(goal=long_goal, result=long_result, status="completed",
+                            tools_used=[f"t{i}" for i in range(14)])
+        bot = _display_bot(agent)
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            r = await c.get("/api/agents/A1")
+            assert r.status == 200
+            body = await r.json()
+        # the whole point: the list truncates at 200, the detail does not
+        assert body["goal"] == long_goal
+        assert body["result"] == long_result
+        assert len(body["tools_used"]) == 14
+        assert body["tools_used_count"] == 14
+        assert body["display_source"] in {
+            "last_execution", "current_inheritance", "spawn_override_pending", "unknown"}
+
+    @pytest.mark.asyncio
+    async def test_detail_list_truncation_still_applies(self):
+        agent = _agent_info(goal="g" * 900, result="r" * 900, status="completed")
+        bot = _display_bot(agent)
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert len(row["goal"]) == 200 and len(row["result"]) == 200
+
+    @pytest.mark.asyncio
+    async def test_detail_carries_overrides_separately_from_execution(self):
+        agent = _agent_info(model_override="gpt-5.5", reasoning_effort_override="low",
+                            last_model="gpt-5.5", last_reasoning_effort="low")
+        bot = _display_bot(agent)
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            body = await (await c.get("/api/agents/A1")).json()
+        assert body["model_override"] == "gpt-5.5"
+        assert body["reasoning_effort_override"] == "low"
+        assert body["display_source"] == "last_execution"
+
+    @pytest.mark.asyncio
+    async def test_detail_unknown_agent_404(self):
+        bot = _display_bot(_agent_info())
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            assert (await c.get("/api/agents/nope")).status == 404
+
+    @pytest.mark.asyncio
+    async def test_detail_no_manager_404(self):
+        bot = MagicMock()
+        bot.agent_manager._agents = "not-a-dict"
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            assert (await c.get("/api/agents/A1")).status == 404

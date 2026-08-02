@@ -74,7 +74,11 @@ export default {
       <!-- Agent cards -->
       <div v-else class="ag-card-grid" role="list" aria-label="Agent list">
         <div v-for="agent in filteredAgents" :key="agent.id"
-             class="ag-card" :class="'ag-card-' + agent.status" role="listitem">
+             class="ag-card ag-card-clickable" :class="'ag-card-' + agent.status" role="listitem"
+             tabindex="0" :aria-label="'Open details for agent ' + agent.label"
+             @click="openDetail(agent)"
+             @keydown.enter.prevent="openDetail(agent)"
+             @keydown.space.prevent="openDetail(agent)">
           <!-- Card header -->
           <div class="ag-card-header">
             <div class="ag-card-title-row">
@@ -88,8 +92,17 @@ export default {
           <!-- Goal -->
           <div class="ag-card-goal">{{ agent.goal }}</div>
 
-          <!-- Progress bar (running agents) -->
-          <div v-if="agent.status === 'running'" class="ag-progress-bar">
+          <!-- Model / reasoning provenance -->
+          <div class="ag-card-policy" :title="displaySourceLabel(agent.display_source)">
+            <span class="ag-policy-chip">{{ displayModelText(agent) }}</span>
+            <span class="ag-policy-chip ag-policy-effort">{{ displayEffortText(agent) }}</span>
+          </div>
+
+          <!-- Progress bar (running agents, honest cap only) -->
+          <div v-if="agent.status === 'running' && hasProgress(agent)" class="ag-progress-bar"
+               role="progressbar" :aria-valuenow="agent.iteration_count"
+               :aria-valuemin="0" :aria-valuemax="agent.max_iterations"
+               :title="agent.iteration_count + ' of ' + agent.max_iterations + ' iterations'">
             <div class="ag-progress-fill" :style="{ width: progressPercent(agent) + '%' }"></div>
           </div>
 
@@ -105,13 +118,8 @@ export default {
             </div>
             <div class="ag-card-stat">
               <span class="ag-card-stat-label">Tools</span>
-              <span class="ag-card-stat-value">{{ (agent.tools_used || []).length }}</span>
+              <span class="ag-card-stat-value">{{ agent.tools_used_count ?? 0 }}</span>
             </div>
-          </div>
-
-          <!-- Tools used -->
-          <div v-if="agent.tools_used && agent.tools_used.length > 0" class="ag-card-tools">
-            <span v-for="tool in agent.tools_used" :key="tool" class="ag-tool-chip">{{ tool }}</span>
           </div>
 
           <!-- Requester -->
@@ -134,13 +142,128 @@ export default {
             <div class="ag-result-text text-red-400">{{ agent.error }}</div>
           </div>
 
-          <!-- Kill button (running only) -->
+          <!-- Kill button (running only) — a separate action: it must never
+               open the detail modal on its way through. -->
           <div v-if="agent.status === 'running'" class="ag-card-actions">
-            <button @click="killAgent(agent.id)" class="btn btn-danger text-xs"
-                    :disabled="killing === agent.id">
+            <button @click.stop="killAgent(agent.id)" @keydown.enter.stop @keydown.space.stop
+                    class="btn btn-danger text-xs" :disabled="killing === agent.id">
               {{ killing === agent.id ? 'Killing...' : 'Kill Agent' }}
             </button>
           </div>
+        </div>
+      </div>
+
+      <!-- Agent detail modal -->
+      <div v-if="detailId" class="modal-overlay" v-modal-focus @click.self="closeDetail"
+           @keyup.escape="closeDetail" tabindex="-1" role="dialog" aria-modal="true"
+           aria-labelledby="agent-detail-title">
+        <div class="modal-content ag-detail-modal">
+          <div class="ag-detail-header">
+            <div class="ag-detail-title-row">
+              <span v-if="detail" class="ag-status-dot" :class="'ag-dot-' + detail.status"
+                    role="img" :aria-label="'Status: ' + detail.status"></span>
+              <h2 id="agent-detail-title" class="ag-detail-title">
+                {{ detail ? detail.label : 'Agent' }}
+              </h2>
+              <span v-if="detail" class="ag-status-badge" :class="'ag-badge-' + detail.status">
+                {{ detail.status }}
+              </span>
+              <span class="ag-card-id">{{ detailId }}</span>
+            </div>
+            <button @click="closeDetail" class="btn btn-ghost text-xs" aria-label="Close details">
+              Close
+            </button>
+          </div>
+
+          <div v-if="detailLoading && !detail" class="skeleton skeleton-row"></div>
+          <div v-else-if="detailError" class="error-state" role="alert">
+            <p class="text-red-400">{{ detailError }}</p>
+          </div>
+
+          <template v-else-if="detail">
+            <!-- Metadata grid -->
+            <div class="ag-detail-meta">
+              <div class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Model</span>
+                <span class="ag-detail-meta-value">{{ displayModelText(detail) }}</span>
+              </div>
+              <div class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Reasoning</span>
+                <span class="ag-detail-meta-value">{{ displayEffortText(detail) }}</span>
+              </div>
+              <div class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Provider</span>
+                <span class="ag-detail-meta-value">{{ detail.last_provider || '—' }}</span>
+              </div>
+              <div class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Iterations</span>
+                <span class="ag-detail-meta-value">
+                  {{ detail.iteration_count }}<template v-if="detail.max_iterations"> / {{ detail.max_iterations }}</template>
+                </span>
+              </div>
+              <div class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Runtime</span>
+                <span class="ag-detail-meta-value">{{ formatDuration(detail.runtime_seconds) }}</span>
+              </div>
+              <div class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Tools used</span>
+                <span class="ag-detail-meta-value">{{ detail.tools_used_count ?? 0 }}</span>
+              </div>
+              <div class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Requested by</span>
+                <span class="ag-detail-meta-value">{{ detail.requester_name || '—' }}</span>
+              </div>
+              <div class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Started</span>
+                <span class="ag-detail-meta-value">{{ formatTs(detail.created_at) }}</span>
+              </div>
+              <div v-if="detail.parent_id" class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Parent</span>
+                <span class="ag-detail-meta-value">{{ detail.parent_id }}</span>
+              </div>
+              <div v-if="detail.children_ids && detail.children_ids.length" class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Children</span>
+                <span class="ag-detail-meta-value">{{ detail.children_ids.length }}</span>
+              </div>
+            </div>
+            <p class="ag-detail-source">{{ displaySourceLabel(detail.display_source) }}</p>
+
+            <!-- Request -->
+            <div class="ag-detail-section">
+              <div class="ag-detail-section-head">
+                <span class="ag-result-label">Request</span>
+                <button @click="copyText('goal', detail.goal)" class="btn btn-ghost text-xs">
+                  {{ copied === 'goal' ? 'Copied' : 'Copy' }}
+                </button>
+              </div>
+              <pre class="ag-detail-text">{{ detail.goal }}</pre>
+            </div>
+
+            <!-- Result / error -->
+            <div v-if="detail.result" class="ag-detail-section">
+              <div class="ag-detail-section-head">
+                <span class="ag-result-label">Result</span>
+                <button @click="copyText('result', detail.result)" class="btn btn-ghost text-xs">
+                  {{ copied === 'result' ? 'Copied' : 'Copy' }}
+                </button>
+              </div>
+              <pre class="ag-detail-text">{{ detail.result }}</pre>
+            </div>
+            <div v-else-if="detail.status === 'running'" class="ag-detail-section">
+              <span class="ag-result-label">Result</span>
+              <p class="ag-detail-pending">Still running — the result appears here when it completes.</p>
+            </div>
+
+            <div v-if="detail.error" class="ag-detail-section">
+              <div class="ag-detail-section-head">
+                <span class="ag-result-label">Error</span>
+                <button @click="copyText('error', detail.error)" class="btn btn-ghost text-xs">
+                  {{ copied === 'error' ? 'Copied' : 'Copy' }}
+                </button>
+              </div>
+              <pre class="ag-detail-text text-red-400">{{ detail.error }}</pre>
+            </div>
+          </template>
         </div>
       </div>
     </div>`,
@@ -173,9 +296,88 @@ export default {
       return agents.value.filter(a => a.status === statusFilter.value);
     });
 
+    // Progress against the cap ACTUALLY in force for this agent (chat 120 /
+    // scheduled 180 / hard 300 all exist; the old hardcoded 30 made every
+    // agent look pinned at 100% after a third of its real budget). Without a
+    // cap from the server the bar renders nothing rather than a guess.
     function progressPercent(agent) {
-      const max = 30;
+      const max = Number(agent.max_iterations) || 0;
+      if (max <= 0) return 0;
       return Math.min(100, Math.round((agent.iteration_count / max) * 100));
+    }
+
+    function hasProgress(agent) {
+      return (Number(agent.max_iterations) || 0) > 0;
+    }
+
+    // "inherit (currently X)" wording is applied ONLY where the value comes
+    // from live config — never where it reports what actually executed.
+    function displayModelText(agent) {
+      const m = agent.display_model || '';
+      if (!m) return 'unknown';
+      return agent.display_source === 'current_inheritance' ? `inherit (currently ${m})` : m;
+    }
+
+    function displayEffortText(agent) {
+      const e = agent.display_reasoning_effort || '';
+      if (!e) return 'unknown';
+      if (e === 'N/A') return 'N/A';
+      return agent.display_source === 'current_inheritance' ? `inherit (currently ${e})` : e;
+    }
+
+    function displaySourceLabel(source) {
+      return {
+        last_execution: 'last executed',
+        current_inheritance: 'inherited from current config — not yet executed',
+        spawn_override_pending: 'requested at spawn — not yet executed',
+        unknown: 'no execution data',
+      }[source] || '';
+    }
+
+    // --- Detail modal -----------------------------------------------------
+    const detail = ref(null);          // full record for the open agent
+    const detailId = ref(null);        // which agent the modal is showing
+    const detailLoading = ref(false);
+    const detailError = ref(null);
+    const copied = ref('');
+
+    async function openDetail(agent) {
+      detailId.value = agent.id;
+      detail.value = null;
+      detailError.value = null;
+      detailLoading.value = true;
+      try {
+        detail.value = await api.get(`/api/agents/${encodeURIComponent(agent.id)}`);
+      } catch (e) {
+        detailError.value = e.message || 'Failed to load agent detail';
+      }
+      detailLoading.value = false;
+    }
+
+    function closeDetail() {
+      detailId.value = null;
+      detail.value = null;
+      detailError.value = null;
+      copied.value = '';
+    }
+
+    // A running agent's modal follows the same 5s cadence as the list, so a
+    // result appears the moment the agent finishes — without a manual reopen.
+    async function refreshDetail() {
+      if (!detailId.value) return;
+      try {
+        detail.value = await api.get(`/api/agents/${encodeURIComponent(detailId.value)}`);
+      } catch { /* transient: keep showing the last good record */ }
+    }
+
+    async function copyText(kind, text) {
+      try {
+        await navigator.clipboard.writeText(text || '');
+        copied.value = kind;
+        setTimeout(() => { if (copied.value === kind) copied.value = ''; }, 1500);
+      } catch {
+        toast.error('Copy failed');
+      }
     }
 
     async function fetchAgents(silent = false) {
@@ -217,6 +419,8 @@ export default {
         refreshInterval = setInterval(() => {
           if (autoRefresh.value) {
             fetchAgents(true);
+            // Keep an open modal live alongside the list.
+            if (detailId.value) refreshDetail();
           }
         }, 5000);
       }
@@ -242,7 +446,10 @@ export default {
       agents, loading, error, killing, autoRefresh, statusFilter,
       runningCount, completedCount, failedCount,
       statusFilters, filteredAgents,
-      formatTs, formatDuration, progressPercent,
+      formatTs, formatDuration, progressPercent, hasProgress,
+      displayModelText, displayEffortText, displaySourceLabel,
+      detail, detailId, detailLoading, detailError, copied,
+      openDetail, closeDetail, copyText,
       fetchAgents, killAgent, startAutoRefresh, stopAutoRefresh,
     };
   },

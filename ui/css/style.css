@@ -370,8 +370,18 @@ textarea.hm-input {
 .chat-container {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 48px);
+  height: calc(100vh - var(--hm-topbar-h));
   overflow: hidden;
+}
+/* Chat-only centered shell (Aaron + Odin, 2026-08-02): conversation reading
+   width caps at 1200px and CENTERS — the one deliberate exception to the
+   left-anchored console canvas. With the 75% bubble limit this yields ~900px
+   max bubbles; laptops still use their full width; mobile rules unchanged.
+   Specificity (0,3,0) beats foundation's .page-viewport .page-fade-in
+   left-anchor regardless of stylesheet order. */
+.page-viewport .chat-container.page-fade-in {
+  max-width: 1200px;
+  margin-inline: auto;
 }
 .chat-messages {
   flex: 1;
@@ -2466,12 +2476,52 @@ textarea.hm-input {
 .ag-card-stat-label { display: block; font-size: 0.6rem; color: var(--hm-text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
 .ag-card-stat-value { display: block; font-family: var(--hm-font-mono); font-size: var(--hm-text-sm); font-weight: 600; }
 
-/* Tool chips */
+/* Tool chips (retained for other surfaces; agent cards show a count instead —
+   the chip list added length without telling the operator anything). */
 .ag-card-tools { display: flex; flex-wrap: wrap; gap: 4px; }
 .ag-tool-chip {
   font-family: var(--hm-font-mono); font-size: 0.6rem; padding: 1px 6px;
   background: var(--hm-gold-dim); color: var(--hm-text-muted); border-radius: 3px;
   border: 1px solid var(--hm-border-subtle);
+}
+
+/* Model / reasoning provenance on the card */
+.ag-card-policy { display: flex; flex-wrap: wrap; gap: 4px; }
+.ag-policy-chip {
+  font-family: var(--hm-font-mono); font-size: 0.62rem; padding: 1px 7px;
+  color: var(--hm-text-muted); background: var(--hm-surface-elevated);
+  border: 1px solid var(--hm-border); border-radius: 3px;
+}
+.ag-policy-effort { color: var(--hm-accent); border-color: rgba(197,139,50,.28); }
+
+/* Card as an activation target for the detail modal */
+.ag-card-clickable { cursor: pointer; transition: border-color .12s ease, background .12s ease; }
+.ag-card-clickable:hover { border-color: var(--hm-border-strong, var(--hm-border)); background: var(--hm-surface-hover); }
+.ag-card-clickable:focus-visible { outline: 2px solid var(--hm-accent); outline-offset: 2px; }
+
+/* Detail modal */
+.ag-detail-modal { width: min(1000px, 94vw); max-height: 88vh; display: flex; flex-direction: column; gap: var(--hm-space-3); overflow-y: auto; }
+.ag-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--hm-space-3); }
+.ag-detail-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--hm-space-2); min-width: 0; }
+.ag-detail-title { margin: 0; font-size: 1rem; font-weight: 650; letter-spacing: -.015em; color: #f2f3f6; }
+.ag-detail-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--hm-space-2) var(--hm-space-3); }
+.ag-detail-meta-item { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ag-detail-meta-label { font-size: 0.6rem; color: var(--hm-text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+.ag-detail-meta-value { font-family: var(--hm-font-mono); font-size: var(--hm-text-xs); color: var(--hm-text); word-break: break-word; }
+.ag-detail-source { margin: 0; font-size: 0.66rem; color: var(--hm-text-dim); font-style: italic; }
+.ag-detail-section { display: flex; flex-direction: column; gap: 4px; }
+.ag-detail-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--hm-space-2); }
+/* Each region scrolls INDEPENDENTLY so a huge request cannot bury the result. */
+.ag-detail-text {
+  margin: 0; padding: var(--hm-space-2); max-height: 34vh; overflow: auto;
+  font-family: var(--hm-font-mono); font-size: var(--hm-text-xs); line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word; color: var(--hm-text-muted);
+  background: var(--hm-bg); border: 1px solid var(--hm-border); border-radius: var(--hm-radius-md);
+}
+.ag-detail-pending { margin: 0; font-size: var(--hm-text-xs); color: var(--hm-text-dim); }
+@media (max-width: 640px) {
+  .ag-detail-modal { width: 96vw; max-height: 92vh; }
+  .ag-detail-text { max-height: 40vh; }
 }
 
 /* Meta */

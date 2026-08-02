@@ -1,6 +1,11 @@
 /* Odin WebUI foundation — application shell and shared interaction language. */
 
 :root {
+  /* Single source for the sticky top-bar height — every viewport calc and
+     sticky offset derives from it (stale hardcoded offsets caused page-level
+     overflow around internally-scrolling views like Chat and Logs). The
+     mobile breakpoint overrides the token, never the consumers. */
+  --hm-topbar-h: 76px;
   --hm-bg: #07090d;
   --hm-bg-raised: #0b0e14;
   --hm-surface: #10141c;
@@ -108,7 +113,7 @@ button, input, select, textarea { font: inherit; }
 .hm-sidebar.collapsed .connection-card, .hm-sidebar.collapsed .shortcut-hint { justify-content: center; padding-inline: 0; }
 
 .hm-main { flex: 1; min-width: 0; height: 100vh; max-height: none; overflow-y: auto; background: transparent; }
-.hm-topbar { position: sticky; top: 0; display: flex; align-items: center; z-index: 25; height: 76px; padding: 0 28px; gap: 22px; background: rgba(7,9,13,.88); border-bottom: 1px solid var(--hm-border-subtle); backdrop-filter: blur(18px); }
+.hm-topbar { position: sticky; top: 0; display: flex; align-items: center; z-index: 25; height: var(--hm-topbar-h); padding: 0 28px; gap: 22px; background: rgba(7,9,13,.88); border-bottom: 1px solid var(--hm-border-subtle); backdrop-filter: blur(18px); }
 .topbar-context { display: flex; flex-direction: column; min-width: 140px; }
 .topbar-kicker { margin-bottom: 2px; color: var(--hm-accent); font-size: .57rem; line-height: 1; text-transform: uppercase; letter-spacing: .16em; font-weight: 700; }
 .topbar-title-row { display: flex; align-items: center; gap: 10px; }
@@ -121,7 +126,7 @@ button, input, select, textarea { font: inherit; }
 .command-trigger { min-height: 34px; padding: 0 8px 0 10px; display: flex; align-items: center; gap: 7px; color: var(--hm-text-muted); background: rgba(255,255,255,.025); border: 1px solid var(--hm-border); border-radius: 7px; font-size: .68rem; cursor: pointer; }
 .command-trigger:hover { color: var(--hm-text); border-color: #3a4352; background: rgba(255,255,255,.045); }
 kbd { padding: 2px 5px; color: #818b99; background: #090c11; border: 1px solid #2b3340; border-radius: 4px; font-family: var(--hm-font-sans); font-size: .57rem; box-shadow: inset 0 -1px rgba(255,255,255,.035); }
-.page-viewport { min-height: calc(100vh - 76px); }
+.page-viewport { min-height: calc(100vh - var(--hm-topbar-h)); }
 .icon-btn.mobile-menu-btn { display: none; }
 .mobile-scrim { display: none; }
 
@@ -130,8 +135,8 @@ kbd { padding: 2px 5px; color: #818b99; background: #090c11; border: 1px solid #
 .icon-btn-danger { color: #d67a7a; }
 .icon-btn-danger:hover { color: #f08a8a; background: rgba(224,100,100,.1); border-color: rgba(224,100,100,.24); }
 
-.section-shell { min-height: calc(100vh - 76px); }
-.section-tabs-wrap { position: sticky; top: 76px; z-index: 20; padding: 0 24px; background: rgba(9,12,17,.92); border-bottom: 1px solid var(--hm-border-subtle); backdrop-filter: blur(16px); }
+.section-shell { min-height: calc(100vh - var(--hm-topbar-h)); }
+.section-tabs-wrap { position: sticky; top: var(--hm-topbar-h); z-index: 20; padding: 0 24px; background: rgba(9,12,17,.92); border-bottom: 1px solid var(--hm-border-subtle); backdrop-filter: blur(16px); }
 .section-tabs { display: flex; align-items: stretch; gap: 2px; min-height: 48px; overflow-x: auto; }
 .section-tab { position: relative; padding: 0 13px; white-space: nowrap; color: #7f8998; background: transparent; border: 0; font-size: .72rem; font-weight: 550; cursor: pointer; }
 .section-tab:hover { color: #c8ced7; }
@@ -213,9 +218,8 @@ kbd { padding: 2px 5px; color: #818b99; background: #090c11; border: 1px solid #
   .command-trigger kbd { display: none; }
 }
 @media (max-width: 640px) {
-  .hm-topbar { height: 64px; }
-  .page-viewport { min-height: calc(100vh - 64px); }
-  .section-tabs-wrap { top: 64px; padding: 0 12px; }
+  :root { --hm-topbar-h: 64px; }
+  .section-tabs-wrap { padding: 0 12px; }
   .topbar-kicker { display: none; }
   .topbar-title-row h1 { font-size: .9rem; }
   .status-pill { display: none; }

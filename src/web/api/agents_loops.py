@@ -17,6 +17,7 @@ from ..api_common import (
     _MAX_GOAL_LEN,
     _validate_string,
 )
+from ._agent_display import agent_display_policy
 
 log = get_logger("web.api")
 
@@ -187,6 +188,13 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
                 "requester_name": info.requester_name,
                 "iteration_count": info.iteration_count,
                 "tools_used": info.tools_used[-10:],
+                # The FULL count — tools_used above is a preview slice, and
+                # reporting its length understated every agent past ten tools.
+                "tools_used_count": len(info.tools_used),
+                # The cap actually in force for this agent (chat/scheduled/
+                # hard limits differ), so progress is computed honestly.
+                "max_iterations": getattr(info, "max_iterations", 0),
+                **agent_display_policy(info, bot),
                 "runtime_seconds": round(runtime, 1),
                 "created_at": info.created_at,
                 "result": (info.result[:200] if info.result else ""),
@@ -198,6 +206,55 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
                 "children_ids": list(getattr(info, "children_ids", [])),
             })
         return web.json_response(agents)
+
+    @routes.get("/api/agents/{agent_id}")
+    async def agent_detail(request: web.Request) -> web.Response:
+        """Full record for ONE agent — the modal's source.
+
+        The list endpoint stays lean and truncated on purpose; untruncated
+        goals and results are fetched only for the agent actually opened.
+        """
+        try:
+            agent_agents = bot.agent_manager._agents
+            if not isinstance(agent_agents, dict):
+                raise AttributeError
+        except (AttributeError, TypeError):
+            return web.json_response({"error": "no agent manager"}, status=404)
+        info = agent_agents.get(request.match_info["agent_id"])
+        if info is None:
+            return web.json_response({"error": "agent not found"}, status=404)
+        runtime = (info.ended_at or time.time()) - info.created_at
+        return web.json_response({
+            "id": request.match_info["agent_id"],
+            "label": info.label,
+            # Untruncated — this is why the detail endpoint exists.
+            "goal": info.goal,
+            "result": info.result or "",
+            "error": info.error or "",
+            "status": info.status,
+            "state": info.state.value if hasattr(info, "state") else info.status,
+            "channel_id": info.channel_id,
+            "requester_name": info.requester_name,
+            "iteration_count": info.iteration_count,
+            "max_iterations": getattr(info, "max_iterations", 0),
+            "tools_used": list(info.tools_used),
+            "tools_used_count": len(info.tools_used),
+            "runtime_seconds": round(runtime, 1),
+            "created_at": info.created_at,
+            "ended_at": info.ended_at,
+            "recovery_attempts": getattr(info, "recovery_attempts", 0),
+            "depth": getattr(info, "depth", 0),
+            "parent_id": getattr(info, "parent_id", None),
+            "children_ids": list(getattr(info, "children_ids", [])),
+            # Spawn-time policy, distinct from what executed.
+            "model_override": getattr(info, "model_override", None),
+            "reasoning_effort_override": getattr(info, "reasoning_effort_override", None),
+            "last_provider": getattr(info, "last_provider", ""),
+            **agent_display_policy(info, bot),
+            # Diagnostics: available for a future surface, not rendered as
+            # primary modal content.
+            "state_history": info._sm.history_as_dicts() if hasattr(info, "_sm") else [],
+        })
 
     @routes.delete("/api/agents/{agent_id}")
     async def kill_agent(request: web.Request) -> web.Response:
