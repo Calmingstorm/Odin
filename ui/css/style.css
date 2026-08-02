@@ -803,8 +803,14 @@ textarea.hm-input {
   flex-direction: column;
   justify-content: center;
 }
+/* width:100% is load-bearing, not redundant: .chat-input-area is a flex
+   column, and in a flex formatting context `margin-inline: auto` absorbs the
+   free space and shrink-wraps the item to its content instead of centring a
+   full-width box. Without an explicit width the composer collapsed to about
+   130px. */
 .chat-input-row,
 .chat-input-hint {
+  width: 100%;
   max-width: var(--chat-work-lane);
   margin-inline: auto;
 }
