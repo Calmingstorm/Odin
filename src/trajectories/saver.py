@@ -88,6 +88,13 @@ class TrajectoryTurn:
     timestamp: str = ""
     source: str = "discord"
 
+    # Autonomous-loop identity. A loop iteration is already a complete turn,
+    # but older records carried only ``source="loop"`` and could not be joined
+    # back to the loop that produced them. These fields are optional so the
+    # on-disk schema stays backward compatible for chat and pre-v3.72 records.
+    loop_id: str = ""
+    loop_iteration: int = 0
+
     user_content: str = ""
     system_prompt: str = ""
     history: list[dict] = field(default_factory=list)
@@ -165,6 +172,10 @@ class TrajectoryTurn:
             "total_duration_ms": self.total_duration_ms,
             "iteration_count": len(self.iterations),
         }
+        if self.loop_id:
+            d["loop_id"] = self.loop_id
+        if self.loop_iteration:
+            d["loop_iteration"] = self.loop_iteration
         if self.context_trace is not None:
             d["context_trace"] = self.context_trace
         if self.user_content_truncated:
@@ -346,6 +357,46 @@ class TrajectorySaver:
             except Exception as e:
                 log.error("Error reading %s for message lookup: %s", filename, e)
         return None
+
+    async def find_by_loop_id(self, loop_id: str, limit: int = 1000) -> list[dict]:
+        """Return durable turns for one autonomous loop, newest first.
+
+        Loop records are date-partitioned with every other trajectory. Scan
+        newest files first and stop at *limit*; exact ``loop_id`` plus
+        ``source=loop`` matching prevents a coincidental field on another turn
+        type from being attributed to the loop.
+        """
+        if not loop_id or limit <= 0:
+            return []
+        results: list[dict] = []
+        files = await self.list_files()
+        for filename in reversed(files):
+            # Do not infer a date from the opaque loop ID. Scan the complete
+            # partition: limiting generic read_file() before filtering would
+            # hide an older loop behind unrelated newer chat/agent traffic.
+            filepath = self.directory / filename
+            try:
+                async with aiofiles.open(filepath) as f:
+                    lines = await f.readlines()
+            except Exception as e:
+                log.error("Error reading %s for loop lookup: %s", filename, e)
+                continue
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("source") != "loop":
+                    continue
+                if entry.get("loop_id") != loop_id:
+                    continue
+                results.append(entry)
+                if len(results) >= limit:
+                    return results
+        return results
 
     def get_prometheus_metrics(self) -> dict:
         return {"trajectories_saved_total": self._count}

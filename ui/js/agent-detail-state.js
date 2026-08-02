@@ -13,6 +13,7 @@ export function createAgentDetailState() {
 
 function boundedRequest(factory, {
   timeoutMs,
+  timeoutLabel,
   scheduleTimeout,
   cancelTimeout,
 }) {
@@ -56,7 +57,7 @@ function boundedRequest(factory, {
   if (!settled && Number.isFinite(timeoutMs) && timeoutMs > 0) {
     timer = scheduleTimeout(() => {
       const seconds = Math.max(1, Math.round(timeoutMs / 1000));
-      finish(false, new Error(`Agent detail request timed out after ${seconds}s`));
+      finish(false, new Error(`${timeoutLabel} request timed out after ${seconds}s`));
       abortController?.abort();
     }, timeoutMs);
   }
@@ -86,6 +87,7 @@ export function createAgentDetailController({
   state,
   requestDetail,
   timeoutMs = AGENT_DETAIL_REQUEST_TIMEOUT_MS,
+  detailLabel = 'Agent detail',
   scheduleTimeout = globalThis.setTimeout.bind(globalThis),
   cancelTimeout = globalThis.clearTimeout.bind(globalThis),
 }) {
@@ -133,7 +135,7 @@ export function createAgentDetailController({
 
     const bounded = boundedRequest(
       (signal) => requestDetail(agentId, { signal }),
-      { timeoutMs, scheduleTimeout, cancelTimeout },
+      { timeoutMs, timeoutLabel: detailLabel, scheduleTimeout, cancelTimeout },
     );
     token.cancel = bounded.cancel;
 
@@ -154,14 +156,14 @@ export function createAgentDetailController({
         // The shared API client intentionally returns null for an empty or
         // malformed successful response. That is not renderable detail and
         // must follow the failure path rather than violating modal coherence.
-        failure = new Error('Agent detail response was empty or invalid');
+        failure = new Error(`${detailLabel} response was empty or invalid`);
       }
 
       if (failure) {
         // A refresh failure keeps the last good record. With no record to
         // render, it must surface the failure rather than leave a blank modal.
         if (state.detail === null) {
-          state.detailError = failure?.message || 'Failed to load agent detail';
+          state.detailError = failure?.message || `Failed to load ${detailLabel.toLowerCase()}`;
         }
       } else {
         // Success is one atomic commit: live data can never retain an obsolete

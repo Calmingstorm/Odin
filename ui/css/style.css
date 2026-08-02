@@ -2700,6 +2700,76 @@ textarea.hm-input {
 }
 .loop-history-entry:last-child { border-bottom: none; }
 
+/* Loops detail: the card is an activation target, while destructive controls
+   remain sibling buttons. The modal reuses the proven Agents focus/sizing and
+   independent-scroll primitives, but its content is durable turn history. */
+.loop-card { display: flex; flex-direction: column; gap: var(--hm-space-3); }
+.loop-card-main {
+  min-width: 0; cursor: pointer; border-radius: var(--hm-radius-md);
+  transition: background .12s ease, box-shadow .12s ease;
+}
+.loop-card-main:hover { background: var(--hm-surface-hover); }
+.loop-card-goal {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+  overflow: hidden; margin-bottom: var(--hm-space-2); color: var(--hm-text);
+  font-size: var(--hm-text-sm); line-height: 1.45;
+}
+.loop-card-main:focus-visible { outline: 2px solid var(--hm-accent); outline-offset: 3px; }
+.loop-card-actions { display: flex; justify-content: flex-end; gap: var(--hm-space-2); }
+.loop-card-preview {
+  display: flex; flex-direction: column; gap: 3px; margin-top: var(--hm-space-3);
+  padding: var(--hm-space-2); border: 1px solid var(--hm-border-subtle);
+  border-radius: var(--hm-radius-md); background: var(--hm-bg);
+  font-size: var(--hm-text-xs); color: var(--hm-text-dim);
+  max-height: 4.5rem; overflow: hidden; white-space: pre-wrap; word-break: break-word;
+}
+.loop-detail-modal { gap: var(--hm-space-4); }
+.loop-detail-goal { max-height: 22vh; }
+.loop-detail-condition { max-height: 14vh; }
+.loop-detail-history-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: var(--hm-space-3); border-top: 1px solid var(--hm-border); padding-top: var(--hm-space-3);
+}
+.loop-detail-history-head h3 { margin: 0 0 2px; font-size: var(--hm-text-sm); }
+.loop-detail-notice {
+  padding: var(--hm-space-2); color: var(--hm-text-muted); font-size: var(--hm-text-xs);
+  background: rgba(197,139,50,.08); border: 1px solid rgba(197,139,50,.2);
+  border-radius: var(--hm-radius-md);
+}
+.loop-detail-iterations { display: flex; flex-direction: column; gap: var(--hm-space-3); }
+.loop-detail-iteration {
+  display: flex; flex-direction: column; gap: var(--hm-space-2);
+  padding: var(--hm-space-3); border: 1px solid var(--hm-border);
+  background: var(--hm-surface-elevated); border-radius: var(--hm-radius-lg);
+}
+.loop-detail-iteration-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: var(--hm-space-2);
+}
+.loop-detail-iteration-head > div { display: flex; flex-direction: column; min-width: 0; }
+.loop-detail-turn-meta {
+  display: flex; flex-wrap: wrap; gap: 5px var(--hm-space-3);
+  font-family: var(--hm-font-mono); font-size: .65rem; color: var(--hm-text-dim);
+}
+.loop-detail-response { max-height: 30vh; }
+.loop-detail-tools { display: flex; flex-wrap: wrap; gap: 4px; }
+.loop-context-details {
+  padding: var(--hm-space-3); border: 1px solid var(--hm-border);
+  border-radius: var(--hm-radius-lg); background: var(--hm-bg);
+}
+.loop-context-details summary {
+  cursor: pointer; color: var(--hm-text-muted); font-size: var(--hm-text-xs);
+  font-weight: 600;
+}
+.loop-context-details[open] summary { margin-bottom: var(--hm-space-2); }
+.loop-context-list { display: flex; flex-direction: column; gap: var(--hm-space-2); margin-top: var(--hm-space-2); }
+.loop-context-entry { max-height: 18vh; }
+@media (max-width: 640px) {
+  .loop-card-actions { justify-content: stretch; }
+  .loop-card-actions .btn { flex: 1; }
+  .loop-detail-history-head { align-items: flex-start; }
+  .loop-detail-turn-meta { display: grid; grid-template-columns: 1fr 1fr; }
+}
+
 /* ================================================================
    PROCESS OUTPUT
    ================================================================ */

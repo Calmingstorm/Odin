@@ -1870,6 +1870,8 @@ class ToolLoopRunner:
                 user_id=user_id,
                 user_name=requester_name,
                 source=policy.trajectory_source,
+                loop_id=_loop_id,
+                loop_iteration=_loop_iter,
             )
             self._turn_recorder._record_user_content(_trajectory, prompt)
 
