@@ -3845,12 +3845,11 @@ Please report this to https://github.com/markedjs/marked.`,e){const n="<p>An err
             <option v-for="tr in timeRanges" :key="tr.value" :value="tr.value">{{ tr.label }}</option>
           </select>
 
-          <div class="flex-1" style="min-width:0;">
-            <div class="flex gap-1.5 items-center">
-              <input v-model="textFilter" type="text" class="hm-input flex-1"
+          <div class="log-filter-field">
+            <div class="log-filter-row">
+              <input v-model="textFilter" type="text" class="hm-input flex-1 log-filter-input"
                      :placeholder="useRegex ? 'Regex pattern...' : 'Filter logs...'"
-                     :class="{ 'border-red-700': regexError }"
-                     style="min-width:120px;" />
+                     :class="{ 'border-red-700': regexError }" />
               <button @click="useRegex = !useRegex" class="btn text-xs"
                       :class="useRegex ? 'btn-primary' : 'btn-ghost'"
                       title="Toggle regex filtering">.*</button>
