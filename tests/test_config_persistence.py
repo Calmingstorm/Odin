@@ -209,3 +209,67 @@ class TestPlaceholderGuard:
         monkeypatch.delenv("ODIN_HOST", raising=False)
         patch_config_paths([(("web", "host"), "0.0.0.0")], path=path)
         assert "host: ${ODIN_HOST:-0.0.0.0}" in path.read_text()
+
+
+class TestCancellationSettlement:
+    """A cancelled caller must not release the lock with a write still running.
+
+    `asyncio.to_thread` creates a Task: cancelling the await returns at once
+    while the worker thread keeps going, so the abandoned write can land after
+    — and overwrite — a later one. The executor-future form settles first.
+    """
+
+    def _slow_writer(self, monkeypatch, delay=0.3):
+        import time as _time
+
+        import src.config.persistence as persistence
+
+        real = persistence.patch_config_paths
+
+        def slow(changes, *, path=None):
+            _time.sleep(delay)
+            real(changes, path=path)
+
+        monkeypatch.setattr(persistence, "patch_config_paths", slow)
+        return persistence
+
+    async def test_cancelled_write_settles_before_returning(self, config_file, monkeypatch):
+        import asyncio
+
+        persistence = self._slow_writer(monkeypatch)
+        task = asyncio.create_task(
+            persistence.persist_config_paths(
+                [(("logging", "level"), "DEBUG")], path=config_file
+            )
+        )
+        await asyncio.sleep(0.05)  # let the executor pick the job up
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # The write COMPLETED before the cancellation propagated: no worker is
+        # still holding a stale document to flush after a later writer commits.
+        assert "level: DEBUG" in config_file.read_text()
+        assert not persistence.config_write_lock.locked()
+
+    async def test_later_writer_is_not_overwritten_by_a_cancelled_one(
+        self, config_file, monkeypatch
+    ):
+        import asyncio
+
+        persistence = self._slow_writer(monkeypatch)
+        task = asyncio.create_task(
+            persistence.persist_config_paths(
+                [(("logging", "level"), "DEBUG")], path=config_file
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        await persistence.persist_config_paths(
+            [(("logging", "level"), "ERROR")], path=config_file
+        )
+        # The last writer wins — a cancelled one cannot come back and stomp it.
+        assert "level: ERROR" in config_file.read_text()

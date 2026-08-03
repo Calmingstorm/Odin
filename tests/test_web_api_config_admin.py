@@ -596,3 +596,68 @@ class TestStartupDiagnostics:
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/startup/diagnostics")).json()
             assert body["checks"] == 8
+
+
+class TestPersonalityPersistFirst:
+    """A failed personality write must leave nothing live.
+
+    All three endpoints used to install the new personality — and register its
+    presets into the process-global registry — BEFORE persisting, so a 500
+    left the new identity effective with nothing on disk behind it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_update_failure_leaves_runtime_untouched(self):
+        app, bot = _app(register_personality)
+        before = bot.config.personality.preset
+        with patch("src.config.persistence.mutate_config_document",
+                   side_effect=OSError("read-only fs")):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/personality", json={"preset": "pirate"})
+                assert r.status == 500
+        assert bot.config.personality.preset == before
+
+    @pytest.mark.asyncio
+    async def test_failed_save_preset_does_not_register_globally(self):
+        from src.llm import system_prompt
+
+        app, bot = _app(register_personality)
+        with patch("src.config.persistence.mutate_config_document",
+                   side_effect=OSError("read-only fs")):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.post("/api/personality/presets", json={
+                    "name": "ghost", "identity": "spooky",
+                })
+                assert r.status == 500
+        assert "ghost" not in bot.config.personality.user_presets
+        assert "ghost" not in system_prompt._USER_PRESETS
+
+    @pytest.mark.asyncio
+    async def test_failed_delete_keeps_the_preset(self):
+        from src.config.schema import PersonalityPreset
+
+        app, bot = _app(register_personality)
+        bot.config.personality.user_presets["keeper"] = PersonalityPreset(
+            name="keeper", identity="stays", voice="",
+        )
+        with patch("src.config.persistence.mutate_config_document",
+                   side_effect=OSError("read-only fs")):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.delete("/api/personality/presets/keeper")
+                assert r.status == 500
+        assert "keeper" in bot.config.personality.user_presets
+
+    @pytest.mark.asyncio
+    async def test_successful_update_still_applies_and_persists(self, _active_config):
+        from ruamel.yaml import YAML
+
+        app, bot = _app(register_personality)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/personality", json={
+                "preset": "custom", "custom_name": "Test", "custom_identity": "id",
+            })
+            assert r.status == 200
+        assert bot.config.personality.preset == "custom"
+        on_disk = YAML().load(_active_config.read_text())["personality"]
+        assert on_disk["preset"] == "custom"
+        assert on_disk["custom_name"] == "Test"

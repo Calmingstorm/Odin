@@ -248,20 +248,54 @@ def patch_config_paths(
     _dump_atomic(document, config_path, orig_mode)
 
 
+async def _run_settled(write: Callable[[], None]) -> None:
+    """Run a sync write to SETTLEMENT, cancellation-safe, then re-raise.
+
+    ``asyncio.to_thread`` creates a Task: cancelling the awaiting coroutine
+    returns immediately while the worker thread keeps running, so the caller's
+    lock is released with a write still in flight — and that abandoned write
+    can land after, and overwrite, a later one. An executor future is not a
+    Task, so the repository's ``asyncio.all_tasks()`` shutdown drain cannot
+    cancel it either; re-shielding through any cancellation keeps the caller
+    inside the lock until the filesystem worker is genuinely done.
+
+    ``fut.exception()`` is the ACTUAL thread result, so a cancelled caller is
+    never mistaken for a successful write. This mirrors
+    ``LLMGateway.run_persist_settled``, which fixed the same race on the LLM
+    persistence path.
+    """
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(None, write)
+    was_cancelled = False
+    while not fut.done():
+        try:
+            await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            was_cancelled = True
+        except Exception:
+            break  # worker raised; fut.done() is now True
+    exc = fut.exception()
+    if exc is not None:
+        raise exc
+    if was_cancelled:
+        # State is coherent (the write finished) — now honor the cancellation.
+        raise asyncio.CancelledError
+
+
 async def persist_config_paths(
     changes: Iterable[tuple[ConfigPath, Any]], *, path: Path | str | None = None
 ) -> None:
-    """Async wrapper: patch leaves off the event loop, under the shared lock."""
+    """Patch leaves off the event loop, under the shared lock, to settlement."""
     changes = list(changes)
     if not changes:
         return
     async with config_write_lock:
-        await asyncio.to_thread(patch_config_paths, changes, path=path)
+        await _run_settled(lambda: patch_config_paths(changes, path=path))
 
 
 async def persist_config_mutation(
     mutate: Callable[[Any], None], *, path: Path | str | None = None
 ) -> None:
-    """Async wrapper: document mutation off the event loop, under the shared lock."""
+    """Mutate the document off the event loop, under the shared lock, to settlement."""
     async with config_write_lock:
-        await asyncio.to_thread(mutate_config_document, mutate, path=path)
+        await _run_settled(lambda: mutate_config_document(mutate, path=path))
