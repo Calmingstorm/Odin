@@ -5,7 +5,7 @@
 import { api, ws } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
-import { formatDuration, formatTokens, formatTs } from '../utils.js';
+import { formatAge, formatDuration, formatTokens, formatTs } from '../utils.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 import { createDetailController } from '../detail-state.js';
 
@@ -506,7 +506,7 @@ export default {
       detail, detailId, detailLoading, detailError, copied,
       totalIterations, runningCount,
       statusDotClass, statusBadge, modeBadge,
-      formatDuration, formatTs, formatTokens,
+      formatAge, formatDuration, formatTs, formatTokens,
       openDetail, closeDetail, copyText,
       fetchLoops, doCreate, doStop, doRestart,
     };
