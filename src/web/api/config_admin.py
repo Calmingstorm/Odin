@@ -19,8 +19,9 @@ from aiohttp import web
 from ... import restart
 from ...config.persistence import (
     ConfigPersistError,
+    config_transaction,
     persist_config_mutation,
-    persist_config_paths,
+    persist_config_paths_locked,
     submitted_leaves,
 )
 from ...config.schema import Config
@@ -367,38 +368,46 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
                 {"error": "Cannot update sensitive fields via API"}, status=403
             )
 
-        # Snapshot before state for diff
-        before_config = _redact_config(bot.config.model_dump())
+        # ONE transaction: snapshot, validate, persist, and rebind all happen
+        # under the shared config lock. Reading bot.config outside it means a
+        # concurrent LLM save can land between the read and the rebind, and the
+        # rebind then drops that change from runtime while the leaf-scoped
+        # write leaves it on disk — runtime and disk silently disagree.
+        async with config_transaction():
+            # Snapshot before state for diff
+            before_config = _redact_config(bot.config.model_dump())
 
-        # Deep merge updates into current config
-        current = bot.config.model_dump()
-        _deep_merge(current, updates)
+            # Deep merge updates into current config
+            current = bot.config.model_dump()
+            _deep_merge(current, updates)
 
-        # Validate by reconstructing the config model
-        try:
-            new_config = Config(**current)
-        except Exception as e:
-            return web.json_response({"error": f"Invalid config: {e}"}, status=400)
+            # Validate by reconstructing the config model
+            try:
+                new_config = Config(**current)
+            except Exception as e:
+                return web.json_response({"error": f"Invalid config: {e}"}, status=400)
 
-        # Persist only the submitted paths, carrying VALIDATED values: a key the
-        # schema dropped never reaches disk, normalization does, and every path
-        # nobody submitted keeps its file text — comments, ordering, and
-        # unresolved ${VAR} placeholders included.
-        leaf_changes = submitted_leaves(updates, new_config.model_dump())
+            # Persist only the submitted paths, carrying VALIDATED values: a key
+            # the schema dropped never reaches disk, normalization does, and
+            # every path nobody submitted keeps its file text — comments,
+            # ordering, and unresolved ${VAR} placeholders included.
+            leaf_changes = submitted_leaves(updates, new_config.model_dump(), Config)
 
-        # Persist BEFORE mutating runtime. The old order applied the change in
-        # memory, then logged any write failure and returned 200 anyway — so the
-        # UI reported success for a change that vanished at the next restart.
-        try:
-            await persist_config_paths(leaf_changes)
-        except ConfigPersistError as e:
-            log.warning("Config rejected — could not persist: %s", e)
-            return web.json_response(
-                {"error": f"Configuration not saved: {_sanitize_error(e)}"}, status=500
-            )
+            # Persist BEFORE mutating runtime. The old order applied the change
+            # in memory, then logged any write failure and returned 200 anyway —
+            # so the UI reported success for a change that vanished at the next
+            # restart.
+            try:
+                await persist_config_paths_locked(leaf_changes)
+            except ConfigPersistError as e:
+                log.warning("Config rejected — could not persist: %s", e)
+                return web.json_response(
+                    {"error": f"Configuration not saved: {_sanitize_error(e)}"},
+                    status=500,
+                )
 
-        # Apply to bot
-        bot.config = new_config
+            # Apply to bot
+            bot.config = new_config
 
         # The per-spawn agent tool schema depends on the agent model/effort
         # axis modes, which can change through this general path too — rebuild

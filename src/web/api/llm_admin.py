@@ -16,6 +16,7 @@ import urllib.parse as _urlparse
 
 from aiohttp import web
 
+from ...config.persistence import config_transaction
 from ...config.schema import (
     AGENT_SETTING_AUTO,
     CODEX_REASONING_EFFORTS,
@@ -411,8 +412,9 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
         # switch_provider runs the SYNC persist on an executor future inside
         # its own lock (settled before the lock releases) and restores the
         # prior provider on persist failure — no interleaving window.
-        result = await bot.llm_gateway.switch_provider(
-            provider, persist=lambda: _persist_llm_sections_sync(bot))
+        async with config_transaction():
+            result = await bot.llm_gateway.switch_provider(
+                provider, persist=lambda: _persist_llm_sections_sync(bot))
         if "error" in result:
             reason = result["error"]
             status = 500 if "persist failed" in reason else 400
@@ -438,7 +440,10 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
         try:
-            async with lock:
+            # config_transaction() is the OUTER lock everywhere; a generic
+            # /api/config save takes it too, so the two paths can no longer
+            # interleave between reading bot.config and rebinding it.
+            async with config_transaction(), lock:
                 cfg = bot.config.openai_codex
                 # Validate BEFORE any mutation — Literal does not validate
                 # direct assignment, and a rejected request must leave config,
@@ -620,8 +625,9 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         # releases), the candidate is applied, persisted, and (on persist
         # failure) EXACTLY restored — no phantom success, no probed reload.
         try:
-            result = await bot.llm_gateway.reload_auxiliary(
-                desired, persist=lambda: _persist_llm_sections_sync(bot))
+            async with config_transaction():
+                result = await bot.llm_gateway.reload_auxiliary(
+                    desired, persist=lambda: _persist_llm_sections_sync(bot))
         except Exception as e:
             log.exception("Auxiliary reload raised")
             return web.json_response({"error": f"reload failed: {e}"}, status=500)
@@ -648,7 +654,10 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
         try:
-            async with lock:
+            # config_transaction() is the OUTER lock everywhere; a generic
+            # /api/config save takes it too, so the two paths can no longer
+            # interleave between reading bot.config and rebinding it.
+            async with config_transaction(), lock:
                 cfg = bot.config.ollama
                 changed = False
                 if "enabled" in body:
@@ -696,7 +705,10 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
         try:
-            async with lock:
+            # config_transaction() is the OUTER lock everywhere; a generic
+            # /api/config save takes it too, so the two paths can no longer
+            # interleave between reading bot.config and rebinding it.
+            async with config_transaction(), lock:
                 cfg = bot.config.kimi
                 changed = False
                 if "enabled" in body:
@@ -823,7 +835,9 @@ def register_ollama_admin(routes: web.RouteTableDef, bot) -> None:
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
-        async with lock:
+        # config_transaction() is the OUTER lock everywhere (see the config
+        # routes) so a generic /api/config save cannot interleave with this one.
+        async with config_transaction(), lock:
             client = getattr(getattr(bot, "llm_gateway", None), "ollama_client", None)
             if client is None:
                 return web.json_response({"error": "Ollama not configured"}, status=503)
@@ -903,7 +917,9 @@ def register_kimi_admin(routes: web.RouteTableDef, bot) -> None:
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
 
-        async with lock:
+        # config_transaction() is the OUTER lock everywhere (see the config
+        # routes) so a generic /api/config save cannot interleave with this one.
+        async with config_transaction(), lock:
             client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
             if client is None:
                 return web.json_response({"error": "Kimi not configured"}, status=503)

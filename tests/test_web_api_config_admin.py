@@ -661,3 +661,54 @@ class TestPersonalityPersistFirst:
         on_disk = YAML().load(_active_config.read_text())["personality"]
         assert on_disk["preset"] == "custom"
         assert on_disk["custom_name"] == "Test"
+
+
+class TestConfigTransaction:
+    """The whole mutation runs under one lock.
+
+    Odin's repro: an LLM update overwritten by a stale generic document. A
+    generic save reads bot.config, validates a merged copy, persists, then
+    rebinds bot.config. If another writer commits between the read and the
+    rebind, the rebind is built from a snapshot that predates it — so the
+    change vanishes from runtime while the leaf-scoped write leaves it on
+    disk, and runtime and disk silently disagree.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_writer_is_not_clobbered(self, _active_config):
+        import asyncio
+
+        from src.config.persistence import config_transaction
+
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            # Hold the transaction like a concurrent LLM route would, mutate
+            # bot.config underneath, and only then let the generic save run.
+            async with config_transaction():
+                request = asyncio.create_task(
+                    c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 7}})
+                )
+                await asyncio.sleep(0.05)
+                # The generic handler must still be waiting for the lock — if it
+                # read bot.config already, this change would be lost below.
+                assert not request.done()
+                bot.config.openai_codex.model = "concurrently-set-model"
+
+            r = await request
+            assert r.status == 200
+
+        assert bot.config.tools.max_tool_iterations_chat == 7, "the save applied"
+        assert bot.config.openai_codex.model == "concurrently-set-model", (
+            "the concurrent writer's change survived the rebind"
+        )
+
+    @pytest.mark.asyncio
+    async def test_lock_is_released_after_a_rejected_save(self, _active_config):
+        """A 400 returns from inside the transaction — the lock must not leak."""
+        from src.config.persistence import config_write_lock
+
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": "no"}})
+            assert r.status == 400
+        assert not config_write_lock.locked()

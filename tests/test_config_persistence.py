@@ -273,3 +273,80 @@ class TestCancellationSettlement:
         )
         # The last writer wins — a cancelled one cannot come back and stomp it.
         assert "level: ERROR" in config_file.read_text()
+
+
+class TestAliasAwareness:
+    """Pydantic accepts legacy spellings via validation_alias
+    (search.chromadb_path → search_db_path). A submitted alias is absent from
+    the validated dump, so without resolution it is silently dropped — and
+    writing the canonical name beside a surviving legacy key means the alias
+    wins on reload, reverting the change."""
+
+    def test_submitted_alias_resolves_to_the_canonical_field(self):
+        from src.config.schema import Config
+
+        leaves = submitted_leaves(
+            {"search": {"chromadb_path": "/new/path"}},
+            {"search": {"search_db_path": "/new/path", "enabled": True}},
+            Config,
+        )
+        assert leaves == [(("search", "search_db_path"), "/new/path", ("chromadb_path",))]
+
+    def test_without_the_schema_an_alias_is_still_dropped(self):
+        """Documents why the call site must pass the model: no schema, no
+        alias resolution."""
+        assert submitted_leaves(
+            {"search": {"chromadb_path": "/new/path"}},
+            {"search": {"search_db_path": "/old", "enabled": True}},
+        ) == []
+
+    def test_canonical_key_still_resolves_normally(self):
+        from src.config.schema import Config
+
+        leaves = submitted_leaves(
+            {"search": {"search_db_path": "/p"}},
+            {"search": {"search_db_path": "/p"}},
+            Config,
+        )
+        assert leaves == [(("search", "search_db_path"), "/p", ("chromadb_path",))]
+
+    def test_writer_updates_the_legacy_key_the_file_uses(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text("search:\n  chromadb_path: /old/path\n")
+        patch_config_paths(
+            [(("search", "search_db_path"), "/new/path", ("chromadb_path",))], path=path
+        )
+        text = path.read_text()
+        assert "chromadb_path: /new/path" in text
+        assert "search_db_path" not in text, "a canonical sibling would lose to the alias"
+
+    def test_writer_uses_the_canonical_key_when_the_file_has_it(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text("search:\n  search_db_path: /old/path\n")
+        patch_config_paths(
+            [(("search", "search_db_path"), "/new/path", ("chromadb_path",))], path=path
+        )
+        assert "search_db_path: /new/path" in path.read_text()
+
+    def test_writer_creates_the_canonical_key_when_neither_exists(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text("discord:\n  token: x\n")
+        patch_config_paths(
+            [(("search", "search_db_path"), "/p", ("chromadb_path",))], path=path
+        )
+        assert "search_db_path: /p" in path.read_text()
+
+    def test_legacy_config_round_trips_to_the_same_effective_value(self, tmp_path):
+        """End to end: a legacy-spelled file edited through this path reloads
+        with the operator's new value, not the old one."""
+        from ruamel.yaml import YAML
+
+        from src.config.schema import Config
+
+        path = tmp_path / "config.yml"
+        path.write_text("discord:\n  token: x\nsearch:\n  chromadb_path: /old\n")
+        patch_config_paths(
+            [(("search", "search_db_path"), "/new", ("chromadb_path",))], path=path
+        )
+        reloaded = Config(**YAML().load(path.read_text()))
+        assert reloaded.search.search_db_path == "/new"

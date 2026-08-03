@@ -57,11 +57,49 @@ class ConfigPersistError(RuntimeError):
 
 
 ConfigPath = Sequence[str]
+# A leaf change: (path, value) or (path, value, other_accepted_spellings). The
+# third element carries a field's legacy aliases so the writer can update the
+# key the file already uses instead of adding a canonical sibling that pydantic
+# would then ignore.
+ConfigChange = (
+    tuple[tuple[str, ...], Any] | tuple[tuple[str, ...], Any, tuple[str, ...]]
+)
+
+
+def _field_lookup(model_cls: Any) -> dict[str, tuple[str, Any, tuple[str, ...]]]:
+    """``{accepted_key: (canonical_name, nested_model_or_None, other_spellings)}``.
+
+    Pydantic accepts legacy spellings through ``validation_alias``
+    (``search.chromadb_path`` → ``search_db_path``). A submitted alias must
+    resolve to its canonical field, or the value is silently dropped: it is
+    absent from the validated dump, so nothing persists it.
+    """
+    from pydantic import BaseModel
+
+    fields = getattr(model_cls, "model_fields", None)
+    if not fields:
+        return {}
+    out: dict[str, tuple[str, Any, tuple[str, ...]]] = {}
+    for name, field in fields.items():
+        annotation = field.annotation
+        nested = (
+            annotation
+            if isinstance(annotation, type) and issubclass(annotation, BaseModel)
+            else None
+        )
+        spellings = [name]
+        for candidate in (field.validation_alias, field.alias):
+            if isinstance(candidate, str) and candidate not in spellings:
+                spellings.append(candidate)
+        others = tuple(s for s in spellings if s != name)
+        for spelling in spellings:
+            out[spelling] = (name, nested, others)
+    return out
 
 
 def submitted_leaves(
-    updates: Mapping[str, Any], validated: Mapping[str, Any]
-) -> list[tuple[tuple[str, ...], Any]]:
+    updates: Mapping[str, Any], validated: Mapping[str, Any], model_cls: Any = None
+) -> list[ConfigChange]:
     """The leaves a caller submitted, carrying their VALIDATED values.
 
     Two properties matter, and they pull in opposite directions:
@@ -77,23 +115,32 @@ def submitted_leaves(
 
     Lists are leaves: a submitted list replaces the stored one wholesale rather
     than being merged element-wise.
-    """
-    out: list[tuple[tuple[str, ...], Any]] = []
 
-    def walk(new: Mapping[str, Any], known: Any, prefix: tuple[str, ...]) -> None:
+    When *model_cls* is given, submitted keys are resolved through the schema so
+    legacy aliases land on their canonical field, and each emitted change also
+    carries that field's other accepted spellings so the writer can update the
+    key the file already uses.
+    """
+    out: list[ConfigChange] = []
+
+    def walk(new: Mapping[str, Any], known: Any, model: Any, prefix: tuple[str, ...]) -> None:
+        lookup = _field_lookup(model) if model is not None else {}
         for key, value in new.items():
-            path = (*prefix, str(key))
-            if not isinstance(known, Mapping) or key not in known:
+            canonical, nested, aliases = lookup.get(str(key), (str(key), None, ()))
+            path = (*prefix, canonical)
+            if not isinstance(known, Mapping) or canonical not in known:
                 # Validation dropped this path (unknown/removed field) — the
                 # runtime ignores it, so disk must not carry it either.
                 continue
-            known_value = known[key]
+            known_value = known[canonical]
             if isinstance(value, Mapping) and isinstance(known_value, Mapping):
-                walk(value, known_value, path)
+                walk(value, known_value, nested, path)
+            elif aliases:
+                out.append((path, known_value, aliases))
             else:
                 out.append((path, known_value))
 
-    walk(updates, validated, ())
+    walk(updates, validated, model_cls, ())
     return out
 
 
@@ -206,7 +253,7 @@ def mutate_config_document(
 
 
 def patch_config_paths(
-    changes: Iterable[tuple[ConfigPath, Any]], *, path: Path | str | None = None
+    changes: Iterable[ConfigChange], *, path: Path | str | None = None
 ) -> None:
     """Apply leaf *changes* to the active config file, touching nothing else.
 
@@ -223,7 +270,9 @@ def patch_config_paths(
         raise ConfigPersistError("config file does not exist")
     document, orig_mode = _load_document(config_path)
 
-    for segments, value in changes:
+    for change in changes:
+        segments, value = change[0], change[1]
+        aliases: tuple[str, ...] = change[2] if len(change) > 2 else ()
         if not segments:
             continue
         node = document
@@ -236,6 +285,15 @@ def patch_config_paths(
                 node[segment] = child
             node = child
         leaf = segments[-1]
+        if hasattr(node, "get") and leaf not in node:
+            # The file may spell this field with a legacy alias. Update THAT key
+            # rather than adding the canonical name beside it: pydantic's
+            # validation_alias wins on reload, so a canonical sibling would be
+            # written and then ignored, silently reverting the change.
+            for alias in aliases:
+                if alias in node:
+                    leaf = alias
+                    break
         if _placeholder_still_accurate(node.get(leaf) if hasattr(node, "get") else None, value):
             # The file holds ${VAR} and the submitted value is just what that
             # placeholder already resolves to — a client that PUT back a whole
@@ -282,8 +340,38 @@ async def _run_settled(write: Callable[[], None]) -> None:
         raise asyncio.CancelledError
 
 
+def config_transaction():
+    """Hold the shared config lock across a WHOLE mutation.
+
+    Locking only the write is not enough. A config update reads
+    ``bot.config``, validates a merged copy, persists, and rebinds
+    ``bot.config`` — four steps. Two writers interleaving between the read and
+    the rebind means the second one's snapshot predates the first one's change,
+    so the rebind drops it from runtime while the leaf-scoped write leaves it
+    on disk: runtime and disk silently disagree.
+
+    Every config writer — the generic endpoint, the LLM routes, personality —
+    takes THIS lock, so all four steps are serialized. Lock order is
+    ``config_transaction()`` OUTER, provider_lock inner; never the reverse.
+
+    Callers inside a transaction use :func:`persist_config_paths_locked` /
+    :func:`persist_config_mutation_locked`, which skip re-acquiring it.
+    """
+    return config_write_lock
+
+
+async def persist_config_paths_locked(
+    changes: Iterable[ConfigChange], *, path: Path | str | None = None
+) -> None:
+    """Patch leaves to settlement. The caller already holds the lock."""
+    changes = list(changes)
+    if not changes:
+        return
+    await _run_settled(lambda: patch_config_paths(changes, path=path))
+
+
 async def persist_config_paths(
-    changes: Iterable[tuple[ConfigPath, Any]], *, path: Path | str | None = None
+    changes: Iterable[ConfigChange], *, path: Path | str | None = None
 ) -> None:
     """Patch leaves off the event loop, under the shared lock, to settlement."""
     changes = list(changes)
