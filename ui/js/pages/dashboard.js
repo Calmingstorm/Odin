@@ -121,7 +121,7 @@ export default {
                 <div class="dash-agent-goal">{{ a.goal }}</div>
                 <div class="dash-agent-meta">
                   <span>{{ formatDuration(a.runtime_seconds) }}</span>
-                  <span v-if="a.tools_used.length > 0" class="dash-agent-tools">{{ a.tools_used.length }} tools</span>
+                  <span v-if="(a.tools_used_count ?? 0) > 0" class="dash-agent-tools">{{ a.tools_used_count }} tools</span>
                 </div>
               </div>
             </div>

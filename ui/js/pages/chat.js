@@ -240,8 +240,17 @@ export default {
     ];
 
     const canSend = computed(() => input.value.trim().length > 0 && !sending.value);
+    // ws is a plain class instance, not a reactive object, so a computed over
+    // ws.state has NO reactive dependency — it evaluates once and freezes,
+    // leaving the pill claiming "Connected" long after the socket dropped and
+    // sends fell back to REST. Mirror logs.js: hold a ref, fed by a CHAINED
+    // onStateChange so the app-level handler still runs.
+    const wsState = ref(ws.state || 'disconnected');
+    let prevStateHandler = null;
+    let chatStateHandler = null;
+
     const wsStatus = computed(() => {
-      const state = ws.state;
+      const state = wsState.value;
       if (state === 'connected') return 'Connected';
       if (state === 'reconnecting') return 'Reconnecting\u2026';
       if (state === 'connecting') return 'Connecting\u2026';
@@ -463,12 +472,21 @@ export default {
 
     onMounted(() => {
       ws.subscribe('chat', onChatMessage);
+      wsState.value = ws.state || 'disconnected';
+      prevStateHandler = ws.onStateChange;
+      chatStateHandler = (state, detail) => {
+        wsState.value = state;
+        if (prevStateHandler) prevStateHandler(state, detail);
+      };
+      ws.onStateChange = chatStateHandler;
       loadHistory();
       nextTick(() => inputEl.value?.focus());
     });
 
     onUnmounted(() => {
       ws.unsubscribe('chat', onChatMessage);
+      // Only relinquish the hook if nobody chained on top of ours.
+      if (ws.onStateChange === chatStateHandler) ws.onStateChange = prevStateHandler;
       stopTypingTimer();
     });
 

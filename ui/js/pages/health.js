@@ -4,7 +4,7 @@
  */
 import { api } from '../api.js';
 import { formatTime } from '../utils.js';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 
 
 const STATUS_COLORS = {
@@ -236,14 +236,23 @@ export default {
     }
 
     let interval = null;
-    onMounted(async () => {
-      await fetchHealth();
-      interval = setInterval(fetchHealth, 30000);
-    });
+    function arm() {
+      // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
+      // DEACTIVATES this component without unmounting it. Anything armed in
+      // onMounted would keep running invisibly until a top-level route change.
+      // Same pattern as loops.js/agents.js/logs.js.
+      fetchHealth();
+      if (!interval) interval = setInterval(fetchHealth, 30000);
+    }
 
-    onUnmounted(() => {
-      if (interval) clearInterval(interval);
-    });
+    function disarm() {
+      if (interval) { clearInterval(interval); interval = null; }
+    }
+
+    onMounted(arm);
+    onActivated(arm);
+    onDeactivated(disarm);
+    onUnmounted(disarm);
 
     return {
       data, loading, error, refreshing, components,

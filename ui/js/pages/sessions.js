@@ -3,7 +3,7 @@
  * Conversation threading, filter presets, sort options, visual improvements
  */
 import { api, ws } from '../api.js';
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
 
 
 const FILTER_PRESETS = [
@@ -779,10 +779,22 @@ export default {
       ws.subscribe('events', onEvent);
     });
 
-    onUnmounted(() => {
+    onActivated(() => {
+      // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
+      // DEACTIVATES this component without unmounting it. Anything armed in
+      // onMounted would keep running invisibly until a top-level route change.
+      // Same pattern as loops.js/agents.js/logs.js.
+      fetchSessions();
+      ws.subscribe('events', onEvent);
+    });
+
+    function disarm() {
       ws.unsubscribe('events', onEvent);
       clearTimeout(debounceTimer);
-    });
+    }
+
+    onDeactivated(disarm);
+    onUnmounted(disarm);
 
     return {
       sessions, loading, error,

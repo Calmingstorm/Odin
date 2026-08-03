@@ -6,7 +6,7 @@ import { api, ws } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatDuration } from '../utils.js';
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
 
 
 export default {
@@ -191,16 +191,25 @@ export default {
       }
     }
 
-    onMounted(() => {
+    function arm() {
+      // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
+      // DEACTIVATES this component without unmounting it. Anything armed in
+      // onMounted would keep running invisibly until a top-level route change.
+      // Same pattern as loops.js/agents.js/logs.js.
       fetchProcesses();
       ws.subscribe('events', onEvent);
       startAutoRefresh();
-    });
+    }
 
-    onUnmounted(() => {
+    function disarm() {
       ws.unsubscribe('events', onEvent);
       stopAutoRefresh();
-    });
+    }
+
+    onMounted(arm);
+    onActivated(arm);
+    onDeactivated(disarm);
+    onUnmounted(disarm);
 
     return {
       processes, loading, error, autoRefresh,

@@ -4,7 +4,7 @@
  */
 import { api } from '../api.js';
 import { fmtNum, formatTime } from '../utils.js';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 
 
 export default {
@@ -205,14 +205,23 @@ export default {
       fetchData();
     };
 
-    onMounted(() => {
+    function arm() {
+      // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
+      // DEACTIVATES this component without unmounting it. Anything armed in
+      // onMounted would keep running invisibly until a top-level route change.
+      // Same pattern as loops.js/agents.js/logs.js.
       fetchData();
-      timer = setInterval(fetchData, 15000);
-    });
+      if (!timer) timer = setInterval(fetchData, 15000);
+    }
 
-    onUnmounted(() => {
-      if (timer) clearInterval(timer);
-    });
+    function disarm() {
+      if (timer) { clearInterval(timer); timer = null; }
+    }
+
+    onMounted(arm);
+    onActivated(arm);
+    onDeactivated(disarm);
+    onUnmounted(disarm);
 
     return { loading, error, data, totals, activeTab, tabs, recentReversed, fmtNum, formatTime, retry };
   }
