@@ -797,3 +797,106 @@ class TestPersonalityTransaction:
             "an unchanged placeholder must survive a personality save"
         )
         assert "preset: custom" in text
+
+
+class TestCancellationDerivedPublication:
+    @pytest.mark.asyncio
+    async def test_generic_personality_save_publishes_derived_state_before_cancel(
+        self, _active_config
+    ):
+        import asyncio
+        import threading
+
+        import src.config.persistence as persistence
+        from src.llm import system_prompt
+
+        app, bot = _app(register_discord_config)
+        started = threading.Event()
+        release = threading.Event()
+        real = persistence.patch_config_paths
+
+        def slow(changes, *, path=None):
+            started.set()
+            release.wait()
+            real(changes, path=path)
+
+        with patch.object(persistence, "patch_config_paths", slow):
+            async with TestClient(TestServer(app)) as c:
+                request = asyncio.create_task(
+                    c.put(
+                        "/api/config",
+                        json={
+                            "personality": {
+                                "preset": "custom",
+                                "custom_name": "Cancelled Odin",
+                                "custom_identity": "still committed",
+                                "user_presets": {
+                                    "cancelled": {
+                                        "name": "Cancelled",
+                                        "identity": "committed",
+                                        "voice": "steady",
+                                    }
+                                },
+                            }
+                        },
+                    )
+                )
+                while not started.is_set():
+                    await asyncio.sleep(0.005)
+                request.cancel()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await request
+
+        assert bot.config.personality.custom_name == "Cancelled Odin"
+        assert "cancelled" in system_prompt._USER_PRESETS
+        bot.prompt_builder.rebuild_default.assert_called_once()
+        bot.tool_catalog.invalidate.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "route", "body"),
+    [
+        ("put", "/api/personality", {"preset": "pirate"}),
+        ("post", "/api/personality/presets", {"name": "cancelled", "identity": "still here"}),
+    ],
+)
+async def test_cancelled_failed_personality_write_does_not_publish(
+    monkeypatch, method, route, body
+):
+    async def cancelled_failure(_changes):
+        return OSError("disk full"), True
+
+    monkeypatch.setattr(
+        "src.web.api.config_admin.persist_config_paths_locked", cancelled_failure
+    )
+    app, bot = _app(register_personality)
+    before = bot.config.personality.model_copy(deep=True)
+
+    async with TestClient(TestServer(app)) as c:
+        with pytest.raises(Exception):
+            await getattr(c, method)(route, json=body)
+
+    assert bot.config.personality == before
+    bot.prompt_builder.invalidate.assert_not_called()
+    bot.tool_catalog.invalidate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_failed_generic_write_does_not_publish(monkeypatch):
+    async def cancelled_failure(_changes):
+        return OSError("disk full"), True
+
+    monkeypatch.setattr(
+        "src.web.api.config_admin.persist_config_paths_locked", cancelled_failure
+    )
+    app, bot = _app(register_discord_config)
+    before = bot.config.tools.max_tool_iterations_chat
+
+    async with TestClient(TestServer(app)) as c:
+        with pytest.raises(Exception):
+            await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 7}})
+
+    assert bot.config.tools.max_tool_iterations_chat == before
+    bot.tool_catalog.invalidate.assert_not_called()

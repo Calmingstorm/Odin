@@ -452,3 +452,97 @@ class TestAnchorSafety:
         path.write_text(self.ANCHORED)
         patch_config_paths([(("logging", "level"), "DEBUG")], path=path)
         assert "level: DEBUG" in path.read_text()
+
+
+class TestPersistOutcomeAndMetadata:
+    async def test_cancelled_failed_write_reports_both(self):
+        import asyncio
+        import threading
+
+        import src.config.persistence as persistence
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def fail_after_release():
+            started.set()
+            release.wait()
+            raise OSError("disk full")
+
+        task = asyncio.create_task(persistence._run_settled(fail_after_release))
+        while not started.is_set():
+            await asyncio.sleep(0.005)
+        task.cancel()
+        release.set()
+        exc, was_cancelled = await task
+        assert isinstance(exc, OSError)
+        assert was_cancelled is True
+
+    async def test_cancelled_write_settles_when_loop_is_closing(self, tmp_path):
+        import subprocess
+        import sys
+        import textwrap
+        from pathlib import Path
+
+        marker = tmp_path / "settled"
+        script = textwrap.dedent(
+            f"""
+            import asyncio
+            import time
+            from pathlib import Path
+            from src.config.persistence import _run_settled
+
+            marker = Path({str(marker)!r})
+
+            def write():
+                time.sleep(0.1)
+                marker.write_text("done")
+
+            async def main():
+                task = asyncio.create_task(_run_settled(write))
+                await asyncio.sleep(0.02)
+                task.cancel()
+                exc, cancelled = await task
+                assert exc is None and cancelled
+
+            asyncio.run(main())
+            """
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).parents[1],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert marker.read_text() == "done"
+        assert "Event loop is closed" not in proc.stderr
+
+    def test_mode_and_mtime_survive_metadata_copy_with_fresh_revision(self, config_file):
+        import time
+
+        before = config_file.stat()
+        os.chmod(config_file, 0o640)
+        old_ns = before.st_mtime_ns - 5_000_000_000
+        os.utime(config_file, ns=(before.st_atime_ns, old_ns))
+        time.sleep(0.01)
+
+        patch_config_paths([(("logging", "level"), "DEBUG")], path=config_file)
+
+        after = config_file.stat()
+        assert after.st_mode & 0o777 == 0o640
+        assert after.st_mtime_ns > old_ns
+        assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+
+    def test_user_xattr_survives_atomic_replace(self, config_file):
+        if not hasattr(os, "setxattr"):
+            pytest.skip("extended attributes unavailable")
+        try:
+            os.setxattr(config_file, b"user.odin_test", b"keep-me")
+        except OSError as exc:
+            pytest.skip(f"filesystem does not support user xattrs: {exc}")
+
+        patch_config_paths([(("logging", "level"), "DEBUG")], path=config_file)
+
+        assert os.getxattr(config_file, b"user.odin_test") == b"keep-me"

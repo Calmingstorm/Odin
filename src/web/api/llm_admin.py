@@ -9,18 +9,19 @@ parity contract pins.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import ipaddress as _ipaddress
-import tempfile
 import urllib.parse as _urlparse
 
 from aiohttp import web
 
-from ...config.persistence import config_transaction
+from ...config.persistence import (
+    config_transaction,
+    patch_config_paths,
+    persist_config_paths_locked,
+)
 from ...config.schema import (
     AGENT_SETTING_AUTO,
     CODEX_REASONING_EFFORTS,
-    active_config_path,
     allowed_efforts_for_model,
     effort_incompatibility_error,
 )
@@ -80,171 +81,6 @@ def _parse_int(val, name: str, lo: int = 1, hi: int = 262000) -> int:
     if v < lo or v > hi:
         raise ValueError(f"{name} must be between {lo} and {hi}")
     return v
-
-_ui_set_secrets: set[str] = set()
-
-def _safe_secret(key, existing_val, memory_val):
-    """Preserve env-var placeholders unless explicitly set via UI this session."""
-    if key in _ui_set_secrets:
-        return memory_val
-    if isinstance(existing_val, str) and "${" in existing_val:
-        return existing_val
-    return memory_val
-
-class PersistError(RuntimeError):
-    """The persistence target could not be read, parsed, or written. Raised
-    (not silently swallowed) so a mutation endpoint fails loudly and triggers
-    rollback instead of reporting a phantom success."""
-
-
-def _persist_llm_sections_sync(bot) -> None:
-    """Merge only LLM-related sections into config.yml using round-trip YAML.
-
-    Preserves comments, ordering, style, env-var placeholders, and the file's
-    permission mode. Raises ``PersistError`` when the target is missing,
-    empty, malformed, or unreadable — for a mutation endpoint that MUST be a
-    failure, not a silent no-op that lets the route claim it persisted.
-    """
-    import os
-
-    # Persist the file the live config was LOADED from — never a CWD-relative
-    # "config.yml". A fabricated Config (a test double or one-off script that
-    # never called load_config) has no active path, so persistence refuses
-    # rather than clobbering whatever config.yml happens to sit in the CWD.
-    config_path = active_config_path()
-    if config_path is None:
-        raise PersistError("refusing to persist a config not loaded from disk")
-    if not config_path.exists():
-        raise PersistError("config.yml does not exist")
-    from ruamel.yaml import YAML
-
-    ry = YAML()
-    ry.preserve_quotes = True
-    try:
-        with open(config_path) as f:
-            existing = ry.load(f)
-    except Exception as exc:
-        # GENERIC client message — ruamel parse errors (esp. duplicate-key)
-        # echo the conflicting VALUES, which in this file are secrets. The raw
-        # detail goes to logs only, never into the raised message / HTTP body.
-        log.warning("config.yml parse failed: %s", type(exc).__name__)
-        raise PersistError("config.yml unreadable or malformed") from None
-    if existing is None:
-        raise PersistError("config.yml is empty")
-    orig_mode = os.stat(config_path).st_mode & 0o777
-
-    if "openai_codex" not in existing:
-        existing["openai_codex"] = {}
-    existing["openai_codex"]["enabled"] = bot.config.openai_codex.enabled
-    existing["openai_codex"]["model"] = bot.config.openai_codex.model
-    existing["openai_codex"]["max_tokens"] = bot.config.openai_codex.max_tokens
-    existing["openai_codex"]["reasoning_effort"] = bot.config.openai_codex.reasoning_effort
-    existing["openai_codex"]["agent_reasoning_effort"] = (
-        bot.config.openai_codex.agent_reasoning_effort
-    )
-    existing["openai_codex"]["agent_model"] = bot.config.openai_codex.agent_model
-    # Removed feature: model routing is gone — strip any legacy block so it
-    # can't linger on disk (runtime already ignores it).
-    existing["openai_codex"].pop("model_routing", None)
-
-    # Auxiliary: only enabled + model are configurable (auth and token limit
-    # are shared with the main Codex client, never overwritten by this surface).
-    aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
-    if aux_cfg is not None:
-        if "auxiliary" not in existing["openai_codex"]:
-            existing["openai_codex"]["auxiliary"] = {}
-        aux_block = existing["openai_codex"]["auxiliary"]
-        aux_block["enabled"] = aux_cfg.enabled
-        aux_block["model"] = aux_cfg.model
-        # Delete the removed knobs so a legacy config gets cleaned on the next
-        # save (auth + token limit are shared with the main Codex client).
-        for dead in ("tasks", "max_tokens", "credentials_path"):
-            aux_block.pop(dead, None)
-
-    if "ollama" not in existing:
-        existing["ollama"] = {}
-    existing["ollama"]["enabled"] = bot.config.ollama.enabled
-    existing["ollama"]["base_url"] = bot.config.ollama.base_url
-    existing["ollama"]["model"] = bot.config.ollama.model
-    existing["ollama"]["max_tokens"] = bot.config.ollama.max_tokens
-    existing["ollama"]["timeout"] = bot.config.ollama.timeout
-    ex_ollama_key = existing["ollama"].get("api_key", "")
-    existing["ollama"]["api_key"] = _safe_secret(
-        "ollama.api_key", ex_ollama_key, bot.config.ollama.api_key
-    )
-
-    if "kimi" not in existing:
-        existing["kimi"] = {}
-    existing["kimi"]["enabled"] = bot.config.kimi.enabled
-    existing["kimi"]["model"] = bot.config.kimi.model
-    existing["kimi"]["max_tokens"] = bot.config.kimi.max_tokens
-    existing["kimi"]["timeout"] = bot.config.kimi.timeout
-    ex_kimi_key = existing["kimi"].get("api_key", "")
-    existing["kimi"]["api_key"] = _safe_secret("kimi.api_key", ex_kimi_key, bot.config.kimi.api_key)
-
-    if "llm_provider" not in existing:
-        existing["llm_provider"] = {}
-    existing["llm_provider"]["active_provider"] = bot.config.llm_provider.active_provider
-
-    # Atomic replace: write a temp file in the same dir, restore the ORIGINAL
-    # mode (mkstemp creates 0600 — os.replace would otherwise silently chmod
-    # the live 0664 config), fsync the file, os.replace, then fsync the dir so
-    # the rename is durable.
-    import io
-
-    buf = io.StringIO()
-    ry.dump(existing, buf)
-    parent = str(config_path.parent or ".")
-    fd, tmp = tempfile.mkstemp(dir=parent, suffix=".yml.tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(buf.getvalue())
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, orig_mode)
-        os.replace(tmp, config_path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
-    # os.replace is THE atomic commit point — the new config is now on disk.
-    # The directory fsync is a durability nicety ONLY; its failure must NOT
-    # raise (that would make the caller "roll back" runtime while disk already
-    # holds the new state, splitting disk vs runtime).
-    with contextlib.suppress(OSError):
-        dir_fd = os.open(parent, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-
-async def _persist_config(bot) -> None:
-    """LEGACY fail-soft persist for the sibling provider routes (Codex/Ollama/
-    Kimi config + model-set) and provider switch.
-
-    Settle-safe: the filesystem worker runs on an executor future via the
-    gateway and settles BEFORE the caller's provider_lock releases, so a
-    cancelled writer can't continue and clobber a later commit (the master
-    stale-write race is fixed). ``PersistError`` (missing/empty/malformed
-    config.yml) is swallowed + logged generically, matching master's silent
-    no-op; a genuine write failure propagates (master-equivalent 500).
-    ``CancelledError`` is NEVER swallowed — re-raised after the worker settles.
-
-    DEFERRED DEBT: these sibling routes are intentionally NOT transactional
-    here (no config/client-generation rollback, no exact snapshot) — a
-    follow-up PR owns that. Only the AUXILIARY route is strict + transactional
-    (see reload_auxiliary). See the PR body's 'Deferred' section.
-    """
-    exc, was_cancelled = await bot.llm_gateway.run_persist_settled(
-        lambda: _persist_llm_sections_sync(bot))
-    if isinstance(exc, PersistError):
-        log.warning("config.yml persist skipped (legacy fail-soft): %s", exc)
-        exc = None
-    if was_cancelled:
-        raise asyncio.CancelledError
-    if exc is not None:
-        raise exc
-
 
 def register_connection_pools(routes: web.RouteTableDef, bot) -> None:
     """Connection pool status (verbatim from the monolith)."""
@@ -414,12 +250,38 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
         # prior provider on persist failure — no interleaving window.
         async with config_transaction():
             result = await bot.llm_gateway.switch_provider(
-                provider, persist=lambda: _persist_llm_sections_sync(bot))
+                provider,
+                persist=lambda: patch_config_paths(
+                    [(('llm_provider', 'active_provider'), provider)]
+                ),
+            )
         if "error" in result:
             reason = result["error"]
             status = 500 if "persist failed" in reason else 400
             return web.json_response(result, status=status)
         return web.json_response(result)
+
+
+def _set_fields(obj, values: dict[str, object]) -> None:
+    for key, value in values.items():
+        setattr(obj, key, value)
+
+
+def _provider_changes(section: str, desired: dict[str, object], body: dict) -> list:
+    return [((section, key), desired[key]) for key in desired if key in body]
+
+
+async def _persist_or_response(changes: list, label: str):
+    """Persist desired leaves and preserve cancellation precedence on failure."""
+    persist_exc, was_cancelled = await persist_config_paths_locked(changes)
+    if persist_exc is not None:
+        log.warning("%s config rejected — could not persist: %s", label, persist_exc)
+        if was_cancelled:
+            raise asyncio.CancelledError
+        return web.json_response(
+            {"error": f"{label} configuration not saved"}, status=500
+        )
+    return was_cancelled
 
 
 def register_provider_config(routes: web.RouteTableDef, bot) -> None:
@@ -528,66 +390,81 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                             },
                             status=400,
                         )
-                changed = False
-                # Agent effort is read from config at call time by the agent
-                # iteration callbacks — persisting it must NOT trigger a codex
-                # client reload (auth-pool refresh) when nothing else changed.
-                needs_reload = False
-                # The spawn-tool effort catalogue depends on the MAIN model
-                # (an inherit-model agent axis resolves through it) AND the
-                # main effort (the inherited default whose servability decides
-                # required-ness), so either change must refresh the cached
-                # catalog exactly like an axis change.
-                model_changed = False
-                effort_changed = False
-                if "enabled" in body:
-                    cfg.enabled = bool(body["enabled"])
-                    changed = True
-                    needs_reload = True
-                if "model" in body and body["model"]:
-                    cfg.model = str(body["model"])
-                    changed = True
-                    needs_reload = True
-                    model_changed = True
-                if "max_tokens" in body:
-                    cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
-                    changed = True
-                    needs_reload = True
-                if effort is not None:
-                    cfg.reasoning_effort = str(effort)
-                    changed = True
-                    needs_reload = True
-                    # The main effort is the INHERITED default an omitted
-                    # per-spawn effort resolves to — the catalogue's
-                    # required-ness depends on it (see agent_tool_policy).
-                    effort_changed = True
-                axis_changed = False
-                if agent_effort_present:
-                    cfg.agent_reasoning_effort = (
-                        None if agent_effort is None else str(agent_effort)
+                desired = {
+                    "enabled": bool(body["enabled"]) if "enabled" in body else cfg.enabled,
+                    "model": str(body["model"]) if body.get("model") else cfg.model,
+                    "max_tokens": (
+                        _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
+                        if "max_tokens" in body
+                        else cfg.max_tokens
+                    ),
+                    "reasoning_effort": (
+                        str(effort) if effort is not None else cfg.reasoning_effort
+                    ),
+                    "agent_reasoning_effort": (
+                        (None if agent_effort is None else str(agent_effort))
+                        if agent_effort_present
+                        else cfg.agent_reasoning_effort
+                    ),
+                    "agent_model": agent_model if agent_model_present else cfg.agent_model,
+                }
+                changes = _provider_changes("openai_codex", desired, body)
+                was_cancelled = await _persist_or_response(changes, "Codex")
+                if isinstance(was_cancelled, web.Response):
+                    return was_cancelled
+                if changes:
+                    prior = {key: getattr(cfg, key) for key in desired}
+                    _set_fields(cfg, desired)
+                    needs_reload = any(
+                        key in body
+                        for key in ("enabled", "model", "max_tokens", "reasoning_effort")
                     )
-                    changed = True
-                    axis_changed = True
-                if agent_model_present:
-                    # Read at call time by the agent callbacks — no client
-                    # reload needed (mirrors agent_reasoning_effort).
-                    cfg.agent_model = agent_model
-                    changed = True
-                    axis_changed = True
-                # An axis or model change mutates live cfg immediately, and the
-                # per-spawn tool schema depends on both — invalidate NOW
-                # (before reload / persist) so a later reload/persist failure
-                # can never leave the catalog cached against the old schema
-                # while cfg already moved.
-                catalog_changed = axis_changed or model_changed or effort_changed
-                if catalog_changed and getattr(bot, "tool_catalog", None):
-                    bot.tool_catalog.invalidate()
-                if changed:
-                    if needs_reload:
-                        await bot.llm_gateway.reload_codex_inner()
-                    await _persist_config(bot)
+                    try:
+                        if needs_reload:
+                            await bot.llm_gateway.reload_codex_inner()
+                    except BaseException:
+                        _set_fields(cfg, prior)
+                        rollback_exc, rollback_cancelled = await persist_config_paths_locked(
+                            [
+                                (("openai_codex", key), value)
+                                for key, value in prior.items()
+                                if key in body
+                            ]
+                        )
+                        if rollback_exc is not None:
+                            log.critical(
+                                "Codex apply failed and persistence rollback failed: %s",
+                                rollback_exc,
+                            )
+                            _set_fields(cfg, desired)
+                            if needs_reload:
+                                await bot.llm_gateway.reload_codex_inner()
+                        elif needs_reload:
+                            await bot.llm_gateway.reload_codex_inner()
+                        if was_cancelled or rollback_cancelled:
+                            raise asyncio.CancelledError
+                        raise
+                    catalog_changed = any(
+                        key in body
+                        for key in (
+                            "model",
+                            "reasoning_effort",
+                            "agent_reasoning_effort",
+                            "agent_model",
+                        )
+                    )
+                    if catalog_changed and getattr(bot, "tool_catalog", None):
+                        bot.tool_catalog.invalidate()
+                if was_cancelled:
+                    raise asyncio.CancelledError
+
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            log.warning("Codex configuration apply failed: %s", e)
+            return web.json_response(
+                {"error": "Codex configuration not applied"}, status=500
+            )
 
         return web.json_response({
             "status": "updated",
@@ -627,7 +504,14 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         try:
             async with config_transaction():
                 result = await bot.llm_gateway.reload_auxiliary(
-                    desired, persist=lambda: _persist_llm_sections_sync(bot))
+                    desired,
+                    persist=lambda: patch_config_paths(
+                        [
+                            (('openai_codex', 'auxiliary', 'enabled'), desired['enabled']),
+                            (('openai_codex', 'auxiliary', 'model'), desired['model']),
+                        ]
+                    ),
+                )
         except Exception as e:
             log.exception("Auxiliary reload raised")
             return web.json_response({"error": f"reload failed: {e}"}, status=500)
@@ -659,31 +543,66 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             # interleave between reading bot.config and rebinding it.
             async with config_transaction(), lock:
                 cfg = bot.config.ollama
-                changed = False
-                if "enabled" in body:
-                    cfg.enabled = bool(body["enabled"])
-                    changed = True
-                if "base_url" in body and body["base_url"]:
-                    cfg.base_url = _validate_ollama_url(str(body["base_url"]))
-                    changed = True
-                if "model" in body and body["model"]:
-                    cfg.model = str(body["model"])
-                    changed = True
-                if "max_tokens" in body:
-                    cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
-                    changed = True
-                if "api_key" in body:
-                    cfg.api_key = str(body["api_key"])
-                    _ui_set_secrets.add("ollama.api_key")
-                    changed = True
-                if "timeout" in body:
-                    cfg.timeout = _parse_int(body["timeout"], "timeout", 10, 3600)
-                    changed = True
-                if changed:
-                    await bot.llm_gateway.reload_ollama_inner()
-                    await _persist_config(bot)
+                desired = {
+                    "enabled": bool(body["enabled"]) if "enabled" in body else cfg.enabled,
+                    "base_url": (
+                        _validate_ollama_url(str(body["base_url"]))
+                        if body.get("base_url")
+                        else cfg.base_url
+                    ),
+                    "model": str(body["model"]) if body.get("model") else cfg.model,
+                    "max_tokens": (
+                        _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
+                        if "max_tokens" in body
+                        else cfg.max_tokens
+                    ),
+                    "api_key": str(body["api_key"]) if "api_key" in body else cfg.api_key,
+                    "timeout": (
+                        _parse_int(body["timeout"], "timeout", 10, 3600)
+                        if "timeout" in body
+                        else cfg.timeout
+                    ),
+                }
+                changes = _provider_changes("ollama", desired, body)
+                was_cancelled = await _persist_or_response(changes, "Ollama")
+                if isinstance(was_cancelled, web.Response):
+                    return was_cancelled
+                if changes:
+                    prior = {key: getattr(cfg, key) for key in desired}
+                    prior_client = bot.llm_gateway.ollama_client
+                    _set_fields(cfg, desired)
+                    try:
+                        await bot.llm_gateway.reload_ollama_inner()
+                    except BaseException:
+                        _set_fields(cfg, prior)
+                        bot.llm_gateway.ollama_client = prior_client
+                        rollback_exc, rollback_cancelled = await persist_config_paths_locked(
+                            [
+                                (("ollama", key), value)
+                                for key, value in prior.items()
+                                if key in body
+                            ]
+                        )
+                        if rollback_exc is not None:
+                            log.critical(
+                                "Ollama apply failed and persistence rollback failed: %s",
+                                rollback_exc,
+                            )
+                            _set_fields(cfg, desired)
+                            await bot.llm_gateway.reload_ollama_inner()
+                        if was_cancelled or rollback_cancelled:
+                            raise asyncio.CancelledError
+                        raise
+                if was_cancelled:
+                    raise asyncio.CancelledError
+
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            log.warning("Ollama configuration apply failed: %s", e)
+            return web.json_response(
+                {"error": "Ollama configuration not applied"}, status=500
+            )
 
         return web.json_response({
             "status": "updated",
@@ -710,28 +629,61 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             # interleave between reading bot.config and rebinding it.
             async with config_transaction(), lock:
                 cfg = bot.config.kimi
-                changed = False
-                if "enabled" in body:
-                    cfg.enabled = bool(body["enabled"])
-                    changed = True
-                if "api_key" in body:
-                    cfg.api_key = str(body["api_key"])
-                    _ui_set_secrets.add("kimi.api_key")
-                    changed = True
-                if "model" in body and body["model"]:
-                    cfg.model = str(body["model"])
-                    changed = True
-                if "max_tokens" in body:
-                    cfg.max_tokens = _parse_int(body["max_tokens"], "max_tokens", 1, 262000)
-                    changed = True
-                if "timeout" in body:
-                    cfg.timeout = _parse_int(body["timeout"], "timeout", 10, 3600)
-                    changed = True
-                if changed:
-                    await bot.llm_gateway.reload_kimi_inner()
-                    await _persist_config(bot)
+                desired = {
+                    "enabled": bool(body["enabled"]) if "enabled" in body else cfg.enabled,
+                    "api_key": str(body["api_key"]) if "api_key" in body else cfg.api_key,
+                    "model": str(body["model"]) if body.get("model") else cfg.model,
+                    "max_tokens": (
+                        _parse_int(body["max_tokens"], "max_tokens", 1, 262000)
+                        if "max_tokens" in body
+                        else cfg.max_tokens
+                    ),
+                    "timeout": (
+                        _parse_int(body["timeout"], "timeout", 10, 3600)
+                        if "timeout" in body
+                        else cfg.timeout
+                    ),
+                }
+                changes = _provider_changes("kimi", desired, body)
+                was_cancelled = await _persist_or_response(changes, "Kimi")
+                if isinstance(was_cancelled, web.Response):
+                    return was_cancelled
+                if changes:
+                    prior = {key: getattr(cfg, key) for key in desired}
+                    prior_client = bot.llm_gateway.kimi_client
+                    _set_fields(cfg, desired)
+                    try:
+                        await bot.llm_gateway.reload_kimi_inner()
+                    except BaseException:
+                        _set_fields(cfg, prior)
+                        bot.llm_gateway.kimi_client = prior_client
+                        rollback_exc, rollback_cancelled = await persist_config_paths_locked(
+                            [
+                                (("kimi", key), value)
+                                for key, value in prior.items()
+                                if key in body
+                            ]
+                        )
+                        if rollback_exc is not None:
+                            log.critical(
+                                "Kimi apply failed and persistence rollback failed: %s",
+                                rollback_exc,
+                            )
+                            _set_fields(cfg, desired)
+                            await bot.llm_gateway.reload_kimi_inner()
+                        if was_cancelled or rollback_cancelled:
+                            raise asyncio.CancelledError
+                        raise
+                if was_cancelled:
+                    raise asyncio.CancelledError
+
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            log.warning("Kimi configuration apply failed: %s", e)
+            return web.json_response(
+                {"error": "Kimi configuration not applied"}, status=500
+            )
 
         return web.json_response({
             "status": "updated",
@@ -854,9 +806,19 @@ def register_ollama_admin(routes: web.RouteTableDef, bot) -> None:
                         ),
                     }, status=400)
 
+            persist_exc, was_cancelled = await persist_config_paths_locked(
+                [(('ollama', 'model'), model)]
+            )
+            if persist_exc is not None:
+                if was_cancelled:
+                    raise asyncio.CancelledError
+                return web.json_response(
+                    {"error": "Ollama model not saved"}, status=500
+                )
             client.model = model
             bot.config.ollama.model = model
-            await _persist_config(bot)
+            if was_cancelled:
+                raise asyncio.CancelledError
         return web.json_response({"status": "updated", "model": model})
 
 
@@ -931,9 +893,19 @@ def register_kimi_admin(routes: web.RouteTableDef, bot) -> None:
                     "error": f"Model '{model}' not available. Models: {', '.join(available[:10])}",
                 }, status=400)
 
+            persist_exc, was_cancelled = await persist_config_paths_locked(
+                [(('kimi', 'model'), model)]
+            )
+            if persist_exc is not None:
+                if was_cancelled:
+                    raise asyncio.CancelledError
+                return web.json_response(
+                    {"error": "Kimi model not saved"}, status=500
+                )
             client.model = model
             bot.config.kimi.model = model
-            await _persist_config(bot)
+            if was_cancelled:
+                raise asyncio.CancelledError
         return web.json_response({"status": "updated", "model": model})
 
 

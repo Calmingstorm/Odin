@@ -18,7 +18,7 @@ from aiohttp import web
 
 from ... import restart
 from ...config.persistence import (
-    ConfigPersistError,
+    PersistOutcome,
     config_transaction,
     persist_config_paths_locked,
     submitted_leaves,
@@ -396,28 +396,39 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
             # in memory, then logged any write failure and returned 200 anyway —
             # so the UI reported success for a change that vanished at the next
             # restart.
-            try:
-                was_cancelled = await persist_config_paths_locked(leaf_changes)
-            except ConfigPersistError as e:
-                log.warning("Config rejected — could not persist: %s", e)
+            persist_exc, was_cancelled = await persist_config_paths_locked(leaf_changes)
+            if persist_exc is not None:
+                if was_cancelled:
+                    raise asyncio.CancelledError
+                log.warning("Config rejected — could not persist: %s", persist_exc)
                 return web.json_response(
-                    {"error": f"Configuration not saved: {_sanitize_error(e)}"},
+                    {"error": f"Configuration not saved: {_sanitize_error(persist_exc)}"},
                     status=500,
                 )
 
-            # Apply to bot
+            # Publish every live view before cancellation may escape. bot.config
+            # is not the whole effective state: personality presets and prompt /
+            # tool schemas have process-global or cached derivatives.
             bot.config = new_config
-            if was_cancelled:
-                # The write COMMITTED before the cancellation reached us, so
-                # runtime had to be updated too — otherwise disk and bot.config
-                # disagree. State is coherent now; honour the cancellation.
-                raise asyncio.CancelledError
+            if "personality" in updates:
+                from src.llm.system_prompt import register_user_presets
 
-        # The per-spawn agent tool schema depends on the agent model/effort
-        # axis modes, which can change through this general path too — rebuild
-        # the tool catalog so the next turn / new spawn sees the new exposure.
-        if getattr(bot, "tool_catalog", None):
-            bot.tool_catalog.invalidate()
+                register_user_presets(
+                    {
+                        name: {
+                            "name": preset.name,
+                            "identity": preset.identity,
+                            "voice": preset.voice,
+                        }
+                        for name, preset in new_config.personality.user_presets.items()
+                    }
+                )
+                bot.prompt_builder.invalidate()
+                bot.prompt_builder.rebuild_default()
+            if getattr(bot, "tool_catalog", None):
+                bot.tool_catalog.invalidate()
+            if was_cancelled:
+                raise asyncio.CancelledError
 
         # Compute config diff and record in audit log
         after_config = _redact_config(new_config.model_dump())
@@ -457,7 +468,7 @@ def register_quick_actions(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({"status": "reloaded"})
 
 
-async def _persist_personality(p) -> bool:
+async def _persist_personality(p) -> PersistOutcome:
     """Write the DESIRED personality section through the shared round-trip writer.
 
     Takes the desired value rather than reading ``bot.config`` so callers can
@@ -545,12 +556,14 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
             # Persist first: installing the personality and registering its
             # presets globally before the write means a failed save leaves the
             # new identity live with nothing on disk to match it.
-            try:
-                was_cancelled = await _persist_personality(desired)
-            except ConfigPersistError as e:
-                log.warning("Personality rejected — could not persist: %s", e)
+            persist_exc, was_cancelled = await _persist_personality(desired)
+            if persist_exc is not None:
+                if was_cancelled:
+                    raise asyncio.CancelledError
+                log.warning("Personality rejected — could not persist: %s", persist_exc)
                 return web.json_response(
-                    {"error": f"Personality not saved: {_sanitize_error(e)}"}, status=500
+                    {"error": f"Personality not saved: {_sanitize_error(persist_exc)}"},
+                    status=500,
                 )
             bot.config.personality = desired
             from src.llm.system_prompt import register_user_presets
@@ -560,11 +573,11 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
                     for k, v in existing_user_presets.items()
                 }
             )
+            bot.prompt_builder.invalidate()
+            bot.tool_catalog.invalidate()
+            bot.prompt_builder.rebuild_default()
             if was_cancelled:
                 raise asyncio.CancelledError
-        bot.prompt_builder.invalidate()
-        bot.tool_catalog.invalidate()
-        bot.prompt_builder.rebuild_default()
         return web.json_response({"status": "updated", "preset": preset})
 
     @routes.post("/api/personality/presets")
@@ -606,12 +619,14 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
             desired = bot.config.personality.model_copy(
                 update={"user_presets": desired_presets}
             )
-            try:
-                was_cancelled = await _persist_personality(desired)
-            except ConfigPersistError as e:
-                log.warning("Preset rejected — could not persist: %s", e)
+            persist_exc, was_cancelled = await _persist_personality(desired)
+            if persist_exc is not None:
+                if was_cancelled:
+                    raise asyncio.CancelledError
+                log.warning("Preset rejected — could not persist: %s", persist_exc)
                 return web.json_response(
-                    {"error": f"Preset not saved: {_sanitize_error(e)}"}, status=500
+                    {"error": f"Preset not saved: {_sanitize_error(persist_exc)}"},
+                    status=500,
                 )
             bot.config.personality = desired
             from src.llm.system_prompt import register_user_presets
@@ -621,6 +636,10 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
                     for k, v in desired_presets.items()
                 }
             )
+            if desired.preset == name:
+                bot.prompt_builder.invalidate()
+                bot.tool_catalog.invalidate()
+                bot.prompt_builder.rebuild_default()
             if was_cancelled:
                 raise asyncio.CancelledError
         return web.json_response({"status": "saved", "name": name})
@@ -644,12 +663,14 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
             if resets_active:
                 update["preset"] = "odin"
             desired = bot.config.personality.model_copy(update=update)
-            try:
-                was_cancelled = await _persist_personality(desired)
-            except ConfigPersistError as e:
-                log.warning("Preset deletion rejected — could not persist: %s", e)
+            persist_exc, was_cancelled = await _persist_personality(desired)
+            if persist_exc is not None:
+                if was_cancelled:
+                    raise asyncio.CancelledError
+                log.warning("Preset deletion rejected — could not persist: %s", persist_exc)
                 return web.json_response(
-                    {"error": f"Preset not deleted: {_sanitize_error(e)}"}, status=500
+                    {"error": f"Preset not deleted: {_sanitize_error(persist_exc)}"},
+                    status=500,
                 )
             bot.config.personality = desired
             from src.llm.system_prompt import register_user_presets
@@ -659,12 +680,12 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
                     for k, v in desired_presets.items()
                 }
             )
+            if resets_active:
+                bot.prompt_builder.invalidate()
+                bot.tool_catalog.invalidate()
+                bot.prompt_builder.rebuild_default()
             if was_cancelled:
                 raise asyncio.CancelledError
-        if resets_active:
-            bot.prompt_builder.invalidate()
-            bot.tool_catalog.invalidate()
-            bot.prompt_builder.rebuild_default()
         return web.json_response({"status": "deleted", "name": name})
 
 

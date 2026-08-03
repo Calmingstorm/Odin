@@ -31,7 +31,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shutil
 import tempfile
+import threading
 import weakref
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from pathlib import Path
@@ -71,6 +73,7 @@ ConfigPath = Sequence[str]
 ConfigChange = (
     tuple[tuple[str, ...], Any] | tuple[tuple[str, ...], Any, tuple[str, ...]]
 )
+PersistOutcome = tuple[BaseException | None, bool]
 
 
 def _field_lookup(model_cls: Any) -> dict[str, tuple[str, Any, tuple[str, ...]]]:
@@ -246,9 +249,26 @@ def _dump_atomic(document: Any, config_path: Path, orig_mode: int) -> None:
             f.write(buf.getvalue())
             f.flush()
             os.fsync(f.fileno())
-        # mkstemp creates 0600; os.replace would otherwise silently tighten the
-        # live config's mode (typically 0664/0640) out from under the operator.
+        # Atomic replacement creates a new inode. Preserve security-relevant
+        # metadata rather than silently changing owner/group or dropping ACLs
+        # and extended attributes. chown precedes copystat because chown can
+        # clear set-id bits; copystat restores mode and supported xattrs.
+        source_stat = os.stat(config_path, follow_symlinks=False)
+        temp_stat = os.stat(tmp, follow_symlinks=False)
+        if (temp_stat.st_uid, temp_stat.st_gid) != (
+            source_stat.st_uid,
+            source_stat.st_gid,
+        ):
+            try:
+                os.chown(tmp, source_stat.st_uid, source_stat.st_gid)
+            except PermissionError:
+                raise ConfigPersistError(
+                    "cannot preserve config file ownership during atomic write"
+                ) from None
+        shutil.copystat(config_path, tmp, follow_symlinks=False)
         os.chmod(tmp, orig_mode)
+        # This is a new config revision; watchers must see a fresh mtime.
+        os.utime(tmp, None, follow_symlinks=False)
         os.replace(tmp, config_path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -349,38 +369,35 @@ def patch_config_paths(
     _dump_atomic(document, config_path, orig_mode)
 
 
-async def _run_settled(write: Callable[[], None]) -> bool:
-    """Run a sync write to SETTLEMENT, cancellation-safe. Returns was_cancelled.
+async def _run_settled(write: Callable[[], None]) -> PersistOutcome:
+    """Run a sync write to settlement; report result and cancellation.
 
-    ``asyncio.to_thread`` creates a Task: cancelling the awaiting coroutine
-    returns immediately, releases the caller's lock, and leaves the worker
-    thread still writing — so that abandoned write can land after, and
-    overwrite, a later one. An executor future is not a Task (the repository's
-    ``asyncio.all_tasks()`` shutdown drain cannot cancel it either);
-    re-shielding through any cancellation keeps the caller inside the lock
-    until the filesystem worker is genuinely done.
-
-    Cancellation is REPORTED, not raised here. The write has already committed
-    to disk by this point, so raising would strand the caller before it can
-    update runtime — disk would say one thing and ``bot.config`` another. The
-    caller finishes making state coherent and re-raises. This mirrors
-    ``LLMGateway.run_persist_settled``, whose contract is the same for the same
-    reason.
+    The dedicated worker thread communicates one explicit outcome through an
+    asyncio Future. That keeps the real write exception available even when
+    cancellation arrived first, and waiting for the thread to join keeps the
+    caller inside the transaction until no write can escape it.
     """
     loop = asyncio.get_running_loop()
-    fut = loop.run_in_executor(None, write)
-    was_cancelled = False
-    while not fut.done():
+    outcome: asyncio.Future[BaseException | None] = loop.create_future()
+
+    def worker() -> None:
         try:
-            await asyncio.shield(fut)
+            write()
+        except BaseException as exc:
+            loop.call_soon_threadsafe(outcome.set_result, exc)
+        else:
+            loop.call_soon_threadsafe(outcome.set_result, None)
+
+    thread = threading.Thread(target=worker, name="odin-config-write", daemon=True)
+    thread.start()
+    was_cancelled = False
+    while not outcome.done():
+        try:
+            await asyncio.shield(outcome)
         except asyncio.CancelledError:
             was_cancelled = True
-        except Exception:
-            break  # worker raised; fut.done() is now True
-    exc = fut.exception()
-    if exc is not None:
-        raise exc
-    return was_cancelled
+    thread.join()
+    return outcome.result(), was_cancelled
 
 
 def config_transaction():
@@ -410,16 +427,15 @@ def config_transaction():
 
 async def persist_config_paths_locked(
     changes: Iterable[ConfigChange], *, path: Path | str | None = None
-) -> bool:
-    """Patch leaves to settlement. The caller already holds the lock.
+) -> PersistOutcome:
+    """Patch leaves to settlement while the caller holds the transaction.
 
-    Returns True when the caller was cancelled mid-write: the write COMMITTED,
-    so the caller must finish updating runtime before re-raising, or disk and
-    ``bot.config`` end up disagreeing.
+    Returns ``(write_exception, was_cancelled)``. The caller publishes or
+    restores runtime from the real write result, then re-raises cancellation.
     """
     changes = list(changes)
     if not changes:
-        return False
+        return None, False
     return await _run_settled(lambda: patch_config_paths(changes, path=path))
 
 
@@ -431,17 +447,19 @@ async def persist_config_paths(
     if not changes:
         return
     async with config_transaction():
-        if await _run_settled(lambda: patch_config_paths(changes, path=path)):
+        exc, was_cancelled = await _run_settled(
+            lambda: patch_config_paths(changes, path=path)
+        )
+        if was_cancelled:
             raise asyncio.CancelledError
+        if exc is not None:
+            raise exc
 
 
 async def persist_config_mutation_locked(
     mutate: Callable[[Any], None], *, path: Path | str | None = None
-) -> bool:
-    """Mutate the document to settlement. The caller already holds the lock.
-
-    Returns True when the caller was cancelled mid-write (see
-    :func:`persist_config_paths_locked`)."""
+) -> PersistOutcome:
+    """Mutate to settlement while the caller holds the transaction."""
     return await _run_settled(lambda: mutate_config_document(mutate, path=path))
 
 
@@ -450,5 +468,10 @@ async def persist_config_mutation(
 ) -> None:
     """Mutate the document off the event loop, under the shared lock, to settlement."""
     async with config_transaction():
-        if await _run_settled(lambda: mutate_config_document(mutate, path=path)):
+        exc, was_cancelled = await _run_settled(
+            lambda: mutate_config_document(mutate, path=path)
+        )
+        if was_cancelled:
             raise asyncio.CancelledError
+        if exc is not None:
+            raise exc
