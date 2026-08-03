@@ -610,7 +610,7 @@ class TestPersonalityPersistFirst:
     async def test_update_failure_leaves_runtime_untouched(self):
         app, bot = _app(register_personality)
         before = bot.config.personality.preset
-        with patch("src.config.persistence.mutate_config_document",
+        with patch("src.config.persistence.patch_config_paths",
                    side_effect=OSError("read-only fs")):
             async with TestClient(TestServer(app)) as c:
                 r = await c.put("/api/personality", json={"preset": "pirate"})
@@ -622,7 +622,7 @@ class TestPersonalityPersistFirst:
         from src.llm import system_prompt
 
         app, bot = _app(register_personality)
-        with patch("src.config.persistence.mutate_config_document",
+        with patch("src.config.persistence.patch_config_paths",
                    side_effect=OSError("read-only fs")):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post("/api/personality/presets", json={
@@ -640,7 +640,7 @@ class TestPersonalityPersistFirst:
         bot.config.personality.user_presets["keeper"] = PersonalityPreset(
             name="keeper", identity="stays", voice="",
         )
-        with patch("src.config.persistence.mutate_config_document",
+        with patch("src.config.persistence.patch_config_paths",
                    side_effect=OSError("read-only fs")):
             async with TestClient(TestServer(app)) as c:
                 r = await c.delete("/api/personality/presets/keeper")
@@ -705,10 +705,95 @@ class TestConfigTransaction:
     @pytest.mark.asyncio
     async def test_lock_is_released_after_a_rejected_save(self, _active_config):
         """A 400 returns from inside the transaction — the lock must not leak."""
-        from src.config.persistence import config_write_lock
+        from src.config.persistence import config_transaction
 
         app, bot = _app(register_discord_config)
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": "no"}})
             assert r.status == 400
-        assert not config_write_lock.locked()
+        assert not config_transaction().locked()
+
+
+class TestCancellationCoherence:
+    """A cancelled save must not leave disk and runtime disagreeing.
+
+    The write commits before the cancellation is observed, so raising at that
+    point would strand the handler before it updates bot.config — disk would
+    say DEBUG while the process kept serving INFO.
+    """
+
+    @pytest.mark.asyncio
+    async def test_runtime_matches_disk_after_a_cancelled_save(self, _active_config):
+        import asyncio
+
+        from ruamel.yaml import YAML
+
+        import src.config.persistence as persistence
+
+        app, bot = _app(register_discord_config)
+        real = persistence.patch_config_paths
+
+        def slow(changes, *, path=None):
+            import time as _time
+            _time.sleep(0.3)
+            real(changes, path=path)
+
+        with patch.object(persistence, "patch_config_paths", slow):
+            async with TestClient(TestServer(app)) as c:
+                request = asyncio.create_task(
+                    c.put("/api/config", json={"logging": {"level": "DEBUG"}})
+                )
+                await asyncio.sleep(0.1)
+                request.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await request
+
+        on_disk = YAML().load(_active_config.read_text())["logging"]["level"]
+        assert on_disk == "DEBUG"
+        assert bot.config.logging.level == "DEBUG", (
+            "runtime must match what was committed to disk"
+        )
+
+
+class TestPersonalityTransaction:
+    """Read → compute → persist → publish must be one transaction: computing
+    outside the lock and publishing after releasing it lets two concurrent
+    saves land with runtime holding one value and disk the other."""
+
+    @pytest.mark.asyncio
+    async def test_personality_save_blocks_on_the_shared_lock(self, _active_config):
+        import asyncio
+
+        from src.config.persistence import config_transaction
+
+        app, bot = _app(register_personality)
+        async with TestClient(TestServer(app)) as c:
+            async with config_transaction():
+                request = asyncio.create_task(
+                    c.put("/api/personality", json={"preset": "pirate"})
+                )
+                await asyncio.sleep(0.05)
+                assert not request.done(), (
+                    "the handler must wait for the lock before reading bot.config"
+                )
+            r = await request
+            assert r.status == 200
+        assert bot.config.personality.preset == "pirate"
+
+    @pytest.mark.asyncio
+    async def test_personality_placeholder_is_not_flattened(self, _active_config, monkeypatch):
+        _active_config.write_text(
+            "discord:\n  token: x\npersonality:\n  custom_name: ${ODIN_NAME}\n"
+        )
+        monkeypatch.setenv("ODIN_NAME", "Odin")
+        app, bot = _app(register_personality)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/personality", json={
+                "preset": "custom", "custom_name": "Odin", "custom_identity": "id",
+            })
+            assert r.status == 200
+        text = _active_config.read_text()
+        assert "custom_name: ${ODIN_NAME}" in text, (
+            "an unchanged placeholder must survive a personality save"
+        )
+        assert "preset: custom" in text

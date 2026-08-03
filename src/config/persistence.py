@@ -21,7 +21,7 @@ This module generalizes the correct one:
 * failure raises ``ConfigPersistError`` so a mutation endpoint fails loudly
   rather than claiming a phantom save.
 
-``config_write_lock`` serializes every writer. Without one shared lock, a
+``config_transaction()`` serializes every writer. Without one shared lock, a
 generic save and an LLM save can interleave between load and write and silently
 drop each other's changes.
 """
@@ -32,7 +32,8 @@ import asyncio
 import contextlib
 import os
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+import weakref
+from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -41,10 +42,16 @@ from .schema import active_config_path
 
 log = get_logger("config.persistence")
 
-# ONE lock for every config writer in the process (generic, LLM, personality,
-# feature panels). Load-modify-write against a shared file is only safe when
-# all writers queue behind the same lock.
-config_write_lock = asyncio.Lock()
+# ONE lock for every config writer (generic, LLM, personality, feature panels):
+# load-modify-write against a shared file is only safe when all writers queue
+# behind the same lock.
+#
+# Created PER EVENT LOOP rather than at import. An asyncio.Lock binds to the
+# loop that first awaits it, so a module-level singleton reaching a second loop
+# raises "is bound to a different event loop" — and if the first loop died
+# holding it, it arrives permanently locked. Keyed weakly so a finished loop's
+# lock is collected with it.
+_loop_locks: MutableMapping[Any, asyncio.Lock] = weakref.WeakKeyDictionary()
 
 
 class ConfigPersistError(RuntimeError):
@@ -162,8 +169,43 @@ def _placeholder_still_accurate(existing: Any, new_value: Any) -> bool:
     except ValueError:
         return False
     # YAML scalars arrive as strings; the validated model has already coerced
-    # them (port "3002" → 3002), so compare both ways.
-    return resolved == new_value or resolved == str(new_value)
+    # them (port "3002" → 3002, enabled "true" → True). Compare the way YAML
+    # itself would, so a typed placeholder is not flattened to a literal: a
+    # plain str() comparison turns "true" vs True into a spurious difference.
+    if resolved == new_value or resolved == str(new_value):
+        return True
+    if isinstance(new_value, bool):
+        return resolved.strip().lower() in (
+            ("true", "yes", "on") if new_value else ("false", "no", "off")
+        )
+    if isinstance(new_value, (int, float)):
+        try:
+            return type(new_value)(resolved.strip()) == new_value
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def _assert_not_shared(node: Any, path: tuple[str, ...]) -> None:
+    """Refuse to write through a YAML anchor/merge-shared mapping.
+
+    ruamel round-trip keeps ONE object behind an anchor and every alias of it,
+    so setting a key on ``<<: *defaults`` (or on an anchored section) silently
+    rewrites every other section sharing it. That breaks the leaf-only contract
+    in the least visible way possible, so this fails loudly instead and leaves
+    the operator's file untouched.
+    """
+    anchor = getattr(node, "anchor", None)
+    if anchor is not None and getattr(anchor, "value", None):
+        raise ConfigPersistError(
+            f"cannot safely edit '{'.'.join(path) or 'root'}': it is a YAML anchor "
+            "shared with other sections — edit the config file directly"
+        )
+    if hasattr(node, "merge") and getattr(node, "merge", None):
+        raise ConfigPersistError(
+            f"cannot safely edit '{'.'.join(path) or 'root'}': it inherits from a "
+            "YAML merge key shared with other sections — edit the config file directly"
+        )
 
 
 def _load_document(config_path: Path) -> tuple[Any, int]:
@@ -276,7 +318,8 @@ def patch_config_paths(
         if not segments:
             continue
         node = document
-        for segment in segments[:-1]:
+        _assert_not_shared(node, ())
+        for depth, segment in enumerate(segments[:-1]):
             child = node.get(segment) if hasattr(node, "get") else None
             if not isinstance(child, dict):
                 # ruamel maps are dict subclasses; a plain dict inserted here
@@ -284,43 +327,45 @@ def patch_config_paths(
                 child = {}
                 node[segment] = child
             node = child
+            _assert_not_shared(node, tuple(segments[: depth + 1]))
         leaf = segments[-1]
-        if hasattr(node, "get") and leaf not in node:
-            # The file may spell this field with a legacy alias. Update THAT key
-            # rather than adding the canonical name beside it: pydantic's
-            # validation_alias wins on reload, so a canonical sibling would be
-            # written and then ignored, silently reverting the change.
-            for alias in aliases:
-                if alias in node:
-                    leaf = alias
-                    break
-        if _placeholder_still_accurate(node.get(leaf) if hasattr(node, "get") else None, value):
-            # The file holds ${VAR} and the submitted value is just what that
-            # placeholder already resolves to — a client that PUT back a whole
-            # fetched document, not an operator changing anything. Keep the
-            # placeholder; writing the resolved value would put the secret on
-            # disk in plaintext.
-            continue
-        node[leaf] = value
+        # Write EVERY spelling the file already carries. Updating only one of a
+        # canonical/legacy pair leaves the other stale, and pydantic's
+        # validation_alias wins on reload — so the change would silently revert.
+        # When the file has none of them, create the canonical key.
+        present = [k for k in (leaf, *aliases) if hasattr(node, "get") and k in node]
+        for target in present or [leaf]:
+            if _placeholder_still_accurate(
+                node.get(target) if hasattr(node, "get") else None, value
+            ):
+                # The file holds ${VAR} and the submitted value is just what that
+                # placeholder already resolves to — a client that PUT back a whole
+                # fetched document, not an operator changing anything. Keep the
+                # placeholder; writing the resolved value would put the secret on
+                # disk in plaintext.
+                continue
+            node[target] = value
 
     _dump_atomic(document, config_path, orig_mode)
 
 
-async def _run_settled(write: Callable[[], None]) -> None:
-    """Run a sync write to SETTLEMENT, cancellation-safe, then re-raise.
+async def _run_settled(write: Callable[[], None]) -> bool:
+    """Run a sync write to SETTLEMENT, cancellation-safe. Returns was_cancelled.
 
     ``asyncio.to_thread`` creates a Task: cancelling the awaiting coroutine
-    returns immediately while the worker thread keeps running, so the caller's
-    lock is released with a write still in flight — and that abandoned write
-    can land after, and overwrite, a later one. An executor future is not a
-    Task, so the repository's ``asyncio.all_tasks()`` shutdown drain cannot
-    cancel it either; re-shielding through any cancellation keeps the caller
-    inside the lock until the filesystem worker is genuinely done.
+    returns immediately, releases the caller's lock, and leaves the worker
+    thread still writing — so that abandoned write can land after, and
+    overwrite, a later one. An executor future is not a Task (the repository's
+    ``asyncio.all_tasks()`` shutdown drain cannot cancel it either);
+    re-shielding through any cancellation keeps the caller inside the lock
+    until the filesystem worker is genuinely done.
 
-    ``fut.exception()`` is the ACTUAL thread result, so a cancelled caller is
-    never mistaken for a successful write. This mirrors
-    ``LLMGateway.run_persist_settled``, which fixed the same race on the LLM
-    persistence path.
+    Cancellation is REPORTED, not raised here. The write has already committed
+    to disk by this point, so raising would strand the caller before it can
+    update runtime — disk would say one thing and ``bot.config`` another. The
+    caller finishes making state coherent and re-raises. This mirrors
+    ``LLMGateway.run_persist_settled``, whose contract is the same for the same
+    reason.
     """
     loop = asyncio.get_running_loop()
     fut = loop.run_in_executor(None, write)
@@ -335,9 +380,7 @@ async def _run_settled(write: Callable[[], None]) -> None:
     exc = fut.exception()
     if exc is not None:
         raise exc
-    if was_cancelled:
-        # State is coherent (the write finished) — now honor the cancellation.
-        raise asyncio.CancelledError
+    return was_cancelled
 
 
 def config_transaction():
@@ -357,17 +400,27 @@ def config_transaction():
     Callers inside a transaction use :func:`persist_config_paths_locked` /
     :func:`persist_config_mutation_locked`, which skip re-acquiring it.
     """
-    return config_write_lock
+    loop = asyncio.get_running_loop()
+    lock = _loop_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _loop_locks[loop] = lock
+    return lock
 
 
 async def persist_config_paths_locked(
     changes: Iterable[ConfigChange], *, path: Path | str | None = None
-) -> None:
-    """Patch leaves to settlement. The caller already holds the lock."""
+) -> bool:
+    """Patch leaves to settlement. The caller already holds the lock.
+
+    Returns True when the caller was cancelled mid-write: the write COMMITTED,
+    so the caller must finish updating runtime before re-raising, or disk and
+    ``bot.config`` end up disagreeing.
+    """
     changes = list(changes)
     if not changes:
-        return
-    await _run_settled(lambda: patch_config_paths(changes, path=path))
+        return False
+    return await _run_settled(lambda: patch_config_paths(changes, path=path))
 
 
 async def persist_config_paths(
@@ -377,13 +430,25 @@ async def persist_config_paths(
     changes = list(changes)
     if not changes:
         return
-    async with config_write_lock:
-        await _run_settled(lambda: patch_config_paths(changes, path=path))
+    async with config_transaction():
+        if await _run_settled(lambda: patch_config_paths(changes, path=path)):
+            raise asyncio.CancelledError
+
+
+async def persist_config_mutation_locked(
+    mutate: Callable[[Any], None], *, path: Path | str | None = None
+) -> bool:
+    """Mutate the document to settlement. The caller already holds the lock.
+
+    Returns True when the caller was cancelled mid-write (see
+    :func:`persist_config_paths_locked`)."""
+    return await _run_settled(lambda: mutate_config_document(mutate, path=path))
 
 
 async def persist_config_mutation(
     mutate: Callable[[Any], None], *, path: Path | str | None = None
 ) -> None:
     """Mutate the document off the event loop, under the shared lock, to settlement."""
-    async with config_write_lock:
-        await _run_settled(lambda: mutate_config_document(mutate, path=path))
+    async with config_transaction():
+        if await _run_settled(lambda: mutate_config_document(mutate, path=path)):
+            raise asyncio.CancelledError

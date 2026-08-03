@@ -157,11 +157,11 @@ class TestPatchConfigPaths:
 
 class TestPersistConfigPaths:
     async def test_async_wrapper_writes_under_the_shared_lock(self, config_file):
-        from src.config.persistence import config_write_lock
+        from src.config.persistence import config_transaction
 
-        assert not config_write_lock.locked()
+        assert not config_transaction().locked()
         await persist_config_paths([(("logging", "level"), "DEBUG")], path=config_file)
-        assert not config_write_lock.locked()
+        assert not config_transaction().locked()
         assert "level: DEBUG" in config_file.read_text()
 
     async def test_async_wrapper_propagates_failure(self, tmp_path):
@@ -250,7 +250,7 @@ class TestCancellationSettlement:
         # The write COMPLETED before the cancellation propagated: no worker is
         # still holding a stale document to flush after a later writer commits.
         assert "level: DEBUG" in config_file.read_text()
-        assert not persistence.config_write_lock.locked()
+        assert not persistence.config_transaction().locked()
 
     async def test_later_writer_is_not_overwritten_by_a_cancelled_one(
         self, config_file, monkeypatch
@@ -350,3 +350,105 @@ class TestAliasAwareness:
         )
         reloaded = Config(**YAML().load(path.read_text()))
         assert reloaded.search.search_db_path == "/new"
+
+
+class TestTypedPlaceholders:
+    """A placeholder holding a non-string scalar must survive a round-trip too.
+
+    The validated model has already coerced it (`true` → True, `3002` → 3002),
+    so a plain str() comparison sees "true" vs "True" and flattens the
+    placeholder into a literal.
+    """
+
+    def test_boolean_placeholder_survives(self, tmp_path, monkeypatch):
+        path = tmp_path / "config.yml"
+        path.write_text("search:\n  enabled: ${SEARCH_ON}\n")
+        monkeypatch.setenv("SEARCH_ON", "true")
+        patch_config_paths([(("search", "enabled"), True)], path=path)
+        assert "enabled: ${SEARCH_ON}" in path.read_text()
+
+    def test_boolean_placeholder_yields_to_a_real_change(self, tmp_path, monkeypatch):
+        path = tmp_path / "config.yml"
+        path.write_text("search:\n  enabled: ${SEARCH_ON}\n")
+        monkeypatch.setenv("SEARCH_ON", "true")
+        patch_config_paths([(("search", "enabled"), False)], path=path)
+        assert "enabled: false" in path.read_text().lower()
+
+    def test_yes_no_spelling_is_understood(self, tmp_path, monkeypatch):
+        path = tmp_path / "config.yml"
+        path.write_text("search:\n  enabled: ${SEARCH_ON}\n")
+        monkeypatch.setenv("SEARCH_ON", "yes")
+        patch_config_paths([(("search", "enabled"), True)], path=path)
+        assert "enabled: ${SEARCH_ON}" in path.read_text()
+
+    def test_float_placeholder_survives(self, tmp_path, monkeypatch):
+        path = tmp_path / "config.yml"
+        path.write_text("tools:\n  ratio: ${RATIO}\n")
+        monkeypatch.setenv("RATIO", "1.50")
+        patch_config_paths([(("tools", "ratio"), 1.5)], path=path)
+        assert "ratio: ${RATIO}" in path.read_text()
+
+
+class TestDualSpellings:
+    """A file carrying BOTH the canonical key and its legacy alias reverts if
+    only one is updated — pydantic's validation_alias wins on reload."""
+
+    def test_both_present_keys_are_updated(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text("search:\n  search_db_path: /old\n  chromadb_path: /old\n")
+        patch_config_paths(
+            [(("search", "search_db_path"), "/new", ("chromadb_path",))], path=path
+        )
+        text = path.read_text()
+        assert "search_db_path: /new" in text
+        assert "chromadb_path: /new" in text
+
+    def test_dual_spelling_file_reloads_with_the_new_value(self, tmp_path):
+        from ruamel.yaml import YAML
+
+        from src.config.schema import Config
+
+        path = tmp_path / "config.yml"
+        path.write_text(
+            "discord:\n  token: x\nsearch:\n  search_db_path: /old\n  chromadb_path: /old\n"
+        )
+        patch_config_paths(
+            [(("search", "search_db_path"), "/new", ("chromadb_path",))], path=path
+        )
+        reloaded = Config(**YAML().load(path.read_text()))
+        assert reloaded.search.search_db_path == "/new"
+
+
+class TestAnchorSafety:
+    """ruamel keeps ONE object behind an anchor and all its aliases, so setting
+    a key through a shared mapping silently rewrites every section sharing it —
+    a leaf-only write that isn't. Fail loudly instead of corrupting."""
+
+    ANCHORED = (
+        "defaults: &defaults\n"
+        "  enabled: true\n"
+        "search:\n"
+        "  <<: *defaults\n"
+        "  search_db_path: /p\n"
+    )
+
+    def test_merge_key_section_is_refused(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text(self.ANCHORED)
+        with pytest.raises(ConfigPersistError, match="merge key"):
+            patch_config_paths([(("search", "enabled"), False)], path=path)
+        assert path.read_text() == self.ANCHORED, "the file must be left untouched"
+
+    def test_anchored_section_is_refused(self, tmp_path):
+        path = tmp_path / "config.yml"
+        source = "defaults: &defaults\n  enabled: true\n"
+        path.write_text(source)
+        with pytest.raises(ConfigPersistError, match="anchor"):
+            patch_config_paths([(("defaults", "enabled"), False)], path=path)
+        assert path.read_text() == source
+
+    def test_ordinary_sections_are_unaffected(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text(self.ANCHORED)
+        patch_config_paths([(("logging", "level"), "DEBUG")], path=path)
+        assert "level: DEBUG" in path.read_text()

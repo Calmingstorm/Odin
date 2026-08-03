@@ -20,7 +20,6 @@ from ... import restart
 from ...config.persistence import (
     ConfigPersistError,
     config_transaction,
-    persist_config_mutation,
     persist_config_paths_locked,
     submitted_leaves,
 )
@@ -398,7 +397,7 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
             # so the UI reported success for a change that vanished at the next
             # restart.
             try:
-                await persist_config_paths_locked(leaf_changes)
+                was_cancelled = await persist_config_paths_locked(leaf_changes)
             except ConfigPersistError as e:
                 log.warning("Config rejected — could not persist: %s", e)
                 return web.json_response(
@@ -408,6 +407,11 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
 
             # Apply to bot
             bot.config = new_config
+            if was_cancelled:
+                # The write COMMITTED before the cancellation reached us, so
+                # runtime had to be updated too — otherwise disk and bot.config
+                # disagree. State is coherent now; honour the cancellation.
+                raise asyncio.CancelledError
 
         # The per-spawn agent tool schema depends on the agent model/effort
         # axis modes, which can change through this general path too — rebuild
@@ -453,7 +457,7 @@ def register_quick_actions(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({"status": "reloaded"})
 
 
-async def _persist_personality(p) -> None:
+async def _persist_personality(p) -> bool:
     """Write the DESIRED personality section through the shared round-trip writer.
 
     Takes the desired value rather than reading ``bot.config`` so callers can
@@ -469,21 +473,23 @@ async def _persist_personality(p) -> None:
     ``${VAR}`` placeholder on the way.
     """
 
-    def mutate(document) -> None:
-        section = document.get("personality")
-        if not isinstance(section, dict):
-            section = {}
-            document["personality"] = section
-        section["preset"] = p.preset
-        section["custom_name"] = p.custom_name
-        section["custom_identity"] = p.custom_identity
-        section["custom_voice"] = p.custom_voice
-        section["user_presets"] = {
-            name: {"name": v.name, "identity": v.identity, "voice": v.voice}
-            for name, v in p.user_presets.items()
-        }
-
-    await persist_config_mutation(mutate)
+    # Leaf changes rather than a section rewrite: rewriting the whole resolved
+    # section flattens any ${VAR} in these fields, and only the leaf path
+    # carries the placeholder, alias, and YAML-anchor guards.
+    changes = [
+        (("personality", "preset"), p.preset),
+        (("personality", "custom_name"), p.custom_name),
+        (("personality", "custom_identity"), p.custom_identity),
+        (("personality", "custom_voice"), p.custom_voice),
+        (
+            ("personality", "user_presets"),
+            {
+                name: {"name": v.name, "identity": v.identity, "voice": v.voice}
+                for name, v in p.user_presets.items()
+            },
+        ),
+    ]
+    return await persist_config_paths_locked(changes)
 
 
 def register_personality(routes: web.RouteTableDef, bot) -> None:
@@ -520,34 +526,42 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
         custom_identity = data.get("custom_identity", "")
         custom_voice = data.get("custom_voice", "")
         from src.config.schema import PersonalityConfig
-        existing_user_presets = (
-            bot.config.personality.user_presets if hasattr(bot.config, "personality") else {}
-        )
-        desired = PersonalityConfig(
-            preset=preset,
-            custom_name=custom_name,
-            custom_identity=custom_identity,
-            custom_voice=custom_voice,
-            user_presets=existing_user_presets,
-        )
-        # Persist first: installing the personality and registering its presets
-        # globally before the write means a failed save leaves the new identity
-        # live with nothing on disk to match it.
-        try:
-            await _persist_personality(desired)
-        except ConfigPersistError as e:
-            log.warning("Personality rejected — could not persist: %s", e)
-            return web.json_response(
-                {"error": f"Personality not saved: {_sanitize_error(e)}"}, status=500
+        # ONE transaction over read → compute → persist → publish. Computing the
+        # desired value outside the lock and publishing after releasing it lets
+        # two concurrent saves interleave: runtime ends up with one preset and
+        # disk with the other.
+        async with config_transaction():
+            existing_user_presets = (
+                bot.config.personality.user_presets
+                if hasattr(bot.config, "personality") else {}
             )
-        bot.config.personality = desired
-        from src.llm.system_prompt import register_user_presets
-        register_user_presets(
-            {
-                k: {"name": v.name, "identity": v.identity, "voice": v.voice}
-                for k, v in existing_user_presets.items()
-            }
-        )
+            desired = PersonalityConfig(
+                preset=preset,
+                custom_name=custom_name,
+                custom_identity=custom_identity,
+                custom_voice=custom_voice,
+                user_presets=existing_user_presets,
+            )
+            # Persist first: installing the personality and registering its
+            # presets globally before the write means a failed save leaves the
+            # new identity live with nothing on disk to match it.
+            try:
+                was_cancelled = await _persist_personality(desired)
+            except ConfigPersistError as e:
+                log.warning("Personality rejected — could not persist: %s", e)
+                return web.json_response(
+                    {"error": f"Personality not saved: {_sanitize_error(e)}"}, status=500
+                )
+            bot.config.personality = desired
+            from src.llm.system_prompt import register_user_presets
+            register_user_presets(
+                {
+                    k: {"name": v.name, "identity": v.identity, "voice": v.voice}
+                    for k, v in existing_user_presets.items()
+                }
+            )
+            if was_cancelled:
+                raise asyncio.CancelledError
         bot.prompt_builder.invalidate()
         bot.tool_catalog.invalidate()
         bot.prompt_builder.rebuild_default()
@@ -584,26 +598,31 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
         if not identity and not voice:
             return web.json_response({"error": "identity or voice is required"}, status=400)
         from src.config.schema import PersonalityPreset
-        desired_presets = dict(bot.config.personality.user_presets)
-        desired_presets[name] = PersonalityPreset(
-            name=display_name, identity=identity, voice=voice
-        )
-        desired = bot.config.personality.model_copy(update={"user_presets": desired_presets})
-        try:
-            await _persist_personality(desired)
-        except ConfigPersistError as e:
-            log.warning("Preset rejected — could not persist: %s", e)
-            return web.json_response(
-                {"error": f"Preset not saved: {_sanitize_error(e)}"}, status=500
+        async with config_transaction():
+            desired_presets = dict(bot.config.personality.user_presets)
+            desired_presets[name] = PersonalityPreset(
+                name=display_name, identity=identity, voice=voice
             )
-        bot.config.personality = desired
-        from src.llm.system_prompt import register_user_presets
-        register_user_presets(
-            {
-                k: {"name": v.name, "identity": v.identity, "voice": v.voice}
-                for k, v in desired_presets.items()
-            }
-        )
+            desired = bot.config.personality.model_copy(
+                update={"user_presets": desired_presets}
+            )
+            try:
+                was_cancelled = await _persist_personality(desired)
+            except ConfigPersistError as e:
+                log.warning("Preset rejected — could not persist: %s", e)
+                return web.json_response(
+                    {"error": f"Preset not saved: {_sanitize_error(e)}"}, status=500
+                )
+            bot.config.personality = desired
+            from src.llm.system_prompt import register_user_presets
+            register_user_presets(
+                {
+                    k: {"name": v.name, "identity": v.identity, "voice": v.voice}
+                    for k, v in desired_presets.items()
+                }
+            )
+            if was_cancelled:
+                raise asyncio.CancelledError
         return web.json_response({"status": "saved", "name": name})
 
     @routes.delete("/api/personality/presets/{name}")
@@ -616,29 +635,32 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
             )
         if name not in bot.config.personality.user_presets:
             return web.json_response({"error": "preset not found"}, status=404)
-        desired_presets = {
-            k: v for k, v in bot.config.personality.user_presets.items() if k != name
-        }
-        update: dict = {"user_presets": desired_presets}
-        resets_active = bot.config.personality.preset == name
-        if resets_active:
-            update["preset"] = "odin"
-        desired = bot.config.personality.model_copy(update=update)
-        try:
-            await _persist_personality(desired)
-        except ConfigPersistError as e:
-            log.warning("Preset deletion rejected — could not persist: %s", e)
-            return web.json_response(
-                {"error": f"Preset not deleted: {_sanitize_error(e)}"}, status=500
-            )
-        bot.config.personality = desired
-        from src.llm.system_prompt import register_user_presets
-        register_user_presets(
-            {
-                k: {"name": v.name, "identity": v.identity, "voice": v.voice}
-                for k, v in desired_presets.items()
+        async with config_transaction():
+            desired_presets = {
+                k: v for k, v in bot.config.personality.user_presets.items() if k != name
             }
-        )
+            update: dict = {"user_presets": desired_presets}
+            resets_active = bot.config.personality.preset == name
+            if resets_active:
+                update["preset"] = "odin"
+            desired = bot.config.personality.model_copy(update=update)
+            try:
+                was_cancelled = await _persist_personality(desired)
+            except ConfigPersistError as e:
+                log.warning("Preset deletion rejected — could not persist: %s", e)
+                return web.json_response(
+                    {"error": f"Preset not deleted: {_sanitize_error(e)}"}, status=500
+                )
+            bot.config.personality = desired
+            from src.llm.system_prompt import register_user_presets
+            register_user_presets(
+                {
+                    k: {"name": v.name, "identity": v.identity, "voice": v.voice}
+                    for k, v in desired_presets.items()
+                }
+            )
+            if was_cancelled:
+                raise asyncio.CancelledError
         if resets_active:
             bot.prompt_builder.invalidate()
             bot.tool_catalog.invalidate()
