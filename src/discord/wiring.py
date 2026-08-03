@@ -416,10 +416,14 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
     )
 
     def recovery_policy_source() -> RecoveryPolicy:
-        live = config  # config object is replaced wholesale on hot reload
+        # BOOT fallback only — this closure captures the Config object passed to
+        # build_services, and a config update REBINDS bot.config rather than
+        # mutating that object, so this source can never see a live change.
+        # build_components replaces it with _live_recovery_policy_source(bot);
+        # this one serves callers that build services without a bot.
         return RecoveryPolicy(
-            deadline_seconds=live.llm_recovery.generation_deadline_seconds,
-            backoff_cap=live.llm_recovery.backoff_cap_seconds,
+            deadline_seconds=config.llm_recovery.generation_deadline_seconds,
+            backoff_cap=config.llm_recovery.backoff_cap_seconds,
         )
 
     turn_store = None
@@ -583,6 +587,25 @@ class BotComponents:
     intake: MessageIntake
 
 
+def _live_recovery_policy_source(bot) -> Callable[[], RecoveryPolicy]:
+    """A recovery-policy source that reads the CURRENT config.
+
+    Components resolve config through ``lambda: bot.config`` precisely because
+    a config update rebinds that attribute; a closure over the boot Config sees
+    nothing. Recovery deadlines were the one policy that claimed liveness in a
+    comment while capturing the boot object.
+    """
+
+    def source() -> RecoveryPolicy:
+        live = bot.config.llm_recovery
+        return RecoveryPolicy(
+            deadline_seconds=live.generation_deadline_seconds,
+            backoff_cap=live.backoff_cap_seconds,
+        )
+
+    return source
+
+
 def build_components(bot, services: BotServices) -> BotComponents:
     """Bot-coupled component assembly — moved verbatim from ``OdinBot.__init__``
     (RFC-002 P2), in the exact construction order it used.
@@ -607,7 +630,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
         sessions=services.sessions,
         reflector=services.reflector,
         model_breakers=services.model_breakers,
-        recovery_policy_source=services.recovery_policy_source,
+        recovery_policy_source=_live_recovery_policy_source(bot),
     )
 
     # Wire LLM callbacks to whichever provider is active

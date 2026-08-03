@@ -609,6 +609,14 @@ class HealthServer:
 
     def set_bot(self, bot: OdinBot) -> None:
         """Wire the bot instance to enable the REST API and WebSocket endpoints."""
+        # Backlink first, and before the enabled check: the bot-facing admin
+        # routes reach the Slack notifier and Grafana handler through
+        # ``bot.health_server``, and nothing ever assigned it — so
+        # /api/slack/status and /api/grafana-alerts/status reported
+        # ``enabled: false`` on a working install while every mutating route
+        # 503'd. Doing it here rather than at the __main__ call site covers
+        # every construction path, including tests and future entry points.
+        bot.health_server = self
         if not self._web_config.enabled:
             return
         from ..web.api import setup_api
@@ -677,7 +685,14 @@ class HealthServer:
         # handlers) alive past the stop window.
         try:
             if self._runner:
+                # Both shutdown_services (via the bot backlink) and __main__
+                # hold a reference now, so stop() can be called twice. The
+                # runner is dropped only AFTER cleanup succeeds: clearing it
+                # first would make a second call a no-op that silently
+                # abandons unfinished cleanup, so a raised cleanup could never
+                # be retried by the later caller.
                 await self._runner.cleanup()
+                self._runner = None
         finally:
             if self._slack_notifier:
                 try:
