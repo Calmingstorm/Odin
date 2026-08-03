@@ -768,3 +768,16 @@ class TestTrajectoryEdgeCases:
         saver = TrajectorySaver(str(tmp_path / "traj"))
         result = await saver.find_by_message_id("nonexistent")
         assert result is None
+
+
+class TestLoopIdentitySerialization:
+    def test_loop_identity_is_serialized_when_present(self):
+        turn = TrajectoryTurn(source="loop", loop_id="abc123", loop_iteration=7)
+        data = turn.to_dict()
+        assert data["loop_id"] == "abc123"
+        assert data["loop_iteration"] == 7
+
+    def test_non_loop_records_keep_canonical_shape(self):
+        data = TrajectoryTurn().to_dict()
+        assert "loop_id" not in data
+        assert "loop_iteration" not in data

@@ -410,6 +410,8 @@ class TestLoopIterationTrajectory:
         assert traj.message_id == "loop:l1:1"
         assert traj.user_content == "do the thing"
         assert save_kwargs["final_response"] == "done"
+        assert traj.loop_id == "l1"
+        assert traj.loop_iteration == 1
         # The iteration must hold BOTH halves: the call and its result
         assert traj.iterations[0].tool_calls[0]["name"] == "run_command"
         assert traj.iterations[0].tool_results[0]["tool_use_id"] == "t1"

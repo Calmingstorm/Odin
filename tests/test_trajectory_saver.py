@@ -91,3 +91,63 @@ class TestFindByMessageId:
         f.write_text('garbage\n{"message_id": "wanted"}\n')
         found = await saver.find_by_message_id("wanted")
         assert found is not None and found["message_id"] == "wanted"
+
+
+class TestFindByLoopId:
+    async def test_exact_loop_source_match_newest_first(self, saver):
+        await _save(saver, message_id="loop-a-1", source="loop")
+        await _save(saver, message_id="loop-a-2", source="loop")
+        await _save(saver, message_id="chat", source="discord")
+        file = saver.directory / (await saver.list_files())[0]
+        lines = file.read_text().splitlines()
+        import json
+        records = [json.loads(line) for line in lines]
+        records[0]["loop_id"] = "a"
+        records[0]["loop_iteration"] = 1
+        records[1]["loop_id"] = "a"
+        records[1]["loop_iteration"] = 2
+        records[2]["loop_id"] = "a"  # wrong source must not be attributed
+        file.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+        found = await saver.find_by_loop_id("a")
+        assert [entry["loop_iteration"] for entry in found] == [2, 1]
+
+    async def test_unrelated_newer_turns_do_not_hide_loop(self, saver):
+        import json
+        file = saver.directory / "2020-03-02.jsonl"
+        records = [
+            {"source": "loop", "loop_id": "a", "loop_iteration": 1},
+            *({"source": "discord", "message_id": f"chat-{i}"} for i in range(150)),
+        ]
+        file.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+        found = await saver.find_by_loop_id("a", limit=1)
+        assert len(found) == 1 and found[0]["loop_iteration"] == 1
+
+    async def test_skips_blank_malformed_and_other_loop_records(self, saver):
+        import json
+        file = saver.directory / "2020-03-03.jsonl"
+        file.write_text(
+            "\nnot-json\n"
+            + json.dumps({"source": "loop", "loop_id": "other"})
+            + "\n"
+            + json.dumps({"source": "loop", "loop_id": "a", "loop_iteration": 3})
+            + "\n"
+        )
+        found = await saver.find_by_loop_id("a")
+        assert [entry["loop_iteration"] for entry in found] == [3]
+
+    async def test_read_failure_skips_partition(self, saver):
+        file = saver.directory / "2020-03-04.jsonl"
+        file.write_text('{}\n')
+        with patch("aiofiles.open", side_effect=OSError("unreadable")):
+            assert await saver.find_by_loop_id("a") == []
+
+    async def test_limit_and_empty_id(self, saver):
+        import json
+        file = saver.directory / "2020-03-03.jsonl"
+        file.write_text("\n".join(
+            json.dumps({"source": "loop", "loop_id": "a", "loop_iteration": i})
+            for i in range(5)
+        ) + "\n")
+        assert len(await saver.find_by_loop_id("a", limit=2)) == 2
+        assert await saver.find_by_loop_id("") == []

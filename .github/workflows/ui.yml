@@ -11,6 +11,7 @@ on:
       - 'tailwind.config.mjs'
       - 'postcss.config.mjs'
       - 'scripts/check-vue-templates.mjs'
+      - 'scripts/check-template-bindings.mjs'
       - 'scripts/check-modal-race.mjs'
       - '.github/workflows/ui.yml'
   pull_request:
@@ -22,6 +23,7 @@ on:
       - 'tailwind.config.mjs'
       - 'postcss.config.mjs'
       - 'scripts/check-vue-templates.mjs'
+      - 'scripts/check-template-bindings.mjs'
       - 'scripts/check-modal-race.mjs'
       - '.github/workflows/ui.yml'
 

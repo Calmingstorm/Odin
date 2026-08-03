@@ -63,6 +63,67 @@ class TestLoops:
             body = await (await c.get("/api/loops")).json()
             assert body[0]["id"] == "L1" and body[0]["goal"] == "watch X"
             assert len(body[0]["iteration_history"]) == 2
+            assert body[0]["last_trigger_age_seconds"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_loop_detail_uses_durable_trajectory_history(self):
+        bot = MagicMock()
+        bot.loop_manager._loops = {"L1": _loop_info(_iteration_history=["preview"])}
+        bot.trajectory_saver.find_by_loop_id = AsyncMock(return_value=[
+            {"source": "loop", "loop_id": "L1", "loop_iteration": 2,
+             "final_response": "full response", "tools_used": ["run_command"],
+             "iterations": [{"provider": "openai-codex", "model": "gpt-5.6-sol",
+                              "reasoning_effort": "xhigh"}]},
+        ])
+        async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
+            r = await c.get("/api/loops/L1?limit=25")
+            body = await r.json()
+        assert r.status == 200
+        assert body["goal"] == "watch X"
+        assert body["last_trigger_age_seconds"] >= 0
+        assert body["iterations"][0]["final_response"] == "full response"
+        assert body["iterations"][0]["model"] == "gpt-5.6-sol"
+        assert "user_content" not in body["iterations"][0]
+        assert body["context_history"] == ["preview"]
+        assert body["history_available"] is True
+        assert body["history_truncated"] is False
+        bot.trajectory_saver.find_by_loop_id.assert_awaited_once_with("L1", limit=26)
+
+    @pytest.mark.asyncio
+    async def test_loop_detail_reports_paging_truthfully(self):
+        bot = MagicMock()
+        bot.loop_manager._loops = {"L1": _loop_info()}
+        bot.trajectory_saver.find_by_loop_id = AsyncMock(return_value=[
+            {"loop_iteration": i} for i in range(4)
+        ])
+        async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
+            body = await (await c.get("/api/loops/L1?limit=3")).json()
+        assert len(body["iterations"]) == 3
+        assert body["history_truncated"] is True
+        assert body["history_limit"] == 3
+
+    @pytest.mark.asyncio
+    async def test_loop_detail_missing_and_unavailable_history(self):
+        bot = MagicMock()
+        bot.loop_manager._loops = {"L1": _loop_info()}
+        bot.trajectory_saver = None
+        async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
+            assert (await c.get("/api/loops/missing")).status == 404
+            body = await (await c.get("/api/loops/L1")).json()
+        assert body["history_available"] is False
+        assert body["iterations"] == []
+
+    @pytest.mark.asyncio
+    async def test_loop_detail_storage_failure_preserves_live_record(self):
+        bot = MagicMock()
+        bot.loop_manager._loops = {"L1": _loop_info()}
+        bot.trajectory_saver.find_by_loop_id = AsyncMock(side_effect=OSError("disk"))
+        async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
+            r = await c.get("/api/loops/L1")
+            body = await r.json()
+        assert r.status == 200
+        assert body["history_available"] is False
+        assert body["goal"] == "watch X"
 
     @pytest.mark.asyncio
     async def test_start_loop_validation(self):
