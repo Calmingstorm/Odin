@@ -685,12 +685,14 @@ class HealthServer:
         # handlers) alive past the stop window.
         try:
             if self._runner:
-                runner, self._runner = self._runner, None
-                # Cleared before awaiting so a second stop() is a no-op. Both
-                # shutdown_services (via the bot backlink) and __main__ hold a
-                # reference to this server; before the backlink existed only
-                # one of them could ever reach it.
-                await runner.cleanup()
+                # Both shutdown_services (via the bot backlink) and __main__
+                # hold a reference now, so stop() can be called twice. The
+                # runner is dropped only AFTER cleanup succeeds: clearing it
+                # first would make a second call a no-op that silently
+                # abandons unfinished cleanup, so a raised cleanup could never
+                # be retried by the later caller.
+                await self._runner.cleanup()
+                self._runner = None
         finally:
             if self._slack_notifier:
                 try:

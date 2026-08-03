@@ -10,6 +10,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from src.config.schema import Config
 from src.discord.wiring import _live_recovery_policy_source
 
@@ -60,6 +62,31 @@ class TestHealthServerBacklink:
         await server.stop()
         await server.stop()
         assert calls == [1]
+
+    async def test_failed_cleanup_stays_retryable(self):
+        """Idempotence must not be achieved by forgetting unfinished work: if
+        cleanup raises, the runner is still held so the later shutdown caller
+        can retry it."""
+        server = self._server()
+        runner = MagicMock()
+        attempts = []
+
+        async def cleanup():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise OSError("cleanup failed")
+
+        runner.cleanup = cleanup
+        server._runner = runner
+
+        with pytest.raises(OSError):
+            await server.stop()
+        assert server._runner is runner, "a failed cleanup must remain retryable"
+
+        await server.stop()
+        assert len(attempts) == 2
+        assert server._runner is None
+
 
 
 class TestLiveRecoveryPolicySource:
