@@ -30,10 +30,32 @@ from src.web.api.config_admin import (
 
 @pytest.fixture(autouse=True)
 def _isolate_cwd(tmp_path, monkeypatch):
-    # Several config_admin handlers persist to a RELATIVE Path("config.yml")
+    # The setup-wizard handler persists to a RELATIVE Path("config.yml")
     # (correct at /opt/odin in prod). Chdir to a temp dir so no test can
     # write the repo's tracked config.yml template.
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _active_config(tmp_path):
+    """Point config persistence at a temp file.
+
+    Config and personality writes go through the shared round-trip writer,
+    which targets the file the live config was LOADED from and refuses to
+    guess a CWD-relative one — a fabricated Config must never clobber whatever
+    config.yml happens to sit in the working directory. Tests therefore have
+    to declare an active path like a real deployment does.
+    """
+    from pathlib import Path
+
+    from src.config.schema import active_config_path, set_active_config_path
+
+    path = tmp_path / "active-config.yml"
+    path.write_text("discord:\n  token: fake\n")
+    previous = active_config_path()
+    set_active_config_path(Path(path))
+    yield path
+    set_active_config_path(previous)
 
 
 @pytest.fixture(autouse=True)
@@ -267,7 +289,7 @@ class TestDiscordConfig:
             assert (await c.put("/api/discord/channel/9/config", data="bad")).status == 400
 
     @pytest.mark.asyncio
-    async def test_update_config_persists_normalized_dropping_removed_keys(self):
+    async def test_update_config_persists_normalized_dropping_removed_keys(self, _active_config):
         # The general /api/config write must persist the VALIDATED config, not
         # the raw merge — a removed key named in the update (model_routing)
         # can't linger on disk.
@@ -417,24 +439,43 @@ class TestDiscordConfig:
             assert bot.config.tools.max_tool_iterations_chat == 7
 
     @pytest.mark.asyncio
-    async def test_config_put_persists_when_file_exists(self):
-        from pathlib import Path
-        Path("config.yml").write_text("discord:\n  token: fake\n")
+    async def test_config_put_persists_when_file_exists(self, _active_config):
+        from ruamel.yaml import YAML
+
         app, bot = _app(register_discord_config)
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 9}})
-            assert r.status == 200  # persist branch taken (file exists)
+            assert r.status == 200
+        on_disk = YAML().load(_active_config.read_text())
+        assert on_disk["tools"]["max_tool_iterations_chat"] == 9
 
     @pytest.mark.asyncio
-    async def test_config_put_persist_failure_still_200(self):
-        from pathlib import Path
-        Path("config.yml").write_text("discord:\n  token: fake\n")
+    async def test_config_put_persist_failure_is_reported_and_changes_nothing(self):
+        """A save that cannot reach disk must fail loudly.
+
+        The old handler applied the change to bot.config FIRST and merely
+        logged a write failure, so the UI reported "Config saved successfully"
+        for a change that silently reverted at the next restart. Persistence
+        now happens before the runtime swap: a failed write means 500 AND an
+        untouched runtime config."""
         app, bot = _app(register_discord_config)
-        with patch("src.web.api.config_admin._write_config", side_effect=OSError("ro")):
+        before = bot.config.tools.max_tool_iterations_chat
+        with patch("src.config.persistence.patch_config_paths", side_effect=OSError("ro")):
             async with TestClient(TestServer(app)) as c:
-                # persist fails but the in-memory apply still succeeds
                 r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 6}})
-                assert r.status == 200
+                assert r.status == 500
+        assert bot.config.tools.max_tool_iterations_chat == before
+
+    @pytest.mark.asyncio
+    async def test_config_put_missing_file_is_reported(self, _active_config):
+        """A missing target used to skip persistence and still return 200."""
+        _active_config.unlink()
+        app, bot = _app(register_discord_config)
+        before = bot.config.tools.max_tool_iterations_chat
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 6}})
+            assert r.status == 500
+        assert bot.config.tools.max_tool_iterations_chat == before
 
     @pytest.mark.asyncio
     async def test_config_put_diff_failure_still_200(self):

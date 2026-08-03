@@ -17,7 +17,13 @@ from pathlib import Path
 from aiohttp import web
 
 from ... import restart
-from ...config.schema import Config, active_config_path
+from ...config.persistence import (
+    ConfigPersistError,
+    persist_config_mutation,
+    persist_config_paths,
+    submitted_leaves,
+)
+from ...config.schema import Config
 from ...odin_log import get_logger
 from ...setup_wizard import (
     build_config,
@@ -374,6 +380,23 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         except Exception as e:
             return web.json_response({"error": f"Invalid config: {e}"}, status=400)
 
+        # Persist only the submitted paths, carrying VALIDATED values: a key the
+        # schema dropped never reaches disk, normalization does, and every path
+        # nobody submitted keeps its file text — comments, ordering, and
+        # unresolved ${VAR} placeholders included.
+        leaf_changes = submitted_leaves(updates, new_config.model_dump())
+
+        # Persist BEFORE mutating runtime. The old order applied the change in
+        # memory, then logged any write failure and returned 200 anyway — so the
+        # UI reported success for a change that vanished at the next restart.
+        try:
+            await persist_config_paths(leaf_changes)
+        except ConfigPersistError as e:
+            log.warning("Config rejected — could not persist: %s", e)
+            return web.json_response(
+                {"error": f"Configuration not saved: {_sanitize_error(e)}"}, status=500
+            )
+
         # Apply to bot
         bot.config = new_config
 
@@ -382,27 +405,6 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         # the tool catalog so the next turn / new spawn sees the new exposure.
         if getattr(bot, "tool_catalog", None):
             bot.tool_catalog.invalidate()
-
-        # Write to disk — persist the VALIDATED/normalized config, not the
-        # pre-normalized merge, so fields removed from the schema (a legacy
-        # model_routing block, auxiliary tasks/max_tokens/credentials_path)
-        # can't linger on disk after runtime has dropped them.
-        # The ACTIVE config, not whatever config.yml sits in the cwd: Odin can
-        # be launched with `python -m src /somewhere/odin.yml`, and writing to
-        # the wrong file meant a change appeared in live config and in the
-        # self-update preflight but vanished on re-exec — contradicting the
-        # preflight's contract that it validates what the restarted process
-        # will use (PR #239 round-10 review). llm_admin already does this.
-        config_path = active_config_path() or Path("config.yml")
-        if config_path.exists():
-            try:
-                await asyncio.to_thread(_write_config, config_path, new_config.model_dump())
-            except Exception:
-                log.warning(
-                    "Config applied in memory but failed to persist to %s",
-                    config_path,
-                    exc_info=True,
-                )
 
         # Compute config diff and record in audit log
         after_config = _redact_config(new_config.model_dump())
@@ -440,6 +442,34 @@ def register_quick_actions(routes: web.RouteTableDef, bot) -> None:
         bot.tool_catalog.invalidate()
         bot.prompt_builder.rebuild_default()
         return web.json_response({"status": "reloaded"})
+
+
+async def _persist_personality(bot) -> None:
+    """Write the personality section through the shared round-trip writer.
+
+    The three personality endpoints used to dump the whole resolved model to
+    ``getattr(request.app, "_config_path", "config.yml")`` — an attribute
+    nothing ever assigns, so the write landed on a CWD-relative path rather
+    than the file the live config was loaded from, and materialized every
+    ``${VAR}`` placeholder on the way.
+    """
+    p = bot.config.personality
+
+    def mutate(document) -> None:
+        section = document.get("personality")
+        if not isinstance(section, dict):
+            section = {}
+            document["personality"] = section
+        section["preset"] = p.preset
+        section["custom_name"] = p.custom_name
+        section["custom_identity"] = p.custom_identity
+        section["custom_voice"] = p.custom_voice
+        section["user_presets"] = {
+            name: {"name": v.name, "identity": v.identity, "voice": v.voice}
+            for name, v in p.user_presets.items()
+        }
+
+    await persist_config_mutation(mutate)
 
 
 def register_personality(routes: web.RouteTableDef, bot) -> None:
@@ -493,9 +523,7 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
                 for k, v in existing_user_presets.items()
             }
         )
-        current = bot.config.model_dump()
-        config_path = getattr(request.app, "_config_path", "config.yml")
-        await asyncio.to_thread(_write_config, config_path, current)
+        await _persist_personality(bot)
         bot.prompt_builder.invalidate()
         bot.tool_catalog.invalidate()
         bot.prompt_builder.rebuild_default()
@@ -542,9 +570,7 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
                 for k, v in bot.config.personality.user_presets.items()
             }
         )
-        current = bot.config.model_dump()
-        config_path = getattr(request.app, "_config_path", "config.yml")
-        await asyncio.to_thread(_write_config, config_path, current)
+        await _persist_personality(bot)
         return web.json_response({"status": "saved", "name": name})
 
     @routes.delete("/api/personality/presets/{name}")
@@ -570,9 +596,7 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
             bot.prompt_builder.invalidate()
             bot.tool_catalog.invalidate()
             bot.prompt_builder.rebuild_default()
-        current = bot.config.model_dump()
-        config_path = getattr(request.app, "_config_path", "config.yml")
-        await asyncio.to_thread(_write_config, config_path, current)
+        await _persist_personality(bot)
         return web.json_response({"status": "deleted", "name": name})
 
 
