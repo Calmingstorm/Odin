@@ -187,8 +187,11 @@ export default {
         <h3 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Live Output</h3>
         <div v-for="(output, tool) in streamOutput" :key="tool"
              class="bg-black rounded p-2 mb-2">
-          <div class="text-gray-400 text-xs mb-1 font-mono">{{ tool }}</div>
-          <div class="max-h-64 overflow-y-auto font-mono text-xs text-green-400 whitespace-pre-wrap">{{ output }}</div>
+          <div class="text-gray-400 text-xs mb-1 font-mono break-all">{{ tool }}</div>
+          <!-- break-all: one long unbroken token (a URL, a base64 blob, a deep
+               path) widened this div past the viewport and scrolled the whole
+               Operations page sideways on a phone. -->
+          <div class="max-h-64 overflow-y-auto font-mono text-xs text-green-400 whitespace-pre-wrap break-all">{{ output }}</div>
         </div>
       </div>
 

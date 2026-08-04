@@ -15,10 +15,11 @@
 const PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
 
 /** Render an instant as the local wall-clock string a datetime-local shows. */
-export function localWallClock(instant) {
+export function localWallClock(instant, withSeconds = false) {
   const pad = (n) => String(n).padStart(2, '0');
-  return `${instant.getFullYear()}-${pad(instant.getMonth() + 1)}-${pad(instant.getDate())}`
+  const base = `${instant.getFullYear()}-${pad(instant.getMonth() + 1)}-${pad(instant.getDate())}`
     + `T${pad(instant.getHours())}:${pad(instant.getMinutes())}`;
+  return withSeconds ? `${base}:${pad(instant.getSeconds())}` : base;
 }
 
 /** Offset label for an instant, e.g. "UTC-4". */
@@ -51,14 +52,20 @@ export function analyzeLocalDateTime(raw) {
   if (!match) return { state: 'invalid', typed };
 
   const [, y, mo, d, hh, mm] = match.slice(0, 6).map(Number);
-  const normalized = typed.slice(0, 16);
+  // Seconds are optional but must be HONOURED, not quietly dropped: accepting
+  // 09:00:30 and scheduling 09:00:00 is the same silent reinterpretation this
+  // module exists to prevent.
+  const ss = match[6] === undefined ? 0 : Number(match[6]);
+  if (ss > 59) return { state: 'invalid', typed };
+  const withSeconds = match[6] !== undefined;
+  const normalized = withSeconds ? typed.slice(0, 19) : typed.slice(0, 16);
 
   // Treat the typed components as if they were UTC, then subtract the zone's
   // offset to get a candidate instant. The offset differs on either side of a
   // transition, so probe BOTH sides rather than assuming how far the clocks
   // move: real zones shift by 30 minutes (Australia/Lord_Howe) and two hours
   // (Antarctica/Troll), not only one.
-  const asIfUTC = Date.UTC(y, mo - 1, d, hh, mm);
+  const asIfUTC = Date.UTC(y, mo - 1, d, hh, mm, ss);
   const dayBefore = new Date(asIfUTC - 86400000).getTimezoneOffset();
   const dayAfter = new Date(asIfUTC + 86400000).getTimezoneOffset();
 
@@ -66,7 +73,7 @@ export function analyzeLocalDateTime(raw) {
   for (const offsetMinutes of new Set([dayBefore, dayAfter])) {
     const instant = new Date(asIfUTC + offsetMinutes * 60000);
     // Keep only instants that really display as the wall clock that was typed.
-    if (localWallClock(instant) !== normalized) continue;
+    if (localWallClock(instant, withSeconds) !== normalized) continue;
     if (candidates.some((c) => c.getTime() === instant.getTime())) continue;
     candidates.push(instant);
   }

@@ -303,27 +303,26 @@ export default {
       if (!scope || scopeEntries.value[scopeName] || loadingScope.value === scopeName) return;
 
       loadingScope.value = scopeName;
-      // Fetch in bounded batches rather than firing one request per key at
-      // once: a scope with hundreds of keys opened hundreds of simultaneous
-      // requests, which is enough to trip the per-IP rate limit and blank the
-      // page (the same way rapid config saves did before the debounce).
-      const BATCH = 8;
-      const entries = [];
-      for (let i = 0; i < scope.keys.length; i += BATCH) {
-        const slice = scope.keys.slice(i, i + BATCH);
-        const loaded = await Promise.all(slice.map(async (key) => {
-          try {
-            const data = await api.get(
-              `/api/memory/${encodeURIComponent(scopeName)}/${encodeURIComponent(key)}`
-            );
-            return { key, value: data.value || '', failed: false };
-          } catch (e) {
-            // A failure is NOT a value. Returning the string "(error loading)"
-            // made it editable, copyable, and savable back over real data.
-            return { key, value: '', failed: true, error: e.message || 'Failed to load' };
-          }
+      // ONE request for the whole scope. Fetching per key was not merely
+      // wasteful: each single-key GET loads the entire memory file server-side,
+      // and a few hundred keys exceeded the per-IP rate limit (120/60s) no
+      // matter how the client batched them — bounding concurrency does not
+      // reduce the total, and pacing under 2 req/s would take minutes.
+      let entries;
+      try {
+        const data = await api.get(`/api/memory/${encodeURIComponent(scopeName)}`);
+        const loaded = data.entries || {};
+        entries = scope.keys.map((key) => (
+          Object.prototype.hasOwnProperty.call(loaded, key)
+            ? { key, value: loaded[key] || '', failed: false }
+            // Present in the index but missing from the scope: report it as a
+            // failure rather than an empty value someone could save over.
+            : { key, value: '', failed: true, error: 'Not found in scope' }
+        ));
+      } catch (e) {
+        entries = scope.keys.map((key) => ({
+          key, value: '', failed: true, error: e.message || 'Failed to load',
         }));
-        entries.push(...loaded);
       }
       scopeEntries.value[scopeName] = entries;
       loadingScope.value = null;

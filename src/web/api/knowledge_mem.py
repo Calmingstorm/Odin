@@ -257,6 +257,24 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
             }
         return web.json_response(result)
 
+    @routes.get("/api/memory/{scope}")
+    async def get_memory_scope(request: web.Request) -> web.Response:
+        """Every key/value in one scope, in ONE request.
+
+        The per-key route below loads the whole memory file to return a single
+        value, so a scope with a few hundred keys cost that many requests AND
+        that many full loads — enough for the WebUI to trip its own per-IP rate
+        limit just by expanding a scope.
+        """
+        scope = request.match_info["scope"]
+        try:
+            all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
+        except StoreCorruptError:
+            return web.json_response(corrupt_read, status=503)
+        if scope not in all_mem:
+            return web.json_response({"error": "scope not found"}, status=404)
+        return web.json_response({"scope": scope, "entries": all_mem[scope]})
+
     @routes.get("/api/memory/{scope}/{key}")
     async def get_memory(request: web.Request) -> web.Response:
         scope = request.match_info["scope"]

@@ -725,12 +725,11 @@ class TestCancellationCoherence:
     @pytest.mark.asyncio
     async def test_runtime_matches_disk_after_a_cancelled_save(self, _active_config):
         import asyncio
+        import threading
 
         from ruamel.yaml import YAML
 
         import src.config.persistence as persistence
-
-        import threading
 
         app, bot = _app(register_discord_config)
         real = persistence.patch_config_paths

@@ -510,19 +510,19 @@ export default {
 
     const timelineSpanLabel = computed(() => {
       if (timelineBuckets.value.length === 0) return '';
-      // Label the span the data actually covers. This chart is fed ONLY by the
-      // live websocket stream — nothing backfills history — so a fixed "Last 24
-      // hours" promised a day of data when the buckets can only hold what has
-      // arrived since the tab was opened.
+      // State a FACT about the rows on screen rather than a duration. The
+      // earlier wording ("Since this tab opened") was still untrue — it
+      // measured the oldest RETAINED, FILTERED entry, which moves when a
+      // filter changes, when logs are cleared, and when the 2000-row cap
+      // evicts. A duration would also need a ticking clock: Date.now() inside
+      // a computed has no reactive dependency, so it freezes while idle.
       const times = filteredLogs.value
         .map(e => e._time && e._time.getTime())
         .filter(Boolean);
       if (times.length === 0) return '';
-      const oldest = Math.min(...times);
-      const minutes = Math.max(1, Math.round((Date.now() - oldest) / 60000));
-      if (minutes < 60) return `Since this tab opened (${minutes} min)`;
-      const hours = Math.round(minutes / 60);
-      return hours >= 24 ? 'Last 24 hours' : `Since this tab opened (${hours} h)`;
+      const oldest = new Date(Math.min(...times));
+      const shown = filteredLogs.value.length;
+      return `${shown} shown, oldest ${oldest.toLocaleTimeString()}`;
     });
 
     const timelineLabelSkip = computed(() => {

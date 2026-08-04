@@ -146,6 +146,7 @@ EXPECTED_ROUTES = [
     ("GET", "/api/logs/search", "search_logs"),
     ("GET", "/api/logs/stats", "log_stats"),
     ("GET", "/api/memory", "list_memory"),
+    ("GET", "/api/memory/{scope}", "get_memory_scope"),
     ("GET", "/api/memory/{scope}/{key}", "get_memory"),
     ("PUT", "/api/memory/{scope}/{key}", "set_memory"),
     ("DELETE", "/api/memory/{scope}/{key}", "delete_memory"),
@@ -232,7 +233,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 185
+        assert len(actual) == len(expected) == 186
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)
