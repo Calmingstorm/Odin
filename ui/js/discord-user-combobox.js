@@ -2,6 +2,10 @@ import { computed, nextTick, onMounted, ref } from 'vue';
 
 const DISCORD_ID = /^\d{15,25}$/;
 
+export function discordMemberDisplayName(member) {
+  return String(member?.display_name || member?.username || member?.id || 'Unknown user');
+}
+
 /**
  * Reusable Discord-member picker.
  *
@@ -88,7 +92,7 @@ export const DiscordUserCombobox = {
     });
 
     function memberName(member) {
-      return String(member?.display_name || member?.username || member?.id || 'Unknown user');
+      return discordMemberDisplayName(member);
     }
 
     function openOptions() {

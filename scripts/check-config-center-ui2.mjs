@@ -230,6 +230,13 @@ assert.match(discord, /api\.get\(['"]\/api\/discord\/members['"]\)/, 'Discord de
 assert.match(discord, /:members="globalMembers"/, 'Discord defaults do not pass known users into the shared picker');
 assert.match(discordUserCombobox, /emits:\s*\[['"]select['"]\]/, 'shared Discord user picker lost selection output');
 assert.match(discordUserCombobox, /\^\\d\{15,25\}\$/, 'shared Discord user picker lost raw snowflake support');
+assert.match(discordUserCombobox, /export function discordMemberDisplayName\(member\)/, 'shared Discord display-name precedence is not reusable');
+assert.match(discordUserCombobox, /member\?\.display_name \|\| member\?\.username \|\| member\?\.id/, 'Discord display-name precedence drifted');
+assert.match(discord, /globalItemLabel\(editor, item\)/, 'Discord global chips still render raw user IDs');
+assert.match(discord, /globalMembersById\.value\.get\(id\)/, 'Discord global chips do not resolve IDs through loaded members');
+assert.match(discord, /member \? discordMemberDisplayName\(member\) : id/, 'unknown Discord users no longer fall back to raw IDs');
+assert.match(discord, /key: ['"]channels['"][^}]*fullWidth: true/, 'Allowed channels is no longer full-width');
+assert.match(discord, /'discord-global-list-full': editor\.fullWidth/, 'Discord global list width no longer follows editor metadata');
 
 console.log('config-center-ui2: de-dup, typed editing, restart flow, and provider advanced controls pinned');
 
@@ -239,6 +246,9 @@ assert.match(config, /runtime_summaries:\s*groupRuntimeSummaries\(group\.entries
 assert.match(config, /No activation control exists in this release/, 'activation-required fields still lead to a dead end');
 assert.match(css, /\.config-center-page\s*\{[^}]*height:\s*calc\(100vh[^}]*display:\s*flex[^}]*overflow:\s*hidden/s, 'Config Center does not own an internal scrolling viewport');
 assert.match(css, /\.cfgc-main\s*\{[^}]*overflow-y:\s*auto/s, 'settings list is not the scrolling region');
+assert.match(css, /\.cfgc-workspace\s*\{[^}]*align-items:\s*stretch[^}]*overflow:\s*hidden/s, 'desktop workspace no longer constrains its grid items to the internal viewport');
+assert.match(css, /\.cfgc-main\s*\{[^}]*height:\s*100%[^}]*overflow-y:\s*auto/s, 'settings list can grow to content height instead of shrinking into its scroll region');
+assert.match(css, /@media\s*\(max-width:\s*900px\)[\s\S]*?\.cfgc-workspace\s*\{[^}]*align-items:\s*start[^}]*overflow:\s*visible[^}]*\}[\s\S]*?\.cfgc-main\s*\{[^}]*height:\s*auto[^}]*overflow:\s*visible/s, 'mobile Config Center no longer restores document-flow scrolling');
 assert.match(internals, /failedEndpointSummary/, 'Internals does not name failed endpoints');
 for (const endpoint of ['/api/pools/ssh', '/api/compression/stats']) {
   assert.ok(internals.includes(endpoint), `Internals endpoint inventory missing ${endpoint}`);
