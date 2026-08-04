@@ -1019,7 +1019,10 @@ class TestConfigMeta:
         "path", "owner", "label", "description", "aliases", "unit", "examples",
         "type", "enum", "constraints", "default", "sensitivity", "secret_route",
         "apply_mode", "apply_handler", "consumers", "restart_reason",
-        "activation_policy", "desired", "effective", "configured", "provenance",
+        "activation_policy", "group_description", "save_effect",
+        "runtime_effect", "action_available", "action_label",
+        "action_endpoint", "action_method", "action_body",
+        "desired", "effective", "configured", "provenance",
         "valid", "validation_errors", "pending_restart", "drift", "last_apply",
         "apply_state",
     }
@@ -1268,3 +1271,65 @@ class TestConfigMeta:
         assert record["pending_restart"] is False
         assert record["effective"] == record["desired"]
         assert record["apply_state"] == "applied"
+
+
+class TestRestartEndpoint:
+    """POST /api/restart — the Config page's pending-restart flow.
+
+    Restart-mode settings save but keep startup values; the page offers a
+    clean restart instead of pointing the operator at a shell. The wizard's
+    delayed-SIGTERM pattern lets the 202 flush before the process exits.
+    """
+
+    @pytest.mark.asyncio
+    async def test_restarts_cleanly_and_returns_202(self):
+        from src import restart as restart_mod
+
+        app, bot = _app(register_quick_actions)
+        bot.api_token_manager = None  # dev mode: no auth configured → gate allows
+        bot.config.web.api_token = ""
+        with patch.object(restart_mod, "request_restart") as req, \
+             patch.object(restart_mod, "restart_requested", return_value=False), \
+             patch("os.kill") as kill:
+            async with TestClient(TestServer(app)) as c:
+                resp = await c.post("/api/restart", json={})
+                body = await resp.json()
+            kill.assert_not_called()  # scheduled via call_later, not fired in-test
+        assert resp.status == 202
+        assert body["status"] == "restarting"
+        req.assert_called_once_with()  # NO env overrides — first-boot-only power
+
+    @pytest.mark.asyncio
+    async def test_idempotent_while_a_restart_is_scheduled(self):
+        from src import restart as restart_mod
+
+        app, bot = _app(register_quick_actions)
+        bot.api_token_manager = None
+        bot.config.web.api_token = ""
+        with patch.object(restart_mod, "request_restart") as req, \
+             patch.object(restart_mod, "restart_requested", return_value=True):
+            async with TestClient(TestServer(app)) as c:
+                resp = await c.post("/api/restart", json={})
+        assert resp.status == 202
+        req.assert_not_called()  # already scheduled — do not double-arm
+
+    def test_the_route_sits_behind_the_admin_gate(self):
+        from src.health.server import _is_admin_only_path
+
+        assert _is_admin_only_path("/api/restart")
+
+
+    @pytest.mark.asyncio
+    async def test_denied_without_admin_identity(self):
+        """Auth configured + no identity on the request = the gate refuses,
+        and nothing gets scheduled."""
+        from src import restart as restart_mod
+
+        app, bot = _app(register_quick_actions)
+        bot.api_token_manager = None
+        bot.config.web.api_token = "configured-token"
+        with patch.object(restart_mod, "request_restart") as req:
+            async with TestClient(TestServer(app)) as c:
+                resp = await c.post("/api/restart", json={})
+        assert resp.status == 403
+        req.assert_not_called()

@@ -526,10 +526,18 @@ class TestEffectiveIsNeverGuessed:
     """
 
     def test_a_field_nothing_reads_reports_no_effective_value(self):
-        record = build_field_record("agents.max_children_per_agent", 9)
-        assert record["desired"] == 9
+        record = build_field_record("openai_codex.max_tokens", 9000)
+        assert record["desired"] == 9000
         assert record["effective"] is None
         assert record["apply_state"] == "dormant"
+
+    def test_the_wired_child_limit_reports_next_tree_semantics(self):
+        """Was THE dormant exemplar; the spawn path consults it now — root
+        snapshot, descendants inherit, so live_for_new_work is the truth."""
+        record = build_field_record("agents.max_children_per_agent", 5)
+        assert record["apply_mode"] == "live_for_new_work"
+        assert record["effective"] == 5
+        assert record["apply_state"] == "applied"
 
     def test_a_gated_field_reports_no_effective_value(self):
         record = build_field_record("usage.directory", "./data/usage")
@@ -556,7 +564,6 @@ class TestEffectiveIsNeverGuessed:
     @pytest.mark.parametrize(
         "path,value",
         [
-            ("agents.max_nesting_depth", 3),
             ("agents.hard_max_iterations", 250),
             ("agents.final_warning_iterations", [10, 2]),
         ],
@@ -568,6 +575,13 @@ class TestEffectiveIsNeverGuessed:
         assert record["apply_mode"] == "live_for_new_work"
         assert record["effective"] is None
         assert record["apply_state"] == "unknown"
+
+    def test_nesting_depth_is_knowable_now_both_paths_consult_it(self):
+        """Was in the non-adopting set; the loop path passes it since the
+        wiring PR, so the next unit of work IS the configured value."""
+        record = build_field_record("agents.max_nesting_depth", 3)
+        assert record["effective"] == 3
+        assert record["apply_state"] == "applied"
 
     @pytest.mark.parametrize("path", ["scrub_secrets", "verify_ssl"])
     def test_dropped_webhook_target_boot_value_is_not_reported_effective(self, path):
@@ -761,3 +775,82 @@ class TestSpecConstruction:
         assert blank.apply_mode is None
         assert blank.consumers == ()
         assert blank.constraints == {}
+
+
+class TestPlainLanguageEffects:
+    """The two sentences an operator needs, replacing 'Activation required'.
+
+    The settled copy is exact for the gated states; drift in those words is
+    drift in meaning, so they are pinned verbatim.
+    """
+
+    def test_an_unwired_field_says_so_in_the_settled_words(self):
+        record = build_field_record("openai_codex.max_tokens", 9000)
+        assert record["save_effect"] == (
+            "Saving updates config.yml. This version of Odin does not use "
+            "this setting. Restarting will not activate it."
+        )
+
+    def test_a_gated_field_says_current_behavior_is_kept(self):
+        record = build_field_record("usage.directory", "./x")
+        assert record["save_effect"] == (
+            "Saving records your choice, but Odin continues using current "
+            "behavior until you apply it explicitly."
+        )
+
+    def test_restart_fields_carry_their_reason_as_runtime_effect(self):
+        record = build_field_record("sessions.max_history", 50)
+        assert "startup value" in record["save_effect"]
+        assert record["runtime_effect"] == record["restart_reason"]
+
+    def test_live_apply_names_its_handler(self):
+        record = build_field_record("openai_codex.model", "sol")
+        assert "PUT /api/llm/codex/config" in record["runtime_effect"]
+
+    def test_every_record_carries_both_sentences(self):
+        from src.config.schema import Config
+
+        payload = build_meta_payload(Config(discord={"token": "x"}).model_dump())
+        assert all(f["save_effect"] for f in payload["fields"])
+
+    def test_action_buttons_are_honest_off_until_one_exists(self):
+        """No activation endpoints exist yet — a rendered button would be the
+        disabled ritual switch the redesign bans."""
+        record = build_field_record("mcp.enabled", False)
+        assert record["action_available"] is False
+        assert record["action_label"] is None
+        assert record["action_endpoint"] is None
+
+
+class TestGroupDescriptions:
+    """Subgroup cards carry their OWN heading copy.
+
+    The first cut of the page stole the first child's description as the
+    group heading — 'Ssh Retry: SSH retry attempts.' — so the copy now lives
+    server-side, one entry per subgroup, CI-gated for completeness.
+    """
+
+    def test_subgroup_records_carry_the_group_heading(self):
+        record = build_field_record("tools.ssh_retry.max_retries", 2)
+        assert record["group_description"] == "How failed SSH connections are retried."
+
+    def test_the_heading_is_not_a_child_description(self):
+        from src.config.apply_registry import GROUP_DESCRIPTIONS
+
+        record = build_field_record("tools.bulkhead.ssh_max_concurrent", 10)
+        assert record["group_description"] == GROUP_DESCRIPTIONS["tools.bulkhead"]
+        assert record["group_description"] != record["description"]
+
+    def test_top_level_leaves_carry_none(self):
+        assert build_field_record("timezone", "UTC")["group_description"] is None
+
+    def test_every_schema_subgroup_has_an_entry(self):
+        from src.config.apply_registry import GROUP_DESCRIPTIONS, schema_facts
+
+        subgroups = {
+            ".".join(k.split(".")[:2])
+            for k in schema_facts()
+            if k.count(".") >= 2
+        }
+        missing = subgroups - set(GROUP_DESCRIPTIONS)
+        assert missing == set(), f"subgroups without heading copy: {missing}"

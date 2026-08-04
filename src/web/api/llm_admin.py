@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import ipaddress as _ipaddress
 import urllib.parse as _urlparse
+from typing import Any
 
 from aiohttp import web
+from pydantic import TypeAdapter, ValidationError
 
 from ...config.persistence import (
     config_transaction,
@@ -154,6 +156,36 @@ def _auxiliary_status(bot) -> dict:
     }
 
 
+def _boot_codex_group_status(
+    bot: Any,
+    group: str,
+    desired: dict[str, Any],
+) -> tuple[dict[str, Any] | None, bool | None]:
+    """Return boot-effective values and whether desired differs.
+
+    Connection-pool and context-compression objects are captured by runtime
+    components at boot. The desired config object is therefore not evidence
+    of what this process uses. ``None`` is deliberate when the boot snapshot
+    is unavailable: unknown is more honest than inventing an applied state.
+    """
+    # OdinClient records this once during construction. Read the concrete
+    # instance dictionary so permissive mocks/proxies cannot manufacture a
+    # pretend snapshot through __getattr__ and make status look authoritative.
+    boot = getattr(bot, "__dict__", {}).get("boot_config_snapshot")
+    if not isinstance(boot, dict):
+        return None, None
+    codex_boot = boot.get("openai_codex")
+    if not isinstance(codex_boot, dict):
+        return None, None
+    effective = codex_boot.get(group)
+    if not isinstance(effective, dict):
+        return None, None
+    # Only compare the public schema keys represented by desired. This keeps
+    # future boot-snapshot metadata from creating a false pending signal.
+    normalized = {key: effective.get(key) for key in desired}
+    return normalized, normalized != desired
+
+
 def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
     """LLM provider management (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -171,6 +203,15 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
         ollama_cfg = getattr(bot.config, "ollama", None)
         kimi_cfg = getattr(bot.config, "kimi", None)
         kimi_has_key = bool(kimi_cfg and kimi_cfg.api_key)
+
+        desired_pool = bot.config.openai_codex.connection_pool.model_dump()
+        desired_compression = bot.config.openai_codex.context_compression.model_dump()
+        effective_pool, pool_pending_restart = _boot_codex_group_status(
+            bot, "connection_pool", desired_pool
+        )
+        effective_compression, compression_pending_restart = _boot_codex_group_status(
+            bot, "context_compression", desired_compression
+        )
 
         result = {
             "active_provider": active,
@@ -205,6 +246,25 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                     if bot.config.openai_codex.agent_model not in (None, "auto")
                     else bot.config.openai_codex.model
                 ),
+                # Advanced transport/retry/pool/compression — the LLM page's
+                # Advanced panel populates exclusively from this endpoint;
+                # omitting these left it displaying schema defaults forever
+                # regardless of config.yml truth.
+                "request_timeout_seconds": bot.config.openai_codex.request_timeout_seconds,
+                "stream_stall_timeout_seconds": (
+                    bot.config.openai_codex.stream_stall_timeout_seconds
+                ),
+                "retry": {
+                    "max_retries": bot.config.openai_codex.retry.max_retries,
+                    "base_delay": bot.config.openai_codex.retry.base_delay,
+                    "max_delay": bot.config.openai_codex.retry.max_delay,
+                },
+                "connection_pool": desired_pool,
+                "effective_connection_pool": effective_pool,
+                "connection_pool_pending_restart": pool_pending_restart,
+                "context_compression": desired_compression,
+                "effective_context_compression": effective_compression,
+                "context_compression_pending_restart": compression_pending_restart,
             },
             "ollama": {
                 "configured": ollama_configured,
@@ -220,6 +280,10 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "enabled": kimi_cfg.enabled if kimi_cfg else False,
                 "model": kimi_cfg.model if kimi_cfg else "",
                 "max_tokens": kimi_cfg.max_tokens if kimi_cfg else 4096,
+                # Present for the same reason as ollama's: the Advanced panel
+                # reads it here — saving worked while display showed the
+                # default forever.
+                "timeout": kimi_cfg.timeout if kimi_cfg else 300,
                 "has_api_key": kimi_has_key,
             },
             "auxiliary": _auxiliary_status(bot),
@@ -268,7 +332,9 @@ def _set_fields(obj, values: dict[str, object]) -> None:
         setattr(obj, key, value)
 
 
-def _provider_changes(section: str, desired: dict[str, object], body: dict) -> list:
+def _provider_changes(
+    section: str, desired: dict[str, object], body: dict
+) -> list[tuple[tuple[str, ...], Any]]:
     return [((section, key), desired[key]) for key in desired if key in body]
 
 
@@ -288,6 +354,125 @@ async def _persist_or_response(
             False,
         )
     return None, was_cancelled
+
+
+def _parse_codex_advanced(body: dict, cfg) -> tuple[list, list, bool] | web.Response:
+    """Validate the Advanced-panel keys out of a codex PUT body.
+
+    Returns ``(persist_changes, apply_ops, wants_reload)`` — persist tuples
+    for the config writer, ``(cfg attribute, new value)`` ops for live config,
+    and whether a live-appliable transport/retry key was present — or an error
+    Response.
+
+    Validation runs through the MERGED Pydantic models themselves, not a
+    hand-mirrored copy of their rules: the first cut re-implemented bounds and
+    got all four ways it can go wrong — int() truncated 1.9 to 1, bool()
+    turned the string "false" into True, a list where a dict belonged was
+    silently ignored with a 200, and an invented floor rejected values the
+    schema accepts. Constructing the real model gives schema-exact coercion
+    and rejection for free, forever.
+
+    Nested groups are applied by REPLACING the whole sub-model object, never
+    by mutating it in place: the boot-built context compressor holds the boot
+    config's nested object by identity, so in-place mutation made compression
+    thresholds live-before-rebind and stale-after — replacement makes
+    persist-only deterministic.
+    """
+    from ...config.schema import (
+        ConnectionPoolConfig,
+        ContextCompressionConfig,
+        RetryConfig,
+    )
+
+    integer_adapter = TypeAdapter(int)
+
+    def _schema_int(value: Any, name: str, lo: int, hi: int) -> int:
+        # Match Pydantic's lax integer coercion (for example "600" -> 600),
+        # except JSON booleans stay forbidden at this HTTP boundary. Pydantic
+        # accepts bool as int for compatibility, but an operator checkbox is
+        # never a meaningful timeout.
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer")
+        try:
+            parsed = integer_adapter.validate_python(value)
+        except ValidationError as exc:
+            raise ValueError(f"{name} must be an integer") from exc
+        if not lo <= parsed <= hi:
+            raise ValueError(f"{name} must be between {lo} and {hi}")
+        return parsed
+
+    persist: list[tuple[tuple[str, ...], Any]] = []
+    ops: list[tuple[str, Any]] = []
+    wants_reload = False
+    try:
+        if "request_timeout_seconds" in body:
+            value = _schema_int(
+                body["request_timeout_seconds"], "request_timeout_seconds", 60, 86400
+            )
+            persist.append((("openai_codex", "request_timeout_seconds"), value))
+            ops.append(("request_timeout_seconds", value))
+            wants_reload = True
+        if "stream_stall_timeout_seconds" in body:
+            value = _schema_int(
+                body["stream_stall_timeout_seconds"],
+                "stream_stall_timeout_seconds", 10, 3600,
+            )
+            persist.append((("openai_codex", "stream_stall_timeout_seconds"), value))
+            ops.append(("stream_stall_timeout_seconds", value))
+            wants_reload = True
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    groups = (
+        ("retry", RetryConfig, True),
+        ("connection_pool", ConnectionPoolConfig, False),
+        ("context_compression", ContextCompressionConfig, False),
+    )
+    for group, model_cls, live in groups:
+        if group not in body:
+            continue
+        submitted = body[group]
+        if not isinstance(submitted, dict):
+            # A list here used to be silently ignored with a 200.
+            return web.json_response(
+                {"error": f"{group} must be an object of settings"}, status=400
+            )
+        unknown = set(submitted) - set(model_cls.model_fields)
+        if unknown:
+            return web.json_response(
+                {"error": f"unknown {group} field(s): {', '.join(sorted(unknown))}"},
+                status=400,
+            )
+        current = getattr(cfg, group)
+        try:
+            merged = model_cls(**{**current.model_dump(), **submitted})
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            loc = ".".join(str(part) for part in first.get("loc", ()))
+            return web.json_response(
+                {"error": f"{group}.{loc}: {first.get('msg', 'invalid value')}"},
+                status=400,
+            )
+        ops.append((group, merged))
+        persist.extend(
+            (("openai_codex", group, key), getattr(merged, key)) for key in submitted
+        )
+        wants_reload = wants_reload or live
+    return persist, ops, wants_reload
+
+
+def _apply_ops(cfg: Any, ops: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
+    """Apply ``(attribute, value)`` ops on cfg; return inverse ops.
+
+    Nested groups arrive as whole model objects and REPLACE the previous
+    object — the inverse holds the prior object by identity, so rollback
+    restores exactly what boot-time captors still reference.
+    """
+    inverse: list[tuple[str, Any]] = []
+    for attr, value in ops:
+        inverse.append((attr, getattr(cfg, attr)))
+        setattr(cfg, attr, value)
+    return inverse
 
 
 def register_provider_config(routes: web.RouteTableDef, bot) -> None:
@@ -414,7 +599,12 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     ),
                     "agent_model": agent_model if agent_model_present else cfg.agent_model,
                 }
+                advanced = _parse_codex_advanced(body, cfg)
+                if isinstance(advanced, web.Response):
+                    return advanced
+                adv_persist, adv_ops, adv_reload = advanced
                 changes = _provider_changes("openai_codex", desired, body)
+                changes = changes + adv_persist
                 persist_response, was_cancelled = await _persist_or_response(
                     changes, "Codex"
                 )
@@ -423,7 +613,12 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 if changes:
                     prior = {key: getattr(cfg, key) for key in desired}
                     _set_fields(cfg, desired)
-                    needs_reload = any(
+                    # Advanced transport/retry apply live through the same
+                    # reload the primary knobs use; pool and compression
+                    # persist only and surface as pending-restart. The old
+                    # handler dropped all of these silently and returned 200.
+                    adv_inverse = _apply_ops(cfg, adv_ops)
+                    needs_reload = adv_reload or any(
                         key in body
                         for key in ("enabled", "model", "max_tokens", "reasoning_effort")
                     )
@@ -432,12 +627,27 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                             await bot.llm_gateway.reload_codex_inner()
                     except BaseException:
                         _set_fields(cfg, prior)
+                        _apply_ops(cfg, adv_inverse)  # restore prior objects
+                        adv_prior_persist: list[
+                            tuple[tuple[str, ...], Any]
+                        ] = []
+                        for attr, prior_value in adv_inverse:
+                            if hasattr(prior_value, "model_dump"):
+                                adv_prior_persist.extend(
+                                    (("openai_codex", attr, key), val)
+                                    for key, val in prior_value.model_dump().items()
+                                )
+                            else:
+                                adv_prior_persist.append(
+                                    (("openai_codex", attr), prior_value)
+                                )
+                        prior_persist: list[tuple[tuple[str, ...], Any]] = [
+                            (("openai_codex", key), value)
+                            for key, value in prior.items()
+                            if key in body
+                        ]
                         rollback_exc, rollback_cancelled = await persist_config_paths_locked(
-                            [
-                                (("openai_codex", key), value)
-                                for key, value in prior.items()
-                                if key in body
-                            ]
+                            prior_persist + adv_prior_persist
                         )
                         if rollback_exc is not None:
                             log.critical(
@@ -445,6 +655,11 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                                 rollback_exc,
                             )
                             _set_fields(cfg, desired)
+                            # Disk kept the DESIRED nested values (their
+                            # rollback failed too) — runtime must republish
+                            # them as well, or transport/retry/pool split
+                            # between disk and process.
+                            _apply_ops(cfg, adv_ops)
                             if needs_reload:
                                 await bot.llm_gateway.reload_codex_inner()
                         elif needs_reload:

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
+from .manager import MAX_NESTING_DEPTH
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -91,6 +92,8 @@ class LoopAgentBridge:
         budget_warnings: list[int] | None = None,
         iteration_timeout: float | None = None,
         max_lifetime: float | None = None,
+        max_depth: int | None = None,
+        max_children: int | None = None,
         iteration_callback_factory: Callable[[str | None, str | None], IterationCallback]
         | None = None,
         context_compression_enabled: bool = False,
@@ -148,6 +151,30 @@ class LoopAgentBridge:
                 else iteration_callback
             )
 
+            # Invocation-bound wrapper, mirroring the direct-agent path: a
+            # nested spawn_agent from THIS agent must carry its id as
+            # parent_id, or the child registers as a fresh ROOT and bypasses
+            # depth, child-limit, and tree-cap enforcement entirely. The
+            # shared callback used to be passed bare, which is exactly how
+            # loop-agent children escaped every tree limit.
+            _self_id: dict[str, str | None] = {"id": None}
+
+            async def _bound_tool_cb(
+                tool_name: str,
+                tool_input: dict,
+                _self_id: dict = _self_id,
+                _shared_cb=tool_executor_callback,
+            ) -> str:
+                if (
+                    tool_name == "spawn_agent"
+                    and _self_id["id"]
+                ):
+                    # Invocation ancestry is authoritative. A nested model may
+                    # not choose a sibling/root as parent and escape this
+                    # agent's depth, child, or lifetime-tree limits.
+                    tool_input = {**tool_input, "parent_id": _self_id["id"]}
+                return await _shared_cb(tool_name, tool_input)
+
             agent_id = self._agent_manager.spawn(
                 label=label,
                 goal=enriched_goal,
@@ -155,12 +182,17 @@ class LoopAgentBridge:
                 requester_id=requester_id,
                 requester_name=requester_name,
                 iteration_callback=cb,
-                tool_executor_callback=tool_executor_callback,
+                tool_executor_callback=_bound_tool_cb,
                 announce_callback=announce_callback,
                 tools=tools,
                 system_prompt=system_prompt,
                 tool_timeouts=tool_timeouts,
                 trajectory_saver=self._trajectory_saver,
+                # Loop-spawned agents used to ignore configured depth and
+                # child limits entirely — the built-in defaults applied no
+                # matter what config said. Same knobs, both paths now.
+                max_depth=max_depth if max_depth is not None else MAX_NESTING_DEPTH,
+                max_children=max_children,
                 max_iterations=max_iterations,
                 budget_warnings=budget_warnings,
                 iteration_timeout=iteration_timeout,
@@ -173,6 +205,9 @@ class LoopAgentBridge:
             )
 
             if not agent_id.startswith("Error"):
+                # The wrapper learns its own id only now — spawn() had to
+                # return first, same as the direct path's mutable-cell trick.
+                _self_id["id"] = agent_id
                 self._loop_agents[loop_id].append(
                     LoopAgentRecord(
                         agent_id=agent_id,

@@ -1373,7 +1373,20 @@ class ToolLoopRunner:
                 st.continuation_count += 1
                 return ("retry", None)
 
-        _final = llm_resp.text or _EMPTY_RESPONSE_FALLBACK
+        # Empty final text after a turn that DID its work is a choice, not a
+        # failure: the completion classifier has already judged the turn
+        # complete, and every anti-fabrication guard runs upstream of here.
+        # Converting that silence into "I couldn't generate a response" was
+        # itself the fabricated failure (thumbs-up reaction lands, apology
+        # follows; video posts with its commentary, apology follows). With no
+        # tools used, the fallback stands — a bare empty generation IS a
+        # failure worth reporting.
+        if llm_resp.text:
+            _final = llm_resp.text
+        elif st.tools_used_in_loop:
+            _final = ""
+        else:
+            _final = _EMPTY_RESPONSE_FALLBACK
         await self._turn_recorder._save_turn_trajectory(
             st._trajectory,
             final_response=_final,

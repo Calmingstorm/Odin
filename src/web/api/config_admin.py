@@ -477,6 +477,35 @@ def register_quick_actions(routes: web.RouteTableDef, bot) -> None:
     # Quick actions
     # ------------------------------------------------------------------
 
+    @routes.post("/api/restart")
+    async def restart_odin(request: web.Request) -> web.Response:
+        """Cleanly restart the running process, on operator request.
+
+        Exists for the Config page's pending-restart flow: restart-mode
+        settings are saved but keep their startup values until the process
+        comes back, so the page offers this instead of telling the operator
+        to find a shell. Same mechanism as the setup wizard: record restart
+        intent, return before dying, then a delayed SIGTERM lets main()
+        re-exec in place regardless of the unit's Restart= policy.
+
+        Idempotent while a restart is already scheduled, and deliberately
+        accepts NO body/env overrides — the wizard's env-override path is for
+        first boot only; this route must never become a way to mutate the
+        process environment.
+        """
+        denied = _require_admin(request)
+        if denied is not None:
+            return denied
+        if restart.restart_requested():
+            return web.json_response({"status": "restarting"}, status=202)
+        restart.request_restart()
+        import os as _os
+        import signal as _signal
+        loop = asyncio.get_running_loop()
+        loop.call_later(2.0, _os.kill, _os.getpid(), _signal.SIGTERM)
+        log.info("Restart requested via /api/restart")
+        return web.json_response({"status": "restarting"}, status=202)
+
     @routes.post("/api/sessions/clear-all")
     async def clear_all_sessions(request: web.Request) -> web.Response:
         denied = _require_admin(request)

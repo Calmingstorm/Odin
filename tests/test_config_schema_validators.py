@@ -255,3 +255,16 @@ class TestAgentModelConfig:
     def test_surrounding_whitespace_stripped(self):
         from src.config.schema import OpenAICodexConfig
         assert OpenAICodexConfig(agent_model=" gpt-5.5 ").agent_model == "gpt-5.5"
+
+
+def test_max_children_per_agent_upper_bound():
+    """1-10: breadth compounds with depth, so a single config value must not
+    ask for absurd fan-out; the manager's tree cap is the backstop."""
+    import pytest
+
+    from src.config.schema import Config
+
+    with pytest.raises(ValueError, match="between 1 and 10"):
+        Config(discord={"token": "x"}, agents={"max_children_per_agent": 11})
+    cfg = Config(discord={"token": "x"}, agents={"max_children_per_agent": 10})
+    assert cfg.agents.max_children_per_agent == 10

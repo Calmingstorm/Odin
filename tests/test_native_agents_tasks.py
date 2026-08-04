@@ -48,7 +48,8 @@ def _fake_gateway(client):
 def _cfg(tools_enabled=True):
     return SimpleNamespace(
         tools=SimpleNamespace(enabled=tools_enabled, tool_timeouts={}),
-        agents=SimpleNamespace(max_nesting_depth=2, hard_max_iterations=300,
+        agents=SimpleNamespace(max_nesting_depth=2, max_children_per_agent=3,
+                               hard_max_iterations=300,
                                max_iterations=120, scheduled_max_iterations=180,
                                final_warning_iterations=[20, 10, 5, 1],
                                iteration_timeout_seconds=900,
@@ -262,6 +263,49 @@ class TestSpawnAgent:
         t._agent_manager._agents = {}
         assert "Error" in await t._handle_spawn_agent(
             _message(), {"label": "w", "goal": "g"})
+
+    async def test_invocation_bound_callback_overwrites_explicit_parent_id(self):
+        """Agent-originated spawn ancestry is not model-selectable.
+
+        Chat-level calls still pass their requested parent_id to spawn(), but
+        once an agent invokes spawn_agent its own id is authoritative.
+        """
+        t = _tools()
+        t._agent_manager.spawn.return_value = "agent-self"
+        t._agent_manager._agents = {}
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        callback = t._agent_manager.spawn.call_args.kwargs["tool_executor_callback"]
+        t._tool_loop.dispatch_loop_tool = AsyncMock(return_value="ok")
+
+        await callback(
+            "spawn_agent",
+            {"label": "child", "goal": "g", "parent_id": "other-tree"},
+        )
+
+        _, dispatched, *_ = t._tool_loop.dispatch_loop_tool.await_args.args
+        assert dispatched["parent_id"] == "agent-self"
+
+    async def test_nested_tool_filter_uses_the_parent_depth_snapshot(self):
+        """Live config cannot change the catalogue within a running tree."""
+        cfg = _cfg()
+        cfg.agents.max_nesting_depth = 1
+        t = _tools(
+            get_config=lambda: cfg,
+            tool_catalog=SimpleNamespace(merged_definitions=lambda: [
+                {"name": "spawn_agent"}, {"name": "run_command"},
+            ]),
+        )
+        t._agent_manager.spawn.return_value = "child-1"
+        # This tree began with depth limit 3 even though live config is now 1.
+        t._agent_manager._agents = {
+            "parent-1": SimpleNamespace(depth=0, max_depth=3)
+        }
+        await t._handle_spawn_agent(
+            _message(),
+            {"label": "child", "goal": "sub", "parent_id": "parent-1"},
+        )
+        tools = t._agent_manager.spawn.call_args.kwargs["tools"]
+        assert {tool["name"] for tool in tools} == {"spawn_agent", "run_command"}
 
     async def test_nested_with_parent_and_compressor(self):
         cc = SimpleNamespace(max_context_chars=500000, keep_recent_iterations=20)

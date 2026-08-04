@@ -350,6 +350,43 @@ MIXED_SECTIONS: frozenset[str] = frozenset({
     "observability",
 })
 
+#: Heading copy for every two-segment subgroup the page renders as a card.
+#: The page groups deeper-than-two-segment leaves by their first two path
+#: segments and shows this as the card's description — its OWN text, never a
+#: child's. The first cut of the page stole the first child's description as
+#: the group heading ("Ssh Retry: SSH retry attempts."), which is exactly the
+#: mislabeling this dict prevents. The CI gate requires an entry for every
+#: subgroup the schema actually produces.
+GROUP_DESCRIPTIONS: dict[str, str] = {
+    "email.imap": "How Odin reads mail: server, credentials, and polling.",
+    "email.smtp": "How Odin sends mail: server, credentials, and identity.",
+    "grafana_alerts.rules": "Per-alert routing and remediation rules.",
+    "image.openai": "Native OpenAI image generation behaviour.",
+    "mcp.servers": "Configured Model Context Protocol servers.",
+    "observability.context_trace": "What each per-turn context trace records, "
+    "and how large one may grow.",
+    "openai_codex.auxiliary": "A cheaper Codex model for the four background "
+    "jobs: compaction, reflection, consolidation, and follow-up.",
+    "openai_codex.connection_pool": "HTTP connection reuse for the Codex "
+    "client. Sized when the client's session is created.",
+    "openai_codex.context_compression": "Compress long tool loops before "
+    "they exceed the model's window.",
+    "openai_codex.retry": "How failed Codex requests are retried.",
+    "outbound_webhooks.targets": "Where lifecycle events are delivered.",
+    "personality.user_presets": "Saved custom identity presets.",
+    "tools.branch_freshness": "Warn when work starts from a stale git branch.",
+    "tools.bulkhead": "Concurrency ceilings per execution kind, so one busy "
+    "path cannot starve the others.",
+    "tools.governor": "The command safety governor: what it refuses, and who "
+    "may override it.",
+    "tools.hosts": "Named hosts commands may target over SSH.",
+    "tools.recovery": "Automatic recovery after a failed tool call.",
+    "tools.ssh_pool": "Reuse SSH connections across commands.",
+    "tools.ssh_retry": "How failed SSH connections are retried.",
+    "tools.streaming": "Stream long tool output as it is produced.",
+    "web.api_tokens": "Scoped API tokens defined in the config file.",
+}
+
 # --------------------------------------------------------------------------
 # Leaves
 # --------------------------------------------------------------------------
@@ -463,29 +500,27 @@ FIELDS: dict[str, FieldSpec] = {
     ),
     # ---------------- agents ----------------
     "agents.max_children_per_agent": FieldSpec(
-        apply_mode="dormant",
-        description="Child limit for spawned agent trees.",
-        activation_policy="No spawn path reads this value: the limit comes "
-        "from a built-in constant, which is also what an agent's own prompt "
-        "advertises. There is no switch to turn on — the spawn path has to "
-        "start consulting it first.",
+        apply_mode="live_for_new_work",
+        description="Lifetime direct-child limit per agent (1-10). Counts "
+        "children ever spawned, not merely concurrent ones.",
+        consumers=(
+            Consumer(
+                "New agent trees",
+                "live_for_new_work",
+                "The root snapshots this at spawn; every descendant inherits "
+                "the root's value, and the agent's own prompt advertises it.",
+            ),
+            Consumer(
+                "Trees already running",
+                "live_for_new_work",
+                "A running tree keeps the limit its root started with.",
+            ),
+        ),
     ),
     "agents.max_nesting_depth": FieldSpec(
         apply_mode="live_for_new_work",
-        description="How deep an agent tree may nest.",
-        consumers=(
-            Consumer(
-                "spawn_agent",
-                "live_for_new_work",
-                "Each spawn reads the configured depth.",
-            ),
-            Consumer(
-                "spawn_loop_agents",
-                "activation_required",
-                "Loop-spawned agents use the built-in depth; this value is not "
-                "consulted on that path.",
-            ),
-        ),
+        description="How deep an agent tree may nest. Both spawn paths read "
+        "it at spawn time; running trees keep the depth they started with.",
     ),
     "agents.max_iterations": FieldSpec(
         apply_mode="live_for_new_work",
@@ -1730,6 +1765,53 @@ def _apply_state(
     return "applied"
 
 
+def _plain_effects(
+    apply_mode: ApplyMode, spec: FieldSpec
+) -> tuple[str, str | None]:
+    """The two sentences an operator actually needs: what saving does, and
+    what the running bot does now.
+
+    The settled copy for the two gated states is exact — implementer-speak
+    like "activation required" is what this replaces. Field-specific detail
+    (restart reasons, activation policies) rides in runtime_effect so the
+    save_effect sentence stays uniform and scannable.
+    """
+    if apply_mode == "live_read":
+        return (
+            "Saving updates config.yml and takes effect immediately.",
+            "Odin reads this value on its next use.",
+        )
+    if apply_mode == "live_apply":
+        handler = spec.apply_handler or "its dedicated endpoint"
+        return (
+            "Saving updates config.yml and reconfigures the running process.",
+            f"Applied live through {handler}.",
+        )
+    if apply_mode == "live_for_new_work":
+        return (
+            "Saving updates config.yml and applies to the next spawn or turn.",
+            "Work already running keeps the values it started with.",
+        )
+    if apply_mode == "restart":
+        return (
+            "Saving updates config.yml. Odin keeps its startup value until "
+            "restarted.",
+            spec.restart_reason,
+        )
+    if apply_mode == "activation_required":
+        return (
+            "Saving records your choice, but Odin continues using current "
+            "behavior until you apply it explicitly.",
+            spec.activation_policy,
+        )
+    # dormant
+    return (
+        "Saving updates config.yml. This version of Odin does not use this "
+        "setting. Restarting will not activate it.",
+        spec.activation_policy,
+    )
+
+
 def build_field_record(
     path: str,
     desired_value: Any,
@@ -1767,6 +1849,7 @@ def build_field_record(
         effective, effective_known = None, False
 
     configured = _configured(desired_value)
+    save_effect, runtime_effect = _plain_effects(apply_mode, spec)
     facts = _facts_for(path)
     # The schema is the authority on shape; the registry only overrides when it
     # knows something Pydantic cannot express.
@@ -1804,6 +1887,19 @@ def build_field_record(
         ],
         "restart_reason": spec.restart_reason,
         "activation_policy": spec.activation_policy,
+        "group_description": GROUP_DESCRIPTIONS.get(
+            ".".join(path.split(".")[:2])
+        ),
+        "save_effect": save_effect,
+        "runtime_effect": runtime_effect,
+        # Honest-buttons-only: a button renders ONLY when a real action
+        # exists. None do yet — the F-lanes add them — so the page must show
+        # plain words, never a disabled ritual switch.
+        "action_available": False,
+        "action_label": None,
+        "action_endpoint": None,
+        "action_method": "POST",
+        "action_body": None,
         "desired": desired,
         "effective": effective,
         "configured": configured,

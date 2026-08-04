@@ -66,6 +66,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/mcp", "/api/tokens", "/api/personality",
     "/api/tools/timeouts", "/api/pools",
     "/api/outbound-webhooks", "/api/grafana-alerts", "/api/slack",
+    "/api/restart",
 )
 
 
