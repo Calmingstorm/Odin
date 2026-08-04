@@ -1019,7 +1019,10 @@ class TestConfigMeta:
         "path", "owner", "label", "description", "aliases", "unit", "examples",
         "type", "enum", "constraints", "default", "sensitivity", "secret_route",
         "apply_mode", "apply_handler", "consumers", "restart_reason",
-        "activation_policy", "desired", "effective", "configured", "provenance",
+        "activation_policy", "group_description", "save_effect",
+        "runtime_effect", "action_available", "action_label",
+        "action_endpoint", "action_method", "action_body",
+        "desired", "effective", "configured", "provenance",
         "valid", "validation_errors", "pending_restart", "drift", "last_apply",
         "apply_state",
     }

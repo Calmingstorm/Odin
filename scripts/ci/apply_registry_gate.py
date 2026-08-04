@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.config.apply_registry import (  # noqa: E402
     FIELDS,
+    GROUP_DESCRIPTIONS,
     MIXED_SECTIONS,
     SECTIONS,
     element_model,
@@ -128,9 +129,29 @@ def main() -> int:
                 f"MIXED_SECTIONS names '{section}', which is not a config section"
             )
 
+    # Every two-segment subgroup renders as a card with its OWN heading copy.
+    # Without an entry the page would fall back to guessing — historically by
+    # stealing the first child's description.
+    subgroups = sorted({
+        ".".join(leaf.split(".")[:2]) for leaf in leaves if leaf.count(".") >= 2
+    })
+    for prefix in subgroups:
+        if prefix not in GROUP_DESCRIPTIONS:
+            findings.append(
+                f"subgroup '{prefix}' has no GROUP_DESCRIPTIONS entry — its "
+                f"card heading would be a guess"
+            )
+    for prefix in sorted(GROUP_DESCRIPTIONS):
+        if prefix not in subgroups:
+            findings.append(
+                f"GROUP_DESCRIPTIONS names '{prefix}', which the schema no "
+                f"longer produces"
+            )
+
     print(
         f"apply-registry-gate: sections={len(sections)} leaves={len(leaves)} "
         f"classified={len(FIELDS)} mixed={len(MIXED_SECTIONS)} "
+        f"groups={len(GROUP_DESCRIPTIONS)} "
         f"findings={len(findings)}"
     )
     if findings:
