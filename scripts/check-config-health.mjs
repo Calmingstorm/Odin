@@ -53,8 +53,8 @@ assert.equal(
 );
 assert.equal(
   (configPage.match(/await loadConfigMeta\(\)/g) || []).length,
-  2,
-  'initial load and post-save refresh must both read the registry endpoint',
+  3,
+  'initial load, post-save refresh, and restart recovery must read the registry endpoint',
 );
 
 const applyDetails = collectApplyDetails([{
@@ -68,7 +68,7 @@ assert.deepEqual(
   ['consumer', 'handler', 'restart', 'activation'],
   'the page must surface every apply-evidence class, not only the badge',
 );
-for (const key of ['field.apply_details', 'sectionApplyDetails(section)']) {
+for (const key of ['fieldGroup.apply_details', 'fieldRuntimeCopy(field)']) {
   assert.equal(configPage.includes(key), true, `config page does not render ${key}`);
 }
 
