@@ -345,6 +345,12 @@ class AgentManager:
     def __init__(self) -> None:
         self._agents: dict[str, AgentInfo] = {}
         self._cleanup_tasks: dict[str, asyncio.Task] = {}
+        # Lifetime spawn count per tree, keyed by root id. Deliberately NOT
+        # derived from the registry: cleanup removes finished agents, and a
+        # registry count would let a tree spend its budget in waves forever.
+        # Entries are pruned only when the tree has no registered members
+        # left (nothing can spawn into it again — parents must exist).
+        self._tree_spawn_counts: dict[str, int] = {}
 
     def spawn(
         self,
@@ -408,11 +414,12 @@ class AgentManager:
                     f"maximum of {parent.max_children} children."
                 )
             tree_root = parent.root_id or parent.id
-            tree_size = sum(
-                1 for a in self._agents.values()
-                if (a.root_id or a.id) == tree_root
-            )
-            if tree_size >= TREE_MAX_AGENTS:
+            # Lifetime counter, never the registry: cleanup shrinks the
+            # registry, and counting it would let a tree respawn its whole
+            # budget every cleanup cycle — the exact geometric invoice the
+            # cap exists to prevent.
+            tree_spawned = self._tree_spawn_counts.get(tree_root, 0)
+            if tree_spawned >= TREE_MAX_AGENTS:
                 return (
                     f"Error: This agent tree has reached the lifetime "
                     f"maximum of {TREE_MAX_AGENTS} agents."
@@ -505,6 +512,9 @@ class AgentManager:
         # Schedule cleanup when the agent task finishes (any exit path)
         task.add_done_callback(lambda _t: self._schedule_cleanup(agent_id))
         self._agents[agent_id] = agent
+        self._tree_spawn_counts[agent.root_id] = (
+            self._tree_spawn_counts.get(agent.root_id, 0) + 1
+        )
 
         log.info(
             "Spawned agent %s (%s) depth=%d for channel %s by %s: %s",
@@ -797,6 +807,13 @@ class AgentManager:
         if ct and not ct.done():
             ct.cancel()
         if agent:
+            root = agent.root_id or agent_id
+            if not any(
+                (a.root_id or a.id) == root for a in self._agents.values()
+            ):
+                # Last member gone: nothing can ever spawn into this tree
+                # again (a parent must exist), so the lifetime counter can go.
+                self._tree_spawn_counts.pop(root, None)
             log.debug("Removed agent %s (%s) via %s", agent_id, agent.label, source or "cleanup")
             return True
         return False

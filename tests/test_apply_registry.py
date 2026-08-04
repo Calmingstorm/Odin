@@ -564,7 +564,6 @@ class TestEffectiveIsNeverGuessed:
     @pytest.mark.parametrize(
         "path,value",
         [
-            ("agents.max_nesting_depth", 3),
             ("agents.hard_max_iterations", 250),
             ("agents.final_warning_iterations", [10, 2]),
         ],
@@ -576,6 +575,13 @@ class TestEffectiveIsNeverGuessed:
         assert record["apply_mode"] == "live_for_new_work"
         assert record["effective"] is None
         assert record["apply_state"] == "unknown"
+
+    def test_nesting_depth_is_knowable_now_both_paths_consult_it(self):
+        """Was in the non-adopting set; the loop path passes it since the
+        wiring PR, so the next unit of work IS the configured value."""
+        record = build_field_record("agents.max_nesting_depth", 3)
+        assert record["effective"] == 3
+        assert record["apply_state"] == "applied"
 
     @pytest.mark.parametrize("path", ["scrub_secrets", "verify_ssl"])
     def test_dropped_webhook_target_boot_value_is_not_reported_effective(self, path):

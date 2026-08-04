@@ -41,6 +41,27 @@ class TestSendChunked:
         for t in msg.all_delivered_texts():
             assert len(t) <= DISCORD_MAX_LEN
 
+    async def test_empty_text_with_no_files_sends_nothing(self, bot):
+        """A deliberately-silent turn delivers silence. Discord rejects empty
+        content, and the old path would have thrown that 400 after retries —
+        or worse, upstream fabricated an apology to have something to send."""
+        msg = FakeMessage("q")
+        await bot.delivery.send_chunked(msg, "")
+        # Raw lists, not reply_texts — that property filters falsy content,
+        # which is exactly how an empty send would hide from the assertion.
+        assert msg.replies == []
+        assert msg.channel.sent == []
+
+    async def test_empty_text_with_pending_files_still_delivers_the_files(self, bot):
+        """An attachment with no commentary is a complete reply — the video
+        case: the file went out, and there was nothing more to say."""
+        msg = FakeMessage("q")
+        bot.channel_state.pending_files[str(msg.channel.id)] = [(b"vid", "clip.mp4")]
+        await bot.delivery.send_chunked(msg, "")
+        assert len(msg.replies) == 1
+        assert msg.replies[0]["files"]
+        assert str(msg.channel.id) not in bot.channel_state.pending_files
+
     async def test_code_fence_reopened_across_chunks(self, bot):
         msg = FakeMessage("q")
         body = "\n".join("x = 1  # padding padding padding" for _ in range(90))

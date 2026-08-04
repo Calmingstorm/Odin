@@ -1183,30 +1183,45 @@ class TestConfiguredChildLimit:
 
         mgr = AgentManager()
         root = self._spawn(mgr, "root", max_children=10)
-        # Fill the registry with tree members directly — spawning 24 real
-        # agents would be slow and beside the point; the cap counts REGISTERED
-        # tree members whatever their state.
-        # Different channel: the per-channel concurrency cap must not fire
-        # first — the TREE cap is what this test exercises.
-        for i in range(TREE_MAX_AGENTS - 1):
-            mgr._agents[f"fake{i}"] = type(mgr._agents[root])(
-                id=f"fake{i}", label="x", goal="g", channel_id="other",
-                requester_id="u1", requester_name="user", root_id=root,
-            )
+        # Drive the LIFETIME counter, not the registry — the cap is charged
+        # per spawn for the tree's whole life.
+        mgr._tree_spawn_counts[root] = TREE_MAX_AGENTS
         blocked = self._spawn(mgr, "straw", parent_id=root)
         assert blocked.startswith("Error")
         assert "lifetime" in blocked and str(TREE_MAX_AGENTS) in blocked
+
+    async def test_cleanup_does_not_refund_the_tree_budget(self):
+        """The cap is LIFETIME: janitor-removing finished children must not
+        let the tree respawn its whole budget every cleanup cycle — a
+        registry-derived count did exactly that."""
+        from src.agents.manager import TREE_MAX_AGENTS
+
+        mgr = AgentManager()
+        root = self._spawn(mgr, "root", max_children=10)
+        child = self._spawn(mgr, "child", parent_id=root)
+        assert not child.startswith("Error")
+        spent = mgr._tree_spawn_counts[root]
+        assert spent == 2  # root + child, charged at spawn
+        # Janitor removes the finished child; the budget must NOT come back.
+        assert mgr._remove_agent(child, source="test") is True
+        assert mgr._tree_spawn_counts[root] == spent
+        mgr._tree_spawn_counts[root] = TREE_MAX_AGENTS
+        blocked = self._spawn(mgr, "wave2", parent_id=root)
+        assert blocked.startswith("Error") and "lifetime" in blocked
+
+    async def test_the_counter_is_pruned_with_the_trees_last_member(self):
+        mgr = AgentManager()
+        root = self._spawn(mgr, "root")
+        assert root in mgr._tree_spawn_counts
+        assert mgr._remove_agent(root, source="test") is True
+        assert root not in mgr._tree_spawn_counts
 
     async def test_a_second_tree_is_not_charged_for_the_first(self):
         from src.agents.manager import TREE_MAX_AGENTS
 
         mgr = AgentManager()
         first = self._spawn(mgr, "root1", max_children=10)
-        for i in range(TREE_MAX_AGENTS):
-            mgr._agents[f"fake{i}"] = type(mgr._agents[first])(
-                id=f"fake{i}", label="x", goal="g", channel_id="c2",
-                requester_id="u1", requester_name="user", root_id=first,
-            )
+        mgr._tree_spawn_counts[first] = TREE_MAX_AGENTS
         second = self._spawn(mgr, "root2")
         assert not second.startswith("Error")
         child = self._spawn(mgr, "child2", parent_id=second)

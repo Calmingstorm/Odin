@@ -519,20 +519,8 @@ FIELDS: dict[str, FieldSpec] = {
     ),
     "agents.max_nesting_depth": FieldSpec(
         apply_mode="live_for_new_work",
-        description="How deep an agent tree may nest.",
-        consumers=(
-            Consumer(
-                "spawn_agent",
-                "live_for_new_work",
-                "Each spawn reads the configured depth.",
-            ),
-            Consumer(
-                "spawn_loop_agents",
-                "activation_required",
-                "Loop-spawned agents use the built-in depth; this value is not "
-                "consulted on that path.",
-            ),
-        ),
+        description="How deep an agent tree may nest. Both spawn paths read "
+        "it at spawn time; running trees keep the depth they started with.",
     ),
     "agents.max_iterations": FieldSpec(
         apply_mode="live_for_new_work",
