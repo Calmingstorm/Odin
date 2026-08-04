@@ -289,21 +289,30 @@ class OdinWebSocket {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     let url = `${proto}//${location.host}/api/ws`;
     if (this._api.token) url += `?token=${encodeURIComponent(this._api.token)}`;
-    this._ws = new WebSocket(url);
+    const socket = new WebSocket(url);
+    this._ws = socket;
+    // Every callback below is guarded on socket identity. Closing a socket does
+    // not cancel its already-queued events: disconnect() clears _ws, connect()
+    // installs a NEW socket, and the old socket's onclose then fires with no
+    // idea it is obsolete — tearing down the live connection's reference, ping
+    // timer and latency, and scheduling a reconnect on top of a healthy socket.
+    const isCurrent = () => this._ws === socket;
 
-    this._ws.onopen = () => {
+    socket.onopen = () => {
+      if (!isCurrent()) return;
       this._reconnectDelay = 1000;
       this._reconnectAttempt = 0;
       // Re-subscribe to channels
       for (const ch of this._subscriptions) {
-        this._ws.send(JSON.stringify({ subscribe: ch }));
+        socket.send(JSON.stringify({ subscribe: ch }));
       }
       this._startPing();
       this._setState('connected');
       if (this.onStatusChange) this.onStatusChange(true);
     };
 
-    this._ws.onmessage = (evt) => {
+    socket.onmessage = (evt) => {
+      if (!isCurrent()) return;
       let data;
       try { data = JSON.parse(evt.data); } catch { return; }
       const type = data.type;
@@ -328,7 +337,9 @@ class OdinWebSocket {
       // subscribed/unsubscribed confirmations are silently consumed
     };
 
-    this._ws.onclose = () => {
+    socket.onclose = () => {
+      // A stale socket's close must not touch the current connection's state.
+      if (!isCurrent()) return;
       this._ws = null;
       this._stopPing();
       this._resetLatency();
@@ -353,7 +364,7 @@ class OdinWebSocket {
       }
     };
 
-    this._ws.onerror = () => {
+    socket.onerror = () => {
       // onclose will fire after onerror, handled there
     };
   }
