@@ -172,6 +172,54 @@ class TestOneTimingModeOnly:
         assert updated["cron"] == "0 * * * *"
 
 
+class TestAmbiguousRunAt:
+    """An offsetless run_at names a wall clock, not an instant.
+
+    It was stamped UTC regardless, so a New York install fired five hours
+    early and a fall-back night ran it twice. The rule lives HERE rather than
+    at the web boundary so every caller is covered — the Discord tool path
+    included, where schedule_task directs the model through parse_time, which
+    always returns an offset-aware value.
+    """
+
+    async def test_a_naive_run_at_is_rejected(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        with pytest.raises(ValueError, match="explicit offset"):
+            await s.add("job", "reminder", "chan1", run_at="2026-11-01T01:30:30")
+        assert s.list_all() == []
+
+    async def test_update_rejects_a_naive_run_at(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        created = await s.add("job", "reminder", "chan1", cron="*/5 * * * *")
+        with pytest.raises(ValueError, match="explicit offset"):
+            await s.update(created["id"], run_at="2026-11-01T01:30:30")
+        assert s.list_all()[0]["cron"] == "*/5 * * * *"
+
+    @pytest.mark.parametrize(
+        "stamp", ["2026-11-01T01:30:30Z", "2026-11-01T01:30:30-04:00"]
+    )
+    async def test_offset_aware_values_are_accepted(self, tmp_path, stamp):
+        s = _make_scheduler(tmp_path)
+        created = await s.add("job", "reminder", "chan1", run_at=stamp)
+        assert created["one_time"] is True
+
+    async def test_parse_time_output_is_always_acceptable(self, tmp_path):
+        """The tool tells the model to use parse_time, so its output must
+        satisfy this rule — otherwise the rule breaks reminders."""
+        from src.tools.time_parser import parse_time
+
+        s = _make_scheduler(tmp_path)
+        created = await s.add(
+            "job", "reminder", "chan1", run_at=parse_time("tomorrow at 9am")
+        )
+        assert created["one_time"] is True
+
+    async def test_a_malformed_value_falls_through_to_the_iso_check(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        with pytest.raises(ValueError, match="Invalid ISO datetime"):
+            await s.add("job", "reminder", "chan1", run_at="not-a-date")
+
+
 class TestSchedulerDelete:
     async def test_delete_existing(self, tmp_path):
         s = _make_scheduler(tmp_path)

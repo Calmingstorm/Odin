@@ -26,7 +26,6 @@ from ...config.schema import (
     effort_incompatibility_error,
 )
 from ...odin_log import get_logger
-from ..api_common import contains_redaction_mask
 
 log = get_logger("web.api")
 
@@ -73,26 +72,6 @@ def _validate_ollama_url(url: str) -> str:
     except Exception:
         pass
     raise ValueError(f"Ollama base_url must point to a local/private network address, got: {host}")
-
-
-def _masked_placeholder_response(body) -> web.Response | None:
-    """Refuse a body carrying the mask this API hands out.
-
-    Status and config reads report secrets as ``••••••••``. A client that
-    renders one as an editable control sends it straight back, and these
-    handlers would install eight bullets as the live API key and persist it.
-    The generic /api/config save refuses the same input; every route that
-    accepts a secret has to, or the fence only covers one door.
-    """
-    if contains_redaction_mask(body):
-        return web.json_response(
-            {
-                "error": "Request contains a redacted placeholder. Send the "
-                "real value, or omit the field to leave it unchanged."
-            },
-            status=400,
-        )
-    return None
 
 
 def _parse_int(val, name: str, lo: int = 1, hi: int = 262000) -> int:
@@ -260,10 +239,6 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        masked = _masked_placeholder_response(body)
-        if masked is not None:
-            return masked
-
         provider = body.get("provider", "")
         if provider not in ("codex", "ollama", "kimi"):
             return web.json_response(
@@ -327,10 +302,6 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        masked = _masked_placeholder_response(body)
-        if masked is not None:
-            return masked
 
         lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
@@ -520,10 +491,6 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        masked = _masked_placeholder_response(body)
-        if masked is not None:
-            return masked
-
         # Persistence runs INSIDE reload_auxiliary's locked transaction: the
         # SYNC write runs on an executor future (settled before the lock
         # releases), the candidate is applied, persisted, and (on persist
@@ -581,10 +548,6 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        masked = _masked_placeholder_response(body)
-        if masked is not None:
-            return masked
 
         lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
@@ -673,10 +636,6 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        masked = _masked_placeholder_response(body)
-        if masked is not None:
-            return masked
 
         lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
@@ -841,10 +800,6 @@ def register_ollama_admin(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        masked = _masked_placeholder_response(body)
-        if masked is not None:
-            return masked
-
         model = body.get("model", "").strip()
         if not model:
             return web.json_response({"error": "model is required"}, status=400)
@@ -936,10 +891,6 @@ def register_kimi_admin(routes: web.RouteTableDef, bot) -> None:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        masked = _masked_placeholder_response(body)
-        if masked is not None:
-            return masked
 
         model = body.get("model", "").strip()
         if not model:

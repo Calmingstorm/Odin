@@ -221,6 +221,115 @@ def test_mask_scan_stops_at_a_depth_limit():
     assert contains_redaction_mask(deep) is False
 
 
+class TestRedactionMaskMiddleware:
+    """The mask is refused for EVERY route, not the ones someone remembered.
+
+    Guarding handlers one at a time failed twice: the generic config save was
+    fenced while the dedicated provider routes still installed the sentinel as
+    the live API key, and fencing those still left MCP headers and
+    outbound-webhook secrets. Nine route modules accept secret-bearing bodies.
+    Enumerating them is how the hole reopens, so the fence lives in middleware.
+    """
+
+    MASK = "•" * 8
+
+    @staticmethod
+    async def _client(handler_spy):
+        from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from src.health.server import _make_redaction_mask_middleware
+
+        async def handler(request):
+            handler_spy.append(request.path)
+            return web.json_response({"ok": True})
+
+        app = web.Application(middlewares=[_make_redaction_mask_middleware()])
+        for route in (
+            "/api/mcp/servers", "/api/outbound-webhooks",
+            "/api/llm/kimi/config", "/api/config", "/api/skills",
+        ):
+            app.router.add_post(route, handler)
+        app.router.add_get("/api/config", handler)
+        return TestClient(TestServer(app))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("route", "body"),
+        [
+            ("/api/mcp/servers", {"headers": {"Authorization": "MASK"}}),
+            ("/api/outbound-webhooks", {"secret": "MASK"}),
+            ("/api/llm/kimi/config", {"api_key": "MASK"}),
+            ("/api/config", {"slack": {"default_webhook_url": "MASK"}}),
+            ("/api/skills", {"nested": [{"deep": {"token": "MASK"}}]}),
+        ],
+    )
+    async def test_a_masked_body_never_reaches_the_handler(self, route, body):
+        import json as _json
+
+        reached: list[str] = []
+        filled = _json.loads(_json.dumps(body).replace("MASK", self.MASK))
+        async with await self._client(reached) as c:
+            resp = await c.post(route, json=filled)
+        assert resp.status == 400
+        assert reached == [], f"{route} ran its handler on a masked body"
+
+    @pytest.mark.asyncio
+    async def test_real_values_are_untouched(self):
+        reached: list[str] = []
+        async with await self._client(reached) as c:
+            assert (await c.post(
+                "/api/llm/kimi/config", json={"api_key": "REAL"}
+            )).status == 200
+            assert (await c.post(
+                "/api/config", json={"discord": {"require_mention": True}}
+            )).status == 200
+        assert len(reached) == 2
+
+    @pytest.mark.asyncio
+    async def test_reads_and_non_json_bodies_are_not_inspected(self):
+        """A GET carries no body, and a non-JSON body is the handler's to
+        parse — the fence must not become a content-type gate."""
+        reached: list[str] = []
+        async with await self._client(reached) as c:
+            assert (await c.get("/api/config")).status == 200
+            resp = await c.post("/api/config", data=self.MASK)
+        assert resp.status == 200
+        assert len(reached) == 2
+
+    @pytest.mark.parametrize("with_auth", [True, False])
+    def test_the_fence_is_actually_installed_on_the_real_server(self, with_auth):
+        """Building the middleware proves it works; this proves it RUNS.
+
+        Without this, deleting the append() line leaves every test above green
+        while the fence protects nothing — the failure mode is silence.
+        It sits outside the auth block on purpose: the mask is never valid
+        input, tokens configured or not.
+        """
+        from src.config.schema import WebConfig
+        from src.health.server import HealthServer
+
+        server = HealthServer(
+            port=0,
+            web_config=WebConfig(
+                enabled=True, api_token="tok" if with_auth else ""
+            ),
+        )
+        names = [getattr(m, "__name__", "") for m in server._app.middlewares]
+        assert "redaction_mask_middleware" in names, names
+
+    @pytest.mark.asyncio
+    async def test_malformed_json_is_left_to_the_handler(self):
+        reached: list[str] = []
+        async with await self._client(reached) as c:
+            resp = await c.post(
+                "/api/config", data="{not json",
+                headers={"Content-Type": "application/json"},
+            )
+        assert resp.status == 200
+        assert reached == ["/api/config"]
+
+
 def test_the_redaction_mask_is_refused_as_input():
     """A page that renders a masked secret as an editable control sends the
     mask back on save. Accepting it writes eight bullets over the credential."""

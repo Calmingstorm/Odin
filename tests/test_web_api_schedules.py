@@ -56,54 +56,6 @@ class TestListCreate:
                                  json={"description": "j", "channel_id": "1"})).status == 400
 
 
-class TestAmbiguousRunAt:
-    """An offsetless run_at names a wall clock, not an instant.
-
-    The scheduler stamps it UTC, so on a New York install it fires five hours
-    early, and on a fall-back night the same wall time happens twice. A browser
-    or script has the offset; the Discord tool path does not and is left alone.
-    """
-
-    async def test_create_rejects_a_naive_run_at(self):
-        bot = _bot()
-        async with TestClient(TestServer(_app(bot))) as c:
-            r = await c.post("/api/schedules", json={
-                "description": "job", "channel_id": "1",
-                "run_at": "2026-11-01T01:30:30",
-            })
-            body = await r.json()
-        assert r.status == 400
-        assert "offset" in body["error"]
-        bot.scheduler.add.assert_not_awaited()
-
-    async def test_update_rejects_a_naive_run_at(self):
-        bot = _bot()
-        async with TestClient(TestServer(_app(bot))) as c:
-            r = await c.put("/api/schedules/S1", json={"run_at": "2026-11-01T01:30:30"})
-        assert r.status == 400
-        bot.scheduler.update.assert_not_awaited()
-
-    async def test_offset_aware_values_are_accepted(self):
-        for stamp in ("2026-11-01T01:30:30Z", "2026-11-01T01:30:30-04:00"):
-            bot = _bot()
-            async with TestClient(TestServer(_app(bot))) as c:
-                r = await c.post("/api/schedules", json={
-                    "description": "job", "channel_id": "1", "run_at": stamp,
-                })
-            assert r.status == 201, stamp
-
-    async def test_a_malformed_value_is_left_to_the_scheduler(self):
-        """Its message is more specific than anything this guard could say."""
-        bot = _bot()
-        bot.scheduler.add = AsyncMock(side_effect=ValueError("Invalid ISO datetime"))
-        async with TestClient(TestServer(_app(bot))) as c:
-            r = await c.post("/api/schedules", json={
-                "description": "job", "channel_id": "1", "run_at": "not-a-date",
-            })
-            body = await r.json()
-        assert r.status == 400
-        assert "Invalid ISO datetime" in body["error"]
-
 
 class TestUpdate:
     async def test_validation(self):
