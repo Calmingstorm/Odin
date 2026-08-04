@@ -88,10 +88,12 @@ export default {
             </div>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">One-Time (ISO datetime)
-            <input v-model="form.run_at" type="text" class="hm-input"
-                   placeholder="e.g. 2026-04-01T09:00:00" />
+            <label class="text-gray-400 text-xs block mb-1">One-Time (your local time)
+            <input v-model="form.run_at" type="datetime-local" class="hm-input" />
             </label>
+            <p v-if="runAtUtcPreview" class="text-xs text-gray-500 mt-1">
+              Fires at {{ runAtUtcPreview }}
+            </p>
           </div>
         </div>
 
@@ -325,6 +327,16 @@ export default {
     });
     const creating = ref(false);
     const createError = ref(null);
+    // Echo the submitted instant back in the operator's own locale, so the
+    // local-vs-UTC translation is visible BEFORE clicking Create rather than
+    // discovered afterwards in the list.
+    const runAtUtcPreview = computed(() => {
+      const raw = (form.value.run_at || '').trim();
+      if (!raw) return '';
+      const instant = new Date(raw);
+      if (Number.isNaN(instant.getTime())) return '';
+      return `${instant.toLocaleString()} (${instant.toISOString()})`;
+    });
 
     // Cron validation
     const cronResult = ref(null);
@@ -450,7 +462,18 @@ export default {
         channel_id: f.channel_id.trim(),
       };
       if (f.cron.trim()) payload.cron = f.cron.trim();
-      if (f.run_at.trim()) payload.run_at = f.run_at.trim();
+      if (f.run_at.trim()) {
+        // The field is datetime-local, i.e. the operator's WALL CLOCK. Send an
+        // explicit instant: a naive string was stamped UTC server-side, so
+        // someone at UTC-5 typing 09:00 got a job that fired at 04:00 local
+        // and a list row showing a time they never entered.
+        const instant = new Date(f.run_at.trim());
+        if (Number.isNaN(instant.getTime())) {
+          createError.value = 'One-time run time is not a valid date';
+          return;
+        }
+        payload.run_at = instant.toISOString();
+      }
       if (f.action === 'reminder' && f.message.trim()) payload.message = f.message.trim();
       if (f.action === 'check') {
         if (f.tool_name.trim()) payload.tool_name = f.tool_name.trim();
@@ -547,7 +570,7 @@ export default {
 
     return {
       schedules, loading, error,
-      showCreate, form, creating, createError,
+      showCreate, form, creating, createError, runAtUtcPreview,
       cronResult, validatingCron, cronPresets,
       runningId, deletingId, togglingId, resettingId,
       expandedId, history, historyLoading, historyError,
