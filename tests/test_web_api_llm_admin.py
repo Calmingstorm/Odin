@@ -1717,3 +1717,102 @@ class TestAuxiliaryRoutePrepareProbeCAS:
             response = await request_task
         assert response.status == 200
         assert captured["plan"].desired_model == "gpt-5.6-terra"
+
+
+class TestCodexAdvancedKnobs:
+    """The LLM page's Advanced panel edits transport/retry/pool/compression.
+
+    The old handler silently DROPPED every one of these keys and returned
+    200 — the panel toasted "saved" for a save that never happened, and
+    /api/llm/status never returned them, so it displayed schema defaults
+    forever regardless of config.yml truth.
+    """
+
+    def _harness(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        return app, bot
+
+    @pytest.mark.asyncio
+    async def test_advanced_keys_persist_and_apply(self):
+        app, bot = self._harness()
+        with patch("src.web.api.llm_admin.persist_config_paths_locked",
+                   new=AsyncMock(return_value=(None, False))) as persist:
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/codex/config", json={
+                    "request_timeout_seconds": 7200,
+                    "retry": {"max_retries": 5, "base_delay": 1.5},
+                    "connection_pool": {"max_connections": 20},
+                    "context_compression": {"max_context_chars": 500000},
+                })
+        assert r.status == 200
+        cfg = bot.config.openai_codex
+        assert cfg.request_timeout_seconds == 7200
+        assert cfg.retry.max_retries == 5
+        assert cfg.retry.base_delay == 1.5
+        assert cfg.connection_pool.max_connections == 20
+        assert cfg.context_compression.max_context_chars == 500000
+        persisted = {change[0] for change in persist.call_args[0][0]}
+        assert ("openai_codex", "request_timeout_seconds") in persisted
+        assert ("openai_codex", "retry", "max_retries") in persisted
+        assert ("openai_codex", "connection_pool", "max_connections") in persisted
+        # Transport/retry reach the live client through the reload path.
+        bot.llm_gateway.reload_codex_inner.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pool_and_compression_alone_do_not_reload(self):
+        """They are restart/rebuild-bound — persisting them must not churn
+        the live client or the auth pool."""
+        app, bot = self._harness()
+        with patch("src.web.api.llm_admin.persist_config_paths_locked",
+                   new=AsyncMock(return_value=(None, False))):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/codex/config", json={
+                    "connection_pool": {"keepalive_timeout": 60},
+                    "context_compression": {"enabled": False},
+                })
+        assert r.status == 200
+        bot.llm_gateway.reload_codex_inner.assert_not_awaited()
+        assert bot.config.openai_codex.context_compression.enabled is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("body", "fragment"), [
+        ({"request_timeout_seconds": 30}, "between 60 and 86400"),
+        ({"stream_stall_timeout_seconds": 5}, "between 10 and 3600"),
+        ({"retry": {"max_retries": -1}}, ">= 0"),
+        ({"connection_pool": {"max_connections": 0}}, ">= 1"),
+        ({"request_timeout_seconds": "soon"}, "must be a number"),
+    ])
+    async def test_bounds_are_enforced_before_any_mutation(self, body, fragment):
+        app, bot = self._harness()
+        before = bot.config.openai_codex.request_timeout_seconds
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json=body)
+            payload = await r.json()
+        assert r.status == 400
+        assert fragment in payload["error"]
+        assert bot.config.openai_codex.request_timeout_seconds == before
+
+    @pytest.mark.asyncio
+    async def test_status_reports_the_advanced_truth(self):
+        """The panel populates exclusively from /api/llm/status; before this,
+        an operator whose config said 7200 saw the 3600 default forever."""
+        app, bot = _app(register_llm_provider)
+        bot.llm_gateway.codex_client = object()
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.kimi_client = None
+        bot.llm_gateway.active_client = SimpleNamespace(
+            model="gpt-5.5", provider_name="codex"
+        )
+        bot.llm_gateway.auxiliary_llm_client = None
+        bot.config.openai_codex.request_timeout_seconds = 7200
+        bot.config.openai_codex.retry.max_retries = 7
+        bot.config.kimi.timeout = 123
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/llm/status")).json()
+        assert body["codex"]["request_timeout_seconds"] == 7200
+        assert body["codex"]["retry"]["max_retries"] == 7
+        assert body["codex"]["connection_pool"]["max_connections"] >= 1
+        assert body["codex"]["context_compression"]["enabled"] in (True, False)
+        assert body["kimi"]["timeout"] == 123

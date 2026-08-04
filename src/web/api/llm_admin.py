@@ -205,6 +205,36 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                     if bot.config.openai_codex.agent_model not in (None, "auto")
                     else bot.config.openai_codex.model
                 ),
+                # Advanced transport/retry/pool/compression — the LLM page's
+                # Advanced panel populates exclusively from this endpoint;
+                # omitting these left it displaying schema defaults forever
+                # regardless of config.yml truth.
+                "request_timeout_seconds": bot.config.openai_codex.request_timeout_seconds,
+                "stream_stall_timeout_seconds": (
+                    bot.config.openai_codex.stream_stall_timeout_seconds
+                ),
+                "retry": {
+                    "max_retries": bot.config.openai_codex.retry.max_retries,
+                    "base_delay": bot.config.openai_codex.retry.base_delay,
+                    "max_delay": bot.config.openai_codex.retry.max_delay,
+                },
+                "connection_pool": {
+                    "max_connections": (
+                        bot.config.openai_codex.connection_pool.max_connections
+                    ),
+                    "keepalive_timeout": (
+                        bot.config.openai_codex.connection_pool.keepalive_timeout
+                    ),
+                },
+                "context_compression": {
+                    "enabled": bot.config.openai_codex.context_compression.enabled,
+                    "max_context_chars": (
+                        bot.config.openai_codex.context_compression.max_context_chars
+                    ),
+                    "keep_recent_iterations": (
+                        bot.config.openai_codex.context_compression.keep_recent_iterations
+                    ),
+                },
             },
             "ollama": {
                 "configured": ollama_configured,
@@ -220,6 +250,10 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "enabled": kimi_cfg.enabled if kimi_cfg else False,
                 "model": kimi_cfg.model if kimi_cfg else "",
                 "max_tokens": kimi_cfg.max_tokens if kimi_cfg else 4096,
+                # Present for the same reason as ollama's: the Advanced panel
+                # reads it here — saving worked while display showed the
+                # default forever.
+                "timeout": kimi_cfg.timeout if kimi_cfg else 300,
                 "has_api_key": kimi_has_key,
             },
             "auxiliary": _auxiliary_status(bot),
@@ -288,6 +322,119 @@ async def _persist_or_response(
             False,
         )
     return None, was_cancelled
+
+
+#: Nested Codex knobs the LLM page's Advanced panel edits. Each entry:
+#: (body group key or None for top-level, field, validator). The old handler
+#: silently DROPPED all of these — the panel toasted "saved" for a save that
+#: never happened — so acceptance here is what makes it real.
+def _parse_codex_advanced(body: dict, cfg) -> tuple[list, list, bool] | web.Response:
+    """Validate the Advanced-panel keys out of a codex PUT body.
+
+    Returns ``(persist_changes, apply_ops, wants_reload)`` — persist tuples for
+    the config writer, ``(parent_attr | None, field, value)`` ops for live
+    config, and whether any live-appliable transport/retry key was present —
+    or an error Response. Bounds mirror the schema's validators, enforced here
+    because direct assignment skips Pydantic validation.
+    """
+
+    def _num(value, name, lo, hi=None, *, integer=True):
+        try:
+            parsed = int(value) if integer else float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be a number")
+        if parsed < lo or (hi is not None and parsed > hi):
+            bound = f"between {lo} and {hi}" if hi is not None else f">= {lo}"
+            raise ValueError(f"{name} must be {bound}")
+        return parsed
+
+    persist: list = []
+    apply_ops: list = []
+    wants_reload = False
+    try:
+        if "request_timeout_seconds" in body:
+            value = _num(
+                body["request_timeout_seconds"], "request_timeout_seconds", 60, 86400
+            )
+            persist.append((("openai_codex", "request_timeout_seconds"), value))
+            apply_ops.append((None, "request_timeout_seconds", value))
+            wants_reload = True
+        if "stream_stall_timeout_seconds" in body:
+            value = _num(
+                body["stream_stall_timeout_seconds"],
+                "stream_stall_timeout_seconds", 10, 3600,
+            )
+            persist.append((("openai_codex", "stream_stall_timeout_seconds"), value))
+            apply_ops.append((None, "stream_stall_timeout_seconds", value))
+            wants_reload = True
+        retry = body.get("retry")
+        if isinstance(retry, dict):
+            for field, integer in (
+                ("max_retries", True), ("base_delay", False), ("max_delay", False),
+            ):
+                if field in retry:
+                    value = _num(retry[field], f"retry.{field}", 0, integer=integer)
+                    persist.append((("openai_codex", "retry", field), value))
+                    apply_ops.append(("retry", field, value))
+                    wants_reload = True
+        pool = body.get("connection_pool")
+        if isinstance(pool, dict):
+            if "max_connections" in pool:
+                value = _num(
+                    pool["max_connections"], "connection_pool.max_connections", 1
+                )
+                persist.append(
+                    (("openai_codex", "connection_pool", "max_connections"), value)
+                )
+                apply_ops.append(("connection_pool", "max_connections", value))
+            if "keepalive_timeout" in pool:
+                value = _num(
+                    pool["keepalive_timeout"], "connection_pool.keepalive_timeout", 0
+                )
+                persist.append(
+                    (("openai_codex", "connection_pool", "keepalive_timeout"), value)
+                )
+                apply_ops.append(("connection_pool", "keepalive_timeout", value))
+        compression = body.get("context_compression")
+        if isinstance(compression, dict):
+            if "enabled" in compression:
+                value = bool(compression["enabled"])
+                persist.append((("openai_codex", "context_compression", "enabled"), value))
+                apply_ops.append(("context_compression", "enabled", value))
+            if "max_context_chars" in compression:
+                value = _num(
+                    compression["max_context_chars"],
+                    "context_compression.max_context_chars", 1000,
+                )
+                persist.append(
+                    (("openai_codex", "context_compression", "max_context_chars"), value)
+                )
+                apply_ops.append(("context_compression", "max_context_chars", value))
+            if "keep_recent_iterations" in compression:
+                value = _num(
+                    compression["keep_recent_iterations"],
+                    "context_compression.keep_recent_iterations", 0,
+                )
+                persist.append(
+                    (
+                        ("openai_codex", "context_compression", "keep_recent_iterations"),
+                        value,
+                    )
+                )
+                apply_ops.append(("context_compression", "keep_recent_iterations", value))
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return persist, apply_ops, wants_reload
+
+
+def _apply_ops(cfg, ops: list) -> list:
+    """Apply ``(parent, field, value)`` ops; return inverse ops for rollback."""
+    inverse: list = []
+    for parent, field, value in ops:
+        target = getattr(cfg, parent) if parent else cfg
+        inverse.append((parent, field, getattr(target, field)))
+        setattr(target, field, value)
+    return inverse
 
 
 def register_provider_config(routes: web.RouteTableDef, bot) -> None:
@@ -414,7 +561,12 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     ),
                     "agent_model": agent_model if agent_model_present else cfg.agent_model,
                 }
+                advanced = _parse_codex_advanced(body, cfg)
+                if isinstance(advanced, web.Response):
+                    return advanced
+                adv_persist, adv_ops, adv_reload = advanced
                 changes = _provider_changes("openai_codex", desired, body)
+                changes = changes + adv_persist
                 persist_response, was_cancelled = await _persist_or_response(
                     changes, "Codex"
                 )
@@ -423,7 +575,12 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 if changes:
                     prior = {key: getattr(cfg, key) for key in desired}
                     _set_fields(cfg, desired)
-                    needs_reload = any(
+                    # Advanced transport/retry apply live through the same
+                    # reload the primary knobs use; pool and compression
+                    # persist only and surface as pending-restart. The old
+                    # handler dropped all of these silently and returned 200.
+                    adv_inverse = _apply_ops(cfg, adv_ops)
+                    needs_reload = adv_reload or any(
                         key in body
                         for key in ("enabled", "model", "max_tokens", "reasoning_effort")
                     )
@@ -432,12 +589,24 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                             await bot.llm_gateway.reload_codex_inner()
                     except BaseException:
                         _set_fields(cfg, prior)
+                        _apply_ops(cfg, adv_inverse)  # restore nested live config
+                        adv_prior_persist = [
+                            (
+                                (
+                                    "openai_codex",
+                                    *((parent, field) if parent else (field,)),
+                                ),
+                                value,
+                            )
+                            for parent, field, value in adv_inverse
+                        ]
                         rollback_exc, rollback_cancelled = await persist_config_paths_locked(
                             [
                                 (("openai_codex", key), value)
                                 for key, value in prior.items()
                                 if key in body
                             ]
+                            + adv_prior_persist
                         )
                         if rollback_exc is not None:
                             log.critical(
