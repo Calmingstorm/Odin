@@ -287,21 +287,28 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
         "error": "memory store is corrupt; refusing to modify (a backup was preserved)"
     }
 
+    _deny_scope = _memory_scope_guard(bot)
+
     @routes.get("/api/memory")
-    async def list_memory(_request: web.Request) -> web.Response:
+    async def list_memory(request: web.Request) -> web.Response:
+        # Authorize before loading so a missing identity in an authenticated
+        # deployment fails closed even when the store has no scopes to filter.
+        denied = _deny_scope(request, "global")
+        if denied:
+            return denied
         try:
             all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
         except StoreCorruptError:
             return web.json_response(corrupt_read, status=503)
         result = {}
         for scope, entries in all_mem.items():
+            if _deny_scope(request, scope):
+                continue
             result[scope] = {
                 "keys": list(entries.keys()),
                 "count": len(entries),
             }
         return web.json_response(result)
-
-    _deny_scope = _memory_scope_guard(bot)
 
     @routes.get("/api/memory/{scope}")
     async def get_memory_scope(request: web.Request) -> web.Response:
@@ -394,16 +401,30 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
             return web.json_response(
                 {"error": "entries must be a non-empty list of {scope, key}"}, status=400
             )
+        validated_entries: list[tuple[str, str]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return web.json_response(
+                    {"error": "each entry must contain a scope and key"}, status=400
+                )
+            scope = entry.get("scope")
+            key = entry.get("key")
+            if not isinstance(scope, str) or not scope or not isinstance(key, str) or not key:
+                return web.json_response(
+                    {"error": "each entry must contain a scope and key"}, status=400
+                )
+            denied = _deny_scope(request, scope)
+            if denied:
+                return denied
+            validated_entries.append((scope, key))
         async with bot.tool_executor._memory_lock:
             try:
                 all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
             except StoreCorruptError:
                 return web.json_response(corrupt_write, status=409)
             deleted = 0
-            for entry in entries:
-                scope = entry.get("scope")
-                key = entry.get("key")
-                if scope and key and scope in all_mem and key in all_mem[scope]:
+            for scope, key in validated_entries:
+                if scope in all_mem and key in all_mem[scope]:
                     del all_mem[scope][key]
                     deleted += 1
             if deleted:

@@ -251,6 +251,12 @@ class TestMemoryNotes:
         async with TestClient(TestServer(_app(register_memory_notes, bot=bot))) as c:
             assert (await c.post("/api/memory/bulk-delete", data="bad")).status == 400
             assert (await c.post("/api/memory/bulk-delete", json={"entries": []})).status == 400
+            assert (await c.post(
+                "/api/memory/bulk-delete", json={"entries": ["not-an-object"]}
+            )).status == 400
+            assert (await c.post(
+                "/api/memory/bulk-delete", json={"entries": [{"scope": "global"}]}
+            )).status == 400
             r = await c.post("/api/memory/bulk-delete", json={"entries": [
                 {"scope": "global", "key": "a"},
                 {"scope": "global", "key": "c"},
@@ -433,6 +439,51 @@ class TestMemoryScopeOwnership:
             assert r.status == 403, await r.text()
             assert "bob-secret" not in await r.text()
 
+    async def test_user_tier_list_hides_other_users_scope_metadata(self):
+        bot = self._authed_bot({
+            "global": {"shared": "g"},
+            "user_alice": {"mine": "a"},
+            "user_bob": {"private-key-name": "bob-secret"},
+        })
+        app = self._with_identity(bot, self._identity("user", "alice"))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.get("/api/memory")
+            assert r.status == 200
+            body = await r.json()
+            assert set(body) == {"global", "user_alice"}
+            assert "private-key-name" not in await r.text()
+
+    async def test_user_tier_cannot_bulk_delete_another_users_key(self):
+        bot = self._authed_bot({
+            "user_alice": {"mine": "a"},
+            "user_bob": {"private": "bob-secret"},
+        })
+        app = self._with_identity(bot, self._identity("user", "alice"))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post("/api/memory/bulk-delete", json={"entries": [
+                {"scope": "user_alice", "key": "mine"},
+                {"scope": "user_bob", "key": "private"},
+            ]})
+            assert r.status == 403
+        # Authorization is checked for the complete request before mutation:
+        # neither the unauthorized key nor the preceding authorized key moved.
+        assert bot._backing["user_alice"] == {"mine": "a"}
+        assert bot._backing["user_bob"] == {"private": "bob-secret"}
+
+    async def test_user_tier_can_bulk_delete_own_and_global_keys(self):
+        bot = self._authed_bot({
+            "global": {"shared": "g"},
+            "user_alice": {"mine": "a"},
+        })
+        app = self._with_identity(bot, self._identity("user", "alice"))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post("/api/memory/bulk-delete", json={"entries": [
+                {"scope": "global", "key": "shared"},
+                {"scope": "user_alice", "key": "mine"},
+            ]})
+            assert r.status == 200
+            assert (await r.json())["count"] == 2
+
     async def test_user_tier_cannot_read_another_users_key(self):
         bot = self._authed_bot({"user_bob": {"note": "bob-secret"}})
         app = self._with_identity(bot, self._identity("user", "alice"))
@@ -468,6 +519,7 @@ class TestMemoryScopeOwnership:
     async def test_missing_identity_fails_closed_when_auth_is_configured(self):
         bot = self._authed_bot({"user_bob": {"note": "bob-secret"}})
         async with TestClient(TestServer(_app(register_memory_notes, bot=bot))) as c:
+            assert (await c.get("/api/memory")).status == 403
             assert (await c.get("/api/memory/user_bob")).status == 403
 
     async def test_no_auth_configured_still_allows_access(self):
