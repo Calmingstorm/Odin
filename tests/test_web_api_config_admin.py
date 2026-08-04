@@ -1317,3 +1317,19 @@ class TestRestartEndpoint:
         from src.health.server import _is_admin_only_path
 
         assert _is_admin_only_path("/api/restart")
+
+
+    @pytest.mark.asyncio
+    async def test_denied_without_admin_identity(self):
+        """Auth configured + no identity on the request = the gate refuses,
+        and nothing gets scheduled."""
+        from src import restart as restart_mod
+
+        app, bot = _app(register_quick_actions)
+        bot.api_token_manager = None
+        bot.config.web.api_token = "configured-token"
+        with patch.object(restart_mod, "request_restart") as req:
+            async with TestClient(TestServer(app)) as c:
+                resp = await c.post("/api/restart", json={})
+        assert resp.status == 403
+        req.assert_not_called()

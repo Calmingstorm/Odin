@@ -1742,9 +1742,13 @@ class TestCodexAdvancedKnobs:
             async with TestClient(TestServer(app)) as c:
                 r = await c.put("/api/llm/codex/config", json={
                     "request_timeout_seconds": 7200,
+                    "stream_stall_timeout_seconds": 240,
                     "retry": {"max_retries": 5, "base_delay": 1.5},
                     "connection_pool": {"max_connections": 20},
-                    "context_compression": {"max_context_chars": 500000},
+                    "context_compression": {
+                        "max_context_chars": 500000,
+                        "keep_recent_iterations": 12,
+                    },
                 })
         assert r.status == 200
         cfg = bot.config.openai_codex
@@ -1753,6 +1757,8 @@ class TestCodexAdvancedKnobs:
         assert cfg.retry.base_delay == 1.5
         assert cfg.connection_pool.max_connections == 20
         assert cfg.context_compression.max_context_chars == 500000
+        assert cfg.stream_stall_timeout_seconds == 240
+        assert cfg.context_compression.keep_recent_iterations == 12
         persisted = {change[0] for change in persist.call_args[0][0]}
         assert ("openai_codex", "request_timeout_seconds") in persisted
         assert ("openai_codex", "retry", "max_retries") in persisted
