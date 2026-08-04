@@ -6,7 +6,8 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatTs, formatAge, formatDuration } from '../utils.js';
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
+import { analyzeLocalDateTime } from '../schedule-time.js';
 
 
 export default {
@@ -88,10 +89,29 @@ export default {
             </div>
           </div>
           <div>
-            <label class="text-gray-400 text-xs block mb-1">One-Time (ISO datetime)
-            <input v-model="form.run_at" type="text" class="hm-input"
-                   placeholder="e.g. 2026-04-01T09:00:00" />
+            <label class="text-gray-400 text-xs block mb-1">One-Time (your local time)
+            <input v-model="form.run_at" type="datetime-local" class="hm-input" />
             </label>
+            <p v-if="runAtAnalysis.state === 'nonexistent'" class="text-xs text-red-400 mt-1" role="alert">
+              That local time does not exist — clocks skip it when daylight saving begins. Choose another time.
+            </p>
+            <div v-else-if="runAtAnalysis.state === 'ambiguous'" class="mt-1">
+              <p class="text-xs text-amber-400" role="alert">
+                That local time happens twice when daylight saving ends. Choose which one:
+              </p>
+              <select v-model="runAtOccurrence" class="hm-select text-xs mt-1">
+                <option :value="null">Choose an occurrence…</option>
+                <option v-for="(opt, i) in runAtAnalysis.options" :key="opt.iso" :value="i">
+                  {{ opt.offset }} — {{ opt.iso }}
+                </option>
+              </select>
+            </div>
+            <p v-else-if="runAtAnalysis.state === 'invalid'" class="text-xs text-red-400 mt-1" role="alert">
+              That is not a valid date and time.
+            </p>
+            <p v-if="runAtUtcPreview" class="text-xs text-gray-500 mt-1">
+              Fires at {{ runAtUtcPreview }}
+            </p>
           </div>
         </div>
 
@@ -325,6 +345,30 @@ export default {
     });
     const creating = ref(false);
     const createError = ref(null);
+    // Echo the submitted instant back in the operator's own locale, so the
+    // local-vs-UTC translation is visible BEFORE clicking Create rather than
+    // discovered afterwards in the list.
+    // Which occurrence the operator picked when a local time happens twice.
+    // NULL until they actually pick: defaulting to 0 made "choose one" a
+    // fiction — Create succeeded without the selector ever being touched.
+    const runAtOccurrence = ref(null);
+    const runAtAnalysis = computed(() => analyzeLocalDateTime(form.value.run_at));
+    // A choice belongs to the wall clock it was made for. Without this, picking
+    // an occurrence for one ambiguous date silently carried into another.
+    watch(() => form.value.run_at, () => { runAtOccurrence.value = null; });
+    const runAtChosen = computed(() => {
+      const a = runAtAnalysis.value;
+      if (a.state === 'ok') return a.instant;
+      if (a.state === 'ambiguous' && runAtOccurrence.value !== null) {
+        return a.options[runAtOccurrence.value]?.instant || null;
+      }
+      return null;
+    });
+    const runAtUtcPreview = computed(() => {
+      const instant = runAtChosen.value;
+      if (!instant) return '';
+      return `${instant.toLocaleString()} local — ${instant.toISOString()} UTC`;
+    });
 
     // Cron validation
     const cronResult = ref(null);
@@ -450,7 +494,34 @@ export default {
         channel_id: f.channel_id.trim(),
       };
       if (f.cron.trim()) payload.cron = f.cron.trim();
-      if (f.run_at.trim()) payload.run_at = f.run_at.trim();
+      if (f.run_at.trim()) {
+        // The field is datetime-local, i.e. the operator's WALL CLOCK. Send an
+        // explicit instant: a naive string was stamped UTC server-side, so
+        // someone at UTC-5 typing 09:00 got a job that fired at 04:00 local
+        // and a list row showing a time they never entered. The analysis also
+        // refuses times the clocks skip and makes a repeated hour an explicit
+        // choice rather than a silent one.
+        const analysis = runAtAnalysis.value;
+        if (analysis.state === 'nonexistent') {
+          createError.value = 'That local time does not exist (daylight saving gap)';
+          return;
+        }
+        if (analysis.state === 'invalid') {
+          createError.value = 'One-time run time is not a valid date';
+          return;
+        }
+        const chosen = runAtChosen.value;
+        if (analysis.state === 'ambiguous' && runAtOccurrence.value === null) {
+          createError.value =
+            'That local time happens twice — choose which occurrence to use';
+          return;
+        }
+        if (!chosen) {
+          createError.value = 'One-time run time could not be resolved';
+          return;
+        }
+        payload.run_at = chosen.toISOString();
+      }
       if (f.action === 'reminder' && f.message.trim()) payload.message = f.message.trim();
       if (f.action === 'check') {
         if (f.tool_name.trim()) payload.tool_name = f.tool_name.trim();
@@ -547,7 +618,8 @@ export default {
 
     return {
       schedules, loading, error,
-      showCreate, form, creating, createError,
+      showCreate, form, creating, createError, runAtUtcPreview,
+      runAtAnalysis, runAtOccurrence,
       cronResult, validatingCron, cronPresets,
       runningId, deletingId, togglingId, resettingId,
       expandedId, history, historyLoading, historyError,

@@ -8,7 +8,7 @@ parity contract pins.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from aiohttp import web
 from croniter import croniter
@@ -182,10 +182,17 @@ def register_schedules(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "expression is required"}, status=400)
         if not croniter.is_valid(expr):
             return web.json_response({"valid": False, "error": "Invalid cron expression"})
-        # Return next 5 run times
-        now = datetime.now()
+        # Return next 5 run times, on the SAME clock the scheduler fires on.
+        # This used to build them from a naive datetime.now() — server-local —
+        # and serialize without an offset, while the real next_run comes from
+        # _cron_next_run in UTC. The browser then parsed the offset-less string
+        # as local time, so the preview an operator trusts before clicking
+        # Create was wrong by the server/browser offset.
+        from ...scheduler.scheduler import _utc_iso
+
+        now = datetime.now(UTC)
         cr = croniter(expr, now)
-        next_runs = [cr.get_next(datetime).isoformat() for _ in range(5)]
+        next_runs = [_utc_iso(cr.get_next(datetime)) for _ in range(5)]
         return web.json_response({"valid": True, "next_runs": next_runs})
 
 
