@@ -43,6 +43,7 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
 from ..tools import ToolResult
+from ..tools.output_streamer import current_call_id as _current_call_id
 from ..turn_state import LedgerIntentError
 from ..turn_state.durability import TurnDurability
 
@@ -1429,6 +1430,11 @@ class ToolLoopRunner:
                 metadata={
                     "tool_input_keys": list((tool_input or {}).keys()),
                     "iteration": st.iteration,
+                    # The model's tool_use id. Consumers pair start with end by
+                    # THIS, not by tool name: concurrent same-name calls cannot
+                    # be told apart by name, and neither LIFO nor FIFO ordering
+                    # is correct when a later call finishes first.
+                    "call_id": block.id,
                 },
             )
         except Exception:
@@ -1463,11 +1469,17 @@ class ToolLoopRunner:
                 # audit record picks up the metadata like the executor path.
                 tool_result, result = _unwrap_native_result(result)
             else:
-                tool_result = await self._tool_executor.execute(
-                    tool_name,
-                    tool_input,
-                    user_id=st.user_id,
-                )
+                # Bind this invocation's identity so streamed output can be
+                # attributed to ONE call rather than merged by tool name.
+                _call_token = _current_call_id.set(block.id)
+                try:
+                    tool_result = await self._tool_executor.execute(
+                        tool_name,
+                        tool_input,
+                        user_id=st.user_id,
+                    )
+                finally:
+                    _current_call_id.reset(_call_token)
                 result = str(tool_result)
         except TimeoutError as e:
             error = str(e)
@@ -1512,7 +1524,8 @@ class ToolLoopRunner:
             result = ensure_failure_visible(result, tool_result.ok)
 
         await self._audit_tool_outcome(
-            st, tool_name, tool_input, result, elapsed_ms, error, tool_result
+            st, tool_name, tool_input, result, elapsed_ms, error, tool_result,
+            call_id=block.id,
         )
 
         # Track for conversational context
@@ -1551,7 +1564,8 @@ class ToolLoopRunner:
         }
 
     async def _audit_tool_outcome(
-        self, st: _ChatTurn, tool_name, tool_input, result, elapsed_ms, error, tool_result
+        self, st: _ChatTurn, tool_name, tool_input, result, elapsed_ms, error, tool_result,
+        *, call_id: str | None = None,
     ) -> None:
         """Write execution + tool_end audit records — never crash tool
         execution on audit failure. (Inline block of the old `_run_tool`.)"""
@@ -1584,7 +1598,12 @@ class ToolLoopRunner:
                 actor=str(st.message.author.id),
                 channel_id=str(st.message.channel.id),
                 detail=result[:150],
-                metadata={"elapsed_ms": elapsed_ms, "error": error, "iteration": st.iteration},
+                metadata={
+                    "elapsed_ms": elapsed_ms,
+                    "error": error,
+                    "iteration": st.iteration,
+                    "call_id": call_id,
+                },
             )
         except Exception as audit_err:
             log.warning("Audit log failed for %s: %s", tool_name, audit_err)
@@ -2074,15 +2093,26 @@ class ToolLoopRunner:
         error = None
         try:
             _t = 3660 if tool_name in _LONG_TIMEOUT_TOOL_SET else st.tool_timeout
-            raw = await asyncio.wait_for(
-                self.dispatch_loop_tool(
-                    tool_name,
-                    tool_input,
-                    st.msg_proxy,
-                    st.user_id,
-                ),
-                timeout=_t,
+            dispatch = self.dispatch_loop_tool(
+                tool_name,
+                tool_input,
+                st.msg_proxy,
+                st.user_id,
             )
+            if self._native_tools.handles(tool_name):
+                # Do not bind across native tools such as spawn_agent: child
+                # tasks copy ContextVars at creation and would inherit the
+                # parent's call id for their whole lifetime.
+                raw = await asyncio.wait_for(dispatch, timeout=_t)
+            else:
+                # Autonomous-loop executor calls use the same streamer as
+                # chat. Bind their model tool-use id too, or concurrent
+                # same-name calls cross streams in the WebUI.
+                _call_token = _current_call_id.set(block.id)
+                try:
+                    raw = await asyncio.wait_for(dispatch, timeout=_t)
+                finally:
+                    _current_call_id.reset(_call_token)
             # Skill CRUD invalidates caches
             if tool_name in (
                 "create_skill",
