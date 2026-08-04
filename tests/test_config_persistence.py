@@ -546,3 +546,39 @@ class TestPersistOutcomeAndMetadata:
         patch_config_paths([(("logging", "level"), "DEBUG")], path=config_file)
 
         assert os.getxattr(config_file, b"user.odin_test") == b"keep-me"
+
+    def test_ownership_mismatch_that_cannot_be_preserved_fails_cleanly(
+        self, config_file, monkeypatch
+    ):
+        """A fresh inode must never silently change config ownership."""
+        from types import SimpleNamespace
+
+        import src.config.persistence as persistence
+
+        original = config_file.read_text()
+        real_stat = os.stat
+
+        def mismatched_source_stat(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            if os.fspath(path) == os.fspath(config_file):
+                return SimpleNamespace(
+                    st_uid=result.st_uid + 1,
+                    st_gid=result.st_gid,
+                    st_mode=result.st_mode,
+                )
+            return result
+
+        monkeypatch.setattr(persistence.os, "stat", mismatched_source_stat)
+        monkeypatch.setattr(
+            persistence.os,
+            "chown",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError()),
+        )
+
+        with pytest.raises(ConfigPersistError, match="preserve config file ownership"):
+            persistence._dump_atomic(
+                {"logging": {"level": "DEBUG"}}, config_file, 0o640
+            )
+
+        assert config_file.read_text() == original
+        assert [p.name for p in config_file.parent.iterdir()] == ["config.yml"]

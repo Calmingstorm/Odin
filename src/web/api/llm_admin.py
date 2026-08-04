@@ -271,17 +271,22 @@ def _provider_changes(section: str, desired: dict[str, object], body: dict) -> l
     return [((section, key), desired[key]) for key in desired if key in body]
 
 
-async def _persist_or_response(changes: list, label: str):
-    """Persist desired leaves and preserve cancellation precedence on failure."""
+async def _persist_or_response(
+    changes: list, label: str
+) -> tuple[web.Response | None, bool]:
+    """Persist desired leaves and return explicit error/cancel outcomes."""
     persist_exc, was_cancelled = await persist_config_paths_locked(changes)
     if persist_exc is not None:
         log.warning("%s config rejected — could not persist: %s", label, persist_exc)
         if was_cancelled:
             raise asyncio.CancelledError
-        return web.json_response(
-            {"error": f"{label} configuration not saved"}, status=500
+        return (
+            web.json_response(
+                {"error": f"{label} configuration not saved"}, status=500
+            ),
+            False,
         )
-    return was_cancelled
+    return None, was_cancelled
 
 
 def register_provider_config(routes: web.RouteTableDef, bot) -> None:
@@ -409,9 +414,11 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     "agent_model": agent_model if agent_model_present else cfg.agent_model,
                 }
                 changes = _provider_changes("openai_codex", desired, body)
-                was_cancelled = await _persist_or_response(changes, "Codex")
-                if isinstance(was_cancelled, web.Response):
-                    return was_cancelled
+                persist_response, was_cancelled = await _persist_or_response(
+                    changes, "Codex"
+                )
+                if persist_response is not None:
+                    return persist_response
                 if changes:
                     prior = {key: getattr(cfg, key) for key in desired}
                     _set_fields(cfg, desired)
@@ -564,9 +571,11 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     ),
                 }
                 changes = _provider_changes("ollama", desired, body)
-                was_cancelled = await _persist_or_response(changes, "Ollama")
-                if isinstance(was_cancelled, web.Response):
-                    return was_cancelled
+                persist_response, was_cancelled = await _persist_or_response(
+                    changes, "Ollama"
+                )
+                if persist_response is not None:
+                    return persist_response
                 if changes:
                     prior = {key: getattr(cfg, key) for key in desired}
                     prior_client = bot.llm_gateway.ollama_client
@@ -645,9 +654,11 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     ),
                 }
                 changes = _provider_changes("kimi", desired, body)
-                was_cancelled = await _persist_or_response(changes, "Kimi")
-                if isinstance(was_cancelled, web.Response):
-                    return was_cancelled
+                persist_response, was_cancelled = await _persist_or_response(
+                    changes, "Kimi"
+                )
+                if persist_response is not None:
+                    return persist_response
                 if changes:
                     prior = {key: getattr(cfg, key) for key in desired}
                     prior_client = bot.llm_gateway.kimi_client

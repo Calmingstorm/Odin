@@ -1546,3 +1546,128 @@ class TestProviderPersistenceTransactions:
         assert response.status == 500
         assert getattr(bot.config, section).model == "new-model"
         assert reload_mock.await_count == 2
+
+
+class TestRemainingPersistenceBranches:
+    @pytest.mark.asyncio
+    async def test_codex_apply_failure_with_successful_rollback_reloads_prior_state(
+        self,
+    ):
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        old_model = bot.config.openai_codex.model
+        gw.reload_codex_inner.side_effect = [RuntimeError("apply failed"), None]
+
+        async with TestClient(TestServer(app)) as c:
+            response = await c.put(
+                "/api/llm/codex/config", json={"model": "new-model"}
+            )
+
+        assert response.status == 500
+        assert bot.config.openai_codex.model == old_model
+        assert gw.reload_codex_inner.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_codex_apply_failure_reports_rollback_cancellation(
+        self, monkeypatch
+    ):
+        outcomes = iter(((None, False), (None, True)))
+
+        async def persist_then_cancelled_rollback(_changes):
+            return next(outcomes)
+
+        monkeypatch.setattr(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            persist_then_cancelled_rollback,
+        )
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        old_model = bot.config.openai_codex.model
+        gw.reload_codex_inner.side_effect = [RuntimeError("apply failed"), None]
+
+        async with TestClient(TestServer(app)) as c:
+            with pytest.raises(Exception):
+                await c.put(
+                    "/api/llm/codex/config", json={"model": "new-model"}
+                )
+
+        assert bot.config.openai_codex.model == old_model
+        assert gw.reload_codex_inner.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("route", "section", "reload_name"),
+        [
+            ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
+            ("/api/llm/kimi/config", "kimi", "reload_kimi_inner"),
+        ],
+    )
+    async def test_apply_failure_preserves_initial_cancellation(
+        self, monkeypatch, route, section, reload_name
+    ):
+        outcomes = iter(((None, True), (None, False)))
+
+        async def cancelled_commit_then_rollback(_changes):
+            return next(outcomes)
+
+        monkeypatch.setattr(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            cancelled_commit_then_rollback,
+        )
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        old_model = getattr(bot.config, section).model
+        getattr(gw, reload_name).side_effect = RuntimeError("apply failed")
+
+        async with TestClient(TestServer(app)) as c:
+            with pytest.raises(Exception):
+                await c.put(route, json={"model": "new-model"})
+
+        assert getattr(bot.config, section).model == old_model
+        assert getattr(gw, reload_name).await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("registrar", "route", "client_attr", "section", "model"),
+    [
+        (register_ollama_admin, "/api/ollama/model", "ollama_client", "ollama", "q:7b"),
+        (register_kimi_admin, "/api/kimi/model", "kimi_client", "kimi", "kimi-k2"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("persist_result", "expected_status", "cancelled"),
+    [
+        ((OSError("disk full"), False), 500, False),
+        ((OSError("disk full"), True), None, True),
+        ((None, True), None, True),
+    ],
+)
+async def test_model_route_persistence_outcomes(
+    monkeypatch, registrar, route, client_attr, section, model,
+    persist_result, expected_status, cancelled
+):
+    async def persist(_changes):
+        return persist_result
+
+    monkeypatch.setattr("src.web.api.llm_admin.persist_config_paths_locked", persist)
+    app, bot = _app(registrar)
+    _gw(bot)
+    client = _provider_client(models=[model])
+    setattr(bot.llm_gateway, client_attr, client)
+    old_model = getattr(bot.config, section).model
+
+    async with TestClient(TestServer(app)) as c:
+        if cancelled:
+            with pytest.raises(Exception):
+                await c.post(route, json={"model": model})
+        else:
+            response = await c.post(route, json={"model": model})
+            assert response.status == expected_status
+
+    if persist_result[0] is None:
+        assert getattr(bot.config, section).model == model
+        assert client.model == model
+    else:
+        assert getattr(bot.config, section).model == old_model
+        assert client.model == "m1"

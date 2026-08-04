@@ -900,3 +900,93 @@ async def test_cancelled_failed_generic_write_does_not_publish(monkeypatch):
 
     assert bot.config.tools.max_tool_iterations_chat == before
     bot.tool_catalog.invalidate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_successful_personality_update_publishes_before_escape(
+    monkeypatch,
+):
+    async def cancelled_success(_changes):
+        return None, True
+
+    monkeypatch.setattr(
+        "src.web.api.config_admin.persist_config_paths_locked", cancelled_success
+    )
+    app, bot = _app(register_personality)
+
+    async with TestClient(TestServer(app)) as c:
+        with pytest.raises(Exception):
+            await c.put("/api/personality", json={"preset": "pirate"})
+
+    assert bot.config.personality.preset == "pirate"
+    bot.prompt_builder.rebuild_default.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_successful_active_preset_save_publishes_derived_state(
+    monkeypatch,
+):
+    async def cancelled_success(_changes):
+        return None, True
+
+    monkeypatch.setattr(
+        "src.web.api.config_admin.persist_config_paths_locked", cancelled_success
+    )
+    app, bot = _app(register_personality)
+    bot.config.personality.preset = "active"
+
+    async with TestClient(TestServer(app)) as c:
+        with pytest.raises(Exception):
+            await c.post(
+                "/api/personality/presets",
+                json={"name": "active", "identity": "committed"},
+            )
+
+    assert "active" in bot.config.personality.user_presets
+    bot.prompt_builder.invalidate.assert_called_once()
+    bot.tool_catalog.invalidate.assert_called_once()
+    bot.prompt_builder.rebuild_default.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_failed_preset_delete_does_not_publish(monkeypatch):
+    from src.config.schema import PersonalityPreset
+
+    async def cancelled_failure(_changes):
+        return OSError("disk full"), True
+
+    monkeypatch.setattr(
+        "src.web.api.config_admin.persist_config_paths_locked", cancelled_failure
+    )
+    app, bot = _app(register_personality)
+    bot.config.personality.user_presets["keep"] = PersonalityPreset(
+        name="Keep", identity="still present"
+    )
+
+    async with TestClient(TestServer(app)) as c:
+        with pytest.raises(Exception):
+            await c.delete("/api/personality/presets/keep")
+
+    assert "keep" in bot.config.personality.user_presets
+
+
+@pytest.mark.asyncio
+async def test_cancelled_successful_preset_delete_publishes_before_escape(monkeypatch):
+    from src.config.schema import PersonalityPreset
+
+    async def cancelled_success(_changes):
+        return None, True
+
+    monkeypatch.setattr(
+        "src.web.api.config_admin.persist_config_paths_locked", cancelled_success
+    )
+    app, bot = _app(register_personality)
+    bot.config.personality.user_presets["gone"] = PersonalityPreset(
+        name="Gone", identity="committed deletion"
+    )
+
+    async with TestClient(TestServer(app)) as c:
+        with pytest.raises(Exception):
+            await c.delete("/api/personality/presets/gone")
+
+    assert "gone" not in bot.config.personality.user_presets
