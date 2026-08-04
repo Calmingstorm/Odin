@@ -3,7 +3,7 @@
  * Shows active tool calls, streaming output, and execution history
  */
 import { api, ws } from '../api.js';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 
 export default {
   setup() {
@@ -78,15 +78,34 @@ export default {
       });
     }
 
-    onMounted(() => {
-      ws.on('events', handleEvent);
-      timer = setInterval(updateElapsed, 500);
-    });
+    let armed = false;
 
-    onUnmounted(() => {
+    function arm() {
+      if (armed) return;
+      armed = true;
+      // Vue fires BOTH onMounted and onActivated on the initial keep-alive
+      // mount, so arming must be idempotent — otherwise the websocket
+      // handler is registered twice and unsubscribe() (which removes one
+      // occurrence) leaves a live copy behind on every visit.
+      // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
+      // DEACTIVATES this component without unmounting it. Anything armed in
+      // onMounted would keep running invisibly until a top-level route change.
+      // Same pattern as loops.js/agents.js/logs.js.
+      ws.on('events', handleEvent);
+      if (!timer) timer = setInterval(updateElapsed, 500);
+    }
+
+    function disarm() {
+      if (!armed) return;
+      armed = false;
       ws.off('events', handleEvent);
-      if (timer) clearInterval(timer);
-    });
+      if (timer) { clearInterval(timer); timer = null; }
+    }
+
+    onMounted(arm);
+    onActivated(arm);
+    onDeactivated(disarm);
+    onUnmounted(disarm);
 
     function formatMs(ms) {
       if (ms < 1000) return `${ms}ms`;

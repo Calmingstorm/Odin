@@ -3,7 +3,7 @@
  * Conversation threading, filter presets, sort options, visual improvements
  */
 import { api, ws } from '../api.js';
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
 
 
 const FILTER_PRESETS = [
@@ -773,16 +773,40 @@ export default {
       }
     }
 
-    onMounted(() => {
-      loadCustomPresets();
+    let armed = false;
+
+    // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
+    // DEACTIVATES this component without unmounting it — anything armed in
+    // onMounted alone would keep running invisibly until a route change.
+    function arm() {
+      if (armed) return;
+      armed = true;
+      // Vue fires BOTH onMounted and onActivated on the initial keep-alive
+      // mount, so arming must be idempotent — otherwise the websocket
+      // handler is registered twice and unsubscribe() (which removes one
+      // occurrence) leaves a live copy behind on every visit.
       fetchSessions();
       ws.subscribe('events', onEvent);
+    }
+
+    onMounted(() => {
+      loadCustomPresets();
+      arm();
     });
 
-    onUnmounted(() => {
+    onActivated(() => {
+      arm();
+    });
+
+    function disarm() {
+      if (!armed) return;
+      armed = false;
       ws.unsubscribe('events', onEvent);
       clearTimeout(debounceTimer);
-    });
+    }
+
+    onDeactivated(disarm);
+    onUnmounted(disarm);
 
     return {
       sessions, loading, error,

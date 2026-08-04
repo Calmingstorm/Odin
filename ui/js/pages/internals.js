@@ -5,7 +5,7 @@
  */
 import { api } from '../api.js';
 import { formatTime } from '../utils.js';
-import { onMounted, onUnmounted, ref } from 'vue';
+import { onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 
 
 const STATUS_COLORS = {
@@ -203,11 +203,33 @@ export default {
       loading.value = false;
     }
 
-    onMounted(() => {
+    let armed = false;
+
+    function arm() {
+      if (armed) return;
+      armed = true;
+      // Vue fires BOTH onMounted and onActivated on the initial keep-alive
+      // mount, so arming must be idempotent — otherwise the websocket
+      // handler is registered twice and unsubscribe() (which removes one
+      // occurrence) leaves a live copy behind on every visit.
+      // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
+      // DEACTIVATES this component without unmounting it. Anything armed in
+      // onMounted would keep running invisibly until a top-level route change.
+      // Same pattern as loops.js/agents.js/logs.js.
       fetchAll();
-      timer = setInterval(fetchAll, 30000);
-    });
-    onUnmounted(() => { if (timer) clearInterval(timer); });
+      if (!timer) timer = setInterval(fetchAll, 30000);
+    }
+
+    function disarm() {
+      if (!armed) return;
+      armed = false;
+      if (timer) { clearInterval(timer); timer = null; }
+    }
+
+    onMounted(arm);
+    onActivated(arm);
+    onDeactivated(disarm);
+    onUnmounted(disarm);
 
     return {
       loading, startup, subsystems, sshPool, httpPool,
