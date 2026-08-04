@@ -1000,3 +1000,259 @@ async def test_cancelled_successful_preset_delete_publishes_before_escape(monkey
             await c.delete("/api/personality/presets/gone")
 
     assert "gone" not in bot.config.personality.user_presets
+
+
+class TestConfigMeta:
+    """GET /api/config/meta — how each section reaches the running bot.
+
+    The page renders apply-mode badges from this. Before it existed the UI
+    inferred everything from a value's shape, which is how it came to report
+    "Config saved successfully" for changes that needed a restart, were owned
+    by another endpoint, or were not wired to anything at all.
+    """
+
+    #: The record keys the page consumes, mirroring the fieldSpec() literal in
+    #: ui/js/config-meta-fixture.js. The fixture exists so the page could be
+    #: built before this route did; the swap is only real if the server emits
+    #: the same keys, so drift on either side has to fail here.
+    RECORD_KEYS = {
+        "path", "owner", "label", "description", "aliases", "unit", "examples",
+        "type", "enum", "constraints", "default", "sensitivity", "secret_route",
+        "apply_mode", "apply_handler", "consumers", "restart_reason",
+        "activation_policy", "desired", "effective", "configured", "provenance",
+        "valid", "validation_errors", "pending_restart", "drift", "last_apply",
+        "apply_state",
+    }
+
+    def test_the_route_sits_behind_the_admin_gate(self):
+        """It returns every non-secret configuration value. Route-level tests
+        run without the auth middleware, so nothing else here would notice the
+        route being moved somewhere the gate does not cover."""
+        from src.health.server import ADMIN_ONLY_PREFIXES
+
+        assert any(
+            "/api/config/meta".startswith(prefix) for prefix in ADMIN_ONLY_PREFIXES
+        )
+
+    @pytest.mark.asyncio
+    async def test_payload_is_the_envelope_the_page_consumes(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        assert body["schema_version"] == 1
+        assert body["revision"]
+        assert isinstance(body["fields"], list) and body["fields"]
+        status = body["status"]
+        assert set(status["counts"]) == {
+            "applied", "pending_restart", "dormant", "invalid", "drift", "unknown",
+        }
+        assert sum(status["counts"].values()) == len(body["fields"])
+        assert status["desired_revision"] == body["revision"]
+
+    @pytest.mark.asyncio
+    async def test_every_record_carries_the_full_contract(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        for record in body["fields"]:
+            assert set(record) == self.RECORD_KEYS, (
+                f"{record['path']} does not match the fixture contract: "
+                f"{set(record) ^ self.RECORD_KEYS}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_every_schema_leaf_is_a_field(self):
+        """Nested leaves too — a section entry cannot stand in for the leaves
+        underneath it, which is how the retry and pool settings went
+        unclassified."""
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        paths = {record["path"] for record in body["fields"]}
+        for expected in (
+            "timezone",
+            "openai_codex.model",
+            "openai_codex.retry.max_retries",
+            "openai_codex.connection_pool.max_connections",
+            "tools.max_tool_iterations_chat",
+            "turn_state.resume_ttl_hours",
+        ):
+            assert expected in paths, f"{expected} has no field record"
+
+    @pytest.mark.asyncio
+    async def test_apply_modes_are_from_the_known_vocabulary(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        # Mirrors APPLY_MODE_LABELS in ui/js/pages/config.js — the page maps
+        # anything else onto its Restart group.
+        allowed = {
+            "live_read", "live_apply", "live_for_new_work", "restart",
+            "activation_required", "legacy_control", "dormant",
+        }
+        for record in body["fields"]:
+            assert record["apply_mode"] in allowed, (
+                f"{record['path']}: {record['apply_mode']} is a mode the page "
+                f"cannot render, and unknown modes fall into its Restart group"
+            )
+            assert record["description"], f"{record['path']} has no description"
+
+    @pytest.mark.asyncio
+    async def test_restart_fields_say_why(self):
+        """A restart badge with no reason is the kind of unexplained claim
+        this campaign kept finding in comments."""
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        for record in body["fields"]:
+            if record["apply_mode"] == "restart":
+                assert record["restart_reason"], (
+                    f"{record['path']} claims restart without a reason"
+                )
+
+    @pytest.mark.asyncio
+    async def test_live_apply_fields_name_their_handler(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        for record in body["fields"]:
+            if record["apply_mode"] == "live_apply":
+                assert record["apply_handler"], (
+                    f"{record['path']} claims a live apply with no handler"
+                )
+
+    @pytest.mark.asyncio
+    async def test_activation_required_fields_say_what_activation_means(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        dormant = [
+            r for r in body["fields"] if r["apply_mode"] == "activation_required"
+        ]
+        assert dormant, "no dormant fields — the vocabulary would be untested"
+        for record in dormant:
+            assert record["activation_policy"], f"{record['path']}"
+            assert record["apply_state"] == "dormant"
+
+    @pytest.mark.asyncio
+    async def test_disagreeing_consumers_are_published_not_averaged(self):
+        """timezone is live for prompts and restart for the time parser. One
+        badge for both would be false whichever it showed."""
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        record = next(r for r in body["fields"] if r["path"] == "timezone")
+        modes = {c["apply_mode"] for c in record["consumers"]}
+        assert "live_read" in modes and "restart" in modes
+        assert all(c["detail"] for c in record["consumers"])
+
+    @pytest.mark.asyncio
+    async def test_secret_state_without_secret_values(self):
+        app, bot = _app(register_discord_config)
+        bot.config.discord.token = "super-secret-token-value"
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.get("/api/config/meta")
+            raw = await resp.text()
+            body = await resp.json()
+
+        record = next(r for r in body["fields"] if r["path"] == "discord.token")
+        assert record["sensitivity"] == "sensitive"
+        assert record["configured"] is True
+        # Null until the dedicated set/clear route exists — a link that 404s
+        # is worse than no link.
+        assert record["secret_route"] is None
+        assert "super-secret-token-value" not in raw
+        # Not even a length, which would narrow a brute force.
+        assert record["desired"] == "•" * 8
+
+    @pytest.mark.asyncio
+    async def test_unset_secret_reports_not_configured(self):
+        app, bot = _app(register_discord_config)
+        bot.config.discord.token = ""
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        record = next(r for r in body["fields"] if r["path"] == "discord.token")
+        assert record["configured"] is False
+        assert record["desired"] == ""
+        assert record["provenance"] == "unset"
+
+    @pytest.mark.asyncio
+    async def test_no_secret_value_appears_anywhere_in_the_payload(self):
+        """Populates the LIST-shaped sections deliberately. A default config
+        leaves api_tokens and webhook targets empty, so a scan over defaults
+        passes while every real install serves its tokens."""
+        app, bot = _app(register_discord_config)
+        bot.config.discord.token = "tok-discord-leak"
+        bot.config.web.api_token = "tok-web-leak"
+        bot.config.audit.hmac_key = "tok-audit-leak"
+        bot.config.slack.default_webhook_url = "tok-slack-webhook-url-leak"
+        raw_config = bot.config.model_dump()
+        raw_config["web"]["api_tokens"] = [
+            {"name": "ops", "token": "tok-in-a-list-leak"}
+        ]
+        raw_config["outbound_webhooks"]["targets"] = [
+            {"name": "a", "url": "https://x", "secret": "tok-target-leak"}
+        ]
+        bot.config = SimpleNamespace(model_dump=lambda: raw_config)
+
+        async with TestClient(TestServer(app)) as c:
+            raw = await (await c.get("/api/config/meta")).text()
+
+        for secret in (
+            "tok-discord-leak",
+            "tok-web-leak",
+            "tok-audit-leak",
+            "tok-slack-webhook-url-leak",
+            "tok-in-a-list-leak",
+            "tok-target-leak",
+        ):
+            assert secret not in raw, f"{secret} reached the config page"
+
+    @pytest.mark.asyncio
+    async def test_restart_field_reports_the_boot_value_as_effective(self):
+        """Changing a restart-mode setting must not read back as applied. The
+        page's whole purpose is to stop claiming success for changes the
+        running process has not adopted."""
+        app, bot = _app(register_discord_config)
+        bot.boot_config_snapshot = bot.config.model_dump()
+        bot.config.sessions.max_history = bot.config.sessions.max_history + 7
+
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        record = next(
+            r for r in body["fields"] if r["path"] == "sessions.max_history"
+        )
+        assert record["apply_mode"] == "restart"
+        assert record["desired"] == bot.config.sessions.max_history
+        assert record["effective"] == bot.boot_config_snapshot["sessions"]["max_history"]
+        assert record["pending_restart"] is True
+        assert record["apply_state"] == "pending_restart"
+        assert body["status"]["counts"]["pending_restart"] >= 1
+        assert body["status"]["effective_revision"] != body["revision"]
+
+    @pytest.mark.asyncio
+    async def test_live_field_is_applied_the_moment_it_changes(self):
+        app, bot = _app(register_discord_config)
+        bot.boot_config_snapshot = bot.config.model_dump()
+        bot.config.discord.respond_to_bots = not bot.config.discord.respond_to_bots
+
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        record = next(
+            r for r in body["fields"] if r["path"] == "discord.respond_to_bots"
+        )
+        assert record["apply_mode"] == "live_read"
+        assert record["pending_restart"] is False
+        assert record["effective"] == record["desired"]
+        assert record["apply_state"] == "applied"

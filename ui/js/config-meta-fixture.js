@@ -7,6 +7,8 @@
  * field records without an adapter.
  */
 
+import { countHealthStates } from './config-health.js';
+
 const REDACTED = '••••••••';
 
 const SECTION_DEFAULTS = {
@@ -326,14 +328,6 @@ function fieldSpec(path, value) {
   return spec;
 }
 
-function countStates(fields) {
-  const counts = { applied: 0, pending_restart: 0, dormant: 0, invalid: 0, drift: 0 };
-  for (const field of fields) {
-    if (Object.hasOwn(counts, field.apply_state)) counts[field.apply_state] += 1;
-  }
-  return counts;
-}
-
 export function createConfigMetaFixture(config) {
   const fields = flatten(config || {}).map(([path, value]) => fieldSpec(path, value));
   return {
@@ -342,7 +336,7 @@ export function createConfigMetaFixture(config) {
     generated_at: null,
     fields,
     status: {
-      counts: countStates(fields),
+      counts: countHealthStates(fields),
       persistence_error: null,
       unsafe_overrides: [],
       desired_revision: null,

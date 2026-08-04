@@ -3501,7 +3501,7 @@ a:focus-visible {
 .cfgc-unsaved-pill { color: #ecc16f; background: rgba(217, 119, 6, 0.1); border: 1px solid rgba(217, 119, 6, 0.24); }
 .cfgc-health-filters {
   display: grid;
-  grid-template-columns: repeat(6, minmax(112px, 1fr));
+  grid-template-columns: repeat(7, minmax(112px, 1fr));
   gap: var(--hm-space-2);
   overflow-x: auto;
   scrollbar-width: thin;
@@ -3538,6 +3538,7 @@ a:focus-visible {
 .cfgc-health-icon.state-dormant { color: #a792d8; background: rgba(139, 92, 246, 0.09); }
 .cfgc-health-icon.state-invalid { color: #e17878; background: rgba(239, 68, 68, 0.09); }
 .cfgc-health-icon.state-drift { color: #e1bd65; background: rgba(234, 179, 8, 0.09); }
+.cfgc-health-icon.state-unknown { color: #9aa6b6; background: rgba(148, 163, 184, 0.09); }
 .cfgc-health-copy { min-width: 0; display: grid; gap: 0.1rem; }
 .cfgc-health-copy > span { overflow: hidden; font-size: var(--hm-text-xs); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .cfgc-health-copy small { color: var(--hm-text-dim); font-size: 0.625rem; white-space: nowrap; }
@@ -3879,7 +3880,7 @@ a:focus-visible {
 
 @media (max-width: 1180px) {
   .config-center-page { --cfgc-rail-w: 190px; }
-  .cfgc-health-filters { grid-template-columns: repeat(6, minmax(106px, 1fr)); }
+  .cfgc-health-filters { grid-template-columns: repeat(7, minmax(106px, 1fr)); }
   .cfgc-category-copy small { display: none; }
   .cfgc-section-header { grid-template-columns: 20px minmax(140px, 0.8fr) minmax(160px, 1.2fr) auto; }
 }
@@ -3924,7 +3925,7 @@ a:focus-visible {
   .cfgc-header-actions .btn-primary { display: none; }
   .cfgc-health { margin-inline: -0.15rem; padding: var(--hm-space-4); }
   .cfgc-health-heading { align-items: flex-start; flex-wrap: wrap; }
-  .cfgc-health-filters { grid-template-columns: repeat(6, 122px); margin-inline: calc(var(--hm-space-4) * -1); padding-inline: var(--hm-space-4); padding-bottom: 0.2rem; scroll-snap-type: x proximity; }
+  .cfgc-health-filters { grid-template-columns: repeat(7, 122px); margin-inline: calc(var(--hm-space-4) * -1); padding-inline: var(--hm-space-4); padding-bottom: 0.2rem; scroll-snap-type: x proximity; }
   .cfgc-health-filter { scroll-snap-align: start; }
   .cfgc-category-rail { top: calc(var(--hm-topbar-h) + var(--hm-section-tabs-h)); margin-inline: -0.1rem; }
   .cfgc-category-scroll { padding-right: 1.5rem; }

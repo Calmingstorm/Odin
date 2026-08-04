@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from aiohttp import web
@@ -350,6 +351,25 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
     async def get_config(_request: web.Request) -> web.Response:
         raw = bot.config.model_dump()
         return web.json_response(_redact_config(raw))
+
+    @routes.get("/api/config/meta")
+    async def get_config_meta(_request: web.Request) -> web.Response:
+        """Every configuration leaf, and how it reaches the running bot.
+
+        The config page renders from THIS, so it states what the code actually
+        does instead of guessing from a value's shape. Secret leaves carry
+        whether one is set and nothing else — never the value, its length, or
+        any prefix of it. The registry is CI-gated, so a new schema leaf cannot
+        appear here unclassified.
+        """
+        from ...config.apply_registry import build_meta_payload
+
+        payload = build_meta_payload(
+            bot.config.model_dump(),
+            boot_dump=getattr(bot, "boot_config_snapshot", None),
+            generated_at=datetime.now(UTC).isoformat(),
+        )
+        return web.json_response(payload)
 
     @routes.put("/api/config")
     async def update_config(request: web.Request) -> web.Response:

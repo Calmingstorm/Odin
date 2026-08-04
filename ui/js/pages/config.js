@@ -8,6 +8,7 @@
 import { api } from '../api.js';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { createConfigMetaFixture } from '../config-meta-fixture.js';
+import { HEALTH_FILTERS } from '../config-health.js';
 
 const CATEGORY_GROUPS = [
   { key: 'core', label: 'Core', icon: 'sliders', sections: ['timezone', 'discord', 'logging', 'permissions', 'graceful_degradation'] },
@@ -17,15 +18,6 @@ const CATEGORY_GROUPS = [
   { key: 'services', label: 'Services', icon: 'link', sections: ['webhook', 'observability', 'email', 'browser', 'comfyui', 'slack', 'mcp'] },
   { key: 'automation', label: 'Automation', icon: 'workflow', sections: ['message_triggers', 'reaction_triggers', 'grafana_alerts', 'outbound_webhooks', 'issue_tracker'] },
   { key: 'infrastructure', label: 'Infrastructure', icon: 'server', sections: ['tools', 'web'] },
-];
-
-const HEALTH_FILTERS = [
-  { key: 'all', label: 'All fields', short: 'All', icon: 'grid' },
-  { key: 'applied', label: 'Applied', short: 'Applied', icon: 'success' },
-  { key: 'pending_restart', label: 'Pending restart', short: 'Restart', icon: 'refresh' },
-  { key: 'dormant', label: 'Activation required', short: 'Dormant', icon: 'pause' },
-  { key: 'invalid', label: 'Invalid', short: 'Invalid', icon: 'error' },
-  { key: 'drift', label: 'Drift', short: 'Drift', icon: 'warning' },
 ];
 
 const APPLY_MODE_LABELS = {

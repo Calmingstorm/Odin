@@ -16,33 +16,19 @@ from typing import Any
 import yaml
 from aiohttp import web
 
+from ..config import sensitivity as _config_sensitivity
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..setup_wizard import write_env_file
 
 log = get_logger("web.api")
 
-# Sensitive config fields that should be redacted in API responses (exact
-# names kept for backward-compat / clarity).
-_SENSITIVE_FIELDS = frozenset({
-    "token", "api_token", "secret", "ssh_key_path", "credentials_path",
-    "api_key", "password", "hmac_key",
-})
-
-# Substrings that mark a key as sensitive regardless of its exact name. Key-name
-# EXACT matching missed fields like `hmac_key`, `webhook_url`, `*_secret`, and
-# `app_password`, leaking them (or future additions) through GET /api/config.
-_SENSITIVE_KEY_SUBSTRINGS = (
-    "token", "secret", "password", "api_key", "apikey",
-    "hmac", "webhook_url", "webhook_urls", "private_key", "credential",
-)
-
-
-def _is_sensitive_key(key: str) -> bool:
-    if key in _SENSITIVE_FIELDS:
-        return True
-    kl = key.lower()
-    return any(s in kl for s in _SENSITIVE_KEY_SUBSTRINGS)
+# One shared sensitivity rule protects both GET /api/config and the Config
+# Center metadata route. Preserve the historical private aliases because route
+# modules and compatibility tests import them from here.
+_SENSITIVE_FIELDS = _config_sensitivity.SENSITIVE_FIELDS
+_SENSITIVE_KEY_SUBSTRINGS = _config_sensitivity.SENSITIVE_KEY_SUBSTRINGS
+_is_sensitive_key = _config_sensitivity.is_sensitive_key
 
 
 # Input validation limits
