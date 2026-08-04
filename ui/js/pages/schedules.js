@@ -348,6 +348,9 @@ export default {
     const history = ref([]);
     const historyLoading = ref(false);
     const historyError = ref('');
+    // Monotonic token — see sessions.js: comparing only expandedId cannot
+    // distinguish two requests for the SAME schedule.
+    let historyRequest = 0;
 
     const cronCount = computed(() => schedules.value.filter(s => s.cron && !s.one_time).length);
     const oneTimeCount = computed(() => schedules.value.filter(s => s.one_time).length);
@@ -415,23 +418,22 @@ export default {
       expandedId.value = scheduleId;
       historyLoading.value = true;
       history.value = [];
+      const token = ++historyRequest;
       try {
         const loaded = await api.get(
           `/api/schedules/${encodeURIComponent(scheduleId)}/history?limit=10`
         );
-        // Same ordering guard as the sessions detail fetch: expand A then B
-        // quickly and A's late response would fill B's row.
-        if (expandedId.value !== scheduleId) return;
+        if (token !== historyRequest || expandedId.value !== scheduleId) return;
         history.value = loaded;
         historyError.value = '';
       } catch (e) {
-        if (expandedId.value !== scheduleId) return;
+        if (token !== historyRequest || expandedId.value !== scheduleId) return;
         history.value = [];
         // Without this the row rendered "No execution history yet", which is
         // indistinguishable from a schedule that genuinely never ran.
         historyError.value = e.message || 'Failed to load execution history';
       }
-      if (expandedId.value !== scheduleId) return;
+      if (token !== historyRequest) return;
       historyLoading.value = false;
     }
 

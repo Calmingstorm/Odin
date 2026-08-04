@@ -669,3 +669,78 @@ class TestTypingAttemptTimeout:
             pass
         assert ch.entered == 1
         assert ch.exits == 1
+
+
+class TestToolEventCallId:
+    """tool_start/tool_end must carry the model's tool_use id.
+
+    The WebUI pairs a completion with its card by this id. Pairing by tool
+    NAME cannot distinguish concurrent same-name calls, and no ordering rule
+    saves it: newest-first closes the wrong card when an earlier call finishes
+    first, oldest-first when a later one does.
+    """
+
+    async def test_tool_end_event_carries_the_call_id(self):
+        from types import SimpleNamespace
+
+        from src.discord.tool_loop import ToolLoopRunner
+
+        events = []
+
+        class _Audit:
+            async def log_event(self, **kwargs):
+                events.append(kwargs)
+
+            async def log_execution(self, **kwargs):
+                pass
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._audit = _Audit()
+        st = SimpleNamespace(
+            message=SimpleNamespace(
+                author=SimpleNamespace(id=1),
+                channel=SimpleNamespace(id=2),
+            ),
+            iteration=3,
+        )
+
+        await runner._audit_tool_outcome(
+            st, "run_command", {"command": "echo hi"}, "ok", 12, None, None,
+            call_id="call_abc123",
+        )
+
+        end = [e for e in events if e.get("event_type") == "tool_end"]
+        assert end, "no tool_end event emitted"
+        assert end[0]["metadata"]["call_id"] == "call_abc123"
+
+    async def test_call_id_is_keyword_only_and_optional(self):
+        """Optional so an older caller cannot break; keyword-only so it can
+        never be filled positionally by accident."""
+        import inspect
+        from types import SimpleNamespace
+
+        from src.discord.tool_loop import ToolLoopRunner
+
+        sig = inspect.signature(ToolLoopRunner._audit_tool_outcome)
+        assert sig.parameters["call_id"].kind is inspect.Parameter.KEYWORD_ONLY
+
+        events = []
+
+        class _Audit:
+            async def log_event(self, **kwargs):
+                events.append(kwargs)
+
+            async def log_execution(self, **kwargs):
+                pass
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._audit = _Audit()
+        st = SimpleNamespace(
+            message=SimpleNamespace(
+                author=SimpleNamespace(id=1), channel=SimpleNamespace(id=2)
+            ),
+            iteration=0,
+        )
+        await runner._audit_tool_outcome(st, "t", {}, "r", 1, None, None)
+        end = [e for e in events if e.get("event_type") == "tool_end"]
+        assert end and end[0]["metadata"]["call_id"] is None

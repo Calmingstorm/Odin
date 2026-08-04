@@ -236,12 +236,12 @@ export default {
       }
     }
 
-    async function saveDefaultPolicy() {
-      // Snapshot BEFORE the write: callers mutate local state optimistically,
-      // so a rejected save would otherwise leave this security screen showing
-      // a policy the server never accepted — the worst place to display a
-      // comfortable lie.
-      const snapshot = JSON.parse(JSON.stringify(defaultPolicy.value));
+    async function saveDefaultPolicy(snapshot = null) {
+      // The snapshot must come from the CALLER, taken BEFORE it mutated local
+      // state — snapshotting here captured the already-changed value, so a
+      // rejected save "restored" exactly what the server refused. On this
+      // screen that means displaying access the server does not grant.
+      const restore = snapshot ?? JSON.parse(JSON.stringify(defaultPolicy.value));
       try {
         const hosts = defaultPolicy.value.allow_all ? null : defaultPolicy.value.allowed_hosts;
         await api.put('/api/host-access/default-policy', {
@@ -250,12 +250,13 @@ export default {
         });
         toast.success('Default policy updated');
       } catch (e) {
-        defaultPolicy.value = snapshot;
+        defaultPolicy.value = restore;
         toast.error(`${e.message || 'Failed to save'} — reverted`);
       }
     }
 
     function toggleDefaultHost(host, checked) {
+      const before = JSON.parse(JSON.stringify(defaultPolicy.value));
       defaultPolicy.value.allow_all = false;
       if (checked) {
         if (!defaultPolicy.value.allowed_hosts.includes(host))
@@ -265,15 +266,16 @@ export default {
         if (defaultPolicy.value.default_host === host)
           defaultPolicy.value.default_host = defaultPolicy.value.allowed_hosts[0] || '';
       }
-      saveDefaultPolicy();
+      saveDefaultPolicy(before);
     }
 
-    async function saveUser(uid) {
+    async function saveUser(uid, snapshot = null) {
       const entry = users.value[uid];
       if (!entry) return;
-      // Same reason as saveDefaultPolicy: without this, a 403 left the screen
-      // claiming a user had lost access the server still grants.
-      const snapshot = JSON.parse(JSON.stringify(entry));
+      // Pre-mutation snapshot from the caller (see saveDefaultPolicy).
+      // `null` means the entry is NEW — the rollback is a removal, not a
+      // restore, so a rejected grant cannot linger on screen as if it stuck.
+      const restore = snapshot;
       try {
         const hosts = entry.allow_all ? null : entry.allowed_hosts;
         await api.put(`/api/host-access/user/${uid}`, {
@@ -283,7 +285,10 @@ export default {
         const m = getMember(uid);
         toast.success(`Updated access for ${m ? m.display_name : uid}`);
       } catch (e) {
-        users.value = { ...users.value, [uid]: snapshot };
+        const next = { ...users.value };
+        if (restore) next[uid] = restore;
+        else delete next[uid];
+        users.value = next;
         const m = getMember(uid);
         toast.error(`${e.message || 'Failed to save'} — reverted ${m ? m.display_name : uid}`);
       }
@@ -292,6 +297,7 @@ export default {
     function toggleUserHost(uid, host, checked) {
       const entry = users.value[uid];
       if (!entry) return;
+      const before = JSON.parse(JSON.stringify(entry));
       entry.allow_all = false;
       if (checked) {
         if (!entry.allowed_hosts.includes(host))
@@ -301,14 +307,15 @@ export default {
         if (entry.default_host === host)
           entry.default_host = entry.allowed_hosts[0] || '';
       }
-      saveUser(uid);
+      saveUser(uid, before);
     }
 
     function setUserDefault(uid, host) {
       const entry = users.value[uid];
       if (!entry) return;
+      const before = JSON.parse(JSON.stringify(entry));
       entry.default_host = host;
-      saveUser(uid);
+      saveUser(uid, before);
     }
 
     function openAddUser() {
@@ -341,7 +348,7 @@ export default {
       const uid = searchQuery.value.trim();
       if (!/^\d{15,25}$/.test(uid)) return;
       users.value[uid] = { allowed_hosts: [...availableHosts.value], default_host: availableHosts.value[0] || '', allow_all: false };
-      saveUser(uid);
+      saveUser(uid, null);  // new entry — rollback removes it
       searchQuery.value = '';
       showDropdown.value = false;
       showAddUser.value = false;
@@ -349,7 +356,7 @@ export default {
 
     function selectMember(m) {
       users.value[m.id] = { allowed_hosts: [...availableHosts.value], default_host: availableHosts.value[0] || '', allow_all: false };
-      saveUser(m.id);
+      saveUser(m.id, null);  // new entry — rollback removes it
       searchQuery.value = '';
       showDropdown.value = false;
       showAddUser.value = false;

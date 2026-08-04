@@ -291,7 +291,8 @@ export default {
                       </div>
                     </div>
                   </div>
-                  <div v-if="threads.length === 0 && detail.messages && detail.messages.length === 0"
+                  <div v-if="detail.error" class="text-red-400 text-sm" role="alert">{{ detail.error }}</div>
+                  <div v-else-if="threads.length === 0 && detail.messages && detail.messages.length === 0"
                        class="text-gray-500 text-sm">No messages in this session</div>
                 </div>
 
@@ -310,7 +311,8 @@ export default {
                     </div>
                     <div class="whitespace-pre-wrap break-words text-gray-200 session-msg-content">{{ truncateContent(m.content) }}</div>
                   </div>
-                  <div v-if="detail.messages && detail.messages.length === 0" class="text-gray-500 text-sm">No messages in this session</div>
+                  <div v-if="detail.error" class="text-red-400 text-sm" role="alert">{{ detail.error }}</div>
+                  <div v-else-if="detail.messages && detail.messages.length === 0" class="text-gray-500 text-sm">No messages in this session</div>
                 </div>
               </div>
             </div>
@@ -358,6 +360,11 @@ export default {
     const expandedId = ref(null);
     const detail = ref(null);
     const detailLoading = ref(false);
+    // Monotonic token: comparing only expandedId cannot distinguish two
+    // requests for the SAME session (expand A, collapse, expand A again), so
+    // an older A response could still overwrite a newer one. Every writer of
+    // `detail` claims a token and commits only if it is still the latest.
+    let detailRequest = 0;
     const clearTarget = ref(null);
     const clearing = ref(false);
     const selected = ref(new Set());
@@ -676,18 +683,16 @@ export default {
       detail.value = null;
       detailLoading.value = true;
       collapsedThreads.value = new Set();
+      const token = ++detailRequest;
       try {
         const loaded = await api.get(`/api/sessions/${encodeURIComponent(channelId)}`);
-        // A slower earlier request must never overwrite a newer selection:
-        // click A then B and A's late response would render A's messages under
-        // B's expanded row, with no cue that the wrong session is shown.
-        if (expandedId.value !== channelId) return;
+        if (token !== detailRequest || expandedId.value !== channelId) return;
         detail.value = loaded;
       } catch (e) {
-        if (expandedId.value !== channelId) return;
+        if (token !== detailRequest || expandedId.value !== channelId) return;
         detail.value = { messages: [], summary: '', error: e.message || 'Failed to load session' };
       }
-      if (expandedId.value !== channelId) return;
+      if (token !== detailRequest) return;
       detailLoading.value = false;
     }
 
@@ -772,8 +777,16 @@ export default {
         debounceTimer = setTimeout(() => {
           fetchSessions();
           if (expandedId.value && data.payload.channel_id === expandedId.value) {
-            api.get(`/api/sessions/${encodeURIComponent(expandedId.value)}`)
-              .then(d => { detail.value = d; })
+            // This background refresh is a `detail` writer too: without a
+            // token it could land after the user selected a different session
+            // and overwrite it.
+            const channelId = expandedId.value;
+            const token = ++detailRequest;
+            api.get(`/api/sessions/${encodeURIComponent(channelId)}`)
+              .then(d => {
+                if (token !== detailRequest || expandedId.value !== channelId) return;
+                detail.value = d;
+              })
               .catch(() => {});
           }
         }, 2000);

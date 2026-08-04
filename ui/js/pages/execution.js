@@ -17,8 +17,15 @@ export default {
       const type = payload.type || event.type;
 
       if (type === 'tool_start') {
+        const callId = payload.metadata?.call_id || null;
         const task = {
-          id: `${payload.action}-${Date.now()}`,
+          // The model's tool_use id when the backend supplies it. Pairing
+          // start with end by tool NAME cannot distinguish concurrent
+          // same-name calls, and no ordering rule fixes that — LIFO closed the
+          // newest card, FIFO closes the oldest, and both are wrong whenever a
+          // later call finishes first.
+          callId,
+          id: callId || `${payload.action}-${Date.now()}`,
           tool: payload.action,
           actor: payload.actor || '',
           channel: payload.channel_id || '',
@@ -34,16 +41,22 @@ export default {
       }
 
       if (type === 'tool_end') {
-        // Tasks are unshifted, so findIndex returns the NEWEST running task
-        // with this name: with two concurrent run_command calls the first
-        // completion closed the second card (wrong elapsed/result) and left
-        // the first running forever. Match the OLDEST running task instead,
-        // which is the one that completes first absent a call id from the
-        // backend to pair them exactly.
+        // Pair by call id — the only identity that survives concurrency.
+        const endCallId = payload.metadata?.call_id || null;
         let idx = -1;
-        for (let i = activeTasks.value.length - 1; i >= 0; i--) {
-          const t = activeTasks.value[i];
-          if (t.tool === payload.action && t.status === 'running') { idx = i; break; }
+        if (endCallId) {
+          idx = activeTasks.value.findIndex(
+            t => t.callId === endCallId && t.status === 'running'
+          );
+        }
+        if (idx < 0 && !endCallId) {
+          // Older backends (and any event predating this field) send no id.
+          // Fall back to oldest-running by name: still a guess, but it can
+          // only mispair events that were already unpairable.
+          for (let i = activeTasks.value.length - 1; i >= 0; i--) {
+            const t = activeTasks.value[i];
+            if (t.tool === payload.action && t.status === 'running') { idx = i; break; }
+          }
         }
         if (idx >= 0) {
           const task = activeTasks.value[idx];

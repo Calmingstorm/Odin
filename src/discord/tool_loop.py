@@ -1429,6 +1429,11 @@ class ToolLoopRunner:
                 metadata={
                     "tool_input_keys": list((tool_input or {}).keys()),
                     "iteration": st.iteration,
+                    # The model's tool_use id. Consumers pair start with end by
+                    # THIS, not by tool name: concurrent same-name calls cannot
+                    # be told apart by name, and neither LIFO nor FIFO ordering
+                    # is correct when a later call finishes first.
+                    "call_id": block.id,
                 },
             )
         except Exception:
@@ -1512,7 +1517,8 @@ class ToolLoopRunner:
             result = ensure_failure_visible(result, tool_result.ok)
 
         await self._audit_tool_outcome(
-            st, tool_name, tool_input, result, elapsed_ms, error, tool_result
+            st, tool_name, tool_input, result, elapsed_ms, error, tool_result,
+            call_id=block.id,
         )
 
         # Track for conversational context
@@ -1551,7 +1557,8 @@ class ToolLoopRunner:
         }
 
     async def _audit_tool_outcome(
-        self, st: _ChatTurn, tool_name, tool_input, result, elapsed_ms, error, tool_result
+        self, st: _ChatTurn, tool_name, tool_input, result, elapsed_ms, error, tool_result,
+        *, call_id: str | None = None,
     ) -> None:
         """Write execution + tool_end audit records — never crash tool
         execution on audit failure. (Inline block of the old `_run_tool`.)"""
@@ -1584,7 +1591,12 @@ class ToolLoopRunner:
                 actor=str(st.message.author.id),
                 channel_id=str(st.message.channel.id),
                 detail=result[:150],
-                metadata={"elapsed_ms": elapsed_ms, "error": error, "iteration": st.iteration},
+                metadata={
+                    "elapsed_ms": elapsed_ms,
+                    "error": error,
+                    "iteration": st.iteration,
+                    "call_id": call_id,
+                },
             )
         except Exception as audit_err:
             log.warning("Audit log failed for %s: %s", tool_name, audit_err)
