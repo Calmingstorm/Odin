@@ -335,10 +335,12 @@ def _make_redaction_mask_middleware() -> Middleware:
             return await handler(request)
         if not request.path.startswith("/api/"):
             return await handler(request)
-        if not (request.content_type or "").startswith("application/json"):
-            return await handler(request)
         try:
-            # aiohttp caches the read payload, so the handler still gets it.
+            # Do not trust Content-Type here. aiohttp's request.json() does not
+            # enforce it, and every API handler uses that permissive parser: a
+            # valid JSON credential body labelled text/plain would otherwise
+            # bypass this fence and still be installed by the handler. aiohttp
+            # caches the payload, so the handler can parse it again unchanged.
             body = await request.json()
         except Exception:
             return await handler(request)  # malformed — the handler reports it

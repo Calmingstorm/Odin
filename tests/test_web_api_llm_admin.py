@@ -17,6 +17,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import Config
+from src.discord.llm_gateway import LLMGateway
 from src.web.api.llm_admin import (
     _parse_int,
     _validate_ollama_url,
@@ -66,6 +67,12 @@ def _gw(bot):
     gw.reload_kimi_inner = AsyncMock()
     # Settle-safe persist runner (real gateway method): default = clean write.
     gw.run_persist_settled = AsyncMock(return_value=(None, False))
+    # Auxiliary route preparation is synchronous but now a concrete gateway
+    # responsibility; bind the real methods rather than letting MagicMock hide
+    # the plan contract.
+    gw._aux_reload_gen = 0
+    gw.prepare_auxiliary_reload = LLMGateway.prepare_auxiliary_reload.__get__(gw)
+    gw._snapshot_aux_build_inputs = LLMGateway._snapshot_aux_build_inputs.__get__(gw)
     return gw
 
 
@@ -450,7 +457,8 @@ class TestProviderConfig:
         app, bot = _app(register_provider_config)
         _gw(bot)
         bot.llm_gateway.codex_client = object()
-        bot.llm_gateway.reload_auxiliary = AsyncMock(
+        gateway = bot.llm_gateway
+        gateway.reload_auxiliary = AsyncMock(
             return_value={"committed": True, "effective_enabled": True, "model": "gpt-5.6-terra"}
         )
         async with TestClient(TestServer(app)) as c:
@@ -458,10 +466,10 @@ class TestProviderConfig:
                 "/api/llm/auxiliary/config", json={"enabled": True, "model": "gpt-5.6-terra"}
             )
             assert r.status == 200
-            desired = bot.llm_gateway.reload_auxiliary.call_args.args[0]
-            assert desired["enabled"] is True
-            assert desired["model"] == "gpt-5.6-terra"
-            assert "tasks" not in desired
+            plan = bot.llm_gateway.reload_auxiliary.call_args.kwargs["plan"]
+            assert plan.desired["enabled"] is True
+            assert plan.desired["model"] == "gpt-5.6-terra"
+            assert "tasks" not in plan.desired
 
     @pytest.mark.asyncio
     async def test_auxiliary_config_invokes_persist_callable(self):
@@ -471,9 +479,13 @@ class TestProviderConfig:
         _gw(bot)
         bot.llm_gateway.codex_client = object()
 
-        async def _reload(desired=None, persist=None):
+        async def _reload(desired=None, persist=None, *, plan=None):
             persist()  # SYNC persist callable — exercise the route's closure
-            return {"committed": True, "effective_enabled": True, "model": desired["model"]}
+            return {
+                "committed": True,
+                "effective_enabled": True,
+                "model": (plan.desired if plan else desired)["model"],
+            }
 
         bot.llm_gateway.reload_auxiliary = _reload
         with patch("src.web.api.llm_admin.patch_config_paths") as persist:
@@ -523,7 +535,7 @@ class TestProviderConfig:
         _gw(bot)
         captured = {}
 
-        async def _reload(desired=None, persist=None):
+        async def _reload(desired=None, persist=None, *, plan=None):
             captured["persist"] = persist
             return {
                 "committed": False,
@@ -547,7 +559,7 @@ class TestProviderConfig:
         app, bot = _app(register_provider_config)
         _gw(bot)
 
-        async def _reload(desired=None, persist=None):
+        async def _reload(desired=None, persist=None, *, plan=None):
             return {"committed": False, "effective_enabled": False, "reason": "persist failed"}
 
         bot.llm_gateway.reload_auxiliary = _reload
@@ -1672,3 +1684,36 @@ async def test_model_route_persistence_outcomes(
     else:
         assert getattr(bot.config, section).model == old_model
         assert client.model == "m1"
+
+
+class TestAuxiliaryRoutePrepareProbeCAS:
+    @pytest.mark.asyncio
+    async def test_route_releases_global_config_lock_during_reload(self):
+        from src.config.persistence import config_transaction
+
+        app, bot = _app(register_provider_config)
+        gateway = _gw(bot)
+        gateway.codex_client = object()
+        probe_started = asyncio.Event()
+        release_probe = asyncio.Event()
+        captured = {}
+
+        async def _reload(desired=None, persist=None, *, plan=None):
+            captured["plan"] = plan
+            probe_started.set()
+            await release_probe.wait()
+            return {"committed": True, "effective_enabled": True, "model": plan.desired_model}
+
+        gateway.reload_auxiliary = _reload
+        async with TestClient(TestServer(app)) as client:
+            request_task = asyncio.create_task(client.put(
+                "/api/llm/auxiliary/config",
+                json={"enabled": True, "model": "gpt-5.6-terra"},
+            ))
+            await probe_started.wait()
+            await asyncio.wait_for(config_transaction().acquire(), timeout=0.1)
+            config_transaction().release()
+            release_probe.set()
+            response = await request_task
+        assert response.status == 200
+        assert captured["plan"].desired_model == "gpt-5.6-terra"

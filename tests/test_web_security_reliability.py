@@ -11,9 +11,12 @@ Covers:
 """
 from __future__ import annotations
 
+import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
 
 from src.context.loader import MAX_CONTEXT_FILE_BYTES, ContextLoader
 from src.health.server import _client_ip, _is_admin_only_path
@@ -287,15 +290,68 @@ class TestRedactionMaskMiddleware:
         assert len(reached) == 2
 
     @pytest.mark.asyncio
-    async def test_reads_and_non_json_bodies_are_not_inspected(self):
-        """A GET carries no body, and a non-JSON body is the handler's to
-        parse — the fence must not become a content-type gate."""
+    async def test_reads_and_malformed_bodies_are_not_inspected(self):
+        """A GET carries no body, and malformed input is the handler's to
+        report — the fence must reject only a parsed JSON mask."""
         reached: list[str] = []
         async with await self._client(reached) as c:
             assert (await c.get("/api/config")).status == 200
             resp = await c.post("/api/config", data=self.MASK)
         assert resp.status == 200
         assert len(reached) == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("content_type", ["text/plain", "application/octet-stream"])
+    async def test_valid_json_cannot_bypass_with_a_false_content_type(self, content_type):
+        """aiohttp request.json() ignores Content-Type, so the middleware must
+        parse on the same terms as the handler or the literal mask reaches it."""
+        reached: list[str] = []
+        async with await self._client(reached) as c:
+            resp = await c.post(
+                "/api/llm/kimi/config",
+                data=json.dumps({"api_key": self.MASK}),
+                headers={"Content-Type": content_type},
+            )
+        assert resp.status == 400
+        assert reached == []
+
+    @pytest.mark.asyncio
+    async def test_real_server_chain_fences_valid_json_with_false_content_type(self):
+        """The installed middleware, not just a test-built copy, must block the
+        Content-Type bypass before an actual API handler can consume it."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from src.config.schema import Config, WebConfig
+        from src.health.server import HealthServer
+        from src.web.api.llm_admin import register_provider_config
+
+        server = HealthServer(
+            port=0, web_config=WebConfig(enabled=False, api_token="")
+        )
+        bot = SimpleNamespace()
+
+        bot.config = Config(discord={"token": "fake"})
+        bot.config.kimi.api_key = "ORIGINAL"
+        bot.llm_gateway = MagicMock()
+        bot.llm_gateway.provider_lock = asyncio.Lock()
+        bot.llm_gateway.reload_kimi_inner = AsyncMock(
+            return_value={"configured": True}
+        )
+        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(None, False))
+        routes = web.RouteTableDef()
+        register_provider_config(routes, bot)
+        server._app.router.add_routes(routes)
+        async with TestClient(TestServer(server._app)) as client:
+            response = await client.put(
+                "/api/llm/kimi/config",
+                data=json.dumps({"api_key": self.MASK}),
+                headers={"Content-Type": "text/plain"},
+            )
+        assert response.status == 400
+        assert bot.config.kimi.api_key == "ORIGINAL"
+        bot.llm_gateway.reload_kimi_inner.assert_not_awaited()
 
     @pytest.mark.parametrize("with_auth", [True, False])
     def test_the_fence_is_actually_installed_on_the_real_server(self, with_auth):
