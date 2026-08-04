@@ -2093,15 +2093,26 @@ class ToolLoopRunner:
         error = None
         try:
             _t = 3660 if tool_name in _LONG_TIMEOUT_TOOL_SET else st.tool_timeout
-            raw = await asyncio.wait_for(
-                self.dispatch_loop_tool(
-                    tool_name,
-                    tool_input,
-                    st.msg_proxy,
-                    st.user_id,
-                ),
-                timeout=_t,
+            dispatch = self.dispatch_loop_tool(
+                tool_name,
+                tool_input,
+                st.msg_proxy,
+                st.user_id,
             )
+            if self._native_tools.handles(tool_name):
+                # Do not bind across native tools such as spawn_agent: child
+                # tasks copy ContextVars at creation and would inherit the
+                # parent's call id for their whole lifetime.
+                raw = await asyncio.wait_for(dispatch, timeout=_t)
+            else:
+                # Autonomous-loop executor calls use the same streamer as
+                # chat. Bind their model tool-use id too, or concurrent
+                # same-name calls cross streams in the WebUI.
+                _call_token = _current_call_id.set(block.id)
+                try:
+                    raw = await asyncio.wait_for(dispatch, timeout=_t)
+                finally:
+                    _current_call_id.reset(_call_token)
             # Skill CRUD invalidates caches
             if tool_name in (
                 "create_skill",

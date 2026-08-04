@@ -1181,6 +1181,23 @@ class TestCallIdAttribution:
     streams.
     """
 
+    async def test_unbound_callbacks_get_distinct_wire_ids(self):
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        seen = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+
+        stream_a, out_a, finish_a = streamer.create_callback("run_command", channel_id="h")
+        stream_b, out_b, finish_b = streamer.create_callback("run_command", channel_id="h")
+        await out_a("a\n")
+        await out_b("b\n")
+        await finish_a()
+        await finish_b()
+
+        assert stream_a != stream_b
+        assert {chunk.call_id for chunk in seen} == {stream_a, stream_b}
+
     async def test_chunks_carry_the_bound_call_id(self):
         from src.tools.output_streamer import ToolOutputStreamer, current_call_id
 
@@ -1226,6 +1243,96 @@ class TestCallIdAttribution:
         assert "from a\n" in "".join(by_id["call_a"])
         assert "from b\n" in "".join(by_id["call_b"])
         assert "from b" not in "".join(by_id["call_a"])
+
+    async def test_autonomous_loop_binds_block_id_for_streams(self):
+        """The loop pipeline is a separate executor entry point from chat.
+
+        It must bind the model tool-use id too; otherwise two concurrent
+        same-name calls from one loop iteration still emit call_id=None.
+        """
+        from types import SimpleNamespace
+
+        from src.discord.tool_loop import ToolLoopRunner
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        seen = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._native_tools = SimpleNamespace(handles=lambda _name: False)
+
+        async def dispatch(*_args):
+            _, on_output, finish = streamer.create_callback("run_command", channel_id="h")
+            await on_output("loop output\n")
+            await finish()
+            return "ok"
+
+        runner.dispatch_loop_tool = dispatch
+        runner._audit = SimpleNamespace(log_execution=AsyncMock())
+        st = SimpleNamespace(
+            tool_timeout=5,
+            msg_proxy=object(),
+            user_id="1",
+            system_prompt="",
+            channel=object(),
+            requester_name="u",
+            channel_id_str="c",
+        )
+        block = SimpleNamespace(
+            id="loop_call_alpha",
+            name="run_command",
+            input={"command": "echo hi"},
+            parse_error=None,
+        )
+
+        result = await runner._run_one_loop_tool(st, block)
+
+        assert result["tool_use_id"] == "loop_call_alpha"
+        assert seen
+        assert {chunk.call_id for chunk in seen} == {"loop_call_alpha"}
+
+    async def test_autonomous_loop_does_not_leak_parent_id_into_native_child(self):
+        """A native spawn can create a long-lived child task.
+
+        ContextVars are copied when that task is created, so the parent tool id
+        must not be bound around native dispatch or every child stream would be
+        attributed to the spawn invocation.
+        """
+        from types import SimpleNamespace
+
+        from src.discord.tool_loop import ToolLoopRunner
+        from src.tools.output_streamer import current_call_id
+
+        observed = []
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._native_tools = SimpleNamespace(handles=lambda _name: True)
+
+        async def dispatch(*_args):
+            observed.append(current_call_id.get())
+            return "ok"
+
+        runner.dispatch_loop_tool = dispatch
+        runner._audit = SimpleNamespace(log_execution=AsyncMock())
+        st = SimpleNamespace(
+            tool_timeout=5,
+            msg_proxy=object(),
+            user_id="1",
+            system_prompt="",
+            channel=object(),
+            requester_name="u",
+            channel_id_str="c",
+        )
+        block = SimpleNamespace(
+            id="spawn_parent",
+            name="spawn_agent",
+            input={},
+            parse_error=None,
+        )
+
+        await runner._run_one_loop_tool(st, block)
+
+        assert observed == [None]
 
 
 async def _noop():

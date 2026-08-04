@@ -141,8 +141,13 @@ class ToolOutputStreamer:
         - *on_output(text)* should be called with each line/chunk of output
         - *finish()* must be called when the tool completes (flushes buffer)
         """
-        call_id = current_call_id.get()
-        stream_id = call_id or f"{tool_name}-{id(object())}-{time.monotonic_ns()}"
+        bound_call_id = current_call_id.get()
+        stream_id = bound_call_id or f"{tool_name}-{id(object())}-{time.monotonic_ns()}"
+        # Non-chat callers (agents, schedules, direct dispatch) may not have a
+        # model tool-use id. The generated stream id is still invocation
+        # identity and must ride the wire; emitting None falls back to the tool
+        # name in the WebUI and recreates same-name stream collisions.
+        call_id = bound_call_id or stream_id
         now = time.monotonic()
         stream = _ActiveStream(
             tool_name=tool_name,

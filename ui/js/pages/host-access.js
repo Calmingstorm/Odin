@@ -2,6 +2,7 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { computed, nextTick, onMounted, ref } from 'vue';
+import { createHostAccessMutationCoordinator } from '../host-access-state.js';
 
 
 export default {
@@ -210,22 +211,61 @@ export default {
       return { allowed_hosts: entry.allowed_hosts, default_host: entry.default_host || '', allow_all: false };
     }
 
-    // Last state the SERVER confirmed, and a generation per scope. Rollback
-    // targets server truth rather than a local snapshot: with v-model the
-    // value is already mutated before @change fires, so a "pre-mutation"
-    // snapshot is impossible there — and a stale failure must never undo a
-    // newer successful write.
-    const clone = (v) => JSON.parse(JSON.stringify(v));
-    let serverDefaultPolicy = null;
-    const serverUsers = {};
-    let defaultPolicyGen = 0;
-    const userGens = {};
+    // Security policy writes are serialized through one coordinator. A stale
+    // callback must not merely be ignored: if it committed on the server it
+    // advances the last-confirmed baseline before a later failure rolls back.
+    // Refreshes join the same queue so an old GET cannot overwrite a new PUT.
+    const coordinator = createHostAccessMutationCoordinator({
+      applyDefault: async (attempted) => {
+        const hosts = attempted.allow_all ? null : attempted.allowed_hosts;
+        await api.put('/api/host-access/default-policy', {
+          allowed_hosts: hosts,
+          default_host: attempted.default_host,
+        });
+      },
+      applyUser: async (uid, attempted) => {
+        const hosts = attempted.allow_all ? null : attempted.allowed_hosts;
+        await api.put(`/api/host-access/user/${uid}`, {
+          allowed_hosts: hosts,
+          default_host: attempted.default_host,
+        });
+      },
+      applyDelete: (uid) => api.del(`/api/host-access/user/${uid}`),
+      onDefaultConfirmed: () => toast.success('Default policy updated'),
+      onDefaultRollback: (confirmed) => {
+        if (confirmed) defaultPolicy.value = confirmed;
+      },
+      onUserConfirmed: (uid) => {
+        const m = getMember(uid);
+        toast.success(`Updated access for ${m ? m.display_name : uid}`);
+      },
+      onUserRollback: (uid, confirmed) => {
+        const next = { ...users.value };
+        if (confirmed) next[uid] = confirmed;
+        else delete next[uid];
+        users.value = next;
+      },
+      onUserDeleted: (uid) => {
+        const next = { ...users.value };
+        delete next[uid];
+        users.value = next;
+      },
+      onError: (e, context) => {
+        const suffix = context.uid ? ` ${getMember(context.uid)?.display_name || context.uid}` : '';
+        toast.error(`${e.message || 'Failed to save'} — reverted${suffix}`);
+      },
+    });
 
+    let fetchGeneration = 0;
     async function fetchData() {
+      const generation = ++fetchGeneration;
       loading.value = true;
       error.value = '';
       try {
-        const hostResp = await api.get('/api/host-access');
+        const hostResp = await coordinator.readSnapshot(
+          () => api.get('/api/host-access')
+        );
+        if (generation !== fetchGeneration) return;
         data.value = hostResp;
         availableHosts.value = hostResp.available_hosts || [];
         defaultPolicy.value = normalizeEntry(hostResp.default_policy, availableHosts.value);
@@ -235,40 +275,26 @@ export default {
           normalized[uid] = normalizeEntry(entry, availableHosts.value);
         }
         users.value = normalized;
-        serverDefaultPolicy = clone(defaultPolicy.value);
-        for (const [uid, entry] of Object.entries(normalized)) serverUsers[uid] = clone(entry);
+        coordinator.seed(defaultPolicy.value, normalized);
       } catch (e) {
-        error.value = e.message || 'Failed to fetch host access data';
+        if (generation === fetchGeneration) {
+          error.value = e.message || 'Failed to fetch host access data';
+        }
       } finally {
-        loading.value = false;
+        if (generation === fetchGeneration) loading.value = false;
       }
       try {
-        members.value = await api.get('/api/discord/members') || [];
+        const loadedMembers = await api.get('/api/discord/members') || [];
+        if (generation === fetchGeneration) members.value = loadedMembers;
       } catch {
-        members.value = [];
+        if (generation === fetchGeneration) members.value = [];
       }
     }
 
-    async function saveDefaultPolicy() {
-      // No parameters: this is bound directly as a @change handler, so any
-      // parameter arrives as a DOM Event — which previously became the
-      // "snapshot" and was assigned to defaultPolicy on failure.
-      const gen = ++defaultPolicyGen;
-      const attempted = clone(defaultPolicy.value);
-      try {
-        const hosts = attempted.allow_all ? null : attempted.allowed_hosts;
-        await api.put('/api/host-access/default-policy', {
-          allowed_hosts: hosts,
-          default_host: attempted.default_host,
-        });
-        if (gen !== defaultPolicyGen) return;  // a newer write owns the truth
-        serverDefaultPolicy = attempted;
-        toast.success('Default policy updated');
-      } catch (e) {
-        if (gen !== defaultPolicyGen) return;  // never undo a newer write
-        if (serverDefaultPolicy) defaultPolicy.value = clone(serverDefaultPolicy);
-        toast.error(`${e.message || 'Failed to save'} — reverted`);
-      }
+    function saveDefaultPolicy() {
+      // No parameters: this is bound directly as a @change handler. Passing a
+      // snapshot here receives the DOM Event because v-model has already run.
+      coordinator.saveDefault(defaultPolicy.value);
     }
 
     function toggleDefaultHost(host, checked) {
@@ -284,32 +310,10 @@ export default {
       saveDefaultPolicy();
     }
 
-    async function saveUser(uid) {
+    function saveUser(uid) {
       const entry = users.value[uid];
       if (!entry) return;
-      const gen = (userGens[uid] = (userGens[uid] || 0) + 1);
-      const attempted = clone(entry);
-      try {
-        const hosts = attempted.allow_all ? null : attempted.allowed_hosts;
-        await api.put(`/api/host-access/user/${uid}`, {
-          allowed_hosts: hosts,
-          default_host: attempted.default_host,
-        });
-        if (gen !== userGens[uid]) return;
-        serverUsers[uid] = attempted;
-        const m = getMember(uid);
-        toast.success(`Updated access for ${m ? m.display_name : uid}`);
-      } catch (e) {
-        if (gen !== userGens[uid]) return;
-        const next = { ...users.value };
-        // No confirmed server state means the entry is new and was rejected —
-        // remove it rather than leave a grant on screen that never took.
-        if (serverUsers[uid]) next[uid] = clone(serverUsers[uid]);
-        else delete next[uid];
-        users.value = next;
-        const m = getMember(uid);
-        toast.error(`${e.message || 'Failed to save'} — reverted ${m ? m.display_name : uid}`);
-      }
+      coordinator.saveUser(uid, entry);
     }
 
     function toggleUserHost(uid, host, checked) {
@@ -395,12 +399,11 @@ export default {
         danger: true,
       });
       if (!ok) return;
-      try {
-        await api.del(`/api/host-access/user/${uid}`);
-        delete users.value[uid];
+      await coordinator.deleteUser(uid);
+      // The coordinator publishes only after the server confirms deletion and
+      // participates in the same ordering protocol as in-flight PUTs.
+      if (!users.value[uid]) {
         toast.success(`Removed override for ${m ? m.display_name : uid}`);
-      } catch (e) {
-        toast.error(e.message || 'Failed to delete');
       }
     }
 
