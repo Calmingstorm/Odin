@@ -7,6 +7,7 @@ import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatTs, formatAge, formatDuration } from '../utils.js';
 import { computed, onMounted, ref } from 'vue';
+import { analyzeLocalDateTime } from '../schedule-time.js';
 
 
 export default {
@@ -91,6 +92,22 @@ export default {
             <label class="text-gray-400 text-xs block mb-1">One-Time (your local time)
             <input v-model="form.run_at" type="datetime-local" class="hm-input" />
             </label>
+            <p v-if="runAtAnalysis.state === 'nonexistent'" class="text-xs text-red-400 mt-1" role="alert">
+              That local time does not exist — clocks skip it when daylight saving begins. Choose another time.
+            </p>
+            <div v-else-if="runAtAnalysis.state === 'ambiguous'" class="mt-1">
+              <p class="text-xs text-amber-400" role="alert">
+                That local time happens twice when daylight saving ends. Choose which one:
+              </p>
+              <select v-model.number="runAtOccurrence" class="hm-select text-xs mt-1">
+                <option v-for="(opt, i) in runAtAnalysis.options" :key="opt.iso" :value="i">
+                  {{ opt.offset }} — {{ opt.iso }}
+                </option>
+              </select>
+            </div>
+            <p v-else-if="runAtAnalysis.state === 'invalid'" class="text-xs text-red-400 mt-1" role="alert">
+              That is not a valid date and time.
+            </p>
             <p v-if="runAtUtcPreview" class="text-xs text-gray-500 mt-1">
               Fires at {{ runAtUtcPreview }}
             </p>
@@ -330,12 +347,19 @@ export default {
     // Echo the submitted instant back in the operator's own locale, so the
     // local-vs-UTC translation is visible BEFORE clicking Create rather than
     // discovered afterwards in the list.
+    // Which occurrence the operator picked when a local time happens twice.
+    const runAtOccurrence = ref(0);
+    const runAtAnalysis = computed(() => analyzeLocalDateTime(form.value.run_at));
+    const runAtChosen = computed(() => {
+      const a = runAtAnalysis.value;
+      if (a.state === 'ok') return a.instant;
+      if (a.state === 'ambiguous') return a.options[runAtOccurrence.value]?.instant || null;
+      return null;
+    });
     const runAtUtcPreview = computed(() => {
-      const raw = (form.value.run_at || '').trim();
-      if (!raw) return '';
-      const instant = new Date(raw);
-      if (Number.isNaN(instant.getTime())) return '';
-      return `${instant.toLocaleString()} (${instant.toISOString()})`;
+      const instant = runAtChosen.value;
+      if (!instant) return '';
+      return `${instant.toLocaleString()} local — ${instant.toISOString()} UTC`;
     });
 
     // Cron validation
@@ -466,13 +490,24 @@ export default {
         // The field is datetime-local, i.e. the operator's WALL CLOCK. Send an
         // explicit instant: a naive string was stamped UTC server-side, so
         // someone at UTC-5 typing 09:00 got a job that fired at 04:00 local
-        // and a list row showing a time they never entered.
-        const instant = new Date(f.run_at.trim());
-        if (Number.isNaN(instant.getTime())) {
+        // and a list row showing a time they never entered. The analysis also
+        // refuses times the clocks skip and makes a repeated hour an explicit
+        // choice rather than a silent one.
+        const analysis = runAtAnalysis.value;
+        if (analysis.state === 'nonexistent') {
+          createError.value = 'That local time does not exist (daylight saving gap)';
+          return;
+        }
+        if (analysis.state === 'invalid') {
           createError.value = 'One-time run time is not a valid date';
           return;
         }
-        payload.run_at = instant.toISOString();
+        const chosen = runAtChosen.value;
+        if (!chosen) {
+          createError.value = 'Choose which occurrence of that local time to use';
+          return;
+        }
+        payload.run_at = chosen.toISOString();
       }
       if (f.action === 'reminder' && f.message.trim()) payload.message = f.message.trim();
       if (f.action === 'check') {
@@ -571,6 +606,7 @@ export default {
     return {
       schedules, loading, error,
       showCreate, form, creating, createError, runAtUtcPreview,
+      runAtAnalysis, runAtOccurrence,
       cronResult, validatingCron, cronPresets,
       runningId, deletingId, togglingId, resettingId,
       expandedId, history, historyLoading, historyError,
