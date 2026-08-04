@@ -140,6 +140,15 @@ if (repeat) {
   check('an ordinary time resolves cleanly', ok.state === 'ok', `state=${ok.state}`);
   check('empty input is its own state', analyzeLocalDateTime('').state === 'empty');
   check('malformed input is rejected', analyzeLocalDateTime('not-a-date').state === 'invalid');
+  // The pattern is anchored at both ends: unanchored, a valid prefix made
+  // trailing junk acceptable. datetime-local cannot emit that, but this module
+  // is exported and a caller should not have to know the difference.
+  check('trailing junk after a valid value is rejected',
+    analyzeLocalDateTime('2026-06-15T09:00garbage').state === 'invalid',
+    analyzeLocalDateTime('2026-06-15T09:00garbage').state);
+  check('a seconds component is still accepted',
+    analyzeLocalDateTime('2026-06-15T09:00:30').state === 'ok',
+    analyzeLocalDateTime('2026-06-15T09:00:30').state);
 }
 
 console.log(`schedule-time [${process.env.TZ}]: ${passed} assertions passed, ${failed} failed`);

@@ -9,7 +9,10 @@
 // Everything here works from the host's local zone through the standard Date
 // getters, so it follows whatever TZ the browser (or a test) is running in.
 
-const PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/;
+// Anchored at BOTH ends: unanchored, "2026-04-01T09:00garbage" parsed as a
+// valid value. A native datetime-local cannot produce that, but this module is
+// exported and a future caller has no reason to expect the looseness.
+const PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
 
 /** Render an instant as the local wall-clock string a datetime-local shows. */
 export function localWallClock(instant) {
@@ -47,7 +50,7 @@ export function analyzeLocalDateTime(raw) {
   const match = PATTERN.exec(typed);
   if (!match) return { state: 'invalid', typed };
 
-  const [, y, mo, d, hh, mm] = match.map(Number);
+  const [, y, mo, d, hh, mm] = match.slice(0, 6).map(Number);
   const normalized = typed.slice(0, 16);
 
   // Treat the typed components as if they were UTC, then subtract the zone's

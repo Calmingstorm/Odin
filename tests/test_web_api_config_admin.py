@@ -730,12 +730,21 @@ class TestCancellationCoherence:
 
         import src.config.persistence as persistence
 
+        import threading
+
         app, bot = _app(register_discord_config)
         real = persistence.patch_config_paths
 
+        # Synchronise on EVENTS, not sleeps. Cancelling after a fixed delay is
+        # a guess about scheduling: under full-suite load the write had not
+        # always begun when the cancel landed, so this test failed for a reason
+        # that had nothing to do with the behaviour it pins.
+        write_started = threading.Event()
+        may_finish = threading.Event()
+
         def slow(changes, *, path=None):
-            import time as _time
-            _time.sleep(0.3)
+            write_started.set()
+            assert may_finish.wait(timeout=10), "test never released the write"
             real(changes, path=path)
 
         with patch.object(persistence, "patch_config_paths", slow):
@@ -743,8 +752,10 @@ class TestCancellationCoherence:
                 request = asyncio.create_task(
                     c.put("/api/config", json={"logging": {"level": "DEBUG"}})
                 )
-                await asyncio.sleep(0.1)
+                # The write is genuinely in flight before we cancel.
+                assert await asyncio.to_thread(write_started.wait, 10), "write never started"
                 request.cancel()
+                may_finish.set()
                 with pytest.raises(asyncio.CancelledError):
                     await request
 

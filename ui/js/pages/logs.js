@@ -464,7 +464,7 @@ export default {
     // Timeline: bucket logs by time intervals
     const TIMELINE_BUCKETS = 24;
     const timelineBuckets = computed(() => {
-      if (logs.value.length === 0) return [];
+      if (filteredLogs.value.length === 0) return [];
       const buckets = [];
       const now = new Date();
       const spanMs = 3600 * 1000; // 1 hour per bucket
@@ -480,7 +480,11 @@ export default {
         });
       }
 
-      for (const entry of logs.value) {
+      // Bucket the rows the list actually shows. Counting unfiltered logs while
+      // rendering filteredLogs meant a bar could show a count the list could
+      // not produce, and jumpToTimelineBucket then found no matching row and
+      // silently did nothing.
+      for (const entry of filteredLogs.value) {
         if (!entry._time) continue;
         const t = entry._time.getTime();
         for (const b of buckets) {
@@ -506,7 +510,19 @@ export default {
 
     const timelineSpanLabel = computed(() => {
       if (timelineBuckets.value.length === 0) return '';
-      return 'Last 24 hours';
+      // Label the span the data actually covers. This chart is fed ONLY by the
+      // live websocket stream — nothing backfills history — so a fixed "Last 24
+      // hours" promised a day of data when the buckets can only hold what has
+      // arrived since the tab was opened.
+      const times = filteredLogs.value
+        .map(e => e._time && e._time.getTime())
+        .filter(Boolean);
+      if (times.length === 0) return '';
+      const oldest = Math.min(...times);
+      const minutes = Math.max(1, Math.round((Date.now() - oldest) / 60000));
+      if (minutes < 60) return `Since this tab opened (${minutes} min)`;
+      const hours = Math.round(minutes / 60);
+      return hours >= 24 ? 'Last 24 hours' : `Since this tab opened (${hours} h)`;
     });
 
     const timelineLabelSkip = computed(() => {

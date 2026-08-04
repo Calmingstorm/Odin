@@ -96,6 +96,24 @@ class OdinAPI {
   }
 
   get(path, options = {}) { return this._request('GET', path, null, options); }
+
+  /** GET returning a Blob, for downloads.
+   *
+   * The alternative is putting the bearer token in a URL so an <a download>
+   * can carry it — which writes the credential into browser history, the
+   * referrer chain, and every server access log that records query strings.
+   * The token belongs in the Authorization header, so the download has to go
+   * through fetch and be handed to the browser as an object URL. */
+  async getBlob(path) {
+    this._lastActivity = Date.now();
+    const resp = await fetch(path, { method: 'GET', headers: this._headers() });
+    if (resp.status === 401) throw new AuthError('Unauthorized');
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => null);
+      throw new ApiError(data?.error || `HTTP ${resp.status}`, resp.status, data);
+    }
+    return resp.blob();
+  }
   post(path, data) { return this._request('POST', path, data); }
   put(path, data) { return this._request('PUT', path, data); }
   del(path) { return this._request('DELETE', path); }

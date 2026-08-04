@@ -142,10 +142,10 @@ export default {
                          @change="toggleSelect(scope.name, entry.key)" />
                   <span class="mem-tree-key">{{ entry.key }}</span>
                   <div class="mem-tree-entry-actions">
-                    <button @click="copyValue(scope.name, entry)" class="btn btn-ghost text-xs">
+                    <button @click="copyValue(scope.name, entry)" class="btn btn-ghost text-xs" :disabled="entry.failed">
                       {{ copied === scope.name + '/' + entry.key ? 'Copied!' : 'Copy' }}
                     </button>
-                    <button @click="startEdit(scope.name, entry.key, entry.value)" class="btn btn-ghost text-xs">Edit</button>
+                    <button @click="startEdit(scope.name, entry.key, entry.value)" class="btn btn-ghost text-xs" :disabled="entry.failed">Edit</button>
                     <button @click="confirmDelete(scope.name, entry.key)" class="btn btn-danger text-xs">Del</button>
                   </div>
                 </div>
@@ -157,6 +157,9 @@ export default {
                     </button>
                     <button @click="editingKey = null" class="btn btn-ghost text-xs">Cancel</button>
                   </div>
+                </div>
+                <div v-else-if="entry.failed" class="mem-tree-value text-red-400" role="alert">
+                  Could not load this value — {{ entry.error }}
                 </div>
                 <div v-else class="mem-tree-value">{{ entry.value }}</div>
               </div>
@@ -300,14 +303,28 @@ export default {
       if (!scope || scopeEntries.value[scopeName] || loadingScope.value === scopeName) return;
 
       loadingScope.value = scopeName;
-      const entries = await Promise.all(scope.keys.map(async (key) => {
-        try {
-          const data = await api.get(`/api/memory/${encodeURIComponent(scopeName)}/${encodeURIComponent(key)}`);
-          return { key, value: data.value || '' };
-        } catch {
-          return { key, value: '(error loading)' };
-        }
-      }));
+      // Fetch in bounded batches rather than firing one request per key at
+      // once: a scope with hundreds of keys opened hundreds of simultaneous
+      // requests, which is enough to trip the per-IP rate limit and blank the
+      // page (the same way rapid config saves did before the debounce).
+      const BATCH = 8;
+      const entries = [];
+      for (let i = 0; i < scope.keys.length; i += BATCH) {
+        const slice = scope.keys.slice(i, i + BATCH);
+        const loaded = await Promise.all(slice.map(async (key) => {
+          try {
+            const data = await api.get(
+              `/api/memory/${encodeURIComponent(scopeName)}/${encodeURIComponent(key)}`
+            );
+            return { key, value: data.value || '', failed: false };
+          } catch (e) {
+            // A failure is NOT a value. Returning the string "(error loading)"
+            // made it editable, copyable, and savable back over real data.
+            return { key, value: '', failed: true, error: e.message || 'Failed to load' };
+          }
+        }));
+        entries.push(...loaded);
+      }
       scopeEntries.value[scopeName] = entries;
       loadingScope.value = null;
     }
