@@ -390,7 +390,6 @@ const App = {
       ws.onLatency = (ms) => { wsLatency.value = ms; };
       ws.onStateChange = (state, detail) => {
         wsState.value = state;
-        if ((detail.latency ?? -1) >= 0) wsLatency.value = detail.latency;
         if (state === 'connected') {
           if (wasConnected) {
             showWsToast('Connection restored', 'success');

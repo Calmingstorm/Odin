@@ -26,14 +26,14 @@ export default {
            background refresh must not replace data we already have:
            one 502 during a restart used to blank a page that had been
            rendering fine, until the next poll a full interval later. -->
-      <div v-else-if="error && !data" class="hm-card border-red-900 error-state" role="alert">
+      <div v-else-if="error && !hasData" class="hm-card border-red-900 error-state" role="alert">
         <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="retry" class="btn btn-ghost text-xs">Retry</button>
       </div>
 
       <div v-else>
-        <div v-if="error" class="hm-card border-amber-900 mb-3" role="status" aria-live="polite">
+        <div v-if="error && hasData" class="hm-card border-amber-900 mb-3" role="status" aria-live="polite">
           <p class="text-amber-400 text-sm">Last refresh failed: {{ error }} — showing the most recent data.</p>
         </div>
         <!-- Header -->
@@ -256,6 +256,10 @@ export default {
   setup() {
     const loading = ref(true);
     const error = ref(null);
+    // Set only after a response actually arrives. The initial value of
+    // `data` is a placeholder shape in some pages, so its truthiness cannot
+    // distinguish "never loaded" from "loaded and now stale".
+    const hasData = ref(false);
     const refreshing = ref(false);
     const activeTab = ref('sessions');
     const data = ref(null);
@@ -320,6 +324,7 @@ export default {
         const resp = await api.get('/api/resource-usage');
         data.value = resp;
         error.value = null;
+        hasData.value = true;
       } catch (e) {
         error.value = e.message || 'Failed to load resource usage';
       } finally {
@@ -368,7 +373,7 @@ export default {
     onUnmounted(disarm);
 
     return {
-      loading, error, refreshing, data, activeTab,
+      hasData, loading, error, refreshing, data, activeTab,
       tabs, collectedAt, storageItems,
       fmtNum, refresh, retry,
     };

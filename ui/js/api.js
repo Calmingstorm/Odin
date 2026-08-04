@@ -182,6 +182,16 @@ class OdinWebSocket {
   get reconnectAttempt() { return this._reconnectAttempt; }
   get latency() { return this._latency; }
 
+  _resetLatency() {
+    // Publish the reset, not just record it. Recording silently left the last
+    // reading from a now-dead socket on screen, so the sidebar could read
+    // "Disconnected — 12ms".
+    this._latency = -1;
+    if (this.onLatency) {
+      try { this.onLatency(-1); } catch { /* listener errors are not ours */ }
+    }
+  }
+
   connect() {
     this._shouldConnect = true;
     this._setState('connecting');
@@ -191,7 +201,7 @@ class OdinWebSocket {
   disconnect() {
     this._shouldConnect = false;
     this._reconnectAttempt = 0;
-    this._latency = -1;
+    this._resetLatency();
     this._stopPing();
     if (this._ws) {
       this._ws.close();
@@ -321,7 +331,7 @@ class OdinWebSocket {
     this._ws.onclose = () => {
       this._ws = null;
       this._stopPing();
-      this._latency = -1;
+      this._resetLatency();
       if (this._chatPending) {
         // The server does not cancel an in-flight turn on disconnect — it
         // finishes under its own guards and lands in session history.
