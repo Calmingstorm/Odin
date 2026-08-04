@@ -42,6 +42,7 @@ from ..api_common import (
     _write_config,
     _write_env_file,
     admin_gate,
+    contains_redaction_mask,
 )
 
 log = get_logger("web.api")
@@ -385,6 +386,18 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         if _contains_blocked_fields(updates, _SENSITIVE_FIELDS):
             return web.json_response(
                 {"error": "Cannot update sensitive fields via API"}, status=403
+            )
+
+        # Refuse a body carrying the mask this API hands out. A client that
+        # renders a redacted secret as an editable control sends the mask back
+        # on save, which would write eight bullets over the real credential.
+        if contains_redaction_mask(updates):
+            return web.json_response(
+                {
+                    "error": "Request contains a redacted placeholder. Send the "
+                    "real value, or omit the field to leave it unchanged."
+                },
+                status=400,
             )
 
         # ONE transaction: snapshot, validate, persist, and rebind all happen

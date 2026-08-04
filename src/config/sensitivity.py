@@ -100,6 +100,23 @@ STORAGE_SENSITIVE_KEYS: frozenset[str] = frozenset(
 )
 
 
+# Containers whose CHILD KEYS are operator-chosen, so per-key classification
+# cannot work inside them: an HTTP header is named "Authorization", an env var
+# is named whatever the operator called it, a webhook map is keyed by nickname.
+# Everything beneath these is opaque and must be masked wholesale. Containers
+# whose children are SCHEMA fields (web.api_tokens, outbound_webhooks.targets,
+# mcp.servers) are deliberately absent: per-key classification works there, and
+# blanket masking would hide a target's url or a token's tier for no gain.
+OPAQUE_CONTAINER_KEYS: frozenset[str] = frozenset(
+    {"headers", "env", "webhook_urls"}
+)
+
+
+def is_opaque_container_key(key: object) -> bool:
+    """Whether every value beneath *key* must be masked, not just matching ones."""
+    return isinstance(key, str) and key.lower() in OPAQUE_CONTAINER_KEYS
+
+
 def is_sensitive_key(key: object) -> bool:
     """Return whether *key* names a secret or credential-bearing container."""
     if not isinstance(key, str):

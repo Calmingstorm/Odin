@@ -1024,6 +1024,34 @@ class TestConfigMeta:
         "apply_state",
     }
 
+    @pytest.mark.asyncio
+    async def test_saving_a_redacted_placeholder_is_refused(self):
+        """GET hands out ••••••••. A client that renders that as an editable
+        field sends it back on save, which would write eight bullets over the
+        real credential. The write side has to refuse it."""
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.put(
+                "/api/config",
+                json={"slack": {"default_webhook_url": "•" * 8}},
+            )
+            body = await resp.json()
+
+        assert resp.status == 400
+        assert "redacted placeholder" in body["error"]
+        assert bot.config.slack.default_webhook_url != "•" * 8
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_save_is_unaffected(self):
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.put(
+                "/api/config", json={"discord": {"require_mention": False}}
+            )
+
+        assert resp.status == 200
+        assert bot.config.discord.require_mention is False
+
     def test_the_route_sits_behind_the_admin_gate(self):
         """It returns every non-secret configuration value. Route-level tests
         run without the auth middleware, so nothing else here would notice the

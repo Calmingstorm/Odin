@@ -297,23 +297,6 @@ def _resolve_path(path: Path | str | None) -> Path:
     return resolved
 
 
-def mutate_config_document(
-    mutate: Callable[[Any], None], *, path: Path | str | None = None
-) -> None:
-    """Load the active config round-trip, apply *mutate*, write it atomically.
-
-    For callers that own a section and know exactly which keys they maintain
-    (``llm_admin``'s LLM-section writer). Callers patching arbitrary paths
-    should use :func:`patch_config_paths` instead.
-    """
-    config_path = _resolve_path(path)
-    if not config_path.exists():
-        raise ConfigPersistError("config file does not exist")
-    document, orig_mode = _load_document(config_path)
-    mutate(document)
-    _dump_atomic(document, config_path, orig_mode)
-
-
 def patch_config_paths(
     changes: Iterable[ConfigChange], *, path: Path | str | None = None
 ) -> None:
@@ -449,27 +432,6 @@ async def persist_config_paths(
     async with config_transaction():
         exc, was_cancelled = await _run_settled(
             lambda: patch_config_paths(changes, path=path)
-        )
-        if was_cancelled:
-            raise asyncio.CancelledError
-        if exc is not None:
-            raise exc
-
-
-async def persist_config_mutation_locked(
-    mutate: Callable[[Any], None], *, path: Path | str | None = None
-) -> PersistOutcome:
-    """Mutate to settlement while the caller holds the transaction."""
-    return await _run_settled(lambda: mutate_config_document(mutate, path=path))
-
-
-async def persist_config_mutation(
-    mutate: Callable[[Any], None], *, path: Path | str | None = None
-) -> None:
-    """Mutate the document off the event loop, under the shared lock, to settlement."""
-    async with config_transaction():
-        exc, was_cancelled = await _run_settled(
-            lambda: mutate_config_document(mutate, path=path)
         )
         if was_cancelled:
             raise asyncio.CancelledError

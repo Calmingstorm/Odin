@@ -125,6 +125,115 @@ def test_redaction_leaves_empty_values():
 
 
 # ---------------------------------------------------------------------------
+# Credential CONTAINERS — child keys are named by the operator
+# ---------------------------------------------------------------------------
+
+def test_operator_named_container_children_are_masked():
+    """An HTTP header is called "Authorization" and a webhook map is keyed by
+    nickname. Neither name looks like a credential, so per-key matching served
+    both values verbatim from GET /api/config."""
+    red = _redact_config({
+        "mcp": {"servers": {"ops": {
+            "transport": "stdio",
+            "headers": {"Authorization": "Bearer REAL"},
+            "env": {"MY_PASSPHRASE": "REAL-ENV"},
+        }}},
+        "slack": {"webhook_urls": {"ops": "https://hooks.slack.com/REAL"}},
+    })
+    servers = red["mcp"]["servers"]["ops"]
+    assert servers["headers"]["Authorization"] == "••••••••"
+    assert servers["env"]["MY_PASSPHRASE"] == "••••••••"
+    assert red["slack"]["webhook_urls"]["ops"] == "••••••••"
+
+
+def test_container_masking_keeps_shape():
+    """Masking the whole subtree would hide which servers and headers exist,
+    which the page needs in order to manage them."""
+    red = _redact_config({
+        "mcp": {"servers": {"ops": {
+            "transport": "stdio", "headers": {"Authorization": "x"},
+        }}},
+    })
+    assert red["mcp"]["servers"]["ops"]["transport"] == "stdio"
+    assert list(red["mcp"]["servers"]["ops"]["headers"]) == ["Authorization"]
+
+
+def test_empty_container_values_are_left_alone():
+    red = _redact_config({"mcp": {"servers": {"a": {"headers": {"X": ""}}}}})
+    assert red["mcp"]["servers"]["a"]["headers"]["X"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Write fence
+# ---------------------------------------------------------------------------
+
+def test_blocked_fields_are_found_inside_lists():
+    """Descending only into dicts left every credential in a list unfenced,
+    even though both key names were on the blocked list."""
+    from src.web.api_common import _SENSITIVE_FIELDS, _contains_blocked_fields
+
+    assert _contains_blocked_fields(
+        {"web": {"api_tokens": [{"token": "x"}]}}, _SENSITIVE_FIELDS
+    )
+    assert _contains_blocked_fields(
+        {"outbound_webhooks": {"targets": [{"secret": "x"}]}}, _SENSITIVE_FIELDS
+    )
+    assert not _contains_blocked_fields(
+        {"discord": {"channels": [1, 2, 3]}}, _SENSITIVE_FIELDS
+    )
+
+
+def test_container_masking_handles_lists_and_runaway_nesting():
+    """A container can hold a list of records, and a hostile body can nest
+    deeper than the walk should follow."""
+    from src.web.api_common import _mask_subtree
+
+    assert _mask_subtree({"a": [{"b": "x"}, "y"]}) == {"a": [{"b": "••••••••"}, "••••••••"]}
+    deep: dict = {}
+    node = deep
+    for _ in range(15):
+        node["n"] = {}
+        node = node["n"]
+    assert "..." in repr(_mask_subtree(deep))
+
+
+def test_blocked_field_scan_stops_at_a_depth_limit():
+    from src.web.api_common import _SENSITIVE_FIELDS, _contains_blocked_fields
+
+    deep: dict = {}
+    node = deep
+    for _ in range(15):
+        node["n"] = {}
+        node = node["n"]
+    node["token"] = "x"
+    assert _contains_blocked_fields(deep, _SENSITIVE_FIELDS) is False
+
+
+def test_mask_scan_stops_at_a_depth_limit():
+    from src.web.api_common import contains_redaction_mask
+
+    deep: dict = {}
+    node = deep
+    for _ in range(15):
+        node["n"] = {}
+        node = node["n"]
+    node["x"] = "••••••••"
+    assert contains_redaction_mask(deep) is False
+
+
+def test_the_redaction_mask_is_refused_as_input():
+    """A page that renders a masked secret as an editable control sends the
+    mask back on save. Accepting it writes eight bullets over the credential."""
+    from src.web.api_common import contains_redaction_mask
+
+    assert contains_redaction_mask({"slack": {"default_webhook_url": "••••••••"}})
+    assert contains_redaction_mask({"web": {"api_tokens": [{"token": "••••••••"}]}})
+    assert contains_redaction_mask({"mcp": {"servers": {"a": {"headers": {"A": "••••••••"}}}}})
+    assert not contains_redaction_mask({"discord": {"require_mention": True}})
+    assert not contains_redaction_mask({"slack": {"default_webhook_url": "https://real"}})
+
+
+# ---------------------------------------------------------------------------
 # SSRF scoping
 # ---------------------------------------------------------------------------
 

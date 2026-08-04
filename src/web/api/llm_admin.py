@@ -490,26 +490,34 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
-        if aux_cfg is None:
-            return web.json_response({"error": "auxiliary config unavailable"}, status=503)
-
-        # Build an IMMUTABLE desired spec (presence-merged with current config)
-        # WITHOUT mutating live config — reload_auxiliary commits it atomically
-        # under the lock, so a concurrent PUT can't install a candidate built
-        # from a config this handler already changed. Only enabled + model are
-        # configurable; auth and token limit are shared with the main Codex.
-        want_enabled = bool(body["enabled"]) if "enabled" in body else aux_cfg.enabled
-        want_model = aux_cfg.model
-        if "model" in body and str(body["model"]).strip():
-            want_model = str(body["model"]).strip()
-        desired = {"enabled": want_enabled, "model": want_model}
         # Persistence runs INSIDE reload_auxiliary's locked transaction: the
         # SYNC write runs on an executor future (settled before the lock
         # releases), the candidate is applied, persisted, and (on persist
         # failure) EXACTLY restored — no phantom success, no probed reload.
         try:
             async with config_transaction():
+                # Read the merge base INSIDE the transaction, as the three
+                # sibling handlers do. Reading it before meant a write landing
+                # in that window was silently reverted: this handler would
+                # rebuild "desired" from the config it saw first and commit
+                # that, discarding the other change without reporting anything.
+                aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
+                if aux_cfg is None:
+                    return web.json_response(
+                        {"error": "auxiliary config unavailable"}, status=503
+                    )
+
+                # Build an IMMUTABLE desired spec (presence-merged with current
+                # config) WITHOUT mutating live config — reload_auxiliary
+                # commits it atomically under the lock. Only enabled + model are
+                # configurable; auth and token limit are shared with main Codex.
+                want_enabled = (
+                    bool(body["enabled"]) if "enabled" in body else aux_cfg.enabled
+                )
+                want_model = aux_cfg.model
+                if "model" in body and str(body["model"]).strip():
+                    want_model = str(body["model"]).strip()
+                desired = {"enabled": want_enabled, "model": want_model}
                 result = await bot.llm_gateway.reload_auxiliary(
                     desired,
                     persist=lambda: patch_config_paths(
