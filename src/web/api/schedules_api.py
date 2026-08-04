@@ -23,6 +23,35 @@ from ..api_common import (
 
 log = get_logger("web.api")
 
+
+def _naive_run_at_error(run_at) -> str | None:
+    """Reject an offsetless ``run_at`` from an API caller.
+
+    ``2026-11-01T01:30:30`` names a wall clock, not an instant. The scheduler
+    stamps it UTC, so on a machine configured for New York it fires five hours
+    early, and on a fall-back night that wall time happens twice. A browser or
+    script has an offset available and should send it.
+
+    The Discord tool path deliberately keeps accepting naive values: the model
+    writes what a person said ("3pm"), and the bot's configured timezone is the
+    documented interpretation there. This rule is for callers with no such
+    context.
+    """
+    if not run_at or not isinstance(run_at, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(run_at)
+    except ValueError:
+        return None  # the scheduler reports malformed input with its own message
+    if parsed.tzinfo is None:
+        return (
+            "run_at must carry a UTC 'Z' or an explicit offset — "
+            f"{run_at!r} names a wall clock, which is ambiguous across "
+            "timezones and repeats on a daylight-saving fall-back"
+        )
+    return None
+
+
 def register_schedules(routes: web.RouteTableDef, bot) -> None:
     """Schedules (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -44,6 +73,9 @@ def register_schedules(routes: web.RouteTableDef, bot) -> None:
                 {"error": "description and channel_id are required"}, status=400
             )
         err = _validate_string(description, "description", _MAX_DESCRIPTION_LEN)
+        if err:
+            return web.json_response({"error": err}, status=400)
+        err = _naive_run_at_error(data.get("run_at"))
         if err:
             return web.json_response({"error": err}, status=400)
         # Web API schedule creation is gated by the admin web token (auth
@@ -92,6 +124,9 @@ def register_schedules(routes: web.RouteTableDef, bot) -> None:
         paused = data.get("paused")
         if paused is not None and not isinstance(paused, bool):
             return web.json_response({"error": "'paused' must be a boolean"}, status=400)
+        err = _naive_run_at_error(data.get("run_at"))
+        if err:
+            return web.json_response({"error": err}, status=400)
         try:
             updated = await bot.scheduler.update(
                 sid,

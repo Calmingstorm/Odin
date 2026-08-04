@@ -1042,6 +1042,58 @@ class TestConfigMeta:
         assert bot.config.slack.default_webhook_url != "•" * 8
 
     @pytest.mark.asyncio
+    async def test_a_save_says_which_leaves_are_not_in_force(self):
+        """This route persists and rebinds config; it does not run the
+        registry's apply handlers. Returning a bare 200 let an operator change
+        the model here and watch chat keep using the old one."""
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.put(
+                "/api/config",
+                json={
+                    "discord": {"respond_to_bots": True},
+                    "openai_codex": {"model": "gpt-5.6-terra"},
+                },
+            )
+            body = await resp.json()
+
+        assert resp.status == 200
+        summary = body["_apply"]
+        assert "discord.respond_to_bots" in summary["applied"]
+        pending = {p["path"]: p for p in summary["pending"]}
+        assert "openai_codex.model" in pending
+        assert pending["openai_codex.model"]["apply_mode"] == "live_apply"
+        # It names the endpoint that would actually apply it.
+        assert "codex" in pending["openai_codex.model"]["apply_handler"]
+
+    @pytest.mark.asyncio
+    async def test_a_restart_bound_leaf_says_why(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.put("/api/config", json={"sessions": {"max_history": 77}})
+            body = await resp.json()
+
+        pending = {p["path"]: p for p in body["_apply"]["pending"]}
+        assert pending["sessions.max_history"]["apply_mode"] == "restart"
+        assert pending["sessions.max_history"]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_an_unwired_leaf_says_what_saving_it_does_not_do(self):
+        """agents.max_children_per_agent is read by nothing — the limit comes
+        from a built-in constant. Saving it must not read as taking effect."""
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.put(
+                "/api/config", json={"agents": {"max_children_per_agent": 9}}
+            )
+            body = await resp.json()
+
+        pending = {p["path"]: p for p in body["_apply"]["pending"]}
+        entry = pending["agents.max_children_per_agent"]
+        assert entry["apply_mode"] == "dormant"
+        assert entry["reason"]
+
+    @pytest.mark.asyncio
     async def test_an_ordinary_save_is_unaffected(self):
         app, bot = _app(register_discord_config)
         async with TestClient(TestServer(app)) as c:

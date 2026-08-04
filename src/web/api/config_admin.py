@@ -47,6 +47,38 @@ from ..api_common import (
 
 log = get_logger("web.api")
 
+
+def _apply_summary(leaf_changes) -> dict:
+    """What actually happened to each saved leaf, per the apply registry.
+
+    The generic save persists and rebinds ``bot.config``; it does not dispatch
+    per-field apply handlers. Fields whose consumers re-read config are in
+    force immediately; the rest are saved and waiting on a restart, a named
+    endpoint, or an activation that this route did not perform. Reporting a
+    bare 200 let an operator change a model here and watch chat keep using the
+    old one.
+    """
+    from ...config.apply_registry import spec_for
+
+    applied: list[str] = []
+    pending: list[dict] = []
+    for path, _value in leaf_changes:
+        dotted = ".".join(str(p) for p in path) if isinstance(path, tuple) else str(path)
+        spec = spec_for(dotted)
+        mode = spec.apply_mode or "restart"
+        if mode in ("live_read", "live_for_new_work"):
+            applied.append(dotted)
+            continue
+        entry = {"path": dotted, "apply_mode": mode}
+        if spec.apply_handler:
+            entry["apply_handler"] = spec.apply_handler
+        if spec.restart_reason:
+            entry["reason"] = spec.restart_reason
+        elif spec.activation_policy:
+            entry["reason"] = spec.activation_policy
+        pending.append(entry)
+    return {"applied": applied, "pending": pending}
+
 def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
     """Setup wizard (first-boot, no auth required) (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -474,7 +506,15 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         # Store diff on request for the audit middleware
         request["_config_diff"] = config_diff
 
-        return web.json_response(after_config)
+        # Say which of the submitted leaves are NOT in force yet. This route
+        # persists and rebinds bot.config; it does not run the registry's
+        # per-field apply handlers, so a model change here is saved and then
+        # ignored by the live client until its dedicated endpoint reloads it.
+        # Returning 200 with nothing else said is the "Config saved
+        # successfully" lie this campaign exists to remove.
+        return web.json_response(
+            {**after_config, "_apply": _apply_summary(leaf_changes)}
+        )
 
 
 def register_quick_actions(routes: web.RouteTableDef, bot) -> None:
