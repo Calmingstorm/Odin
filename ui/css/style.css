@@ -3470,6 +3470,8 @@ a:focus-visible {
 .llm-advanced-toggle { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .llm-advanced-footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: var(--hm-space-4); }
 .llm-advanced-footer p { max-width: 680px; color: var(--hm-text-dim); font-size: var(--hm-text-xs); line-height: 1.5; }
+.llm-advanced-state { grid-column: 1 / -1; margin: 0; color: var(--hm-text-dim); font-size: var(--hm-text-xs); line-height: 1.45; }
+.llm-advanced-state.pending { color: var(--hm-warning-text); }
 .llm-advanced.compact .llm-advanced-body { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
 .llm-advanced.compact .llm-advanced-footer { grid-column: auto; }
 .llm-field-note { display: block; margin-top: 0.3rem; color: #9a8255; line-height: 1.4; }

@@ -4902,6 +4902,13 @@ var Bg=Object.defineProperty;var Hg=(e,t,s)=>t in e?Bg(e,t,{enumerable:!0,config
               </section>
               <section class="llm-advanced-group">
                 <header><strong>Connection pool</strong><span>Shared Codex HTTP transport</span></header>
+                <p v-if="llmStatus?.codex?.connection_pool_pending_restart === true" class="llm-advanced-state pending" role="status">
+                  Saved values need a restart. This process still uses {{ llmStatus.codex.effective_connection_pool?.max_connections }} connections with {{ llmStatus.codex.effective_connection_pool?.keepalive_timeout }}s keepalive.
+                </p>
+                <p v-else-if="llmStatus?.codex?.connection_pool_pending_restart === false" class="llm-advanced-state">
+                  Saved values match this process. Future changes take effect after restart.
+                </p>
+                <p v-else class="llm-advanced-state">Future changes take effect after restart; current process values are unavailable.</p>
                 <label>Maximum connections
                   <input v-model.number="codexForm.connection_pool.max_connections" type="number" min="1" class="hm-input" />
                 </label>
@@ -4911,6 +4918,13 @@ var Bg=Object.defineProperty;var Hg=(e,t,s)=>t in e?Bg(e,t,{enumerable:!0,config
               </section>
               <section class="llm-advanced-group">
                 <header><strong>Context compression</strong><span>Long-conversation compaction</span></header>
+                <p v-if="llmStatus?.codex?.context_compression_pending_restart === true" class="llm-advanced-state pending" role="status">
+                  Saved values need a restart. This process still uses compression {{ llmStatus.codex.effective_context_compression?.enabled ? 'on' : 'off' }}, {{ Number(llmStatus.codex.effective_context_compression?.max_context_chars || 0).toLocaleString() }} characters, and {{ llmStatus.codex.effective_context_compression?.keep_recent_iterations }} recent iterations.
+                </p>
+                <p v-else-if="llmStatus?.codex?.context_compression_pending_restart === false" class="llm-advanced-state">
+                  Saved values match this process. Future changes take effect after restart.
+                </p>
+                <p v-else class="llm-advanced-state">Future changes take effect after restart; current process values are unavailable.</p>
                 <label class="llm-advanced-toggle">Enabled
                   <span class="toggle-switch"><input v-model="codexForm.context_compression.enabled" type="checkbox" /><span class="toggle-slider"></span></span>
                 </label>
@@ -4922,7 +4936,7 @@ var Bg=Object.defineProperty;var Hg=(e,t,s)=>t in e?Bg(e,t,{enumerable:!0,config
                 </label>
               </section>
               <div class="llm-advanced-footer">
-                <p>These settings reload through the Codex provider endpoint. Connection-pool changes rebuild its transport.</p>
+                <p>Transport and retry changes apply now. Connection pool and context compression are saved for the next restart.</p>
                 <button type="button" class="btn btn-primary text-xs" @click="saveCodexConfigNow" :disabled="savingCodex">{{ savingCodex ? 'Saving…' : 'Save advanced settings' }}</button>
               </div>
             </div>

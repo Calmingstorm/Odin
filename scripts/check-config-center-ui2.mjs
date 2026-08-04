@@ -208,6 +208,11 @@ for (const field of ['request_timeout_seconds', 'stream_stall_timeout_seconds', 
 }
 assert.ok((llm.match(/v-model\.number="(?:ollama|kimi)Form\.timeout"/g) || []).length === 2, 'provider timeout controls drifted');
 assert.match(llm, /Unsupported by the current Codex provider/, 'unsupported max_tokens is not labelled');
+for (const field of ['effective_connection_pool', 'connection_pool_pending_restart', 'effective_context_compression', 'context_compression_pending_restart']) {
+  assert.ok(llm.includes(field), `Codex owner page does not consume status truth: ${field}`);
+}
+assert.doesNotMatch(llm, /These settings reload through the Codex provider endpoint|Connection-pool changes rebuild its transport/, 'boot-bound settings are falsely described as live');
+assert.match(llm, /Transport and retry changes apply now[\s\S]*saved for the next restart/, 'advanced apply-boundary copy is missing');
 assert.match(css, /\.cfgc-field\s*\{[^}]*grid-template-columns:\s*minmax\([^}]*4fr[^}]*5fr[^}]*3fr/s, 'wide 4/5/3 field grid missing');
 assert.match(css, /\.config-center-page\s*\{[^}]*max-width:\s*1600px/s, 'wide shell has no readable max width');
 
