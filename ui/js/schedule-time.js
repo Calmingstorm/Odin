@@ -44,31 +44,47 @@ export function offsetLabel(instant) {
 export function analyzeLocalDateTime(raw) {
   const typed = String(raw || '').trim();
   if (!typed) return { state: 'empty' };
-  if (!PATTERN.test(typed)) return { state: 'invalid', typed };
+  const match = PATTERN.exec(typed);
+  if (!match) return { state: 'invalid', typed };
 
-  const first = new Date(typed);
-  if (Number.isNaN(first.getTime())) return { state: 'invalid', typed };
+  const [, y, mo, d, hh, mm] = match.map(Number);
+  const normalized = typed.slice(0, 16);
 
-  // A time the clocks skipped round-trips to a DIFFERENT wall clock, because
-  // Date normalized it forward into the gap's far side.
-  const normalized = typed.length > 16 ? typed.slice(0, 16) : typed;
-  if (localWallClock(first) !== normalized) {
-    return { state: 'nonexistent', typed };
+  // Treat the typed components as if they were UTC, then subtract the zone's
+  // offset to get a candidate instant. The offset differs on either side of a
+  // transition, so probe BOTH sides rather than assuming how far the clocks
+  // move: real zones shift by 30 minutes (Australia/Lord_Howe) and two hours
+  // (Antarctica/Troll), not only one.
+  const asIfUTC = Date.UTC(y, mo - 1, d, hh, mm);
+  const dayBefore = new Date(asIfUTC - 86400000).getTimezoneOffset();
+  const dayAfter = new Date(asIfUTC + 86400000).getTimezoneOffset();
+
+  const candidates = [];
+  for (const offsetMinutes of new Set([dayBefore, dayAfter])) {
+    const instant = new Date(asIfUTC + offsetMinutes * 60000);
+    // Keep only instants that really display as the wall clock that was typed.
+    if (localWallClock(instant) !== normalized) continue;
+    if (candidates.some((c) => c.getTime() === instant.getTime())) continue;
+    candidates.push(instant);
   }
+  candidates.sort((a, b) => a.getTime() - b.getTime());
 
-  // A repeated hour has a second instant, one hour later in UTC, that displays
-  // as the same wall clock.
-  const second = new Date(first.getTime() + 3600000);
-  if (localWallClock(second) === normalized) {
+  // No instant displays this wall clock: the clocks skipped it.
+  if (candidates.length === 0) return { state: 'nonexistent', typed };
+
+  // More than one: the wall clock happened more than once.
+  if (candidates.length > 1) {
     return {
       state: 'ambiguous',
       typed,
-      options: [
-        { instant: first, offset: offsetLabel(first), iso: first.toISOString() },
-        { instant: second, offset: offsetLabel(second), iso: second.toISOString() },
-      ],
+      options: candidates.map((instant) => ({
+        instant,
+        offset: offsetLabel(instant),
+        iso: instant.toISOString(),
+      })),
     };
   }
 
-  return { state: 'ok', typed, instant: first, iso: first.toISOString() };
+  const instant = candidates[0];
+  return { state: 'ok', typed, instant, iso: instant.toISOString() };
 }

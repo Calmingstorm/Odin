@@ -6,7 +6,7 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatTs, formatAge, formatDuration } from '../utils.js';
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { analyzeLocalDateTime } from '../schedule-time.js';
 
 
@@ -99,7 +99,8 @@ export default {
               <p class="text-xs text-amber-400" role="alert">
                 That local time happens twice when daylight saving ends. Choose which one:
               </p>
-              <select v-model.number="runAtOccurrence" class="hm-select text-xs mt-1">
+              <select v-model="runAtOccurrence" class="hm-select text-xs mt-1">
+                <option :value="null">Choose an occurrence…</option>
                 <option v-for="(opt, i) in runAtAnalysis.options" :key="opt.iso" :value="i">
                   {{ opt.offset }} — {{ opt.iso }}
                 </option>
@@ -348,12 +349,19 @@ export default {
     // local-vs-UTC translation is visible BEFORE clicking Create rather than
     // discovered afterwards in the list.
     // Which occurrence the operator picked when a local time happens twice.
-    const runAtOccurrence = ref(0);
+    // NULL until they actually pick: defaulting to 0 made "choose one" a
+    // fiction — Create succeeded without the selector ever being touched.
+    const runAtOccurrence = ref(null);
     const runAtAnalysis = computed(() => analyzeLocalDateTime(form.value.run_at));
+    // A choice belongs to the wall clock it was made for. Without this, picking
+    // an occurrence for one ambiguous date silently carried into another.
+    watch(() => form.value.run_at, () => { runAtOccurrence.value = null; });
     const runAtChosen = computed(() => {
       const a = runAtAnalysis.value;
       if (a.state === 'ok') return a.instant;
-      if (a.state === 'ambiguous') return a.options[runAtOccurrence.value]?.instant || null;
+      if (a.state === 'ambiguous' && runAtOccurrence.value !== null) {
+        return a.options[runAtOccurrence.value]?.instant || null;
+      }
       return null;
     });
     const runAtUtcPreview = computed(() => {
@@ -503,8 +511,13 @@ export default {
           return;
         }
         const chosen = runAtChosen.value;
+        if (analysis.state === 'ambiguous' && runAtOccurrence.value === null) {
+          createError.value =
+            'That local time happens twice — choose which occurrence to use';
+          return;
+        }
         if (!chosen) {
-          createError.value = 'Choose which occurrence of that local time to use';
+          createError.value = 'One-time run time could not be resolved';
           return;
         }
         payload.run_at = chosen.toISOString();
