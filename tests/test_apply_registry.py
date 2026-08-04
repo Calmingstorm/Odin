@@ -15,6 +15,7 @@ import pytest
 
 from src.config.apply_registry import (
     FIELDS,
+    HEALTH_STATES,
     MIXED_SECTIONS,
     REDACTED,
     SECTIONS,
@@ -41,6 +42,16 @@ def _page_modes() -> set[str]:
     block = re.search(r"APPLY_MODE_LABELS\s*=\s*\{(.*?)\}", source, re.S)
     assert block, "APPLY_MODE_LABELS not found — the page contract moved"
     return set(re.findall(r"^\s*(\w+)\s*:", block.group(1), re.M))
+
+
+def _page_health_states() -> tuple[str, ...]:
+    import re
+    from pathlib import Path
+
+    source = Path("ui/js/config-health.js").read_text(encoding="utf-8")
+    block = re.search(r"HEALTH_STATES\s*=\s*Object\.freeze\(\[(.*?)\]\)", source, re.S)
+    assert block, "HEALTH_STATES not found — the page contract moved"
+    return tuple(re.findall(r"['\"]([^'\"]+)['\"]", block.group(1)))
 
 
 VOCABULARY = _page_modes()
@@ -671,6 +682,25 @@ class TestRevision:
 
 
 class TestMetaPayload:
+    def test_health_vocabulary_matches_the_page(self):
+        """A server-only state must not disappear from the page totals."""
+        payload = build_meta_payload({"browser": {"viewport_width": 1280}})
+        assert tuple(payload["status"]["counts"]) == HEALTH_STATES
+        assert HEALTH_STATES == _page_health_states()
+
+    def test_unrecognised_health_state_fails_instead_of_disappearing(
+        self, monkeypatch
+    ):
+        import src.config.apply_registry as registry
+
+        monkeypatch.setattr(
+            registry,
+            "build_field_record",
+            lambda *args, **kwargs: {"apply_state": "future_state"},
+        )
+        with pytest.raises(ValueError, match="unsupported config health state"):
+            build_meta_payload({"browser": {"viewport_width": 1280}})
+
     def test_envelope_shape(self):
         payload = build_meta_payload({"browser": {"viewport_width": 1280}})
         assert payload["schema_version"] == 1

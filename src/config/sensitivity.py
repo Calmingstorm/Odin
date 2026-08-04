@@ -60,6 +60,45 @@ PUBLIC_NON_SECRET_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# Checkpointed tool payloads use deliberately narrower, exact normalized-key
+# matching.  This is a different policy from config metadata: broad substring
+# matching would start redacting innocent tool arguments such as ``tokenizer``,
+# while PUBLIC_NON_SECRET_KEYS must never weaken storage redaction by accident.
+# Keep the policy here beside the config rule so there is one sensitivity
+# authority, but expose a separate predicate because their contracts differ.
+STORAGE_SENSITIVE_KEYS: frozenset[str] = frozenset(
+    {
+        "password",
+        "passwd",
+        "pwd",
+        "passphrase",
+        "secret",
+        "clientsecret",
+        "secretkey",
+        "token",
+        "apitoken",
+        "accesstoken",
+        "refreshtoken",
+        "sessiontoken",
+        "idtoken",
+        "bearertoken",
+        "authtoken",
+        "apikey",
+        "authorization",
+        "auth",
+        "bearer",
+        "credential",
+        "credentials",
+        "privatekey",
+        "accesskey",
+        "secretaccesskey",
+        "cookie",
+        "setcookie",
+        "sessionid",
+        "csrftoken",
+    }
+)
+
 
 def is_sensitive_key(key: object) -> bool:
     """Return whether *key* names a secret or credential-bearing container."""
@@ -73,3 +112,16 @@ def is_sensitive_key(key: object) -> bool:
         or lowered in SENSITIVE_CONTAINER_KEYS
         or any(fragment in lowered for fragment in SENSITIVE_KEY_SUBSTRINGS)
     )
+
+
+def is_storage_sensitive_key(key: object) -> bool:
+    """Return whether *key* must redact its whole checkpointed value.
+
+    Matching stays exact after case/separator normalization. This preserves the
+    checkpoint codec's established behavior independently of config-only public
+    control names and compound-name matching.
+    """
+    if not isinstance(key, str):
+        return False
+    normalized = key.lower().replace("-", "").replace("_", "")
+    return normalized in STORAGE_SENSITIVE_KEYS

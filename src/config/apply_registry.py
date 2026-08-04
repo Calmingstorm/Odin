@@ -69,6 +69,18 @@ REDACTED = "•" * 8
 
 SCHEMA_VERSION = 1
 
+# The server and Config Center must speak exactly this health vocabulary. The
+# cross-language contract test reads HEALTH_STATES from config-health.js, while
+# build_meta_payload derives its counters here and rejects invented states.
+HEALTH_STATES: tuple[str, ...] = (
+    "applied",
+    "pending_restart",
+    "dormant",
+    "invalid",
+    "drift",
+    "unknown",
+)
+
 
 @dataclass(frozen=True)
 class Consumer:
@@ -1863,18 +1875,12 @@ def build_meta_payload(
         for path, value in flatten(config_dump)
     ]
 
-    counts = {
-        "applied": 0,
-        "pending_restart": 0,
-        "dormant": 0,
-        "invalid": 0,
-        "drift": 0,
-        "unknown": 0,
-    }
+    counts = dict.fromkeys(HEALTH_STATES, 0)
     for record in fields:
         state = record["apply_state"]
-        if state in counts:
-            counts[state] += 1
+        if state not in counts:
+            raise ValueError(f"unsupported config health state: {state!r}")
+        counts[state] += 1
 
     desired_revision = config_revision(config_dump)
     # Deliberately null. A hash of the raw boot dump would disagree with the
