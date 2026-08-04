@@ -40,7 +40,9 @@ from __future__ import annotations
 import enum
 import functools
 import hashlib
+import hmac
 import json
+import secrets as secrets_module
 import types
 import typing
 from dataclasses import dataclass, field, replace
@@ -110,6 +112,8 @@ class SectionSpec:
     apply_handler: str | None = None
     restart_reason: str | None = None
     activation_policy: str | None = None
+    #: Published when every leaf in the section shares the same disagreement.
+    consumers: tuple[Consumer, ...] = ()
 
 
 # --------------------------------------------------------------------------
@@ -224,25 +228,28 @@ SECTIONS: dict[str, SectionSpec] = {
         owner="personality",
     ),
     "reaction_triggers": SectionSpec(
-        "activation_required",
+        "dormant",
         "Discord reaction event automation.",
         owner="reaction_triggers",
-        activation_policy="Saving triggers does not arm them. Activation is "
-        "explicit so an upgrade never starts acting on reactions by itself.",
+        activation_policy="The cog loads with no configuration and no "
+        "scheduler, and nothing in production supplies them. There is no "
+        "activation action yet.",
     ),
     "message_triggers": SectionSpec(
-        "activation_required",
+        "dormant",
         "Discord message event automation.",
         owner="message_triggers",
-        activation_policy="Saving triggers does not arm them. Activation is "
-        "explicit so an upgrade never starts acting on messages by itself.",
+        activation_policy="The cog loads with no configuration and no "
+        "scheduler, and nothing in production supplies them. There is no "
+        "activation action yet.",
     ),
     "mcp": SectionSpec(
-        "activation_required",
+        "dormant",
         "Model Context Protocol servers and tool publication.",
         owner="mcp",
-        activation_policy="Servers are configurable while disabled. Starting "
-        "them, and publishing their tools, is an explicit action.",
+        activation_policy="No production path constructs the MCP manager, so "
+        "these values are stored and read by nothing. Configure them freely; "
+        "wiring comes later.",
     ),
     "slack": SectionSpec(
         "restart",
@@ -250,11 +257,12 @@ SECTIONS: dict[str, SectionSpec] = {
         restart_reason="The Slack notifier is constructed at startup.",
     ),
     "issue_tracker": SectionSpec(
-        "activation_required",
+        "dormant",
         "Issue tracker provider and tool lifecycle.",
         owner="issue_tracker",
-        activation_policy="Credentials and provider are configurable while the "
-        "integration is off. Publishing its tools is an explicit action.",
+        activation_policy="No production path constructs an issue-tracker "
+        "client, so these values are stored and read by nothing. Configure "
+        "them freely; wiring comes later.",
     ),
     "audit": SectionSpec(
         "restart",
@@ -273,10 +281,25 @@ SECTIONS: dict[str, SectionSpec] = {
         "on the legacy webhook-gated behaviour.",
     ),
     "outbound_webhooks": SectionSpec(
-        "live_apply",
+        "restart",
         "Outbound event targets, delivery, and safety policy.",
         owner="outbound_webhooks",
-        apply_handler="PUT /api/outbound-webhooks/{webhook_id}",
+        restart_reason="The dispatcher is built at startup, and only if it was "
+        "enabled then. Saving configuration does not create or update it; the "
+        "dedicated endpoint edits the running dispatcher without persisting.",
+        consumers=(
+            Consumer(
+                "Saving configuration",
+                "restart",
+                "Persisted, but the running dispatcher is not rebuilt.",
+            ),
+            Consumer(
+                "Outbound webhook endpoints",
+                "live_apply",
+                "Edits the running dispatcher immediately, and does NOT write "
+                "config — the change is lost on restart.",
+            ),
+        ),
     ),
     "graceful_degradation": SectionSpec(
         "activation_required",
@@ -724,6 +747,20 @@ FIELDS: dict[str, FieldSpec] = {
         unit="seconds",
         description="Whole-request timeout, a backstop rather than a working "
         "limit.",
+        consumers=(
+            Consumer(
+                "Primary Codex client",
+                "live_apply",
+                "The reload copies this onto the live client.",
+            ),
+            Consumer(
+                "Auxiliary Codex client",
+                "live_apply",
+                "Snapshotted when the auxiliary client is built, so it stays "
+                "stale until PUT /api/llm/auxiliary/config rebuilds it — a "
+                "Codex reload alone does not reach it.",
+            ),
+        ),
     ),
     "openai_codex.stream_stall_timeout_seconds": FieldSpec(
         apply_mode="live_apply",
@@ -731,24 +768,80 @@ FIELDS: dict[str, FieldSpec] = {
         unit="seconds",
         description="Maximum silence between streamed reads before the "
         "connection is treated as dead.",
+        consumers=(
+            Consumer(
+                "Primary Codex client",
+                "live_apply",
+                "The reload copies this onto the live client.",
+            ),
+            Consumer(
+                "Auxiliary Codex client",
+                "live_apply",
+                "Snapshotted when the auxiliary client is built, so it stays "
+                "stale until PUT /api/llm/auxiliary/config rebuilds it — a "
+                "Codex reload alone does not reach it.",
+            ),
+        ),
     ),
     "openai_codex.retry.max_retries": FieldSpec(
         apply_mode="live_apply",
         apply_handler="POST /api/codex/reload",
         description="Total request attempts. Zero means one attempt with no "
         "retries.",
+        consumers=(
+            Consumer(
+                "Primary Codex client",
+                "live_apply",
+                "The reload copies this onto the live client.",
+            ),
+            Consumer(
+                "Auxiliary Codex client",
+                "live_apply",
+                "Snapshotted when the auxiliary client is built, so it stays "
+                "stale until PUT /api/llm/auxiliary/config rebuilds it — a "
+                "Codex reload alone does not reach it.",
+            ),
+        ),
     ),
     "openai_codex.retry.base_delay": FieldSpec(
         apply_mode="live_apply",
         apply_handler="POST /api/codex/reload",
         unit="seconds",
         description="Initial retry delay.",
+        consumers=(
+            Consumer(
+                "Primary Codex client",
+                "live_apply",
+                "The reload copies this onto the live client.",
+            ),
+            Consumer(
+                "Auxiliary Codex client",
+                "live_apply",
+                "Snapshotted when the auxiliary client is built, so it stays "
+                "stale until PUT /api/llm/auxiliary/config rebuilds it — a "
+                "Codex reload alone does not reach it.",
+            ),
+        ),
     ),
     "openai_codex.retry.max_delay": FieldSpec(
         apply_mode="live_apply",
         apply_handler="POST /api/codex/reload",
         unit="seconds",
         description="Maximum retry delay.",
+        consumers=(
+            Consumer(
+                "Primary Codex client",
+                "live_apply",
+                "The reload copies this onto the live client.",
+            ),
+            Consumer(
+                "Auxiliary Codex client",
+                "live_apply",
+                "Snapshotted when the auxiliary client is built, so it stays "
+                "stale until PUT /api/llm/auxiliary/config rebuilds it — a "
+                "Codex reload alone does not reach it.",
+            ),
+        ),
     ),
     "openai_codex.connection_pool.max_connections": FieldSpec(
         apply_mode="restart",
@@ -1223,10 +1316,9 @@ def _pattern_spec(path: str) -> FieldSpec | None:
             )
         if path.endswith(".scrub_secrets") or path.endswith(".verify_ssl"):
             return FieldSpec(
-                apply_mode="activation_required",
-                description="Target-bound safety override.",
-                activation_policy="Review this target and acknowledge the safety "
-                "override before it takes effect.",
+                description="Target-bound safety override. The dedicated "
+                "endpoint applies it to the running dispatcher immediately, "
+                "with no acknowledgement step and without persisting it.",
             )
     return None
 
@@ -1261,10 +1353,13 @@ def spec_for(path: str) -> FieldSpec:
             apply_mode=section_spec.apply_mode if section_spec else "restart",
         )
     if resolved.sensitivity is None:
-        resolved = replace(
-            resolved,
-            sensitivity="sensitive" if _is_sensitive_path(path) else "public",
-        )
+        if _is_sensitive_path(path):
+            derived: Sensitivity = "sensitive"
+        elif _facts_for(path).get("secret_container"):
+            derived = "secret_container"
+        else:
+            derived = "public"
+        resolved = replace(resolved, sensitivity=derived)
     if resolved.owner is None:
         owner = section_spec.owner if section_spec else None
         if owner is None:
@@ -1280,7 +1375,7 @@ def spec_for(path: str) -> FieldSpec:
             or f"{_title_case(section)} is constructed during startup.",
         )
     if (
-        resolved.apply_mode == "activation_required"
+        resolved.apply_mode in ("activation_required", "dormant")
         and resolved.activation_policy is None
     ):
         policy = section_spec.activation_policy if section_spec else None
@@ -1290,6 +1385,8 @@ def spec_for(path: str) -> FieldSpec:
             or "Saving configuration does not enable this feature. Explicit "
             "activation is required.",
         )
+    if not resolved.consumers and section_spec is not None:
+        resolved = replace(resolved, consumers=section_spec.consumers)
     if resolved.apply_mode == "live_apply" and resolved.apply_handler is None:
         resolved = replace(
             resolved,
@@ -1461,6 +1558,16 @@ def schema_facts() -> dict[str, dict[str, Any]]:
             if element is not None:
                 walk(element, path)
             facts = _annotation_facts(annotation)
+            facts["is_container"] = element is not None
+            facts["aliases"] = [
+                alias
+                for alias in (
+                    getattr(info, "validation_alias", None),
+                    getattr(info, "alias", None),
+                    getattr(info, "serialization_alias", None),
+                )
+                if isinstance(alias, str) and alias != name
+            ]
             facts["constraints"] = _constraint_facts(info)
             default = info.default
             facts["default"] = (
@@ -1471,17 +1578,47 @@ def schema_facts() -> dict[str, dict[str, Any]]:
             out[path] = facts
 
     walk(Config, "")
+
+    # A container whose RECORDS carry credentials is itself a credential
+    # container, empty or not. Deciding this from the current value would make
+    # an empty api_tokens list a public raw-JSON control — a place to type a
+    # token into the generic editor.
+    for path, facts in out.items():
+        if facts.get("type") not in ("array", "object"):
+            continue
+        prefix = f"{path}."
+        facts["secret_container"] = any(
+            key.startswith(prefix)
+            and set(key[len(prefix):].split(".")) & SENSITIVE_SEGMENTS
+            for key in out
+        )
     return out
 
 
 def _facts_for(path: str) -> dict[str, Any]:
-    """Schema facts for a path, with list/dict entry indices normalised away."""
+    """Schema facts for a path, with container entry keys normalised away.
+
+    An entry key is arbitrary — ``tools.hosts.prod.ssh_user``,
+    ``mcp.servers.foo.transport``, ``web.api_tokens.0.tier``. Dropping only
+    digits and ``*`` handled the list case and silently missed every
+    dict-keyed one, so those fields fell back to guessing their type and
+    default from whatever value happened to be there.
+    """
     facts = schema_facts()
     if path in facts:
         return facts[path]
-    parts = path.split(".")
-    generic = ".".join(p for p in parts if not p.isdigit() and p != "*")
-    return facts.get(generic, {})
+
+    kept: list[str] = []
+    drop_entry_key = False
+    for segment in path.split("."):
+        # Exactly one segment after a container is that entry's key, and only
+        # one: everything below it is schema again.
+        if drop_entry_key:
+            drop_entry_key = False
+            continue
+        kept.append(segment)
+        drop_entry_key = bool(facts.get(".".join(kept), {}).get("is_container"))
+    return facts.get(".".join(kept), {})
 
 
 def _value_type(value: Any) -> str:
@@ -1519,8 +1656,26 @@ def _public_value(value: Any, sensitivity: Sensitivity) -> Any:
     return REDACTED if _configured(value) else ""
 
 
+#: Modes whose effective value follows from configuration alone.
+#:
+#: ``live_read`` consumers re-read config, so the next read is the desired
+#: value. ``live_for_new_work`` is the same statement scoped to the next spawn
+#: or turn; the per-consumer records say what already-running work keeps.
+#:
+#: Every other mode needs something this module cannot see — whether a named
+#: apply handler has run, whether a feature was activated, what a hardcoded
+#: constant is. For those, effective is UNKNOWN and says so. Echoing desired
+#: back would be the original lie in a more authoritative shape.
+_SELF_EVIDENT_MODES: frozenset[str] = frozenset({"live_read", "live_for_new_work"})
+
+
 def _apply_state(
-    *, apply_mode: ApplyMode, pending_restart: bool, drift: bool, valid: bool
+    *,
+    apply_mode: ApplyMode,
+    pending_restart: bool,
+    drift: bool,
+    valid: bool,
+    effective_known: bool,
 ) -> str:
     if not valid:
         return "invalid"
@@ -1530,6 +1685,10 @@ def _apply_state(
         return "drift"
     if apply_mode in ("activation_required", "dormant"):
         return "dormant"
+    if not effective_known:
+        # Not one of the page's five buckets, deliberately: it is counted
+        # nowhere rather than counted as applied.
+        return "unknown"
     return "applied"
 
 
@@ -1553,12 +1712,20 @@ def build_field_record(
     apply_mode: ApplyMode = spec.apply_mode or "restart"
 
     desired = _public_value(desired_value, sensitivity)
-    if apply_mode == "restart" and has_boot:
-        effective = _public_value(boot_value, sensitivity)
-        pending_restart = boot_value != desired_value
-    else:
+    pending_restart = False
+    effective_known = True
+    if apply_mode == "restart":
+        # The boot snapshot is what the running components were built from, so
+        # this one is a fact rather than an inference.
+        if has_boot:
+            effective = _public_value(boot_value, sensitivity)
+            pending_restart = boot_value != desired_value
+        else:
+            effective, effective_known = None, False
+    elif apply_mode in _SELF_EVIDENT_MODES:
         effective = desired
-        pending_restart = False
+    else:
+        effective, effective_known = None, False
 
     configured = _configured(desired_value)
     facts = _facts_for(path)
@@ -1578,7 +1745,7 @@ def build_field_record(
         "label": spec.label or _title_case(leaf),
         "description": spec.description
         or f"{_title_case(leaf)} setting for {_title_case(section)}.",
-        "aliases": [],
+        "aliases": list(facts.get("aliases") or []),
         "unit": spec.unit,
         "examples": [],
         "type": resolved_type,
@@ -1586,9 +1753,10 @@ def build_field_record(
         "constraints": resolved_constraints,
         "default": facts.get("default"),
         "sensitivity": sensitivity,
-        "secret_route": (
-            None if sensitivity == "public" else f"/api/config/secrets/{path}"
-        ),
+        # Null until the dedicated set/clear route exists. §4 defines this as
+        # THE endpoint for the secret, not a URL it will have one day, and a
+        # link that 404s is worse than no link.
+        "secret_route": None,
         "apply_mode": apply_mode,
         "apply_handler": spec.apply_handler,
         "consumers": [
@@ -1617,19 +1785,34 @@ def build_field_record(
         pending_restart=pending_restart,
         drift=False,
         valid=True,
+        effective_known=effective_known,
     )
     return record
 
 
-def config_revision(config_dump: dict[str, Any]) -> str:
-    """Stable identity for a configuration state.
+#: Per-process key, so a published revision cannot be recomputed off-box.
+#:
+#: An unkeyed digest over the resolved configuration is an offline verification
+#: oracle for the secrets inside it: with the rest of the config known, a
+#: low-entropy secret falls to a few guesses compared against the published
+#: value. Odin demonstrated exactly that against the first version of this
+#: function. A random per-process key makes the revision opaque while keeping
+#: it a faithful change detector, which is all a revision is for.
+_REVISION_KEY = secrets_module.token_bytes(32)
 
-    Secret values are hashed like everything else. The digest is not reversible
-    and never leaves as a value, and excluding secrets would let two genuinely
-    different configurations report the same revision.
+
+def config_revision(config_dump: dict[str, Any]) -> str:
+    """Opaque identity for a configuration state.
+
+    Changes whenever any value changes — including a secret, so a
+    revision-bound write cannot miss a credential rotation — while revealing
+    nothing about the values themselves. Not stable across restarts, which is
+    correct: it identifies a state within the life of a process.
     """
     canonical = json.dumps(config_dump, sort_keys=True, default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return hmac.new(
+        _REVISION_KEY, canonical.encode("utf-8"), hashlib.sha256
+    ).hexdigest()[:16]
 
 
 def build_meta_payload(
@@ -1660,9 +1843,13 @@ def build_meta_payload(
             counts[state] += 1
 
     desired_revision = config_revision(config_dump)
-    effective_revision = (
-        config_revision(boot_dump) if boot_dump is not None else None
-    )
+    # Deliberately null. A hash of the raw boot dump would disagree with the
+    # desired revision after any live change, while every field correctly
+    # reported itself applied — a whole-document diff contradicting the
+    # per-field truth. A real effective revision needs real effective state
+    # for every field, which this module cannot see; per-field
+    # `pending_restart` carries what IS known today.
+    effective_revision = None
 
     return {
         "schema_version": SCHEMA_VERSION,

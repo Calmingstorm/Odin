@@ -215,10 +215,13 @@ class TestSensitivity:
         they cannot be enumerated in advance — they have to be matched."""
         assert is_secret(path)
 
-    def test_target_safety_overrides_require_activation(self):
+    def test_target_safety_overrides_do_not_claim_an_activation_step(self):
+        """The dedicated endpoint applies these to the running dispatcher
+        immediately. Advertising an acknowledgement step that no route asks
+        for would be a safety theatre the code does not perform."""
         spec = spec_for("outbound_webhooks.targets.alerts.verify_ssl")
-        assert spec.apply_mode == "activation_required"
-        assert spec.activation_policy
+        assert spec.apply_mode != "activation_required"
+        assert spec.activation_policy is None
 
     def test_ordinary_settings_are_not_secret(self):
         assert not is_secret("browser.viewport_width")
@@ -302,27 +305,25 @@ class TestSecretsInsideListRecords:
         assert fields["outbound_webhooks.targets.0.url"]["desired"] == "https://x"
         assert fields["outbound_webhooks.targets.0.secret"]["desired"] == REDACTED
 
-    def test_target_bound_safety_overrides_are_still_matched_by_index(self):
+    def test_target_records_are_still_matched_by_index(self):
         payload = build_meta_payload(
             {"outbound_webhooks": {"targets": [{"verify_ssl": False}]}}
         )
         record = payload["fields"][0]
         assert record["path"] == "outbound_webhooks.targets.0.verify_ssl"
-        assert record["apply_mode"] == "activation_required"
+        assert record["description"]
 
 
 class TestFieldRecord:
     def test_public_value_is_returned_as_it_is(self):
         record = build_field_record("browser.viewport_width", 1280)
         assert record["desired"] == 1280
-        assert record["effective"] == 1280
         assert record["type"] == "integer"
         assert record["configured"] is True
 
     def test_secret_value_never_appears(self):
         record = build_field_record("discord.token", "a-real-token")
         assert record["desired"] == REDACTED
-        assert record["effective"] == REDACTED
         assert record["configured"] is True
         assert "a-real-token" not in repr(record)
 
@@ -370,10 +371,11 @@ class TestFieldRecord:
         assert record["pending_restart"] is False
         assert record["apply_state"] == "applied"
 
-    def test_without_a_boot_snapshot_nothing_is_claimed_pending(self):
+    def test_without_a_boot_snapshot_effective_is_unknown_not_guessed(self):
         record = build_field_record("sessions.max_history", 500)
         assert record["pending_restart"] is False
-        assert record["effective"] == 500
+        assert record["effective"] is None
+        assert record["apply_state"] == "unknown"
 
     def test_dormant_field_is_never_reported_applied(self):
         record = build_field_record("usage.directory", "./data/usage")
@@ -398,7 +400,8 @@ class TestApplyState:
         from src.config.apply_registry import _apply_state
 
         state = _apply_state(
-            apply_mode="restart", pending_restart=True, drift=True, valid=False
+            apply_mode="restart", pending_restart=True, drift=True, valid=False,
+            effective_known=True,
         )
         assert state == "invalid"
 
@@ -406,7 +409,8 @@ class TestApplyState:
         from src.config.apply_registry import _apply_state
 
         state = _apply_state(
-            apply_mode="restart", pending_restart=True, drift=True, valid=True
+            apply_mode="restart", pending_restart=True, drift=True, valid=True,
+            effective_known=True,
         )
         assert state == "pending_restart"
 
@@ -418,6 +422,7 @@ class TestApplyState:
             pending_restart=False,
             drift=True,
             valid=True,
+            effective_known=True,
         )
         assert state == "drift"
 
@@ -480,6 +485,121 @@ class TestSchemaDerivedFacts:
         assert "outbound_webhooks.targets.secret" in facts
 
 
+class TestEffectiveIsNeverGuessed:
+    """What the running bot uses, or an explicit unknown.
+
+    The first version of this module set effective = desired for everything
+    except restart, so `agents.max_children_per_agent = 9` reported effective
+    9 while the runtime went on using its hardcoded 3. That is the original
+    defect of this page wearing a more authoritative JSON shape.
+    """
+
+    def test_a_field_nothing_reads_reports_no_effective_value(self):
+        record = build_field_record("agents.max_children_per_agent", 9)
+        assert record["desired"] == 9
+        assert record["effective"] is None
+        assert record["apply_state"] == "dormant"
+
+    def test_a_gated_field_reports_no_effective_value(self):
+        record = build_field_record("usage.directory", "./data/usage")
+        assert record["effective"] is None
+        assert record["apply_state"] == "dormant"
+
+    def test_a_handler_applied_field_reports_no_effective_value(self):
+        """Whether the named handler has run is not visible from config."""
+        record = build_field_record("openai_codex.model", "gpt-5.6-sol")
+        assert record["apply_mode"] == "live_apply"
+        assert record["effective"] is None
+        assert record["apply_state"] == "unknown"
+
+    def test_a_re_read_field_is_effective_immediately(self):
+        record = build_field_record("discord.respond_to_bots", True)
+        assert record["effective"] is True
+        assert record["apply_state"] == "applied"
+
+    def test_next_work_fields_report_the_value_the_next_unit_will_use(self):
+        record = build_field_record("agents.max_iterations", 200)
+        assert record["apply_mode"] == "live_for_new_work"
+        assert record["effective"] == 200
+
+    def test_restart_field_still_reports_the_boot_value(self):
+        record = build_field_record(
+            "sessions.max_history", 500, boot_value=100, has_boot=True
+        )
+        assert record["effective"] == 100
+        assert record["apply_state"] == "pending_restart"
+
+
+class TestRevisionIsNotAnOracle:
+    """A published revision must not let anyone test secret guesses offline.
+
+    The first version hashed the resolved config with plain SHA-256 and
+    published the digest. With the rest of the config known, a low-entropy
+    secret falls to a handful of guesses — Odin recovered one that way.
+    """
+
+    def test_the_revision_cannot_be_recomputed_off_box(self):
+        import hashlib
+        import json
+
+        config = {"discord": {"token": "guessable"}}
+        canonical = json.dumps(config, sort_keys=True, default=str)
+        unkeyed = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+        assert config_revision(config) != unkeyed
+
+    def test_guessing_a_secret_does_not_reproduce_the_revision(self):
+        """The exact attack: same config shape, candidate secrets, compare."""
+        published = config_revision({"discord": {"token": "hunter2"}})
+        candidates = ["hunter1", "hunter2", "hunter3", "password"]
+        recomputed = {
+            candidate: __import__("hashlib")
+            .sha256(
+                __import__("json")
+                .dumps({"discord": {"token": candidate}}, sort_keys=True)
+                .encode()
+            )
+            .hexdigest()[:16]
+            for candidate in candidates
+        }
+        assert published not in recomputed.values()
+
+    def test_a_changed_secret_still_changes_the_revision(self):
+        """Opacity must not cost change detection, or a revision-bound write
+        could miss a credential rotation."""
+        left = config_revision({"discord": {"token": "one"}})
+        right = config_revision({"discord": {"token": "two"}})
+        assert left != right
+
+    def test_effective_revision_is_not_published_as_a_raw_boot_diff(self):
+        """It used to hash the boot dump, so any live change made the two
+        revisions disagree while every field correctly said applied."""
+        payload = build_meta_payload(
+            {"discord": {"respond_to_bots": True}},
+            boot_dump={"discord": {"respond_to_bots": False}},
+        )
+        assert payload["status"]["effective_revision"] is None
+        record = payload["fields"][0]
+        assert record["apply_state"] == "applied"
+
+
+class TestContainerSensitivity:
+    """An empty credential container is still a credential container."""
+
+    @pytest.mark.parametrize(
+        "path", ["web.api_tokens", "outbound_webhooks.targets", "mcp.servers"]
+    )
+    def test_empty_secret_containers_are_not_public_json_controls(self, path):
+        """Rendered as a public container, the generic editor becomes a place
+        to type a credential into."""
+        assert spec_for(path).sensitivity == "secret_container"
+
+    def test_a_container_without_credentials_stays_public(self):
+        assert spec_for("tools.hosts").sensitivity == "public"
+
+    def test_secret_route_is_null_until_the_route_exists(self):
+        assert build_field_record("discord.token", "x")["secret_route"] is None
+
+
 class TestRevision:
     def test_same_configuration_has_the_same_revision(self):
         assert config_revision({"a": 1}) == config_revision({"a": 1})
@@ -518,7 +638,10 @@ class TestMetaPayload:
             }
         )
         counts = payload["status"]["counts"]
-        assert sum(counts.values()) == len(payload["fields"])
+        # Fields whose effective state is unknown are counted in NO bucket.
+        # Under-counting is the honest failure here; counting them as applied
+        # is the one that misleads.
+        assert sum(counts.values()) <= len(payload["fields"])
         assert counts["dormant"] == 1
 
     def test_boot_snapshot_makes_pending_restart_visible(self):

@@ -1165,11 +1165,12 @@ class TestConfigMeta:
         record = next(r for r in body["fields"] if r["path"] == "discord.token")
         assert record["sensitivity"] == "sensitive"
         assert record["configured"] is True
-        assert record["secret_route"] == "/api/config/secrets/discord.token"
+        # Null until the dedicated set/clear route exists — a link that 404s
+        # is worse than no link.
+        assert record["secret_route"] is None
         assert "super-secret-token-value" not in raw
         # Not even a length, which would narrow a brute force.
         assert record["desired"] == "•" * 8
-        assert record["effective"] == "•" * 8
 
     @pytest.mark.asyncio
     async def test_unset_secret_reports_not_configured(self):
