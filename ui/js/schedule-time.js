@@ -14,6 +14,17 @@
 // exported and a future caller has no reason to expect the looseness.
 const PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
 
+
+/** Keep the create form on exactly one timing mode. */
+export function enforceExclusiveTiming(form, activeMode) {
+  if (activeMode === 'cron' && String(form.cron || '').trim()) {
+    form.run_at = '';
+  } else if (activeMode === 'run_at' && String(form.run_at || '').trim()) {
+    form.cron = '';
+  }
+  return form;
+}
+
 /** Render an instant as the local wall-clock string a datetime-local shows. */
 export function localWallClock(instant, withSeconds = false) {
   const pad = (n) => String(n).padStart(2, '0');

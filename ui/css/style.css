@@ -3540,7 +3540,7 @@ a:focus-visible {
 .cfgc-health-icon.state-drift { color: #e1bd65; background: rgba(234, 179, 8, 0.09); }
 .cfgc-health-icon.state-unknown { color: #9aa6b6; background: rgba(148, 163, 184, 0.09); }
 .cfgc-health-copy { min-width: 0; display: grid; gap: 0.1rem; }
-.cfgc-health-copy > span { overflow: hidden; font-size: var(--hm-text-xs); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.cfgc-health-copy > span { font-size: var(--hm-text-xs); font-weight: 650; line-height: 1.25; overflow-wrap: anywhere; white-space: normal; }
 .cfgc-health-copy small { color: var(--hm-text-dim); font-size: 0.625rem; white-space: nowrap; }
 .cfgc-health-alert {
   display: flex;
@@ -3813,6 +3813,15 @@ a:focus-visible {
 .cfgc-apply-pill.apply-activation-required, .cfgc-apply-pill.apply-dormant { color: #af99df; background: rgba(139, 92, 246, 0.08); border-color: rgba(139, 92, 246, 0.18); }
 .cfgc-apply-pill.apply-legacy-control { color: #d8bd70; background: rgba(234, 179, 8, 0.07); border-color: rgba(234, 179, 8, 0.18); }
 .cfgc-sensitive { display: inline-flex; align-items: center; gap: 0.22rem; color: #b6a06f; }
+.cfgc-apply-details { margin-top: var(--hm-space-3); display: grid; gap: var(--hm-space-2); }
+.cfgc-section-apply-details { margin: 0 var(--hm-space-5) var(--hm-space-4); display: grid; gap: var(--hm-space-2); }
+.cfgc-apply-detail { padding: 0.55rem 0.65rem; background: rgba(4, 7, 11, 0.26); border: 1px solid var(--hm-border-subtle); border-radius: var(--hm-radius-md); }
+.cfgc-apply-detail-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--hm-space-2); }
+.cfgc-apply-detail-heading strong { color: #aeb8c5; font-size: 0.64rem; font-weight: 650; }
+.cfgc-apply-detail > p { margin-top: 0.3rem; color: var(--hm-text-dim); font-size: 0.62rem; line-height: 1.45; }
+.cfgc-apply-detail > code { display: block; margin-top: 0.3rem; overflow-wrap: anywhere; color: #c8ad75; font-family: var(--hm-font-mono); font-size: 0.6rem; }
+.cfgc-apply-detail.detail-restart { border-color: rgba(217, 119, 6, 0.16); }
+.cfgc-apply-detail.detail-activation { border-color: rgba(139, 92, 246, 0.17); }
 .cfgc-field-control { min-width: 0; display: grid; align-content: start; }
 .cfgc-field-control .hm-input,
 .cfgc-field-control .hm-select { width: 100%; }

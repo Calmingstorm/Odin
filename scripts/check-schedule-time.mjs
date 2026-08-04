@@ -94,7 +94,7 @@ if (process.env.SCHEDULE_TIME_WORKER !== '1') {
 }
 
 // Worker: one zone, taken from TZ.
-const { analyzeLocalDateTime, localWallClock } = await import('../ui/js/schedule-time.js');
+const { analyzeLocalDateTime, enforceExclusiveTiming, localWallClock } = await import('../ui/js/schedule-time.js');
 const { gap, repeat } = findTransitions();
 
 // Guard the guard: without a real transition these assertions prove nothing.
@@ -169,6 +169,29 @@ if (repeat) {
   check('non-numeric seconds are rejected',
     analyzeLocalDateTime('2026-06-15T09:00:ab').state === 'invalid',
     analyzeLocalDateTime('2026-06-15T09:00:ab').state);
+}
+
+
+// The form must never submit both modes. Exercise the same helper its input
+// handlers call, rather than merely searching source text for a disabled attr.
+{
+  const form = { cron: '0 9 * * *', run_at: '2026-06-15T09:00:30' };
+  enforceExclusiveTiming(form, 'run_at');
+  check('one-time input clears cron', form.cron === '', JSON.stringify(form));
+  form.cron = '0 9 * * *';
+  enforceExclusiveTiming(form, 'cron');
+  check('cron input clears one-time', form.run_at === '', JSON.stringify(form));
+
+  const schedulesSource = await import('node:fs').then(fs => fs.readFileSync(
+    new URL('../ui/js/pages/schedules.js', import.meta.url), 'utf8'));
+  check('datetime-local offers second precision',
+    /type="datetime-local"\s+step="1"/.test(schedulesSource));
+  check('one-time control passes its new value to the exclusive-mode handler',
+    /datetime-local[^>]+@input="onRunAtInput\(\$event\.target\.value\)"/.test(schedulesSource));
+  check('cron control passes its new value to the exclusive-mode handler',
+    /placeholder="e\.g\. 0 \*\/6 \* \* \*"[^>]+@input="onCronInput\(\$event\.target\.value\)"/.test(schedulesSource));
+  check('create path rejects dual timing payloads defensively',
+    schedulesSource.includes("Choose either Cron or One-Time, not both"));
 }
 
 console.log(`schedule-time [${process.env.TZ}]: ${passed} assertions passed, ${failed} failed`);

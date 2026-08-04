@@ -1,10 +1,9 @@
 /*
- * Temporary /api/config/meta fixture for the Config Center shell.
+ * Historical /api/config/meta fixture retained as a contract-development aid.
  *
- * Keep the returned payload aligned with docs/plans/config-center-plan.md §4.
- * U1 deliberately owns no backend route. Once S2 lands, config.js replaces the
- * fixture loader with api.get('/api/config/meta'); the page consumes the same
- * field records without an adapter.
+ * Production Config Center code must not import this module. Runtime metadata
+ * comes exclusively from GET /api/config/meta; scripts/check-config-health.mjs
+ * pins that boundary so local classifications cannot quietly return.
  */
 
 import { countHealthStates } from './config-health.js';
