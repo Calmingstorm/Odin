@@ -8,6 +8,8 @@ const configAst = parseJs(config, { sourceType: 'module' });
 const llm = readFileSync('ui/js/pages/llm-config.js', 'utf8');
 const css = readFileSync('ui/css/style.css', 'utf8');
 const discord = readFileSync('ui/js/pages/discord-config.js', 'utf8');
+const hostAccess = readFileSync('ui/js/pages/host-access.js', 'utf8');
+const discordUserCombobox = readFileSync('ui/js/discord-user-combobox.js', 'utf8');
 const apiTokens = readFileSync('ui/js/pages/api-tokens.js', 'utf8');
 
 function pageTemplate(source, label, ast = parseJs(source, { sourceType: 'module' })) {
@@ -215,6 +217,19 @@ assert.doesNotMatch(llm, /These settings reload through the Codex provider endpo
 assert.match(llm, /Transport and retry changes apply now[\s\S]*saved for the next restart/, 'advanced apply-boundary copy is missing');
 assert.match(css, /\.cfgc-field\s*\{[^}]*grid-template-columns:\s*minmax\([^}]*4fr[^}]*5fr/s, 'wide two-column field grid missing');
 assert.match(css, /\.config-center-page\s*\{[^}]*max-width:\s*1600px/s, 'wide shell has no readable max width');
+
+assert.match(css, /\.cfgc-field-copy\s*\{[^}]*padding-inline:\s*var\(--hm-space-4\)/s, 'field-card copy still rides the inner vertical rule');
+for (const page of [hostAccess, discord]) {
+  assert.match(page, /DiscordUserCombobox/, 'Discord user picker is not shared with both owner pages');
+  assert.match(page, /<discord-user-combobox/, 'owner page does not render the shared Discord user picker');
+}
+for (const key of ['allowed_users', 'ignore_bot_ids']) {
+  assert.match(discord, new RegExp(`key: ['"]${key}['"][^}]*userAutocomplete: true`), `${key} lost Discord user autocomplete`);
+}
+assert.match(discord, /api\.get\(['"]\/api\/discord\/members['"]\)/, 'Discord defaults do not load the known-user source');
+assert.match(discord, /:members="globalMembers"/, 'Discord defaults do not pass known users into the shared picker');
+assert.match(discordUserCombobox, /emits:\s*\[['"]select['"]\]/, 'shared Discord user picker lost selection output');
+assert.match(discordUserCombobox, /\^\\d\{15,25\}\$/, 'shared Discord user picker lost raw snowflake support');
 
 console.log('config-center-ui2: de-dup, typed editing, restart flow, and provider advanced controls pinned');
 

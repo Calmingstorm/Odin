@@ -3872,7 +3872,7 @@ a:focus-visible {
 .cfgc-field:last-child { border-bottom: 0; }
 .cfgc-field.changed { margin-inline: calc(var(--hm-space-3) * -1); padding-inline: var(--hm-space-3); background: rgba(197, 139, 50, 0.035); border-radius: var(--hm-radius-md); }
 .cfgc-field.invalid { background: rgba(239, 68, 68, 0.035); }
-.cfgc-field-copy { min-width: 0; }
+.cfgc-field-copy { min-width: 0; padding-inline: var(--hm-space-4); }
 .cfgc-field-copy > label { display: block; color: var(--hm-text); font-size: var(--hm-text-sm); font-weight: 630; }
 .cfgc-field-copy > code { display: block; margin-top: 0.2rem; overflow-wrap: anywhere; color: #687382; font-family: var(--hm-font-mono); font-size: 0.6rem; }
 .cfgc-field-copy > p { max-width: 620px; margin-top: 0.42rem; color: var(--hm-text-muted); font-size: var(--hm-text-xs); line-height: 1.52; }
@@ -4055,6 +4055,46 @@ a:focus-visible {
 .cfgc-group-apply-details { padding: 0 var(--hm-space-4) var(--hm-space-4); }
 .cfgc-group-apply-details summary { color: var(--hm-text-dim); cursor: pointer; font-size: var(--hm-text-xs); }
 .cfgc-apply-detail-list { margin-top: var(--hm-space-3); display: grid; gap: var(--hm-space-2); }
+
+.discord-user-combobox { position: relative; width: 100%; }
+.discord-user-combobox > .hm-input { width: 100%; }
+.discord-user-combobox-options {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  right: 0;
+  max-height: 15rem;
+  overflow-y: auto;
+  background: #0d121a;
+  border: 1px solid #3b4555;
+  border-radius: var(--hm-radius-md);
+  box-shadow: var(--hm-shadow-lg);
+}
+.discord-user-combobox-option {
+  width: 100%;
+  min-height: 38px;
+  padding: 0.45rem 0.65rem;
+  display: flex;
+  align-items: center;
+  gap: var(--hm-space-2);
+  color: var(--hm-text-muted);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: var(--hm-text-xs);
+  text-align: left;
+}
+.discord-user-combobox-option:hover,
+.discord-user-combobox-option.active { color: var(--hm-text); background: rgba(197, 139, 50, 0.09); }
+.discord-user-combobox-option img,
+.discord-user-combobox-avatar { width: 22px; height: 22px; flex: none; border-radius: var(--hm-radius-full); }
+.discord-user-combobox-avatar { display: inline-grid; place-items: center; color: var(--hm-text-dim); background: #293140; font-size: 0.6rem; }
+.discord-user-combobox-name { min-width: 0; overflow: hidden; color: inherit; text-overflow: ellipsis; white-space: nowrap; }
+.discord-user-combobox-username { min-width: 0; overflow: hidden; color: var(--hm-text-dim); text-overflow: ellipsis; white-space: nowrap; }
+.discord-user-combobox-bot { margin-left: auto; padding: 0.08rem 0.25rem; color: #c4b5fd; background: rgba(99, 102, 241, 0.2); border-radius: 3px; font-size: 0.52rem; }
+.discord-global-user-picker { display: block; }
+.discord-global-list-full { grid-column: 1 / -1; }
 .cfgc-chip-editor { display: grid; gap: var(--hm-space-3); }
 .cfgc-chip-list { min-height: 32px; display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
 .cfgc-chip {
