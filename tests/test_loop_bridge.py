@@ -125,3 +125,68 @@ class TestCleanupAndActive:
         active = b.get_active_loop_agents("loop1")
         assert len(active) == 1 and active[0]["status"] == "running"
         assert active[0]["label"] == "L0"
+
+
+class TestInvocationBoundToolCallback:
+    """A loop agent's nested spawn_agent must carry its own id as parent_id.
+
+    The shared callback used to be passed bare, so every loop-agent child
+    registered as a fresh ROOT and bypassed depth, child-limit, and tree-cap
+    enforcement entirely — reproduced during review by driving the callback
+    and watching the request arrive parentless.
+    """
+
+    def _bridge_and_captured(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from src.agents.loop_bridge import LoopAgentBridge
+
+        captured = {}
+
+        def fake_spawn(**kwargs):
+            captured.update(kwargs)
+            return "agent123"
+
+        mgr = MagicMock()
+        mgr.spawn = fake_spawn
+        bridge = LoopAgentBridge(agent_manager=mgr, trajectory_saver=None)
+
+        async def shared_cb(tool_name, tool_input):
+            captured["dispatched"] = (tool_name, tool_input)
+            return "ok"
+
+        async def iter_cb(*a, **k):
+            return SimpleNamespace(text="", tool_calls=None)
+
+        ids = bridge.spawn_agents_for_loop(
+            loop_id="L1", iteration=1, loop_goal="g",
+            tasks=[{"label": "a", "goal": "g"}],
+            channel_id="c1", requester_id="u1", requester_name="user",
+            iteration_callback=iter_cb, tool_executor_callback=shared_cb,
+        )
+        assert ids == ["agent123"]
+        return captured
+
+    async def test_nested_spawn_gains_the_agents_own_parent_id(self):
+        captured = self._bridge_and_captured()
+        bound_cb = captured["tool_executor_callback"]
+        await bound_cb("spawn_agent", {"label": "child", "goal": "g"})
+        name, tool_input = captured["dispatched"]
+        assert name == "spawn_agent"
+        assert tool_input["parent_id"] == "agent123"
+
+    async def test_an_explicit_parent_id_is_not_overridden(self):
+        captured = self._bridge_and_captured()
+        bound_cb = captured["tool_executor_callback"]
+        await bound_cb("spawn_agent", {"label": "c", "goal": "g", "parent_id": "other"})
+        _, tool_input = captured["dispatched"]
+        assert tool_input["parent_id"] == "other"
+
+    async def test_other_tools_pass_through_untouched(self):
+        captured = self._bridge_and_captured()
+        bound_cb = captured["tool_executor_callback"]
+        await bound_cb("run_command", {"command": "ls"})
+        name, tool_input = captured["dispatched"]
+        assert name == "run_command"
+        assert "parent_id" not in tool_input

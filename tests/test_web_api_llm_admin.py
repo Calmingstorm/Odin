@@ -1788,7 +1788,13 @@ class TestCodexAdvancedKnobs:
         ({"stream_stall_timeout_seconds": 5}, "between 10 and 3600"),
         ({"retry": {"max_retries": -1}}, ">= 0"),
         ({"connection_pool": {"max_connections": 0}}, ">= 1"),
-        ({"request_timeout_seconds": "soon"}, "must be a number"),
+        ({"request_timeout_seconds": "soon"}, "must be an integer"),
+        # Schema-exact rejections the first hand-mirrored validator got wrong:
+        ({"retry": {"max_retries": 1.9}}, "integer"),
+        ({"retry": [1, 2]}, "must be an object"),
+        ({"retry": {"bogus_knob": 1}}, "unknown retry field"),
+        ({"request_timeout_seconds": True}, "must be an integer"),
+        ({"stream_stall_timeout_seconds": 90.5}, "must be an integer"),
     ])
     async def test_bounds_are_enforced_before_any_mutation(self, body, fragment):
         app, bot = self._harness()
@@ -1799,6 +1805,69 @@ class TestCodexAdvancedKnobs:
         assert r.status == 400
         assert fragment in payload["error"]
         assert bot.config.openai_codex.request_timeout_seconds == before
+
+    @pytest.mark.asyncio
+    async def test_nested_groups_are_replaced_not_mutated_in_place(self):
+        """The boot-built compressor holds the boot config's nested object BY
+        IDENTITY. In-place mutation made compression live-before-rebind and
+        stale-after; replacement makes persist-only deterministic."""
+        app, bot = self._harness()
+        boot_held = bot.config.openai_codex.context_compression
+        before = boot_held.max_context_chars
+        with patch("src.web.api.llm_admin.persist_config_paths_locked",
+                   new=AsyncMock(return_value=(None, False))):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/codex/config", json={
+                    "context_compression": {"max_context_chars": 123456},
+                })
+        assert r.status == 200
+        assert boot_held.max_context_chars == before  # captor untouched
+        assert bot.config.openai_codex.context_compression is not boot_held
+        assert bot.config.openai_codex.context_compression.max_context_chars == 123456
+
+    @pytest.mark.asyncio
+    async def test_schema_lax_coercions_apply_not_hand_rolled_ones(self):
+        """bool("false") was True under the hand-rolled validator; the schema
+        model coerces the string honestly. And the invented floor on
+        max_context_chars is gone — the schema accepts 1, so this does."""
+        app, bot = self._harness()
+        with patch("src.web.api.llm_admin.persist_config_paths_locked",
+                   new=AsyncMock(return_value=(None, False))):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/codex/config", json={
+                    "context_compression": {"enabled": "false", "max_context_chars": 1},
+                })
+        assert r.status == 200
+        assert bot.config.openai_codex.context_compression.enabled is False
+        assert bot.config.openai_codex.context_compression.max_context_chars == 1
+
+    @pytest.mark.asyncio
+    async def test_double_failure_republishes_nested_desired(self):
+        """Reload fails AND the persistence rollback fails: disk kept the
+        desired nested values, so runtime must follow them — the prior code
+        left runtime on the restored priors while disk held desired, a
+        split-brain between process and file."""
+        app, bot = self._harness()
+        bot.llm_gateway.reload_codex_inner = AsyncMock(
+            side_effect=[RuntimeError("apply blew up"), None]
+        )
+        persist = AsyncMock(side_effect=[
+            (None, False),                       # forward persist succeeds
+            (RuntimeError("disk full"), False),  # rollback persist fails
+        ])
+        with patch("src.web.api.llm_admin.persist_config_paths_locked", new=persist):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/codex/config", json={
+                    "model": "gpt-5.6-terra",
+                    "retry": {"max_retries": 7},
+                    "request_timeout_seconds": 7200,
+                })
+                body_text = await r.text()
+        assert r.status == 500, body_text
+        # Runtime follows the disk it could not roll back.
+        assert bot.config.openai_codex.retry.max_retries == 7
+        assert bot.config.openai_codex.request_timeout_seconds == 7200
+        assert bot.config.openai_codex.model == "gpt-5.6-terra"
 
     @pytest.mark.asyncio
     async def test_status_reports_the_advanced_truth(self):
