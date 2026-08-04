@@ -760,16 +760,24 @@ export default {
     }
 
     // Export
-    function exportSession(channelId, format) {
-      const token = api._token;
-      let url = `/api/sessions/${encodeURIComponent(channelId)}/export?format=${format}`;
-      if (token) url += `&token=${encodeURIComponent(token)}`;
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `session-${channelId}.${format === 'text' ? 'txt' : 'json'}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+    async function exportSession(channelId, format) {
+      // Fetch with the Authorization header and download from a Blob. The old
+      // path reached past the public getter for api._token and appended it as
+      // a query parameter, which lands the credential in browser history, the
+      // referrer chain, and any access log that records query strings.
+      const path = `/api/sessions/${encodeURIComponent(channelId)}/export?format=${format}`;
+      try {
+        const blob = await api.getBlob(path);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `session-${channelId}.${format === 'text' ? 'txt' : 'json'}`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        // Previously the browser navigated and failure was invisible.
+        error.value = e.message || 'Failed to export session';
+      }
     }
 
     // WebSocket: debounced refresh on new message events

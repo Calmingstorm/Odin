@@ -232,6 +232,50 @@ def register_knowledge(routes: web.RouteTableDef, bot) -> None:
         })
 
 
+def _memory_scope_guard(bot):
+    """Deny a non-admin identity access to another user's memory scope.
+
+    Memory is not under ADMIN_ONLY_PREFIXES, so before this every route here
+    served any scope to any authenticated caller: a user-tier token could read
+    (and write) `user_<someone-else>` outright. The per-key route made that
+    tedious; a scope route would have made it one request.
+
+    Non-admin callers get the shared `global` scope and their OWN `user_<id>`
+    scope. Admin is unrestricted. A missing identity fails closed unless no
+    auth is configured at all, matching ``admin_gate``.
+    """
+
+    def _auth_configured() -> bool:
+        # Defensive throughout: a bot without a web config must not turn an
+        # authorization check into a 500. Nothing configured means auth is
+        # disabled wholesale, which is the documented dev-mode behaviour.
+        web_cfg = getattr(getattr(bot, "config", None), "web", None)
+        tm = getattr(bot, "api_token_manager", None)
+        return bool(
+            getattr(web_cfg, "api_token", "")
+            or getattr(web_cfg, "api_tokens", None)
+            or (tm and tm.list_tokens())
+        )
+
+    def _deny(request: web.Request, scope: str) -> web.Response | None:
+        identity = getattr(request, "_api_identity", None)
+        if identity is None:
+            if _auth_configured():
+                return web.json_response({"error": "memory access denied"}, status=403)
+            return None  # dev mode: auth disabled wholesale
+        if getattr(identity, "tier", "admin") == "admin":
+            return None
+        user_id = getattr(identity, "user_id", None)
+        allowed = {"global"}
+        if user_id:
+            allowed.add(f"user_{user_id}")
+        if scope not in allowed:
+            return web.json_response({"error": "memory access denied"}, status=403)
+        return None
+
+    return _deny
+
+
 def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
     """Memory (persistent notes — global + per-user scopes) (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -243,24 +287,57 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
         "error": "memory store is corrupt; refusing to modify (a backup was preserved)"
     }
 
+    _deny_scope = _memory_scope_guard(bot)
+
     @routes.get("/api/memory")
-    async def list_memory(_request: web.Request) -> web.Response:
+    async def list_memory(request: web.Request) -> web.Response:
+        # Authorize before loading so a missing identity in an authenticated
+        # deployment fails closed even when the store has no scopes to filter.
+        denied = _deny_scope(request, "global")
+        if denied:
+            return denied
         try:
             all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
         except StoreCorruptError:
             return web.json_response(corrupt_read, status=503)
         result = {}
         for scope, entries in all_mem.items():
+            if _deny_scope(request, scope):
+                continue
             result[scope] = {
                 "keys": list(entries.keys()),
                 "count": len(entries),
             }
         return web.json_response(result)
 
+    @routes.get("/api/memory/{scope}")
+    async def get_memory_scope(request: web.Request) -> web.Response:
+        """Every key/value in one scope, in ONE request.
+
+        The per-key route below loads the whole memory file to return a single
+        value, so a scope with a few hundred keys cost that many requests AND
+        that many full loads — enough for the WebUI to trip its own per-IP rate
+        limit just by expanding a scope.
+        """
+        scope = request.match_info["scope"]
+        denied = _deny_scope(request, scope)
+        if denied:
+            return denied
+        try:
+            all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
+        except StoreCorruptError:
+            return web.json_response(corrupt_read, status=503)
+        if scope not in all_mem:
+            return web.json_response({"error": "scope not found"}, status=404)
+        return web.json_response({"scope": scope, "entries": all_mem[scope]})
+
     @routes.get("/api/memory/{scope}/{key}")
     async def get_memory(request: web.Request) -> web.Response:
         scope = request.match_info["scope"]
         key = request.match_info["key"]
+        denied = _deny_scope(request, scope)
+        if denied:
+            return denied
         try:
             all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
         except StoreCorruptError:
@@ -274,6 +351,9 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
     async def set_memory(request: web.Request) -> web.Response:
         scope = request.match_info["scope"]
         key = request.match_info["key"]
+        denied = _deny_scope(request, scope)
+        if denied:
+            return denied
         data = await request.json()
         value = data.get("value")
         if value is None:
@@ -295,6 +375,9 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
     async def delete_memory(request: web.Request) -> web.Response:
         scope = request.match_info["scope"]
         key = request.match_info["key"]
+        denied = _deny_scope(request, scope)
+        if denied:
+            return denied
         async with bot.tool_executor._memory_lock:
             try:
                 all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
@@ -318,16 +401,30 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
             return web.json_response(
                 {"error": "entries must be a non-empty list of {scope, key}"}, status=400
             )
+        validated_entries: list[tuple[str, str]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return web.json_response(
+                    {"error": "each entry must contain a scope and key"}, status=400
+                )
+            scope = entry.get("scope")
+            key = entry.get("key")
+            if not isinstance(scope, str) or not scope or not isinstance(key, str) or not key:
+                return web.json_response(
+                    {"error": "each entry must contain a scope and key"}, status=400
+                )
+            denied = _deny_scope(request, scope)
+            if denied:
+                return denied
+            validated_entries.append((scope, key))
         async with bot.tool_executor._memory_lock:
             try:
                 all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
             except StoreCorruptError:
                 return web.json_response(corrupt_write, status=409)
             deleted = 0
-            for entry in entries:
-                scope = entry.get("scope")
-                key = entry.get("key")
-                if scope and key and scope in all_mem and key in all_mem[scope]:
+            for scope, key in validated_entries:
+                if scope in all_mem and key in all_mem[scope]:
                     del all_mem[scope][key]
                     deleted += 1
             if deleted:

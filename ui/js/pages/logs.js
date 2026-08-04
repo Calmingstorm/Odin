@@ -464,7 +464,7 @@ export default {
     // Timeline: bucket logs by time intervals
     const TIMELINE_BUCKETS = 24;
     const timelineBuckets = computed(() => {
-      if (logs.value.length === 0) return [];
+      if (filteredLogs.value.length === 0) return [];
       const buckets = [];
       const now = new Date();
       const spanMs = 3600 * 1000; // 1 hour per bucket
@@ -480,7 +480,11 @@ export default {
         });
       }
 
-      for (const entry of logs.value) {
+      // Bucket the rows the list actually shows. Counting unfiltered logs while
+      // rendering filteredLogs meant a bar could show a count the list could
+      // not produce, and jumpToTimelineBucket then found no matching row and
+      // silently did nothing.
+      for (const entry of filteredLogs.value) {
         if (!entry._time) continue;
         const t = entry._time.getTime();
         for (const b of buckets) {
@@ -506,7 +510,19 @@ export default {
 
     const timelineSpanLabel = computed(() => {
       if (timelineBuckets.value.length === 0) return '';
-      return 'Last 24 hours';
+      // State a FACT about the rows on screen rather than a duration. The
+      // earlier wording ("Since this tab opened") was still untrue — it
+      // measured the oldest RETAINED, FILTERED entry, which moves when a
+      // filter changes, when logs are cleared, and when the 2000-row cap
+      // evicts. A duration would also need a ticking clock: Date.now() inside
+      // a computed has no reactive dependency, so it freezes while idle.
+      const times = filteredLogs.value
+        .map(e => e._time && e._time.getTime())
+        .filter(Boolean);
+      if (times.length === 0) return '';
+      const oldest = new Date(Math.min(...times));
+      const shown = filteredLogs.value.length;
+      return `${shown} shown, oldest ${oldest.toLocaleTimeString()}`;
     });
 
     const timelineLabelSkip = computed(() => {

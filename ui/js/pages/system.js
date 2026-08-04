@@ -10,21 +10,27 @@ import LLMConfigPage from './llm-config.js';
 import InternalsPage from './internals.js';
 import UpdatePage from './update.js';
 
+// Exported so the command palette derives its destinations from the SAME
+// list the tab strip renders. Hand-mirroring them meant a renamed tab id
+// silently sent the palette to the default tab, with no error anywhere
+// (tabbed-page falls back when ?tab= does not match).
+export const TABS = [
+    { id: 'health', label: 'Health', component: HealthPage },
+    { id: 'resources', label: 'Resources', component: ResourcesPage },
+    { id: 'logs', label: 'Logs', component: LogsPage },
+    { id: 'config', label: 'Config', component: ConfigPage },
+    { id: 'discord', label: 'Discord', component: DiscordConfigPage },
+    { id: 'host-access', label: 'Host Access', component: HostAccessPage },
+    { id: 'api-tokens', label: 'API Tokens', component: ApiTokensPage },
+    { id: 'llm', label: 'LLM Config', component: LLMConfigPage },
+    { id: 'internals', label: 'Internals', component: InternalsPage },
+    { id: 'update', label: 'Update', component: UpdatePage },
+];
+
 export default {
   components: { TabbedPage },
   setup() {
-    const tabs = [
-      { id: 'health', label: 'Health', component: HealthPage },
-      { id: 'resources', label: 'Resources', component: ResourcesPage },
-      { id: 'logs', label: 'Logs', component: LogsPage },
-      { id: 'config', label: 'Config', component: ConfigPage },
-      { id: 'discord', label: 'Discord', component: DiscordConfigPage },
-      { id: 'host-access', label: 'Host Access', component: HostAccessPage },
-      { id: 'api-tokens', label: 'API Tokens', component: ApiTokensPage },
-      { id: 'llm', label: 'LLM Config', component: LLMConfigPage },
-      { id: 'internals', label: 'Internals', component: InternalsPage },
-      { id: 'update', label: 'Update', component: UpdatePage },
-    ];
+    const tabs = TABS;
     return { tabs };
   },
   template: `<tabbed-page :tabs="tabs" default-tab="health" group-label="System" />`,

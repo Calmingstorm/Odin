@@ -219,18 +219,29 @@ class TestCancellationSettlement:
     — and overwrite — a later one. The executor-future form settles first.
     """
 
-    def _slow_writer(self, monkeypatch, delay=0.3):
-        import time as _time
+    def _slow_writer(self, monkeypatch):
+        """A writer that blocks until the test releases it.
+
+        Event-synchronised rather than sleep-based: cancelling after a fixed
+        delay is a guess about scheduling, and under full-suite load the write
+        had not always begun when the cancel landed.
+        """
+        import threading
 
         import src.config.persistence as persistence
 
         real = persistence.patch_config_paths
+        started = threading.Event()
+        release = threading.Event()
 
         def slow(changes, *, path=None):
-            _time.sleep(delay)
+            started.set()
+            assert release.wait(timeout=10), "test never released the write"
             real(changes, path=path)
 
         monkeypatch.setattr(persistence, "patch_config_paths", slow)
+        persistence._test_write_started = started
+        persistence._test_write_release = release
         return persistence
 
     async def test_cancelled_write_settles_before_returning(self, config_file, monkeypatch):
@@ -242,8 +253,11 @@ class TestCancellationSettlement:
                 [(("logging", "level"), "DEBUG")], path=config_file
             )
         )
-        await asyncio.sleep(0.05)  # let the executor pick the job up
+        assert await asyncio.to_thread(
+            persistence._test_write_started.wait, 10
+        ), "write never started"
         task.cancel()
+        persistence._test_write_release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
 
@@ -263,11 +277,15 @@ class TestCancellationSettlement:
                 [(("logging", "level"), "DEBUG")], path=config_file
             )
         )
-        await asyncio.sleep(0.05)
+        assert await asyncio.to_thread(
+            persistence._test_write_started.wait, 10
+        ), "write never started"
         task.cancel()
+        persistence._test_write_release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
 
+        monkeypatch.undo()
         await persistence.persist_config_paths(
             [(("logging", "level"), "ERROR")], path=config_file
         )
