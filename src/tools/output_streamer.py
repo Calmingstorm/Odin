@@ -8,6 +8,7 @@ seconds per active stream.  A final chunk (``finished=True``) is always sent.
 
 from __future__ import annotations
 
+import contextvars
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -20,6 +21,14 @@ log = get_logger("output_streamer")
 # Type alias for async listener callbacks.
 StreamListener = Callable[["StreamChunk"], Awaitable[None]]
 
+# The tool_use id of the invocation currently executing, so streamed output can
+# be attributed to ONE call. Tool name is not identity: two concurrent
+# run_command calls stream under the same name, and a consumer keying by name
+# merges their output onto both cards and lets either completion clear both.
+current_call_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_call_id", default=None
+)
+
 
 @dataclass(slots=True)
 class StreamChunk:
@@ -31,6 +40,7 @@ class StreamChunk:
     timestamp: str
     channel_id: str
     finished: bool = False
+    call_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -40,6 +50,7 @@ class StreamChunk:
             "timestamp": self.timestamp,
             "channel_id": self.channel_id,
             "finished": self.finished,
+            "call_id": self.call_id,
         }
 
 
@@ -130,7 +141,8 @@ class ToolOutputStreamer:
         - *on_output(text)* should be called with each line/chunk of output
         - *finish()* must be called when the tool completes (flushes buffer)
         """
-        stream_id = f"{tool_name}-{id(object())}-{time.monotonic_ns()}"
+        call_id = current_call_id.get()
+        stream_id = call_id or f"{tool_name}-{id(object())}-{time.monotonic_ns()}"
         now = time.monotonic()
         stream = _ActiveStream(
             tool_name=tool_name,
@@ -154,6 +166,7 @@ class ToolOutputStreamer:
                     sequence=stream.sequence,
                     timestamp=ts,
                     channel_id=channel_id,
+                    call_id=call_id,
                 )
                 stream.sequence += 1
                 stream.last_emit = now
@@ -170,6 +183,7 @@ class ToolOutputStreamer:
                     sequence=stream.sequence,
                     timestamp=ts,
                     channel_id=channel_id,
+                    call_id=call_id,
                 )
                 stream.sequence += 1
                 await self._emit(chunk)
@@ -180,6 +194,7 @@ class ToolOutputStreamer:
                 timestamp=ts,
                 channel_id=channel_id,
                 finished=True,
+                call_id=call_id,
             )
             await self._emit(final)
             self._active_streams.pop(stream_id, None)

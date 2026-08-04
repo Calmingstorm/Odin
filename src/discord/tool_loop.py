@@ -43,6 +43,7 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
 from ..tools import ToolResult
+from ..tools.output_streamer import current_call_id as _current_call_id
 from ..turn_state import LedgerIntentError
 from ..turn_state.durability import TurnDurability
 
@@ -1468,11 +1469,17 @@ class ToolLoopRunner:
                 # audit record picks up the metadata like the executor path.
                 tool_result, result = _unwrap_native_result(result)
             else:
-                tool_result = await self._tool_executor.execute(
-                    tool_name,
-                    tool_input,
-                    user_id=st.user_id,
-                )
+                # Bind this invocation's identity so streamed output can be
+                # attributed to ONE call rather than merged by tool name.
+                _call_token = _current_call_id.set(block.id)
+                try:
+                    tool_result = await self._tool_executor.execute(
+                        tool_name,
+                        tool_input,
+                        user_id=st.user_id,
+                    )
+                finally:
+                    _current_call_id.reset(_call_token)
                 result = str(tool_result)
         except TimeoutError as e:
             error = str(e)

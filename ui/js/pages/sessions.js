@@ -686,14 +686,17 @@ export default {
       const token = ++detailRequest;
       try {
         const loaded = await api.get(`/api/sessions/${encodeURIComponent(channelId)}`);
-        if (token !== detailRequest || expandedId.value !== channelId) return;
-        detail.value = loaded;
+        if (token === detailRequest && expandedId.value === channelId) detail.value = loaded;
       } catch (e) {
-        if (token !== detailRequest || expandedId.value !== channelId) return;
-        detail.value = { messages: [], summary: '', error: e.message || 'Failed to load session' };
+        if (token === detailRequest && expandedId.value === channelId) {
+          detail.value = { messages: [], summary: '', error: e.message || 'Failed to load session' };
+        }
+      } finally {
+        // Settle the spinner unconditionally for the LATEST request. Returning
+        // early on supersession left it spinning forever over data that had
+        // already arrived.
+        if (token === detailRequest) detailLoading.value = false;
       }
-      if (token !== detailRequest) return;
-      detailLoading.value = false;
     }
 
     // Selection
@@ -777,14 +780,15 @@ export default {
         debounceTimer = setTimeout(() => {
           fetchSessions();
           if (expandedId.value && data.payload.channel_id === expandedId.value) {
-            // This background refresh is a `detail` writer too: without a
-            // token it could land after the user selected a different session
-            // and overwrite it.
+            // A BACKGROUND refresh: it must yield to the foreground rather
+            // than supersede it. Claiming a new token stranded the spinner —
+            // the in-flight foreground request saw a stale token, returned
+            // early, and never settled detailLoading.
             const channelId = expandedId.value;
-            const token = ++detailRequest;
+            const seen = detailRequest;
             api.get(`/api/sessions/${encodeURIComponent(channelId)}`)
               .then(d => {
-                if (token !== detailRequest || expandedId.value !== channelId) return;
+                if (seen !== detailRequest || expandedId.value !== channelId) return;
                 detail.value = d;
               })
               .catch(() => {});

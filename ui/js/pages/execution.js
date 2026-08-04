@@ -77,13 +77,18 @@ export default {
       }
 
       if (type === 'tool_stream') {
-        const key = payload.tool_name || 'unknown';
+        // Key by invocation, not tool name: two concurrent run_command calls
+        // stream under the SAME name, so a name key merged their output onto
+        // both cards and let either completion delete both streams.
+        const key = payload.call_id || payload.tool_name || 'unknown';
         if (payload.finished) {
-          delete streamOutput.value[key];
+          const next = { ...streamOutput.value };
+          delete next[key];
+          streamOutput.value = next;
         } else {
           const current = streamOutput.value[key] || '';
           const lines = (current + (payload.chunk || '')).split('\n');
-          streamOutput.value[key] = lines.slice(-30).join('\n');
+          streamOutput.value = { ...streamOutput.value, [key]: lines.slice(-30).join('\n') };
         }
         return;
       }
@@ -172,8 +177,8 @@ export default {
             <span :class="task.fadingOut ? 'text-gray-400' : 'text-blue-400'" class="font-mono text-sm">{{ formatMs(task.elapsed) }}</span>
           </div>
           <!-- Streaming output for this tool -->
-          <div v-if="streamOutput[task.tool]"
-               class="bg-black rounded p-2 mt-2 max-h-48 overflow-y-auto font-mono text-xs text-green-400 whitespace-pre-wrap">{{ streamOutput[task.tool] }}</div>
+          <div v-if="streamOutput[task.callId || task.tool]"
+               class="bg-black rounded p-2 mt-2 max-h-48 overflow-y-auto font-mono text-xs text-green-400 whitespace-pre-wrap break-all">{{ streamOutput[task.callId || task.tool] }}</div>
         </div>
       </div>
 

@@ -73,8 +73,29 @@ class TestStreamChunk:
             tool_name="t", chunk="c", sequence=0,
             timestamp="ts", channel_id="ch",
         ).to_dict()
-        expected_keys = {"tool_name", "chunk", "sequence", "timestamp", "channel_id", "finished"}
+        # call_id joined the wire payload so consumers can attribute streamed
+        # output to ONE invocation: two concurrent calls to the same tool
+        # stream under the same name, and a name-keyed consumer merges their
+        # output and lets either completion clear both. Additive, so existing
+        # consumers that ignore unknown keys are unaffected.
+        expected_keys = {
+            "tool_name", "chunk", "sequence", "timestamp", "channel_id",
+            "finished", "call_id",
+        }
         assert set(d.keys()) == expected_keys
+
+    def test_call_id_defaults_to_none_for_untracked_invocations(self):
+        d = StreamChunk(
+            tool_name="t", chunk="c", sequence=0, timestamp="ts", channel_id="ch",
+        ).to_dict()
+        assert d["call_id"] is None
+
+    def test_call_id_round_trips(self):
+        d = StreamChunk(
+            tool_name="t", chunk="c", sequence=0, timestamp="ts", channel_id="ch",
+            call_id="call_xyz",
+        ).to_dict()
+        assert d["call_id"] == "call_xyz"
 
 
 # ---------------------------------------------------------------------------
@@ -1150,3 +1171,62 @@ class TestEdgeCases:
         from datetime import datetime
         # Should parse as valid ISO timestamp
         datetime.fromisoformat(chunk.timestamp)
+
+
+class TestCallIdAttribution:
+    """Streamed chunks must carry the invocation they belong to.
+
+    Keying by tool_name cannot separate two concurrent run_command calls:
+    their output merges onto both cards and either completion deletes both
+    streams.
+    """
+
+    async def test_chunks_carry_the_bound_call_id(self):
+        from src.tools.output_streamer import ToolOutputStreamer, current_call_id
+
+        seen = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+
+        token = current_call_id.set("call_alpha")
+        try:
+            _, on_output, finish = streamer.create_callback("run_command", channel_id="h")
+            await on_output("hello\n")
+            await finish()
+        finally:
+            current_call_id.reset(token)
+
+        assert seen, "no chunks emitted"
+        assert {c.call_id for c in seen} == {"call_alpha"}
+
+    async def test_concurrent_same_name_calls_get_distinct_ids(self):
+        from src.tools.output_streamer import ToolOutputStreamer, current_call_id
+
+        seen = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+
+        token_a = current_call_id.set("call_a")
+        _, out_a, fin_a = streamer.create_callback("run_command", channel_id="h")
+        current_call_id.reset(token_a)
+
+        token_b = current_call_id.set("call_b")
+        _, out_b, fin_b = streamer.create_callback("run_command", channel_id="h")
+        current_call_id.reset(token_b)
+
+        await out_a("from a\n")
+        await out_b("from b\n")
+        await fin_a()
+        await fin_b()
+
+        by_id = {}
+        for c in seen:
+            by_id.setdefault(c.call_id, []).append(c.chunk)
+        assert set(by_id) == {"call_a", "call_b"}
+        assert "from a\n" in "".join(by_id["call_a"])
+        assert "from b\n" in "".join(by_id["call_b"])
+        assert "from b" not in "".join(by_id["call_a"])
+
+
+async def _noop():
+    return None
