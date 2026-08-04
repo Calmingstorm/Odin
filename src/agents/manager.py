@@ -36,7 +36,10 @@ TOOL_EXEC_TIMEOUT = 300          # 5 min timeout per tool execution
 # callback via src/llm/recovery.py. AgentInfo.recovery_attempts remains for
 # API/trajectory shape compatibility and stays 0.)
 MAX_NESTING_DEPTH = 2            # default max sub-agent depth (root=0)
-MAX_CHILDREN_PER_AGENT = 3       # max direct children one agent can spawn
+MAX_CHILDREN_PER_AGENT = 3       # fallback direct-child limit (config overrides at spawn)
+TREE_MAX_AGENTS = 25             # hard ceiling on agents in one tree's lifetime —
+                                 # breadth x depth must never compound into a
+                                 # geometric invoice, whatever config says
 
 # Agent-management tools — allowed or blocked based on nesting depth
 AGENT_MANAGEMENT_TOOLS = frozenset({
@@ -286,6 +289,15 @@ class AgentInfo:
     # (chat/scheduled/hard limits differ) so progress can be computed honestly
     # instead of against a hardcoded guess.
     max_iterations: int = MAX_AGENT_ITERATIONS
+    # Lifetime direct-child limit for THIS agent, snapshotted from config when
+    # the ROOT of its tree was spawned; every descendant inherits the root's
+    # value, so a live config change never produces a tree whose members
+    # disagree about the rules. It counts children ever spawned, not merely
+    # concurrent ones. The agent's own prompt advertises this same number.
+    max_children: int = MAX_CHILDREN_PER_AGENT
+    # Root of this agent's tree (self for roots) — the unit the tree-lifetime
+    # agent cap is enforced against.
+    root_id: str = ""
     depth: int = 0
     parent_id: str | None = None
     children_ids: list[str] = field(default_factory=list)
@@ -350,6 +362,7 @@ class AgentManager:
         trajectory_saver: AgentTrajectorySaver | None = None,
         parent_id: str | None = None,
         max_depth: int = MAX_NESTING_DEPTH,
+        max_children: int | None = None,
         max_iterations: int | None = None,
         budget_warnings: builtins.list[int] | None = None,
         iteration_timeout: float | None = None,
@@ -385,10 +398,24 @@ class AgentManager:
                     f"Error: Maximum nesting depth ({max_depth}) exceeded. "
                     f"Parent '{parent_id}' is at depth {parent.depth}."
                 )
-            if len(parent.children_ids) >= MAX_CHILDREN_PER_AGENT:
+            # The PARENT's snapshot governs — taken from config when its
+            # tree's root spawned. A live config change applies to the next
+            # tree, never to one already running. Counts children ever
+            # spawned (lifetime), not merely concurrent.
+            if len(parent.children_ids) >= parent.max_children:
                 return (
                     f"Error: Parent agent '{parent_id}' has reached the "
-                    f"maximum of {MAX_CHILDREN_PER_AGENT} children."
+                    f"maximum of {parent.max_children} children."
+                )
+            tree_root = parent.root_id or parent.id
+            tree_size = sum(
+                1 for a in self._agents.values()
+                if (a.root_id or a.id) == tree_root
+            )
+            if tree_size >= TREE_MAX_AGENTS:
+                return (
+                    f"Error: This agent tree has reached the lifetime "
+                    f"maximum of {TREE_MAX_AGENTS} agents."
                 )
 
         agent_id = uuid.uuid4().hex[:8]
@@ -406,7 +433,19 @@ class AgentManager:
             model_override=model_override,
             reasoning_effort_override=reasoning_effort_override,
             max_iterations=max_iterations or MAX_AGENT_ITERATIONS,
+            max_children=(
+                self._agents[parent_id].max_children
+                if parent_id and parent_id in self._agents
+                else (max_children or MAX_CHILDREN_PER_AGENT)
+            ),
+            root_id=(
+                (self._agents[parent_id].root_id or parent_id)
+                if parent_id and parent_id in self._agents
+                else ""
+            ),
         )
+        if not agent.root_id:
+            agent.root_id = agent_id
 
         # Register as child of parent
         if parent_id and parent_id in self._agents:
@@ -424,7 +463,7 @@ class AgentManager:
             remaining = max_depth - depth
             agent_system += (
                 f"AGENT CONTEXT: You are agent '{label}' (depth {depth}). "
-                f"You may spawn up to {MAX_CHILDREN_PER_AGENT} sub-agents "
+                f"You may spawn up to {agent.max_children} sub-agents "
                 f"({remaining} nesting level{'s' if remaining != 1 else ''} remaining). "
                 f"When done, provide a clear summary of results."
             )

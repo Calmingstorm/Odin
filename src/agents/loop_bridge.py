@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
+from .manager import MAX_NESTING_DEPTH
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -91,6 +92,8 @@ class LoopAgentBridge:
         budget_warnings: list[int] | None = None,
         iteration_timeout: float | None = None,
         max_lifetime: float | None = None,
+        max_depth: int | None = None,
+        max_children: int | None = None,
         iteration_callback_factory: Callable[[str | None, str | None], IterationCallback]
         | None = None,
         context_compression_enabled: bool = False,
@@ -161,6 +164,11 @@ class LoopAgentBridge:
                 system_prompt=system_prompt,
                 tool_timeouts=tool_timeouts,
                 trajectory_saver=self._trajectory_saver,
+                # Loop-spawned agents used to ignore configured depth and
+                # child limits entirely — the built-in defaults applied no
+                # matter what config said. Same knobs, both paths now.
+                max_depth=max_depth if max_depth is not None else MAX_NESTING_DEPTH,
+                max_children=max_children,
                 max_iterations=max_iterations,
                 budget_warnings=budget_warnings,
                 iteration_timeout=iteration_timeout,

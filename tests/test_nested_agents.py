@@ -1,6 +1,7 @@
 """Tests for nested agent spawning — depth-limited sub-agent hierarchy."""
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 from src.agents.manager import (
@@ -1100,3 +1101,113 @@ class TestEdgeCases:
         names = {t["name"] for t in result}
         assert "run_command" in names
         assert "read_file" in names
+
+
+# ---------------------------------------------------------------------------
+# Configured child limit — root snapshot, inherited by the whole tree
+# ---------------------------------------------------------------------------
+
+class TestConfiguredChildLimit:
+    """agents.max_children_per_agent finally reaches the spawn path.
+
+    The schema declared it configurable while spawn() and the prompt hardcoded
+    3 — the config page truthfully called it 'not wired', and the fix is
+    wiring, not wording. Contract: the ROOT snapshots the configured limit,
+    every descendant inherits the root's snapshot (a live config change never
+    yields a tree whose members disagree), and a tree-lifetime cap backstops
+    breadth x depth.
+    """
+
+    def _spawn(self, mgr, label, parent_id=None, max_children=None, max_depth=5):
+        return mgr.spawn(
+            label=label, goal="go", channel_id="c1",
+            requester_id="u1", requester_name="user",
+            iteration_callback=_make_iter_cb(),
+            tool_executor_callback=_make_tool_cb(),
+            parent_id=parent_id, max_children=max_children,
+            max_depth=max_depth,
+        )
+
+    async def test_root_snapshots_the_configured_limit(self):
+        mgr = AgentManager()
+        root = self._spawn(mgr, "root", max_children=5)
+        assert mgr._agents[root].max_children == 5
+        assert mgr._agents[root].root_id == root
+
+    async def test_omitted_limit_falls_back_to_the_constant(self):
+        mgr = AgentManager()
+        root = self._spawn(mgr, "root")
+        assert mgr._agents[root].max_children == MAX_CHILDREN_PER_AGENT
+
+    async def test_descendants_inherit_the_roots_snapshot_not_live_config(self):
+        """A child spawned with a DIFFERENT configured value still runs under
+        the root's — mid-tree config changes cannot split the rules."""
+        mgr = AgentManager()
+        root = self._spawn(mgr, "root", max_children=5)
+        child = self._spawn(mgr, "child", parent_id=root, max_children=9)
+        assert mgr._agents[child].max_children == 5
+        assert mgr._agents[child].root_id == root
+        grandchild = self._spawn(mgr, "gc", parent_id=child, max_children=2)
+        assert mgr._agents[grandchild].max_children == 5
+        assert mgr._agents[grandchild].root_id == root
+
+    async def test_the_parents_snapshot_governs_enforcement(self):
+        mgr = AgentManager()
+        root = self._spawn(mgr, "root", max_children=2)
+        assert not self._spawn(mgr, "c1", parent_id=root).startswith("Error")
+        assert not self._spawn(mgr, "c2", parent_id=root).startswith("Error")
+        third = self._spawn(mgr, "c3", parent_id=root)
+        assert third.startswith("Error")
+        assert "maximum of 2 children" in third
+
+    async def test_the_agents_own_prompt_advertises_the_effective_limit(
+        self, monkeypatch
+    ):
+        """The prompt used to hardcode the constant — it lied to the agent
+        whenever config differed. Capture what the worker actually receives."""
+        import src.agents.manager as manager_mod
+
+        captured = {}
+
+        async def fake_run(agent, system_prompt, *args, **kwargs):
+            captured["system"] = system_prompt
+
+        monkeypatch.setattr(manager_mod, "_run_agent", fake_run)
+        mgr = AgentManager()
+        self._spawn(mgr, "root", max_children=7)
+        await asyncio.sleep(0)  # let the spawn task enter the stub
+        assert "up to 7 sub-agents" in captured["system"]
+
+    async def test_tree_lifetime_cap_backstops_breadth_times_depth(self):
+        from src.agents.manager import TREE_MAX_AGENTS
+
+        mgr = AgentManager()
+        root = self._spawn(mgr, "root", max_children=10)
+        # Fill the registry with tree members directly — spawning 24 real
+        # agents would be slow and beside the point; the cap counts REGISTERED
+        # tree members whatever their state.
+        # Different channel: the per-channel concurrency cap must not fire
+        # first — the TREE cap is what this test exercises.
+        for i in range(TREE_MAX_AGENTS - 1):
+            mgr._agents[f"fake{i}"] = type(mgr._agents[root])(
+                id=f"fake{i}", label="x", goal="g", channel_id="other",
+                requester_id="u1", requester_name="user", root_id=root,
+            )
+        blocked = self._spawn(mgr, "straw", parent_id=root)
+        assert blocked.startswith("Error")
+        assert "lifetime" in blocked and str(TREE_MAX_AGENTS) in blocked
+
+    async def test_a_second_tree_is_not_charged_for_the_first(self):
+        from src.agents.manager import TREE_MAX_AGENTS
+
+        mgr = AgentManager()
+        first = self._spawn(mgr, "root1", max_children=10)
+        for i in range(TREE_MAX_AGENTS):
+            mgr._agents[f"fake{i}"] = type(mgr._agents[first])(
+                id=f"fake{i}", label="x", goal="g", channel_id="c2",
+                requester_id="u1", requester_name="user", root_id=first,
+            )
+        second = self._spawn(mgr, "root2")
+        assert not second.startswith("Error")
+        child = self._spawn(mgr, "child2", parent_id=second)
+        assert not child.startswith("Error")

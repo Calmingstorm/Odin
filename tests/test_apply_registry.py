@@ -526,10 +526,18 @@ class TestEffectiveIsNeverGuessed:
     """
 
     def test_a_field_nothing_reads_reports_no_effective_value(self):
-        record = build_field_record("agents.max_children_per_agent", 9)
-        assert record["desired"] == 9
+        record = build_field_record("openai_codex.max_tokens", 9000)
+        assert record["desired"] == 9000
         assert record["effective"] is None
         assert record["apply_state"] == "dormant"
+
+    def test_the_wired_child_limit_reports_next_tree_semantics(self):
+        """Was THE dormant exemplar; the spawn path consults it now — root
+        snapshot, descendants inherit, so live_for_new_work is the truth."""
+        record = build_field_record("agents.max_children_per_agent", 5)
+        assert record["apply_mode"] == "live_for_new_work"
+        assert record["effective"] == 5
+        assert record["apply_state"] == "applied"
 
     def test_a_gated_field_reports_no_effective_value(self):
         record = build_field_record("usage.directory", "./data/usage")
@@ -771,7 +779,7 @@ class TestPlainLanguageEffects:
     """
 
     def test_an_unwired_field_says_so_in_the_settled_words(self):
-        record = build_field_record("agents.max_children_per_agent", 9)
+        record = build_field_record("openai_codex.max_tokens", 9000)
         assert record["save_effect"] == (
             "Saving updates config.yml. This version of Odin does not use "
             "this setting. Restarting will not activate it."

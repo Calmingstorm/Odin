@@ -500,12 +500,22 @@ FIELDS: dict[str, FieldSpec] = {
     ),
     # ---------------- agents ----------------
     "agents.max_children_per_agent": FieldSpec(
-        apply_mode="dormant",
-        description="Child limit for spawned agent trees.",
-        activation_policy="No spawn path reads this value: the limit comes "
-        "from a built-in constant, which is also what an agent's own prompt "
-        "advertises. There is no switch to turn on — the spawn path has to "
-        "start consulting it first.",
+        apply_mode="live_for_new_work",
+        description="Lifetime direct-child limit per agent (1-10). Counts "
+        "children ever spawned, not merely concurrent ones.",
+        consumers=(
+            Consumer(
+                "New agent trees",
+                "live_for_new_work",
+                "The root snapshots this at spawn; every descendant inherits "
+                "the root's value, and the agent's own prompt advertises it.",
+            ),
+            Consumer(
+                "Trees already running",
+                "live_for_new_work",
+                "A running tree keeps the limit its root started with.",
+            ),
+        ),
     ),
     "agents.max_nesting_depth": FieldSpec(
         apply_mode="live_for_new_work",

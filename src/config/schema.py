@@ -133,6 +133,16 @@ class AgentsConfig(BaseModel):
             raise ValueError("agent limits must be >= 1")
         return v
 
+    @field_validator("max_children_per_agent")
+    @classmethod
+    def _children_bounded(cls, v):
+        # Direct-child breadth compounds with nesting depth; the tree-lifetime
+        # cap in the agent manager is the hard backstop, this keeps a single
+        # config value from asking for absurd fan-out in the first place.
+        if v > 10:
+            raise ValueError("max_children_per_agent must be between 1 and 10")
+        return v
+
     @field_validator("iteration_timeout_seconds", "max_lifetime_seconds")
     @classmethod
     def _agents_timeout_bounds(cls, v, info):

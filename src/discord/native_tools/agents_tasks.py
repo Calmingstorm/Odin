@@ -701,6 +701,12 @@ class AgentTaskTools:
             system_prompt=system_prompt,
             parent_id=parent_id_arg,
             max_depth=max_depth,
+            # Root snapshot: config read at spawn time; descendants inherit
+            # the root's value inside the manager. Fallback stays the
+            # manager's constant for omitted/None.
+            max_children=getattr(agents_cfg, "max_children_per_agent", None)
+            if agents_cfg
+            else None,
             tool_timeouts=self._get_config().tools.tool_timeouts,
             trajectory_saver=self._agent_trajectory_saver,
             max_iterations=iter_cap,
@@ -999,6 +1005,14 @@ class AgentTaskTools:
             max_iterations=self._get_config().agents.max_iterations,
             iteration_timeout=self._get_config().agents.iteration_timeout_seconds,
             max_lifetime=self._get_config().agents.max_lifetime_seconds,
+            # Close the loop-path gap: depth and child limits now reach
+            # loop-spawned agents too, instead of silently using built-ins.
+            max_depth=getattr(
+                self._get_config().agents, "max_nesting_depth", None
+            ),
+            max_children=getattr(
+                self._get_config().agents, "max_children_per_agent", None
+            ),
             context_compression_enabled=bool(cc),
             max_context_chars=cc.max_context_chars if cc else 750000,
             keep_recent_iterations=cc.keep_recent_iterations if cc else 30,
