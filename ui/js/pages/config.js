@@ -2,12 +2,12 @@
  * Odin Configuration Center — page shell and information architecture.
  *
  * U1 owns navigation, search, health filtering, section-scoped drafts, review,
- * and responsive behaviour. Typed domain editors arrive in U2. Until S2
- * exposes /api/config/meta this page consumes the exact §4 fixture contract.
+ * and responsive behaviour. Apply behavior comes from the authoritative
+ * /api/config/meta registry; the page never reconstructs it from local rules.
  */
 import { api } from '../api.js';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { createConfigMetaFixture } from '../config-meta-fixture.js';
+import { collectApplyDetails } from '../config-apply-details.js';
 import { HEALTH_FILTERS } from '../config-health.js';
 
 const CATEGORY_GROUPS = [
@@ -57,9 +57,7 @@ const EXPANDED_STORAGE_KEY = 'odin_config_center_expanded_v1';
 const CATEGORY_STORAGE_KEY = 'odin_config_center_category_v1';
 const MAX_UNDO = 50;
 
-// S2 integration is intentionally one line: replace this initializer with
-// `const loadConfigMeta = () => api.get('/api/config/meta');`.
-const loadConfigMeta = config => Promise.resolve(createConfigMetaFixture(config));
+const loadConfigMeta = () => api.get('/api/config/meta');
 
 function deepClone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -226,6 +224,10 @@ export default {
             </button>
           </div>
 
+          <div v-if="metaRefreshError" class="cfgc-health-alert warning" role="alert">
+            <odin-icon name="warning" :size="16" />
+            <div><strong>Apply status is stale</strong><span>{{ metaRefreshError }} Refresh to retrieve current registry state.</span></div>
+          </div>
           <div v-if="meta.status?.persistence_error" class="cfgc-health-alert danger" role="alert">
             <odin-icon name="error" :size="16" />
             <div><strong>Persistence error</strong><span>{{ meta.status.persistence_error }}</span></div>
@@ -337,6 +339,17 @@ export default {
                     </a>
                   </div>
 
+                  <div v-if="sectionOwner(section) && sectionApplyDetails(section).length" class="cfgc-section-apply-details" aria-label="Section apply behavior details">
+                    <div v-for="detail in sectionApplyDetails(section)" :key="detail.key" :class="['cfgc-apply-detail', 'detail-' + detail.kind]">
+                      <div class="cfgc-apply-detail-heading">
+                        <strong>{{ detail.label }}</strong>
+                        <span v-if="detail.apply_mode" :class="['cfgc-apply-pill', applyClass(detail.apply_mode)]">{{ applyModeLabel(detail.apply_mode) }}</span>
+                      </div>
+                      <code v-if="detail.code">{{ detail.code }}</code>
+                      <p v-if="detail.text">{{ detail.text }}</p>
+                    </div>
+                  </div>
+
                   <div v-if="section === 'discord'" class="cfgc-owner-card compact">
                     <span class="cfgc-owner-icon"><odin-icon name="message" :size="18" /></span>
                     <div>
@@ -373,6 +386,16 @@ export default {
                           <span :class="['cfgc-apply-pill', applyClass(field.apply_mode)]">{{ applyModeLabel(field.apply_mode) }}</span>
                           <span v-if="field.unit">{{ field.unit }}</span>
                           <span v-if="field.sensitivity !== 'public'" class="cfgc-sensitive"><odin-icon name="shield" :size="12" /> write-only</span>
+                        </div>
+                        <div v-if="field.apply_details?.length" class="cfgc-apply-details" aria-label="Apply behavior details">
+                          <div v-for="detail in field.apply_details" :key="detail.key" :class="['cfgc-apply-detail', 'detail-' + detail.kind]">
+                            <div class="cfgc-apply-detail-heading">
+                              <strong>{{ detail.label }}</strong>
+                              <span v-if="detail.apply_mode" :class="['cfgc-apply-pill', applyClass(detail.apply_mode)]">{{ applyModeLabel(detail.apply_mode) }}</span>
+                            </div>
+                            <code v-if="detail.code">{{ detail.code }}</code>
+                            <p v-if="detail.text">{{ detail.text }}</p>
+                          </div>
                         </div>
                       </div>
 
@@ -503,6 +526,7 @@ export default {
     const saving = ref(false);
     const error = ref(null);
     const toast = ref(null);
+    const metaRefreshError = ref(null);
     const searchQuery = ref('');
     const healthFilter = ref('all');
     const activeCategory = ref(loadCategoryState());
@@ -604,7 +628,10 @@ export default {
     const reviewRestartCount = computed(() => diffEntries.value.filter(entry => entry.apply_mode === 'restart').length);
 
     function metadataForPath(path) {
-      if (fieldsByPath.value.has(path)) return fieldsByPath.value.get(path);
+      if (fieldsByPath.value.has(path)) {
+        const field = fieldsByPath.value.get(path);
+        return { ...field, apply_details: collectApplyDetails([field]) };
+      }
       const prefix = `${path}.`;
       const descendants = fields.value.filter(field => field.path.startsWith(prefix));
       if (!descendants.length) return null;
@@ -619,6 +646,7 @@ export default {
         configured: descendants.some(field => field.configured),
         provenance: descendants.find(field => field.provenance !== 'unset')?.provenance || 'unset',
         apply_mode: modes.length === 1 ? modes[0] : sectionApplyMode(path.split('.')[0]),
+        apply_details: collectApplyDetails(descendants),
         constraints: {},
         enum: null,
       };
@@ -660,6 +688,10 @@ export default {
       const modes = [...new Set(sectionFields(section).map(field => applyModeLabel(field.apply_mode)))];
       if (!modes.length) return '';
       return modes.length === 1 ? modes[0] : `Mixed apply behaviour: ${modes.join(' · ')}`;
+    }
+
+    function sectionApplyDetails(section) {
+      return collectApplyDetails(sectionFields(section));
     }
 
     function sectionOwner(section) {
@@ -953,8 +985,11 @@ export default {
       try {
         const patch = buildSectionPatch(config.value, drafts.value);
         const result = await api.put('/api/config', patch);
+
+        // Persistence has committed at this point. Clear the draft before the
+        // independent metadata refresh so a transient GET failure cannot make
+        // the operator retry an already-successful write.
         config.value = result;
-        meta.value = await loadConfigMeta(result);
         drafts.value = {};
         editingSection.value = null;
         editingBaseline.value = undefined;
@@ -963,7 +998,15 @@ export default {
         redoStack.value = [];
         jsonErrors.value = {};
         reviewOpen.value = false;
-        showToast('success', 'Configuration saved. Apply status has been refreshed.');
+
+        try {
+          meta.value = await loadConfigMeta();
+          metaRefreshError.value = null;
+          showToast('success', 'Configuration saved. Apply status has been refreshed.');
+        } catch (metaError) {
+          metaRefreshError.value = metaError.message || 'Unknown metadata error.';
+          showToast('error', `Configuration saved, but apply status could not be refreshed: ${metaRefreshError.value}`);
+        }
       } catch (saveError) {
         showToast('error', saveError.message || 'Configuration could not be saved');
       } finally {
@@ -977,9 +1020,10 @@ export default {
       error.value = null;
       try {
         const nextConfig = await api.get('/api/config');
-        const nextMeta = await loadConfigMeta(nextConfig);
+        const nextMeta = await loadConfigMeta();
         config.value = nextConfig;
         meta.value = nextMeta;
+        metaRefreshError.value = null;
         const available = visibleCategories.value;
         if (!available.some(group => group.key === activeCategory.value)) {
           activeCategory.value = available[0]?.key || CATEGORY_GROUPS[0].key;
@@ -1031,14 +1075,14 @@ export default {
     });
 
     return {
-      config, meta, loading, saving, error, toast,
+      config, meta, loading, saving, error, toast, metaRefreshError,
       searchQuery, healthFilter, activeCategory, editingSection, reviewOpen, mobileOverflowOpen,
       healthFilters, visibleCategories, displayGroups, reviewGroups,
       sectionCount, fieldCount, hasChanges, changeCount, changedSectionCount,
       hasDraftErrors, canUndo, canRedo, globalFilterActive, reviewRestartCount,
       healthCount, categoryStats, selectCategory, selectHealthFilter, clearFilters,
       sectionLabel, sectionDescription, sectionFieldCount, sectionHealthCount,
-      sectionApplySummary, sectionOwner, ownerInfo, sectionEntries, sectionSearchHits,
+      sectionApplySummary, sectionApplyDetails, sectionOwner, ownerInfo, sectionEntries, sectionSearchHits,
       sectionChanged, fieldChanged, isSectionExpanded, toggleSection,
       startSectionDraft, finishSectionDraft, cancelSectionDraft, discardAllDrafts,
       setFieldValue, setJsonFieldValue, fieldError, sectionHasErrors,
