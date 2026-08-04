@@ -46,6 +46,7 @@ from ..api_common import (
 
 log = get_logger("web.api")
 
+
 def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
     """Setup wizard (first-boot, no auth required) (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -461,6 +462,11 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         # Store diff on request for the audit middleware
         request["_config_diff"] = config_diff
 
+        # NOTE: the response shape is the settled legacy one — callers, and
+        # the Config page's own state, treat this body as the config document.
+        # Per-field apply state belongs on /api/config/meta, which reports it
+        # from the registry with consumer-aware effective state; adding a key
+        # here invented a 36th section and duplicated that logic badly.
         return web.json_response(after_config)
 
 

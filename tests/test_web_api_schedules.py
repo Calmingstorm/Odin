@@ -56,6 +56,7 @@ class TestListCreate:
                                  json={"description": "j", "channel_id": "1"})).status == 400
 
 
+
 class TestUpdate:
     async def test_validation(self):
         async with TestClient(TestServer(_app())) as c:

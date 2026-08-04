@@ -61,9 +61,12 @@ EXPECTED_TOOL_HASHES = {
     "purge_messages": "db35efc321c205b1",
     "post_file": "6860faab30251338",
     "generate_file": "2f4687a63e985fdd",
-    "schedule_task": "8ce8ebd429e7ad19",
+    # Updated 2026-08-04: run_at now requires an explicit offset at the
+    # scheduler boundary, so the tool must not advertise an invalid naive ISO.
+    "schedule_task": "f06f1865a4ec7e95",
     "list_schedules": "6f72cb95cee9eb6c",
-    "update_schedule": "46f5e367a38afbbc",
+    # Updated with schedule_task: scheduler updates reject naive run_at too.
+    "update_schedule": "35c886de5f87cb5d",
     "delete_schedule": "01e54d37b70471a8",
     "parse_time": "6ae3f4c04138a2cd",
     "search_history": "d3d173bfe5262866",

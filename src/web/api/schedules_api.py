@@ -23,6 +23,7 @@ from ..api_common import (
 
 log = get_logger("web.api")
 
+
 def register_schedules(routes: web.RouteTableDef, bot) -> None:
     """Schedules (verbatim from the monolith)."""
     # ------------------------------------------------------------------

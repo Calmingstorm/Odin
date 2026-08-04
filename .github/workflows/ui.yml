@@ -10,9 +10,9 @@ on:
       - 'vite.config.mjs'
       - 'tailwind.config.mjs'
       - 'postcss.config.mjs'
-      - 'scripts/check-vue-templates.mjs'
-      - 'scripts/check-template-bindings.mjs'
-      - 'scripts/check-modal-race.mjs'
+      # Every script `npm run check` runs. Listing only some of them let a PR
+      # that weakens or deletes an unlisted guard run with no WebUI job at all.
+      - 'scripts/check-*.mjs'
       - '.github/workflows/ui.yml'
   pull_request:
     paths:
@@ -22,9 +22,9 @@ on:
       - 'vite.config.mjs'
       - 'tailwind.config.mjs'
       - 'postcss.config.mjs'
-      - 'scripts/check-vue-templates.mjs'
-      - 'scripts/check-template-bindings.mjs'
-      - 'scripts/check-modal-race.mjs'
+      # Every script `npm run check` runs. Listing only some of them let a PR
+      # that weakens or deletes an unlisted guard run with no WebUI job at all.
+      - 'scripts/check-*.mjs'
       - '.github/workflows/ui.yml'
 
 jobs:

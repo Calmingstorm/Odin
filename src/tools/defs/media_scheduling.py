@@ -112,8 +112,9 @@ TOOLS_SECTION: list[dict] = [
                 "run_at": {
                     "type": "string",
                     "description": (
-                        "ISO datetime for one-time tasks (e.g. '2026-03-20T09:00'). Use parse_time "
-                        "to convert natural language. Omit for recurring."
+                        "Offset-aware ISO datetime for one-time tasks "
+                        "(e.g. '2026-03-20T09:00:00Z'). Use parse_time to convert "
+                        "natural language. Omit for recurring."
                     ),
                 },
                 "trigger": {
@@ -268,7 +269,10 @@ TOOLS_SECTION: list[dict] = [
                 },
                 "run_at": {
                     "type": "string",
-                    "description": "New ISO datetime for one-time (replaces previous timing)",
+                    "description": (
+                        "New offset-aware ISO datetime for one-time "
+                        "(replaces previous timing)"
+                    ),
                 },
                 "trigger": {
                     "type": "object",

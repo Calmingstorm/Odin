@@ -86,15 +86,48 @@ def _safe_int_param(
         return min(max(default, lo), hi)
 
 
-def _contains_blocked_fields(d: dict, blocked: frozenset[str], *, _depth: int = 0) -> bool:
-    """Recursively check if any keys in *d* are in *blocked*."""
+def _contains_blocked_fields(d: Any, blocked: frozenset[str], *, _depth: int = 0) -> bool:
+    """Recursively check if any keys in *d* are in *blocked*.
+
+    Lists are traversed too. Descending only into dicts left every credential
+    inside a list unfenced — ``web.api_tokens[].token`` and
+    ``outbound_webhooks.targets[].secret`` reached the writer despite both
+    names being on the blocked list.
+    """
     if _depth > 10:
+        return False
+    if isinstance(d, list):
+        return any(
+            _contains_blocked_fields(item, blocked, _depth=_depth + 1) for item in d
+        )
+    if not isinstance(d, dict):
         return False
     for key, value in d.items():
         if key in blocked:
             return True
-        if isinstance(value, dict) and _contains_blocked_fields(value, blocked, _depth=_depth + 1):
+        if _contains_blocked_fields(value, blocked, _depth=_depth + 1):
             return True
+    return False
+
+
+def contains_redaction_mask(obj: Any, *, _depth: int = 0) -> bool:
+    """Whether a submitted body carries the mask this API hands out.
+
+    A page that renders a masked secret as an editable control round-trips
+    ``••••••••`` back on save, overwriting the real credential with eight
+    bullets. Nobody sets a secret to that deliberately, so refusing it costs no
+    legitimate capability and closes the destruction path wherever it appears.
+    """
+    if _depth > 10:
+        return False
+    if isinstance(obj, str):
+        return obj == "••••••••"
+    if isinstance(obj, dict):
+        return any(
+            contains_redaction_mask(v, _depth=_depth + 1) for v in obj.values()
+        )
+    if isinstance(obj, list):
+        return any(contains_redaction_mask(v, _depth=_depth + 1) for v in obj)
     return False
 
 
@@ -109,16 +142,43 @@ def _deep_merge(base: dict, updates: dict, *, _depth: int = 0) -> None:
             base[key] = value
 
 
-def _redact_config(obj: Any, *, _depth: int = 0) -> Any:
-    """Recursively redact sensitive fields from config dicts."""
+def _mask_subtree(obj: Any, *, _depth: int = 0) -> Any:
+    """Mask every scalar beneath *obj*, keeping the shape.
+
+    Used for containers whose child keys are operator-chosen. Keys survive so
+    the page can still show WHICH headers or webhooks exist; only values go.
+    """
     if _depth > 10:
         return "..."
     if isinstance(obj, dict):
-        return {
-            k: "••••••••" if _is_sensitive_key(k) and isinstance(v, str) and v
-            else _redact_config(v, _depth=_depth + 1)
-            for k, v in obj.items()
-        }
+        return {k: _mask_subtree(v, _depth=_depth + 1) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_mask_subtree(v, _depth=_depth + 1) for v in obj]
+    if obj is None or obj == "":
+        return obj
+    return "••••••••"
+
+
+def _redact_config(obj: Any, *, _depth: int = 0) -> Any:
+    """Recursively redact sensitive fields from config dicts.
+
+    Two rules, because one is not enough. A credential-shaped KEY masks its own
+    string value. A credential CONTAINER masks everything underneath it,
+    because its child keys are named by the operator — `headers.Authorization`
+    and `webhook_urls.ops` look ordinary and used to be served verbatim.
+    """
+    if _depth > 10:
+        return "..."
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            if _config_sensitivity.is_opaque_container_key(k):
+                out[k] = _mask_subtree(v, _depth=_depth + 1)
+            elif _is_sensitive_key(k) and isinstance(v, str) and v:
+                out[k] = "••••••••"
+            else:
+                out[k] = _redact_config(v, _depth=_depth + 1)
+        return out
     if isinstance(obj, list):
         return [_redact_config(v, _depth=_depth + 1) for v in obj]
     return obj

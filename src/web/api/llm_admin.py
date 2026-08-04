@@ -73,6 +73,7 @@ def _validate_ollama_url(url: str) -> str:
         pass
     raise ValueError(f"Ollama base_url must point to a local/private network address, got: {host}")
 
+
 def _parse_int(val, name: str, lo: int = 1, hi: int = 262000) -> int:
     try:
         v = int(val)
@@ -490,35 +491,36 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
-        if aux_cfg is None:
-            return web.json_response({"error": "auxiliary config unavailable"}, status=503)
-
-        # Build an IMMUTABLE desired spec (presence-merged with current config)
-        # WITHOUT mutating live config — reload_auxiliary commits it atomically
-        # under the lock, so a concurrent PUT can't install a candidate built
-        # from a config this handler already changed. Only enabled + model are
-        # configurable; auth and token limit are shared with the main Codex.
-        want_enabled = bool(body["enabled"]) if "enabled" in body else aux_cfg.enabled
-        want_model = aux_cfg.model
-        if "model" in body and str(body["model"]).strip():
-            want_model = str(body["model"]).strip()
-        desired = {"enabled": want_enabled, "model": want_model}
-        # Persistence runs INSIDE reload_auxiliary's locked transaction: the
-        # SYNC write runs on an executor future (settled before the lock
-        # releases), the candidate is applied, persisted, and (on persist
-        # failure) EXACTLY restored — no phantom success, no probed reload.
+        # Prepare under the global config transaction, then release it for
+        # candidate construction and the live model probe. reload_auxiliary()
+        # reacquires config_transaction() OUTER and provider_lock inner for a
+        # CAS-checked swap + persistence transaction.
         try:
             async with config_transaction():
-                result = await bot.llm_gateway.reload_auxiliary(
-                    desired,
-                    persist=lambda: patch_config_paths(
-                        [
-                            (('openai_codex', 'auxiliary', 'enabled'), desired['enabled']),
-                            (('openai_codex', 'auxiliary', 'model'), desired['model']),
-                        ]
-                    ),
+                aux_cfg = getattr(bot.config.openai_codex, "auxiliary", None)
+                if aux_cfg is None:
+                    return web.json_response(
+                        {"error": "auxiliary config unavailable"}, status=503
+                    )
+
+                want_enabled = (
+                    bool(body["enabled"]) if "enabled" in body else aux_cfg.enabled
                 )
+                want_model = aux_cfg.model
+                if "model" in body and str(body["model"]).strip():
+                    want_model = str(body["model"]).strip()
+                desired = {"enabled": want_enabled, "model": want_model}
+                plan = bot.llm_gateway.prepare_auxiliary_reload(desired)
+
+            result = await bot.llm_gateway.reload_auxiliary(
+                plan=plan,
+                persist=lambda: patch_config_paths(
+                    [
+                        (("openai_codex", "auxiliary", "enabled"), desired["enabled"]),
+                        (("openai_codex", "auxiliary", "model"), desired["model"]),
+                    ]
+                ),
+            )
         except Exception as e:
             log.exception("Auxiliary reload raised")
             return web.json_response({"error": f"reload failed: {e}"}, status=500)
@@ -739,6 +741,7 @@ def register_ollama_admin(routes: web.RouteTableDef, bot) -> None:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
+
         base_url = (body.get("base_url") or "").rstrip("/")
         try:
             base_url = _validate_ollama_url(base_url)

@@ -1011,3 +1011,180 @@ class TestPersistWorkerAlwaysSettles:
         # the settle observed the cancellation but only after the worker settled
         assert was_cancelled is True
         assert exc is None
+
+
+class TestAuxiliaryPrepareProbeCAS:
+    """The live probe must not monopolize config, and a stale probe may not win."""
+
+    @staticmethod
+    def _aux_cfg(enabled=True, model="gpt-5.6-luna"):
+        cfg = _cfg()
+        cfg.openai_codex.auxiliary = SimpleNamespace(enabled=enabled, model=model)
+        return cfg
+
+    @staticmethod
+    async def _flush_drains(gw):
+        if gw._aux_drains:
+            await asyncio.gather(*list(gw._aux_drains))
+
+    async def test_probe_runs_without_holding_the_global_config_lock(self):
+        from src.config.persistence import config_transaction
+
+        cfg = self._aux_cfg()
+        primary = _primary()
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(cfg, codex=primary, aux=None)
+        desired = {"enabled": True, "model": "gpt-5.6-terra"}
+        async with config_transaction():
+            plan = gw.prepare_auxiliary_reload(desired)
+
+        probe_started = asyncio.Event()
+        release_probe = asyncio.Event()
+
+        async def _probe(_client):
+            probe_started.set()
+            await release_probe.wait()
+            return None
+
+        with patch.object(gw, "_probe_aux", side_effect=_probe), \
+             patch("src.discord.llm_gateway.CodexChatClient"), \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
+            task = asyncio.create_task(gw.reload_auxiliary(plan=plan))
+            await probe_started.wait()
+            # An unrelated writer acquires immediately while the provider stalls.
+            await asyncio.wait_for(config_transaction().acquire(), timeout=0.1)
+            config_transaction().release()
+            release_probe.set()
+            result = await task
+        await self._flush_drains(gw)
+        assert result["committed"] is True
+        assert gw.auxiliary_llm_client is candidate
+
+    async def test_concurrent_aux_change_rejects_a_stale_probed_candidate(self):
+        from src.config.persistence import config_transaction
+
+        cfg = self._aux_cfg()
+        prior = SimpleNamespace(drain_and_close=AsyncMock())
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(cfg, codex=_primary(), aux=prior)
+        desired = {"enabled": True, "model": "gpt-5.6-terra"}
+        async with config_transaction():
+            plan = gw.prepare_auxiliary_reload(desired)
+
+        probe_started = asyncio.Event()
+        release_probe = asyncio.Event()
+
+        async def _probe(_client):
+            probe_started.set()
+            await release_probe.wait()
+            return None
+
+        with patch.object(gw, "_probe_aux", side_effect=_probe), \
+             patch("src.discord.llm_gateway.CodexChatClient"), \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
+            task = asyncio.create_task(gw.reload_auxiliary(plan=plan))
+            await probe_started.wait()
+            async with config_transaction():
+                cfg.openai_codex.auxiliary.model = "gpt-5.6-sol"
+            release_probe.set()
+            result = await task
+        await self._flush_drains(gw)
+        assert result["committed"] is False
+        assert "concurrent" in result["reason"]
+        assert cfg.openai_codex.auxiliary.model == "gpt-5.6-sol"
+        assert gw.auxiliary_llm_client is prior
+        candidate.drain_and_close.assert_awaited_once()
+        prior.drain_and_close.assert_not_called()
+
+    async def test_concurrent_candidate_input_change_rejects_stale_client(self):
+        from src.config.persistence import config_transaction
+
+        cfg = self._aux_cfg()
+        prior = SimpleNamespace(drain_and_close=AsyncMock())
+        candidate = SimpleNamespace(drain_and_close=AsyncMock())
+        gw = _gw(cfg, codex=_primary(), aux=prior)
+        desired = {"enabled": True, "model": "gpt-5.6-terra"}
+        async with config_transaction():
+            plan = gw.prepare_auxiliary_reload(desired)
+
+        probe_started = asyncio.Event()
+        release_probe = asyncio.Event()
+
+        async def _probe(_client):
+            probe_started.set()
+            await release_probe.wait()
+            return None
+
+        with patch.object(gw, "_probe_aux", side_effect=_probe), \
+             patch("src.discord.llm_gateway.CodexChatClient"), \
+             patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=candidate):
+            task = asyncio.create_task(gw.reload_auxiliary(plan=plan))
+            await probe_started.wait()
+            async with config_transaction():
+                cfg.openai_codex.max_tokens += 1
+            release_probe.set()
+            result = await task
+        await self._flush_drains(gw)
+        assert result["committed"] is False
+        assert "Codex config" in result["reason"]
+        assert gw.auxiliary_llm_client is prior
+        candidate.drain_and_close.assert_awaited_once()
+
+
+class TestAuxiliaryPlanEdges:
+    @staticmethod
+    def _cfg_with_aux(*, enabled=True, model="gpt-5.6-luna"):
+        cfg = _cfg()
+        cfg.openai_codex.auxiliary = SimpleNamespace(enabled=enabled, model=model)
+        return cfg
+
+    async def test_plan_defaults_to_current_auxiliary_state(self):
+        cfg = self._cfg_with_aux(enabled=False, model="gpt-5.6-sol")
+        gw = _gw(cfg, codex=_primary(), aux=None)
+        plan = gw.prepare_auxiliary_reload()
+        assert plan.desired == {"enabled": False, "model": "gpt-5.6-sol"}
+
+    async def test_explicit_desired_must_match_supplied_plan(self):
+        cfg = self._cfg_with_aux()
+        gw = _gw(cfg, codex=_primary(), aux=None)
+        plan = gw.prepare_auxiliary_reload(
+            {"enabled": True, "model": "gpt-5.6-terra"}
+        )
+        with pytest.raises(ValueError, match="does not match"):
+            await gw.reload_auxiliary(
+                {"enabled": True, "model": "gpt-5.6-sol"}, plan=plan
+            )
+
+    async def test_preexisting_stale_plan_is_rejected_before_build(self):
+        cfg = self._cfg_with_aux()
+        gw = _gw(cfg, codex=_primary(), aux=None)
+        plan = gw.prepare_auxiliary_reload(
+            {"enabled": True, "model": "gpt-5.6-terra"}
+        )
+        gw._aux_reload_gen += 1
+        with patch.object(gw, "_build_aux_candidate") as build:
+            result = await gw.reload_auxiliary(plan=plan)
+        assert result["committed"] is False
+        assert "concurrent" in result["reason"]
+        build.assert_not_called()
+
+    async def test_primary_change_is_a_stale_plan(self):
+        cfg = self._cfg_with_aux()
+        gw = _gw(cfg, codex=_primary(), aux=None)
+        plan = gw.prepare_auxiliary_reload(
+            {"enabled": True, "model": "gpt-5.6-terra"}
+        )
+        gw.codex_client = _primary()
+        result = await gw.reload_auxiliary(plan=plan)
+        assert result["committed"] is False
+        assert result["reason"] == "concurrent reload: primary changed; retry"
+
+    async def test_no_primary_is_reported_without_building(self):
+        cfg = self._cfg_with_aux()
+        gw = _gw(cfg, codex=None, aux=None)
+        plan = gw.prepare_auxiliary_reload(
+            {"enabled": True, "model": "gpt-5.6-terra"}
+        )
+        result = await gw.reload_auxiliary(plan=plan)
+        assert result["committed"] is False
+        assert "no primary" in result["reason"]

@@ -1024,6 +1024,18 @@ class TestConfigMeta:
         "apply_state",
     }
 
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_save_is_unaffected(self):
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.put(
+                "/api/config", json={"discord": {"require_mention": False}}
+            )
+
+        assert resp.status == 200
+        assert bot.config.discord.require_mention is False
+
     def test_the_route_sits_behind_the_admin_gate(self):
         """It returns every non-secret configuration value. Route-level tests
         run without the auth middleware, so nothing else here would notice the
