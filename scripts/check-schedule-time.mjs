@@ -146,9 +146,29 @@ if (repeat) {
   check('trailing junk after a valid value is rejected',
     analyzeLocalDateTime('2026-06-15T09:00garbage').state === 'invalid',
     analyzeLocalDateTime('2026-06-15T09:00garbage').state);
-  check('a seconds component is still accepted',
-    analyzeLocalDateTime('2026-06-15T09:00:30').state === 'ok',
-    analyzeLocalDateTime('2026-06-15T09:00:30').state);
+  // Accepting :30 proves nothing — the truncating implementation returned 'ok'
+  // too. Pin the RESULTING INSTANT, which is what was silently wrong.
+  {
+    const withSeconds = analyzeLocalDateTime('2026-06-15T09:00:30');
+    check('a seconds component is accepted', withSeconds.state === 'ok', withSeconds.state);
+    check('and the seconds actually survive',
+      withSeconds.state === 'ok' && withSeconds.instant.getSeconds() === 30,
+      withSeconds.state === 'ok' ? String(withSeconds.instant.getSeconds()) : withSeconds.state);
+    const withoutSeconds = analyzeLocalDateTime('2026-06-15T09:00');
+    check('and differ from the same time without them',
+      withSeconds.state === 'ok' && withoutSeconds.state === 'ok'
+        && withSeconds.iso !== withoutSeconds.iso,
+      `${withSeconds.iso} vs ${withoutSeconds.iso}`);
+    check('a minute value with no seconds resolves at :00',
+      withoutSeconds.state === 'ok' && withoutSeconds.instant.getSeconds() === 0,
+      withoutSeconds.state === 'ok' ? String(withoutSeconds.instant.getSeconds()) : '');
+  }
+  check('out-of-range seconds are rejected',
+    analyzeLocalDateTime('2026-06-15T09:00:60').state === 'invalid',
+    analyzeLocalDateTime('2026-06-15T09:00:60').state);
+  check('non-numeric seconds are rejected',
+    analyzeLocalDateTime('2026-06-15T09:00:ab').state === 'invalid',
+    analyzeLocalDateTime('2026-06-15T09:00:ab').state);
 }
 
 console.log(`schedule-time [${process.env.TZ}]: ${passed} assertions passed, ${failed} failed`);
