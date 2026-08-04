@@ -26,7 +26,18 @@ export default {
         <div class="skeleton skeleton-text" style="width:200px;margin:0 auto;"></div>
       </div>
 
+      <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
+        <p class="text-red-400">{{ error }}</p>
+        <button @click="retry" class="btn btn-ghost text-xs">Retry</button>
+      </div>
+
       <div v-else class="space-y-4">
+        <div v-if="failedCount > 0" class="hm-card border-amber-900" role="status" aria-live="polite">
+          <p class="text-amber-400 text-sm">
+            {{ failedCount }} of 9 internal endpoints failed to load — those sections may be empty.
+          </p>
+        </div>
 
         <!-- Startup Diagnostics -->
         <section class="hm-card" style="padding:1.25rem;">
@@ -175,6 +186,11 @@ export default {
     const compressionStats = ref(null);
     const freshnessStats = ref(null);
     const governorStats = ref(null);
+    // Every endpoint failing used to render a fully-loaded page of empty
+    // sections: no error, no retry, nothing to distinguish "the bot is down"
+    // from "nothing to report".
+    const error = ref('');
+    const failedCount = ref(0);
     let timer = null;
 
     async function fetchAll() {
@@ -200,7 +216,21 @@ export default {
       compressionStats.value = val(6);
       freshnessStats.value = val(7);
       governorStats.value = val(8);
+      const rejected = results.filter(r => r.status === 'rejected');
+      failedCount.value = rejected.length;
+      if (rejected.length === results.length) {
+        const reason = rejected[0]?.reason;
+        error.value = reason?.message || 'Failed to load internals';
+      } else {
+        error.value = '';
+      }
       loading.value = false;
+    }
+
+    function retry() {
+      loading.value = true;
+      error.value = '';
+      fetchAll();
     }
 
     let armed = false;
@@ -232,7 +262,7 @@ export default {
     onUnmounted(disarm);
 
     return {
-      loading, startup, subsystems, sshPool, httpPool,
+      loading, error, failedCount, retry, startup, subsystems, sshPool, httpPool,
       riskStats, recoveryStats, compressionStats, freshnessStats,
       governorStats, statusColor, formatTime,
     };

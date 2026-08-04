@@ -168,6 +168,11 @@ class OdinWebSocket {
     this._state = 'disconnected';
     this.onStatusChange = null; // callback(connected: boolean)
     this.onStateChange = null;  // callback(state: string, detail: object)
+    // Latency is measured on every pong but was only ever published through
+    // onStateChange — which _setState suppresses when the state is unchanged,
+    // and _latency is reset to -1 on disconnect, so the sidebar readout could
+    // never render a real value.
+    this.onLatency = null;      // callback(latencyMs: number)
   }
 
   get connected() { return this._ws?.readyState === WebSocket.OPEN; }
@@ -296,6 +301,9 @@ class OdinWebSocket {
         if (data.ts) {
           this._latency = Date.now() - data.ts;
           this._lastPongTime = Date.now();
+          if (this.onLatency) {
+            try { this.onLatency(this._latency); } catch { /* listener errors are not ours */ }
+          }
         }
         return;
       }

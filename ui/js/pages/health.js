@@ -40,13 +40,20 @@ export default {
       </div>
 
       <!-- Error state -->
-      <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
+      <!-- Full-page error ONLY when there is nothing to show. A failed
+           background refresh must not replace data we already have:
+           one 502 during a restart used to blank a page that had been
+           rendering fine, until the next poll a full interval later. -->
+      <div v-else-if="error && !data" class="hm-card border-red-900 error-state" role="alert">
         <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="retry" class="btn btn-ghost text-xs">Retry</button>
       </div>
 
       <div v-else>
+        <div v-if="error" class="hm-card border-amber-900 mb-3" role="status" aria-live="polite">
+          <p class="text-amber-400 text-sm">Last refresh failed: {{ error }} — showing the most recent data.</p>
+        </div>
         <!-- Overall status banner -->
         <div class="hm-card mb-4" style="padding:1.25rem 1.5rem;">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;">

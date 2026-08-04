@@ -22,13 +22,20 @@ export default {
       </div>
 
       <!-- Error -->
-      <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
+      <!-- Full-page error ONLY when there is nothing to show. A failed
+           background refresh must not replace data we already have:
+           one 502 during a restart used to blank a page that had been
+           rendering fine, until the next poll a full interval later. -->
+      <div v-else-if="error && !data" class="hm-card border-red-900 error-state" role="alert">
         <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="retry" class="btn btn-ghost text-xs">Retry</button>
       </div>
 
       <div v-else>
+        <div v-if="error" class="hm-card border-amber-900 mb-3" role="status" aria-live="polite">
+          <p class="text-amber-400 text-sm">Last refresh failed: {{ error }} — showing the most recent data.</p>
+        </div>
         <!-- Header -->
         <div class="flex items-center justify-between mb-4">
           <h2 class="text-lg font-semibold text-slate-200">Resource Usage</h2>
