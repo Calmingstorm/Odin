@@ -168,8 +168,10 @@ class LoopAgentBridge:
                 if (
                     tool_name == "spawn_agent"
                     and _self_id["id"]
-                    and not tool_input.get("parent_id")
                 ):
+                    # Invocation ancestry is authoritative. A nested model may
+                    # not choose a sibling/root as parent and escape this
+                    # agent's depth, child, or lifetime-tree limits.
                     tool_input = {**tool_input, "parent_id": _self_id["id"]}
                 return await _shared_cb(tool_name, tool_input)
 

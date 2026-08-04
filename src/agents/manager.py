@@ -289,12 +289,12 @@ class AgentInfo:
     # (chat/scheduled/hard limits differ) so progress can be computed honestly
     # instead of against a hardcoded guess.
     max_iterations: int = MAX_AGENT_ITERATIONS
-    # Lifetime direct-child limit for THIS agent, snapshotted from config when
-    # the ROOT of its tree was spawned; every descendant inherits the root's
-    # value, so a live config change never produces a tree whose members
-    # disagree about the rules. It counts children ever spawned, not merely
-    # concurrent ones. The agent's own prompt advertises this same number.
+    # Lifetime direct-child and depth limits, snapshotted from config when
+    # the ROOT of the tree was spawned. Every descendant inherits the root's
+    # values, so a live config change never changes the rules under a running
+    # tree. The agent's own prompt advertises these same effective limits.
     max_children: int = MAX_CHILDREN_PER_AGENT
+    max_depth: int = MAX_NESTING_DEPTH
     # Root of this agent's tree (self for roots) — the unit the tree-lifetime
     # agent cap is enforced against.
     root_id: str = ""
@@ -399,9 +399,13 @@ class AgentManager:
             if not parent:
                 return f"Error: Parent agent '{parent_id}' not found."
             depth = parent.depth + 1
-            if depth > max_depth:
+            # The root's depth snapshot governs every descendant. The
+            # caller-supplied max_depth is only meaningful when starting a
+            # new root; rereading live config here would split one tree across
+            # two different limits.
+            if depth > parent.max_depth:
                 return (
-                    f"Error: Maximum nesting depth ({max_depth}) exceeded. "
+                    f"Error: Maximum nesting depth ({parent.max_depth}) exceeded. "
                     f"Parent '{parent_id}' is at depth {parent.depth}."
                 )
             # The PARENT's snapshot governs — taken from config when its
@@ -445,6 +449,11 @@ class AgentManager:
                 if parent_id and parent_id in self._agents
                 else (max_children or MAX_CHILDREN_PER_AGENT)
             ),
+            max_depth=(
+                self._agents[parent_id].max_depth
+                if parent_id and parent_id in self._agents
+                else max_depth
+            ),
             root_id=(
                 (self._agents[parent_id].root_id or parent_id)
                 if parent_id and parent_id in self._agents
@@ -465,9 +474,9 @@ class AgentManager:
         else:
             agent_system = ""
 
-        can_nest = depth < max_depth
+        can_nest = depth < agent.max_depth
         if can_nest:
-            remaining = max_depth - depth
+            remaining = agent.max_depth - depth
             agent_system += (
                 f"AGENT CONTEXT: You are agent '{label}' (depth {depth}). "
                 f"You may spawn up to {agent.max_children} sub-agents "
@@ -482,7 +491,9 @@ class AgentManager:
             )
 
         # Filter tools based on depth
-        filtered_tools = filter_agent_tools(tools or [], depth=depth, max_depth=max_depth)
+        filtered_tools = filter_agent_tools(
+            tools or [], depth=depth, max_depth=agent.max_depth
+        )
 
         # Seed messages with the goal
         agent.messages = [{"role": "user", "content": goal}]

@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import ipaddress as _ipaddress
 import urllib.parse as _urlparse
+from typing import Any
 
 from aiohttp import web
+from pydantic import TypeAdapter, ValidationError
 
 from ...config.persistence import (
     config_transaction,
@@ -154,6 +156,36 @@ def _auxiliary_status(bot) -> dict:
     }
 
 
+def _boot_codex_group_status(
+    bot: Any,
+    group: str,
+    desired: dict[str, Any],
+) -> tuple[dict[str, Any] | None, bool | None]:
+    """Return boot-effective values and whether desired differs.
+
+    Connection-pool and context-compression objects are captured by runtime
+    components at boot. The desired config object is therefore not evidence
+    of what this process uses. ``None`` is deliberate when the boot snapshot
+    is unavailable: unknown is more honest than inventing an applied state.
+    """
+    # OdinClient records this once during construction. Read the concrete
+    # instance dictionary so permissive mocks/proxies cannot manufacture a
+    # pretend snapshot through __getattr__ and make status look authoritative.
+    boot = getattr(bot, "__dict__", {}).get("boot_config_snapshot")
+    if not isinstance(boot, dict):
+        return None, None
+    codex_boot = boot.get("openai_codex")
+    if not isinstance(codex_boot, dict):
+        return None, None
+    effective = codex_boot.get(group)
+    if not isinstance(effective, dict):
+        return None, None
+    # Only compare the public schema keys represented by desired. This keeps
+    # future boot-snapshot metadata from creating a false pending signal.
+    normalized = {key: effective.get(key) for key in desired}
+    return normalized, normalized != desired
+
+
 def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
     """LLM provider management (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -171,6 +203,15 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
         ollama_cfg = getattr(bot.config, "ollama", None)
         kimi_cfg = getattr(bot.config, "kimi", None)
         kimi_has_key = bool(kimi_cfg and kimi_cfg.api_key)
+
+        desired_pool = bot.config.openai_codex.connection_pool.model_dump()
+        desired_compression = bot.config.openai_codex.context_compression.model_dump()
+        effective_pool, pool_pending_restart = _boot_codex_group_status(
+            bot, "connection_pool", desired_pool
+        )
+        effective_compression, compression_pending_restart = _boot_codex_group_status(
+            bot, "context_compression", desired_compression
+        )
 
         result = {
             "active_provider": active,
@@ -218,23 +259,12 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                     "base_delay": bot.config.openai_codex.retry.base_delay,
                     "max_delay": bot.config.openai_codex.retry.max_delay,
                 },
-                "connection_pool": {
-                    "max_connections": (
-                        bot.config.openai_codex.connection_pool.max_connections
-                    ),
-                    "keepalive_timeout": (
-                        bot.config.openai_codex.connection_pool.keepalive_timeout
-                    ),
-                },
-                "context_compression": {
-                    "enabled": bot.config.openai_codex.context_compression.enabled,
-                    "max_context_chars": (
-                        bot.config.openai_codex.context_compression.max_context_chars
-                    ),
-                    "keep_recent_iterations": (
-                        bot.config.openai_codex.context_compression.keep_recent_iterations
-                    ),
-                },
+                "connection_pool": desired_pool,
+                "effective_connection_pool": effective_pool,
+                "connection_pool_pending_restart": pool_pending_restart,
+                "context_compression": desired_compression,
+                "effective_context_compression": effective_compression,
+                "context_compression_pending_restart": compression_pending_restart,
             },
             "ollama": {
                 "configured": ollama_configured,
@@ -302,7 +332,9 @@ def _set_fields(obj, values: dict[str, object]) -> None:
         setattr(obj, key, value)
 
 
-def _provider_changes(section: str, desired: dict[str, object], body: dict) -> list:
+def _provider_changes(
+    section: str, desired: dict[str, object], body: dict
+) -> list[tuple[tuple[str, ...], Any]]:
     return [((section, key), desired[key]) for key in desired if key in body]
 
 
@@ -346,28 +378,31 @@ def _parse_codex_advanced(body: dict, cfg) -> tuple[list, list, bool] | web.Resp
     thresholds live-before-rebind and stale-after — replacement makes
     persist-only deterministic.
     """
-    from pydantic import ValidationError
-
     from ...config.schema import (
         ConnectionPoolConfig,
         ContextCompressionConfig,
         RetryConfig,
     )
 
-    def _schema_int(value, name, lo, hi):
-        # Schema-true integer: the config fields are ints with range
-        # validators; bool is an int subclass and 1.9 must not truncate.
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+    integer_adapter = TypeAdapter(int)
+
+    def _schema_int(value: Any, name: str, lo: int, hi: int) -> int:
+        # Match Pydantic's lax integer coercion (for example "600" -> 600),
+        # except JSON booleans stay forbidden at this HTTP boundary. Pydantic
+        # accepts bool as int for compatibility, but an operator checkbox is
+        # never a meaningful timeout.
+        if isinstance(value, bool):
             raise ValueError(f"{name} must be an integer")
-        if isinstance(value, float) and not value.is_integer():
-            raise ValueError(f"{name} must be an integer")
-        parsed = int(value)
+        try:
+            parsed = integer_adapter.validate_python(value)
+        except ValidationError as exc:
+            raise ValueError(f"{name} must be an integer") from exc
         if not lo <= parsed <= hi:
             raise ValueError(f"{name} must be between {lo} and {hi}")
         return parsed
 
-    persist: list = []
-    ops: list = []
+    persist: list[tuple[tuple[str, ...], Any]] = []
+    ops: list[tuple[str, Any]] = []
     wants_reload = False
     try:
         if "request_timeout_seconds" in body:
@@ -426,14 +461,14 @@ def _parse_codex_advanced(body: dict, cfg) -> tuple[list, list, bool] | web.Resp
     return persist, ops, wants_reload
 
 
-def _apply_ops(cfg, ops: list) -> list:
+def _apply_ops(cfg: Any, ops: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
     """Apply ``(attribute, value)`` ops on cfg; return inverse ops.
 
     Nested groups arrive as whole model objects and REPLACE the previous
     object — the inverse holds the prior object by identity, so rollback
     restores exactly what boot-time captors still reference.
     """
-    inverse: list = []
+    inverse: list[tuple[str, Any]] = []
     for attr, value in ops:
         inverse.append((attr, getattr(cfg, attr)))
         setattr(cfg, attr, value)
@@ -593,7 +628,9 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     except BaseException:
                         _set_fields(cfg, prior)
                         _apply_ops(cfg, adv_inverse)  # restore prior objects
-                        adv_prior_persist = []
+                        adv_prior_persist: list[
+                            tuple[tuple[str, ...], Any]
+                        ] = []
                         for attr, prior_value in adv_inverse:
                             if hasattr(prior_value, "model_dump"):
                                 adv_prior_persist.extend(
@@ -604,13 +641,13 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                                 adv_prior_persist.append(
                                     (("openai_codex", attr), prior_value)
                                 )
+                        prior_persist: list[tuple[tuple[str, ...], Any]] = [
+                            (("openai_codex", key), value)
+                            for key, value in prior.items()
+                            if key in body
+                        ]
                         rollback_exc, rollback_cancelled = await persist_config_paths_locked(
-                            [
-                                (("openai_codex", key), value)
-                                for key, value in prior.items()
-                                if key in body
-                            ]
-                            + adv_prior_persist
+                            prior_persist + adv_prior_persist
                         )
                         if rollback_exc is not None:
                             log.critical(

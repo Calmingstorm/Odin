@@ -176,12 +176,13 @@ class TestInvocationBoundToolCallback:
         assert name == "spawn_agent"
         assert tool_input["parent_id"] == "agent123"
 
-    async def test_an_explicit_parent_id_is_not_overridden(self):
+    async def test_an_explicit_parent_id_is_overridden_by_invoking_agent(self):
+        """A nested model cannot choose another tree and evade its limits."""
         captured = self._bridge_and_captured()
         bound_cb = captured["tool_executor_callback"]
         await bound_cb("spawn_agent", {"label": "c", "goal": "g", "parent_id": "other"})
         _, tool_input = captured["dispatched"]
-        assert tool_input["parent_id"] == "other"
+        assert tool_input["parent_id"] == "agent123"
 
     async def test_other_tools_pass_through_untouched(self):
         captured = self._bridge_and_captured()

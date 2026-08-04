@@ -1151,6 +1151,46 @@ class TestConfiguredChildLimit:
         assert mgr._agents[grandchild].max_children == 5
         assert mgr._agents[grandchild].root_id == root
 
+    async def test_descendants_inherit_the_roots_depth_snapshot(self):
+        """A live depth change applies only to the next root tree."""
+        mgr = AgentManager()
+        root = self._spawn(mgr, "root", max_depth=2)
+        assert mgr._agents[root].max_depth == 2
+        # Callers now offer a larger live value, but this tree stays at two.
+        child = self._spawn(mgr, "child", parent_id=root, max_depth=9)
+        grandchild = self._spawn(mgr, "gc", parent_id=child, max_depth=9)
+        assert mgr._agents[child].max_depth == 2
+        assert mgr._agents[grandchild].max_depth == 2
+        blocked = self._spawn(mgr, "too-deep", parent_id=grandchild, max_depth=9)
+        assert blocked.startswith("Error")
+        assert "Maximum nesting depth (2)" in blocked
+
+    async def test_depth_prompt_and_tools_use_the_root_snapshot(self, monkeypatch):
+        """The visible tool set and prompt must agree with enforcement."""
+        import src.agents.manager as manager_mod
+
+        captured = []
+
+        async def fake_run(agent, system_prompt, tools, *args, **kwargs):
+            captured.append((agent, system_prompt, tools))
+
+        monkeypatch.setattr(manager_mod, "_run_agent", fake_run)
+        mgr = AgentManager()
+        root = self._spawn(mgr, "root", max_depth=1)
+        child = mgr.spawn(
+            label="child", goal="go", channel_id="c1",
+            requester_id="u1", requester_name="user",
+            iteration_callback=_make_iter_cb(),
+            tool_executor_callback=_make_tool_cb(),
+            parent_id=root,
+            max_depth=9,
+            tools=[{"name": "spawn_agent"}, {"name": "run_command"}],
+        )
+        await asyncio.sleep(0)
+        child_record = next(item for item in captured if item[0].id == child)
+        assert "maximum nesting depth" in child_record[1]
+        assert {tool["name"] for tool in child_record[2]} == {"run_command"}
+
     async def test_the_parents_snapshot_governs_enforcement(self):
         mgr = AgentManager()
         root = self._spawn(mgr, "root", max_children=2)
