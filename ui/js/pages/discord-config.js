@@ -35,7 +35,6 @@ export default {
               <h2 class="text-sm font-semibold text-gray-300">Global defaults</h2>
               <p>These settings apply when a guild or channel has no narrower override.</p>
             </div>
-            <span class="provider-status text-xs text-green-400"><span class="status-dot online" aria-hidden="true"></span>Bot credential configured</span>
           </div>
           <div v-if="globalError" class="text-xs text-red-400 mb-3" role="alert">{{ globalError }}</div>
           <div class="discord-global-grid">

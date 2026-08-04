@@ -34,7 +34,14 @@ const CONFIG_EXCLUDED_SECTIONS = new Set([
   'llm_provider', 'openai_codex', 'ollama', 'kimi', 'personality', 'discord',
 ]);
 
-const CONFIG_EXCLUDED_PATHS = new Set(['web.api_tokens']);
+const CONFIG_EXCLUDED_PATH_PREFIXES = Object.freeze([
+  'web.api_tokens',
+  'outbound_webhooks.targets',
+]);
+
+function isExcludedConfigPath(path) {
+  return CONFIG_EXCLUDED_PATH_PREFIXES.some(prefix => path === prefix || path.startsWith(`${prefix}.`));
+}
 
 const STRUCTURED_CONTAINER_PATHS = new Set([
   'sessions.context_budget_overrides', 'tools.governor.host_overrides', 'tools.hosts',
@@ -427,7 +434,7 @@ export default {
 
                               <input v-else :id="fieldInputId(field.path)" class="hm-input font-mono" type="text"
                                      :value="field.value ?? ''" @focus="beginInputEdit(field.path)"
-                                     @input="setFieldValue(field, $event.target.value, { coalesce: true })" @blur="endInputEdit(field)" />
+                                     @input="setFieldValue(field, $event.target.value, { coalesce: true })" @blur="endTextInputEdit(field.path)" />
                             </template>
                             <p v-if="fieldError(field)" class="cfgc-field-error" role="alert">{{ fieldError(field) }}</p>
                           </div>
@@ -578,7 +585,7 @@ export default {
     let restartPollAttempts = 0;
 
     const fields = computed(() => (meta.value?.fields || []).filter(field =>
-      !CONFIG_EXCLUDED_SECTIONS.has(field.path.split('.')[0]) && !CONFIG_EXCLUDED_PATHS.has(field.path)
+      !CONFIG_EXCLUDED_SECTIONS.has(field.path.split('.')[0]) && !isExcludedConfigPath(field.path)
     ));
     const fieldsByPath = computed(() => new Map(fields.value.map(field => [field.path, field])));
     const sectionCount = computed(() => visibleCategories.value.reduce((total, group) => total + group.sections.length, 0));
@@ -726,7 +733,7 @@ export default {
     function sectionEntries(section) {
       const root = pendingConfig.value;
       return sectionFields(section).filter(field => {
-        if (field.path === 'web.api_tokens') return false;
+        if (isExcludedConfigPath(field.path)) return false;
         const segments = field.path.split('.');
         if (segments.length <= 2) return true;
         // Flatten schema-known nested model leaves. Wildcard/container records
@@ -960,6 +967,14 @@ export default {
     function beginInputEdit(path) {
       lastUndoEdit = { path: null, at: 0 };
       inputDrafts.value = { ...inputDrafts.value, [path]: String(valueAtPath(pendingConfig.value, path) ?? '') };
+    }
+
+    function endTextInputEdit(path) {
+      lastUndoEdit = { path: null, at: 0 };
+      if (!Object.hasOwn(inputDrafts.value, path)) return;
+      const next = { ...inputDrafts.value };
+      delete next[path];
+      inputDrafts.value = next;
     }
 
     function endInputEdit(field) {
@@ -1278,7 +1293,7 @@ export default {
       fieldRuntimeCopy, hasHonestAction, runFieldAction,
       sectionChanged, fieldChanged, isSectionExpanded, toggleSection,
       discardAllDrafts,
-      setFieldValue, setNumberFieldValue, numberInputValue, beginInputEdit, endInputEdit,
+      setFieldValue, setNumberFieldValue, numberInputValue, beginInputEdit, endTextInputEdit, endInputEdit,
       addWarningThreshold, removeWarningThreshold, isScalarArray, addScalarArrayItem, removeScalarArrayItem, fieldError, sectionHasErrors,
       undo, redo, openReview, closeReview, mobileCancel,
       applyModeLabel, applyClass, compactValue, formatValue, fieldId, fieldInputId, focusField,
