@@ -4,7 +4,7 @@
  */
 import { api } from '../api.js';
 import { computed, onMounted, ref } from 'vue';
-import { DiscordUserCombobox } from '../discord-user-combobox.js';
+import { DiscordUserCombobox, discordMemberDisplayName } from '../discord-user-combobox.js';
 
 
 export default {
@@ -46,12 +46,12 @@ export default {
             <label class="discord-global-toggle">Respond to bots by default
               <span class="toggle-switch"><input v-model="globalDraft.respond_to_bots" type="checkbox" /><span class="toggle-slider"></span></span>
             </label>
-            <div v-for="editor in globalListEditors" :key="editor.key" :class="['discord-global-list', { 'discord-global-list-full': editor.userAutocomplete }]">
+            <div v-for="editor in globalListEditors" :key="editor.key" :class="['discord-global-list', { 'discord-global-list-full': editor.fullWidth }]">
               <strong>{{ editor.label }}</strong>
               <p>{{ editor.description }}</p>
               <div class="cfgc-chip-list">
-                <span v-for="item in globalDraft[editor.key]" :key="item" class="cfgc-chip">{{ item }}
-                  <button type="button" @click="removeGlobalItem(editor.key, item)" :aria-label="'Remove ' + item">×</button>
+                <span v-for="item in globalDraft[editor.key]" :key="item" class="cfgc-chip">{{ globalItemLabel(editor, item) }}
+                  <button type="button" @click="removeGlobalItem(editor.key, item)" :aria-label="'Remove ' + globalItemLabel(editor, item)">×</button>
                 </span>
                 <span v-if="!globalDraft[editor.key].length" class="cfgc-chip-empty">No entries</span>
               </div>
@@ -193,11 +193,14 @@ export default {
     const globalArrayInputs = ref({});
     const globalMembers = ref([]);
     const globalListEditors = Object.freeze([
-      { key: 'allowed_users', label: 'Allowed users', description: 'Discord user IDs allowed by the global bot policy.', placeholder: 'Search Discord users…', userAutocomplete: true },
-      { key: 'channels', label: 'Allowed channels', description: 'Channel IDs included by the global bot policy.', placeholder: 'Discord channel ID' },
-      { key: 'ignore_bot_ids', label: 'Ignored bot IDs', description: 'Bot identities Odin never responds to automatically.', placeholder: 'Search Discord users or bots…', userAutocomplete: true },
+      { key: 'allowed_users', label: 'Allowed users', description: 'Discord user IDs allowed by the global bot policy.', placeholder: 'Search Discord users…', userAutocomplete: true, fullWidth: true },
+      { key: 'channels', label: 'Allowed channels', description: 'Channel IDs included by the global bot policy.', placeholder: 'Discord channel ID', fullWidth: true },
+      { key: 'ignore_bot_ids', label: 'Ignored bot IDs', description: 'Bot identities Odin never responds to automatically.', placeholder: 'Search Discord users or bots…', userAutocomplete: true, fullWidth: true },
     ]);
     const globalChanged = computed(() => JSON.stringify(globalConfig.value) !== JSON.stringify(globalDraft.value));
+    const globalMembersById = computed(() => new Map(
+      globalMembers.value.map(member => [String(member.id), member]),
+    ));
 
     function guildEnabled(guild) {
       if (guild.config && guild.config.enabled !== undefined) return guild.config.enabled;
@@ -280,6 +283,13 @@ export default {
       }
     }
 
+    function globalItemLabel(editor, item) {
+      const id = String(item);
+      if (!editor.userAutocomplete) return id;
+      const member = globalMembersById.value.get(id);
+      return member ? discordMemberDisplayName(member) : id;
+    }
+
     function addGlobalItem(key, selectedValue = null) {
       const value = String(selectedValue ?? globalArrayInputs.value[key] ?? '').trim();
       if (!value || globalDraft.value[key].includes(value)) return;
@@ -318,7 +328,7 @@ export default {
     return {
       guilds, loading, error, expanded, globalDraft, globalSaving, globalError, globalArrayInputs, globalMembers, globalListEditors, globalChanged,
       guildEnabled, guildMention, guildBots, hasOverride, toggleGuild,
-      fetchGuilds, setGuildConfig, setChannelConfig, clearOverride, addGlobalItem, removeGlobalItem, saveGlobalDefaults,
+      fetchGuilds, setGuildConfig, setChannelConfig, clearOverride, globalItemLabel, addGlobalItem, removeGlobalItem, saveGlobalDefaults,
     };
   },
 };
