@@ -3642,8 +3642,9 @@ a:focus-visible {
   flex: 1;
   display: grid;
   grid-template-columns: var(--cfgc-rail-w) minmax(0, 1fr);
-  align-items: start;
+  align-items: stretch;
   gap: var(--hm-space-5);
+  overflow: hidden;
 }
 .cfgc-category-rail {
   position: relative;
@@ -3716,7 +3717,7 @@ a:focus-visible {
 .cfgc-rail-key span { display: flex; align-items: center; gap: 0.25rem; }
 .cfgc-rail-key b { font-style: normal; }
 
-.cfgc-main { min-width: 0; min-height: 0; overflow-y: auto; padding-bottom: 5rem; }
+.cfgc-main { min-width: 0; min-height: 0; height: 100%; overflow-y: auto; padding-bottom: 5rem; }
 .cfgc-toolbar {
   position: sticky;
   top: 0;
@@ -4132,8 +4133,8 @@ a:focus-visible {
 
 @media (max-width: 900px) {
   .config-center-page { --cfgc-rail-w: 100%; height: auto; min-height: 100% !important; overflow: visible; }
-  .cfgc-workspace { min-height: auto; flex: none; grid-template-columns: minmax(0, 1fr); gap: var(--hm-space-3); }
-  .cfgc-main { overflow: visible; padding-bottom: 5rem; }
+  .cfgc-workspace { min-height: auto; flex: none; grid-template-columns: minmax(0, 1fr); align-items: start; gap: var(--hm-space-3); overflow: visible; }
+  .cfgc-main { height: auto; overflow: visible; padding-bottom: 5rem; }
   .cfgc-category-rail {
     position: sticky;
     top: calc(var(--hm-topbar-h) + var(--hm-section-tabs-h));

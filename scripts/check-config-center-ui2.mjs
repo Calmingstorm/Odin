@@ -239,6 +239,9 @@ assert.match(config, /runtime_summaries:\s*groupRuntimeSummaries\(group\.entries
 assert.match(config, /No activation control exists in this release/, 'activation-required fields still lead to a dead end');
 assert.match(css, /\.config-center-page\s*\{[^}]*height:\s*calc\(100vh[^}]*display:\s*flex[^}]*overflow:\s*hidden/s, 'Config Center does not own an internal scrolling viewport');
 assert.match(css, /\.cfgc-main\s*\{[^}]*overflow-y:\s*auto/s, 'settings list is not the scrolling region');
+assert.match(css, /\.cfgc-workspace\s*\{[^}]*align-items:\s*stretch[^}]*overflow:\s*hidden/s, 'desktop workspace no longer constrains its grid items to the internal viewport');
+assert.match(css, /\.cfgc-main\s*\{[^}]*height:\s*100%[^}]*overflow-y:\s*auto/s, 'settings list can grow to content height instead of shrinking into its scroll region');
+assert.match(css, /@media\s*\(max-width:\s*900px\)[\s\S]*?\.cfgc-workspace\s*\{[^}]*align-items:\s*start[^}]*overflow:\s*visible[^}]*\}[\s\S]*?\.cfgc-main\s*\{[^}]*height:\s*auto[^}]*overflow:\s*visible/s, 'mobile Config Center no longer restores document-flow scrolling');
 assert.match(internals, /failedEndpointSummary/, 'Internals does not name failed endpoints');
 for (const endpoint of ['/api/pools/ssh', '/api/compression/stats']) {
   assert.ok(internals.includes(endpoint), `Internals endpoint inventory missing ${endpoint}`);
