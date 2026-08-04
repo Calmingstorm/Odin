@@ -5,7 +5,7 @@
  */
 import { api } from '../api.js';
 import { formatTime } from '../utils.js';
-import { onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 
 
 const STATUS_COLORS = {
@@ -35,7 +35,8 @@ export default {
       <div v-else class="space-y-4">
         <div v-if="failedCount > 0" class="hm-card border-amber-900" role="status" aria-live="polite">
           <p class="text-amber-400 text-sm">
-            {{ failedCount }} of 9 internal endpoints failed to load — those sections may be empty.
+            {{ failedCount }} of {{ endpoints.length }} internal endpoints failed to load:
+            <strong>{{ failedEndpointSummary }}</strong>.
           </p>
         </div>
 
@@ -151,9 +152,10 @@ export default {
           <section class="hm-card" style="padding:1rem;">
             <h3 class="text-sm font-medium mb-2">Context Compression</h3>
             <div v-if="compressionStats" class="text-xs text-gray-400 space-y-1">
-              <div>Compressions: {{ compressionStats.total || 0 }}</div>
+              <div>Compressions: {{ compressionStats.compressions || 0 }}</div>
+              <div>Iterations compressed: {{ compressionStats.iterations_compressed || 0 }}</div>
               <div>Chars saved: {{ (compressionStats.chars_saved || 0).toLocaleString() }}</div>
-              <div v-if="compressionStats.avg_ratio">Avg ratio: {{ (compressionStats.avg_ratio * 100).toFixed(0) }}%</div>
+              <div>Prefix cache hit rate: {{ ((compressionStats.prefix_hit_rate || 0) * 100).toFixed(0) }}%</div>
             </div>
             <p v-else class="text-xs text-gray-500">No compression data</p>
           </section>
@@ -191,20 +193,25 @@ export default {
     // from "nothing to report".
     const error = ref('');
     const failedCount = ref(0);
+    const failedEndpoints = ref([]);
+    const failedEndpointSummary = computed(() => failedEndpoints.value
+      .map(endpoint => `${endpoint.label} (${endpoint.path}${endpoint.reason ? `: ${endpoint.reason}` : ''})`)
+      .join('; '));
+    const endpoints = Object.freeze([
+      { key: 'startup', label: 'Startup diagnostics', path: '/api/startup/diagnostics' },
+      { key: 'subsystems', label: 'Subsystem status', path: '/api/subsystems/status' },
+      { key: 'sshPool', label: 'SSH pool', path: '/api/pools/ssh' },
+      { key: 'httpPool', label: 'HTTP pool', path: '/api/pools/http' },
+      { key: 'riskStats', label: 'Risk stats', path: '/api/risk/stats' },
+      { key: 'recoveryStats', label: 'Recovery stats', path: '/api/recovery/stats' },
+      { key: 'compressionStats', label: 'Compression stats', path: '/api/compression/stats' },
+      { key: 'freshnessStats', label: 'Freshness stats', path: '/api/freshness/stats' },
+      { key: 'governorStats', label: 'Governor stats', path: '/api/governor/stats' },
+    ]);
     let timer = null;
 
     async function fetchAll() {
-      const results = await Promise.allSettled([
-        api.get('/api/startup/diagnostics'),
-        api.get('/api/subsystems/status'),
-        api.get('/api/pools/ssh'),
-        api.get('/api/pools/http'),
-        api.get('/api/risk/stats'),
-        api.get('/api/recovery/stats'),
-        api.get('/api/compression/stats'),
-        api.get('/api/freshness/stats'),
-        api.get('/api/governor/stats'),
-      ]);
+      const results = await Promise.allSettled(endpoints.map(endpoint => api.get(endpoint.path)));
       const val = (i) => results[i].status === 'fulfilled' ? results[i].value : null;
       startup.value = val(0) || {};
       const sub = val(1);
@@ -217,7 +224,10 @@ export default {
       freshnessStats.value = val(7);
       governorStats.value = val(8);
       const rejected = results.filter(r => r.status === 'rejected');
-      failedCount.value = rejected.length;
+      failedEndpoints.value = results.flatMap((result, index) => result.status === 'rejected'
+        ? [{ ...endpoints[index], reason: result.reason?.message || 'request failed' }]
+        : []);
+      failedCount.value = failedEndpoints.value.length;
       if (rejected.length === results.length) {
         const reason = rejected[0]?.reason;
         error.value = reason?.message || 'Failed to load internals';
@@ -262,7 +272,7 @@ export default {
     onUnmounted(disarm);
 
     return {
-      loading, error, failedCount, retry, startup, subsystems, sshPool, httpPool,
+      loading, error, failedCount, failedEndpoints, failedEndpointSummary, endpoints, retry, startup, subsystems, sshPool, httpPool,
       riskStats, recoveryStats, compressionStats, freshnessStats,
       governorStats, statusColor, formatTime,
     };

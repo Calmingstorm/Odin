@@ -146,7 +146,7 @@ assert.match(config, /setFieldValue\(field, parsed, \{ coalesce: true \}\)/, 'ty
 assert.match(config, /UNDO_COALESCE_MS/, 'text edit undo coalescing missing');
 assert.match(config, /agents\.final_warning_iterations/, 'warning-threshold chip editor missing');
 assert.match(config, /No unsaved changes/, 'honest draft copy missing');
-assert.match(config, /What saving does[\s\S]*What Odin does now/, 'plain-language save/runtime effects missing');
+assert.match(config, /groupRuntimeSummaries[\s\S]*fieldRuntimeCopy/, 'grouped plain-language save/runtime effects missing');
 assert.match(config, /field\.action_available === true/, 'honest action gate missing');
 const restartButtons = [];
 walkTemplate(configTemplateAst, node => {
@@ -213,7 +213,18 @@ for (const field of ['effective_connection_pool', 'connection_pool_pending_resta
 }
 assert.doesNotMatch(llm, /These settings reload through the Codex provider endpoint|Connection-pool changes rebuild its transport/, 'boot-bound settings are falsely described as live');
 assert.match(llm, /Transport and retry changes apply now[\s\S]*saved for the next restart/, 'advanced apply-boundary copy is missing');
-assert.match(css, /\.cfgc-field\s*\{[^}]*grid-template-columns:\s*minmax\([^}]*4fr[^}]*5fr[^}]*3fr/s, 'wide 4/5/3 field grid missing');
+assert.match(css, /\.cfgc-field\s*\{[^}]*grid-template-columns:\s*minmax\([^}]*4fr[^}]*5fr/s, 'wide two-column field grid missing');
 assert.match(css, /\.config-center-page\s*\{[^}]*max-width:\s*1600px/s, 'wide shell has no readable max width');
 
 console.log('config-center-ui2: de-dup, typed editing, restart flow, and provider advanced controls pinned');
+
+const internals = readFileSync('ui/js/pages/internals.js', 'utf8');
+assert.doesNotMatch(config, /<div class="cfgc-field-runtime">/, 'repetitive per-field save/runtime boxes returned');
+assert.match(config, /runtime_summaries:\s*groupRuntimeSummaries\(group\.entries\)/, 'runtime behavior is not summarized once per field group');
+assert.match(config, /No activation control exists in this release/, 'activation-required fields still lead to a dead end');
+assert.match(css, /\.config-center-page\s*\{[^}]*height:\s*calc\(100vh[^}]*display:\s*flex[^}]*overflow:\s*hidden/s, 'Config Center does not own an internal scrolling viewport');
+assert.match(css, /\.cfgc-main\s*\{[^}]*overflow-y:\s*auto/s, 'settings list is not the scrolling region');
+assert.match(internals, /failedEndpointSummary/, 'Internals does not name failed endpoints');
+for (const endpoint of ['/api/pools/ssh', '/api/compression/stats']) {
+  assert.ok(internals.includes(endpoint), `Internals endpoint inventory missing ${endpoint}`);
+}

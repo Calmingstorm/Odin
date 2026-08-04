@@ -633,7 +633,7 @@ class TestPoolAPI:
             "active_connections": 2, "total_opened": 5, "total_reused": 3,
         }
         executor.ssh_pool = pool
-        bot = _make_bot(executor=executor)
+        bot = _make_bot(tool_executor=executor)
         async with TestClient(TestServer(_make_app(bot))) as client:
             resp = await client.get("/api/pools/ssh")
             assert resp.status == 200
@@ -644,7 +644,7 @@ class TestPoolAPI:
         from aiohttp.test_utils import TestClient, TestServer
         executor = MagicMock()
         executor.ssh_pool = None
-        bot = _make_bot(executor=executor)
+        bot = _make_bot(tool_executor=executor)
         async with TestClient(TestServer(_make_app(bot))) as client:
             resp = await client.get("/api/pools/ssh")
             assert resp.status == 503
@@ -683,7 +683,7 @@ class TestPoolAPI:
         pool = AsyncMock()
         pool.close_all.return_value = 3
         executor.ssh_pool = pool
-        bot = _make_bot(executor=executor)
+        bot = _make_bot(tool_executor=executor)
         async with TestClient(TestServer(_make_app(bot))) as client:
             resp = await client.post("/api/pools/ssh/close", json={})
             assert resp.status == 200
@@ -696,7 +696,7 @@ class TestPoolAPI:
         pool = AsyncMock()
         pool.close_host.return_value = True
         executor.ssh_pool = pool
-        bot = _make_bot(executor=executor)
+        bot = _make_bot(tool_executor=executor)
         async with TestClient(TestServer(_make_app(bot))) as client:
             resp = await client.post(
                 "/api/pools/ssh/close",

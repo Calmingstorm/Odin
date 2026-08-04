@@ -388,6 +388,7 @@ class TestCallSitesSurviveTypingFailure:
 # fail-safes, and pipeline-level coverage of the _run_inner error paths.
 # ---------------------------------------------------------------------------
 
+
 class _RaisingInstanceCheckMeta(type):
     def __instancecheck__(cls, instance):
         raise RuntimeError("isinstance exploded")
@@ -705,7 +706,13 @@ class TestToolEventCallId:
         )
 
         await runner._audit_tool_outcome(
-            st, "run_command", {"command": "echo hi"}, "ok", 12, None, None,
+            st,
+            "run_command",
+            {"command": "echo hi"},
+            "ok",
+            12,
+            None,
+            None,
             call_id="call_abc123",
         )
 
@@ -736,9 +743,7 @@ class TestToolEventCallId:
         runner = ToolLoopRunner.__new__(ToolLoopRunner)
         runner._audit = _Audit()
         st = SimpleNamespace(
-            message=SimpleNamespace(
-                author=SimpleNamespace(id=1), channel=SimpleNamespace(id=2)
-            ),
+            message=SimpleNamespace(author=SimpleNamespace(id=1), channel=SimpleNamespace(id=2)),
             iteration=0,
         )
         await runner._audit_tool_outcome(st, "t", {}, "r", 1, None, None)

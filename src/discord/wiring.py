@@ -116,6 +116,7 @@ class BotServices:
     subsystem_guard: SubsystemGuard
     diff_tracker: DiffTracker
     context_compressor: object | None
+    compression_stats: object | None
     prefix_tracker: object | None
     auxiliary_llm_client: object | None
     outbound_webhook_dispatcher: object | None
@@ -440,12 +441,14 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
 
     # Context compressor — summarizes prior tool iterations when context grows.
     context_compressor = None
+    compression_stats = None
     prefix_tracker = None
     _compress = getattr(config.openai_codex, "context_compression", None)
     if _compress and _compress.enabled:
-        from ..llm.context_compressor import PrefixTracker
+        from ..llm.context_compressor import CompressionStats, PrefixTracker
 
-        prefix_tracker = PrefixTracker()
+        compression_stats = CompressionStats()
+        prefix_tracker = PrefixTracker(compression_stats)
         context_compressor = _compress  # config object itself acts as the on/off + thresholds
 
     # Auxiliary LLM client — a cheaper Codex model for background jobs
@@ -551,6 +554,7 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
         subsystem_guard=subsystem_guard,
         diff_tracker=diff_tracker,
         context_compressor=context_compressor,
+        compression_stats=compression_stats,
         prefix_tracker=prefix_tracker,
         auxiliary_llm_client=auxiliary_llm_client,
         outbound_webhook_dispatcher=outbound_webhook_dispatcher,
@@ -743,6 +747,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             # live: the web layer rebuilds it via prompt_builder.rebuild_default()
             get_default_system_prompt=lambda: prompt_builder.default_prompt,
             get_context_compressor=lambda: bot.context_compressor,
+            get_compression_stats=lambda: services.compression_stats,
             llm_gateway=llm_gateway,
             prompt_builder=prompt_builder,
             tool_catalog=tool_catalog,

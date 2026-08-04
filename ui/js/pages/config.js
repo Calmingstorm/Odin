@@ -25,7 +25,7 @@ const APPLY_MODE_LABELS = {
   live_apply: 'Reloads live',
   live_for_new_work: 'Applies to new work',
   restart: 'Restart required',
-  activation_required: 'Saved, then enabled separately',
+  activation_required: 'Saved only — see activation note',
   legacy_control: 'Controlled elsewhere',
   dormant: 'Saved for future support',
 };
@@ -439,20 +439,25 @@ export default {
                             <p v-if="fieldError(field)" class="cfgc-field-error" role="alert">{{ fieldError(field) }}</p>
                           </div>
 
-                          <div class="cfgc-field-runtime">
-                            <strong>What saving does</strong>
-                            <p>{{ fieldRuntimeCopy(field).save }}</p>
-                            <strong>What Odin does now</strong>
-                            <p>{{ fieldRuntimeCopy(field).runtime }}</p>
+                          <div v-if="fieldSpecificRuntimeNote(field)" class="cfgc-field-runtime-note">
+                            <strong>{{ field.apply_mode === 'activation_required' ? 'Activation note' : 'Runtime note' }}</strong>
+                            <p>{{ fieldSpecificRuntimeNote(field) }}</p>
                             <button v-if="hasHonestAction(field)" type="button" class="btn btn-ghost text-xs" @click="runFieldAction(field)">{{ field.action_label }}</button>
                           </div>
                         </div>
                       </div>
 
-                      <div v-if="fieldGroup.apply_details.length" class="cfgc-group-apply-details">
+                      <div v-if="fieldGroup.runtime_summaries.length || fieldGroup.apply_details.length" class="cfgc-group-apply-details">
                         <details>
-                          <summary>{{ fieldGroup.apply_details.length }} runtime detail{{ fieldGroup.apply_details.length === 1 ? '' : 's' }}</summary>
-                          <div class="cfgc-apply-detail-list">
+                          <summary>{{ fieldGroup.runtime_summaries.length ? 'What saving changes' : fieldGroup.apply_details.length + ' runtime detail' + (fieldGroup.apply_details.length === 1 ? '' : 's') }}</summary>
+                          <div v-if="fieldGroup.runtime_summaries.length" class="cfgc-runtime-summary-list">
+                            <div v-for="summary in fieldGroup.runtime_summaries" :key="summary.key" class="cfgc-runtime-summary">
+                              <strong>{{ summary.label }}</strong>
+                              <p>{{ summary.save }}</p>
+                              <p>{{ summary.runtime }}</p>
+                            </div>
+                          </div>
+                          <div v-if="fieldGroup.apply_details.length" class="cfgc-apply-detail-list">
                             <div v-for="detail in fieldGroup.apply_details" :key="detail.key" :class="['cfgc-apply-detail', 'detail-' + detail.kind]">
                               <div class="cfgc-apply-detail-heading">
                                 <strong>{{ detail.label }}</strong>
@@ -768,6 +773,7 @@ export default {
           label: group.path ? titleCase(group.path.split('.').at(-1)) : null,
           description: descriptionRecord?.group_description || null,
           apply_details: collectApplyDetails(group.entries),
+          runtime_summaries: groupRuntimeSummaries(group.entries),
         };
       });
     }
@@ -787,6 +793,32 @@ export default {
           dormant: 'This version of Odin does not use the saved value. Restarting will not activate it.',
         }[field.apply_mode] || 'Effective runtime state is not currently observable.'),
       };
+    }
+
+    function groupRuntimeSummaries(entries) {
+      const summaries = new Map();
+      for (const field of entries) {
+        const copy = fieldRuntimeCopy(field);
+        const key = `${field.apply_mode}|${copy.save}|${copy.runtime}`;
+        if (!summaries.has(key)) {
+          summaries.set(key, {
+            key,
+            label: applyModeLabel(field.apply_mode),
+            save: copy.save,
+            runtime: copy.runtime,
+          });
+        }
+      }
+      return [...summaries.values()];
+    }
+
+    function fieldSpecificRuntimeNote(field) {
+      if (hasHonestAction(field)) return field.runtime_effect || field.activation_policy || '';
+      if (field.apply_mode === 'activation_required') {
+        const policy = field.activation_policy || field.runtime_effect;
+        return policy ? `Not active after saving. No activation control exists in this release. ${policy}` : 'Not active after saving; no activation control exists in this release.';
+      }
+      return '';
     }
 
     function hasHonestAction(field) {
@@ -1290,7 +1322,7 @@ export default {
       healthCount, categoryStats, selectCategory, selectHealthFilter, clearFilters,
       sectionLabel, sectionDescription, sectionFieldCount, sectionHealthCount,
       sectionApplySummary, sectionApplyDetails, sectionEntries, fieldGroups, sectionSearchHits,
-      fieldRuntimeCopy, hasHonestAction, runFieldAction,
+      fieldRuntimeCopy, fieldSpecificRuntimeNote, hasHonestAction, runFieldAction,
       sectionChanged, fieldChanged, isSectionExpanded, toggleSection,
       discardAllDrafts,
       setFieldValue, setNumberFieldValue, numberInputValue, beginInputEdit, endTextInputEdit, endInputEdit,
