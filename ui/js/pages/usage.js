@@ -22,13 +22,20 @@ export default {
       </div>
 
       <!-- Error -->
-      <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
+      <!-- Full-page error ONLY when there is nothing to show. A failed
+           background refresh must not replace data we already have:
+           one 502 during a restart used to blank a page that had been
+           rendering fine, until the next poll a full interval later. -->
+      <div v-else-if="error && !hasData" class="hm-card border-red-900 error-state" role="alert">
         <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="retry" class="btn btn-ghost text-xs">Retry</button>
       </div>
 
       <div v-else>
+        <div v-if="error && hasData" class="hm-card border-amber-900 mb-3" role="status" aria-live="polite">
+          <p class="text-amber-400 text-sm">Last refresh failed: {{ error }} — showing the most recent data.</p>
+        </div>
         <!-- Totals -->
         <h2 class="text-lg font-semibold mb-3 text-slate-200">LLM Usage</h2>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
@@ -171,6 +178,10 @@ export default {
   setup() {
     const loading = ref(true);
     const error = ref(null);
+    // Set only after a response actually arrives. The initial value of
+    // `data` is a placeholder shape in some pages, so its truthiness cannot
+    // distinguish "never loaded" from "loaded and now stale".
+    const hasData = ref(false);
     const data = ref({ by_user: {}, by_channel: {}, by_tool: {}, recent: [], pricing: {} });
     const totals = ref({ requests: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, cost_usd: 0 });
     const activeTab = ref('user');
@@ -193,6 +204,7 @@ export default {
         data.value = resp;
         totals.value = resp.totals || totals.value;
         error.value = null;
+        hasData.value = true;
       } catch (e) {
         error.value = e.message;
       } finally {
@@ -233,6 +245,6 @@ export default {
     onDeactivated(disarm);
     onUnmounted(disarm);
 
-    return { loading, error, data, totals, activeTab, tabs, recentReversed, fmtNum, formatTime, retry };
+    return { hasData, loading, error, data, totals, activeTab, tabs, recentReversed, fmtNum, formatTime, retry };
   }
 };

@@ -168,6 +168,11 @@ class OdinWebSocket {
     this._state = 'disconnected';
     this.onStatusChange = null; // callback(connected: boolean)
     this.onStateChange = null;  // callback(state: string, detail: object)
+    // Latency is measured on every pong but was only ever published through
+    // onStateChange — which _setState suppresses when the state is unchanged,
+    // and _latency is reset to -1 on disconnect, so the sidebar readout could
+    // never render a real value.
+    this.onLatency = null;      // callback(latencyMs: number)
   }
 
   get connected() { return this._ws?.readyState === WebSocket.OPEN; }
@@ -176,6 +181,16 @@ class OdinWebSocket {
   get state() { return this._state; }
   get reconnectAttempt() { return this._reconnectAttempt; }
   get latency() { return this._latency; }
+
+  _resetLatency() {
+    // Publish the reset, not just record it. Recording silently left the last
+    // reading from a now-dead socket on screen, so the sidebar could read
+    // "Disconnected — 12ms".
+    this._latency = -1;
+    if (this.onLatency) {
+      try { this.onLatency(-1); } catch { /* listener errors are not ours */ }
+    }
+  }
 
   connect() {
     this._shouldConnect = true;
@@ -186,7 +201,7 @@ class OdinWebSocket {
   disconnect() {
     this._shouldConnect = false;
     this._reconnectAttempt = 0;
-    this._latency = -1;
+    this._resetLatency();
     this._stopPing();
     if (this._ws) {
       this._ws.close();
@@ -274,21 +289,30 @@ class OdinWebSocket {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     let url = `${proto}//${location.host}/api/ws`;
     if (this._api.token) url += `?token=${encodeURIComponent(this._api.token)}`;
-    this._ws = new WebSocket(url);
+    const socket = new WebSocket(url);
+    this._ws = socket;
+    // Every callback below is guarded on socket identity. Closing a socket does
+    // not cancel its already-queued events: disconnect() clears _ws, connect()
+    // installs a NEW socket, and the old socket's onclose then fires with no
+    // idea it is obsolete — tearing down the live connection's reference, ping
+    // timer and latency, and scheduling a reconnect on top of a healthy socket.
+    const isCurrent = () => this._ws === socket;
 
-    this._ws.onopen = () => {
+    socket.onopen = () => {
+      if (!isCurrent()) return;
       this._reconnectDelay = 1000;
       this._reconnectAttempt = 0;
       // Re-subscribe to channels
       for (const ch of this._subscriptions) {
-        this._ws.send(JSON.stringify({ subscribe: ch }));
+        socket.send(JSON.stringify({ subscribe: ch }));
       }
       this._startPing();
       this._setState('connected');
       if (this.onStatusChange) this.onStatusChange(true);
     };
 
-    this._ws.onmessage = (evt) => {
+    socket.onmessage = (evt) => {
+      if (!isCurrent()) return;
       let data;
       try { data = JSON.parse(evt.data); } catch { return; }
       const type = data.type;
@@ -296,6 +320,9 @@ class OdinWebSocket {
         if (data.ts) {
           this._latency = Date.now() - data.ts;
           this._lastPongTime = Date.now();
+          if (this.onLatency) {
+            try { this.onLatency(this._latency); } catch { /* listener errors are not ours */ }
+          }
         }
         return;
       }
@@ -310,10 +337,12 @@ class OdinWebSocket {
       // subscribed/unsubscribed confirmations are silently consumed
     };
 
-    this._ws.onclose = () => {
+    socket.onclose = () => {
+      // A stale socket's close must not touch the current connection's state.
+      if (!isCurrent()) return;
       this._ws = null;
       this._stopPing();
-      this._latency = -1;
+      this._resetLatency();
       if (this._chatPending) {
         // The server does not cancel an in-flight turn on disconnect — it
         // finishes under its own guards and lands in session history.
@@ -335,7 +364,7 @@ class OdinWebSocket {
       }
     };
 
-    this._ws.onerror = () => {
+    socket.onerror = () => {
       // onclose will fire after onerror, handled there
     };
   }

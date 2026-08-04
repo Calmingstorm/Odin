@@ -11,8 +11,9 @@
     "check:templates": "node scripts/check-vue-templates.mjs",
     "check:template-bindings": "node scripts/check-template-bindings.mjs",
     "check:modal-race": "node scripts/check-modal-race.mjs",
-    "check": "npm run check:templates && npm run check:template-bindings && npm run check:modal-race && npm run check:host-access-races && npm run build",
-    "check:host-access-races": "node scripts/check-host-access-races.mjs"
+    "check": "npm run check:templates && npm run check:template-bindings && npm run check:modal-race && npm run check:host-access-races && npm run check:socket-identity && npm run build",
+    "check:host-access-races": "node scripts/check-host-access-races.mjs",
+    "check:socket-identity": "node scripts/check-socket-identity.mjs"
   },
   "dependencies": {
     "dompurify": "^3.2.0",
