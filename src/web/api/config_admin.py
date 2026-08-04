@@ -351,6 +351,58 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         raw = bot.config.model_dump()
         return web.json_response(_redact_config(raw))
 
+    @routes.get("/api/config/meta")
+    async def get_config_meta(_request: web.Request) -> web.Response:
+        """How each configuration section reaches the running bot.
+
+        The WebUI renders apply-mode badges from THIS, so the page states what
+        the code actually does instead of guessing from a value's shape. The
+        registry is CI-gated, so a new schema section cannot appear here
+        unclassified.
+        """
+        from ...config.apply_registry import FIELDS, SECTIONS, is_secret
+
+        def render(spec) -> dict:
+            out: dict = {
+                "apply_mode": spec.apply_mode,
+                "summary": spec.summary,
+            }
+            if spec.owner:
+                out["owner"] = spec.owner
+            if spec.dedicated_endpoint:
+                out["dedicated_endpoint"] = spec.dedicated_endpoint
+            if spec.restart_reason:
+                out["restart_reason"] = spec.restart_reason
+            if spec.consumers:
+                out["consumers"] = [
+                    {"name": name, "apply_mode": mode, "detail": detail}
+                    for name, mode, detail in spec.consumers
+                ]
+            return out
+
+        current = bot.config.model_dump()
+        sections = {}
+        for name, spec in SECTIONS.items():
+            entry = render(spec)
+            entry["fields"] = {
+                path.split(".", 1)[1]: render(field_spec)
+                for path, field_spec in FIELDS.items()
+                if path.startswith(f"{name}.")
+            }
+            # Secret STATE only — never the value, length, or any prefix of it.
+            section_value = current.get(name)
+            if isinstance(section_value, dict):
+                secrets = {}
+                for key, value in section_value.items():
+                    path = f"{name}.{key}"
+                    if is_secret(path):
+                        secrets[key] = {"configured": bool(value)}
+                if secrets:
+                    entry["secrets"] = secrets
+            sections[name] = entry
+
+        return web.json_response({"sections": sections})
+
     @routes.put("/api/config")
     async def update_config(request: web.Request) -> web.Response:
         try:

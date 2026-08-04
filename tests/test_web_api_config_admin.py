@@ -1000,3 +1000,108 @@ async def test_cancelled_successful_preset_delete_publishes_before_escape(monkey
             await c.delete("/api/personality/presets/gone")
 
     assert "gone" not in bot.config.personality.user_presets
+
+
+class TestConfigMeta:
+    """GET /api/config/meta — how each section reaches the running bot.
+
+    The page renders apply-mode badges from this. Before it existed the UI
+    inferred everything from a value's shape, which is how it came to report
+    "Config saved successfully" for changes that needed a restart, were owned
+    by another endpoint, or were not wired to anything at all.
+    """
+
+    @pytest.mark.asyncio
+    async def test_every_schema_section_is_described(self):
+        from src.config.schema import Config as _Config
+
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        described = set(body["sections"])
+        actual = set(_Config(discord={"token": "x"}).model_dump())
+        assert actual - described == set(), f"undescribed sections: {actual - described}"
+
+    @pytest.mark.asyncio
+    async def test_apply_modes_are_from_the_known_vocabulary(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        allowed = {
+            "live", "live_for_new_work", "dedicated",
+            "restart", "activation_required", "dead",
+        }
+        for name, entry in body["sections"].items():
+            assert entry["apply_mode"] in allowed, f"{name}: {entry['apply_mode']}"
+            assert entry["summary"], f"{name} has no summary"
+
+    @pytest.mark.asyncio
+    async def test_restart_sections_say_why(self):
+        """A restart badge with no reason is the kind of unexplained claim
+        this campaign kept finding in comments."""
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        for name, entry in body["sections"].items():
+            if entry["apply_mode"] == "restart":
+                assert entry.get("restart_reason"), f"{name} claims restart without a reason"
+
+    @pytest.mark.asyncio
+    async def test_dedicated_sections_name_their_endpoint(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        for name, entry in body["sections"].items():
+            if entry["apply_mode"] == "dedicated":
+                assert entry.get("dedicated_endpoint"), f"{name} names no owner endpoint"
+
+    @pytest.mark.asyncio
+    async def test_mixed_sections_expose_per_consumer_detail(self):
+        """timezone is live for prompts and restart for the time parser. One
+        badge for both would be false whichever it showed."""
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        consumers = body["sections"]["timezone"]["consumers"]
+        modes = {c["apply_mode"] for c in consumers}
+        assert "live" in modes and "restart" in modes
+        assert all(c["detail"] for c in consumers)
+
+    @pytest.mark.asyncio
+    async def test_secret_state_without_secret_values(self):
+        app, bot = _app(register_discord_config)
+        bot.config.discord.token = "super-secret-token-value"
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.get("/api/config/meta")
+            raw = await resp.text()
+            body = await resp.json()
+
+        assert body["sections"]["discord"]["secrets"]["token"] == {"configured": True}
+        assert "super-secret-token-value" not in raw
+        # Not even a length, which would narrow a brute force.
+        assert "24" not in body["sections"]["discord"]["secrets"]["token"].values()
+
+    @pytest.mark.asyncio
+    async def test_unset_secret_reports_not_configured(self):
+        app, bot = _app(register_discord_config)
+        bot.config.discord.token = ""
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+        assert body["sections"]["discord"]["secrets"]["token"] == {"configured": False}
+
+    @pytest.mark.asyncio
+    async def test_field_overrides_are_exposed(self):
+        """agents.max_children_per_agent is dead while its section is live for
+        new work — the exception has to survive to the page."""
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        agents = body["sections"]["agents"]
+        assert agents["apply_mode"] == "live_for_new_work"
+        assert agents["fields"]["max_children_per_agent"]["apply_mode"] == "dead"
