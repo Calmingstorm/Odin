@@ -34,12 +34,12 @@ from src.config.apply_registry import (  # noqa: E402
     FIELDS,
     MIXED_SECTIONS,
     SECTIONS,
-    SENSITIVE_SEGMENTS,
     element_model,
     has_explicit_spec,
     spec_for,
 )
 from src.config.schema import Config  # noqa: E402
+from src.config.sensitivity import is_sensitive_key  # noqa: E402
 
 
 def _unwrap(annotation: object) -> object:
@@ -113,8 +113,10 @@ def main() -> int:
             )
 
     for leaf in leaves:
-        segments = set(leaf.split("."))
-        if segments & SENSITIVE_SEGMENTS and spec_for(leaf).sensitivity == "public":
+        if (
+            is_sensitive_key(leaf.rsplit(".", 1)[-1])
+            and spec_for(leaf).sensitivity == "public"
+        ):
             findings.append(
                 f"'{leaf}' looks like a credential but is classified public — "
                 f"its value would be served to the page"

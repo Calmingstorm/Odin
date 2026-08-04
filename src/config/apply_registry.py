@@ -50,6 +50,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from .sensitivity import is_sensitive_key
+
 ApplyMode = Literal[
     "live_read",
     "live_apply",
@@ -99,6 +101,9 @@ class FieldSpec:
     restart_reason: str | None = None
     #: What activation means, for ``activation_required``.
     activation_policy: str | None = None
+    #: False when the schema value was present at boot but boot wiring did not
+    #: pass it to the component. Such a snapshot cannot prove effective state.
+    boot_snapshot_is_effective: bool = True
     consumers: tuple[Consumer, ...] = ()
 
 
@@ -332,22 +337,6 @@ MIXED_SECTIONS: frozenset[str] = frozenset({
     "agents",
     "observability",
 })
-
-#: Path segments that carry credentials wherever they appear.
-SENSITIVE_SEGMENTS: frozenset[str] = frozenset({
-    "token",
-    "api_token",
-    "api_key",
-    "password",
-    "secret",
-    "credentials_path",
-    "ssh_key_path",
-    "hmac_key",
-    "webhook_urls",
-    "headers",
-    "env",
-})
-
 
 # --------------------------------------------------------------------------
 # Leaves
@@ -1316,15 +1305,34 @@ def _pattern_spec(path: str) -> FieldSpec | None:
             )
         if path.endswith(".scrub_secrets") or path.endswith(".verify_ssl"):
             return FieldSpec(
-                description="Target-bound safety override. The dedicated "
-                "endpoint applies it to the running dispatcher immediately, "
-                "with no acknowledgement step and without persisting it.",
+                description="Target-bound safety override. Boot wiring drops "
+                "the persisted value and the live target defaults to true; "
+                "the dedicated endpoint can change the running dispatcher "
+                "without persisting it.",
+                boot_snapshot_is_effective=False,
             )
     return None
 
 
 def _is_sensitive_path(path: str) -> bool:
-    return any(segment in SENSITIVE_SEGMENTS for segment in path.split("."))
+    """Use the same compound-key rule as GET /api/config redaction.
+
+    A credential-bearing scalar or plain mapping makes its descendants secret
+    (``slack.webhook_urls.ops``). A container OF schema records does not:
+    ``web.api_tokens.0.tier`` is public metadata beside the token field. The
+    schema distinction prevents both leaking arbitrary-key maps and redacting
+    whole records into uselessness.
+    """
+    segments = path.split(".")
+    facts = schema_facts()
+    for index, segment in enumerate(segments):
+        if not is_sensitive_key(segment):
+            continue
+        ancestor = ".".join(segments[: index + 1])
+        if index < len(segments) - 1 and facts.get(ancestor, {}).get("is_container"):
+            continue
+        return True
+    return False
 
 
 def _title_case(value: str) -> str:
@@ -1353,10 +1361,13 @@ def spec_for(path: str) -> FieldSpec:
             apply_mode=section_spec.apply_mode if section_spec else "restart",
         )
     if resolved.sensitivity is None:
-        if _is_sensitive_path(path):
-            derived: Sensitivity = "sensitive"
-        elif _facts_for(path).get("secret_container"):
-            derived = "secret_container"
+        # Container shape wins over a credential-shaped container name. A list
+        # such as web.api_tokens must expose only configured state, not masquerade
+        # as one scalar secret and not serialize its entries.
+        if _facts_for(path).get("secret_container"):
+            derived: Sensitivity = "secret_container"
+        elif _is_sensitive_path(path):
+            derived = "sensitive"
         else:
             derived = "public"
         resolved = replace(resolved, sensitivity=derived)
@@ -1589,7 +1600,10 @@ def schema_facts() -> dict[str, dict[str, Any]]:
         prefix = f"{path}."
         facts["secret_container"] = any(
             key.startswith(prefix)
-            and set(key[len(prefix):].split(".")) & SENSITIVE_SEGMENTS
+            and any(
+                is_sensitive_key(segment)
+                for segment in key[len(prefix):].split(".")
+            )
             for key in out
         )
     return out
@@ -1669,6 +1683,18 @@ def _public_value(value: Any, sensitivity: Sensitivity) -> Any:
 _SELF_EVIDENT_MODES: frozenset[str] = frozenset({"live_read", "live_for_new_work"})
 
 
+def _effective_is_self_evident(spec: FieldSpec, apply_mode: ApplyMode) -> bool:
+    """Whether config alone proves what every consumer will use next.
+
+    A broad ``live_for_new_work`` badge is not evidence when even one named
+    consumer never adopts the field. Consumer records are therefore part of
+    the proof, not merely explanatory text.
+    """
+    return apply_mode in _SELF_EVIDENT_MODES and all(
+        consumer.apply_mode in _SELF_EVIDENT_MODES for consumer in spec.consumers
+    )
+
+
 def _apply_state(
     *,
     apply_mode: ApplyMode,
@@ -1686,8 +1712,8 @@ def _apply_state(
     if apply_mode in ("activation_required", "dormant"):
         return "dormant"
     if not effective_known:
-        # Not one of the page's five buckets, deliberately: it is counted
-        # nowhere rather than counted as applied.
+        # The page exposes Unknown as a first-class filter; uncertainty is
+        # visible rather than disappearing from the health total.
         return "unknown"
     return "applied"
 
@@ -1715,14 +1741,15 @@ def build_field_record(
     pending_restart = False
     effective_known = True
     if apply_mode == "restart":
-        # The boot snapshot is what the running components were built from, so
-        # this one is a fact rather than an inference.
-        if has_boot:
+        # A boot snapshot is evidence only when wiring actually passed that
+        # schema value to the running component. Per-target webhook safety
+        # values are currently dropped, so echoing their boot value would lie.
+        if has_boot and spec.boot_snapshot_is_effective:
             effective = _public_value(boot_value, sensitivity)
             pending_restart = boot_value != desired_value
         else:
             effective, effective_known = None, False
-    elif apply_mode in _SELF_EVIDENT_MODES:
+    elif _effective_is_self_evident(spec, apply_mode):
         effective = desired
     else:
         effective, effective_known = None, False
@@ -1836,7 +1863,14 @@ def build_meta_payload(
         for path, value in flatten(config_dump)
     ]
 
-    counts = {"applied": 0, "pending_restart": 0, "dormant": 0, "invalid": 0, "drift": 0}
+    counts = {
+        "applied": 0,
+        "pending_restart": 0,
+        "dormant": 0,
+        "invalid": 0,
+        "drift": 0,
+        "unknown": 0,
+    }
     for record in fields:
         state = record["apply_state"]
         if state in counts:

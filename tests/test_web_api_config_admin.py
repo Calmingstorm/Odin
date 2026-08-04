@@ -1045,8 +1045,9 @@ class TestConfigMeta:
         assert isinstance(body["fields"], list) and body["fields"]
         status = body["status"]
         assert set(status["counts"]) == {
-            "applied", "pending_restart", "dormant", "invalid", "drift",
+            "applied", "pending_restart", "dormant", "invalid", "drift", "unknown",
         }
+        assert sum(status["counts"].values()) == len(body["fields"])
         assert status["desired_revision"] == body["revision"]
 
     @pytest.mark.asyncio
@@ -1193,6 +1194,7 @@ class TestConfigMeta:
         bot.config.discord.token = "tok-discord-leak"
         bot.config.web.api_token = "tok-web-leak"
         bot.config.audit.hmac_key = "tok-audit-leak"
+        bot.config.slack.default_webhook_url = "tok-slack-webhook-url-leak"
         raw_config = bot.config.model_dump()
         raw_config["web"]["api_tokens"] = [
             {"name": "ops", "token": "tok-in-a-list-leak"}
@@ -1209,6 +1211,7 @@ class TestConfigMeta:
             "tok-discord-leak",
             "tok-web-leak",
             "tok-audit-leak",
+            "tok-slack-webhook-url-leak",
             "tok-in-a-list-leak",
             "tok-target-leak",
         ):

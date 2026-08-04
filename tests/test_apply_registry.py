@@ -227,13 +227,32 @@ class TestSensitivity:
         assert not is_secret("browser.viewport_width")
         assert not is_secret("discord.channels")
 
-    def test_no_leaf_is_declassified_by_an_explicit_entry(self):
-        for path in FIELDS:
-            if any(
-                seg in path.split(".")
-                for seg in ("token", "password", "api_key", "hmac_key", "secret")
-            ):
+    def test_no_credential_shaped_schema_leaf_is_public(self):
+        """Use the shared compound-key rule, not an exact-segment shortlist.
+
+        ``default_webhook_url`` was leaked by the old exact list even though
+        GET /api/config already knew that webhook_url is credential-shaped.
+        """
+        from src.config.apply_registry import schema_facts
+        from src.config.sensitivity import is_sensitive_key
+
+        for path in schema_facts():
+            if is_sensitive_key(path.rsplit(".", 1)[-1]):
                 assert is_secret(path), f"{path} would be served as a value"
+
+    def test_compound_webhook_url_is_redacted(self):
+        record = build_field_record(
+            "slack.default_webhook_url", "https://hooks.slack.invalid/secret"
+        )
+        assert record["sensitivity"] == "sensitive"
+        assert record["desired"] == REDACTED
+
+    def test_arbitrary_key_inside_webhook_url_map_is_redacted(self):
+        record = build_field_record(
+            "slack.webhook_urls.ops", "https://hooks.slack.invalid/secret"
+        )
+        assert record["sensitivity"] == "sensitive"
+        assert record["desired"] == REDACTED
 
 
 class TestFlatten:
@@ -302,6 +321,7 @@ class TestSecretsInsideListRecords:
         fields = {
             f["path"]: f for f in build_meta_payload(self.POPULATED)["fields"]
         }
+        assert fields["web.api_tokens.0.name"]["desired"] == "ops"
         assert fields["outbound_webhooks.targets.0.url"]["desired"] == "https://x"
         assert fields["outbound_webhooks.targets.0.secret"]["desired"] == REDACTED
 
@@ -522,6 +542,35 @@ class TestEffectiveIsNeverGuessed:
         assert record["apply_mode"] == "live_for_new_work"
         assert record["effective"] == 200
 
+    @pytest.mark.parametrize(
+        "path,value",
+        [
+            ("agents.max_nesting_depth", 3),
+            ("agents.hard_max_iterations", 250),
+            ("agents.final_warning_iterations", [10, 2]),
+        ],
+    )
+    def test_non_adopting_consumer_makes_effective_unknown(self, path, value):
+        """spawn_loop_agents ignores these, so the next unit of work is not a
+        single knowable value despite the broad live_for_new_work mode."""
+        record = build_field_record(path, value)
+        assert record["apply_mode"] == "live_for_new_work"
+        assert record["effective"] is None
+        assert record["apply_state"] == "unknown"
+
+    @pytest.mark.parametrize("path", ["scrub_secrets", "verify_ssl"])
+    def test_dropped_webhook_target_boot_value_is_not_reported_effective(self, path):
+        record = build_field_record(
+            f"outbound_webhooks.targets.0.{path}",
+            False,
+            boot_value=False,
+            has_boot=True,
+        )
+        assert record["desired"] is False
+        assert record["effective"] is None
+        assert record["pending_restart"] is False
+        assert record["apply_state"] == "unknown"
+
     def test_restart_field_still_reports_the_boot_value(self):
         record = build_field_record(
             "sessions.max_history", 500, boot_value=100, has_boot=True
@@ -638,11 +687,12 @@ class TestMetaPayload:
             }
         )
         counts = payload["status"]["counts"]
-        # Fields whose effective state is unknown are counted in NO bucket.
-        # Under-counting is the honest failure here; counting them as applied
-        # is the one that misleads.
-        assert sum(counts.values()) <= len(payload["fields"])
+        assert set(counts) == {
+            "applied", "pending_restart", "dormant", "invalid", "drift", "unknown",
+        }
+        assert sum(counts.values()) == len(payload["fields"])
         assert counts["dormant"] == 1
+        assert counts["unknown"] == 2
 
     def test_boot_snapshot_makes_pending_restart_visible(self):
         payload = build_meta_payload(

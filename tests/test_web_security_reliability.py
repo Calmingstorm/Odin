@@ -114,6 +114,8 @@ def test_is_sensitive_key_substring():
     assert _is_sensitive_key("gitea_webhook_url")
     assert _is_sensitive_key("db_password")
     assert not _is_sensitive_key("hostname")
+    assert not _is_sensitive_key("max_tokens")
+    assert not _is_sensitive_key("scrub_secrets")
 
 
 def test_redaction_leaves_empty_values():
