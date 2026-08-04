@@ -1,0 +1,560 @@
+"""The claims the config page makes about how settings apply.
+
+Every entry in the registry is a claim about code. These tests do not check
+that the claims are TRUE — only a reader with the consumer in front of them can
+do that, and the CI gate forces a leaf to be classified rather than guessed.
+What they do check is that no claim is malformed: a restart badge without a
+reason, a live-apply badge naming no handler, or a gated field that never says
+what activation means are all ways of sounding authoritative while telling the
+operator nothing.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from src.config.apply_registry import (
+    FIELDS,
+    MIXED_SECTIONS,
+    REDACTED,
+    SECTIONS,
+    ApplyMode,
+    Consumer,
+    FieldSpec,
+    build_field_record,
+    build_meta_payload,
+    config_revision,
+    flatten,
+    has_explicit_spec,
+    is_secret,
+    spec_for,
+)
+
+
+#: Mirrors APPLY_MODE_LABELS in ui/js/pages/config.js. Read from the page
+#: source rather than restated, so the two cannot drift apart quietly.
+def _page_modes() -> set[str]:
+    import re
+    from pathlib import Path
+
+    source = Path("ui/js/pages/config.js").read_text(encoding="utf-8")
+    block = re.search(r"APPLY_MODE_LABELS\s*=\s*\{(.*?)\}", source, re.S)
+    assert block, "APPLY_MODE_LABELS not found — the page contract moved"
+    return set(re.findall(r"^\s*(\w+)\s*:", block.group(1), re.M))
+
+
+VOCABULARY = _page_modes()
+
+
+class TestVocabulary:
+    def test_the_registry_speaks_only_modes_the_page_renders(self):
+        """The page maps any mode it does not know onto its Restart group, so
+        an invented mode tells an operator that restarting activates something
+        restarting cannot touch."""
+        import typing
+
+        assert set(typing.get_args(ApplyMode)) <= VOCABULARY, (
+            f"modes the page cannot render: "
+            f"{set(typing.get_args(ApplyMode)) - VOCABULARY}"
+        )
+
+    def test_dormant_and_activation_required_are_both_available(self):
+        """They are different states — one is gated, the other is read by
+        nothing — and collapsing them would send an operator hunting for a
+        switch that does not exist."""
+        import typing
+
+        modes = set(typing.get_args(ApplyMode))
+        assert {"dormant", "activation_required"} <= modes
+
+    def test_every_section_uses_a_known_mode(self):
+        for name, spec in SECTIONS.items():
+            assert spec.apply_mode in VOCABULARY, name
+            assert spec.description, f"{name} has no description"
+
+    def test_every_field_uses_a_known_mode(self):
+        for path, spec in FIELDS.items():
+            if spec.apply_mode is not None:
+                assert spec.apply_mode in VOCABULARY, path
+
+    def test_every_consumer_uses_a_known_mode(self):
+        for path, spec in FIELDS.items():
+            for consumer in spec.consumers:
+                assert consumer.apply_mode in VOCABULARY, path
+                assert consumer.name and consumer.detail, path
+
+
+class TestClaimsAreComplete:
+    """A badge that states a conclusion and withholds the reason is the habit
+    this campaign existed to break."""
+
+    @pytest.mark.parametrize("path", sorted(FIELDS))
+    def test_restart_claims_say_why(self, path):
+        spec = spec_for(path)
+        if spec.apply_mode == "restart":
+            assert spec.restart_reason, f"{path} claims restart without a reason"
+
+    @pytest.mark.parametrize("path", sorted(FIELDS))
+    def test_live_apply_claims_name_a_handler(self, path):
+        spec = spec_for(path)
+        if spec.apply_mode == "live_apply":
+            assert spec.apply_handler, f"{path} claims live apply with no handler"
+
+    @pytest.mark.parametrize("path", sorted(FIELDS))
+    def test_gated_claims_say_what_activation_means(self, path):
+        spec = spec_for(path)
+        if spec.apply_mode == "activation_required":
+            assert spec.activation_policy, f"{path} is gated with no policy"
+
+    @pytest.mark.parametrize("path", sorted(FIELDS))
+    def test_unwired_claims_explain_themselves(self, path):
+        """§4 requires an activation policy for dormant as well as gated
+        fields. For a field nothing reads, that text has to say so plainly
+        rather than describe a switch that does not exist."""
+        spec = spec_for(path)
+        if spec.apply_mode == "dormant":
+            assert spec.description, f"{path} is unwired with no description"
+            assert spec.activation_policy, (
+                f"{path} is unwired and says nothing about what that means"
+            )
+
+    def test_mixed_sections_classify_every_leaf_they_own(self):
+        """Declaring a section non-uniform and then letting a leaf inherit
+        would publish exactly the unchecked claim the declaration denies."""
+        for path in FIELDS:
+            section = path.split(".", 1)[0]
+            if section in MIXED_SECTIONS:
+                assert has_explicit_spec(path)
+
+    def test_disagreeing_consumers_carry_the_weakest_badge(self):
+        """When consumers disagree, the badge must not promise more than the
+        slowest one delivers — otherwise the page reports success for a change
+        half the system has not adopted.
+
+        Consumers marked ``activation_required`` are excluded: those do not
+        read the value at all, which is a coverage gap rather than a slower
+        path, and is disclosed in the consumer's own detail text.
+        """
+        rank = {
+            "live_read": 0,
+            "live_apply": 1,
+            "live_for_new_work": 1,
+            "restart": 2,
+        }
+        for path, spec in FIELDS.items():
+            applying = [c for c in spec.consumers if c.apply_mode != "activation_required"]
+            if not applying:
+                continue
+            resolved = spec_for(path)
+            worst = max(rank[c.apply_mode] for c in applying)
+            assert rank[resolved.apply_mode] >= worst, (
+                f"{path} advertises {resolved.apply_mode} while a consumer is "
+                f"slower than that"
+            )
+
+
+class TestResolution:
+    def test_explicit_leaf_beats_the_section_default(self):
+        assert SECTIONS["turn_state"].apply_mode == "restart"
+        assert spec_for("turn_state.payload_retention_days").apply_mode == "live_read"
+
+    def test_leaf_without_an_entry_inherits_its_section(self):
+        assert spec_for("browser.viewport_width").apply_mode == (
+            SECTIONS["browser"].apply_mode
+        )
+
+    def test_unknown_section_is_treated_as_restart_not_as_live(self):
+        """An unclassified path must never render as applied. The CI gate stops
+        this reaching a release; the fallback decides what happens if it ever
+        slips through."""
+        spec = spec_for("brand_new_section.some_field")
+        assert spec.apply_mode == "restart"
+        assert spec.restart_reason
+
+    def test_restart_leaf_inherits_the_section_reason(self):
+        assert spec_for("sessions.max_history").restart_reason == (
+            SECTIONS["sessions"].restart_reason
+        )
+
+    def test_gated_leaf_inherits_the_section_policy(self):
+        assert spec_for("usage.enabled").activation_policy == (
+            SECTIONS["usage"].activation_policy
+        )
+
+    def test_live_apply_leaf_inherits_the_section_handler(self):
+        assert spec_for("ollama.host").apply_handler == (
+            SECTIONS["ollama"].apply_handler
+        )
+
+
+class TestSensitivity:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "discord.token",
+            "web.api_token",
+            "audit.hmac_key",
+            "email.smtp.password",
+            "tools.ssh_key_path",
+            "openai_codex.credentials_path",
+        ],
+    )
+    def test_credentials_are_secret(self, path):
+        assert is_secret(path)
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "mcp.servers.thing.headers",
+            "mcp.servers.thing.env",
+            "outbound_webhooks.targets.alerts.secret",
+        ],
+    )
+    def test_user_created_credential_containers_are_secret(self, path):
+        """These leaves only exist once someone adds a server or a target, so
+        they cannot be enumerated in advance — they have to be matched."""
+        assert is_secret(path)
+
+    def test_target_safety_overrides_require_activation(self):
+        spec = spec_for("outbound_webhooks.targets.alerts.verify_ssl")
+        assert spec.apply_mode == "activation_required"
+        assert spec.activation_policy
+
+    def test_ordinary_settings_are_not_secret(self):
+        assert not is_secret("browser.viewport_width")
+        assert not is_secret("discord.channels")
+
+    def test_no_leaf_is_declassified_by_an_explicit_entry(self):
+        for path in FIELDS:
+            if any(
+                seg in path.split(".")
+                for seg in ("token", "password", "api_key", "hmac_key", "secret")
+            ):
+                assert is_secret(path), f"{path} would be served as a value"
+
+
+class TestFlatten:
+    def test_nested_paths_are_reached(self):
+        flat = dict(flatten({"a": {"b": {"c": 1}}}))
+        assert flat == {"a.b.c": 1}
+
+    def test_empty_mapping_is_itself_a_leaf(self):
+        """A cleared credential container must not vanish from the page —
+        disappearing is indistinguishable from 'no such setting'."""
+        flat = dict(flatten({"mcp": {"servers": {}}}))
+        assert flat == {"mcp.servers": {}}
+
+    def test_list_of_plain_values_stays_one_leaf(self):
+        """It is edited as a single value, so splitting it into indexed leaves
+        would make the page unusable for allowlists."""
+        flat = dict(flatten({"a": [1, 2]}))
+        assert flat == {"a": [1, 2]}
+
+    def test_empty_list_stays_one_leaf(self):
+        flat = dict(flatten({"a": []}))
+        assert flat == {"a": []}
+
+    def test_list_of_records_is_descended_into(self):
+        flat = dict(flatten({"targets": [{"name": "a"}, {"name": "b"}]}))
+        assert flat == {"targets.0.name": "a", "targets.1.name": "b"}
+
+
+class TestSecretsInsideListRecords:
+    """The leak this class of flattening exists to prevent.
+
+    ``web.api_tokens`` and ``outbound_webhooks.targets`` are lists whose every
+    entry carries a credential. Treated as single leaves they are 'public'
+    lists, and the whole list — tokens included — is serialized into the
+    payload. A default config has both lists empty, which is why a payload-wide
+    secret scan over default config passes while real installs leak.
+    """
+
+    POPULATED = {
+        "web": {"api_tokens": [{"name": "ops", "token": "WEB-TOKEN-LEAK"}]},
+        "outbound_webhooks": {
+            "targets": [
+                {"name": "a", "url": "https://x", "secret": "SIGNING-LEAK"},
+            ]
+        },
+    }
+
+    def test_no_credential_from_a_list_record_reaches_the_payload(self):
+        import json
+
+        raw = json.dumps(build_meta_payload(self.POPULATED))
+        assert "WEB-TOKEN-LEAK" not in raw
+        assert "SIGNING-LEAK" not in raw
+
+    def test_each_record_credential_is_its_own_redacted_field(self):
+        fields = {
+            f["path"]: f for f in build_meta_payload(self.POPULATED)["fields"]
+        }
+        token = fields["web.api_tokens.0.token"]
+        assert token["sensitivity"] == "sensitive"
+        assert token["desired"] == REDACTED
+        assert token["configured"] is True
+
+    def test_public_siblings_stay_readable(self):
+        """Redacting the whole record would make targets unmanageable."""
+        fields = {
+            f["path"]: f for f in build_meta_payload(self.POPULATED)["fields"]
+        }
+        assert fields["outbound_webhooks.targets.0.url"]["desired"] == "https://x"
+        assert fields["outbound_webhooks.targets.0.secret"]["desired"] == REDACTED
+
+    def test_target_bound_safety_overrides_are_still_matched_by_index(self):
+        payload = build_meta_payload(
+            {"outbound_webhooks": {"targets": [{"verify_ssl": False}]}}
+        )
+        record = payload["fields"][0]
+        assert record["path"] == "outbound_webhooks.targets.0.verify_ssl"
+        assert record["apply_mode"] == "activation_required"
+
+
+class TestFieldRecord:
+    def test_public_value_is_returned_as_it_is(self):
+        record = build_field_record("browser.viewport_width", 1280)
+        assert record["desired"] == 1280
+        assert record["effective"] == 1280
+        assert record["type"] == "integer"
+        assert record["configured"] is True
+
+    def test_secret_value_never_appears(self):
+        record = build_field_record("discord.token", "a-real-token")
+        assert record["desired"] == REDACTED
+        assert record["effective"] == REDACTED
+        assert record["configured"] is True
+        assert "a-real-token" not in repr(record)
+
+    def test_redaction_is_a_fixed_width_regardless_of_the_secret(self):
+        """A mask that tracked length would hand out the length."""
+        short = build_field_record("discord.token", "x")
+        long = build_field_record("discord.token", "x" * 400)
+        assert short["desired"] == long["desired"] == REDACTED
+
+    def test_unset_secret_reports_unset_not_redacted(self):
+        record = build_field_record("discord.token", "")
+        assert record["desired"] == ""
+        assert record["configured"] is False
+        assert record["provenance"] == "unset"
+
+    def test_secret_container_is_emptied_not_masked(self):
+        record = build_field_record(
+            "mcp.servers.thing.headers", {"Authorization": "Bearer x"}
+        )
+        assert record["desired"] == {}
+        assert "Bearer x" not in repr(record)
+        assert record["configured"] is True
+
+    def test_restart_field_reports_the_boot_value_as_effective(self):
+        record = build_field_record(
+            "sessions.max_history", 500, boot_value=100, has_boot=True
+        )
+        assert record["desired"] == 500
+        assert record["effective"] == 100
+        assert record["pending_restart"] is True
+        assert record["apply_state"] == "pending_restart"
+
+    def test_unchanged_restart_field_is_applied(self):
+        record = build_field_record(
+            "sessions.max_history", 100, boot_value=100, has_boot=True
+        )
+        assert record["pending_restart"] is False
+        assert record["apply_state"] == "applied"
+
+    def test_live_field_is_never_pending_a_restart(self):
+        record = build_field_record(
+            "turn_state.payload_retention_days", 30, boot_value=7, has_boot=True
+        )
+        assert record["effective"] == 30
+        assert record["pending_restart"] is False
+        assert record["apply_state"] == "applied"
+
+    def test_without_a_boot_snapshot_nothing_is_claimed_pending(self):
+        record = build_field_record("sessions.max_history", 500)
+        assert record["pending_restart"] is False
+        assert record["effective"] == 500
+
+    def test_dormant_field_is_never_reported_applied(self):
+        record = build_field_record("usage.directory", "./data/usage")
+        assert record["apply_state"] == "dormant"
+        assert record["activation_policy"]
+
+    def test_consumers_survive_to_the_record(self):
+        record = build_field_record("timezone", "UTC")
+        modes = {c["apply_mode"] for c in record["consumers"]}
+        assert modes == {"live_read", "restart"}
+
+
+class TestApplyState:
+    """The state a field reports, in precedence order.
+
+    ``invalid`` and ``drift`` are not produced yet — validation and runtime
+    comparison land later — but the page already renders them, so the
+    precedence is pinned now rather than discovered by whoever wires them.
+    """
+
+    def test_invalid_outranks_every_other_state(self):
+        from src.config.apply_registry import _apply_state
+
+        state = _apply_state(
+            apply_mode="restart", pending_restart=True, drift=True, valid=False
+        )
+        assert state == "invalid"
+
+    def test_pending_restart_outranks_drift(self):
+        from src.config.apply_registry import _apply_state
+
+        state = _apply_state(
+            apply_mode="restart", pending_restart=True, drift=True, valid=True
+        )
+        assert state == "pending_restart"
+
+    def test_drift_outranks_dormant(self):
+        from src.config.apply_registry import _apply_state
+
+        state = _apply_state(
+            apply_mode="activation_required",
+            pending_restart=False,
+            drift=True,
+            valid=True,
+        )
+        assert state == "drift"
+
+    def test_secret_list_is_emptied_not_masked(self):
+        record = build_field_record("outbound_webhooks.webhook_urls", ["https://x"])
+        assert record["desired"] == []
+        assert "https://x" not in repr(record)
+
+
+class TestSchemaDerivedFacts:
+    """Type, enum, constraints, and default come from Pydantic.
+
+    §4 of the plan says these are "derived from pydantic where possible, never
+    hand-duplicated". The fixture hand-wrote them and got two wrong — it
+    claimed viewport_width accepted 100..7680 and command_timeout_seconds
+    10..3600, neither of which the schema says. Deriving cannot drift.
+    """
+
+    def test_enum_comes_from_the_literal_annotation(self):
+        record = build_field_record("llm_provider.active_provider", "codex")
+        assert record["enum"] == ["codex", "ollama", "kimi"]
+
+    def test_type_comes_from_the_annotation_not_the_current_value(self):
+        """An unset optional string must still say 'string', or the page has
+        no idea which widget to render."""
+        record = build_field_record("openai_codex.agent_model", None)
+        assert record["type"] == "string"
+
+    def test_default_comes_from_the_schema(self):
+        assert build_field_record("sessions.max_history", 999)["default"] == 50
+
+    def test_declared_bounds_are_published(self):
+        record = build_field_record("turn_state.payload_retention_days", 7.0)
+        assert record["constraints"] == {"minimum": 1.0, "maximum": 90.0}
+
+    def test_bounds_that_live_only_in_a_validator_are_not_invented(self):
+        """Restating a validator's numbers is how the page ends up offering a
+        range the schema stopped accepting."""
+        record = build_field_record("browser.viewport_width", 1920)
+        assert record["constraints"] == {}
+
+    def test_unknown_paths_fall_back_to_the_value_shape(self):
+        record = build_field_record("not_a_section.not_a_field", 5)
+        assert record["type"] == "integer"
+        assert record["default"] is None
+
+    def test_list_entry_paths_resolve_to_their_record_field(self):
+        """An entry's fields are schema, so web.api_tokens.0.tier must pick up
+        the tier field's facts rather than be treated as an unknown path — and
+        an unset one must still know it is a string with a default."""
+        record = build_field_record("web.api_tokens.0.tier", None)
+        assert record["type"] == "string"
+        assert record["default"] == "admin"
+
+    def test_credentials_in_list_entries_are_known_to_the_schema_walk(self):
+        from src.config.apply_registry import schema_facts
+
+        facts = schema_facts()
+        assert "web.api_tokens.token" in facts
+        assert "outbound_webhooks.targets.secret" in facts
+
+
+class TestRevision:
+    def test_same_configuration_has_the_same_revision(self):
+        assert config_revision({"a": 1}) == config_revision({"a": 1})
+
+    def test_key_order_does_not_change_the_revision(self):
+        assert config_revision({"a": 1, "b": 2}) == config_revision({"b": 2, "a": 1})
+
+    def test_a_changed_value_changes_the_revision(self):
+        assert config_revision({"a": 1}) != config_revision({"a": 2})
+
+    def test_a_changed_secret_changes_the_revision(self):
+        """Excluding secrets would let two genuinely different configurations
+        report the same revision."""
+        left = config_revision({"discord": {"token": "one"}})
+        right = config_revision({"discord": {"token": "two"}})
+        assert left != right
+
+    def test_unserialisable_values_do_not_raise(self):
+        assert config_revision({"a": object()})
+
+
+class TestMetaPayload:
+    def test_envelope_shape(self):
+        payload = build_meta_payload({"browser": {"viewport_width": 1280}})
+        assert payload["schema_version"] == 1
+        assert payload["revision"] == payload["status"]["desired_revision"]
+        assert payload["status"]["effective_revision"] is None
+        assert [f["path"] for f in payload["fields"]] == ["browser.viewport_width"]
+
+    def test_counts_cover_every_field(self):
+        payload = build_meta_payload(
+            {
+                "browser": {"viewport_width": 1280},
+                "usage": {"directory": "./x"},
+                "sessions": {"max_history": 10},
+            }
+        )
+        counts = payload["status"]["counts"]
+        assert sum(counts.values()) == len(payload["fields"])
+        assert counts["dormant"] == 1
+
+    def test_boot_snapshot_makes_pending_restart_visible(self):
+        payload = build_meta_payload(
+            {"sessions": {"max_history": 500}},
+            boot_dump={"sessions": {"max_history": 100}},
+        )
+        assert payload["status"]["counts"]["pending_restart"] == 1
+        assert payload["status"]["effective_revision"] != payload["revision"]
+
+    def test_a_field_absent_at_boot_is_not_reported_pending(self):
+        """A setting added since startup has no boot value to compare against;
+        inventing one would manufacture a restart prompt."""
+        payload = build_meta_payload(
+            {"sessions": {"max_history": 500}}, boot_dump={"sessions": {}}
+        )
+        record = payload["fields"][0]
+        assert record["pending_restart"] is False
+
+    def test_persistence_error_is_carried_to_the_page(self):
+        payload = build_meta_payload({"a": {"b": 1}}, persistence_error="disk full")
+        assert payload["status"]["persistence_error"] == "disk full"
+
+
+class TestSpecConstruction:
+    def test_specs_are_immutable(self):
+        with pytest.raises(Exception):
+            FIELDS["timezone"].apply_mode = "live_read"
+
+    def test_consumer_is_immutable(self):
+        consumer = Consumer("x", "live_read", "y")
+        with pytest.raises(Exception):
+            consumer.name = "z"
+
+    def test_default_spec_carries_no_claims(self):
+        blank = FieldSpec()
+        assert blank.apply_mode is None
+        assert blank.consumers == ()
+        assert blank.constraints == {}

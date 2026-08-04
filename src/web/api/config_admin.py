@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from aiohttp import web
@@ -353,55 +354,22 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
 
     @routes.get("/api/config/meta")
     async def get_config_meta(_request: web.Request) -> web.Response:
-        """How each configuration section reaches the running bot.
+        """Every configuration leaf, and how it reaches the running bot.
 
-        The WebUI renders apply-mode badges from THIS, so the page states what
-        the code actually does instead of guessing from a value's shape. The
-        registry is CI-gated, so a new schema section cannot appear here
-        unclassified.
+        The config page renders from THIS, so it states what the code actually
+        does instead of guessing from a value's shape. Secret leaves carry
+        whether one is set and nothing else — never the value, its length, or
+        any prefix of it. The registry is CI-gated, so a new schema leaf cannot
+        appear here unclassified.
         """
-        from ...config.apply_registry import FIELDS, SECTIONS, is_secret
+        from ...config.apply_registry import build_meta_payload
 
-        def render(spec) -> dict:
-            out: dict = {
-                "apply_mode": spec.apply_mode,
-                "summary": spec.summary,
-            }
-            if spec.owner:
-                out["owner"] = spec.owner
-            if spec.dedicated_endpoint:
-                out["dedicated_endpoint"] = spec.dedicated_endpoint
-            if spec.restart_reason:
-                out["restart_reason"] = spec.restart_reason
-            if spec.consumers:
-                out["consumers"] = [
-                    {"name": name, "apply_mode": mode, "detail": detail}
-                    for name, mode, detail in spec.consumers
-                ]
-            return out
-
-        current = bot.config.model_dump()
-        sections = {}
-        for name, spec in SECTIONS.items():
-            entry = render(spec)
-            entry["fields"] = {
-                path.split(".", 1)[1]: render(field_spec)
-                for path, field_spec in FIELDS.items()
-                if path.startswith(f"{name}.")
-            }
-            # Secret STATE only — never the value, length, or any prefix of it.
-            section_value = current.get(name)
-            if isinstance(section_value, dict):
-                secrets = {}
-                for key, value in section_value.items():
-                    path = f"{name}.{key}"
-                    if is_secret(path):
-                        secrets[key] = {"configured": bool(value)}
-                if secrets:
-                    entry["secrets"] = secrets
-            sections[name] = entry
-
-        return web.json_response({"sections": sections})
+        payload = build_meta_payload(
+            bot.config.model_dump(),
+            boot_dump=getattr(bot, "boot_config_snapshot", None),
+            generated_at=datetime.now(UTC).isoformat(),
+        )
+        return web.json_response(payload)
 
     @routes.put("/api/config")
     async def update_config(request: web.Request) -> web.Response:

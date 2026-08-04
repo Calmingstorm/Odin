@@ -67,6 +67,11 @@ class OdinBot(commands.Bot):
         )
 
         self.config = config
+        # What the running components were actually built from. Restart-mode
+        # settings keep using this after config.yml changes, so the config page
+        # needs it to report "effective" honestly instead of echoing the
+        # desired value back and calling it applied.
+        self.boot_config_snapshot = config.model_dump()
         # commands.Bot already initializes self.tree (app_commands.CommandTree); do not overwrite
         self.start_time = time.monotonic()
 

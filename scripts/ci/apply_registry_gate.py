@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Every config section must declare how it reaches the running bot.
+"""Every config leaf must declare how it reaches the running bot.
 
-The WebUI and the config API both render apply-mode from
-``src/config/apply_registry.py``. If a new schema section can be added without
-an entry, the page starts guessing again — and a page that guesses is exactly
-the defect this campaign set out to remove.
+The config page renders apply-mode from ``src/config/apply_registry.py``. A leaf
+the registry cannot classify would be rendered by guessing, and a guess in the
+page built to stop guessing is worse than saying nothing.
+
+Walks the Pydantic models rather than a dumped instance, so nested and optional
+sub-models (``openai_codex.retry.max_retries``, ``email.smtp.password``) are
+checked too — a dump hides every branch that happens to be ``None`` today.
 
 Fails when:
-  * a schema section has no registry entry (the page would have nothing to say);
-  * the registry names a section or field the schema no longer has (a stale
-    claim, which is worse than silence);
-  * a field override names a section that does not exist.
+  * a schema section has no registry entry;
+  * a leaf inside a section declared non-uniform (``MIXED_SECTIONS``) has no
+    explicit classification, and would silently inherit an unchecked claim;
+  * the registry names a section or leaf the schema no longer has;
+  * a credential-shaped leaf is explicitly declassified to ``public``.
 
 Exit 0 clean, 1 on findings.
 """
@@ -18,32 +22,68 @@ Exit 0 clean, 1 on findings.
 from __future__ import annotations
 
 import sys
+import types
+import typing
 from pathlib import Path
+
+from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.config.apply_registry import (  # noqa: E402
     FIELDS,
-    SECRET_PATHS,
+    MIXED_SECTIONS,
     SECTIONS,
+    SENSITIVE_SEGMENTS,
+    element_model,
+    has_explicit_spec,
+    spec_for,
 )
 from src.config.schema import Config  # noqa: E402
 
 
-def _schema_shape() -> dict[str, set[str]]:
-    """{section: {field, ...}} from the real model, not a hand-kept list."""
-    sample = Config(discord={"token": "x"})
-    shape: dict[str, set[str]] = {}
-    for section, value in sample.model_dump().items():
-        shape[section] = set(value.keys()) if isinstance(value, dict) else set()
-    return shape
+def _unwrap(annotation: object) -> object:
+    """Strip Optional/Union wrappers down to the first model, if any."""
+    origin = typing.get_origin(annotation)
+    if origin in (typing.Union, types.UnionType):
+        for arg in typing.get_args(annotation):
+            if arg is type(None):
+                continue
+            unwrapped = _unwrap(arg)
+            if isinstance(unwrapped, type) and issubclass(unwrapped, BaseModel):
+                return unwrapped
+        return annotation
+    return annotation
+
+
+def _leaves(model: type[BaseModel], prefix: str = "") -> list[str]:
+    """Every settable leaf path under a model.
+
+    Container fields are reported twice over: the container itself, which is
+    edited as one value when empty, and its record fields behind a ``*``
+    wildcard.
+    """
+    out: list[str] = []
+    for name, info in model.model_fields.items():
+        path = f"{prefix}.{name}" if prefix else name
+        annotation = _unwrap(info.annotation)
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            nested = _leaves(annotation, path)
+            out.extend(nested or [path])
+            continue
+        out.append(path)
+        element = element_model(info.annotation)
+        if element is not None:
+            out.extend(_leaves(element, f"{path}.*"))
+    return out
 
 
 def main() -> int:
-    shape = _schema_shape()
+    leaves = _leaves(Config)
+    sections = sorted({leaf.split(".", 1)[0] for leaf in leaves})
     findings: list[str] = []
 
-    for section in sorted(shape):
+    for section in sections:
         if section not in SECTIONS:
             findings.append(
                 f"schema section '{section}' has no apply_registry entry — "
@@ -51,35 +91,52 @@ def main() -> int:
             )
 
     for section in sorted(SECTIONS):
-        if section not in shape:
+        if section not in sections:
             findings.append(
-                f"apply_registry declares '{section}', which the schema no longer has"
+                f"apply_registry declares section '{section}', which the schema "
+                f"no longer has"
             )
 
+    known = set(leaves)
     for path in sorted(FIELDS):
-        section, _, leaf = path.partition(".")
-        if section not in shape:
-            findings.append(f"field override '{path}' names an unknown section")
-        elif leaf and shape[section] and leaf not in shape[section]:
+        if path not in known:
             findings.append(
-                f"field override '{path}' names a field '{section}' no longer has"
+                f"apply_registry classifies '{path}', which the schema no longer has"
             )
 
-    for path in sorted(SECRET_PATHS):
-        section = path.split(".", 1)[0]
-        if section not in shape:
-            findings.append(f"secret path '{path}' names an unknown section")
+    for leaf in leaves:
+        section = leaf.split(".", 1)[0]
+        if section in MIXED_SECTIONS and not has_explicit_spec(leaf):
+            findings.append(
+                f"'{leaf}' inherits the '{section}' default, but '{section}' is "
+                f"declared non-uniform — classify this leaf against its consumer"
+            )
+
+    for leaf in leaves:
+        segments = set(leaf.split("."))
+        if segments & SENSITIVE_SEGMENTS and spec_for(leaf).sensitivity == "public":
+            findings.append(
+                f"'{leaf}' looks like a credential but is classified public — "
+                f"its value would be served to the page"
+            )
+
+    for section in sorted(MIXED_SECTIONS):
+        if section not in SECTIONS:
+            findings.append(
+                f"MIXED_SECTIONS names '{section}', which is not a config section"
+            )
 
     print(
-        f"apply-registry-gate: sections={len(shape)} classified={len(SECTIONS)} "
-        f"overrides={len(FIELDS)} findings={len(findings)}"
+        f"apply-registry-gate: sections={len(sections)} leaves={len(leaves)} "
+        f"classified={len(FIELDS)} mixed={len(MIXED_SECTIONS)} "
+        f"findings={len(findings)}"
     )
     if findings:
         print("\nUnclassified or stale configuration:")
-        for f in findings:
-            print(f"  {f}")
+        for finding in findings:
+            print(f"  {finding}")
         return 1
-    print("every configuration section declares how it applies.")
+    print("every configuration leaf declares how it applies.")
     return 0
 
 

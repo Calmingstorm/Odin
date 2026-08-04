@@ -194,6 +194,14 @@ New endpoints (legacy `GET`/`PUT /api/config` shapes untouched, per C1):
 
 ## 5. Per-feature settlement (C5 set — all become enable-able from the WebUI)
 
+> The apply-mode column below is the **target** each feature is being moved to,
+> not what the code does today. Present behaviour lives in
+> `src/config/apply_registry.py`, which is leaf-level and CI-gated; where the
+> two differ, the registry is the fact and this table is the intent. Example:
+> `agents.max_children_per_agent` is `activation_required` in the registry
+> because no spawn path reads it at all, and reaches the `live_for_new_work`
+> below only once the one-time apply described here exists.
+
 Post-campaign apply classes; none requires a restart provided controllers and dormant holders are
 constructed at ordinary startup. Where staging and atomic swap cannot be guaranteed, the registry
 must classify the field `restart` rather than impersonate liveness.
