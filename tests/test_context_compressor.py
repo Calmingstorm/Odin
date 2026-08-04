@@ -647,6 +647,38 @@ class TestCompressionStats:
             "prefix_hits", "prefix_misses", "total_checks", "prefix_hit_rate",
         }
 
+    def test_live_stats_sink_tracks_real_compression(self):
+        stats = CompressionStats()
+        messages = [{"role": "user", "content": "prefix"}]
+        for index in range(3):
+            messages.extend([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": str(index), "name": "x", "input": {}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": str(index),
+                            "content": "y" * 100,
+                        }
+                    ],
+                },
+            ])
+
+        _compressed, count = compress_tool_context(
+            messages, max_context_chars=1, keep_recent=1, stats=stats,
+        )
+
+        assert count > 0
+        assert stats.compressions == 1
+        assert stats.iterations_compressed == count
+        assert stats.chars_saved > 0
+
     def test_hit_rate_zero_when_no_checks(self):
         s = CompressionStats()
         assert s.as_dict()["prefix_hit_rate"] == 0.0

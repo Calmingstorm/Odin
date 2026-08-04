@@ -93,7 +93,7 @@ def register_connection_pools(routes: web.RouteTableDef, bot) -> None:
 
     @routes.get("/api/pools/ssh")
     async def get_ssh_pool(_request: web.Request) -> web.Response:
-        executor = getattr(bot, "executor", None)
+        executor = getattr(bot, "tool_executor", None)
         if executor is None or not hasattr(executor, "ssh_pool") or executor.ssh_pool is None:
             return web.json_response({"error": "SSH pool not available"}, status=503)
         return web.json_response(executor.ssh_pool.get_metrics())
@@ -116,7 +116,7 @@ def register_connection_pools(routes: web.RouteTableDef, bot) -> None:
 
     @routes.post("/api/pools/ssh/close")
     async def close_ssh_pool_host(request: web.Request) -> web.Response:
-        executor = getattr(bot, "executor", None)
+        executor = getattr(bot, "tool_executor", None)
         if executor is None or not hasattr(executor, "ssh_pool") or executor.ssh_pool is None:
             return web.json_response({"error": "SSH pool not available"}, status=503)
         try:

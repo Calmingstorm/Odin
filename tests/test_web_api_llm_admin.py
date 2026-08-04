@@ -307,17 +307,27 @@ class TestConnectionPools:
     @pytest.mark.asyncio
     async def test_ssh_pool_unavailable(self):
         app, bot = _app(register_connection_pools)
-        bot.executor = None
+        bot.tool_executor = None
         async with TestClient(TestServer(app)) as c:
             assert (await c.get("/api/pools/ssh")).status == 503
 
     @pytest.mark.asyncio
     async def test_ssh_pool_metrics(self):
         app, bot = _app(register_connection_pools)
-        bot.executor.ssh_pool.get_metrics.return_value = {"connections": 3}
+        bot.tool_executor.ssh_pool.get_metrics.return_value = {"connections": 3}
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/pools/ssh")).json()
             assert body["connections"] == 3
+
+    @pytest.mark.asyncio
+    async def test_ssh_pool_uses_public_tool_executor_handle(self):
+        app, bot = _app(register_connection_pools)
+        bot.executor = None
+        bot.tool_executor.ssh_pool.get_metrics.return_value = {"connections": 7}
+        async with TestClient(TestServer(app)) as c:
+            response = await c.get("/api/pools/ssh")
+            assert response.status == 200
+            assert (await response.json())["connections"] == 7
 
     @pytest.mark.asyncio
     async def test_http_pools(self):
@@ -341,8 +351,8 @@ class TestConnectionPools:
     @pytest.mark.asyncio
     async def test_ssh_close_host_and_all(self):
         app, bot = _app(register_connection_pools)
-        bot.executor.ssh_pool.close_host = AsyncMock(return_value=True)
-        bot.executor.ssh_pool.close_all = AsyncMock(return_value=4)
+        bot.tool_executor.ssh_pool.close_host = AsyncMock(return_value=True)
+        bot.tool_executor.ssh_pool.close_all = AsyncMock(return_value=4)
         async with TestClient(TestServer(app)) as c:
             r = await c.post("/api/pools/ssh/close", json={"host": "server"})
             assert (await r.json())["closed"] is True
@@ -363,7 +373,7 @@ class TestConnectionPools:
     @pytest.mark.asyncio
     async def test_ssh_close_unavailable(self):
         app, bot = _app(register_connection_pools)
-        bot.executor = None
+        bot.tool_executor = None
         async with TestClient(TestServer(app)) as c:
             assert (await c.post("/api/pools/ssh/close", json={})).status == 503
 

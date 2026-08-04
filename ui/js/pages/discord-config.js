@@ -4,9 +4,11 @@
  */
 import { api } from '../api.js';
 import { computed, onMounted, ref } from 'vue';
+import { DiscordUserCombobox } from '../discord-user-combobox.js';
 
 
 export default {
+  components: { DiscordUserCombobox },
   template: `
     <div class="p-6 page-fade-in">
       <div class="flex items-center justify-between mb-4">
@@ -44,7 +46,7 @@ export default {
             <label class="discord-global-toggle">Respond to bots by default
               <span class="toggle-switch"><input v-model="globalDraft.respond_to_bots" type="checkbox" /><span class="toggle-slider"></span></span>
             </label>
-            <div v-for="editor in globalListEditors" :key="editor.key" class="discord-global-list">
+            <div v-for="editor in globalListEditors" :key="editor.key" :class="['discord-global-list', { 'discord-global-list-full': editor.userAutocomplete }]">
               <strong>{{ editor.label }}</strong>
               <p>{{ editor.description }}</p>
               <div class="cfgc-chip-list">
@@ -53,7 +55,13 @@ export default {
                 </span>
                 <span v-if="!globalDraft[editor.key].length" class="cfgc-chip-empty">No entries</span>
               </div>
-              <div class="cfgc-chip-add">
+              <div v-if="editor.userAutocomplete" class="cfgc-chip-add discord-global-user-picker">
+                <discord-user-combobox :members="globalMembers" :excluded-ids="globalDraft[editor.key]"
+                                        :options-id="'discord-global-' + editor.key + '-options'"
+                                        :placeholder="editor.placeholder" :aria-label="'Search ' + editor.label.toLowerCase()"
+                                        @select="addGlobalItem(editor.key, $event)" />
+              </div>
+              <div v-else class="cfgc-chip-add">
                 <input v-model="globalArrayInputs[editor.key]" class="hm-input font-mono" type="text" :placeholder="editor.placeholder"
                        @keydown.enter.prevent="addGlobalItem(editor.key)" />
                 <button type="button" class="btn btn-ghost text-xs" @click="addGlobalItem(editor.key)">Add</button>
@@ -183,10 +191,11 @@ export default {
     const globalSaving = ref(false);
     const globalError = ref(null);
     const globalArrayInputs = ref({});
+    const globalMembers = ref([]);
     const globalListEditors = Object.freeze([
-      { key: 'allowed_users', label: 'Allowed users', description: 'Discord user IDs allowed by the global bot policy.', placeholder: 'Discord user ID' },
+      { key: 'allowed_users', label: 'Allowed users', description: 'Discord user IDs allowed by the global bot policy.', placeholder: 'Search Discord users…', userAutocomplete: true },
       { key: 'channels', label: 'Allowed channels', description: 'Channel IDs included by the global bot policy.', placeholder: 'Discord channel ID' },
-      { key: 'ignore_bot_ids', label: 'Ignored bot IDs', description: 'Bot identities Odin never responds to automatically.', placeholder: 'Discord bot ID' },
+      { key: 'ignore_bot_ids', label: 'Ignored bot IDs', description: 'Bot identities Odin never responds to automatically.', placeholder: 'Search Discord users or bots…', userAutocomplete: true },
     ]);
     const globalChanged = computed(() => JSON.stringify(globalConfig.value) !== JSON.stringify(globalDraft.value));
 
@@ -217,7 +226,12 @@ export default {
       loading.value = true;
       error.value = null;
       try {
-        guilds.value = await api.get('/api/discord/guilds');
+        const [loadedGuilds, loadedMembers] = await Promise.all([
+          api.get('/api/discord/guilds'),
+          api.get('/api/discord/members').catch(() => []),
+        ]);
+        guilds.value = loadedGuilds;
+        globalMembers.value = loadedMembers;
         try {
           const loadedConfig = await api.get('/api/config');
           const discord = loadedConfig.discord || {};
@@ -266,8 +280,8 @@ export default {
       }
     }
 
-    function addGlobalItem(key) {
-      const value = String(globalArrayInputs.value[key] || '').trim();
+    function addGlobalItem(key, selectedValue = null) {
+      const value = String(selectedValue ?? globalArrayInputs.value[key] ?? '').trim();
       if (!value || globalDraft.value[key].includes(value)) return;
       globalDraft.value[key] = [...globalDraft.value[key], value];
       globalArrayInputs.value = { ...globalArrayInputs.value, [key]: '' };
@@ -302,7 +316,7 @@ export default {
     onMounted(fetchGuilds);
 
     return {
-      guilds, loading, error, expanded, globalDraft, globalSaving, globalError, globalArrayInputs, globalListEditors, globalChanged,
+      guilds, loading, error, expanded, globalDraft, globalSaving, globalError, globalArrayInputs, globalMembers, globalListEditors, globalChanged,
       guildEnabled, guildMention, guildBots, hasOverride, toggleGuild,
       fetchGuilds, setGuildConfig, setChannelConfig, clearOverride, addGlobalItem, removeGlobalItem, saveGlobalDefaults,
     };

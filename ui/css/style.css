@@ -3492,10 +3492,17 @@ a:focus-visible {
 .config-center-page {
   --cfgc-rail-w: 218px;
   --cfgc-panel-border: rgba(49, 57, 71, 0.86);
-  position: relative;
-  padding-bottom: 5rem;
+  height: calc(100vh - var(--hm-topbar-h) - var(--hm-section-tabs-h));
+  min-height: 0 !important;
+  padding-bottom: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 .cfgc-page-header {
+  position: relative;
+  z-index: 16;
+  flex: none;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -3533,6 +3540,7 @@ a:focus-visible {
 .cfgc-loading-grid .skeleton:last-child { grid-column: 2; }
 
 .cfgc-health {
+  flex: none;
   margin-bottom: var(--hm-space-5);
   padding: var(--hm-space-5);
   background:
@@ -3630,15 +3638,18 @@ a:focus-visible {
 .cfgc-health-alert.warning { color: #e3bb69; background: rgba(234, 179, 8, 0.065); border: 1px solid rgba(234, 179, 8, 0.17); }
 
 .cfgc-workspace {
+  min-height: 0;
+  flex: 1;
   display: grid;
   grid-template-columns: var(--cfgc-rail-w) minmax(0, 1fr);
   align-items: start;
   gap: var(--hm-space-5);
 }
 .cfgc-category-rail {
-  position: sticky;
-  top: calc(var(--hm-topbar-h) + var(--hm-section-tabs-h) + var(--hm-space-4));
-  max-height: calc(100vh - var(--hm-topbar-h) - var(--hm-section-tabs-h) - 2rem);
+  position: relative;
+  top: auto;
+  height: 100%;
+  max-height: none;
   padding: var(--hm-space-3);
   overflow: hidden auto;
   background: rgba(12, 16, 23, 0.9);
@@ -3705,10 +3716,10 @@ a:focus-visible {
 .cfgc-rail-key span { display: flex; align-items: center; gap: 0.25rem; }
 .cfgc-rail-key b { font-style: normal; }
 
-.cfgc-main { min-width: 0; }
+.cfgc-main { min-width: 0; min-height: 0; overflow-y: auto; padding-bottom: 5rem; }
 .cfgc-toolbar {
   position: sticky;
-  top: calc(var(--hm-topbar-h) + var(--hm-section-tabs-h));
+  top: 0;
   z-index: 12;
   margin: 0 0 var(--hm-space-4);
   padding: var(--hm-space-3);
@@ -3861,7 +3872,7 @@ a:focus-visible {
 .cfgc-field:last-child { border-bottom: 0; }
 .cfgc-field.changed { margin-inline: calc(var(--hm-space-3) * -1); padding-inline: var(--hm-space-3); background: rgba(197, 139, 50, 0.035); border-radius: var(--hm-radius-md); }
 .cfgc-field.invalid { background: rgba(239, 68, 68, 0.035); }
-.cfgc-field-copy { min-width: 0; }
+.cfgc-field-copy { min-width: 0; padding-inline: var(--hm-space-4); }
 .cfgc-field-copy > label { display: block; color: var(--hm-text); font-size: var(--hm-text-sm); font-weight: 630; }
 .cfgc-field-copy > code { display: block; margin-top: 0.2rem; overflow-wrap: anywhere; color: #687382; font-family: var(--hm-font-mono); font-size: 0.6rem; }
 .cfgc-field-copy > p { max-width: 620px; margin-top: 0.42rem; color: var(--hm-text-muted); font-size: var(--hm-text-xs); line-height: 1.52; }
@@ -3968,6 +3979,7 @@ a:focus-visible {
   grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
 }
 .cfgc-restart-banner {
+  flex: none;
   margin-bottom: var(--hm-space-5);
   padding: var(--hm-space-4) var(--hm-space-5);
   display: grid;
@@ -4019,25 +4031,70 @@ a:focus-visible {
 .cfgc-field-group-header > span { flex: none; color: var(--hm-text-dim); font-size: 0.6rem; }
 .cfgc-field-group .cfgc-fields { padding: 0; }
 .cfgc-field {
-  grid-template-columns: minmax(180px, 4fr) minmax(190px, 5fr) minmax(180px, 3fr);
+  grid-template-columns: minmax(180px, 4fr) minmax(190px, 5fr);
   align-items: start;
 }
-.cfgc-field-runtime {
+.cfgc-field-runtime-note {
+  grid-column: 1 / -1;
   min-width: 0;
+  margin-top: calc(var(--hm-space-2) * -1);
   padding: var(--hm-space-3);
   display: grid;
-  gap: 0.2rem;
-  background: rgba(4, 7, 11, 0.27);
-  border: 1px solid var(--hm-border-subtle);
+  gap: 0.25rem;
+  background: rgba(139, 92, 246, 0.045);
+  border: 1px solid rgba(139, 92, 246, 0.16);
   border-radius: var(--hm-radius-md);
 }
-.cfgc-field-runtime strong { color: #b8c0cb; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.055em; }
-.cfgc-field-runtime strong:not(:first-child) { margin-top: 0.35rem; }
-.cfgc-field-runtime p { color: var(--hm-text-muted); font-size: 0.66rem; line-height: 1.45; }
-.cfgc-field-runtime .btn { margin-top: var(--hm-space-2); justify-self: start; }
+.cfgc-field-runtime-note strong { color: #b9a6df; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.055em; }
+.cfgc-field-runtime-note p { color: var(--hm-text-muted); font-size: 0.66rem; line-height: 1.45; }
+.cfgc-field-runtime-note .btn { margin-top: var(--hm-space-2); justify-self: start; }
+.cfgc-runtime-summary-list { margin-top: var(--hm-space-3); display: grid; gap: var(--hm-space-2); }
+.cfgc-runtime-summary { padding: var(--hm-space-3); background: rgba(4, 7, 11, 0.27); border: 1px solid var(--hm-border-subtle); border-radius: var(--hm-radius-md); }
+.cfgc-runtime-summary strong { color: #b8c0cb; font-size: 0.62rem; }
+.cfgc-runtime-summary p { margin-top: 0.25rem; color: var(--hm-text-muted); font-size: 0.66rem; line-height: 1.45; }
 .cfgc-group-apply-details { padding: 0 var(--hm-space-4) var(--hm-space-4); }
 .cfgc-group-apply-details summary { color: var(--hm-text-dim); cursor: pointer; font-size: var(--hm-text-xs); }
 .cfgc-apply-detail-list { margin-top: var(--hm-space-3); display: grid; gap: var(--hm-space-2); }
+
+.discord-user-combobox { position: relative; width: 100%; }
+.discord-user-combobox > .hm-input { width: 100%; }
+.discord-user-combobox-options {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  right: 0;
+  max-height: 15rem;
+  overflow-y: auto;
+  background: #0d121a;
+  border: 1px solid #3b4555;
+  border-radius: var(--hm-radius-md);
+  box-shadow: var(--hm-shadow-lg);
+}
+.discord-user-combobox-option {
+  width: 100%;
+  min-height: 38px;
+  padding: 0.45rem 0.65rem;
+  display: flex;
+  align-items: center;
+  gap: var(--hm-space-2);
+  color: var(--hm-text-muted);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: var(--hm-text-xs);
+  text-align: left;
+}
+.discord-user-combobox-option:hover,
+.discord-user-combobox-option.active { color: var(--hm-text); background: rgba(197, 139, 50, 0.09); }
+.discord-user-combobox-option img,
+.discord-user-combobox-avatar { width: 22px; height: 22px; flex: none; border-radius: var(--hm-radius-full); }
+.discord-user-combobox-avatar { display: inline-grid; place-items: center; color: var(--hm-text-dim); background: #293140; font-size: 0.6rem; }
+.discord-user-combobox-name { min-width: 0; overflow: hidden; color: inherit; text-overflow: ellipsis; white-space: nowrap; }
+.discord-user-combobox-username { min-width: 0; overflow: hidden; color: var(--hm-text-dim); text-overflow: ellipsis; white-space: nowrap; }
+.discord-user-combobox-bot { margin-left: auto; padding: 0.08rem 0.25rem; color: #c4b5fd; background: rgba(99, 102, 241, 0.2); border-radius: 3px; font-size: 0.52rem; }
+.discord-global-user-picker { display: block; }
+.discord-global-list-full { grid-column: 1 / -1; }
 .cfgc-chip-editor { display: grid; gap: var(--hm-space-3); }
 .cfgc-chip-list { min-height: 32px; display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
 .cfgc-chip {
@@ -4071,15 +4128,16 @@ a:focus-visible {
   .cfgc-section-summary { grid-column: 2; white-space: normal; }
   .cfgc-section-badges { grid-column: 3; grid-row: 1 / span 2; }
   .cfgc-field { grid-template-columns: minmax(180px, 5fr) minmax(220px, 7fr); }
-  .cfgc-field-runtime { grid-column: 1 / -1; }
 }
 
 @media (max-width: 900px) {
-  .config-center-page { --cfgc-rail-w: 100%; }
-  .cfgc-workspace { grid-template-columns: minmax(0, 1fr); gap: var(--hm-space-3); }
+  .config-center-page { --cfgc-rail-w: 100%; height: auto; min-height: 100% !important; overflow: visible; }
+  .cfgc-workspace { min-height: auto; flex: none; grid-template-columns: minmax(0, 1fr); gap: var(--hm-space-3); }
+  .cfgc-main { overflow: visible; padding-bottom: 5rem; }
   .cfgc-category-rail {
     position: sticky;
     top: calc(var(--hm-topbar-h) + var(--hm-section-tabs-h));
+    height: auto;
     z-index: 13;
     max-height: none;
     padding: var(--hm-space-2);

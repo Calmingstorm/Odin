@@ -1,11 +1,13 @@
 import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { createHostAccessMutationCoordinator } from '../host-access-state.js';
+import { DiscordUserCombobox } from '../discord-user-combobox.js';
 
 
 export default {
+  components: { DiscordUserCombobox },
   template: `
     <div class="p-6 page-fade-in">
       <div class="flex items-center justify-between mb-4">
@@ -65,42 +67,10 @@ export default {
           <!-- Add user form with autocomplete -->
           <div v-if="showAddUser" class="mb-4 p-3 bg-gray-800 rounded border border-gray-700">
             <div class="flex items-center gap-3 relative">
-              <div class="relative w-72">
-                <input ref="searchInput" v-model="searchQuery" placeholder="Search users..."
-                       role="combobox" aria-label="Search users" aria-autocomplete="list"
-                       :aria-expanded="showDropdown" aria-controls="host-user-options"
-                       :aria-activedescendant="activeOptionId"
-                       @input="onSearchInput" @keydown.down.prevent="highlightNext"
-                       @keydown.up.prevent="highlightPrev" @keydown.enter.prevent="selectHighlighted"
-                       @keydown.escape="closeDropdown" @blur="onBlur"
-                       class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-300 w-full" />
-                <div v-if="showDropdown && (filteredMembers.length > 0 || isRawId)"
-                     id="host-user-options" role="listbox"
-                     class="absolute z-50 mt-1 w-full max-h-60 overflow-y-auto bg-gray-900 border border-gray-600 rounded shadow-lg">
-                  <div v-if="isRawId && !filteredMembers.length"
-                       @mousedown.prevent="addRawId" id="host-user-option-raw" role="option"
-                       :aria-selected="highlightIdx === 0"
-                       class="flex items-center gap-2 px-3 py-2 cursor-pointer text-sm hover:bg-gray-800">
-                    <div class="w-5 h-5 rounded-full bg-gray-700 flex items-center justify-center text-xs text-gray-400">?</div>
-                    <span class="text-gray-200">Add by ID: {{ searchQuery.trim() }}</span>
-                    <span class="text-gray-500 text-xs ml-auto">press Enter</span>
-                  </div>
-                  <div v-for="(m, idx) in filteredMembers" :key="m.id"
-                       @mousedown.prevent="selectMember(m)" :id="'host-user-option-' + idx" role="option"
-                       :aria-selected="idx === highlightIdx"
-                       class="flex items-center gap-2 px-3 py-2 cursor-pointer text-sm"
-                       :class="idx === highlightIdx ? 'bg-gray-700' : 'hover:bg-gray-800'">
-                    <img v-if="m.avatar_url" :src="m.avatar_url + '?size=24'" class="w-5 h-5 rounded-full" />
-                    <div v-else class="w-5 h-5 rounded-full bg-gray-700 flex items-center justify-center text-xs text-gray-400">
-                      {{ m.display_name.charAt(0) }}
-                    </div>
-                    <span class="text-gray-200">{{ m.display_name }}</span>
-                    <span class="text-gray-500 text-xs">{{ m.username }}</span>
-                    <span v-if="m.bot" class="text-xs px-1 rounded bg-indigo-900 text-indigo-300 ml-auto">BOT</span>
-                  </div>
-                </div>
-              </div>
-              <button @click="showAddUser = false; searchQuery = ''" class="btn btn-ghost text-xs">Cancel</button>
+              <discord-user-combobox class="w-72" :members="members" :excluded-ids="Object.keys(users)"
+                                      options-id="host-user-options" placeholder="Search users…"
+                                      aria-label="Search users" autofocus @select="addUserById" />
+              <button @click="showAddUser = false" class="btn btn-ghost text-xs">Cancel</button>
             </div>
           </div>
 
@@ -168,11 +138,7 @@ export default {
     const defaultPolicy = ref({ allowed_hosts: [], default_host: '' });
     const users = ref({});
     const showAddUser = ref(false);
-    const searchQuery = ref('');
-    const showDropdown = ref(false);
-    const highlightIdx = ref(0);
     const members = ref([]);
-    const searchInput = ref(null);
 
     const membersById = computed(() => {
       const map = {};
@@ -184,24 +150,6 @@ export default {
       return membersById.value[uid] || null;
     }
 
-    const isRawId = computed(() => /^\d{15,25}$/.test(searchQuery.value.trim()));
-    const activeOptionId = computed(() => {
-      if (!showDropdown.value) return undefined;
-      if (filteredMembers.value[highlightIdx.value]) return 'host-user-option-' + highlightIdx.value;
-      if (isRawId.value) return 'host-user-option-raw';
-      return undefined;
-    });
-
-    const filteredMembers = computed(() => {
-      const q = searchQuery.value.toLowerCase().trim();
-      if (!q) return members.value.filter(m => !users.value[m.id]);
-      return members.value.filter(m =>
-        !users.value[m.id] &&
-        (m.display_name.toLowerCase().includes(q) ||
-         m.username.toLowerCase().includes(q) ||
-         m.id.includes(q))
-      );
-    });
 
     function normalizeEntry(entry, hosts) {
       if (!entry) return { allowed_hosts: [...hosts], default_host: hosts[0] || '', allow_all: true };
@@ -340,54 +288,17 @@ export default {
 
     function openAddUser() {
       showAddUser.value = true;
-      searchQuery.value = '';
-      highlightIdx.value = 0;
-      nextTick(() => { if (searchInput.value) searchInput.value.focus(); });
     }
 
-    function onSearchInput() {
-      showDropdown.value = true;
-      highlightIdx.value = 0;
-    }
-
-    function highlightNext() {
-      if (highlightIdx.value < filteredMembers.value.length - 1) highlightIdx.value++;
-    }
-
-    function highlightPrev() {
-      if (highlightIdx.value > 0) highlightIdx.value--;
-    }
-
-    function selectHighlighted() {
-      const m = filteredMembers.value[highlightIdx.value];
-      if (m) { selectMember(m); return; }
-      if (isRawId.value) addRawId();
-    }
-
-    function addRawId() {
-      const uid = searchQuery.value.trim();
-      if (!/^\d{15,25}$/.test(uid)) return;
-      users.value[uid] = { allowed_hosts: [...availableHosts.value], default_host: availableHosts.value[0] || '', allow_all: false };
+    function addUserById(uid) {
+      if (!/^\d{15,25}$/.test(uid) || users.value[uid]) return;
+      users.value[uid] = {
+        allowed_hosts: [...availableHosts.value],
+        default_host: availableHosts.value[0] || '',
+        allow_all: false,
+      };
       saveUser(uid);
-      searchQuery.value = '';
-      showDropdown.value = false;
       showAddUser.value = false;
-    }
-
-    function selectMember(m) {
-      users.value[m.id] = { allowed_hosts: [...availableHosts.value], default_host: availableHosts.value[0] || '', allow_all: false };
-      saveUser(m.id);
-      searchQuery.value = '';
-      showDropdown.value = false;
-      showAddUser.value = false;
-    }
-
-    function closeDropdown() {
-      showDropdown.value = false;
-    }
-
-    function onBlur() {
-      setTimeout(() => { showDropdown.value = false; }, 150);
     }
 
     async function deleteUser(uid) {
@@ -411,12 +322,9 @@ export default {
 
     return {
       loading, error, data, availableHosts, defaultPolicy, users,
-      showAddUser, searchQuery, showDropdown, highlightIdx,
-      members, filteredMembers, isRawId, activeOptionId, searchInput,
+      showAddUser, members,
       fetchData, saveDefaultPolicy, toggleDefaultHost, getMember,
-      toggleUserHost, setUserDefault, openAddUser, deleteUser,
-      onSearchInput, highlightNext, highlightPrev, selectHighlighted,
-      selectMember, closeDropdown, onBlur, addRawId,
+      toggleUserHost, setUserDefault, openAddUser, addUserById, deleteUser,
     };
   },
 };

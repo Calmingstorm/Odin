@@ -391,6 +391,7 @@ class ToolLoopDeps:
     audit: AuditLogger
     loop_manager: LoopManager
     stuck_loop_tracker_cls: type[StuckLoopTracker]
+    get_compression_stats: Callable = lambda: None
     # Durable turn-state store (None = checkpointing off). Default keeps
     # every existing construction working; wiring passes the real store.
     turn_store: object | None = None
@@ -404,6 +405,7 @@ class ToolLoopRunner:
         self._get_config = deps.get_config
         self._get_default_system_prompt = deps.get_default_system_prompt
         self._get_context_compressor = deps.get_context_compressor
+        self._get_compression_stats = deps.get_compression_stats
         self._llm_gateway = deps.llm_gateway
         self._prompt_builder = deps.prompt_builder
         self._tool_catalog = deps.tool_catalog
@@ -858,6 +860,7 @@ class ToolLoopRunner:
                         st.messages,
                         max_context_chars=_cc.max_context_chars,
                         keep_recent=_cc.keep_recent_iterations,
+                        stats=self._get_compression_stats(),
                     )
                     log.info("context_compressor: trimmed %d chars", _saved)
             except Exception:
