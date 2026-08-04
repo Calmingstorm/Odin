@@ -29,6 +29,43 @@ export default {
       </div>
 
       <div v-else class="space-y-4">
+        <section v-if="globalDraft" class="hm-card discord-global-card">
+          <div class="discord-global-heading">
+            <div>
+              <h2 class="text-sm font-semibold text-gray-300">Global defaults</h2>
+              <p>These settings apply when a guild or channel has no narrower override.</p>
+            </div>
+          </div>
+          <div v-if="globalError" class="text-xs text-red-400 mb-3" role="alert">{{ globalError }}</div>
+          <div class="discord-global-grid">
+            <label class="discord-global-toggle">Require @mention by default
+              <span class="toggle-switch"><input v-model="globalDraft.require_mention" type="checkbox" /><span class="toggle-slider"></span></span>
+            </label>
+            <label class="discord-global-toggle">Respond to bots by default
+              <span class="toggle-switch"><input v-model="globalDraft.respond_to_bots" type="checkbox" /><span class="toggle-slider"></span></span>
+            </label>
+            <div v-for="editor in globalListEditors" :key="editor.key" class="discord-global-list">
+              <strong>{{ editor.label }}</strong>
+              <p>{{ editor.description }}</p>
+              <div class="cfgc-chip-list">
+                <span v-for="item in globalDraft[editor.key]" :key="item" class="cfgc-chip">{{ item }}
+                  <button type="button" @click="removeGlobalItem(editor.key, item)" :aria-label="'Remove ' + item">×</button>
+                </span>
+                <span v-if="!globalDraft[editor.key].length" class="cfgc-chip-empty">No entries</span>
+              </div>
+              <div class="cfgc-chip-add">
+                <input v-model="globalArrayInputs[editor.key]" class="hm-input font-mono" type="text" :placeholder="editor.placeholder"
+                       @keydown.enter.prevent="addGlobalItem(editor.key)" />
+                <button type="button" class="btn btn-ghost text-xs" @click="addGlobalItem(editor.key)">Add</button>
+              </div>
+            </div>
+          </div>
+          <div class="discord-global-footer">
+            <span>Saving changes only these global defaults. Guild and channel overrides remain untouched.</span>
+            <button type="button" class="btn btn-primary text-xs" @click="saveGlobalDefaults" :disabled="globalSaving || !globalChanged">{{ globalSaving ? 'Saving…' : 'Save global defaults' }}</button>
+          </div>
+        </section>
+
         <div v-for="guild in guilds" :key="guild.id" class="hm-card">
           <!-- Guild header -->
           <div class="flex items-center justify-between mb-3">
@@ -141,6 +178,17 @@ export default {
     const loading = ref(true);
     const error = ref(null);
     const expanded = ref({});
+    const globalConfig = ref(null);
+    const globalDraft = ref(null);
+    const globalSaving = ref(false);
+    const globalError = ref(null);
+    const globalArrayInputs = ref({});
+    const globalListEditors = Object.freeze([
+      { key: 'allowed_users', label: 'Allowed users', description: 'Discord user IDs allowed by the global bot policy.', placeholder: 'Discord user ID' },
+      { key: 'channels', label: 'Allowed channels', description: 'Channel IDs included by the global bot policy.', placeholder: 'Discord channel ID' },
+      { key: 'ignore_bot_ids', label: 'Ignored bot IDs', description: 'Bot identities Odin never responds to automatically.', placeholder: 'Discord bot ID' },
+    ]);
+    const globalChanged = computed(() => JSON.stringify(globalConfig.value) !== JSON.stringify(globalDraft.value));
 
     function guildEnabled(guild) {
       if (guild.config && guild.config.enabled !== undefined) return guild.config.enabled;
@@ -170,6 +218,21 @@ export default {
       error.value = null;
       try {
         guilds.value = await api.get('/api/discord/guilds');
+        try {
+          const loadedConfig = await api.get('/api/config');
+          const discord = loadedConfig.discord || {};
+          globalConfig.value = {
+            allowed_users: [...(discord.allowed_users || [])],
+            channels: [...(discord.channels || [])],
+            respond_to_bots: Boolean(discord.respond_to_bots),
+            require_mention: Boolean(discord.require_mention),
+            ignore_bot_ids: [...(discord.ignore_bot_ids || [])],
+          };
+          globalDraft.value = JSON.parse(JSON.stringify(globalConfig.value));
+          globalError.value = null;
+        } catch (globalLoadError) {
+          globalError.value = globalLoadError.message || 'Global defaults could not be loaded.';
+        }
       } catch (e) {
         error.value = e.message;
       }
@@ -203,12 +266,45 @@ export default {
       }
     }
 
+    function addGlobalItem(key) {
+      const value = String(globalArrayInputs.value[key] || '').trim();
+      if (!value || globalDraft.value[key].includes(value)) return;
+      globalDraft.value[key] = [...globalDraft.value[key], value];
+      globalArrayInputs.value = { ...globalArrayInputs.value, [key]: '' };
+    }
+
+    function removeGlobalItem(key, value) {
+      globalDraft.value[key] = globalDraft.value[key].filter(item => item !== value);
+    }
+
+    async function saveGlobalDefaults() {
+      if (!globalChanged.value || globalSaving.value) return;
+      globalSaving.value = true;
+      globalError.value = null;
+      try {
+        const result = await api.put('/api/config', { discord: globalDraft.value });
+        const discord = result.discord || globalDraft.value;
+        globalConfig.value = {
+          allowed_users: [...(discord.allowed_users || [])],
+          channels: [...(discord.channels || [])],
+          respond_to_bots: Boolean(discord.respond_to_bots),
+          require_mention: Boolean(discord.require_mention),
+          ignore_bot_ids: [...(discord.ignore_bot_ids || [])],
+        };
+        globalDraft.value = JSON.parse(JSON.stringify(globalConfig.value));
+      } catch (saveError) {
+        globalError.value = saveError.message || 'Global defaults could not be saved.';
+      } finally {
+        globalSaving.value = false;
+      }
+    }
+
     onMounted(fetchGuilds);
 
     return {
-      guilds, loading, error, expanded,
+      guilds, loading, error, expanded, globalDraft, globalSaving, globalError, globalArrayInputs, globalListEditors, globalChanged,
       guildEnabled, guildMention, guildBots, hasOverride, toggleGuild,
-      fetchGuilds, setGuildConfig, setChannelConfig, clearOverride,
+      fetchGuilds, setGuildConfig, setChannelConfig, clearOverride, addGlobalItem, removeGlobalItem, saveGlobalDefaults,
     };
   },
 };

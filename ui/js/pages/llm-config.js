@@ -168,8 +168,9 @@ export default {
             </div>
             <div>
               <label class="text-xs text-gray-400 block">Max Tokens
-              <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfigNow"
+              <input v-model.number="codexForm.max_tokens" type="number" disabled aria-describedby="codex-max-tokens-note"
                      class="hm-input" />
+              <small id="codex-max-tokens-note" class="llm-field-note">Unsupported by the current Codex provider. Preserved in config, never sent to Responses requests.</small>
               </label>
             </div>
           </div>
@@ -183,6 +184,74 @@ export default {
                class="text-sm text-yellow-400 bg-yellow-900/20 rounded p-2 border border-yellow-800 mt-3">
             {{ auxData.unavailable_reason }}
           </div>
+          <details class="llm-advanced" :open="advancedOpen.codex" @toggle="advancedOpen.codex = $event.target.open">
+            <summary>
+              <span>Advanced Settings</span>
+              <small>Transport, retries, connection pool, and context compression</small>
+            </summary>
+            <div class="llm-advanced-body">
+              <section class="llm-advanced-group">
+                <header><strong>Transport</strong><span>Request lifecycle limits</span></header>
+                <label>Request timeout <small>seconds</small>
+                  <input v-model.number="codexForm.request_timeout_seconds" type="number" min="60" max="86400" class="hm-input" />
+                </label>
+                <label>Stream stall timeout <small>seconds</small>
+                  <input v-model.number="codexForm.stream_stall_timeout_seconds" type="number" min="10" max="3600" class="hm-input" />
+                </label>
+              </section>
+              <section class="llm-advanced-group">
+                <header><strong>Retry policy</strong><span>Transient request failures</span></header>
+                <label>Maximum retries
+                  <input v-model.number="codexForm.retry.max_retries" type="number" min="0" class="hm-input" />
+                </label>
+                <label>Base delay <small>seconds</small>
+                  <input v-model.number="codexForm.retry.base_delay" type="number" min="0" step="any" class="hm-input" />
+                </label>
+                <label>Maximum delay <small>seconds</small>
+                  <input v-model.number="codexForm.retry.max_delay" type="number" min="0" step="any" class="hm-input" />
+                </label>
+              </section>
+              <section class="llm-advanced-group">
+                <header><strong>Connection pool</strong><span>Shared Codex HTTP transport</span></header>
+                <p v-if="llmStatus?.codex?.connection_pool_pending_restart === true" class="llm-advanced-state pending" role="status">
+                  Saved values need a restart. This process still uses {{ llmStatus.codex.effective_connection_pool?.max_connections }} connections with {{ llmStatus.codex.effective_connection_pool?.keepalive_timeout }}s keepalive.
+                </p>
+                <p v-else-if="llmStatus?.codex?.connection_pool_pending_restart === false" class="llm-advanced-state">
+                  Saved values match this process. Future changes take effect after restart.
+                </p>
+                <p v-else class="llm-advanced-state">Future changes take effect after restart; current process values are unavailable.</p>
+                <label>Maximum connections
+                  <input v-model.number="codexForm.connection_pool.max_connections" type="number" min="1" class="hm-input" />
+                </label>
+                <label>Keepalive timeout <small>seconds</small>
+                  <input v-model.number="codexForm.connection_pool.keepalive_timeout" type="number" min="0" class="hm-input" />
+                </label>
+              </section>
+              <section class="llm-advanced-group">
+                <header><strong>Context compression</strong><span>Long-conversation compaction</span></header>
+                <p v-if="llmStatus?.codex?.context_compression_pending_restart === true" class="llm-advanced-state pending" role="status">
+                  Saved values need a restart. This process still uses compression {{ llmStatus.codex.effective_context_compression?.enabled ? 'on' : 'off' }}, {{ Number(llmStatus.codex.effective_context_compression?.max_context_chars || 0).toLocaleString() }} characters, and {{ llmStatus.codex.effective_context_compression?.keep_recent_iterations }} recent iterations.
+                </p>
+                <p v-else-if="llmStatus?.codex?.context_compression_pending_restart === false" class="llm-advanced-state">
+                  Saved values match this process. Future changes take effect after restart.
+                </p>
+                <p v-else class="llm-advanced-state">Future changes take effect after restart; current process values are unavailable.</p>
+                <label class="llm-advanced-toggle">Enabled
+                  <span class="toggle-switch"><input v-model="codexForm.context_compression.enabled" type="checkbox" /><span class="toggle-slider"></span></span>
+                </label>
+                <label>Maximum context characters
+                  <input v-model.number="codexForm.context_compression.max_context_chars" type="number" min="1" class="hm-input" />
+                </label>
+                <label>Recent iterations to keep
+                  <input v-model.number="codexForm.context_compression.keep_recent_iterations" type="number" min="1" class="hm-input" />
+                </label>
+              </section>
+              <div class="llm-advanced-footer">
+                <p>Transport and retry changes apply now. Connection pool and context compression are saved for the next restart.</p>
+                <button type="button" class="btn btn-primary text-xs" @click="saveCodexConfigNow" :disabled="savingCodex">{{ savingCodex ? 'Saving…' : 'Save advanced settings' }}</button>
+              </div>
+            </div>
+          </details>
           <div class="border-t border-gray-700 pt-4">
           <h3 class="text-xs font-semibold text-gray-400 mb-2">Authentication</h3>
           <p class="text-xs text-gray-500 mb-4">
@@ -346,6 +415,17 @@ export default {
               </div>
             </div>
           </div>
+          <details class="llm-advanced compact" :open="advancedOpen.kimi" @toggle="advancedOpen.kimi = $event.target.open">
+            <summary><span>Advanced Settings</span><small>Provider request timeout</small></summary>
+            <div class="llm-advanced-body">
+              <section class="llm-advanced-group single">
+                <label>Request timeout <small>seconds</small>
+                  <input v-model.number="kimiForm.timeout" type="number" min="10" max="3600" class="hm-input" />
+                </label>
+              </section>
+              <div class="llm-advanced-footer"><button type="button" class="btn btn-primary text-xs" @click="saveKimiConfigNow" :disabled="savingKimi">Save timeout</button></div>
+            </div>
+          </details>
           <div v-if="kimiStatus.health && kimiStatus.health.error"
                class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
             {{ kimiStatus.health.error }}
@@ -396,6 +476,17 @@ export default {
               </label>
             </div>
           </div>
+          <details class="llm-advanced compact" :open="advancedOpen.ollama" @toggle="advancedOpen.ollama = $event.target.open">
+            <summary><span>Advanced Settings</span><small>Provider request timeout</small></summary>
+            <div class="llm-advanced-body">
+              <section class="llm-advanced-group single">
+                <label>Request timeout <small>seconds</small>
+                  <input v-model.number="ollamaForm.timeout" type="number" min="10" max="3600" class="hm-input" />
+                </label>
+              </section>
+              <div class="llm-advanced-footer"><button type="button" class="btn btn-primary text-xs" @click="saveOllamaConfigNow" :disabled="savingOllama">Save timeout</button></div>
+            </div>
+          </details>
           <div v-if="ollamaStatus.health && ollamaStatus.health.error"
                class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
             {{ ollamaStatus.health.error }}
@@ -417,7 +508,13 @@ export default {
     // agent_reasoning_effort / agent_model: '' = inherit the chat setting
     // (the server normalizes ''/null to inherit; distinct from the literal
     // effort "none")
-    const codexForm = ref({ enabled: false, model: 'gpt-5.5', max_tokens: 4096, reasoning_effort: 'medium', agent_reasoning_effort: '', agent_model: '' });
+    const codexForm = ref({
+      enabled: false, model: 'gpt-5.5', max_tokens: 4096, reasoning_effort: 'medium', agent_reasoning_effort: '', agent_model: '',
+      request_timeout_seconds: 3600, stream_stall_timeout_seconds: 180,
+      retry: { max_retries: 3, base_delay: 1, max_delay: 30 },
+      connection_pool: { max_connections: 10, keepalive_timeout: 30 },
+      context_compression: { enabled: true, max_context_chars: 750000, keep_recent_iterations: 30 },
+    });
 
     // Codex model catalog — ONE ordered list renders the Model, Agent Model,
     // and Auxiliary Model selects so the dropdowns can never drift apart.
@@ -490,8 +587,9 @@ export default {
       saveAuxConfigDebounced();
     }
     const savingAux = ref(false);
-    const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096 });
-    const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 });
+    const advancedOpen = ref({ codex: false, ollama: false, kimi: false });
+    const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096, timeout: 300 });
+    const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 , timeout: 300 });
     const ollamaKeyDirty = ref(false);
     const kimiKeyDirty = ref(false);
     const savingCodex = ref(false);
@@ -561,18 +659,25 @@ export default {
           codexForm.value.agent_reasoning_effort = data.codex.agent_reasoning_effort || '';
           codexForm.value.agent_model = data.codex.agent_model || '';
           codexForm.value.max_tokens = data.codex.max_tokens || 4096;
+          codexForm.value.request_timeout_seconds = data.codex.request_timeout_seconds ?? codexForm.value.request_timeout_seconds;
+          codexForm.value.stream_stall_timeout_seconds = data.codex.stream_stall_timeout_seconds ?? codexForm.value.stream_stall_timeout_seconds;
+          codexForm.value.retry = { ...codexForm.value.retry, ...(data.codex.retry || {}) };
+          codexForm.value.connection_pool = { ...codexForm.value.connection_pool, ...(data.codex.connection_pool || {}) };
+          codexForm.value.context_compression = { ...codexForm.value.context_compression, ...(data.codex.context_compression || {}) };
         }
         if (data.ollama && !saveOllamaConfigDebounced.pending()) {
           ollamaForm.value.enabled = data.ollama.enabled;
           ollamaForm.value.base_url = data.ollama.base_url || '';
           ollamaForm.value.model = data.ollama.model || '';
           ollamaForm.value.max_tokens = data.ollama.max_tokens || 4096;
+          ollamaForm.value.timeout = data.ollama.timeout ?? ollamaForm.value.timeout;
           // Don't overwrite api_key from server (it's masked)
         }
         if (data.kimi && !saveKimiConfigDebounced.pending()) {
           kimiForm.value.enabled = data.kimi.enabled;
           kimiForm.value.model = data.kimi.model || '';
           kimiForm.value.max_tokens = data.kimi.max_tokens || 4096;
+          kimiForm.value.timeout = data.kimi.timeout ?? kimiForm.value.timeout;
         }
         if (data.auxiliary) {
           auxData.value = data.auxiliary;
@@ -892,7 +997,7 @@ export default {
     });
 
     return {
-      loading, llmStatus, selectedProvider, switching,
+      loading, llmStatus, selectedProvider, switching, advancedOpen,
       codexForm, codexModelOptions, codexAgentModelOptions,
       mainMaxAllowed, agentMaxAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
       auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
