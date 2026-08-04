@@ -237,6 +237,11 @@ export default {
     }
 
     async function saveDefaultPolicy() {
+      // Snapshot BEFORE the write: callers mutate local state optimistically,
+      // so a rejected save would otherwise leave this security screen showing
+      // a policy the server never accepted — the worst place to display a
+      // comfortable lie.
+      const snapshot = JSON.parse(JSON.stringify(defaultPolicy.value));
       try {
         const hosts = defaultPolicy.value.allow_all ? null : defaultPolicy.value.allowed_hosts;
         await api.put('/api/host-access/default-policy', {
@@ -245,7 +250,8 @@ export default {
         });
         toast.success('Default policy updated');
       } catch (e) {
-        toast.error(e.message || 'Failed to save');
+        defaultPolicy.value = snapshot;
+        toast.error(`${e.message || 'Failed to save'} — reverted`);
       }
     }
 
@@ -265,6 +271,9 @@ export default {
     async function saveUser(uid) {
       const entry = users.value[uid];
       if (!entry) return;
+      // Same reason as saveDefaultPolicy: without this, a 403 left the screen
+      // claiming a user had lost access the server still grants.
+      const snapshot = JSON.parse(JSON.stringify(entry));
       try {
         const hosts = entry.allow_all ? null : entry.allowed_hosts;
         await api.put(`/api/host-access/user/${uid}`, {
@@ -274,7 +283,9 @@ export default {
         const m = getMember(uid);
         toast.success(`Updated access for ${m ? m.display_name : uid}`);
       } catch (e) {
-        toast.error(e.message || 'Failed to save');
+        users.value = { ...users.value, [uid]: snapshot };
+        const m = getMember(uid);
+        toast.error(`${e.message || 'Failed to save'} — reverted ${m ? m.display_name : uid}`);
       }
     }
 

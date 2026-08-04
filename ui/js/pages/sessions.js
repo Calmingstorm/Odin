@@ -677,10 +677,17 @@ export default {
       detailLoading.value = true;
       collapsedThreads.value = new Set();
       try {
-        detail.value = await api.get(`/api/sessions/${encodeURIComponent(channelId)}`);
+        const loaded = await api.get(`/api/sessions/${encodeURIComponent(channelId)}`);
+        // A slower earlier request must never overwrite a newer selection:
+        // click A then B and A's late response would render A's messages under
+        // B's expanded row, with no cue that the wrong session is shown.
+        if (expandedId.value !== channelId) return;
+        detail.value = loaded;
       } catch (e) {
-        detail.value = { messages: [], summary: '' };
+        if (expandedId.value !== channelId) return;
+        detail.value = { messages: [], summary: '', error: e.message || 'Failed to load session' };
       }
+      if (expandedId.value !== channelId) return;
       detailLoading.value = false;
     }
 

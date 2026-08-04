@@ -34,9 +34,17 @@ export default {
       }
 
       if (type === 'tool_end') {
-        const idx = activeTasks.value.findIndex(
-          t => t.tool === payload.action && t.status === 'running'
-        );
+        // Tasks are unshifted, so findIndex returns the NEWEST running task
+        // with this name: with two concurrent run_command calls the first
+        // completion closed the second card (wrong elapsed/result) and left
+        // the first running forever. Match the OLDEST running task instead,
+        // which is the one that completes first absent a call id from the
+        // backend to pair them exactly.
+        let idx = -1;
+        for (let i = activeTasks.value.length - 1; i >= 0; i--) {
+          const t = activeTasks.value[i];
+          if (t.tool === payload.action && t.status === 'running') { idx = i; break; }
+        }
         if (idx >= 0) {
           const task = activeTasks.value[idx];
           task.status = payload.metadata?.error ? 'error' : 'success';

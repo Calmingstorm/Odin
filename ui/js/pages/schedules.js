@@ -270,6 +270,7 @@ export default {
                   <!-- Execution history -->
                   <div class="text-xs font-medium text-gray-400 mb-2">Execution History</div>
                   <div v-if="historyLoading" class="text-xs text-gray-500">Loading...</div>
+                  <div v-else-if="historyError" class="text-xs text-red-400" role="alert">{{ historyError }}</div>
                   <div v-else-if="history.length === 0" class="text-xs text-gray-600">No execution history yet.</div>
                   <table v-else class="hm-table text-xs">
                     <thead>
@@ -346,6 +347,7 @@ export default {
     const expandedId = ref(null);
     const history = ref([]);
     const historyLoading = ref(false);
+    const historyError = ref('');
 
     const cronCount = computed(() => schedules.value.filter(s => s.cron && !s.one_time).length);
     const oneTimeCount = computed(() => schedules.value.filter(s => s.one_time).length);
@@ -414,10 +416,22 @@ export default {
       historyLoading.value = true;
       history.value = [];
       try {
-        history.value = await api.get(`/api/schedules/${encodeURIComponent(scheduleId)}/history?limit=10`);
+        const loaded = await api.get(
+          `/api/schedules/${encodeURIComponent(scheduleId)}/history?limit=10`
+        );
+        // Same ordering guard as the sessions detail fetch: expand A then B
+        // quickly and A's late response would fill B's row.
+        if (expandedId.value !== scheduleId) return;
+        history.value = loaded;
+        historyError.value = '';
       } catch (e) {
+        if (expandedId.value !== scheduleId) return;
         history.value = [];
+        // Without this the row rendered "No execution history yet", which is
+        // indistinguishable from a schedule that genuinely never ran.
+        historyError.value = e.message || 'Failed to load execution history';
       }
+      if (expandedId.value !== scheduleId) return;
       historyLoading.value = false;
     }
 
@@ -534,7 +548,7 @@ export default {
       showCreate, form, creating, createError,
       cronResult, validatingCron, cronPresets,
       runningId, deletingId, togglingId, resettingId,
-      expandedId, history, historyLoading,
+      expandedId, history, historyLoading, historyError,
       cronCount, oneTimeCount, webhookCount, pausedCount, failingCount,
       formatTs, formatAge, formatFuture, formatMs, formatDuration,
       onCronInput, validateCron, toggleExpand,
