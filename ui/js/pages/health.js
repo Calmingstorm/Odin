@@ -236,7 +236,15 @@ export default {
     }
 
     let interval = null;
+    let armed = false;
+
     function arm() {
+      if (armed) return;
+      armed = true;
+      // Vue fires BOTH onMounted and onActivated on the initial keep-alive
+      // mount, so arming must be idempotent — otherwise the websocket
+      // handler is registered twice and unsubscribe() (which removes one
+      // occurrence) leaves a live copy behind on every visit.
       // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
       // DEACTIVATES this component without unmounting it. Anything armed in
       // onMounted would keep running invisibly until a top-level route change.
@@ -246,6 +254,8 @@ export default {
     }
 
     function disarm() {
+      if (!armed) return;
+      armed = false;
       if (interval) { clearInterval(interval); interval = null; }
     }
 
